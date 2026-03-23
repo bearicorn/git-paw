@@ -179,6 +179,7 @@ pub fn remove_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), Paw
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::process::Command;
     use tempfile::TempDir;
 
@@ -247,6 +248,7 @@ mod tests {
     // --- validate_repo ---
 
     #[test]
+    #[serial]
     fn validate_repo_returns_root_inside_repo() {
         let repo = setup_test_repo();
         let result = validate_repo(repo.path());
@@ -274,6 +276,7 @@ mod tests {
     // --- list_branches ---
 
     #[test]
+    #[serial]
     fn list_branches_returns_sorted_branches() {
         let repo = setup_test_repo();
 
@@ -386,6 +389,7 @@ mod tests {
     // --- create_worktree ---
 
     #[test]
+    #[serial]
     fn create_worktree_at_correct_path() {
         let test_repo = setup_test_repo();
         let repo_root = test_repo.path();
@@ -420,6 +424,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn create_worktree_errors_on_checked_out_branch() {
         let test_repo = setup_test_repo();
         let repo_root = test_repo.path();
@@ -443,6 +448,7 @@ mod tests {
     // --- remove_worktree ---
 
     #[test]
+    #[serial]
     fn remove_worktree_cleans_up_fully() {
         let test_repo = setup_test_repo();
         let repo_root = test_repo.path();
