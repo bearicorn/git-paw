@@ -7,8 +7,6 @@ use std::process;
 
 /// Exit codes for git-paw.
 pub mod exit_code {
-    /// Successful execution.
-    pub const SUCCESS: i32 = 0;
     /// General error.
     pub const ERROR: i32 = 1;
     /// User cancelled (Ctrl+C or empty selection).
