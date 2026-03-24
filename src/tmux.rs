@@ -28,6 +28,7 @@ impl TmuxCommand {
     }
 
     /// Return a human-readable command string (e.g. `tmux new-session -d -s paw-proj`).
+    #[allow(dead_code)]
     pub fn as_command_string(&self) -> String {
         format!("tmux {}", self.args.join(" "))
     }
@@ -78,6 +79,7 @@ impl TmuxSession {
     }
 
     /// Return all commands as human-readable strings (for dry-run / testing).
+    #[allow(dead_code)]
     pub fn command_strings(&self) -> Vec<String> {
         self.commands
             .iter()
@@ -119,18 +121,29 @@ pub struct TmuxSessionBuilder {
     project_name: String,
     panes: Vec<PaneSpec>,
     mouse_mode: bool,
+    session_name_override: Option<String>,
 }
 
 impl TmuxSessionBuilder {
     /// Create a new builder for the given project name.
     ///
-    /// The session will be named `paw-<project_name>`.
+    /// The session will be named `paw-<project_name>` unless overridden
+    /// with [`session_name`](Self::session_name).
     pub fn new(project_name: &str) -> Self {
         Self {
             project_name: project_name.to_owned(),
             panes: Vec::new(),
             mouse_mode: true,
+            session_name_override: None,
         }
+    }
+
+    /// Override the session name instead of deriving it from the project name.
+    ///
+    /// Use this with [`resolve_session_name`] to handle name collisions.
+    pub fn session_name(mut self, name: String) -> Self {
+        self.session_name_override = Some(name);
+        self
     }
 
     /// Add a pane that will `cd` into the worktree and run the CLI command.
@@ -159,7 +172,9 @@ impl TmuxSessionBuilder {
             ));
         }
 
-        let session_name = format!("paw-{}", self.project_name);
+        let session_name = self
+            .session_name_override
+            .unwrap_or_else(|| format!("paw-{}", self.project_name));
         let mut commands = Vec::new();
 
         // 1. Create detached session (pane 0 is implicit)
@@ -290,7 +305,6 @@ pub fn is_session_alive(name: &str) -> Result<bool, PawError> {
 ///
 /// Starts with `paw-<project_name>` and appends `-2`, `-3`, etc. if the name
 /// is already taken by another session.
-// TODO: wire up after merge — compare session state project_root for true collision detection
 pub fn resolve_session_name(project_name: &str) -> Result<String, PawError> {
     let base = format!("paw-{project_name}");
 
@@ -342,28 +356,6 @@ pub fn kill_session(name: &str) -> Result<(), PawError> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(PawError::TmuxError(stderr.trim().to_owned()))
     }
-}
-
-/// List all tmux sessions whose names start with `paw-`.
-pub fn list_paw_sessions() -> Result<Vec<String>, PawError> {
-    let output = Command::new("tmux")
-        .args(["list-sessions", "-F", "#{session_name}"])
-        .output()
-        .map_err(|e| PawError::TmuxError(format!("failed to list tmux sessions: {e}")))?;
-
-    // If tmux server is not running, list-sessions fails — treat as empty list
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let sessions = stdout
-        .lines()
-        .filter(|line| line.starts_with("paw-"))
-        .map(str::to_owned)
-        .collect();
-
-    Ok(sessions)
 }
 
 #[cfg(test)]

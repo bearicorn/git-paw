@@ -98,6 +98,7 @@ pub fn save_session(session: &Session) -> Result<(), PawError> {
 }
 
 /// Loads a session by name, returning `None` if the file does not exist.
+#[allow(dead_code)]
 pub fn load_session(session_name: &str) -> Result<Option<Session>, PawError> {
     load_session_from(session_name, &sessions_dir()?)
 }
@@ -140,6 +141,7 @@ fn save_session_in(session: &Session, dir: &Path) -> Result<(), PawError> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn load_session_from(session_name: &str, dir: &Path) -> Result<Option<Session>, PawError> {
     let path = dir.join(format!("{session_name}.json"));
 
