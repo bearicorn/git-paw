@@ -146,3 +146,243 @@ pub enum Command {
         name: String,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// Helper: parse args as if running `git-paw <args>`.
+    fn parse(args: &[&str]) -> Cli {
+        let mut full = vec!["git-paw"];
+        full.extend(args);
+        Cli::try_parse_from(full).expect("failed to parse")
+    }
+
+    // -- Default subcommand --
+
+    #[test]
+    fn no_args_defaults_to_none_command() {
+        let cli = parse(&[]);
+        assert!(
+            cli.command.is_none(),
+            "no args should yield None (handled as Start in main)"
+        );
+    }
+
+    // -- Start subcommand --
+
+    #[test]
+    fn start_with_no_flags() {
+        let cli = parse(&["start"]);
+        match cli.command.unwrap() {
+            Command::Start {
+                cli,
+                branches,
+                dry_run,
+                preset,
+            } => {
+                assert!(cli.is_none());
+                assert!(branches.is_none());
+                assert!(!dry_run);
+                assert!(preset.is_none());
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_with_cli_flag() {
+        let cli = parse(&["start", "--cli", "claude"]);
+        match cli.command.unwrap() {
+            Command::Start { cli, .. } => assert_eq!(cli.as_deref(), Some("claude")),
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_with_branches_flag_comma_separated() {
+        let cli = parse(&["start", "--branches", "feat/a,feat/b,fix/c"]);
+        match cli.command.unwrap() {
+            Command::Start { branches, .. } => {
+                let b = branches.expect("branches should be set");
+                assert_eq!(b, vec!["feat/a", "feat/b", "fix/c"]);
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_with_dry_run() {
+        let cli = parse(&["start", "--dry-run"]);
+        match cli.command.unwrap() {
+            Command::Start { dry_run, .. } => assert!(dry_run),
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_with_preset() {
+        let cli = parse(&["start", "--preset", "backend"]);
+        match cli.command.unwrap() {
+            Command::Start { preset, .. } => assert_eq!(preset.as_deref(), Some("backend")),
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_with_all_flags() {
+        let cli = parse(&[
+            "start",
+            "--cli",
+            "gemini",
+            "--branches",
+            "a,b",
+            "--dry-run",
+            "--preset",
+            "dev",
+        ]);
+        match cli.command.unwrap() {
+            Command::Start {
+                cli,
+                branches,
+                dry_run,
+                preset,
+            } => {
+                assert_eq!(cli.as_deref(), Some("gemini"));
+                assert_eq!(branches.unwrap(), vec!["a", "b"]);
+                assert!(dry_run);
+                assert_eq!(preset.as_deref(), Some("dev"));
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    // -- Stop subcommand --
+
+    #[test]
+    fn stop_parses() {
+        let cli = parse(&["stop"]);
+        assert!(matches!(cli.command.unwrap(), Command::Stop));
+    }
+
+    // -- Purge subcommand --
+
+    #[test]
+    fn purge_without_force() {
+        let cli = parse(&["purge"]);
+        match cli.command.unwrap() {
+            Command::Purge { force } => assert!(!force),
+            other => panic!("expected Purge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn purge_with_force() {
+        let cli = parse(&["purge", "--force"]);
+        match cli.command.unwrap() {
+            Command::Purge { force } => assert!(force),
+            other => panic!("expected Purge, got {other:?}"),
+        }
+    }
+
+    // -- Status subcommand --
+
+    #[test]
+    fn status_parses() {
+        let cli = parse(&["status"]);
+        assert!(matches!(cli.command.unwrap(), Command::Status));
+    }
+
+    // -- List-CLIs subcommand --
+
+    #[test]
+    fn list_clis_parses() {
+        let cli = parse(&["list-clis"]);
+        assert!(matches!(cli.command.unwrap(), Command::ListClis));
+    }
+
+    // -- Add-CLI subcommand --
+
+    #[test]
+    fn add_cli_with_required_args() {
+        let cli = parse(&["add-cli", "my-agent", "/usr/local/bin/my-agent"]);
+        match cli.command.unwrap() {
+            Command::AddCli {
+                name,
+                command,
+                display_name,
+            } => {
+                assert_eq!(name, "my-agent");
+                assert_eq!(command, "/usr/local/bin/my-agent");
+                assert!(display_name.is_none());
+            }
+            other => panic!("expected AddCli, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_cli_with_display_name() {
+        let cli = parse(&[
+            "add-cli",
+            "my-agent",
+            "my-agent",
+            "--display-name",
+            "My Agent",
+        ]);
+        match cli.command.unwrap() {
+            Command::AddCli {
+                name,
+                command,
+                display_name,
+            } => {
+                assert_eq!(name, "my-agent");
+                assert_eq!(command, "my-agent");
+                assert_eq!(display_name.as_deref(), Some("My Agent"));
+            }
+            other => panic!("expected AddCli, got {other:?}"),
+        }
+    }
+
+    // -- Remove-CLI subcommand --
+
+    #[test]
+    fn remove_cli_parses() {
+        let cli = parse(&["remove-cli", "my-agent"]);
+        match cli.command.unwrap() {
+            Command::RemoveCli { name } => assert_eq!(name, "my-agent"),
+            other => panic!("expected RemoveCli, got {other:?}"),
+        }
+    }
+
+    // -- Help text quality --
+
+    #[test]
+    fn version_flag_is_accepted() {
+        let result = Cli::try_parse_from(["git-paw", "--version"]);
+        // clap returns Err(DisplayVersion) for --version, which is expected
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn help_flag_is_accepted() {
+        let result = Cli::try_parse_from(["git-paw", "--help"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn unknown_subcommand_is_rejected() {
+        let result = Cli::try_parse_from(["git-paw", "unknown-command"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_cli_missing_required_args_is_rejected() {
+        let result = Cli::try_parse_from(["git-paw", "add-cli"]);
+        assert!(result.is_err());
+    }
+}
