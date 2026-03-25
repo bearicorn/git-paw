@@ -6,6 +6,7 @@
 pub mod cli;
 pub mod config;
 pub mod detect;
+pub mod dirs;
 pub mod error;
 pub mod git;
 pub mod interactive;

@@ -89,7 +89,7 @@ impl PawConfig {
 
 /// Returns the path to the global config file (`~/.config/git-paw/config.toml`).
 pub fn global_config_path() -> Result<PathBuf, PawError> {
-    dirs::config_dir()
+    crate::dirs::config_dir()
         .map(|d| d.join("git-paw").join("config.toml"))
         .ok_or_else(|| PawError::ConfigError("could not determine config directory".into()))
 }

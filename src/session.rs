@@ -213,7 +213,7 @@ pub fn delete_session_in(session_name: &str, dir: &Path) -> Result<(), PawError>
 
 /// Returns the sessions directory (`~/.local/share/git-paw/sessions/`).
 fn sessions_dir() -> Result<PathBuf, PawError> {
-    let base = dirs::data_dir().ok_or_else(|| {
+    let base = crate::dirs::data_dir().ok_or_else(|| {
         PawError::SessionError("could not determine XDG data directory".to_string())
     })?;
     Ok(base.join("git-paw").join("sessions"))
