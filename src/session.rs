@@ -523,6 +523,14 @@ mod tests {
         assert_eq!(session.effective_status(|_| true), SessionStatus::Stopped);
     }
 
+    // -- SessionStatus Display --
+
+    #[test]
+    fn session_status_displays_as_lowercase_string() {
+        assert_eq!(SessionStatus::Active.to_string(), "active");
+        assert_eq!(SessionStatus::Stopped.to_string(), "stopped");
+    }
+
     // -- Recovery: save → tmux dies → state has everything to reconstruct --
 
     #[test]

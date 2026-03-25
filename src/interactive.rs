@@ -553,4 +553,32 @@ mod tests {
             vec![("fix/api".to_string(), "alpha".to_string())]
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Display impls
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cli_mode_display() {
+        assert_eq!(CliMode::Uniform.to_string(), "Same CLI for all branches");
+        assert_eq!(CliMode::PerBranch.to_string(), "Different CLI per branch");
+    }
+
+    #[test]
+    fn cli_info_display_same_names() {
+        let info = CliInfo {
+            display_name: "claude".to_string(),
+            binary_name: "claude".to_string(),
+        };
+        assert_eq!(info.to_string(), "claude");
+    }
+
+    #[test]
+    fn cli_info_display_different_names() {
+        let info = CliInfo {
+            display_name: "My Agent".to_string(),
+            binary_name: "my-agent".to_string(),
+        };
+        assert_eq!(info.to_string(), "My Agent (my-agent)");
+    }
 }

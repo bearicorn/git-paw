@@ -262,6 +262,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn validate_repo_returns_not_a_git_repo_outside() {
         let dir = TempDir::new().expect("create temp dir");
         let result = validate_repo(dir.path());

@@ -383,12 +383,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    #[serial_test::serial]
     fn ensure_tmux_installed_succeeds_when_present() {
-        // Only uses which::which, does not need a live tmux server.
-        if which::which("tmux").is_err() {
-            eprintln!("skipping: tmux binary not on PATH");
-            return;
-        }
+        // Requires #[serial] because detect tests modify PATH.
         assert!(ensure_tmux_installed().is_ok());
     }
 
@@ -739,5 +736,87 @@ mod tests {
             !cmds.iter().any(|c| c.contains("mouse on")),
             "no mouse-on command should be emitted when disabled"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC: Session liveness and collision handling
+    // -----------------------------------------------------------------------
+
+    /// Helper to create a detached tmux session for testing.
+    fn create_test_session(name: &str) {
+        let output = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", name])
+            .output()
+            .expect("create tmux session");
+        assert!(
+            output.status.success(),
+            "failed to create test session '{name}'"
+        );
+    }
+
+    /// Helper to kill a tmux session, ignoring errors.
+    fn cleanup_session(name: &str) {
+        let _ = kill_session(name);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn is_session_alive_returns_false_for_nonexistent() {
+        let alive = is_session_alive("paw-definitely-does-not-exist-12345").unwrap();
+        assert!(!alive);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn session_lifecycle_create_check_kill() {
+        let name = "paw-unit-test-lifecycle";
+        cleanup_session(name);
+
+        create_test_session(name);
+        assert!(is_session_alive(name).unwrap());
+
+        kill_session(name).unwrap();
+        assert!(!is_session_alive(name).unwrap());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_session_name_returns_base_when_no_collision() {
+        let name = resolve_session_name("unit-test-no-collision-xyz").unwrap();
+        assert_eq!(name, "paw-unit-test-no-collision-xyz");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_session_name_appends_suffix_on_collision() {
+        let base_name = "paw-unit-test-collision";
+        cleanup_session(base_name);
+        cleanup_session(&format!("{base_name}-2"));
+
+        create_test_session(base_name);
+
+        let resolved = resolve_session_name("unit-test-collision").unwrap();
+        assert_eq!(resolved, format!("{base_name}-2"));
+
+        cleanup_session(base_name);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn built_session_can_be_executed_and_killed() {
+        let project = "unit-test-execute";
+        let session_name = format!("paw-{project}");
+        cleanup_session(&session_name);
+
+        let session = TmuxSessionBuilder::new(project)
+            .add_pane(make_pane("main", "/tmp", "echo hello"))
+            .build()
+            .unwrap();
+
+        session.execute().unwrap();
+        assert!(is_session_alive(&session_name).unwrap());
+
+        kill_session(&session_name).unwrap();
+        assert!(!is_session_alive(&session_name).unwrap());
     }
 }
