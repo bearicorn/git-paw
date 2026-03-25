@@ -84,6 +84,16 @@ jobs:
           print(f'Coverage {pct:.1f}% meets 80% threshold')
           "
 
+  docs:
+    name: Docs Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mdBook
+        uses: taiki-e/install-action@mdbook
+      - name: Build book
+        run: mdbook build docs/
+
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
