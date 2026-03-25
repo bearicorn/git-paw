@@ -9,12 +9,17 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -32,48 +37,25 @@ jobs:
       matrix:
         os: [macos-14, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Run tests
-        run: cargo test
-
-  test-ignored:
-    name: Test (tmux-dependent)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
-      - name: Run ignored tests
-        run: cargo test -- --include-ignored
-
-  coverage:
-    name: Coverage
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
+      - name: Install tmux (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Install tmux (macOS)
+        if: runner.os == 'macOS'
+        run: brew install tmux
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Generate coverage
-        run: cargo llvm-cov --lcov --output-path lcov.info
-      - name: Upload to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          files: lcov.info
-          fail_ci_if_error: true
-          token: ${{ secrets.CODECOV_TOKEN }}
-      - name: Check coverage threshold
+      - name: Run tests with coverage
         run: |
           cargo llvm-cov --json --output-path cov.json
           COVERAGE=$(python3 -c "import json; d=json.load(open('cov.json')); print(f\"{d['data'][0]['totals']['lines']['percent']:.1f}\")")
-          echo "Line coverage: ${COVERAGE}%"
+          echo "## Coverage: ${COVERAGE}%" >> "$GITHUB_STEP_SUMMARY"
+          echo "[Full report](https://bearicorn.github.io/git-paw/coverage/)" >> "$GITHUB_STEP_SUMMARY"
           python3 -c "
           import json, sys
           d = json.load(open('cov.json'))
@@ -84,21 +66,11 @@ jobs:
           print(f'Coverage {pct:.1f}% meets 80% threshold')
           "
 
-  docs:
-    name: Docs Build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install mdBook
-        uses: taiki-e/install-action@mdbook
-      - name: Build book
-        run: mdbook build docs/
-
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-audit
         uses: taiki-e/install-action@cargo-audit
@@ -108,3 +80,36 @@ jobs:
         run: cargo audit
       - name: Run cargo deny
         run: cargo deny check
+
+  docs:
+    name: Build & Deploy Docs
+    needs: [lint, test, audit]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pages
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - uses: taiki-e/install-action@mdbook
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install cargo-about
+        run: cargo install cargo-about
+      - name: Generate third-party licenses
+        run: cargo about generate about.hbs -o docs/src/licenses.md
+      - name: Build book
+        run: mdbook build docs/
+      - name: Generate coverage report
+        run: cargo llvm-cov --html --output-dir docs/book/coverage
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs/book
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4

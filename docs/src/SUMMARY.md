@@ -14,3 +14,4 @@
 - [Contributing](contributing.md)
 - [Changelog](changelog.md)
 - [FAQ](faq.md)
+- [Third-Party Licenses](licenses.md)

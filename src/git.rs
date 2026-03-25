@@ -297,9 +297,23 @@ mod tests {
 
         let branches = list_branches(repo.path()).expect("list branches");
 
+        // The default branch name depends on git config (main or master)
+        let default_branch = branches
+            .iter()
+            .find(|b| *b == "main" || *b == "master")
+            .expect("should have a default branch")
+            .clone();
+
+        let mut expected = vec![
+            "alpha".to_string(),
+            "feature/auth".to_string(),
+            default_branch,
+            "zebra".to_string(),
+        ];
+        expected.sort();
+
         assert_eq!(
-            branches,
-            vec!["alpha", "feature/auth", "main", "zebra"],
+            branches, expected,
             "branches should be sorted alphabetically"
         );
     }

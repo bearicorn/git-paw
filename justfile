@@ -7,14 +7,10 @@ check: lint test
 test:
     cargo test
 
-# Run all tests including tmux-dependent ignored tests
-test-all:
-    cargo test -- --include-ignored
-
-# Generate HTML coverage report
+# Generate HTML coverage report (same output location as CI)
 coverage:
-    cargo llvm-cov --html
-    @echo "Report: target/llvm-cov/html/index.html"
+    cargo llvm-cov --html --output-dir docs/book/coverage
+    @echo "Report: docs/book/coverage/index.html"
 
 # Run fmt check + clippy
 lint:

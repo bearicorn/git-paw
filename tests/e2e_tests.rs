@@ -77,6 +77,10 @@ fn dry_run_with_flags_shows_plan() {
     run_git(tr.path(), &["branch", "feat/a"]);
     run_git(tr.path(), &["branch", "feat/b"]);
 
+    // Register "echo" as a custom CLI so detection finds it
+    let config = tr.path().join(".git-paw.toml");
+    fs::write(&config, "[clis.echo]\ncommand = \"/bin/echo\"\n").expect("write config");
+
     cmd()
         .current_dir(tr.path())
         .args([
