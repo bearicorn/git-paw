@@ -58,6 +58,7 @@ impl PawConfig {
     ///
     /// Scalar fields from `overlay` take precedence when present.
     /// Map fields are merged with `overlay` entries winning on key collisions.
+    #[must_use]
     pub fn merged_with(&self, overlay: &Self) -> Self {
         let mut clis = self.clis.clone();
         for (k, v) in &overlay.clis {
@@ -121,7 +122,7 @@ pub fn load_config(repo_root: &Path) -> Result<PawConfig, PawError> {
 }
 
 /// Loads merged config from an explicit global path and repo root.
-fn load_config_from(global_path: &Path, repo_root: &Path) -> Result<PawConfig, PawError> {
+pub fn load_config_from(global_path: &Path, repo_root: &Path) -> Result<PawConfig, PawError> {
     let global = load_config_file(global_path)?.unwrap_or_default();
     let repo = load_config_file(&repo_config_path(repo_root))?.unwrap_or_default();
     Ok(global.merged_with(&repo))
@@ -161,7 +162,7 @@ pub fn add_custom_cli(
 /// Adds a custom CLI to the config at the given path.
 ///
 /// If `command` is not an absolute path, it is resolved via PATH using `which`.
-fn add_custom_cli_to(
+pub fn add_custom_cli_to(
     config_path: &Path,
     name: &str,
     command: &str,
@@ -199,7 +200,7 @@ pub fn remove_custom_cli(name: &str) -> Result<(), PawError> {
 /// Removes a custom CLI from the config at the given path.
 ///
 /// Returns `PawError::CliNotFound` if the name is not present in the config.
-fn remove_custom_cli_from(config_path: &Path, name: &str) -> Result<(), PawError> {
+pub fn remove_custom_cli_from(config_path: &Path, name: &str) -> Result<(), PawError> {
     let mut config = load_config_file(config_path)?.unwrap_or_default();
 
     if config.clis.remove(name).is_none() {

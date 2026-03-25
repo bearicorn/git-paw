@@ -141,12 +141,14 @@ impl TmuxSessionBuilder {
     /// Override the session name instead of deriving it from the project name.
     ///
     /// Use this with [`resolve_session_name`] to handle name collisions.
+    #[must_use]
     pub fn session_name(mut self, name: String) -> Self {
         self.session_name_override = Some(name);
         self
     }
 
     /// Add a pane that will `cd` into the worktree and run the CLI command.
+    #[must_use]
     pub fn add_pane(mut self, spec: PaneSpec) -> Self {
         self.panes.push(spec);
         self
@@ -156,6 +158,7 @@ impl TmuxSessionBuilder {
     ///
     /// When enabled, users can click to switch panes, drag borders to resize,
     /// and scroll. This is set per-session and does not affect other tmux sessions.
+    #[must_use]
     pub fn mouse_mode(mut self, enabled: bool) -> Self {
         self.mouse_mode = enabled;
         self

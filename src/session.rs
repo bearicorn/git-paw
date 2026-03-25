@@ -119,10 +119,11 @@ pub fn delete_session(session_name: &str) -> Result<(), PawError> {
 }
 
 // ---------------------------------------------------------------------------
-// Internal implementations (accept dir for testability)
+// Directory-parameterized implementations (public for integration tests)
 // ---------------------------------------------------------------------------
 
-fn save_session_in(session: &Session, dir: &Path) -> Result<(), PawError> {
+/// Atomically writes a session to the given directory.
+pub fn save_session_in(session: &Session, dir: &Path) -> Result<(), PawError> {
     fs::create_dir_all(dir)
         .map_err(|e| PawError::SessionError(format!("failed to create sessions dir: {e}")))?;
 
@@ -141,8 +142,8 @@ fn save_session_in(session: &Session, dir: &Path) -> Result<(), PawError> {
     Ok(())
 }
 
-#[allow(dead_code)]
-fn load_session_from(session_name: &str, dir: &Path) -> Result<Option<Session>, PawError> {
+/// Loads a session by name from the given directory.
+pub fn load_session_from(session_name: &str, dir: &Path) -> Result<Option<Session>, PawError> {
     let path = dir.join(format!("{session_name}.json"));
 
     let contents = match fs::read_to_string(&path) {
@@ -161,7 +162,8 @@ fn load_session_from(session_name: &str, dir: &Path) -> Result<Option<Session>, 
     Ok(Some(session))
 }
 
-fn find_session_for_repo_in(repo_path: &Path, dir: &Path) -> Result<Option<Session>, PawError> {
+/// Finds the session for a repo path, scanning the given directory.
+pub fn find_session_for_repo_in(repo_path: &Path, dir: &Path) -> Result<Option<Session>, PawError> {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
@@ -198,7 +200,8 @@ fn find_session_for_repo_in(repo_path: &Path, dir: &Path) -> Result<Option<Sessi
     Ok(None)
 }
 
-fn delete_session_in(session_name: &str, dir: &Path) -> Result<(), PawError> {
+/// Deletes a session file by name from the given directory.
+pub fn delete_session_in(session_name: &str, dir: &Path) -> Result<(), PawError> {
     let path = dir.join(format!("{session_name}.json"));
 
     match fs::remove_file(&path) {
