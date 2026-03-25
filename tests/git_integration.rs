@@ -212,3 +212,76 @@ fn worktree_dir_name_handles_nested_slashes() {
     let name = git::worktree_dir_name("proj", "feature/deep/nested/branch");
     assert_eq!(name, "proj-feature-deep-nested-branch");
 }
+
+// ---------------------------------------------------------------------------
+// Remote branch deduplication and prefix stripping
+// ---------------------------------------------------------------------------
+
+#[test]
+fn list_branches_strips_remote_prefix_and_deduplicates() {
+    // Create a bare repo to act as the remote
+    let sandbox = TempDir::new().expect("create sandbox");
+    let bare_path = sandbox.path().join("bare.git");
+    std::fs::create_dir_all(&bare_path).expect("create bare dir");
+
+    Command::new("git")
+        .current_dir(&bare_path)
+        .args(["init", "--bare"])
+        .output()
+        .expect("init bare repo");
+
+    // Clone the bare repo to get a local with remote tracking
+    let clone_path = sandbox.path().join("clone");
+    Command::new("git")
+        .args([
+            "clone",
+            bare_path.to_string_lossy().as_ref(),
+            clone_path.to_string_lossy().as_ref(),
+        ])
+        .output()
+        .expect("clone repo");
+
+    run_git(&clone_path, &["config", "user.email", "test@test.com"]);
+    run_git(&clone_path, &["config", "user.name", "Test"]);
+
+    // Initial commit + push
+    std::fs::write(clone_path.join("README.md"), "# test").expect("write file");
+    run_git(&clone_path, &["add", "."]);
+    run_git(&clone_path, &["commit", "-m", "initial"]);
+
+    // Detect the default branch name (main or master depending on git version)
+    let output = Command::new("git")
+        .current_dir(&clone_path)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .expect("get default branch");
+    let default_branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    run_git(&clone_path, &["push", "-u", "origin", &default_branch]);
+
+    // Create a feature branch locally and push so it exists as both
+    // local and remote-tracking (origin/feature/auth)
+    run_git(&clone_path, &["checkout", "-b", "feature/auth"]);
+    run_git(&clone_path, &["push", "-u", "origin", "feature/auth"]);
+    run_git(&clone_path, &["checkout", &default_branch]);
+
+    let branches = git::list_branches(&clone_path).expect("list branches");
+
+    // Each branch should appear exactly once (deduplicated across local + remote)
+    let auth_count = branches.iter().filter(|b| *b == "feature/auth").count();
+    assert_eq!(
+        auth_count, 1,
+        "feature/auth should appear once (deduplicated), got: {branches:?}"
+    );
+
+    let default_count = branches.iter().filter(|b| *b == &default_branch).count();
+    assert_eq!(
+        default_count, 1,
+        "{default_branch} should appear once (deduplicated), got: {branches:?}"
+    );
+
+    // No branch should retain the origin/ prefix
+    assert!(
+        branches.iter().all(|b| !b.starts_with("origin/")),
+        "no branch should have origin/ prefix, got: {branches:?}"
+    );
+}

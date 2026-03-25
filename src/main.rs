@@ -3,25 +3,20 @@
 //! Orchestrates multiple AI coding CLI sessions across git worktrees
 //! from a single terminal using tmux.
 
-mod cli;
-mod config;
-mod detect;
-mod error;
-mod git;
-mod interactive;
-mod session;
-mod tmux;
-
 use std::path::Path;
 use std::time::SystemTime;
 
 use clap::Parser;
 use dialoguer::Confirm;
 
-use cli::{Cli, Command};
-use config::PawConfig;
-use error::PawError;
-use session::{Session, SessionStatus, WorktreeEntry};
+use git_paw::cli::{Cli, Command};
+use git_paw::config::{self, PawConfig};
+use git_paw::detect;
+use git_paw::error::PawError;
+use git_paw::git;
+use git_paw::interactive;
+use git_paw::session::{self, Session, SessionStatus, WorktreeEntry};
+use git_paw::tmux;
 
 fn main() {
     let args = Cli::parse();

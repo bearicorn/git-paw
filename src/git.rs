@@ -246,6 +246,8 @@ mod tests {
     }
 
     // --- validate_repo ---
+    // Behavioral: tests the public contract — given a path, does the system
+    // correctly identify whether it's inside a git repo and return the root?
 
     #[test]
     #[serial]
@@ -275,6 +277,9 @@ mod tests {
     }
 
     // --- list_branches ---
+    // Behavioral: tests the public function against a real git repo.
+    // Deduplication and remote-prefix stripping are covered in integration tests
+    // (list_branches_strips_remote_prefix_and_deduplicates) using a real remote.
 
     #[test]
     #[serial]
@@ -299,32 +304,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_branch_output_deduplicates_local_and_remote() {
-        // Simulate git branch -a output where main exists both locally and as origin/main
-        let output = "main\nfeature/auth\norigin/main\norigin/feature/auth\norigin/HEAD\n";
-        let branches = parse_branch_output(output);
-        assert_eq!(
-            branches,
-            vec!["feature/auth", "main"],
-            "should deduplicate and exclude HEAD"
-        );
-    }
-
-    #[test]
-    fn parse_branch_output_strips_remote_prefix() {
-        let output = "origin/feature/deep/nested\n";
-        let branches = parse_branch_output(output);
-        assert_eq!(branches, vec!["feature/deep/nested"]);
-    }
-
-    #[test]
-    fn parse_branch_output_empty_input() {
-        let branches = parse_branch_output("");
-        assert!(branches.is_empty());
-    }
-
     // --- project_name ---
+    // Behavioral: public function contract — the directory name IS the project name.
+    // The exact output matters because it's used in session names and worktree paths.
 
     #[test]
     fn project_name_from_path() {
@@ -340,6 +322,9 @@ mod tests {
     }
 
     // --- worktree_dir_name ---
+    // Behavioral: public function whose exact output determines actual directory names
+    // on disk. The format is the contract — other modules depend on this for path
+    // construction, so the exact string matters.
 
     #[test]
     fn worktree_dir_name_replaces_slash_with_dash() {
@@ -370,24 +355,9 @@ mod tests {
         assert_eq!(worktree_dir_name("git-paw", "main"), "git-paw-main");
     }
 
-    // --- strip_remote_prefix ---
-
-    #[test]
-    fn strip_remote_prefix_removes_origin() {
-        assert_eq!(strip_remote_prefix("origin/feature/auth"), "feature/auth");
-    }
-
-    #[test]
-    fn strip_remote_prefix_preserves_local() {
-        assert_eq!(strip_remote_prefix("feature/auth"), "feature/auth");
-    }
-
-    #[test]
-    fn strip_remote_prefix_origin_simple() {
-        assert_eq!(strip_remote_prefix("origin/main"), "main");
-    }
-
-    // --- create_worktree ---
+    // --- create_worktree / remove_worktree ---
+    // Behavioral: tests real git worktree operations against temp repos.
+    // Verifies observable outcomes (directory exists, files present, cleanup works).
 
     #[test]
     #[serial]
