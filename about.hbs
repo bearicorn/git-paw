@@ -1,0 +1,23 @@
+# Third-Party Licenses
+
+git-paw includes the following third-party software.
+
+{{#each licenses}}
+{{#if first_of_kind}}
+## {{name}} ({{id}})
+
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}
+{{/each}}
+
+<details>
+<summary>License text</summary>
+
+```
+{{{text}}}
+```
+
+</details>
+
+{{/if}}
+{{/each}}

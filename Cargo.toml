@@ -1,0 +1,43 @@
+[package]
+name = "git-paw"
+version = "0.1.0"
+edition = "2024"
+description = "Parallel AI Worktrees — orchestrate multiple AI coding CLI sessions across git worktrees"
+license = "MIT"
+repository = "https://github.com/bearicorn/git-paw"
+homepage = "https://bearicorn.github.io/git-paw"
+keywords = ["cli", "tmux", "git", "ai", "worktree"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+dialoguer = "0.12"
+console = "0.16.3"
+which = "8.0.2"
+thiserror = "2"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9.8"
+
+[[bin]]
+name = "git-paw"
+path = "src/main.rs"
+test = false
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+serial_test = "3"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

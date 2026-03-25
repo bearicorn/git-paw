@@ -1,0 +1,72 @@
+# git-cliff configuration
+# https://git-cliff.org/docs/configuration
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).\n
+"""
+body = """
+{% if version -%}
+    ## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else -%}
+    ## [Unreleased]
+{% endif -%}
+
+{% for group, commits in commits | group_by(attribute="group") %}
+    ### {{ group | striptags | trim | upper_first }}
+    {% for commit in commits %}
+        - {% if commit.scope %}*({{ commit.scope }})* {% endif %}{{ commit.message | upper_first }}\
+            {% if commit.breaking %} **BREAKING**{% endif %}\
+            {% if commit.remote.pr_number %} ([#{{ commit.remote.pr_number }}](https://github.com/bearicorn/git-paw/pull/{{ commit.remote.pr_number }})){% endif %}\
+    {% endfor %}
+{% endfor %}
+"""
+footer = """
+{% for release in releases -%}
+    {% if release.version -%}
+        {% if release.previous and release.previous.version -%}
+            [{{ release.version | trim_start_matches(pat="v") }}]: https://github.com/bearicorn/git-paw/compare/{{ release.previous.version }}...{{ release.version }}
+        {% endif -%}
+    {% else -%}
+        {% if release.previous and release.previous.version -%}
+            [Unreleased]: https://github.com/bearicorn/git-paw/compare/{{ release.previous.version }}...HEAD
+        {% endif -%}
+    {% endif -%}
+{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+protect_breaking_commits = false
+filter_commits = false
+tag_pattern = "v[0-9].*"
+sort_commits = "newest"
+
+commit_parsers = [
+    { message = "^feat", group = "<!-- 0 -->Features" },
+    { message = "^fix", group = "<!-- 1 -->Bug Fixes" },
+    { message = "^perf", group = "<!-- 2 -->Performance" },
+    { message = "^refactor", group = "<!-- 3 -->Refactor" },
+    { message = "^docs", group = "<!-- 4 -->Documentation" },
+    { message = "^test", group = "<!-- 5 -->Testing" },
+    { message = "^ci", group = "<!-- 6 -->CI/CD" },
+    { message = "^chore\\(release\\)", skip = true },
+    { message = "^chore\\(deps\\)", skip = true },
+    { message = "^chore|^style", group = "<!-- 7 -->Miscellaneous" },
+]
+
+[bump]
+features_always_bump_minor = true
+breaking_always_bump_major = true
+
+[remote.github]
+owner = "bearicorn"
+repo = "git-paw"

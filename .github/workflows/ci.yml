@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tmux (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Install tmux (macOS)
+        if: runner.os == 'macOS'
+        run: brew install tmux
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Run tests with coverage
+        run: |
+          cargo llvm-cov --json --output-path cov.json
+          COVERAGE=$(python3 -c "import json; d=json.load(open('cov.json')); print(f\"{d['data'][0]['totals']['lines']['percent']:.1f}\")")
+          echo "## Coverage: ${COVERAGE}%" >> "$GITHUB_STEP_SUMMARY"
+          echo "[Full report](https://bearicorn.github.io/git-paw/coverage/)" >> "$GITHUB_STEP_SUMMARY"
+          python3 -c "
+          import json, sys
+          d = json.load(open('cov.json'))
+          pct = d['data'][0]['totals']['lines']['percent']
+          if pct < 80:
+              print(f'Coverage {pct:.1f}% is below 80% threshold')
+              sys.exit(1)
+          print(f'Coverage {pct:.1f}% meets 80% threshold')
+          "
+
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+      - name: Run cargo audit
+        run: cargo audit
+      - name: Run cargo deny
+        run: cargo deny check
+
+  docs:
+    name: Build & Deploy Docs
+    needs: [lint, test, audit]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pages
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - uses: taiki-e/install-action@mdbook
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install cargo-about
+        run: cargo install cargo-about
+      - name: Generate third-party licenses
+        run: cargo about generate about.hbs -o docs/src/licenses.md
+      - name: Build book
+        run: mdbook build docs/
+      - name: Generate coverage report
+        run: cargo llvm-cov --html --output-dir docs/book/coverage
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs/book
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
