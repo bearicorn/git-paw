@@ -21,6 +21,9 @@ target
 #.idea/
 
 
+# mdBook build output
+docs/book/
+
 # Added by cargo
 
 /target

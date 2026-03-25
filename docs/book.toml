@@ -1,0 +1,17 @@
+[book]
+title = "git-paw"
+authors = ["bearicorn"]
+description = "Parallel AI Worktrees — orchestrate multiple AI coding CLI sessions across git worktrees"
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/bearicorn/git-paw"
+edit-url-template = "https://github.com/bearicorn/git-paw/edit/main/docs/{path}"
+
+[output.html.search]
+enable = true
+limit-results = 20
