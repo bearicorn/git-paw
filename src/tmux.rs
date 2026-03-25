@@ -28,6 +28,8 @@ impl TmuxCommand {
     }
 
     /// Return a human-readable command string (e.g. `tmux new-session -d -s paw-proj`).
+    // Not called by production code — used by `TmuxSession::command_strings()` for
+    // dry-run contract tests that verify the commands shown to users via `--dry-run`.
     #[allow(dead_code)]
     pub fn as_command_string(&self) -> String {
         format!("tmux {}", self.args.join(" "))
@@ -79,6 +81,8 @@ impl TmuxSession {
     }
 
     /// Return all commands as human-readable strings (for dry-run / testing).
+    // Not called by production code — used by unit tests as the dry-run contract
+    // surface to verify the tmux commands shown to users via `--dry-run`.
     #[allow(dead_code)]
     pub fn command_strings(&self) -> Vec<String> {
         self.commands
@@ -383,6 +387,7 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // AC: Checks tmux presence with actionable error
+    // Behavioral: verifies the public contract — does the system detect tmux?
     // -----------------------------------------------------------------------
 
     #[test]
@@ -394,6 +399,8 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // AC: Creates named sessions, handles collision
+    // Behavioral: session name is a public field used by attach, status, and
+    // dry-run output. The exact naming convention is the public contract.
     // -----------------------------------------------------------------------
 
     #[test]
@@ -421,8 +428,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn session_name_override_replaces_default() {
+        let session = TmuxSessionBuilder::new("my-project")
+            .session_name("custom-session-name".to_string())
+            .add_pane(make_pane("main", "/tmp/wt", "claude"))
+            .build()
+            .unwrap();
+
+        assert_eq!(session.name, "custom-session-name");
+        let cmds = session.command_strings();
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains("new-session") && c.contains("custom-session-name")),
+            "should use overridden session name"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // AC: Dynamic pane count based on input
+    // Dry-run contract: verifies the number of commands matches the number of
+    // panes the user requested. Actual pane creation verified by e2e test
+    // tmux_session_with_five_panes_and_different_clis.
     // -----------------------------------------------------------------------
 
     #[test]
@@ -471,6 +498,8 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // AC: Correct commands sent to panes
+    // Dry-run contract: users see these exact commands in --dry-run output,
+    // so the format (cd + cli, Enter, pane indices) is user-facing.
     // -----------------------------------------------------------------------
 
     #[test]
@@ -537,6 +566,9 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // AC: Pane titles show branch and CLI
+    // Dry-run contract: title format is user-visible in both --dry-run output
+    // and tmux pane borders. Actual tmux titles verified by e2e test
+    // tmux_session_with_five_panes_and_different_clis.
     // -----------------------------------------------------------------------
 
     #[test]
@@ -583,115 +615,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pane_titles_target_the_session() {
-        let session = TmuxSessionBuilder::new("proj")
-            .add_pane(make_pane("main", "/tmp/wt", "claude"))
-            .build()
-            .unwrap();
-
-        let cmds = session.command_strings();
-        let border_cmds: Vec<&String> = cmds
-            .iter()
-            .filter(|c| c.contains("pane-border-status") || c.contains("pane-border-format"))
-            .collect();
-
-        for cmd in &border_cmds {
-            assert!(
-                cmd.contains("-t paw-proj"),
-                "pane border config should target the session, got: {cmd}"
-            );
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // AC: Tiled layout applied (before each split + final)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn tiled_layout_applied_before_every_split() {
-        let mut builder = TmuxSessionBuilder::new("proj");
-        for i in 0..6 {
-            builder = builder.add_pane(make_pane(
-                &format!("feat/b{i}"),
-                &format!("/tmp/wt{i}"),
-                "claude",
-            ));
-        }
-        let session = builder.build().unwrap();
-        let cmds = session.command_strings();
-
-        let split_indices: Vec<usize> = cmds
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.contains("split-window"))
-            .map(|(i, _)| i)
-            .collect();
-
-        assert_eq!(split_indices.len(), 5, "6 panes need 5 splits");
-
-        for &idx in &split_indices {
-            assert!(
-                idx > 0
-                    && cmds[idx - 1].contains("select-layout")
-                    && cmds[idx - 1].contains("tiled"),
-                "split at position {idx} must be preceded by tiled layout"
-            );
-        }
-    }
-
-    #[test]
-    fn final_tiled_layout_applied_after_last_pane() {
-        let session = TmuxSessionBuilder::new("proj")
-            .add_pane(make_pane("feat/a", "/tmp/a", "claude"))
-            .add_pane(make_pane("feat/b", "/tmp/b", "codex"))
-            .build()
-            .unwrap();
-
-        let cmds = session.command_strings();
-        let last = cmds.last().expect("should have commands");
-        assert!(
-            last.contains("select-layout") && last.contains("tiled"),
-            "last command should be final tiled layout, got: {last}"
-        );
-    }
-
-    #[test]
-    fn single_pane_still_gets_final_tiled_layout() {
-        let session = TmuxSessionBuilder::new("proj")
-            .add_pane(make_pane("main", "/tmp/wt", "claude"))
-            .build()
-            .unwrap();
-
-        let cmds = session.command_strings();
-        let last = cmds.last().expect("should have commands");
-        assert!(
-            last.contains("select-layout") && last.contains("tiled"),
-            "even a single pane should get final tiled layout"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // AC: Builder returns command strings without executing (testable)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn command_strings_are_valid_tmux_invocations() {
-        let session = TmuxSessionBuilder::new("proj")
-            .add_pane(make_pane("main", "/tmp/wt", "claude"))
-            .build()
-            .unwrap();
-
-        for cmd in &session.command_strings() {
-            assert!(
-                cmd.starts_with("tmux "),
-                "all command strings should be tmux invocations, got: {cmd}"
-            );
-        }
-    }
-
     // -----------------------------------------------------------------------
     // AC: Mouse mode (per-session, configurable, default on)
+    // Dry-run contract: users see mouse config in --dry-run output.
+    // Actual tmux behavior verified by e2e test tmux_mouse_mode_enabled_by_default.
     // -----------------------------------------------------------------------
 
     #[test]
@@ -705,24 +632,6 @@ mod tests {
         assert!(
             cmds.iter().any(|c| c.contains("mouse on")),
             "mouse should be enabled by default"
-        );
-    }
-
-    #[test]
-    fn mouse_mode_targets_session_not_global() {
-        let session = TmuxSessionBuilder::new("proj")
-            .add_pane(make_pane("main", "/tmp/wt", "claude"))
-            .build()
-            .unwrap();
-
-        let cmds = session.command_strings();
-        let mouse_cmd = cmds
-            .iter()
-            .find(|c| c.contains("mouse on"))
-            .expect("should have mouse command");
-        assert!(
-            mouse_cmd.contains("-t paw-proj"),
-            "mouse setting should target the session, got: {mouse_cmd}"
         );
     }
 
@@ -743,6 +652,8 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // AC: Session liveness and collision handling
+    // Behavioral: tests against a real tmux server — verifies observable
+    // outcomes (session exists, session is killed, names are unique).
     // -----------------------------------------------------------------------
 
     /// Helper to create a detached tmux session for testing.

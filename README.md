@@ -137,6 +137,23 @@ cargo install git-paw
 - [tmux](https://github.com/tmux/tmux) — terminal multiplexer
 - [Git](https://git-scm.com/) — with worktree support (2.5+)
 
+### `git paw` vs `git-paw`
+
+Once installed to your PATH, git-paw works as a git subcommand:
+
+```bash
+git paw start    # git finds `git-paw` on PATH automatically
+```
+
+You can also call the binary directly — useful during development or if it's not on PATH:
+
+```bash
+git-paw start    # equivalent
+cargo run -- start  # during development
+```
+
+All examples below use `git paw`, but `git-paw` works identically.
+
 ## Usage
 
 ### `start` — Launch or reattach

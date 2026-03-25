@@ -393,13 +393,16 @@ fn config_with_many_custom_clis() {
 
     let mut toml = String::new();
     for i in 0..10 {
-        toml.push_str(&format!(
+        use std::fmt::Write;
+        write!(
+            toml,
             r#"
 [clis.agent-{i}]
 command = "/bin/agent-{i}"
 display_name = "Agent {i}"
 "#
-        ));
+        )
+        .unwrap();
     }
 
     fs::write(&config_path, &toml).expect("write config");

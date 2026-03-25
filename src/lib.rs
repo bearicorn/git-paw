@@ -3,8 +3,6 @@
 //! Orchestrates multiple AI coding CLI sessions across git worktrees
 //! from a single terminal using tmux.
 
-#![allow(dead_code)]
-
 pub mod cli;
 pub mod config;
 pub mod detect;

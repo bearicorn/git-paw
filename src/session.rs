@@ -97,12 +97,6 @@ pub fn save_session(session: &Session) -> Result<(), PawError> {
     save_session_in(session, &sessions_dir()?)
 }
 
-/// Loads a session by name, returning `None` if the file does not exist.
-#[allow(dead_code)]
-pub fn load_session(session_name: &str) -> Result<Option<Session>, PawError> {
-    load_session_from(session_name, &sessions_dir()?)
-}
-
 /// Finds the session associated with a given repository path.
 ///
 /// Scans all `.json` files in the sessions directory and returns the first
