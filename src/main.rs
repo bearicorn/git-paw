@@ -24,6 +24,7 @@ fn main() {
     let command = args.command.unwrap_or(Command::Start {
         cli: None,
         branches: None,
+        from_specs: false,
         dry_run: false,
         preset: None,
     });
@@ -39,9 +40,16 @@ fn run(command: Command) -> Result<(), PawError> {
         Command::Start {
             cli: cli_flag,
             branches: branches_flag,
+            from_specs,
             dry_run,
             preset,
-        } => cmd_start(cli_flag, branches_flag, dry_run, preset.as_deref()),
+        } => {
+            if from_specs {
+                eprintln!("error: --from-specs is not yet implemented");
+                std::process::exit(1);
+            }
+            cmd_start(cli_flag, branches_flag, dry_run, preset.as_deref())
+        }
         Command::Stop => cmd_stop(),
         Command::Purge { force } => cmd_purge(force),
         Command::Status => cmd_status(),
@@ -52,6 +60,14 @@ fn run(command: Command) -> Result<(), PawError> {
             display_name,
         } => cmd_add_cli(&name, &command, display_name.as_deref()),
         Command::RemoveCli { name } => cmd_remove_cli(&name),
+        Command::Init => {
+            eprintln!("error: init is not yet implemented");
+            std::process::exit(1);
+        }
+        Command::Replay { .. } => {
+            eprintln!("error: replay is not yet implemented");
+            std::process::exit(1);
+        }
     }
 }
 

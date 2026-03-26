@@ -31,6 +31,38 @@ pub struct Preset {
     pub cli: String,
 }
 
+/// How to handle CLAUDE.md alongside AGENTS.md.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClaudeMdMode {
+    /// Create AGENTS.md symlink to CLAUDE.md (same content for all CLIs).
+    Symlink,
+    /// Copy CLAUDE.md to AGENTS.md (separate files, user manages both).
+    Copy,
+    /// Create fresh AGENTS.md (other CLIs won't see CLAUDE.md content).
+    #[default]
+    Skip,
+}
+
+/// Spec scanning configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpecsConfig {
+    /// Directory containing spec files (relative to repo root).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    /// Spec format type: `"openspec"` or `"markdown"`.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "type")]
+    pub spec_type: Option<String>,
+}
+
+/// Session logging configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LoggingConfig {
+    /// Whether session logging is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 /// Top-level git-paw configuration.
 ///
 /// All fields are optional — absent config files produce empty defaults.
@@ -40,9 +72,21 @@ pub struct PawConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_cli: Option<String>,
 
+    /// Default CLI for `--from-specs` (bypasses picker when set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_spec_cli: Option<String>,
+
+    /// Prefix for spec-derived branch names (default: `"spec/"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_prefix: Option<String>,
+
     /// Whether to enable tmux mouse mode for sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mouse: Option<bool>,
+
+    /// How to handle CLAUDE.md alongside AGENTS.md.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_md: Option<ClaudeMdMode>,
 
     /// Custom CLI definitions keyed by name.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -51,6 +95,14 @@ pub struct PawConfig {
     /// Named presets keyed by name.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub presets: HashMap<String, Preset>,
+
+    /// Spec scanning configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specs: Option<SpecsConfig>,
+
+    /// Session logging configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logging: Option<LoggingConfig>,
 }
 
 impl PawConfig {
@@ -75,9 +127,20 @@ impl PawConfig {
                 .default_cli
                 .clone()
                 .or_else(|| self.default_cli.clone()),
+            default_spec_cli: overlay
+                .default_spec_cli
+                .clone()
+                .or_else(|| self.default_spec_cli.clone()),
+            branch_prefix: overlay
+                .branch_prefix
+                .clone()
+                .or_else(|| self.branch_prefix.clone()),
             mouse: overlay.mouse.or(self.mouse),
+            claude_md: overlay.claude_md.clone().or_else(|| self.claude_md.clone()),
             clis,
             presets,
+            specs: overlay.specs.clone().or_else(|| self.specs.clone()),
+            logging: overlay.logging.clone().or_else(|| self.logging.clone()),
         }
     }
 
@@ -525,7 +588,10 @@ cli = "claude"
 
         let original = PawConfig {
             default_cli: Some("claude".into()),
+            default_spec_cli: None,
+            branch_prefix: None,
             mouse: Some(true),
+            claude_md: None,
             clis: HashMap::from([(
                 "test".into(),
                 CustomCli {
@@ -540,6 +606,8 @@ cli = "claude"
                     cli: "claude".into(),
                 },
             )]),
+            specs: None,
+            logging: None,
         };
 
         save_config_to(&config_path, &original).unwrap();

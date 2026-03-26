@@ -59,6 +59,18 @@ pub enum PawError {
     /// Custom CLI not found in config.
     #[error("CLI '{0}' not found in config")]
     CliNotFound(String),
+
+    /// Init operation failed.
+    #[error("Init error: {0}")]
+    InitError(String),
+
+    /// AGENTS.md operation failed.
+    #[error("AGENTS.md error: {0}")]
+    AgentsMdError(String),
+
+    /// Spec scanning failed.
+    #[error("Spec error: {0}")]
+    SpecError(String),
 }
 
 impl PawError {

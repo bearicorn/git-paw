@@ -45,6 +45,8 @@ pub enum Command {
                       git paw start\n  \
                       git paw start --cli claude\n  \
                       git paw start --cli claude --branches feat/auth,feat/api\n  \
+                      git paw start --from-specs\n  \
+                      git paw start --from-specs --cli claude\n  \
                       git paw start --dry-run\n  \
                       git paw start --preset backend"
     )]
@@ -60,6 +62,13 @@ pub enum Command {
             help = "Comma-separated branches (skips branch picker)"
         )]
         branches: Option<Vec<String>>,
+
+        /// Launch from spec files instead of interactive selection.
+        #[arg(
+            long,
+            help = "Launch from spec files (reads .git-paw/config.toml [specs])"
+        )]
+        from_specs: bool,
 
         /// Preview the session plan without executing.
         #[arg(long, help = "Preview the session plan without executing")]
@@ -145,6 +154,44 @@ pub enum Command {
         #[arg(help = "Name of the custom CLI to remove")]
         name: String,
     },
+
+    /// Initialize .git-paw/ and inject into AGENTS.md
+    #[command(
+        about = "Initialize .git-paw/ and inject into AGENTS.md",
+        long_about = "Creates the .git-paw/ directory with a default config, sets up .gitignore \
+                      for logs, and injects a git-paw section into AGENTS.md.\n\n\
+                      Examples:\n  git paw init"
+    )]
+    Init,
+
+    /// View captured session logs
+    #[command(
+        about = "View captured session logs",
+        long_about = "Reads session logs captured by pipe-pane. By default, strips ANSI codes \
+                      for clean output. Use --color to view with colors via less -R.\n\n\
+                      Examples:\n  \
+                      git paw replay --list\n  \
+                      git paw replay feat/add-auth\n  \
+                      git paw replay feat/add-auth --color\n  \
+                      git paw replay feat/add-auth --session paw-myproject"
+    )]
+    Replay {
+        /// Branch name to replay (fuzzy-matched against log filenames).
+        #[arg(required_unless_present = "list", help = "Branch to replay")]
+        branch: Option<String>,
+
+        /// List available log sessions and branches.
+        #[arg(long, help = "List available log sessions and branches")]
+        list: bool,
+
+        /// Display with ANSI colors via less -R.
+        #[arg(long, help = "Display with colors via less -R")]
+        color: bool,
+
+        /// Session name to replay from (defaults to most recent).
+        #[arg(long, help = "Session to replay from (defaults to most recent)")]
+        session: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -179,11 +226,13 @@ mod tests {
             Command::Start {
                 cli,
                 branches,
+                from_specs,
                 dry_run,
                 preset,
             } => {
                 assert!(cli.is_none());
                 assert!(branches.is_none());
+                assert!(!from_specs);
                 assert!(!dry_run);
                 assert!(preset.is_none());
             }
@@ -248,6 +297,7 @@ mod tests {
                 branches,
                 dry_run,
                 preset,
+                ..
             } => {
                 assert_eq!(cli.as_deref(), Some("gemini"));
                 assert_eq!(branches.unwrap(), vec!["a", "b"]);
