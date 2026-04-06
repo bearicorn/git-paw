@@ -45,8 +45,7 @@ fn run(command: Command) -> Result<(), PawError> {
             preset,
         } => {
             if from_specs {
-                eprintln!("error: --from-specs is not yet implemented");
-                std::process::exit(1);
+                return cmd_start_from_specs(cli_flag.as_deref(), dry_run);
             }
             cmd_start(cli_flag, branches_flag, dry_run, preset.as_deref())
         }
@@ -60,14 +59,13 @@ fn run(command: Command) -> Result<(), PawError> {
             display_name,
         } => cmd_add_cli(&name, &command, display_name.as_deref()),
         Command::RemoveCli { name } => cmd_remove_cli(&name),
-        Command::Init => {
-            eprintln!("error: init is not yet implemented");
-            std::process::exit(1);
-        }
-        Command::Replay { .. } => {
-            eprintln!("error: replay is not yet implemented");
-            std::process::exit(1);
-        }
+        Command::Init => git_paw::init::run_init(),
+        Command::Replay {
+            branch,
+            list,
+            color,
+            session,
+        } => cmd_replay(branch, list, color, session.as_deref()),
     }
 }
 
@@ -111,22 +109,21 @@ fn cmd_start(
         .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
     let repo_root = git::validate_repo(&cwd)?;
 
-    // Check for existing session
-    if let Some(existing) = session::find_session_for_repo(&repo_root)? {
+    // Check for existing session (skip reattach/recovery during dry-run)
+    let existing_session = session::find_session_for_repo(&repo_root)?;
+    if !dry_run && let Some(existing) = &existing_session {
         let alive = tmux::is_session_alive(&existing.session_name)?;
 
         if alive {
-            // Active session — reattach
             println!("Reattaching to session '{}'...", existing.session_name);
             return tmux::attach(&existing.session_name);
         }
 
-        // Stopped/stale session — recover
         println!("Recovering session '{}'...", existing.session_name);
-        return recover_session(&repo_root, &existing);
+        return recover_session(&repo_root, existing);
     }
 
-    // No session — fresh launch
+    // Fresh launch (or dry-run preview)
     tmux::ensure_tmux_installed()?;
     let config = config::load_config(&repo_root)?;
     let custom_defs = config_to_custom_defs(&config);
@@ -170,6 +167,12 @@ fn cmd_start(
     let session_name = tmux::resolve_session_name(&project)?;
 
     if dry_run {
+        if let Some(ref existing) = existing_session {
+            eprintln!(
+                "warning: session '{}' already exists — purge it before starting a new one\n",
+                existing.session_name
+            );
+        }
         println!("Dry run — session plan:\n");
         println!("  Session:  {session_name}");
         println!("  Mouse:    {}", if mouse { "on" } else { "off" });
@@ -182,6 +185,9 @@ fn cmd_start(
     }
 
     // Create worktrees and build tmux session
+    // Prune stale worktree registrations from previous sessions
+    git::prune_worktrees(&repo_root)?;
+
     let mut builder = tmux::TmuxSessionBuilder::new(&project)
         .session_name(session_name)
         .mouse_mode(mouse);
@@ -221,6 +227,173 @@ fn cmd_start(
     session::save_session(&state)?;
 
     // Attach
+    tmux::attach(&tmux_session.name)
+}
+
+// ---------------------------------------------------------------------------
+// Command: start --from-specs
+// ---------------------------------------------------------------------------
+
+/// Launches sessions from spec files instead of interactive branch selection.
+fn cmd_start_from_specs(cli_flag: Option<&str>, dry_run: bool) -> Result<(), PawError> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
+    let repo_root = git::validate_repo(&cwd)?;
+
+    // Check for existing session (skip reattach/recovery during dry-run)
+    let existing_session = session::find_session_for_repo(&repo_root)?;
+    if !dry_run && let Some(existing) = &existing_session {
+        let alive = tmux::is_session_alive(&existing.session_name)?;
+
+        if alive {
+            println!("Reattaching to session '{}'...", existing.session_name);
+            return tmux::attach(&existing.session_name);
+        }
+
+        println!("Recovering session '{}'...", existing.session_name);
+        return recover_session(&repo_root, existing);
+    }
+
+    // Fresh launch from specs (or dry-run preview)
+    tmux::ensure_tmux_installed()?;
+    let config = config::load_config(&repo_root)?;
+
+    // Scan for pending specs
+    let specs = git_paw::specs::scan_specs(&config, &repo_root)?;
+    if specs.is_empty() {
+        println!("No pending specs found.");
+        return Ok(());
+    }
+
+    // Detect available CLIs
+    let custom_defs = config_to_custom_defs(&config);
+    let detected = detect::detect_clis(&custom_defs);
+    if detected.is_empty() {
+        return Err(PawError::NoCLIsFound);
+    }
+
+    // Resolve CLI assignments for specs
+    let interactive_clis: Vec<interactive::CliInfo> =
+        detected.iter().map(to_interactive_cli).collect();
+    let prompter = interactive::TerminalPrompter;
+    let mappings = interactive::resolve_cli_for_specs(
+        &specs,
+        cli_flag,
+        &config,
+        &interactive_clis,
+        &prompter,
+    )?;
+
+    // Build a lookup from branch to spec for prompt/owned_files
+    let spec_by_branch: std::collections::HashMap<&str, &git_paw::specs::SpecEntry> =
+        specs.iter().map(|s| (s.branch.as_str(), s)).collect();
+
+    let project = git::project_name(&repo_root);
+    let mouse = config.mouse.unwrap_or(true);
+    let session_name = tmux::resolve_session_name(&project)?;
+
+    // Dry run — print plan and exit
+    if dry_run {
+        if let Some(ref existing) = existing_session {
+            eprintln!(
+                "warning: session '{}' already exists — purge it before starting a new one\n",
+                existing.session_name
+            );
+        }
+        println!("Dry run — session plan (from specs):\n");
+        println!("  Session:  {session_name}");
+        println!("  Mouse:    {}", if mouse { "on" } else { "off" });
+        println!();
+        for (branch, cli) in &mappings {
+            let wt_dir = git::worktree_dir_name(&project, branch);
+            println!("  {branch} \u{2192} {cli} (../{wt_dir})");
+        }
+        return Ok(());
+    }
+
+    launch_spec_session(
+        &repo_root,
+        &config,
+        &mappings,
+        &spec_by_branch,
+        &project,
+        mouse,
+    )
+}
+
+/// Creates worktrees, sets up AGENTS.md, builds the tmux session, and attaches.
+fn launch_spec_session(
+    repo_root: &std::path::Path,
+    config: &PawConfig,
+    mappings: &[(String, String)],
+    spec_by_branch: &std::collections::HashMap<&str, &git_paw::specs::SpecEntry>,
+    project: &str,
+    mouse: bool,
+) -> Result<(), PawError> {
+    let session_name = tmux::resolve_session_name(project)?;
+
+    // Prune stale worktree registrations from previous sessions
+    git::prune_worktrees(repo_root)?;
+
+    let mut builder = tmux::TmuxSessionBuilder::new(project)
+        .session_name(session_name)
+        .mouse_mode(mouse);
+    let mut worktree_entries = Vec::new();
+
+    for (branch, cli) in mappings {
+        let wt_path = git::create_worktree(repo_root, branch)?;
+        let wt_str = wt_path.to_string_lossy().to_string();
+
+        // Set up AGENTS.md with spec content
+        if let Some(spec) = spec_by_branch.get(branch.as_str()) {
+            let assignment = git_paw::agents::WorktreeAssignment {
+                branch: branch.clone(),
+                cli: cli.clone(),
+                spec_content: Some(spec.prompt.clone()),
+                owned_files: spec.owned_files.clone(),
+            };
+            git_paw::agents::setup_worktree_agents_md(repo_root, &wt_path, &assignment)?;
+        }
+
+        builder = builder.add_pane(tmux::PaneSpec {
+            branch: branch.clone(),
+            worktree: wt_str,
+            cli_command: cli.clone(),
+        });
+
+        worktree_entries.push(WorktreeEntry {
+            branch: branch.clone(),
+            worktree_path: wt_path,
+            cli: cli.clone(),
+        });
+    }
+
+    let mut tmux_session = builder.build()?;
+
+    // Set up logging if enabled
+    if config.logging.as_ref().is_some_and(|l| l.enabled) {
+        git_paw::logging::ensure_log_dir(repo_root, &tmux_session.name)?;
+        for (i, (branch, _)) in mappings.iter().enumerate() {
+            let log_path = git_paw::logging::log_file_path(repo_root, &tmux_session.name, branch);
+            let pane_target = format!("{}:{}.{}", tmux_session.name, 0, i);
+            tmux_session.pipe_pane(&pane_target, &log_path);
+        }
+    }
+
+    // Execute tmux session
+    tmux_session.execute()?;
+
+    // Save session state
+    let state = Session {
+        session_name: tmux_session.name.clone(),
+        repo_path: repo_root.to_path_buf(),
+        project_name: project.to_string(),
+        created_at: SystemTime::now(),
+        status: SessionStatus::Active,
+        worktrees: worktree_entries,
+    };
+    session::save_session(&state)?;
+
     tmux::attach(&tmux_session.name)
 }
 
@@ -415,6 +588,41 @@ fn cmd_add_cli(name: &str, command: &str, display_name: Option<&str>) -> Result<
     config::add_custom_cli(name, command, display_name)?;
     println!("Added custom CLI '{name}'.");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Command: remove-cli
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Command: replay
+// ---------------------------------------------------------------------------
+
+/// Replays captured session logs.
+fn cmd_replay(
+    branch: Option<String>,
+    list: bool,
+    color: bool,
+    session: Option<&str>,
+) -> Result<(), PawError> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
+    let repo_root = git::validate_repo(&cwd)?;
+
+    if list {
+        return git_paw::replay::display_list(&repo_root);
+    }
+
+    // clap ensures branch is present when --list is absent
+    let branch = branch.expect("branch is required unless --list is passed");
+    let session_name = git_paw::replay::resolve_session(&repo_root, session)?;
+    let log_path = git_paw::replay::find_log(&repo_root, &session_name, &branch)?;
+
+    if color {
+        git_paw::replay::replay_colored(&log_path)
+    } else {
+        git_paw::replay::replay_stripped(&log_path)
+    }
 }
 
 // ---------------------------------------------------------------------------

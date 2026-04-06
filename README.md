@@ -57,6 +57,19 @@ git-paw lets you run multiple AI coding assistants in parallel, each in its own 
 - **Session persistence** — state saved to disk, survives tmux crashes and system reboots
 - **Dry run** — preview the session plan before executing with `--dry-run`
 - **Mouse-friendly tmux** — click to switch panes, drag borders to resize, scroll with mouse wheel
+- **Spec-driven launch** — auto-discover specs and launch sessions with `--from-specs`
+- **AGENTS.md integration** — auto-inject session context into worktree AGENTS.md files
+- **Session logging** — capture raw terminal output per pane for later review
+- **Replay** — view session logs with ANSI stripping or colored output via `less -R`
+- **Project init** — `git paw init` bootstraps `.git-paw/`, config, and gitignore
+- **Standards-based** — uses `AGENTS.md` following the Linux Foundation standard for AI agent instructions
+
+> **Tip:** git-paw uses `AGENTS.md` as the standard agent instruction file. If your AI CLI reads a different file (e.g., `CLAUDE.md`, `GEMINI.md`), you can symlink it:
+> ```bash
+> ln -s AGENTS.md CLAUDE.md   # Claude Code reads CLAUDE.md
+> ln -s AGENTS.md GEMINI.md   # Gemini reads GEMINI.md
+> ```
+> Add these symlinks to `.gitignore` so they stay local to each developer.
 
 ## Platform Support
 
@@ -154,6 +167,14 @@ All examples below use `git paw`, but `git-paw` works identically.
 
 ## Usage
 
+### `init` — Initialize project
+
+```bash
+git paw init
+```
+
+Creates `.git-paw/` directory with default config and sets up `.gitignore` for logs.
+
 ### `start` — Launch or reattach
 
 ```bash
@@ -162,6 +183,10 @@ git paw start
 
 # Specify CLI and branches
 git paw start --cli claude --branches feat/auth,feat/api
+
+# Launch from spec files (OpenSpec or Markdown)
+git paw start --from-specs
+git paw start --from-specs --cli claude
 
 # Use a preset from config
 git paw start --preset backend
@@ -229,23 +254,57 @@ git paw remove-cli my-agent
 
 Only custom CLIs can be removed — auto-detected CLIs cannot.
 
+### `replay` — View session logs
+
+```bash
+# List available log sessions
+git paw replay --list
+
+# View a branch's log (ANSI stripped)
+git paw replay feat/auth
+
+# View with colors via less -R
+git paw replay feat/auth --color
+
+# Replay from a specific session
+git paw replay feat/auth --session paw-myproject
+```
+
+Requires session logging to be enabled in config.
+
 ## Configuration
 
 ### Per-repo config (`.git-paw/config.toml`)
 
 ```toml
-default_cli = "claude"
+# Pre-select a CLI in the interactive picker
+default_cli = "my-cli"
 mouse = true
+
+# Bypass picker entirely for --from-specs mode
+default_spec_cli = "my-cli"
+
+# Prefix for spec-derived branches (default: "spec/")
+branch_prefix = "spec/"
+
+# Spec scanning
+[specs]
+dir = "specs"
+type = "openspec"  # or "markdown"
+
+# Session logging
+[logging]
+enabled = true
 
 [presets.backend]
 branches = ["feat/api", "fix/db"]
-cli = "claude"
+cli = "my-cli"
 ```
 
 ### Global config (`~/.config/git-paw/config.toml`)
 
 ```toml
-default_cli = "claude"
+default_cli = "my-cli"
 mouse = true
 
 [clis.my-agent]
@@ -258,7 +317,7 @@ display_name = "Local LLM"
 
 [presets.backend]
 branches = ["feat/api", "fix/db"]
-cli = "claude"
+cli = "my-cli"
 ```
 
 Per-repo config overrides global config for overlapping fields.

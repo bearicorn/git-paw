@@ -74,7 +74,7 @@ The system SHALL match the `<branch>` argument against both the original branch 
 
 ### Requirement: ANSI stripping correctness
 
-The ANSI stripper SHALL remove all CSI sequences (starting with `\x1b[`) while preserving all non-escape content.
+The ANSI stripper SHALL remove all CSI sequences (starting with `\x1b[`) and OSC sequences (`\x1b]...\x07` and `\x1b]...\x1b\\`) while preserving all non-escape content.
 
 #### Scenario: Plain text passes through unchanged
 - **WHEN** content has no ANSI sequences
@@ -83,6 +83,10 @@ The ANSI stripper SHALL remove all CSI sequences (starting with `\x1b[`) while p
 #### Scenario: Multiple sequences in one line
 - **WHEN** a line contains `\x1b[1m\x1b[31mBold Red\x1b[0m Normal`
 - **THEN** the stripped output SHALL be `Bold Red Normal`
+
+#### Scenario: OSC sequences stripped
+- **WHEN** the log file contains OSC sequences (`\x1b]0;window title\x07` or `\x1b]8;;https://example.com\x1b\\`)
+- **THEN** the stripped output SHALL not contain those sequences
 
 #### Scenario: Incomplete escape sequence at end of input
 - **WHEN** content ends with `\x1b[` (incomplete CSI)

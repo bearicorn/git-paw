@@ -63,7 +63,7 @@ cargo llvm-cov --html
 Tests are organized as:
 - **Unit tests** — `#[cfg(test)]` modules within each source file
 - **Integration tests** — `tests/` directory (CLI binary tests, worktree lifecycle, session round-trips)
-- **Tmux-dependent tests** — marked `#[ignore]`, run with `--include-ignored`
+- **Tmux-dependent tests** — run normally (tmux is a hard dependency)
 
 ## Code Style
 

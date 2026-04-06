@@ -56,6 +56,11 @@ The system SHALL validate that each resolved CLI name matches an available CLI.
 - **WHEN** `default_spec_cli = "nonexistent"` and no such CLI is available
 - **THEN** the system SHALL return `PawError::CliNotFound("nonexistent")`
 
+#### Scenario: --cli flag references unknown CLI
+- **GIVEN** specs exist
+- **WHEN** `--cli nonexistent` is passed and "nonexistent" is not in available CLIs
+- **THEN** the system SHALL return `PawError::CliNotFound("nonexistent")`
+
 ### Requirement: No prompt when fully resolved
 
 The system SHALL not show any interactive prompt when all branches are resolved via `--cli`, `paw_cli`, or `default_spec_cli`.

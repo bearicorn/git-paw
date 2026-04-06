@@ -74,6 +74,10 @@ Scan `tasks.md` for lines matching the pattern `Files owned:` or `Owned files:` 
 
 **Why:** The OpenSpec convention is flat — each change is a top-level directory under `changes/`. Recursion would be confusing and break the 1:1 mapping between directory and change.
 
+### Design Note: Local `parse_frontmatter()` implementation
+
+`openspec.rs` has its own local `parse_frontmatter()` function that returns `Vec<(String, String)>` (preserving insertion order), separate from the shared `parse_frontmatter()` in `specs/mod.rs` which returns `HashMap<String, String>`. This duplication is acceptable: the local version was implemented before the shared one existed, and the `Vec` return type is slightly better suited for ordered frontmatter processing. Both implementations use the same line-by-line parsing approach with no YAML dependency.
+
 ## Risks / Trade-offs
 
 **[Missing tasks.md]** → A change directory without `tasks.md` is skipped with a warning to stderr. It's not an error because the change might be in-progress (only proposal written so far). → The scanner only returns actionable changes.

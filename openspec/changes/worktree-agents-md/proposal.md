@@ -23,7 +23,7 @@ When git-paw creates worktrees for parallel AI sessions, each AI coding CLI need
 
 ## Impact
 
-- **Modified files**: `src/git.rs` (worktree creation hooks to trigger AGENTS.md generation)
-- **New logic in `src/agents.rs`**: `generate_worktree_agents_md()` and `exclude_from_git()` functions (extends the `agents-md-injection` module)
+- **Modified files**: `src/agents.rs` (all worktree AGENTS.md generation and git exclude logic lives here)
+- **New logic in `src/agents.rs`**: `generate_worktree_agents_md()` and `exclude_from_git()` functions (extends the `agents-md-injection` module). Includes a `resolve_git_dir()` helper that handles worktree `.git` files (which contain a `gitdir:` pointer to the actual git directory) so that `.git/info/exclude` can be correctly located in both regular repos and worktrees.
 - **No new dependencies**
 - **No CLI changes** — this is triggered automatically during worktree creation

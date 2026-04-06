@@ -191,6 +191,172 @@ fn status_from_non_git_dir_fails() {
 }
 
 // ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+
+#[test]
+fn init_creates_git_paw_dir() {
+    let tr = setup_test_repo();
+
+    cmd()
+        .current_dir(tr.path())
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("Created .git-paw/")
+                .and(predicate::str::contains("Initialized git-paw")),
+        );
+
+    assert!(tr.path().join(".git-paw").is_dir());
+    assert!(tr.path().join(".git-paw/config.toml").exists());
+    assert!(tr.path().join(".git-paw/logs").is_dir());
+    assert!(!tr.path().join("AGENTS.md").exists());
+}
+
+#[test]
+fn init_outside_git_repo_fails() {
+    let tmp = TempDir::new().expect("create temp dir");
+
+    cmd()
+        .current_dir(tmp.path())
+        .arg("init")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Not a git repository"));
+}
+
+#[test]
+fn init_is_idempotent() {
+    let tr = setup_test_repo();
+
+    cmd().current_dir(tr.path()).arg("init").assert().success();
+
+    cmd()
+        .current_dir(tr.path())
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Already initialized"));
+}
+
+// ---------------------------------------------------------------------------
+// From-specs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn from_specs_no_specs_config_returns_error() {
+    let tr = setup_test_repo();
+
+    // Create a .git-paw/config.toml without [specs] section
+    let config = tr.path().join(".git-paw").join("config.toml");
+    fs::create_dir_all(config.parent().unwrap()).expect("create config dir");
+    fs::write(&config, "# no specs section\n").expect("write config");
+
+    cmd()
+        .current_dir(tr.path())
+        .args(["start", "--from-specs"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("[specs]"));
+}
+
+#[test]
+fn from_specs_dry_run_with_valid_specs_shows_plan() {
+    let tr = setup_test_repo();
+
+    // Create config with [specs] section pointing to openspec/changes
+    let paw_dir = tr.path().join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    fs::write(
+        paw_dir.join("config.toml"),
+        "[specs]\ndir = \"openspec/changes\"\ntype = \"openspec\"\n",
+    )
+    .expect("write config");
+
+    // Register "echo" as a custom CLI so detection finds it
+    let config_content = fs::read_to_string(paw_dir.join("config.toml")).unwrap();
+    fs::write(
+        paw_dir.join("config.toml"),
+        format!("{config_content}\n[clis.echo]\ncommand = \"/bin/echo\"\n"),
+    )
+    .expect("append cli");
+
+    // Create a spec with tasks.md
+    let spec_dir = tr.path().join("openspec/changes/add-auth");
+    fs::create_dir_all(&spec_dir).expect("create spec dir");
+    fs::write(spec_dir.join("tasks.md"), "Implement authentication\n").expect("write tasks.md");
+
+    cmd()
+        .current_dir(tr.path())
+        .args(["start", "--from-specs", "--dry-run", "--cli", "echo"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("Dry run")
+                .and(predicate::str::contains("spec/add-auth"))
+                .and(predicate::str::contains("echo")),
+        );
+}
+
+#[test]
+fn from_specs_empty_specs_dir_prints_no_pending() {
+    let tr = setup_test_repo();
+
+    // Create config with [specs] section
+    let paw_dir = tr.path().join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    fs::write(
+        paw_dir.join("config.toml"),
+        "[specs]\ndir = \"openspec/changes\"\ntype = \"openspec\"\n",
+    )
+    .expect("write config");
+
+    // Create the empty specs directory
+    fs::create_dir_all(tr.path().join("openspec/changes")).expect("create specs dir");
+
+    cmd()
+        .current_dir(tr.path())
+        .args(["start", "--from-specs"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No pending specs"));
+}
+
+// ---------------------------------------------------------------------------
+// Replay
+// ---------------------------------------------------------------------------
+
+#[test]
+fn replay_list_with_no_logs_shows_message() {
+    let tr = setup_test_repo();
+
+    cmd()
+        .current_dir(tr.path())
+        .args(["replay", "--list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No log sessions"));
+}
+
+#[test]
+fn replay_nonexistent_branch_shows_error() {
+    let tr = setup_test_repo();
+
+    // Create a session log directory with one log so resolve_session succeeds
+    let log_dir = tr.path().join(".git-paw/logs/paw-test");
+    fs::create_dir_all(&log_dir).expect("create log dir");
+    fs::write(log_dir.join("main.log"), "some log content").expect("write log");
+
+    cmd()
+        .current_dir(tr.path())
+        .args(["replay", "nonexistent-branch"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("nonexistent-branch"));
+}
+
+// ---------------------------------------------------------------------------
 // Tmux-dependent
 // ---------------------------------------------------------------------------
 
@@ -384,6 +550,130 @@ fn attach_fails_for_nonexistent_session() {
 
     let result = attach("paw-e2e-attach-nonexistent-xyz");
     assert!(result.is_err(), "attach to nonexistent session should fail");
+}
+
+// ---------------------------------------------------------------------------
+// Replay — ANSI stripping
+// ---------------------------------------------------------------------------
+
+#[test]
+fn replay_strips_ansi_from_log() {
+    let tr = setup_test_repo();
+
+    // Create a log file with ANSI escape codes
+    let log_dir = tr.path().join(".git-paw/logs/paw-test");
+    fs::create_dir_all(&log_dir).expect("create log dir");
+    fs::write(log_dir.join("main.log"), "\x1b[31mred\x1b[0m plain").expect("write log with ANSI");
+
+    cmd()
+        .current_dir(tr.path())
+        .args(["replay", "main", "--session", "paw-test"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("red plain")
+                .and(predicate::str::contains("\x1b[31m").not())
+                .and(predicate::str::contains("\x1b[0m").not()),
+        );
+}
+
+// ---------------------------------------------------------------------------
+// Replay — list shows sessions and branches
+// ---------------------------------------------------------------------------
+
+#[test]
+fn replay_list_shows_sessions_and_branches() {
+    let tr = setup_test_repo();
+
+    // Create log files for a session with two branches
+    let log_dir = tr.path().join(".git-paw/logs/paw-test");
+    fs::create_dir_all(&log_dir).expect("create log dir");
+    fs::write(log_dir.join("feat--auth.log"), "auth log").expect("write auth log");
+    fs::write(log_dir.join("main.log"), "main log").expect("write main log");
+
+    cmd()
+        .current_dir(tr.path())
+        .args(["replay", "--list"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("paw-test")
+                .and(predicate::str::contains("2 branches"))
+                .and(predicate::str::contains("feat/auth"))
+                .and(predicate::str::contains("main")),
+        );
+}
+
+// ---------------------------------------------------------------------------
+// From-specs — markdown format dry run
+// ---------------------------------------------------------------------------
+
+#[test]
+fn from_specs_markdown_format_dry_run() {
+    let tr = setup_test_repo();
+
+    // Create config with [specs] section using markdown type
+    let paw_dir = tr.path().join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    fs::write(
+        paw_dir.join("config.toml"),
+        "[specs]\ndir = \"specs\"\ntype = \"markdown\"\n\n[clis.echo]\ncommand = \"/bin/echo\"\n",
+    )
+    .expect("write config");
+
+    // Create a markdown spec file with paw_status: pending frontmatter
+    let specs_dir = tr.path().join("specs");
+    fs::create_dir_all(&specs_dir).expect("create specs dir");
+    fs::write(
+        specs_dir.join("add-auth.md"),
+        "---\npaw_status: pending\n---\nImplement authentication\n",
+    )
+    .expect("write spec");
+
+    cmd()
+        .current_dir(tr.path())
+        .args(["start", "--from-specs", "--dry-run", "--cli", "echo"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("Dry run")
+                .and(predicate::str::contains("add-auth"))
+                .and(predicate::str::contains("echo")),
+        );
+}
+
+// ---------------------------------------------------------------------------
+// From-specs — skips done markdown specs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn from_specs_skips_done_markdown_specs() {
+    let tr = setup_test_repo();
+
+    // Create config with [specs] section using markdown type
+    let paw_dir = tr.path().join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    fs::write(
+        paw_dir.join("config.toml"),
+        "[specs]\ndir = \"specs\"\ntype = \"markdown\"\n\n[clis.echo]\ncommand = \"/bin/echo\"\n",
+    )
+    .expect("write config");
+
+    // Create a markdown spec file with paw_status: done (not pending)
+    let specs_dir = tr.path().join("specs");
+    fs::create_dir_all(&specs_dir).expect("create specs dir");
+    fs::write(
+        specs_dir.join("add-auth.md"),
+        "---\npaw_status: done\n---\nAlready implemented\n",
+    )
+    .expect("write spec");
+
+    cmd()
+        .current_dir(tr.path())
+        .args(["start", "--from-specs"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No pending specs"));
 }
 
 #[test]

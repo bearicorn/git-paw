@@ -1,6 +1,6 @@
 ## Why
 
-AI coding CLIs (Claude Code, Codex, Gemini, etc.) read instruction files like `AGENTS.md` to understand project context. git-paw needs a reusable module that can inject a git-paw section into these files — both at `init` time (root repo) and at session launch time (per-worktree). This module provides the core read/write/inject logic with marker-based idempotency that multiple consumers depend on.
+AI coding CLIs read instruction files like `AGENTS.md` to understand project context. git-paw needs a reusable module that can inject a git-paw section into per-worktree AGENTS.md files at session launch time. This module provides the core read/write/inject logic with marker-based idempotency.
 
 ## What Changes
 
@@ -11,7 +11,7 @@ AI coding CLIs (Claude Code, Codex, Gemini, etc.) read instruction files like `A
   - Replace the content between markers while preserving surrounding content
   - Read file content with proper error handling
 - All functions are pure or take `&Path` — no CLI, no config, no side effects beyond file I/O
-- This module is consumed by `init-command` (root AGENTS.md) and `worktree-agents-md` (per-worktree AGENTS.md)
+- This module is consumed by `worktree-agents-md` (per-worktree AGENTS.md generation)
 
 ## Capabilities
 
@@ -27,4 +27,4 @@ _(none — this is a new library module with no CLI or config changes)_
 - **Modified files**: `src/main.rs` or `src/lib.rs` (add `mod agents;`), `src/error.rs` (add `AgentsMdError` variant)
 - **No new dependencies** — uses only `std::fs` and `std::path`
 - **No CLI changes** — this is a library module, not a command
-- **Consumers**: `init-command` calls `inject_section()` for root AGENTS.md; `worktree-agents-md` calls lower-level functions for per-worktree generation
+- **Consumer**: `worktree-agents-md` calls these functions for per-worktree AGENTS.md generation

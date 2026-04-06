@@ -155,11 +155,11 @@ pub enum Command {
         name: String,
     },
 
-    /// Initialize .git-paw/ and inject into AGENTS.md
+    /// Initialize .git-paw/ directory and configuration
     #[command(
-        about = "Initialize .git-paw/ and inject into AGENTS.md",
-        long_about = "Creates the .git-paw/ directory with a default config, sets up .gitignore \
-                      for logs, and injects a git-paw section into AGENTS.md.\n\n\
+        about = "Initialize .git-paw/ directory and configuration",
+        long_about = "Creates the .git-paw/ directory with a default config and sets up \
+                      .gitignore for logs.\n\n\
                       Examples:\n  git paw init"
     )]
     Init,
@@ -424,6 +424,24 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
     }
 
+    // --- Gap #6: init_parses ---
+
+    #[test]
+    fn init_parses() {
+        let cli = parse(&["init"]);
+        assert!(matches!(cli.command.unwrap(), Command::Init));
+    }
+
+    // --- Gap #7: init_help_text ---
+
+    #[test]
+    fn init_help_text() {
+        let result = Cli::try_parse_from(["git-paw", "init", "--help"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
     #[test]
     fn unknown_subcommand_is_rejected() {
         let result = Cli::try_parse_from(["git-paw", "unknown-command"]);
@@ -434,5 +452,87 @@ mod tests {
     fn add_cli_missing_required_args_is_rejected() {
         let result = Cli::try_parse_from(["git-paw", "add-cli"]);
         assert!(result.is_err());
+    }
+
+    // -- Replay subcommand --
+
+    #[test]
+    fn replay_with_branch() {
+        let cli = parse(&["replay", "feat/add-auth"]);
+        match cli.command.unwrap() {
+            Command::Replay {
+                branch,
+                list,
+                color,
+                session,
+            } => {
+                assert_eq!(branch.as_deref(), Some("feat/add-auth"));
+                assert!(!list);
+                assert!(!color);
+                assert!(session.is_none());
+            }
+            other => panic!("expected Replay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_with_list() {
+        let cli = parse(&["replay", "--list"]);
+        match cli.command.unwrap() {
+            Command::Replay { branch, list, .. } => {
+                assert!(list);
+                assert!(branch.is_none());
+            }
+            other => panic!("expected Replay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_with_color() {
+        let cli = parse(&["replay", "feat/add-auth", "--color"]);
+        match cli.command.unwrap() {
+            Command::Replay { color, .. } => assert!(color),
+            other => panic!("expected Replay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_with_session() {
+        let cli = parse(&["replay", "feat/add-auth", "--session", "paw-myproject"]);
+        match cli.command.unwrap() {
+            Command::Replay { session, .. } => {
+                assert_eq!(session.as_deref(), Some("paw-myproject"));
+            }
+            other => panic!("expected Replay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_no_args_fails() {
+        let result = Cli::try_parse_from(["git-paw", "replay"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn replay_help_text() {
+        let result = Cli::try_parse_from(["git-paw", "replay", "--help"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(help.contains("--list"));
+        assert!(help.contains("--color"));
+        assert!(help.contains("--session"));
+    }
+
+    #[test]
+    fn help_shows_replay_subcommand() {
+        let result = Cli::try_parse_from(["git-paw", "--help"]);
+        let err = result.unwrap_err();
+        let help = err.to_string();
+        assert!(
+            help.contains("replay"),
+            "help should list the replay subcommand"
+        );
     }
 }

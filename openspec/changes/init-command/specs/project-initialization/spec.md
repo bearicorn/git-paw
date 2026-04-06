@@ -50,7 +50,7 @@ Running `git paw init` multiple times SHALL produce the same result as running i
 
 #### Scenario: Double init produces identical state
 - **WHEN** `git paw init` is run twice in the same repo
-- **THEN** the resulting `.git-paw/` directory, config, `.gitignore`, and `AGENTS.md` SHALL be identical to a single run
+- **THEN** the resulting `.git-paw/` directory, config, and `.gitignore` SHALL be identical to a single run
 
 ### Requirement: Init requires a git repository
 
@@ -66,7 +66,7 @@ The system SHALL print a summary of actions taken (directories created, files wr
 
 #### Scenario: Init in fresh repo shows all actions
 - **WHEN** `git paw init` is run in a repo with no prior setup
-- **THEN** stdout SHALL report creation of `.git-paw/`, `config.toml`, `logs/`, `.gitignore` update, and `AGENTS.md` injection
+- **THEN** stdout SHALL report creation of `.git-paw/`, `config.toml`, `logs/`, and `.gitignore` update
 
 #### Scenario: Init in already-initialized repo shows skips
 - **WHEN** `git paw init` is run in an already-initialized repo

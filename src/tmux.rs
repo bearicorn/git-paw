@@ -90,6 +90,21 @@ impl TmuxSession {
             .map(TmuxCommand::as_command_string)
             .collect()
     }
+
+    /// Queue a `pipe-pane` command to capture pane output to a log file.
+    ///
+    /// Appends `tmux pipe-pane -o -t <pane_target> "cat >> <log_path>"` to the
+    /// command queue. Should be called after the pane has been created.
+    pub fn pipe_pane(&mut self, pane_target: &str, log_path: &std::path::Path) -> &mut Self {
+        self.commands.push(TmuxCommand::new(&[
+            "pipe-pane",
+            "-o",
+            "-t",
+            pane_target,
+            &format!("cat >> {}", log_path.display()),
+        ]));
+        self
+    }
 }
 
 /// Builder that accumulates tmux operations for creating and configuring a session.
@@ -185,11 +200,16 @@ impl TmuxSessionBuilder {
         let mut commands = Vec::new();
 
         // 1. Create detached session (pane 0 is implicit)
+        // Use -c to set pane 0's working directory directly, avoiding a race
+        // condition where send-keys fires before the shell is ready.
+        let first_worktree = &self.panes[0].worktree;
         commands.push(TmuxCommand::new(&[
             "new-session",
             "-d",
             "-s",
             &session_name,
+            "-c",
+            first_worktree,
         ]));
 
         // 2. Mouse mode
@@ -219,11 +239,10 @@ impl TmuxSessionBuilder {
             " #{pane_title} ",
         ]));
 
-        // 4. First pane — already exists as pane 0
+        // 4. First pane — already exists as pane 0 (directory set by -c above)
         let first = &self.panes[0];
         let pane_target = format!("{session_name}:0.0");
         let pane_title = format!("{} \u{2192} {}", first.branch, first.cli_command);
-        let pane_cmd = format!("cd {} && {}", first.worktree, first.cli_command);
         commands.push(TmuxCommand::new(&[
             "select-pane",
             "-t",
@@ -235,7 +254,7 @@ impl TmuxSessionBuilder {
             "send-keys",
             "-t",
             &pane_target,
-            &pane_cmd,
+            &first.cli_command,
             "Enter",
         ]));
 
@@ -513,10 +532,12 @@ mod tests {
         let cmds = session.command_strings();
         let send_keys = commands_containing(&cmds, "send-keys");
 
+        // Pane 0 uses -c on new-session for its directory, so just runs the CLI
         assert!(
-            send_keys[0].contains("cd /home/user/wt-auth && claude"),
-            "first pane should cd into wt-auth and run claude"
+            send_keys[0].contains("claude"),
+            "first pane should run claude"
         );
+        // Subsequent panes use cd && cli
         assert!(
             send_keys[1].contains("cd /home/user/wt-api && gemini"),
             "second pane should cd into wt-api and run gemini"
@@ -713,6 +734,121 @@ mod tests {
         assert_eq!(resolved, format!("{base_name}-2"));
 
         cleanup_session(base_name);
+    }
+
+    // -----------------------------------------------------------------------
+    // AC: pipe-pane logging integration
+    // Dry-run contract: verifies the pipe-pane command is queued correctly.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pipe_pane_queues_correct_command() {
+        let mut session = TmuxSessionBuilder::new("proj")
+            .add_pane(make_pane("feat/auth", "/tmp/wt1", "claude"))
+            .build()
+            .unwrap();
+
+        let log_path = std::path::PathBuf::from("/repo/.git-paw/logs/paw-proj/feat--auth.log");
+        session.pipe_pane("paw-proj:0.0", &log_path);
+
+        let cmds = session.command_strings();
+        let pipe_cmds: Vec<&String> = cmds.iter().filter(|c| c.contains("pipe-pane")).collect();
+        assert_eq!(pipe_cmds.len(), 1);
+        assert!(pipe_cmds[0].contains("pipe-pane -o -t paw-proj:0.0"));
+        assert!(pipe_cmds[0].contains("cat >> /repo/.git-paw/logs/paw-proj/feat--auth.log"));
+    }
+
+    // --- Gap #10: pipe-pane conditional on logging ---
+
+    #[test]
+    fn session_without_pipe_pane_has_no_pipe_pane_commands() {
+        let session = TmuxSessionBuilder::new("proj")
+            .add_pane(make_pane("main", "/tmp/wt", "claude"))
+            .build()
+            .unwrap();
+
+        let cmds = session.command_strings();
+        assert!(
+            !cmds.iter().any(|c| c.contains("pipe-pane")),
+            "session built without pipe_pane calls should have no pipe-pane commands"
+        );
+    }
+
+    #[test]
+    fn session_with_pipe_pane_differs_from_without() {
+        let session_without = TmuxSessionBuilder::new("proj")
+            .add_pane(make_pane("main", "/tmp/wt", "claude"))
+            .build()
+            .unwrap();
+        let cmds_without = session_without.command_strings();
+
+        let mut session_with = TmuxSessionBuilder::new("proj")
+            .add_pane(make_pane("main", "/tmp/wt", "claude"))
+            .build()
+            .unwrap();
+        let log_path = std::path::PathBuf::from("/repo/.git-paw/logs/paw-proj/main.log");
+        session_with.pipe_pane("paw-proj:0.0", &log_path);
+        let cmds_with = session_with.command_strings();
+
+        assert_ne!(
+            cmds_without, cmds_with,
+            "command lists should differ when pipe-pane is added"
+        );
+        assert!(
+            cmds_with.iter().any(|c| c.contains("pipe-pane")),
+            "session with pipe_pane should contain pipe-pane command"
+        );
+    }
+
+    // --- Gap #11: pipe-pane ordering ---
+
+    #[test]
+    fn pipe_pane_appears_after_send_keys_for_pane() {
+        let mut session = TmuxSessionBuilder::new("proj")
+            .add_pane(make_pane("feat/auth", "/tmp/wt1", "claude"))
+            .add_pane(make_pane("feat/api", "/tmp/wt2", "codex"))
+            .build()
+            .unwrap();
+
+        let log0 = std::path::PathBuf::from("/repo/logs/feat--auth.log");
+        let log1 = std::path::PathBuf::from("/repo/logs/feat--api.log");
+        session.pipe_pane("paw-proj:0.0", &log0);
+        session.pipe_pane("paw-proj:0.1", &log1);
+
+        let cmds = session.command_strings();
+
+        // Find the last send-keys index and first pipe-pane index
+        let last_send_keys = cmds
+            .iter()
+            .rposition(|c| c.contains("send-keys"))
+            .expect("should have send-keys");
+        let first_pipe_pane = cmds
+            .iter()
+            .position(|c| c.contains("pipe-pane"))
+            .expect("should have pipe-pane");
+
+        assert!(
+            first_pipe_pane > last_send_keys,
+            "pipe-pane commands (index {first_pipe_pane}) should appear after \
+             all send-keys commands (last at index {last_send_keys})"
+        );
+    }
+
+    #[test]
+    fn pipe_pane_appears_in_dry_run_output() {
+        let mut session = TmuxSessionBuilder::new("proj")
+            .add_pane(make_pane("main", "/tmp/wt", "claude"))
+            .build()
+            .unwrap();
+
+        let log_path = std::path::PathBuf::from("/repo/.git-paw/logs/paw-proj/main.log");
+        session.pipe_pane("paw-proj:0.0", &log_path);
+
+        let cmds = session.command_strings();
+        assert!(
+            cmds.iter().any(|c| c.starts_with("tmux pipe-pane")),
+            "dry-run output should include pipe-pane command"
+        );
     }
 
     #[test]
