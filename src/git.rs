@@ -116,6 +116,27 @@ pub fn worktree_dir_name(project: &str, branch: &str) -> String {
     format!("{project}-{sanitized}")
 }
 
+/// Prunes stale worktree registrations.
+///
+/// Runs `git worktree prune` to clean up references to worktrees whose
+/// directories no longer exist. This prevents "already registered worktree"
+/// errors when recreating worktrees after a previous session was purged.
+pub fn prune_worktrees(repo_root: &Path) -> Result<(), PawError> {
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(["worktree", "prune"])
+        .output()
+        .map_err(|e| PawError::WorktreeError(format!("failed to run git worktree prune: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(PawError::WorktreeError(format!(
+            "git worktree prune failed: {stderr}"
+        )));
+    }
+    Ok(())
+}
+
 /// Creates a git worktree for the given branch.
 ///
 /// The worktree is placed in the parent directory of `repo_root`, named using

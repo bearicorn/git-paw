@@ -23,14 +23,14 @@ The `[specs]` config section (added by `init-command`) provides the `dir` (spec 
 ### Decision 1: Trait-based backend dispatch
 
 ```rust
-pub trait SpecBackend {
+pub trait SpecBackend: fmt::Debug {
     fn scan(&self, dir: &Path) -> Result<Vec<SpecEntry>, PawError>;
 }
 ```
 
 `scan_specs()` reads `config.specs.type` and instantiates the matching backend. Unknown types return `PawError::SpecError`.
 
-**Why:** Adding a new spec format means implementing one trait, not modifying scanner logic. The trait is object-safe so it can be used dynamically (`Box<dyn SpecBackend>`).
+**Why:** Adding a new spec format means implementing one trait, not modifying scanner logic. The trait is object-safe so it can be used dynamically (`Box<dyn SpecBackend>`). The `fmt::Debug` bound is required so that backend instances can be debug-printed for diagnostics and logging.
 
 **Alternative considered:** Enum dispatch instead of trait. Rejected — trait is more extensible and follows Rust conventions for pluggable behavior.
 
@@ -83,3 +83,7 @@ fn backend_for_type(spec_type: &str) -> Result<Box<dyn SpecBackend>, PawError> {
 **[Backend stubs]** → This change creates the trait and stub backends that return empty results. The real implementations come in Wave 2. → Acceptable — Wave 1 branches compile and test independently.
 
 **[Spec directory validation]** → The scanner validates that `specs_dir` exists and is a directory before passing to the backend. Invalid paths produce `SpecError`, not a panic.
+
+**[Stale worktree registrations]** → When a session is purged, worktree directories are deleted but git may retain stale registrations. The caller (`start --from-specs` and `start`) must run `git worktree prune` before creating new worktrees to avoid "already registered worktree" errors.
+
+**[Dry-run with active session]** → `--dry-run` skips session reattach/recovery and always shows the plan. If a session already exists, a warning is printed to stderr: `"warning: session '<name>' already exists — purge it before starting a new one"`. This applies to both `start --dry-run` and `start --from-specs --dry-run`.

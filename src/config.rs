@@ -31,19 +31,6 @@ pub struct Preset {
     pub cli: String,
 }
 
-/// How to handle CLAUDE.md alongside AGENTS.md.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ClaudeMdMode {
-    /// Create AGENTS.md symlink to CLAUDE.md (same content for all CLIs).
-    Symlink,
-    /// Copy CLAUDE.md to AGENTS.md (separate files, user manages both).
-    Copy,
-    /// Create fresh AGENTS.md (other CLIs won't see CLAUDE.md content).
-    #[default]
-    Skip,
-}
-
 /// Spec scanning configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SpecsConfig {
@@ -83,10 +70,6 @@ pub struct PawConfig {
     /// Whether to enable tmux mouse mode for sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mouse: Option<bool>,
-
-    /// How to handle CLAUDE.md alongside AGENTS.md.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_md: Option<ClaudeMdMode>,
 
     /// Custom CLI definitions keyed by name.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -136,7 +119,6 @@ impl PawConfig {
                 .clone()
                 .or_else(|| self.branch_prefix.clone()),
             mouse: overlay.mouse.or(self.mouse),
-            claude_md: overlay.claude_md.clone().or_else(|| self.claude_md.clone()),
             clis,
             presets,
             specs: overlay.specs.clone().or_else(|| self.specs.clone()),
@@ -175,6 +157,14 @@ fn load_config_file(path: &Path) -> Result<Option<PawConfig>, PawError> {
     }
 }
 
+/// Loads only the repo-level configuration (`.git-paw/config.toml`).
+///
+/// Returns defaults if the file does not exist. Useful when you need to
+/// update and save repo-level settings without clobbering global values.
+pub fn load_repo_config(repo_root: &Path) -> Result<PawConfig, PawError> {
+    Ok(load_config_file(&repo_config_path(repo_root))?.unwrap_or_default())
+}
+
 /// Loads the merged configuration for a repository.
 ///
 /// Reads the global config and the per-repo config, merging them with
@@ -189,6 +179,11 @@ pub fn load_config_from(global_path: &Path, repo_root: &Path) -> Result<PawConfi
     let global = load_config_file(global_path)?.unwrap_or_default();
     let repo = load_config_file(&repo_config_path(repo_root))?.unwrap_or_default();
     Ok(global.merged_with(&repo))
+}
+
+/// Saves a [`PawConfig`] to the repo-level config file (`.git-paw/config.toml`).
+pub fn save_repo_config(repo_root: &Path, config: &PawConfig) -> Result<(), PawError> {
+    save_config_to(&repo_config_path(repo_root), config)
 }
 
 /// Writes a [`PawConfig`] to a TOML file atomically (temp file + rename).
@@ -253,6 +248,57 @@ pub fn add_custom_cli_to(
     save_config_to(config_path, &config)
 }
 
+/// Returns a default `config.toml` string with sensible defaults and
+/// commented-out v0.2.0 fields for discoverability.
+pub fn generate_default_config() -> String {
+    r#"# git-paw configuration
+# See https://github.com/bearicorn/git-paw for documentation.
+
+# Pre-select a CLI in the interactive picker (user can still change).
+# Omit to show the full picker with no default.
+# default_cli = ""
+
+# Enable tmux mouse mode for sessions (default: true).
+# mouse = true
+
+# Bypass the CLI picker entirely for --from-specs mode.
+# Omit to prompt or use per-spec paw_cli fields.
+# default_spec_cli = ""
+
+# Prefix for spec-derived branch names (default: "spec/").
+# branch_prefix = "spec/"
+
+# Spec scanning configuration.
+# [specs]
+# dir = "specs"
+#
+# OpenSpec format (directory-based, default):
+# type = "openspec"
+#
+# Markdown format (frontmatter-based):
+# type = "markdown"
+# Each .md file uses YAML frontmatter fields:
+#   paw_status  — "pending" | "done" | "in-progress" (required)
+#   paw_branch  — branch name suffix (optional, falls back to filename)
+#   paw_cli     — CLI override for this spec (optional)
+
+# Session logging configuration.
+# [logging]
+# enabled = false
+
+# Custom CLI definitions.
+# [clis.my-agent]
+# command = "/usr/local/bin/my-agent"
+# display_name = "My Agent"
+
+# Named presets for quick launches.
+# [presets.my-preset]
+# branches = ["feat/api", "fix/db"]
+# cli = ""
+"#
+    .to_string()
+}
+
 /// Removes a custom CLI from the global config.
 ///
 /// Returns `PawError::CliNotFound` if the name is not present in the config.
@@ -296,6 +342,8 @@ mod tests {
             r#"
 default_cli = "claude"
 mouse = false
+default_spec_cli = "gemini"
+branch_prefix = "spec/"
 
 [clis.my-agent]
 command = "/usr/local/bin/my-agent"
@@ -307,12 +355,21 @@ command = "ollama-code"
 [presets.backend]
 branches = ["feature/api", "fix/db"]
 cli = "claude"
+
+[specs]
+dir = "my-specs"
+type = "openspec"
+
+[logging]
+enabled = true
 "#,
         );
 
         let config = load_config_file(&path).unwrap().unwrap();
         assert_eq!(config.default_cli.as_deref(), Some("claude"));
         assert_eq!(config.mouse, Some(false));
+        assert_eq!(config.default_spec_cli.as_deref(), Some("gemini"));
+        assert_eq!(config.branch_prefix.as_deref(), Some("spec/"));
         assert_eq!(config.clis.len(), 2);
         assert_eq!(
             config.clis["my-agent"].display_name.as_deref(),
@@ -324,6 +381,11 @@ cli = "claude"
             config.presets["backend"].branches,
             vec!["feature/api", "fix/db"]
         );
+        let specs = config.specs.unwrap();
+        assert_eq!(specs.dir.as_deref(), Some("my-specs"));
+        assert_eq!(specs.spec_type.as_deref(), Some("openspec"));
+        let logging = config.logging.unwrap();
+        assert!(logging.enabled);
     }
 
     #[test]
@@ -581,6 +643,60 @@ cli = "claude"
 
     // --- Round-trip: config survives write + read ---
 
+    // --- default_spec_cli behavior ---
+
+    #[test]
+    fn parses_default_spec_cli_when_present() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "default_spec_cli = \"claude\"\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        assert_eq!(config.default_spec_cli.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn default_spec_cli_defaults_to_none() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "default_cli = \"claude\"\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        assert_eq!(config.default_spec_cli, None);
+    }
+
+    #[test]
+    fn repo_overrides_global_default_spec_cli() {
+        let tmp = TempDir::new().unwrap();
+        let global_path = tmp.path().join("global").join("config.toml");
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+
+        write_file(&global_path, "default_spec_cli = \"claude\"\n");
+        write_file(
+            &repo_config_path(&repo_root),
+            "default_spec_cli = \"gemini\"\n",
+        );
+
+        let config = load_config_from(&global_path, &repo_root).unwrap();
+        assert_eq!(config.default_spec_cli.as_deref(), Some("gemini"));
+    }
+
+    #[test]
+    fn global_default_spec_cli_preserved_when_repo_absent() {
+        let tmp = TempDir::new().unwrap();
+        let global_path = tmp.path().join("global").join("config.toml");
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+
+        write_file(&global_path, "default_spec_cli = \"claude\"\n");
+
+        let config = load_config_from(&global_path, &repo_root).unwrap();
+        assert_eq!(config.default_spec_cli.as_deref(), Some("claude"));
+    }
+
+    // --- Round-trip: config survives write + read ---
+
     #[test]
     fn config_survives_save_and_load() {
         let tmp = TempDir::new().unwrap();
@@ -591,7 +707,6 @@ cli = "claude"
             default_spec_cli: None,
             branch_prefix: None,
             mouse: Some(true),
-            claude_md: None,
             clis: HashMap::from([(
                 "test".into(),
                 CustomCli {
@@ -613,5 +728,105 @@ cli = "claude"
         save_config_to(&config_path, &original).unwrap();
         let loaded = load_config_file(&config_path).unwrap().unwrap();
         assert_eq!(original, loaded);
+    }
+
+    // --- Gap #1: Parse [specs] section with populated fields ---
+
+    #[test]
+    fn parses_specs_section_with_populated_fields() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[specs]\ndir = \"my-specs\"\ntype = \"openspec\"\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let specs = config.specs.unwrap();
+        assert_eq!(specs.dir.as_deref(), Some("my-specs"));
+        assert_eq!(specs.spec_type.as_deref(), Some("openspec"));
+    }
+
+    // --- Gap #2: Parse [logging] section with enabled ---
+
+    #[test]
+    fn parses_logging_section_with_enabled() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[logging]\nenabled = true\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let logging = config.logging.unwrap();
+        assert!(logging.enabled);
+    }
+
+    // --- Gap #3: Round-trip with specs and logging populated ---
+
+    #[test]
+    fn round_trip_with_specs_and_logging() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        let original = PawConfig {
+            specs: Some(SpecsConfig {
+                dir: Some("specs".into()),
+                spec_type: Some("openspec".into()),
+            }),
+            logging: Some(LoggingConfig { enabled: true }),
+            ..Default::default()
+        };
+
+        save_config_to(&config_path, &original).unwrap();
+        let loaded = load_config_file(&config_path).unwrap().unwrap();
+        assert_eq!(original, loaded);
+        assert_eq!(loaded.specs.unwrap().dir.as_deref(), Some("specs"));
+        assert!(loaded.logging.unwrap().enabled);
+    }
+
+    // --- Gap #4: Generated config is valid TOML ---
+
+    #[test]
+    fn generated_default_config_is_valid_toml() {
+        let raw = generate_default_config();
+        let stripped: String = raw
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .collect::<Vec<&str>>()
+            .join("\n");
+
+        let parsed: Result<PawConfig, _> = toml::from_str(&stripped);
+        assert!(
+            parsed.is_ok(),
+            "generated config with comments stripped should be valid TOML, got: {:?}",
+            parsed.unwrap_err()
+        );
+    }
+
+    // --- Gap #5: branch_prefix merge ---
+
+    #[test]
+    fn branch_prefix_repo_overrides_global() {
+        let tmp = TempDir::new().unwrap();
+        let global_path = tmp.path().join("global").join("config.toml");
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+
+        write_file(&global_path, "branch_prefix = \"feat/\"\n");
+        write_file(&repo_config_path(&repo_root), "branch_prefix = \"spec/\"\n");
+
+        let config = load_config_from(&global_path, &repo_root).unwrap();
+        assert_eq!(config.branch_prefix.as_deref(), Some("spec/"));
+    }
+
+    #[test]
+    fn generated_default_config_contains_commented_examples() {
+        let output = generate_default_config();
+        assert!(
+            output.contains("default_spec_cli"),
+            "should contain default_spec_cli"
+        );
+        assert!(
+            output.contains("branch_prefix"),
+            "should contain branch_prefix"
+        );
+        assert!(output.contains("[specs]"), "should contain [specs]");
+        assert!(output.contains("[logging]"), "should contain [logging]");
     }
 }

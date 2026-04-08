@@ -21,6 +21,17 @@ target
 #.idea/
 
 
+# CLI-specific agent instruction symlinks (symlinked to AGENTS.md)
+CLAUDE.md
+GEMINI.md
+
+# AI tool configuration directories (local per-developer)
+.claude/
+.gemini/
+.cursor/
+.aider*
+.codex/
+
 # mdBook build output
 docs/book/
 

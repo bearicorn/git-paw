@@ -1,6 +1,6 @@
 ## Context
 
-git-paw needs to inject instructions into `AGENTS.md` in two contexts: the root repo (via `init`) and per-worktree (via `start`). Both need the same marker detection, section replacement, and content generation logic. This module provides that shared foundation.
+git-paw needs to inject instructions into per-worktree `AGENTS.md` files during `start`. This requires marker detection, section replacement, and content generation logic. This module provides that shared foundation.
 
 The existing codebase has no markdown file manipulation. `error.rs` has `PawError` with string-carrying variants. The module follows the same pattern.
 
@@ -8,12 +8,10 @@ The existing codebase has no markdown file manipulation. `error.rs` has `PawErro
 
 **Goals:**
 - Reusable library functions for marker-based markdown section injection
-- Content generation for the root git-paw section (static, format-agnostic)
 - Idempotent injection: append if absent, replace if present
-- Clean API surface for two consumers: `init.rs` (root) and future `worktree-agents-md` (per-worktree)
+- Clean API surface for `worktree-agents-md` (per-worktree AGENTS.md generation)
 
 **Non-Goals:**
-- CLAUDE.md symlink handling (belongs to `init-command` or `claude-md-compat`)
 - Per-worktree content generation with branch/CLI/spec context (belongs to `worktree-agents-md`)
 - File permission management or git operations
 
@@ -57,11 +55,11 @@ When replacing an existing section:
 
 Add `AgentsMdError(String)` to `PawError` for all file I/O errors in this module. The string carries context like the file path and operation that failed.
 
-**Why:** Distinct from `InitError` — this module is used outside of init. The error message should say "AGENTS.md error" not "Init error" when called from `start`.
+**Why:** Distinct from `InitError`. The error message should say "AGENTS.md error" to clearly identify the source of the failure.
 
 ## Risks / Trade-offs
 
-**[Marker in user content]** → A user could accidentally write `<!-- git-paw:start` in their own AGENTS.md content. → Low risk — the marker is tool-specific. If it happens, re-running init replaces the "section" which would be confusing but recoverable.
+**[Marker in user content]** → A user could accidentally write `<!-- git-paw:start` in their own AGENTS.md content. → Low risk — the marker is tool-specific.
 
 **[Large file performance]** → Reading entire AGENTS.md into memory for string operations. → Acceptable — these files are typically < 10KB. No streaming needed.
 

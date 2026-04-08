@@ -45,11 +45,11 @@ pub fn pipe_pane(&mut self, pane_target: &str, log_path: &Path) -> &mut Self
 
 **Why:** Fits the existing builder pattern. The command is queued alongside `split-window`, `send-keys`, etc. and executed in order. In dry-run mode, it's printed but not executed.
 
-### Decision 4: Logging module owns directory management, not config
+### Decision 4: Logging module owns directory management, hardcoded path
 
-`logging.rs` provides `ensure_log_dir()` which creates the session-specific directory. It reads the base log path from config (`logging.log_dir`, default `.git-paw/logs`).
+`logging.rs` provides `ensure_log_dir()` which creates the session-specific directory. The base log path is hardcoded to `.git-paw/logs/` — the `LoggingConfig` struct only has an `enabled: bool` field, with no configurable `log_dir`.
 
-**Why:** The `init` command creates the top-level `.git-paw/logs/` directory. The logging module creates per-session subdirectories at launch time. This separation means `init` doesn't need to know about sessions.
+**Why:** The `init` command creates the top-level `.git-paw/logs/` directory. The logging module creates per-session subdirectories at launch time. This separation means `init` doesn't need to know about sessions. A configurable log directory was considered but deemed unnecessary for v0.2.0 — all logs live under `.git-paw/logs/` by convention.
 
 ### Decision 5: Enumeration functions for replay
 

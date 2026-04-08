@@ -24,7 +24,9 @@ fn help_shows_all_subcommands() {
             .and(predicate::str::contains("status"))
             .and(predicate::str::contains("list-clis"))
             .and(predicate::str::contains("add-cli"))
-            .and(predicate::str::contains("remove-cli")),
+            .and(predicate::str::contains("remove-cli"))
+            .and(predicate::str::contains("init"))
+            .and(predicate::str::contains("replay")),
     );
 }
 

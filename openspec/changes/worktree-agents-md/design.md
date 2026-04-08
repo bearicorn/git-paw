@@ -14,7 +14,6 @@ The `agents-md-injection` change provides the core marker-based injection functi
 
 **Non-Goals:**
 - Modifying the `create_worktree()` function signature (callers compose the two steps)
-- CLAUDE.md symlink handling in worktrees (belongs to `claude-md-compat`)
 - Reading specs or deriving file ownership (callers pass this data in)
 
 ## Decisions

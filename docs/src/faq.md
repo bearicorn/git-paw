@@ -75,7 +75,7 @@ Both are optional. See [Configuration](configuration/README.md).
 Add to your global or repo config:
 
 ```toml
-default_cli = "claude"
+default_cli = "my-cli"
 ```
 
 ### How do I disable mouse mode?

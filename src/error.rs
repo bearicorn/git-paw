@@ -71,6 +71,10 @@ pub enum PawError {
     /// Spec scanning failed.
     #[error("Spec error: {0}")]
     SpecError(String),
+
+    /// Replay operation failed.
+    #[error("Replay error: {0}")]
+    ReplayError(String),
 }
 
 impl PawError {
@@ -204,6 +208,45 @@ mod tests {
         for err in errors {
             assert_eq!(err.exit_code(), exit_code::ERROR, "failed for {err:?}");
         }
+    }
+
+    #[test]
+    fn test_spec_error_includes_detail() {
+        let msg = PawError::SpecError("bad format".into()).to_string();
+        assert!(
+            msg.contains("bad format"),
+            "should include the inner detail"
+        );
+        assert!(
+            msg.contains("Spec error"),
+            "should have the Spec error prefix"
+        );
+    }
+
+    #[test]
+    fn test_spec_error_exit_code() {
+        assert_eq!(
+            PawError::SpecError("test".into()).exit_code(),
+            exit_code::ERROR
+        );
+    }
+
+    #[test]
+    fn test_agents_md_error_includes_detail() {
+        let msg = PawError::AgentsMdError("cannot write file".into()).to_string();
+        assert!(
+            msg.contains("AGENTS.md error"),
+            "should include AGENTS.md prefix"
+        );
+        assert!(
+            msg.contains("cannot write file"),
+            "should include the inner detail"
+        );
+        assert_eq!(
+            PawError::AgentsMdError("x".into()).exit_code(),
+            exit_code::ERROR,
+            "should use general exit code"
+        );
     }
 
     #[test]

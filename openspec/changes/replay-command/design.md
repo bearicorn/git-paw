@@ -23,9 +23,9 @@ The `logging.rs` module provides `list_log_sessions()` and `list_logs_for_sessio
 
 ### Decision 1: ANSI stripping without regex crate
 
-Strip ANSI escape codes using a byte-by-byte state machine that detects `ESC[...m` (SGR), `ESC[...H` (cursor), and other CSI sequences. No regex dependency needed.
+Strip ANSI escape codes using a byte-by-byte state machine that detects CSI sequences (`\x1b[` followed by parameters and a final byte in `@`-`~` range) and OSC sequences (`\x1b]...\x07` and `\x1b]...\x1b\\`). No regex dependency needed.
 
-**Why:** The `regex` crate is not in the approved dependency list. ANSI CSI sequences follow a well-defined pattern (`\x1b[` followed by parameters and a final byte in `@`-`~` range). A state machine handles this reliably in < 50 lines.
+**Why:** The `regex` crate is not in the approved dependency list. CSI and OSC sequences follow well-defined patterns. OSC sequences (Operating System Commands) are emitted by many modern terminals and AI CLIs for features like setting window titles, hyperlinks, and bracketed paste markers. The state machine handles both CSI and OSC reliably.
 
 **Alternative considered:** Add `regex` dependency. Rejected — not approved, and the problem is simple enough for direct parsing.
 
