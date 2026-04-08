@@ -294,3 +294,75 @@ Test: `config_integration::repo_custom_clis_merge_with_global_custom_clis`
 - **THEN** all 10 SHALL be parsed correctly
 
 Test: `config_integration::config_with_many_custom_clis`
+
+### Requirement: The system SHALL support a default_spec_cli config field
+
+The system SHALL support a `default_spec_cli` field in `PawConfig` that specifies the CLI to use for `--from-specs` branches that don't have a `paw_cli` override, bypassing the interactive picker.
+
+#### Scenario: default_spec_cli set
+- **WHEN** a config has `default_spec_cli = "claude"`
+- **THEN** `PawConfig.default_spec_cli` SHALL be `Some("claude")`
+
+#### Scenario: default_spec_cli absent
+- **WHEN** a config has no `default_spec_cli` field
+- **THEN** `PawConfig.default_spec_cli` SHALL be `None`
+
+#### Scenario: Merge preserves repo override
+- **WHEN** global config has `default_spec_cli = "claude"` and repo config has `default_spec_cli = "gemini"`
+- **THEN** the merged config SHALL have `default_spec_cli = Some("gemini")`
+
+### Requirement: Repo SHALL override new v0.2.0 scalar fields
+
+#### Scenario: Repo overrides new v0.2.0 scalar fields
+- **GIVEN** global config has `default_spec_cli = "claude"` and repo has `default_spec_cli = "gemini"`
+- **WHEN** configs are merged
+- **THEN** `default_spec_cli` SHALL be `"gemini"`
+
+### Requirement: Specs configuration section
+
+The system SHALL support an optional `[specs]` section with `specs_dir` and `enabled` fields.
+
+#### Scenario: Specs section with all fields
+- **GIVEN** a TOML file with `[specs]` containing `specs_dir = "openspec/specs"` and `enabled = true`
+- **WHEN** the file is loaded
+- **THEN** `specs.specs_dir` SHALL be `"openspec/specs"` and `specs.enabled` SHALL be `true`
+
+#### Scenario: Specs section defaults
+- **GIVEN** a TOML file without a `[specs]` section
+- **WHEN** the file is loaded
+- **THEN** `specs` SHALL be `None`
+
+### Requirement: Logging configuration section
+
+The system SHALL support an optional `[logging]` section with `enabled` and `log_dir` fields.
+
+#### Scenario: Logging section with all fields
+- **GIVEN** a TOML file with `[logging]` containing `enabled = true` and `log_dir = ".git-paw/logs"`
+- **WHEN** the file is loaded
+- **THEN** `logging.enabled` SHALL be `true` and `logging.log_dir` SHALL be `".git-paw/logs"`
+
+#### Scenario: Logging section defaults
+- **GIVEN** a TOML file without a `[logging]` section
+- **WHEN** the file is loaded
+- **THEN** `logging` SHALL be `None`
+
+### Requirement: Default config generation
+
+The system SHALL provide a function to generate a default `config.toml` string with active defaults and commented-out v0.2.0 fields.
+
+#### Scenario: Generated config is valid TOML
+- **WHEN** the default config string is generated
+- **THEN** it SHALL be parseable as valid TOML
+
+#### Scenario: Generated config contains commented examples
+- **WHEN** the default config string is generated
+- **THEN** it SHALL contain commented-out examples for `default_spec_cli`, `branch_prefix`, `[specs]`, and `[logging]`
+
+### Requirement: Config round-trip with new fields
+
+A `PawConfig` with v0.2.0 fields populated SHALL be identical after save and reload.
+
+#### Scenario: Config with specs and logging round-trips
+- **GIVEN** a config with `default_spec_cli`, `branch_prefix`, `specs`, and `logging` populated
+- **WHEN** saved and loaded back
+- **THEN** it SHALL be equal to the original
