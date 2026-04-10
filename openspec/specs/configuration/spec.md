@@ -1,9 +1,7 @@
 ## Purpose
 
 Parse TOML configuration from global (`~/.config/git-paw/config.toml`) and per-repo (`.git-paw/config.toml`) files. Supports custom CLI definitions, presets, and programmatic add/remove of custom CLIs with repo config overriding global config.
-
 ## Requirements
-
 ### Requirement: Parse TOML config with all fields
 
 The system SHALL parse a TOML configuration file containing `default_cli`, `mouse`, `clis`, and `presets` fields.
@@ -348,15 +346,15 @@ The system SHALL support an optional `[logging]` section with `enabled` and `log
 
 ### Requirement: Default config generation
 
-The system SHALL provide a function to generate a default `config.toml` string with active defaults and commented-out v0.2.0 fields.
+The system SHALL provide a function to generate a default `config.toml` string with active defaults and commented-out fields including the `[broker]` section.
 
-#### Scenario: Generated config is valid TOML
+#### Scenario: Generated config contains commented broker examples
 - **WHEN** the default config string is generated
-- **THEN** it SHALL be parseable as valid TOML
+- **THEN** it SHALL contain commented-out examples for `[broker]` with `enabled`, `port`, and `bind` fields
 
 #### Scenario: Generated config contains commented examples
 - **WHEN** the default config string is generated
-- **THEN** it SHALL contain commented-out examples for `default_spec_cli`, `branch_prefix`, `[specs]`, and `[logging]`
+- **THEN** it SHALL contain commented-out examples for `default_spec_cli`, `branch_prefix`, `[specs]`, `[logging]`, and `[broker]`
 
 ### Requirement: Config round-trip with new fields
 
@@ -366,3 +364,39 @@ A `PawConfig` with v0.2.0 fields populated SHALL be identical after save and rel
 - **GIVEN** a config with `default_spec_cli`, `branch_prefix`, `specs`, and `logging` populated
 - **WHEN** saved and loaded back
 - **THEN** it SHALL be equal to the original
+
+### Requirement: Broker configuration section
+
+The system SHALL support an optional `[broker]` section with the following fields:
+
+- `enabled: bool` — defaults to `false` when the field or section is absent
+- `port: u16` — defaults to `9119` when absent
+- `bind: String` — defaults to `"127.0.0.1"` when absent
+
+The `BrokerConfig` struct SHALL provide a `url(&self) -> String` method returning `http://<bind>:<port>`.
+
+#### Scenario: Broker section with all fields
+- **GIVEN** a TOML file with `[broker]` containing `enabled = true`, `port = 9200`, `bind = "127.0.0.1"`
+- **WHEN** the file is loaded
+- **THEN** `broker.enabled` SHALL be `true`, `broker.port` SHALL be `9200`, `broker.bind` SHALL be `"127.0.0.1"`
+
+#### Scenario: Broker section defaults
+- **GIVEN** a TOML file without a `[broker]` section
+- **WHEN** the file is loaded
+- **THEN** `broker` SHALL have `enabled = false`, `port = 9119`, `bind = "127.0.0.1"`
+
+#### Scenario: Partial broker section
+- **GIVEN** a TOML file with `[broker]` containing only `enabled = true`
+- **WHEN** the file is loaded
+- **THEN** `broker.enabled` SHALL be `true`, `broker.port` SHALL be `9119`, `broker.bind` SHALL be `"127.0.0.1"`
+
+#### Scenario: BrokerConfig url method
+- **GIVEN** `BrokerConfig { enabled: true, port: 9200, bind: "127.0.0.1" }`
+- **WHEN** `url()` is called
+- **THEN** the result SHALL be `"http://127.0.0.1:9200"`
+
+#### Scenario: Broker config round-trips through save and load
+- **GIVEN** a config with `[broker]` fully populated
+- **WHEN** saved and loaded back
+- **THEN** all broker fields SHALL match the original
+

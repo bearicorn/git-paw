@@ -63,10 +63,16 @@ The `BrokerConfig` struct SHALL provide a `url(&self) -> String` method returnin
 - **WHEN** saved and loaded back
 - **THEN** all broker fields SHALL match the original
 
+## MODIFIED Requirements
+
 ### Requirement: Default config generation
 
-The system SHALL provide a function to generate a default `config.toml` string with active defaults and commented-out fields.
+The system SHALL provide a function to generate a default `config.toml` string with active defaults and commented-out fields including the `[broker]` section.
 
 #### Scenario: Generated config contains commented broker examples
 - **WHEN** the default config string is generated
 - **THEN** it SHALL contain commented-out examples for `[broker]` with `enabled`, `port`, and `bind` fields
+
+#### Scenario: Generated config contains commented examples
+- **WHEN** the default config string is generated
+- **THEN** it SHALL contain commented-out examples for `default_spec_cli`, `branch_prefix`, `[specs]`, `[logging]`, and `[broker]`

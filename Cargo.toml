@@ -1,6 +1,6 @@
 [package]
 name = "git-paw"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Parallel AI Worktrees — orchestrate multiple AI coding CLI sessions across git worktrees"
 license = "MIT"

@@ -1,9 +1,7 @@
 ## Purpose
 
 Define the central error type `PawError` used across all git-paw modules. Every variant carries an actionable, user-facing message and maps to a process exit code.
-
 ## Requirements
-
 ### Requirement: Actionable error messages for each variant
 
 Each `PawError` variant SHALL produce a user-facing message that explains the problem and suggests a remedy where appropriate.
@@ -124,3 +122,54 @@ All `PawError` variants SHALL support `Debug` formatting.
 - **THEN** the output SHALL contain `"NotAGitRepo"`
 
 Test: `error::tests::test_debug_derived`
+
+### Requirement: SkillError variants with actionable messages
+
+The system SHALL define a `SkillError` type with variants for skill loading failures. Each variant SHALL produce a user-facing message that explains the problem and suggests a remedy. `SkillError` SHALL be wrappable inside `PawError` as a variant.
+
+The following variants SHALL exist:
+
+- `UnknownSkill { name: String }` — no embedded or user override found for the requested skill name
+- `UserOverrideRead { path: PathBuf, source: std::io::Error }` — a user override file exists but cannot be read
+
+#### Scenario: UnknownSkill is actionable
+- **GIVEN** `SkillError::UnknownSkill { name: "nonexistent" }`
+- **WHEN** formatted with `Display`
+- **THEN** the message SHALL mention the skill name `"nonexistent"` and indicate no embedded default exists
+
+#### Scenario: UserOverrideRead is actionable
+- **GIVEN** `SkillError::UserOverrideRead { path: "/home/user/.config/git-paw/agent-skills/coordination.md", .. }`
+- **WHEN** formatted with `Display`
+- **THEN** the message SHALL include the file path and suggest checking permissions
+
+#### Scenario: SkillError exit code
+- **GIVEN** any `SkillError` variant wrapped in `PawError`
+- **WHEN** `exit_code()` is called
+- **THEN** it SHALL return `1`
+
+### Requirement: BrokerError variants with actionable messages
+
+The system SHALL define a `BrokerError` type with variants for broker-specific failures. Each variant SHALL produce a user-facing message that explains the problem and suggests a remedy. `BrokerError` SHALL be wrappable inside `PawError` as a variant.
+
+The following variants SHALL exist:
+
+- `PortInUse { port: u16 }` — the configured port is already occupied
+- `ProbeTimeout { port: u16 }` — the stale-broker probe timed out
+- `BindFailed(std::io::Error)` — socket bind failed for a reason other than port-in-use
+- `RuntimeFailed(std::io::Error)` — tokio runtime construction failed
+
+#### Scenario: PortInUse is actionable
+- **GIVEN** `BrokerError::PortInUse { port: 9119 }`
+- **WHEN** formatted with `Display`
+- **THEN** the message SHALL mention port `9119` and suggest changing `[broker] port` in config
+
+#### Scenario: ProbeTimeout is actionable
+- **GIVEN** `BrokerError::ProbeTimeout { port: 9119 }`
+- **WHEN** formatted with `Display`
+- **THEN** the message SHALL mention the port and suggest checking for stuck processes
+
+#### Scenario: BrokerError exit code
+- **GIVEN** any `BrokerError` variant wrapped in `PawError`
+- **WHEN** `exit_code()` is called
+- **THEN** it SHALL return `1`
+
