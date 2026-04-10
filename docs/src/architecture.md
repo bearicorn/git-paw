@@ -18,6 +18,14 @@ This chapter covers git-paw's internal architecture: module structure, data flow
 │   detect.rs      git.rs      tmux.rs  session.rs │
 │  (PATH scan)   (worktrees)  (builder)  (JSON)    │
 │                                                   │
+├─────────────────────────────────────────────────┤
+│                                                   │
+│   broker/         skills.rs   dashboard.rs       │
+│   ├── mod.rs       (template   (ratatui TUI,     │
+│   ├── server.rs     injection)  pane 0 status)   │
+│   ├── state.rs                                   │
+│   └── flush.rs                                   │
+│                                                   │
 └───────────────────────────────────────────────────┘
 ```
 
@@ -33,6 +41,9 @@ This chapter covers git-paw's internal architecture: module structure, data flow
 | **Config** | `src/config.rs` | Parses TOML from global (`~/.config/git-paw/config.toml`) and per-repo (`.git-paw/config.toml`). Merges with repo-wins semantics. |
 | **Interactive** | `src/interactive.rs` | Terminal prompts via dialoguer. Mode picker, branch multi-select, CLI picker. Skips prompts when flags are provided. |
 | **Error** | `src/error.rs` | `PawError` enum with thiserror. Actionable error messages and distinct exit codes. |
+| **Broker** | `src/broker/` | HTTP coordination server (axum). Receives status, artifact, and blocked messages from agents. Provides cursor-based polling. |
+| **Dashboard** | `src/dashboard.rs` | Ratatui TUI running in pane 0. Renders live agent status table. Embeds the broker via shared state. |
+| **Skills** | `src/skills.rs` | Loads skill templates from defaults or `~/.config/git-paw/agent-skills/`. Injects coordination instructions into worktree AGENTS.md files. |
 
 ## Start Flow
 
@@ -90,6 +101,15 @@ git paw start
 └──────────────────────────────────────────────────────┘
      │
      ▼
+┌─ Broker enabled? ───────────────────────────────────┐
+│  yes → Pane 0 runs `git paw __dashboard`             │
+│         ├─ Starts axum HTTP server on configured port│
+│         ├─ Injects GIT_PAW_BROKER_URL into all panes │
+│         └─ Renders ratatui status table              │
+│  no  → Pane 0 runs the first agent CLI (v0.2 path)  │
+└──────────────────────────────────────────────────────┘
+     │
+     ▼
 ┌─ Save session state ────────────────────────────────┐
 │  session.save_session() → atomic JSON write          │
 └──────────────────────────────────────────────────────┘
@@ -99,6 +119,33 @@ git paw start
 │  tmux.attach() → user enters tmux session            │
 └──────────────────────────────────────────────────────┘
 ```
+
+## Broker Architecture
+
+When `[broker] enabled = true`, pane 0 runs `git paw __dashboard` instead of an agent CLI. This single process hosts both the HTTP broker and the dashboard TUI.
+
+```
+Pane 0 process (git paw __dashboard):
+├── tokio runtime (background threads)
+│   └── axum HTTP server on localhost:9119
+│       ├── POST /publish
+│       ├── GET /messages/:agent_id?since=N
+│       └── GET /status
+├── Flush thread (std::thread, 5s interval)
+│   └── Appends to broker.log
+└── Main thread
+    └── ratatui dashboard (1s tick)
+```
+
+### BrokerState
+
+The `BrokerState` struct (in `src/broker/state.rs`) is wrapped in `Arc<Mutex<...>>` and shared between the axum server handlers and the ratatui dashboard render loop. The server writes incoming messages; the dashboard reads the latest state on each tick.
+
+The flush thread periodically serializes the message log to `.git-paw/broker.log` as a JSONL audit trail. This runs on a plain `std::thread` to avoid contention with the tokio runtime.
+
+### Environment injection
+
+When the broker is enabled, git-paw sets `GIT_PAW_BROKER_URL=http://127.0.0.1:<port>` in the tmux environment for the session. Each agent pane inherits this variable and can use it to communicate with the broker.
 
 ## Worktree Lifecycle
 
@@ -145,6 +192,8 @@ Session state is persisted as JSON under `~/.local/share/git-paw/sessions/`:
   "project_name": "my-app",
   "created_at": "2025-01-15T10:30:00Z",
   "status": "active",
+  "broker_port": 9119,
+  "broker_enabled": true,
   "worktrees": [
     {
       "branch": "feat/auth",
@@ -159,6 +208,8 @@ Session state is persisted as JSON under `~/.local/share/git-paw/sessions/`:
   ]
 }
 ```
+
+The `broker_port` and `broker_enabled` fields are present when the broker is configured. They allow `git paw status` to display broker information and `git paw purge` to clean up `broker.log`.
 
 ### Atomic writes
 

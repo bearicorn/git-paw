@@ -75,6 +75,18 @@ pub enum PawError {
     /// Replay operation failed.
     #[error("Replay error: {0}")]
     ReplayError(String),
+
+    /// Broker operation failed.
+    #[error("Broker error: {0}")]
+    BrokerError(#[from] crate::broker::BrokerError),
+
+    /// Skill template loading failed.
+    #[error(transparent)]
+    SkillError(#[from] crate::skills::SkillError),
+
+    /// Dashboard TUI operation failed.
+    #[error("Dashboard error: {0}")]
+    DashboardError(String),
 }
 
 impl PawError {
@@ -204,6 +216,9 @@ mod tests {
             PawError::BranchError("test".into()),
             PawError::TmuxError("test".into()),
             PawError::CliNotFound("test".into()),
+            PawError::SkillError(crate::skills::SkillError::UnknownSkill {
+                name: "test".into(),
+            }),
         ];
         for err in errors {
             assert_eq!(err.exit_code(), exit_code::ERROR, "failed for {err:?}");
@@ -246,6 +261,55 @@ mod tests {
             PawError::AgentsMdError("x".into()).exit_code(),
             exit_code::ERROR,
             "should use general exit code"
+        );
+    }
+
+    #[test]
+    fn test_skill_error_unknown_is_actionable() {
+        let inner = crate::skills::SkillError::UnknownSkill {
+            name: "nonexistent".into(),
+        };
+        let msg = inner.to_string();
+        assert!(msg.contains("nonexistent"), "should mention the skill name");
+        let paw = PawError::from(inner);
+        assert_eq!(paw.exit_code(), exit_code::ERROR);
+    }
+
+    #[test]
+    fn test_skill_error_user_override_read_is_actionable() {
+        let inner = crate::skills::SkillError::UserOverrideRead {
+            path: std::path::PathBuf::from(
+                "/home/user/.config/git-paw/agent-skills/coordination.md",
+            ),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied"),
+        };
+        let msg = inner.to_string();
+        assert!(
+            msg.contains("coordination.md"),
+            "should include the file path"
+        );
+        assert!(
+            msg.contains("permission"),
+            "should suggest checking permissions"
+        );
+        let paw = PawError::from(inner);
+        assert_eq!(paw.exit_code(), exit_code::ERROR);
+    }
+
+    #[test]
+    fn test_dashboard_error_includes_detail() {
+        let msg = PawError::DashboardError("not in tmux".into()).to_string();
+        assert!(
+            msg.contains("not in tmux"),
+            "should include the inner detail"
+        );
+        assert!(
+            msg.contains("Dashboard error"),
+            "should have the Dashboard error prefix"
+        );
+        assert_eq!(
+            PawError::DashboardError("test".into()).exit_code(),
+            exit_code::ERROR
         );
     }
 

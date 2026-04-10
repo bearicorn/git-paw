@@ -141,7 +141,22 @@ pub fn prune_worktrees(repo_root: &Path) -> Result<(), PawError> {
 ///
 /// The worktree is placed in the parent directory of `repo_root`, named using
 /// [`worktree_dir_name`]. Returns the path to the created worktree.
-pub fn create_worktree(repo_root: &Path, branch: &str) -> Result<PathBuf, PawError> {
+/// Result of creating a worktree, including whether the branch was newly created.
+#[derive(Debug)]
+pub struct WorktreeCreation {
+    /// Path to the created worktree directory.
+    pub path: PathBuf,
+    /// Whether git-paw created the branch (true) or it already existed (false).
+    pub branch_created: bool,
+}
+
+/// Creates a git worktree for `branch`.
+///
+/// If the branch already exists, checks it out in a new worktree. If the
+/// branch does not exist, creates it from HEAD with `git worktree add -b`.
+/// Returns both the worktree path and whether the branch was newly created,
+/// so the session can track which branches to delete on purge.
+pub fn create_worktree(repo_root: &Path, branch: &str) -> Result<WorktreeCreation, PawError> {
     let project = project_name(repo_root);
     let dir_name = worktree_dir_name(&project, branch);
 
@@ -150,20 +165,76 @@ pub fn create_worktree(repo_root: &Path, branch: &str) -> Result<PathBuf, PawErr
     })?;
     let worktree_path = parent.join(&dir_name);
 
+    // Try with existing branch first.
     let output = Command::new("git")
         .current_dir(repo_root)
         .args(["worktree", "add", &worktree_path.to_string_lossy(), branch])
         .output()
         .map_err(|e| PawError::WorktreeError(format!("failed to run git worktree add: {e}")))?;
 
-    if !output.status.success() {
+    if output.status.success() {
+        return Ok(WorktreeCreation {
+            path: worktree_path,
+            branch_created: false,
+        });
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // If the branch doesn't exist, create it with -b.
+    if stderr.contains("invalid reference") {
+        let output = Command::new("git")
+            .current_dir(repo_root)
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                &worktree_path.to_string_lossy(),
+            ])
+            .output()
+            .map_err(|e| {
+                PawError::WorktreeError(format!("failed to run git worktree add -b: {e}"))
+            })?;
+
+        if output.status.success() {
+            return Ok(WorktreeCreation {
+                path: worktree_path,
+                branch_created: true,
+            });
+        }
+
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(PawError::WorktreeError(format!(
-            "git worktree add failed for branch '{branch}': {stderr}"
+            "git worktree add -b failed for branch '{branch}': {stderr}"
         )));
     }
 
-    Ok(worktree_path)
+    Err(PawError::WorktreeError(format!(
+        "git worktree add failed for branch '{branch}': {stderr}"
+    )))
+}
+
+/// Deletes a local git branch.
+///
+/// Uses `git branch -D` (force delete) because purge is a destructive
+/// operation and the user has already confirmed. Only call this for branches
+/// that git-paw created (tracked via `WorktreeEntry::branch_created`).
+pub fn delete_branch(repo_root: &Path, branch: &str) -> Result<(), PawError> {
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(["branch", "-D", branch])
+        .output()
+        .map_err(|e| PawError::BranchError(format!("failed to run git branch -D: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(PawError::BranchError(format!(
+            "git branch -D failed for '{branch}': {stderr}"
+        )));
+    }
+
+    Ok(())
 }
 
 /// Removes a git worktree at the given path.
@@ -406,7 +477,8 @@ mod tests {
             .output()
             .expect("create branch");
 
-        let worktree_path = create_worktree(repo_root, "feature/test").expect("create worktree");
+        let wt = create_worktree(repo_root, "feature/test").expect("create worktree");
+        let worktree_path = wt.path;
 
         // Verify path follows ../<project>-<sanitized-branch> convention
         let expected_dir_name = worktree_dir_name(&project_name(repo_root), "feature/test");
@@ -465,7 +537,9 @@ mod tests {
             .output()
             .expect("create branch");
 
-        let worktree_path = create_worktree(repo_root, "feature/cleanup").expect("create worktree");
+        let worktree_path = create_worktree(repo_root, "feature/cleanup")
+            .expect("create worktree")
+            .path;
         assert!(worktree_path.exists());
 
         remove_worktree(repo_root, &worktree_path).expect("remove worktree");

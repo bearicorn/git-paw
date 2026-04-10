@@ -50,6 +50,45 @@ pub struct LoggingConfig {
     pub enabled: bool,
 }
 
+/// HTTP broker configuration for agent coordination.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrokerConfig {
+    /// Whether the broker is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// TCP port the broker listens on.
+    #[serde(default = "BrokerConfig::default_port")]
+    pub port: u16,
+    /// Bind address for the broker.
+    #[serde(default = "BrokerConfig::default_bind")]
+    pub bind: String,
+}
+
+impl Default for BrokerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 9119,
+            bind: "127.0.0.1".to_string(),
+        }
+    }
+}
+
+impl BrokerConfig {
+    /// Returns the full URL for the broker endpoint.
+    pub fn url(&self) -> String {
+        format!("http://{}:{}", self.bind, self.port)
+    }
+
+    fn default_port() -> u16 {
+        9119
+    }
+
+    fn default_bind() -> String {
+        "127.0.0.1".to_string()
+    }
+}
+
 /// Top-level git-paw configuration.
 ///
 /// All fields are optional — absent config files produce empty defaults.
@@ -86,6 +125,10 @@ pub struct PawConfig {
     /// Session logging configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logging: Option<LoggingConfig>,
+
+    /// HTTP broker configuration.
+    #[serde(default)]
+    pub broker: BrokerConfig,
 }
 
 impl PawConfig {
@@ -123,6 +166,11 @@ impl PawConfig {
             presets,
             specs: overlay.specs.clone().or_else(|| self.specs.clone()),
             logging: overlay.logging.clone().or_else(|| self.logging.clone()),
+            broker: if overlay.broker == BrokerConfig::default() {
+                self.broker.clone()
+            } else {
+                overlay.broker.clone()
+            },
         }
     }
 
@@ -285,6 +333,12 @@ pub fn generate_default_config() -> String {
 # Session logging configuration.
 # [logging]
 # enabled = false
+
+# HTTP broker for agent coordination (requires --broker flag on start).
+# [broker]
+# enabled = true
+# port = 9119
+# bind = "127.0.0.1"
 
 # Custom CLI definitions.
 # [clis.my-agent]
@@ -723,6 +777,7 @@ enabled = true
             )]),
             specs: None,
             logging: None,
+            broker: BrokerConfig::default(),
         };
 
         save_config_to(&config_path, &original).unwrap();
@@ -828,5 +883,89 @@ enabled = true
         );
         assert!(output.contains("[specs]"), "should contain [specs]");
         assert!(output.contains("[logging]"), "should contain [logging]");
+        assert!(output.contains("[broker]"), "should contain [broker]");
+    }
+
+    // --- BrokerConfig ---
+
+    #[test]
+    fn broker_config_defaults() {
+        let config = BrokerConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.port, 9119);
+        assert_eq!(config.bind, "127.0.0.1");
+    }
+
+    #[test]
+    fn broker_config_url() {
+        let config = BrokerConfig::default();
+        assert_eq!(config.url(), "http://127.0.0.1:9119");
+
+        let custom = BrokerConfig {
+            enabled: true,
+            port: 8080,
+            bind: "0.0.0.0".to_string(),
+        };
+        assert_eq!(custom.url(), "http://0.0.0.0:8080");
+    }
+
+    #[test]
+    fn empty_config_gets_broker_defaults() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        assert!(!config.broker.enabled);
+        assert_eq!(config.broker.port, 9119);
+        assert_eq!(config.broker.bind, "127.0.0.1");
+    }
+
+    #[test]
+    fn parses_full_broker_section() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[broker]\nenabled = true\nport = 8080\nbind = \"0.0.0.0\"\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        assert!(config.broker.enabled);
+        assert_eq!(config.broker.port, 8080);
+        assert_eq!(config.broker.bind, "0.0.0.0");
+    }
+
+    #[test]
+    fn parses_partial_broker_section() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[broker]\nenabled = true\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        assert!(config.broker.enabled);
+        assert_eq!(config.broker.port, 9119);
+        assert_eq!(config.broker.bind, "127.0.0.1");
+    }
+
+    #[test]
+    fn broker_config_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        let original = PawConfig {
+            broker: BrokerConfig {
+                enabled: true,
+                port: 9200,
+                bind: "127.0.0.1".to_string(),
+            },
+            ..Default::default()
+        };
+
+        save_config_to(&config_path, &original).unwrap();
+        let loaded = load_config_file(&config_path).unwrap().unwrap();
+        assert_eq!(loaded.broker.enabled, original.broker.enabled);
+        assert_eq!(loaded.broker.port, original.broker.port);
+        assert_eq!(loaded.broker.bind, original.broker.bind);
     }
 }

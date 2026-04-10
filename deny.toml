@@ -1,5 +1,10 @@
 [advisories]
-ignore = []
+ignore = [
+    # paste is unmaintained (RUSTSEC-2024-0436) but is a transitive dep of
+    # ratatui — no security risk, just an unmaintained notice. Ratatui upstream
+    # will migrate to pastey in a future release.
+    "RUSTSEC-2024-0436",
+]
 
 [licenses]
 allow = [
