@@ -63,6 +63,10 @@ git-paw lets you run multiple AI coding assistants in parallel, each in its own 
 - **Replay** — view session logs with ANSI stripping or colored output via `less -R`
 - **Project init** — `git paw init` bootstraps `.git-paw/`, config, and gitignore
 - **Standards-based** — uses `AGENTS.md` following the Linux Foundation standard for AI agent instructions
+- **Agent coordination** — built-in HTTP broker lets agents share status, artifacts, and blocked requests
+- **Dashboard TUI** — live status table in pane 0 shows agent progress at a glance
+- **Skill templates** — coordination instructions auto-injected into each agent's AGENTS.md
+- **Cursor-based messaging** — lossless message polling with sequence tracking
 
 > **Tip:** git-paw uses `AGENTS.md` as the standard agent instruction file. If your AI CLI reads a different file (e.g., `CLAUDE.md`, `GEMINI.md`), you can symlink it:
 > ```bash

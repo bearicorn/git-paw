@@ -1,0 +1,47 @@
+# git-paw configuration
+# See https://github.com/bearicorn/git-paw for documentation.
+
+# Pre-select a CLI in the interactive picker (user can still change).
+# Omit to show the full picker with no default.
+# default_cli = ""
+
+# Enable tmux mouse mode for sessions (default: true).
+# mouse = true
+
+# Bypass the CLI picker entirely for --from-specs mode.
+# Omit to prompt or use per-spec paw_cli fields.
+# default_spec_cli = ""
+
+# Prefix for spec-derived branch names (default: "spec/").
+branch_prefix = "feat/"
+
+# Spec scanning configuration.
+[specs]
+type = "openspec"
+dir = "openspec/changes"
+#
+# Markdown format (frontmatter-based):
+# type = "markdown"
+# Each .md file uses YAML frontmatter fields:
+#   paw_status  — "pending" | "done" | "in-progress" (required)
+#   paw_branch  — branch name suffix (optional, falls back to filename)
+#   paw_cli     — CLI override for this spec (optional)
+
+# Session logging configuration.
+# [logging]
+# enabled = false
+
+# HTTP broker for agent coordination
+[broker]
+enabled = true
+port = 9119
+
+# Custom CLI definitions.
+# [clis.my-agent]
+# command = "/usr/local/bin/my-agent"
+# display_name = "My Agent"
+
+# Named presets for quick launches.
+# [presets.my-preset]
+# branches = ["feat/api", "fix/db"]
+# cli = ""

@@ -54,7 +54,14 @@ src/
 │   ├── openspec.rs   # OpenSpec format backend (changes/ directory)
 │   └── markdown.rs   # Markdown format backend (frontmatter-based)
 ├── logging.rs        # Session logging via tmux pipe-pane
-└── replay.rs         # Replay captured session logs (ANSI/OSC stripping)
+├── replay.rs         # Replay captured session logs (ANSI/OSC stripping)
+├── broker/           # v0.3.0 — HTTP broker for agent coordination
+│   ├── mod.rs        # Module root, BrokerState, BrokerHandle, start_broker()
+│   ├── messages.rs   # BrokerMessage enum, payloads, validation, slugify_branch()
+│   ├── server.rs     # axum router, HTTP endpoint handlers
+│   └── delivery.rs   # Message routing, cursor-based polling, log flush
+├── skills.rs         # v0.3.0 — Agent skill template loading and rendering
+└── dashboard.rs      # v0.3.0 — ratatui TUI status table for pane 0
 ```
 
 ## Development Commands
@@ -114,7 +121,7 @@ This project follows **Conventional Commits** (Commitizen compatible).
 Format: `<type>(<scope>): <description>`
 
 Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `ci`, `chore`, `perf`
-Scopes: `detect`, `git`, `tmux`, `session`, `config`, `interactive`, `error`, `cli`, `docs`, `ci`, `specs`, `agents`, `logging`, `replay`, `init`
+Scopes: `detect`, `git`, `tmux`, `session`, `config`, `interactive`, `error`, `cli`, `docs`, `ci`, `specs`, `agents`, `logging`, `replay`, `init`, `broker`, `dashboard`, `skills`
 
 Examples:
 ```
@@ -141,7 +148,9 @@ The root command has `after_help` with a quick-start guide.
 - `assert_cmd` for CLI binary tests
 - tmux is a hard dependency — tmux tests run normally, not ignored
 - All tests independent — no shared mutable state
-- All tests must test behavior, not implementation
+- **All tests must be behavioral** — test observable inputs/outputs and public API contracts, not internal implementation details. Do not test private struct field values, internal function calls, or module-private state.
+- **Every OpenSpec scenario maps to at least one test** — if a spec requirement has a WHEN/THEN scenario, there must be a corresponding test asserting that behavior
+- **E2E tests required for cross-module features** — any feature that spans multiple modules (e.g. publish → delivery → poll → HTTP response) must have an integration test exercising the full flow
 
 ### Dependencies
 
@@ -158,8 +167,12 @@ Only add dependencies listed in the approved set:
 | `serde` + `serde_json` | Session state serialization |
 | `toml` + `serde` | Config file parsing |
 | `dirs` | Platform XDG directories |
+| `tokio` | Async runtime (broker HTTP server) |
+| `axum` | HTTP server framework (broker endpoints) |
+| `ratatui` | TUI framework (dashboard) |
+| `crossterm` | Terminal backend for ratatui |
 
-Dev: `assert_cmd`, `predicates`, `tempfile`, `serial_test`
+Dev: `assert_cmd`, `predicates`, `tempfile`, `serial_test`, `tower`, `hyper`, `hyper-util`, `http-body-util`
 
 Do not add other dependencies without explicit approval.
 
@@ -175,6 +188,7 @@ All fields in `PawConfig` (`src/config.rs`):
 | `mouse` | `Option<bool>` | Enable tmux mouse mode (default: `true`) |
 | `specs` | `Option<SpecsConfig>` | `[specs]` section: `dir`, `type` |
 | `logging` | `Option<LoggingConfig>` | `[logging]` section: `enabled` |
+| `broker` | `BrokerConfig` | `[broker]` section: `enabled`, `port`, `bind` |
 | `clis` | `HashMap<String, CustomCli>` | Custom CLI definitions |
 | `presets` | `HashMap<String, Preset>` | Named presets (branches + cli) |
 
@@ -204,6 +218,47 @@ Both are expected to be on PATH. All tests run normally, including tmux-dependen
 - Set pane titles to `<branch> → <cli>` via `select-pane -T`
 - Enable `pane-border-status top` and `pane-border-format " #{pane_title} "` per-session
 
+## Change Checklist
+
+Every change (feature, fix, refactor) must complete ALL of the following before it is considered done. This applies whether the work is done by a human or an AI agent.
+
+### 1. Specs updated
+- If the change adds new behavior: create or update OpenSpec specs under `openspec/changes/` or `openspec/specs/`
+- If the change modifies existing behavior: write a MODIFIED requirement in a delta spec referencing the exact existing requirement name
+- Every requirement must have at least one WHEN/THEN scenario
+
+### 2. Implementation matches specs
+- Every SHALL/MUST requirement in the spec is implemented
+- No behavior exists that contradicts a spec requirement
+- If the implementation deviates from the spec, update the spec first
+
+### 3. Tests are behavioral
+- Every spec scenario has a corresponding test
+- Tests assert observable behavior (inputs → outputs, error conditions, public API contracts)
+- Tests do NOT assert implementation details (private field values, internal function calls, mock interactions)
+- Cross-module features have E2E integration tests exercising the full flow (e.g. HTTP request → internal routing → HTTP response)
+
+### 4. Docs updated
+- `--help` text updated if CLI surface changed
+- README.md updated if user-facing features added
+- mdBook chapters updated or created (`docs/src/`)
+- Configuration reference updated if config fields added
+- Architecture docs updated if module structure changed
+- `mdbook build docs/` must succeed
+
+### 5. Quality gates pass
+- `just check` — fmt + clippy + all tests
+- `just deny` — license/advisory/duplicate-dep checks
+- No `unwrap()`/`expect()` in non-test code
+- All public items have doc comments
+- Coverage >= 80% on logic (TUI draw loops exempt)
+
+### 6. Backward compatibility preserved
+- New optional fields use `#[serde(default)]` and `skip_serializing_if`
+- Existing v0.2.0 configs/sessions load without error
+- When a feature is disabled (e.g. `[broker] enabled = false`), behavior is identical to the previous version
+- Existing tests pass unchanged
+
 ## Spec-Driven Development
 
 This project uses OpenSpec-style specifications in `openspec/changes/`.
@@ -224,10 +279,12 @@ Requirements include GIVEN/WHEN/THEN scenarios. Each scenario maps to at least o
 - `assert_cmd` for CLI binary tests
 - `predicates` for output assertions
 - Tmux-dependent tests run normally (tmux is a hard dependency)
+- E2E tests required for cross-module features (HTTP round-trips, session lifecycle, etc.)
 
 ### Coverage
 - Run: `just coverage`
 - Target: >= 80% line coverage
+- TUI draw loops and terminal I/O exempt from coverage gate (tested manually via smoke tests)
 
 ## Documentation
 
@@ -261,3 +318,7 @@ Handled by cargo-dist. Config: `[workspace.metadata.dist]` in `Cargo.toml`.
 ## Commits
 
 Commits should not include any reference to AI assistants. It should also be one clean linear commit. The commit should also resolve the issue that you are working on.
+
+**Every commit must be buildable and releasable.** `just check` must pass at each commit. Do not commit code that breaks the build, fails tests, or deviates from specs with the intent to "fix it later." If your implementation doesn't match the spec, fix it before committing — or update the spec first if the deviation is intentional.
+
+**Match specs exactly.** Field names, function signatures, and wire formats must match the OpenSpec requirements precisely. If the spec says `exports: Vec<String>`, use that name. Read the spec before coding, not after.

@@ -164,6 +164,16 @@ pub enum Command {
     )]
     Init,
 
+    /// Internal: run the broker and dashboard in pane 0
+    #[command(
+        hide = true,
+        name = "__dashboard",
+        about = "Internal: run the broker and dashboard in pane 0",
+        long_about = "Internal subcommand used by git-paw to run the broker and dashboard TUI \
+                      in pane 0 of a tmux session. Not intended for direct invocation."
+    )]
+    Dashboard,
+
     /// View captured session logs
     #[command(
         about = "View captured session logs",
@@ -533,6 +543,25 @@ mod tests {
         assert!(
             help.contains("replay"),
             "help should list the replay subcommand"
+        );
+    }
+
+    // -- __dashboard subcommand --
+
+    #[test]
+    fn dashboard_parses() {
+        let cli = parse(&["__dashboard"]);
+        assert!(matches!(cli.command.unwrap(), Command::Dashboard));
+    }
+
+    #[test]
+    fn dashboard_does_not_appear_in_help() {
+        let result = Cli::try_parse_from(["git-paw", "--help"]);
+        let err = result.unwrap_err();
+        let help = err.to_string();
+        assert!(
+            !help.contains("__dashboard"),
+            "hidden __dashboard subcommand should not appear in help output"
         );
     }
 }
