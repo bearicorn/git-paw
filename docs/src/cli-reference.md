@@ -98,7 +98,7 @@ git paw stop
 
 ## `git paw purge`
 
-Nuclear option: kills the tmux session, removes all worktrees, and deletes session state. Requires confirmation unless `--force` is used.
+Nuclear option: kills the tmux session, removes all worktrees, and deletes session state. When the broker was enabled, also removes `broker.log`. Requires confirmation unless `--force` is used.
 
 ```
 Usage: git-paw purge [OPTIONS]
@@ -116,7 +116,7 @@ git paw purge --force
 
 ## `git paw status`
 
-Displays the current session status, branches, CLIs, and worktree paths for the repository in the current directory.
+Displays the current session status, branches, CLIs, and worktree paths for the repository in the current directory. When the broker is enabled, also shows the broker URL and connected agent count.
 
 ```
 Usage: git-paw status

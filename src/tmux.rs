@@ -141,6 +141,7 @@ pub struct TmuxSessionBuilder {
     panes: Vec<PaneSpec>,
     mouse_mode: bool,
     session_name_override: Option<String>,
+    env_vars: Vec<(String, String)>,
 }
 
 impl TmuxSessionBuilder {
@@ -154,6 +155,7 @@ impl TmuxSessionBuilder {
             panes: Vec::new(),
             mouse_mode: true,
             session_name_override: None,
+            env_vars: Vec::new(),
         }
     }
 
@@ -183,10 +185,21 @@ impl TmuxSessionBuilder {
         self
     }
 
+    /// Set a session-level environment variable.
+    ///
+    /// The resulting `tmux set-environment -t <session> <key> <value>` command
+    /// is emitted before any `send-keys` commands so all panes inherit it.
+    #[must_use]
+    pub fn set_environment(mut self, key: &str, value: &str) -> Self {
+        self.env_vars.push((key.to_owned(), value.to_owned()));
+        self
+    }
+
     /// Build the full sequence of tmux commands without executing anything.
     ///
     /// Returns a [`TmuxSession`] that can be executed or inspected.
     /// Returns an error if no panes have been added.
+    #[allow(clippy::too_many_lines)]
     pub fn build(self) -> Result<TmuxSession, PawError> {
         if self.panes.is_empty() {
             return Err(PawError::TmuxError(
@@ -239,7 +252,18 @@ impl TmuxSessionBuilder {
             " #{pane_title} ",
         ]));
 
-        // 4. First pane — already exists as pane 0 (directory set by -c above)
+        // 4. Session-level environment variables (before any send-keys)
+        for (key, value) in &self.env_vars {
+            commands.push(TmuxCommand::new(&[
+                "set-environment",
+                "-t",
+                &session_name,
+                key,
+                value,
+            ]));
+        }
+
+        // 5. First pane — already exists as pane 0 (directory set by -c above)
         let first = &self.panes[0];
         let pane_target = format!("{session_name}:0.0");
         let pane_title = format!("{} \u{2192} {}", first.branch, first.cli_command);
@@ -258,7 +282,7 @@ impl TmuxSessionBuilder {
             "Enter",
         ]));
 
-        // 5. Subsequent panes — tiled layout before each split
+        // 6. Subsequent panes — tiled layout before each split
         for (i, pane) in self.panes.iter().enumerate().skip(1) {
             // Apply tiled layout before split to ensure space
             commands.push(TmuxCommand::new(&[
@@ -291,7 +315,7 @@ impl TmuxSessionBuilder {
             ]));
         }
 
-        // 6. Final tiled layout for clean alignment
+        // 7. Final tiled layout for clean alignment
         commands.push(TmuxCommand::new(&[
             "select-layout",
             "-t",
@@ -848,6 +872,89 @@ mod tests {
         assert!(
             cmds.iter().any(|c| c.starts_with("tmux pipe-pane")),
             "dry-run output should include pipe-pane command"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC: set_environment emits correct commands
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn set_environment_emits_correct_tmux_command() {
+        let session = TmuxSessionBuilder::new("proj")
+            .add_pane(make_pane("main", "/tmp/wt", "claude"))
+            .set_environment("GIT_PAW_BROKER_URL", "http://127.0.0.1:9119")
+            .build()
+            .unwrap();
+
+        let cmds = session.command_strings();
+        let env_cmds = commands_containing(&cmds, "set-environment");
+        assert_eq!(env_cmds.len(), 1, "should have exactly one set-environment");
+        assert!(
+            env_cmds[0]
+                .contains("set-environment -t paw-proj GIT_PAW_BROKER_URL http://127.0.0.1:9119"),
+            "set-environment command should contain key and value, got: {}",
+            env_cmds[0]
+        );
+    }
+
+    #[test]
+    fn set_environment_appears_before_send_keys() {
+        let session = TmuxSessionBuilder::new("proj")
+            .add_pane(make_pane("feat/a", "/tmp/a", "claude"))
+            .add_pane(make_pane("feat/b", "/tmp/b", "codex"))
+            .set_environment("GIT_PAW_BROKER_URL", "http://127.0.0.1:9119")
+            .build()
+            .unwrap();
+
+        let cmds = session.command_strings();
+        let first_env = cmds
+            .iter()
+            .position(|c| c.contains("set-environment"))
+            .expect("should have set-environment");
+        let first_send = cmds
+            .iter()
+            .position(|c| c.contains("send-keys"))
+            .expect("should have send-keys");
+
+        assert!(
+            first_env < first_send,
+            "set-environment (index {first_env}) should appear before first send-keys (index {first_send})"
+        );
+    }
+
+    #[test]
+    fn multiple_env_vars_both_appear() {
+        let session = TmuxSessionBuilder::new("proj")
+            .add_pane(make_pane("main", "/tmp/wt", "claude"))
+            .set_environment("A", "1")
+            .set_environment("B", "2")
+            .build()
+            .unwrap();
+
+        let cmds = session.command_strings();
+        let env_cmds = commands_containing(&cmds, "set-environment");
+        assert_eq!(
+            env_cmds.len(),
+            2,
+            "should have two set-environment commands"
+        );
+        assert!(env_cmds[0].contains("A 1"));
+        assert!(env_cmds[1].contains("B 2"));
+    }
+
+    #[test]
+    fn set_environment_in_dry_run_output() {
+        let session = TmuxSessionBuilder::new("proj")
+            .add_pane(make_pane("main", "/tmp/wt", "claude"))
+            .set_environment("MY_VAR", "my_val")
+            .build()
+            .unwrap();
+
+        let cmds = session.command_strings();
+        assert!(
+            cmds.iter().any(|c| c.starts_with("tmux set-environment")),
+            "dry-run output should include set-environment command"
         );
     }
 

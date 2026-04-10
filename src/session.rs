@@ -46,6 +46,10 @@ pub struct WorktreeEntry {
     pub worktree_path: PathBuf,
     /// The AI CLI assigned to this worktree.
     pub cli: String,
+    /// Whether git-paw created this branch (vs. it already existing).
+    /// When `true`, `purge` will delete the branch after removing the worktree.
+    #[serde(default)]
+    pub branch_created: bool,
 }
 
 /// Persisted session state for a git-paw session.
@@ -68,6 +72,18 @@ pub struct Session {
     pub status: SessionStatus,
     /// Worktrees managed by this session.
     pub worktrees: Vec<WorktreeEntry>,
+
+    /// Broker port (when broker is enabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_port: Option<u16>,
+
+    /// Broker bind address (when broker is enabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_bind: Option<String>,
+
+    /// Path to the broker log file (when broker is enabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_log_path: Option<PathBuf>,
 }
 
 impl Session {
@@ -210,6 +226,13 @@ pub fn delete_session_in(session_name: &str, dir: &Path) -> Result<(), PawError>
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
+
+/// Returns the sessions directory (`~/.local/share/git-paw/sessions/`).
+///
+/// Also used by the broker to place `broker.log` alongside session state.
+pub fn session_state_dir() -> Result<PathBuf, PawError> {
+    sessions_dir()
+}
 
 /// Returns the sessions directory (`~/.local/share/git-paw/sessions/`).
 fn sessions_dir() -> Result<PathBuf, PawError> {
@@ -361,18 +384,24 @@ mod tests {
                     branch: "feature/auth".to_string(),
                     worktree_path: PathBuf::from("/Users/test/code/my-project-feature-auth"),
                     cli: "claude".to_string(),
+                    branch_created: false,
                 },
                 WorktreeEntry {
                     branch: "fix/api".to_string(),
                     worktree_path: PathBuf::from("/Users/test/code/my-project-fix-api"),
                     cli: "gemini".to_string(),
+                    branch_created: false,
                 },
                 WorktreeEntry {
                     branch: "feature/logging".to_string(),
                     worktree_path: PathBuf::from("/Users/test/code/my-project-feature-logging"),
                     cli: "claude".to_string(),
+                    branch_created: false,
                 },
             ],
+            broker_port: None,
+            broker_bind: None,
+            broker_log_path: None,
         }
     }
 
@@ -529,6 +558,101 @@ mod tests {
     }
 
     // -- Recovery: save → tmux dies → state has everything to reconstruct --
+
+    // -- Broker fields --
+
+    #[test]
+    fn session_with_broker_fields_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let mut session = sample_session();
+        session.broker_port = Some(9119);
+        session.broker_bind = Some("127.0.0.1".to_string());
+        session.broker_log_path = Some(PathBuf::from("/tmp/broker.log"));
+
+        save_session_in(&session, dir.path()).unwrap();
+
+        let loaded = load_session_from("paw-my-project", dir.path())
+            .unwrap()
+            .expect("session should exist");
+
+        assert_eq!(loaded.broker_port, Some(9119));
+        assert_eq!(loaded.broker_bind.as_deref(), Some("127.0.0.1"));
+        assert_eq!(
+            loaded.broker_log_path,
+            Some(PathBuf::from("/tmp/broker.log"))
+        );
+    }
+
+    #[test]
+    fn v020_session_json_loads_with_broker_fields_as_none() {
+        let dir = TempDir::new().unwrap();
+        // Simulate a v0.2.0 session JSON that has no broker fields
+        let json = r#"{
+            "session_name": "paw-legacy",
+            "repo_path": "/tmp/legacy-repo",
+            "project_name": "legacy",
+            "created_at": "2024-03-23T12:00:00Z",
+            "status": "active",
+            "worktrees": []
+        }"#;
+        std::fs::write(dir.path().join("paw-legacy.json"), json).unwrap();
+
+        let loaded = load_session_from("paw-legacy", dir.path())
+            .unwrap()
+            .expect("session should load");
+
+        assert!(loaded.broker_port.is_none());
+        assert!(loaded.broker_bind.is_none());
+        assert!(loaded.broker_log_path.is_none());
+        assert_eq!(loaded.session_name, "paw-legacy");
+    }
+
+    #[test]
+    fn session_with_broker_fields_serializes_them() {
+        let dir = TempDir::new().unwrap();
+        let mut session = sample_session();
+        session.broker_port = Some(9119);
+        session.broker_bind = Some("127.0.0.1".to_string());
+        session.broker_log_path = Some(PathBuf::from("/tmp/broker.log"));
+        save_session_in(&session, dir.path()).unwrap();
+
+        let json = std::fs::read_to_string(dir.path().join("paw-my-project.json")).unwrap();
+        assert!(
+            json.contains("broker_port"),
+            "JSON should contain broker_port"
+        );
+        assert!(
+            json.contains("broker_bind"),
+            "JSON should contain broker_bind"
+        );
+        assert!(
+            json.contains("broker_log_path"),
+            "JSON should contain broker_log_path"
+        );
+    }
+
+    #[test]
+    fn session_without_broker_fields_omits_them_from_json() {
+        let dir = TempDir::new().unwrap();
+        let session = sample_session(); // broker fields are all None
+        save_session_in(&session, dir.path()).unwrap();
+
+        let json = std::fs::read_to_string(dir.path().join("paw-my-project.json")).unwrap();
+        assert!(
+            !json.contains("broker_port"),
+            "JSON should not contain broker_port when None"
+        );
+        assert!(
+            !json.contains("broker_bind"),
+            "JSON should not contain broker_bind when None"
+        );
+        assert!(
+            !json.contains("broker_log_path"),
+            "JSON should not contain broker_log_path when None"
+        );
+    }
+
+    // -- Recovery with broker fields --
 
     #[test]
     fn recovery_after_tmux_crash_has_all_data_to_reconstruct() {

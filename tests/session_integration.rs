@@ -29,13 +29,18 @@ fn make_session(suffix: &str) -> Session {
                 branch: "feature/auth".to_string(),
                 worktree_path: PathBuf::from(format!("/tmp/wt-{suffix}-auth")),
                 cli: "claude".to_string(),
+                branch_created: false,
             },
             WorktreeEntry {
                 branch: "fix/db".to_string(),
                 worktree_path: PathBuf::from(format!("/tmp/wt-{suffix}-db")),
                 cli: "gemini".to_string(),
+                branch_created: false,
             },
         ],
+        broker_port: None,
+        broker_bind: None,
+        broker_log_path: None,
     }
 }
 

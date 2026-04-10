@@ -9,6 +9,7 @@ use std::time::SystemTime;
 use clap::Parser;
 use dialoguer::Confirm;
 
+use git_paw::broker;
 use git_paw::cli::{Cli, Command};
 use git_paw::config::{self, PawConfig};
 use git_paw::detect;
@@ -59,6 +60,7 @@ fn run(command: Command) -> Result<(), PawError> {
             display_name,
         } => cmd_add_cli(&name, &command, display_name.as_deref()),
         Command::RemoveCli { name } => cmd_remove_cli(&name),
+        Command::Dashboard => cmd_dashboard(),
         Command::Init => git_paw::init::run_init(),
         Command::Replay {
             branch,
@@ -99,6 +101,7 @@ fn to_interactive_cli(cli: &detect::CliInfo) -> interactive::CliInfo {
 // ---------------------------------------------------------------------------
 
 /// Smart start: reattach if active, recover if stale, launch fresh if new.
+#[allow(clippy::too_many_lines)]
 fn cmd_start(
     cli_flag: Option<String>,
     branches_flag: Option<Vec<String>>,
@@ -188,14 +191,54 @@ fn cmd_start(
     // Prune stale worktree registrations from previous sessions
     git::prune_worktrees(&repo_root)?;
 
+    let broker_config = config.broker.clone();
+
     let mut builder = tmux::TmuxSessionBuilder::new(&project)
         .session_name(session_name)
         .mouse_mode(mouse);
+
+    // Broker: inject dashboard pane and environment variable
+    if broker_config.enabled {
+        let repo_str = repo_root.to_string_lossy().to_string();
+        builder = builder.add_pane(tmux::PaneSpec {
+            branch: "dashboard".to_string(),
+            worktree: repo_str,
+            cli_command: format!(
+                "{} __dashboard",
+                std::env::current_exe()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("git-paw"))
+                    .display()
+            ),
+        });
+        builder = builder.set_environment("GIT_PAW_BROKER_URL", &broker_config.url());
+    }
+
     let mut worktree_entries = Vec::new();
 
+    // Resolve coordination skill once if broker is enabled
+    let skill_content = if broker_config.enabled {
+        let template = git_paw::skills::resolve("coordination")?;
+        Some(template)
+    } else {
+        None
+    };
+
     for (branch, cli) in &selection.mappings {
-        let wt_path = git::create_worktree(&repo_root, branch)?;
-        let wt_str = wt_path.to_string_lossy().to_string();
+        let wt = git::create_worktree(&repo_root, branch)?;
+        let wt_str = wt.path.to_string_lossy().to_string();
+
+        // Inject AGENTS.md with skill content when broker is enabled
+        let rendered_skill = skill_content
+            .as_ref()
+            .map(|tmpl| git_paw::skills::render(tmpl, branch, &broker_config.url()));
+        let assignment = git_paw::agents::WorktreeAssignment {
+            branch: branch.clone(),
+            cli: cli.clone(),
+            spec_content: None,
+            owned_files: None,
+            skill_content: rendered_skill,
+        };
+        git_paw::agents::setup_worktree_agents_md(&repo_root, &wt.path, &assignment)?;
 
         builder = builder.add_pane(tmux::PaneSpec {
             branch: branch.clone(),
@@ -205,8 +248,9 @@ fn cmd_start(
 
         worktree_entries.push(WorktreeEntry {
             branch: branch.clone(),
-            worktree_path: wt_path,
+            worktree_path: wt.path,
             cli: cli.clone(),
+            branch_created: wt.branch_created,
         });
     }
 
@@ -216,14 +260,24 @@ fn cmd_start(
     tmux_session.execute()?;
 
     // Save session state
-    let state = Session {
+    let mut state = Session {
         session_name: tmux_session.name.clone(),
         repo_path: repo_root,
         project_name: project,
         created_at: SystemTime::now(),
         status: SessionStatus::Active,
         worktrees: worktree_entries,
+        broker_port: None,
+        broker_bind: None,
+        broker_log_path: None,
     };
+
+    if broker_config.enabled {
+        state.broker_port = Some(broker_config.port);
+        state.broker_bind = Some(broker_config.bind.clone());
+        state.broker_log_path = Some(session::session_state_dir()?.join("broker.log"));
+    }
+
     session::save_session(&state)?;
 
     // Attach
@@ -335,25 +389,61 @@ fn launch_spec_session(
     // Prune stale worktree registrations from previous sessions
     git::prune_worktrees(repo_root)?;
 
+    let broker_config = config.broker.clone();
+
     let mut builder = tmux::TmuxSessionBuilder::new(project)
         .session_name(session_name)
         .mouse_mode(mouse);
+
+    // Broker: inject dashboard pane and environment variable
+    if broker_config.enabled {
+        let repo_str = repo_root.to_string_lossy().to_string();
+        builder = builder.add_pane(tmux::PaneSpec {
+            branch: "dashboard".to_string(),
+            worktree: repo_str,
+            cli_command: format!(
+                "{} __dashboard",
+                std::env::current_exe()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("git-paw"))
+                    .display()
+            ),
+        });
+        builder = builder.set_environment("GIT_PAW_BROKER_URL", &broker_config.url());
+    }
+
+    // Resolve coordination skill once if broker is enabled
+    let skill_template = if broker_config.enabled {
+        Some(git_paw::skills::resolve("coordination")?)
+    } else {
+        None
+    };
+
     let mut worktree_entries = Vec::new();
 
     for (branch, cli) in mappings {
-        let wt_path = git::create_worktree(repo_root, branch)?;
-        let wt_str = wt_path.to_string_lossy().to_string();
+        let wt = git::create_worktree(repo_root, branch)?;
+        let wt_str = wt.path.to_string_lossy().to_string();
 
-        // Set up AGENTS.md with spec content
-        if let Some(spec) = spec_by_branch.get(branch.as_str()) {
-            let assignment = git_paw::agents::WorktreeAssignment {
-                branch: branch.clone(),
-                cli: cli.clone(),
-                spec_content: Some(spec.prompt.clone()),
-                owned_files: spec.owned_files.clone(),
-            };
-            git_paw::agents::setup_worktree_agents_md(repo_root, &wt_path, &assignment)?;
-        }
+        // Set up AGENTS.md with spec + skill content
+        let rendered_skill = skill_template
+            .as_ref()
+            .map(|tmpl| git_paw::skills::render(tmpl, branch, &broker_config.url()));
+
+        let spec_content = spec_by_branch
+            .get(branch.as_str())
+            .map(|s| s.prompt.clone());
+        let owned_files = spec_by_branch
+            .get(branch.as_str())
+            .and_then(|s| s.owned_files.clone());
+
+        let assignment = git_paw::agents::WorktreeAssignment {
+            branch: branch.clone(),
+            cli: cli.clone(),
+            spec_content,
+            owned_files,
+            skill_content: rendered_skill,
+        };
+        git_paw::agents::setup_worktree_agents_md(repo_root, &wt.path, &assignment)?;
 
         builder = builder.add_pane(tmux::PaneSpec {
             branch: branch.clone(),
@@ -363,19 +453,21 @@ fn launch_spec_session(
 
         worktree_entries.push(WorktreeEntry {
             branch: branch.clone(),
-            worktree_path: wt_path,
+            worktree_path: wt.path,
             cli: cli.clone(),
+            branch_created: wt.branch_created,
         });
     }
 
     let mut tmux_session = builder.build()?;
 
-    // Set up logging if enabled
+    // Set up logging if enabled — pane indices shift by 1 when broker is enabled
     if config.logging.as_ref().is_some_and(|l| l.enabled) {
+        let pane_offset = usize::from(broker_config.enabled);
         git_paw::logging::ensure_log_dir(repo_root, &tmux_session.name)?;
         for (i, (branch, _)) in mappings.iter().enumerate() {
             let log_path = git_paw::logging::log_file_path(repo_root, &tmux_session.name, branch);
-            let pane_target = format!("{}:{}.{}", tmux_session.name, 0, i);
+            let pane_target = format!("{}:{}.{}", tmux_session.name, 0, i + pane_offset);
             tmux_session.pipe_pane(&pane_target, &log_path);
         }
     }
@@ -384,14 +476,24 @@ fn launch_spec_session(
     tmux_session.execute()?;
 
     // Save session state
-    let state = Session {
+    let mut state = Session {
         session_name: tmux_session.name.clone(),
         repo_path: repo_root.to_path_buf(),
         project_name: project.to_string(),
         created_at: SystemTime::now(),
         status: SessionStatus::Active,
         worktrees: worktree_entries,
+        broker_port: None,
+        broker_bind: None,
+        broker_log_path: None,
     };
+
+    if broker_config.enabled {
+        state.broker_port = Some(broker_config.port);
+        state.broker_bind = Some(broker_config.bind.clone());
+        state.broker_log_path = Some(session::session_state_dir()?.join("broker.log"));
+    }
+
     session::save_session(&state)?;
 
     tmux::attach(&tmux_session.name)
@@ -422,6 +524,75 @@ fn recover_session(repo_root: &Path, existing: &Session) -> Result<(), PawError>
     session::save_session(&updated)?;
 
     tmux::attach(&tmux_session.name)
+}
+
+// ---------------------------------------------------------------------------
+// Command: __dashboard
+// ---------------------------------------------------------------------------
+
+/// Runs the broker and dashboard in pane 0 (internal command).
+fn cmd_dashboard() -> Result<(), PawError> {
+    // This is an internal command that should only run inside tmux
+    if std::env::var("TMUX").is_err() {
+        return Err(PawError::DashboardError(
+            "this is an internal command that should only be run by git-paw inside tmux"
+                .to_string(),
+        ));
+    }
+
+    let cwd = std::env::current_dir()
+        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
+    let repo_root = git::validate_repo(&cwd)?;
+    let config = config::load_config(&repo_root)?;
+    let broker_config = config.broker;
+
+    let log_path = session::session_state_dir()?.join("broker.log");
+    let broker_state = broker::BrokerState::new(Some(log_path));
+    let handle = broker::start_broker(&broker_config, broker_state)?;
+    let state = std::sync::Arc::clone(&handle.state);
+
+    // Set up a flag that SIGHUP sets to signal the dashboard to exit gracefully.
+    // tmux sends SIGHUP to pane processes when killing sessions. Without this,
+    // the process would be terminated before BrokerHandle::drop runs, losing
+    // the final log flush.
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    #[cfg(unix)]
+    {
+        use std::sync::atomic::AtomicPtr;
+
+        static SHUTDOWN_PTR: AtomicPtr<std::sync::atomic::AtomicBool> =
+            AtomicPtr::new(std::ptr::null_mut());
+
+        const SIGHUP: std::ffi::c_int = 1;
+
+        unsafe extern "C" {
+            fn signal(signum: std::ffi::c_int, handler: extern "C" fn(std::ffi::c_int)) -> usize;
+        }
+
+        extern "C" fn sighup_handler(_: std::ffi::c_int) {
+            let ptr = SHUTDOWN_PTR.load(std::sync::atomic::Ordering::Acquire);
+            if !ptr.is_null() {
+                unsafe {
+                    (*ptr).store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+
+        // Store the flag pointer so the signal handler can access it.
+        SHUTDOWN_PTR.store(
+            std::sync::Arc::as_ptr(&shutdown).cast_mut(),
+            std::sync::atomic::Ordering::Release,
+        );
+
+        // SAFETY: sighup_handler only sets an AtomicBool, which is
+        // async-signal-safe. The pointer is valid for the process lifetime.
+        unsafe {
+            signal(SIGHUP, sighup_handler);
+        }
+    }
+
+    git_paw::dashboard::run_dashboard(&state, handle, &shutdown)
 }
 
 // ---------------------------------------------------------------------------
@@ -496,6 +667,20 @@ fn cmd_purge(force: bool) -> Result<(), PawError> {
         }
     }
 
+    // Delete branches that git-paw created (best-effort)
+    for entry in &existing.worktrees {
+        if entry.branch_created
+            && let Err(e) = git::delete_branch(&repo_root, &entry.branch)
+        {
+            eprintln!("warning: failed to delete branch '{}': {e}", entry.branch);
+        }
+    }
+
+    // Delete broker log if it exists (best-effort)
+    if let Some(ref log_path) = existing.broker_log_path {
+        let _ = std::fs::remove_file(log_path);
+    }
+
     // Delete session state
     session::delete_session(&existing.session_name)?;
 
@@ -530,6 +715,16 @@ fn cmd_status() -> Result<(), PawError> {
     println!("Status:  {status_icon} {effective}");
     println!("Tmux:    {}", if alive { "running" } else { "not running" });
     println!();
+
+    // Broker info
+    if let (Some(bind), Some(port)) = (&existing.broker_bind, existing.broker_port) {
+        let url = format!("http://{bind}:{port}");
+        match broker::probe_broker(&url) {
+            broker::ProbeResult::LiveBroker => println!("Broker:  {url} (running)"),
+            _ => println!("Broker:  {url} (not responding)"),
+        }
+        println!();
+    }
 
     if existing.worktrees.is_empty() {
         println!("  (no worktrees)");

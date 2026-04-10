@@ -52,6 +52,12 @@ cli = "codex"
 # Session logging
 # [logging]
 # enabled = false
+
+# Agent coordination broker
+# [broker]
+# enabled = false
+# port = 9119
+# bind = "127.0.0.1"
 ```
 
 ## Settings Reference
@@ -197,6 +203,43 @@ enabled = true
 
 When enabled, logs are written to `.git-paw/logs/<session>/` using `tmux pipe-pane`. See [Session Logging](../user-guide/session-logging.md) for details.
 
+## Broker
+
+Configure the HTTP broker for agent coordination. When enabled, git-paw starts a lightweight HTTP server that lets agents share status updates, artifacts, and blocked requests.
+
+```toml
+[broker]
+enabled = true
+port = 9119
+bind = "127.0.0.1"
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Whether to start the coordination broker |
+| `port` | `9119` | HTTP port for the broker server |
+| `bind` | `"127.0.0.1"` | Bind address -- never bind to `0.0.0.0` on shared machines |
+
+When the broker is enabled, git-paw injects the `GIT_PAW_BROKER_URL` environment variable into each agent pane, pointing to `http://<bind>:<port>`. Agents use this URL to communicate with the broker.
+
+### Multi-repo port assignment
+
+If you run git-paw sessions for multiple repositories at the same time, each session needs a different port. Set a unique `port` in each repo's `.git-paw/config.toml`:
+
+```toml
+# Repo A
+[broker]
+enabled = true
+port = 9119
+
+# Repo B (in its own .git-paw/config.toml)
+[broker]
+enabled = true
+port = 9120
+```
+
+See [Agent Coordination](../user-guide/coordination.md) for usage details.
+
 ## Merging Rules
 
 When both global and repo configs exist, they merge with these rules:
@@ -211,6 +254,7 @@ When both global and repo configs exist, they merge with these rules:
 | `presets` | Maps merge (repo overrides per-key) |
 | `specs` | Repo wins |
 | `logging` | Repo wins |
+| `broker` | Repo wins |
 
 **Example:** If global config defines `[clis.my-agent]` and repo config defines `[clis.my-agent]` with a different command, the repo version wins. But a `[clis.other-tool]` in global config still appears — maps are merged, not replaced.
 

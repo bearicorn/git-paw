@@ -2,6 +2,7 @@
 //!
 //! Tests the `git-paw` binary and tmux orchestration in realistic scenarios.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -722,4 +723,394 @@ fn attach_succeeds_for_live_session() {
     }
 
     cleanup_session(session_name);
+}
+
+// ---------------------------------------------------------------------------
+// Broker session full lifecycle (v0.3.0 coordination)
+// ---------------------------------------------------------------------------
+
+/// Helper to make HTTP requests to the broker using raw TCP.
+fn http_req_e2e(
+    url: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> (u16, String) {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let addr = url.strip_prefix("http://").unwrap_or(url);
+    let mut stream = TcpStream::connect(addr).expect("failed to connect to broker");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
+    for (key, value) in headers {
+        let _ = write!(request, "{key}: {value}\r\n");
+    }
+    if !body.is_empty() {
+        let _ = write!(request, "Content-Length: {}\r\n", body.len());
+    }
+    request.push_str("\r\n");
+    request.push_str(body);
+
+    stream
+        .write_all(request.as_bytes())
+        .expect("failed to write request");
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok();
+
+    // Parse status code
+    let header_section = response.split("\r\n\r\n").next().unwrap_or("");
+    let status_line = header_section.lines().next().unwrap_or("");
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    // Extract body (handle chunked)
+    let body_raw = response
+        .split_once("\r\n\r\n")
+        .map_or_else(String::new, |(_, b)| b.to_string());
+    let body_decoded = if header_section
+        .to_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
+        decode_chunked_e2e(&body_raw)
+    } else {
+        body_raw
+    };
+
+    (status, body_decoded)
+}
+
+fn decode_chunked_e2e(body: &str) -> String {
+    let mut result = String::new();
+    let mut remaining = body;
+    loop {
+        let line_end = remaining.find("\r\n").unwrap_or(remaining.len());
+        let size_str = &remaining[..line_end];
+        let size = usize::from_str_radix(size_str.trim(), 16).unwrap_or(0);
+        if size == 0 {
+            break;
+        }
+        remaining = &remaining[line_end + 2..];
+        if remaining.len() >= size {
+            result.push_str(&remaining[..size]);
+            remaining = &remaining[size..];
+            if remaining.starts_with("\r\n") {
+                remaining = &remaining[2..];
+            }
+        } else {
+            break;
+        }
+    }
+    result
+}
+
+/// Drop guard that kills a tmux session on drop, ensuring cleanup even on panic.
+struct SessionGuard<'a>(&'a str);
+
+impl Drop for SessionGuard<'_> {
+    fn drop(&mut self) {
+        let _ = kill_session(self.0);
+    }
+}
+
+/// Find a free port by binding to port 0 and reading back the assigned port.
+fn find_free_port() -> u16 {
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("failed to bind to ephemeral port");
+    listener
+        .local_addr()
+        .expect("failed to get local addr")
+        .port()
+}
+
+#[test]
+#[serial]
+fn broker_session_full_lifecycle() {
+    ensure_tmux_installed().expect("tmux must be installed to run this test");
+
+    let session_name = "paw-test-repo";
+
+    // Cleanup guard: ensure the session is killed even on panic
+    let _guard = SessionGuard(session_name);
+
+    // Kill any leftover session from a prior run
+    cleanup_session(session_name);
+
+    // -----------------------------------------------------------------------
+    // Step 1: Setup — create a test repo with AGENTS.md + broker config
+    // -----------------------------------------------------------------------
+    let tr = setup_test_repo();
+
+    // Create and commit AGENTS.md
+    let agents_path = tr.path().join("AGENTS.md");
+    fs::write(&agents_path, "# Test\n").expect("write AGENTS.md");
+    run_git(tr.path(), &["add", "AGENTS.md"]);
+    run_git(tr.path(), &["commit", "-m", "add AGENTS.md"]);
+
+    // Pick a free port for the broker
+    let broker_port = find_free_port();
+
+    // Create .git-paw/config.toml with broker + specs config + echo CLI
+    let paw_dir = tr.path().join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    let config_content = format!(
+        "[broker]\nenabled = true\nport = {broker_port}\n\n\
+         [specs]\ntype = \"openspec\"\n\n\
+         [clis.echo]\ncommand = \"/bin/echo\"\n"
+    );
+    fs::write(paw_dir.join("config.toml"), &config_content).expect("write config");
+
+    // -----------------------------------------------------------------------
+    // Step 2: Start — launch the session (will fail to attach but session is created)
+    // -----------------------------------------------------------------------
+    let _start_output = cmd()
+        .current_dir(tr.path())
+        .args([
+            "start",
+            "--cli",
+            "echo",
+            "--branches",
+            "feat/smoke-a,feat/smoke-b",
+        ])
+        .output()
+        .expect("run start command");
+    // Do NOT assert success — attach fails without a TTY, but session IS created
+
+    // Wait for the broker to initialize — retry until it accepts connections or timeout.
+    let broker_ready = (0..20).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::net::TcpStream::connect(format!("127.0.0.1:{broker_port}")).is_ok()
+    });
+    if !broker_ready {
+        // Capture pane 0 output for diagnostics
+        let pane_output = std::process::Command::new("tmux")
+            .args(["capture-pane", "-t", &format!("{session_name}:0.0"), "-p"])
+            .output()
+            .map_or_else(
+                |e| format!("failed to capture pane: {e}"),
+                |o| String::from_utf8_lossy(&o.stdout).to_string(),
+            );
+        let pane_cmd = std::process::Command::new("tmux")
+            .args([
+                "list-panes",
+                "-t",
+                session_name,
+                "-F",
+                "#{pane_index}: #{pane_current_command} (#{pane_pid})",
+            ])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        panic!(
+            "broker did not start on port {broker_port} within 10 seconds\n\
+             Pane commands:\n{pane_cmd}\n\
+             Pane 0 output:\n{pane_output}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 3: Verify tmux session exists
+    // -----------------------------------------------------------------------
+    assert!(
+        is_session_alive(session_name).expect("check session"),
+        "session {session_name} should be alive after start"
+    );
+
+    // -----------------------------------------------------------------------
+    // Step 4: Verify pane count — 3 panes (dashboard + 2 agents)
+    // -----------------------------------------------------------------------
+    let pane_output = std::process::Command::new("tmux")
+        .args(["list-panes", "-t", session_name, "-F", "#{pane_index}"])
+        .output()
+        .expect("list panes");
+    let pane_count = String::from_utf8_lossy(&pane_output.stdout).lines().count();
+    assert_eq!(
+        pane_count, 3,
+        "session should have 3 panes (dashboard + 2 agents), got {pane_count}"
+    );
+
+    // -----------------------------------------------------------------------
+    // Step 5: Verify broker responds at /status
+    // -----------------------------------------------------------------------
+    let broker_url = format!("127.0.0.1:{broker_port}");
+    let (status, body) = http_req_e2e(&format!("http://{broker_url}"), "GET", "/status", &[], "");
+    assert_eq!(status, 200, "broker /status should return 200");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON from /status");
+    assert_eq!(json["git_paw"], true, "status should contain git_paw: true");
+
+    // -----------------------------------------------------------------------
+    // Step 6: Publish + poll roundtrip
+    // -----------------------------------------------------------------------
+    let http_url = format!("http://{broker_url}");
+
+    // Register agent feat-smoke-a with a status message
+    let (status, _) = http_req_e2e(
+        &http_url,
+        "POST",
+        "/publish",
+        &[("Content-Type", "application/json")],
+        r#"{"type":"agent.status","agent_id":"feat-smoke-a","payload":{"status":"working","modified_files":[]}}"#,
+    );
+    assert_eq!(status, 202, "status publish should return 202");
+
+    // Register agent feat-smoke-b
+    let (status, _) = http_req_e2e(
+        &http_url,
+        "POST",
+        "/publish",
+        &[("Content-Type", "application/json")],
+        r#"{"type":"agent.status","agent_id":"feat-smoke-b","payload":{"status":"idle","modified_files":[]}}"#,
+    );
+    assert_eq!(status, 202, "second agent status should return 202");
+
+    // Publish an artifact from feat-smoke-a (broadcasts to feat-smoke-b)
+    let (status, _) = http_req_e2e(
+        &http_url,
+        "POST",
+        "/publish",
+        &[("Content-Type", "application/json")],
+        r#"{"type":"agent.artifact","agent_id":"feat-smoke-a","payload":{"status":"done","exports":[],"modified_files":["src/lib.rs"]}}"#,
+    );
+    assert_eq!(status, 202, "artifact publish should return 202");
+
+    // Poll feat-smoke-b's inbox — should contain the artifact
+    let (status, body) = http_req_e2e(&http_url, "GET", "/messages/feat-smoke-b", &[], "");
+    assert_eq!(status, 200);
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON from /messages");
+    let messages = json["messages"]
+        .as_array()
+        .expect("messages should be an array");
+    assert_eq!(
+        messages.len(),
+        1,
+        "feat-smoke-b should have exactly 1 artifact message"
+    );
+    let last_seq = json["last_seq"]
+        .as_u64()
+        .expect("last_seq should be a number");
+    assert!(last_seq > 0, "last_seq should be positive");
+
+    // -----------------------------------------------------------------------
+    // Step 7: Cursor advancement — since=last_seq returns empty
+    // -----------------------------------------------------------------------
+    let path = format!("/messages/feat-smoke-b?since={last_seq}");
+    let (status, body) = http_req_e2e(&http_url, "GET", &path, &[], "");
+    assert_eq!(status, 200);
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    let messages = json["messages"]
+        .as_array()
+        .expect("messages should be an array");
+    assert!(
+        messages.is_empty(),
+        "no new messages after cursor, got {} messages",
+        messages.len()
+    );
+
+    // -----------------------------------------------------------------------
+    // Step 8: Verify AGENTS.md skill injection in worktree
+    // -----------------------------------------------------------------------
+    // Find worktree paths by listing git worktrees
+    let wt_output = std::process::Command::new("git")
+        .current_dir(tr.path())
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .expect("list worktrees");
+    let wt_list = String::from_utf8_lossy(&wt_output.stdout);
+
+    // Collect worktree paths (excluding the main repo).
+    // Canonicalize to handle macOS /var -> /private/var symlinks.
+    let repo_canonical = tr.path().canonicalize().expect("canonicalize repo path");
+    let mut worktree_paths: Vec<PathBuf> = Vec::new();
+    for line in wt_list.lines() {
+        if let Some(path_str) = line.strip_prefix("worktree ") {
+            let path = PathBuf::from(path_str);
+            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if canonical != repo_canonical {
+                worktree_paths.push(path);
+            }
+        }
+    }
+    assert_eq!(
+        worktree_paths.len(),
+        2,
+        "should have 2 worktrees, got {}",
+        worktree_paths.len()
+    );
+
+    // Check at least one worktree's AGENTS.md contains skill injection
+    let agents_content =
+        fs::read_to_string(worktree_paths[0].join("AGENTS.md")).expect("read worktree AGENTS.md");
+    assert!(
+        agents_content.contains("Coordination Skills"),
+        "AGENTS.md should contain 'Coordination Skills', got:\n{agents_content}"
+    );
+    assert!(
+        agents_content.contains("${GIT_PAW_BROKER_URL}"),
+        "AGENTS.md should contain '${{GIT_PAW_BROKER_URL}}', got:\n{agents_content}"
+    );
+    // Check the slugified branch name appears (feat-smoke-a or feat-smoke-b)
+    let has_slug =
+        agents_content.contains("feat-smoke-a") || agents_content.contains("feat-smoke-b");
+    assert!(
+        has_slug,
+        "AGENTS.md should contain slugified branch name, got:\n{agents_content}"
+    );
+
+    // -----------------------------------------------------------------------
+    // Step 9: Stop — kill the tmux session and verify broker port is freed
+    // -----------------------------------------------------------------------
+    cmd().current_dir(tr.path()).arg("stop").assert().success();
+
+    // Wait for broker to shut down
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    // Verify the broker port is freed — binding to it should succeed
+    let bind_result = std::net::TcpListener::bind(format!("127.0.0.1:{broker_port}"));
+    assert!(
+        bind_result.is_ok(),
+        "broker port {broker_port} should be freed after stop"
+    );
+    drop(bind_result);
+
+    // -----------------------------------------------------------------------
+    // Step 10: Purge — remove worktrees and branches
+    // -----------------------------------------------------------------------
+    cmd()
+        .current_dir(tr.path())
+        .args(["purge", "--force"])
+        .assert()
+        .success();
+
+    // Verify worktrees are removed
+    for wt_path in &worktree_paths {
+        assert!(
+            !wt_path.exists(),
+            "worktree {} should be removed after purge",
+            wt_path.display()
+        );
+    }
+
+    // Verify branches are deleted
+    let branch_output = std::process::Command::new("git")
+        .current_dir(tr.path())
+        .args(["branch"])
+        .output()
+        .expect("list branches");
+    let branches = String::from_utf8_lossy(&branch_output.stdout);
+    assert!(
+        !branches.contains("feat/smoke-a"),
+        "feat/smoke-a should be deleted after purge, branches:\n{branches}"
+    );
+    assert!(
+        !branches.contains("feat/smoke-b"),
+        "feat/smoke-b should be deleted after purge, branches:\n{branches}"
+    );
 }
