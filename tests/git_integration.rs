@@ -136,16 +136,20 @@ fn create_and_remove_worktree() {
     create_branch(tr.path(), "feature/test-wt");
 
     // Create worktree
-    let wt_path = git::create_worktree(tr.path(), "feature/test-wt").expect("create worktree");
-    assert!(wt_path.exists(), "worktree directory should exist");
+    let wt = git::create_worktree(tr.path(), "feature/test-wt").expect("create worktree");
+    assert!(wt.path.exists(), "worktree directory should exist");
     assert!(
-        wt_path.join("README.md").exists(),
+        wt.path.join("README.md").exists(),
         "worktree should contain repo files"
+    );
+    assert!(
+        !wt.branch_created,
+        "branch already existed, should not be marked as created"
     );
 
     // Remove worktree
-    git::remove_worktree(tr.path(), &wt_path).expect("remove worktree");
-    assert!(!wt_path.exists(), "worktree directory should be removed");
+    git::remove_worktree(tr.path(), &wt.path).expect("remove worktree");
+    assert!(!wt.path.exists(), "worktree directory should be removed");
 }
 
 #[test]
@@ -153,17 +157,17 @@ fn worktree_placed_as_sibling_of_repo() {
     let tr = setup_test_repo();
     create_branch(tr.path(), "feature/sibling");
 
-    let wt_path = git::create_worktree(tr.path(), "feature/sibling").expect("create worktree");
+    let wt = git::create_worktree(tr.path(), "feature/sibling").expect("create worktree");
 
     // Worktree should be in the same parent directory as the repo
     assert_eq!(
-        wt_path.parent().unwrap(),
+        wt.path.parent().unwrap(),
         tr.path().parent().unwrap(),
         "worktree should be a sibling of the repo"
     );
 
     // Clean up
-    git::remove_worktree(tr.path(), &wt_path).expect("remove worktree");
+    git::remove_worktree(tr.path(), &wt.path).expect("remove worktree");
 }
 
 #[test]
@@ -284,4 +288,68 @@ fn list_branches_strips_remote_prefix_and_deduplicates() {
         branches.iter().all(|b| !b.starts_with("origin/")),
         "no branch should have origin/ prefix, got: {branches:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// AGENTS.md injection protection in real worktrees
+// ---------------------------------------------------------------------------
+
+#[test]
+fn agents_md_injection_not_staged_by_git_add_in_worktree() {
+    // Setup: create a repo with a tracked AGENTS.md (like any project using
+    // the Linux Foundation AGENTS.md standard).
+    let tr = setup_test_repo();
+    std::fs::write(tr.path().join("AGENTS.md"), "# Project Rules\n").unwrap();
+    run_git(tr.path(), &["add", "AGENTS.md"]);
+    run_git(tr.path(), &["commit", "-m", "add agents"]);
+
+    // Create a real worktree (this is what git paw start does)
+    create_branch(tr.path(), "feat/test-injection");
+    let wt = git::create_worktree(tr.path(), "feat/test-injection").expect("create worktree");
+
+    // Inject session content (this is what setup_worktree_agents_md does)
+    let assignment = git_paw::agents::WorktreeAssignment {
+        branch: "feat/test-injection".to_string(),
+        cli: "claude".to_string(),
+        spec_content: Some("Implement the widget.\n".to_string()),
+        owned_files: Some(vec!["src/widget.rs".to_string()]),
+        skill_content: None,
+    };
+    git_paw::agents::setup_worktree_agents_md(tr.path(), &wt.path, &assignment)
+        .expect("inject agents md");
+
+    // Verify AGENTS.md was modified (session content injected)
+    let content = std::fs::read_to_string(wt.path.join("AGENTS.md")).unwrap();
+    assert!(
+        content.contains("feat/test-injection"),
+        "AGENTS.md should contain injected session content"
+    );
+
+    // THE CRITICAL ASSERTION: git add -A should NOT stage AGENTS.md
+    run_git(&wt.path, &["add", "-A"]);
+    let output = Command::new("git")
+        .current_dir(&wt.path)
+        .args(["diff", "--cached", "--name-only"])
+        .output()
+        .expect("git diff --cached");
+    let staged = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !staged.contains("AGENTS.md"),
+        "AGENTS.md should NOT be staged after git add -A, but got: {staged}"
+    );
+
+    // Also verify git status doesn't show it
+    let output = Command::new("git")
+        .current_dir(&wt.path)
+        .args(["status", "--porcelain"])
+        .output()
+        .expect("git status");
+    let status = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !status.contains("AGENTS.md"),
+        "AGENTS.md should not appear in git status, got: {status}"
+    );
+
+    // Cleanup
+    git::remove_worktree(tr.path(), &wt.path).expect("remove worktree");
 }
