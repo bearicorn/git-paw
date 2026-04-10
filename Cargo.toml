@@ -8,6 +8,7 @@ repository = "https://github.com/bearicorn/git-paw"
 homepage = "https://bearicorn.github.io/git-paw"
 keywords = ["cli", "tmux", "git", "ai", "worktree"]
 categories = ["command-line-utilities", "development-tools"]
+include = ["src/**/*", "assets/**/*", "Cargo.toml", "LICENSE*", "README*"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -19,6 +20,10 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1.2"
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+axum = "0.8"
+ratatui = "0.29"
+crossterm = "0.28"
 
 [[bin]]
 name = "git-paw"
@@ -30,12 +35,17 @@ assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
 serial_test = "3"
+tower = { version = "0.5", features = ["util"] }
+hyper = "1"
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
+await_holding_lock = "deny"
 
 # The profile that 'dist' will build with
 [profile.dist]

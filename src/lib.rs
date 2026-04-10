@@ -4,8 +4,10 @@
 //! from a single terminal using tmux.
 
 pub mod agents;
+pub mod broker;
 pub mod cli;
 pub mod config;
+pub mod dashboard;
 pub mod detect;
 pub mod dirs;
 pub mod error;
@@ -15,5 +17,6 @@ pub mod interactive;
 pub mod logging;
 pub mod replay;
 pub mod session;
+pub mod skills;
 pub mod specs;
 pub mod tmux;
