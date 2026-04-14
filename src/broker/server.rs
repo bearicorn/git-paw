@@ -33,12 +33,34 @@ struct PollResponse {
     last_seq: u64,
 }
 
+/// Response body for the `GET /log` endpoint.
+#[derive(Serialize)]
+struct LogResponse {
+    /// All messages with `seq > since`, in chronological order.
+    /// Each entry is `[seq, timestamp_unix_secs, message]`.
+    entries: Vec<LogEntry>,
+    /// Highest sequence number in the result (0 if empty).
+    last_seq: u64,
+}
+
+/// One entry in `GET /log`.
+#[derive(Serialize)]
+struct LogEntry {
+    /// Sequence number assigned at publish time.
+    seq: u64,
+    /// Wall-clock seconds since the Unix epoch when the message was published.
+    timestamp_unix_secs: u64,
+    /// The original broker message.
+    message: BrokerMessage,
+}
+
 /// Builds the axum [`Router`] with all broker endpoints.
 pub fn router(state: Arc<BrokerState>) -> Router {
     Router::new()
         .route("/publish", post(publish))
         .route("/messages/{agent_id}", get(messages))
         .route("/status", get(status))
+        .route("/log", get(log))
         .with_state(state)
 }
 
@@ -133,6 +155,48 @@ async fn messages(
             messages: msgs,
             last_seq,
         }),
+    )
+        .into_response()
+}
+
+/// `GET /log?since=N` — returns the broker's full message log filtered to
+/// `seq > since`.
+///
+/// Used by `cmd_supervisor` to reconstruct broker state from outside the
+/// dashboard process so it can build the dependency graph for merge ordering
+/// and write a real session summary instead of an empty one.
+async fn log(State(state): State<Arc<BrokerState>>, Query(params): Query<PollQuery>) -> Response {
+    let since = match params.since {
+        Some(s) => match s.parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({"error": "since must be a valid u64"})),
+                )
+                    .into_response();
+            }
+        },
+        None => 0,
+    };
+
+    let raw = delivery::full_log(&state, since);
+    let last_seq = raw.iter().map(|(s, _, _)| *s).max().unwrap_or(0);
+    let entries: Vec<LogEntry> = raw
+        .into_iter()
+        .map(|(seq, ts, message)| LogEntry {
+            seq,
+            timestamp_unix_secs: ts
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            message,
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        axum::Json(LogResponse { entries, last_seq }),
     )
         .into_response()
 }
@@ -433,5 +497,105 @@ mod tests {
         assert_eq!(status_resp.status(), StatusCode::OK);
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn log_returns_full_message_log_in_chronological_order() {
+        let state = Arc::new(BrokerState::new(None));
+        // Seed the broker with three published messages.
+        for (agent, status_label) in [
+            ("feat-a", "working"),
+            ("feat-b", "blocked"),
+            ("feat-c", "done"),
+        ] {
+            let msg = BrokerMessage::Status {
+                agent_id: agent.to_string(),
+                payload: super::super::messages::StatusPayload {
+                    status: status_label.to_string(),
+                    modified_files: vec![],
+                    message: None,
+                },
+            };
+            delivery::publish_message(&state, &msg);
+        }
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/log")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let entries = parsed["entries"].as_array().expect("entries array");
+        assert_eq!(entries.len(), 3, "all three messages must appear in /log");
+        // Chronological order: feat-a first, feat-c last.
+        assert_eq!(entries[0]["message"]["agent_id"], "feat-a");
+        assert_eq!(entries[2]["message"]["agent_id"], "feat-c");
+        assert_eq!(parsed["last_seq"], 3);
+    }
+
+    #[tokio::test]
+    async fn log_with_since_filters_older_entries() {
+        let state = Arc::new(BrokerState::new(None));
+        for agent in ["feat-a", "feat-b", "feat-c"] {
+            let msg = BrokerMessage::Status {
+                agent_id: agent.to_string(),
+                payload: super::super::messages::StatusPayload {
+                    status: "working".to_string(),
+                    modified_files: vec![],
+                    message: None,
+                },
+            };
+            delivery::publish_message(&state, &msg);
+        }
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/log?since=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let entries = parsed["entries"].as_array().unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "since=2 must yield only the message at seq=3"
+        );
+        assert_eq!(entries[0]["seq"], 3);
+    }
+
+    #[tokio::test]
+    async fn log_invalid_since_returns_400() {
+        let app = test_router();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/log?since=notanumber")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }
