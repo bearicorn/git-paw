@@ -30,6 +30,18 @@ pub enum MessageError {
     #[error("from field must not be empty")]
     EmptyFromField,
 
+    /// The `verified_by` field is empty or whitespace-only.
+    #[error("verified_by field must not be empty")]
+    EmptyVerifiedBy,
+
+    /// The `errors` list is empty.
+    #[error("errors list must not be empty")]
+    EmptyErrors,
+
+    /// The `question` field is empty or whitespace-only.
+    #[error("question field must not be empty")]
+    EmptyQuestionField,
+
     /// JSON deserialization failed.
     #[error("invalid message JSON: {0}")]
     Deserialize(#[from] serde_json::Error),
@@ -66,6 +78,35 @@ pub struct BlockedPayload {
     pub from: String,
 }
 
+/// Payload for `agent.verified` messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedPayload {
+    /// Agent ID of the verifier (typically `"supervisor"`).
+    pub verified_by: String,
+    /// Optional human-readable summary of the verification result.
+    pub message: Option<String>,
+}
+
+/// Payload for `agent.question` messages.
+///
+/// Wire format: `{"type": "agent.question", "agent_id": "<slug>", "payload": {"question": "<text>"}}`.
+/// The `question` field MUST NOT be empty. Question messages are routed to the
+/// `"supervisor"` inbox by the broker delivery layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionPayload {
+    /// The question text the agent is asking.
+    pub question: String,
+}
+
+/// Payload for `agent.feedback` messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedbackPayload {
+    /// Agent ID of the sender (typically `"supervisor"`).
+    pub from: String,
+    /// List of error messages the target agent should address.
+    pub errors: Vec<String>,
+}
+
 /// Envelope for all inter-agent messages.
 ///
 /// The wire format uses JSON with an internally tagged `"type"` discriminator
@@ -97,6 +138,30 @@ pub enum BrokerMessage {
         /// Blocked payload (contains `from` -- the unblocking agent).
         payload: BlockedPayload,
     },
+    /// Verification acknowledgement -- broadcast to all peers.
+    #[serde(rename = "agent.verified")]
+    Verified {
+        /// Target agent ID (the agent whose work was verified).
+        agent_id: String,
+        /// Verified payload (contains `verified_by` -- the sender).
+        payload: VerifiedPayload,
+    },
+    /// Feedback from a verifier -- delivered to the target agent only.
+    #[serde(rename = "agent.feedback")]
+    Feedback {
+        /// Target agent ID (the agent receiving feedback).
+        agent_id: String,
+        /// Feedback payload (contains `from` -- the sender).
+        payload: FeedbackPayload,
+    },
+    /// Agent question -- delivered to the `"supervisor"` inbox for human reply.
+    #[serde(rename = "agent.question")]
+    Question {
+        /// Sender agent ID (the agent asking the question).
+        agent_id: String,
+        /// Question payload.
+        payload: QuestionPayload,
+    },
 }
 
 impl BrokerMessage {
@@ -115,7 +180,10 @@ impl BrokerMessage {
         match self {
             Self::Status { agent_id, .. }
             | Self::Artifact { agent_id, .. }
-            | Self::Blocked { agent_id, .. } => agent_id,
+            | Self::Blocked { agent_id, .. }
+            | Self::Verified { agent_id, .. }
+            | Self::Feedback { agent_id, .. }
+            | Self::Question { agent_id, .. } => agent_id,
         }
     }
 
@@ -124,11 +192,16 @@ impl BrokerMessage {
     /// - `Status` returns `payload.status` (e.g. `"working"`)
     /// - `Artifact` returns `payload.status` (e.g. `"done"`)
     /// - `Blocked` returns `"blocked"`
+    /// - `Verified` returns `"verified"`
+    /// - `Feedback` returns `"feedback"`
     pub fn status_label(&self) -> &str {
         match self {
             Self::Status { payload, .. } => &payload.status,
             Self::Artifact { payload, .. } => &payload.status,
             Self::Blocked { .. } => "blocked",
+            Self::Verified { .. } => "verified",
+            Self::Feedback { .. } => "feedback",
+            Self::Question { .. } => "question",
         }
     }
 
@@ -161,6 +234,24 @@ impl BrokerMessage {
                 }
                 if payload.from.trim().is_empty() {
                     return Err(MessageError::EmptyFromField);
+                }
+            }
+            Self::Verified { payload, .. } => {
+                if payload.verified_by.trim().is_empty() {
+                    return Err(MessageError::EmptyVerifiedBy);
+                }
+            }
+            Self::Feedback { payload, .. } => {
+                if payload.from.trim().is_empty() {
+                    return Err(MessageError::EmptyFromField);
+                }
+                if payload.errors.is_empty() {
+                    return Err(MessageError::EmptyErrors);
+                }
+            }
+            Self::Question { payload, .. } => {
+                if payload.question.trim().is_empty() {
+                    return Err(MessageError::EmptyQuestionField);
                 }
             }
         }
@@ -201,6 +292,34 @@ impl fmt::Display for BrokerMessage {
                     "[{agent_id}] blocked: needs {} from {}",
                     payload.needs, payload.from
                 )
+            }
+            Self::Verified {
+                agent_id, payload, ..
+            } => {
+                if let Some(message) = &payload.message {
+                    write!(
+                        f,
+                        "[{agent_id}] verified by {} \u{2014} {message}",
+                        payload.verified_by
+                    )
+                } else {
+                    write!(f, "[{agent_id}] verified by {}", payload.verified_by)
+                }
+            }
+            Self::Feedback {
+                agent_id, payload, ..
+            } => {
+                write!(
+                    f,
+                    "[{agent_id}] feedback from {}: {} errors",
+                    payload.from,
+                    payload.errors.len()
+                )
+            }
+            Self::Question {
+                agent_id, payload, ..
+            } => {
+                write!(f, "[{agent_id}] question: {}", payload.question)
             }
         }
     }
@@ -518,6 +637,179 @@ mod tests {
         let result = slugify_branch("feat/日本語");
         assert!(result.is_ascii());
         assert_eq!(result, "feat");
+    }
+
+    fn make_verified(agent_id: &str, verified_by: &str, message: Option<&str>) -> BrokerMessage {
+        BrokerMessage::Verified {
+            agent_id: agent_id.to_string(),
+            payload: VerifiedPayload {
+                verified_by: verified_by.to_string(),
+                message: message.map(str::to_string),
+            },
+        }
+    }
+
+    fn make_feedback(agent_id: &str, from: &str, errors: &[&str]) -> BrokerMessage {
+        BrokerMessage::Feedback {
+            agent_id: agent_id.to_string(),
+            payload: FeedbackPayload {
+                from: from.to_string(),
+                errors: errors.iter().map(|s| (*s).to_string()).collect(),
+            },
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_verified_with_message() {
+        let msg = make_verified("feat-errors", "supervisor", Some("all 12 tests pass"));
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"agent.verified\""));
+        assert!(json.contains("all 12 tests pass"));
+        let back: BrokerMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn serde_roundtrip_verified_without_message() {
+        let msg = make_verified("feat-errors", "supervisor", None);
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: BrokerMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn serde_roundtrip_feedback() {
+        let msg = make_feedback(
+            "feat-errors",
+            "supervisor",
+            &["test failed", "missing doc comment"],
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"agent.feedback\""));
+        let back: BrokerMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn from_json_empty_verified_by_rejected() {
+        let json = r#"{"type":"agent.verified","agent_id":"feat-errors","payload":{"verified_by":"","message":null}}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        assert!(matches!(err, MessageError::EmptyVerifiedBy));
+    }
+
+    #[test]
+    fn from_json_empty_feedback_from_rejected() {
+        let json = r#"{"type":"agent.feedback","agent_id":"feat-errors","payload":{"from":"","errors":["e1"]}}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        assert!(matches!(err, MessageError::EmptyFromField));
+    }
+
+    #[test]
+    fn from_json_empty_feedback_errors_rejected() {
+        let json = r#"{"type":"agent.feedback","agent_id":"feat-errors","payload":{"from":"supervisor","errors":[]}}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        assert!(matches!(err, MessageError::EmptyErrors));
+    }
+
+    #[test]
+    fn display_verified_without_message() {
+        let msg = make_verified("feat-errors", "supervisor", None);
+        assert_eq!(msg.to_string(), "[feat-errors] verified by supervisor");
+    }
+
+    #[test]
+    fn display_verified_with_message() {
+        let msg = make_verified("feat-errors", "supervisor", Some("all tests pass"));
+        assert_eq!(
+            msg.to_string(),
+            "[feat-errors] verified by supervisor \u{2014} all tests pass"
+        );
+    }
+
+    #[test]
+    fn display_feedback_with_three_errors() {
+        let msg = make_feedback("feat-errors", "supervisor", &["e1", "e2", "e3"]);
+        assert_eq!(
+            msg.to_string(),
+            "[feat-errors] feedback from supervisor: 3 errors"
+        );
+    }
+
+    #[test]
+    fn status_label_verified() {
+        let msg = make_verified("feat-x", "supervisor", None);
+        assert_eq!(msg.status_label(), "verified");
+    }
+
+    #[test]
+    fn status_label_feedback() {
+        let msg = make_feedback("feat-x", "supervisor", &["e"]);
+        assert_eq!(msg.status_label(), "feedback");
+    }
+
+    #[test]
+    fn agent_id_verified() {
+        let msg = make_verified("feat-x", "supervisor", None);
+        assert_eq!(msg.agent_id(), "feat-x");
+    }
+
+    #[test]
+    fn agent_id_feedback() {
+        let msg = make_feedback("feat-x", "supervisor", &["e"]);
+        assert_eq!(msg.agent_id(), "feat-x");
+    }
+
+    fn make_question(agent_id: &str, question: &str) -> BrokerMessage {
+        BrokerMessage::Question {
+            agent_id: agent_id.to_string(),
+            payload: QuestionPayload {
+                question: question.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn question_empty_field_rejected() {
+        let json =
+            r#"{"type":"agent.question","agent_id":"feat-config","payload":{"question":""}}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        assert!(matches!(err, MessageError::EmptyQuestionField));
+    }
+
+    #[test]
+    fn serde_roundtrip_question() {
+        let msg = make_question("feat-config", "Should I skip tests?");
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"agent.question\""));
+        assert!(json.contains("\"agent_id\":\"feat-config\""));
+        let back: BrokerMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn display_question() {
+        let msg = make_question("feat-config", "Should I add a config field?");
+        let s = msg.to_string();
+        assert_eq!(s, "[feat-config] question: Should I add a config field?");
+        assert!(!s.contains('\n'));
+    }
+
+    #[test]
+    fn status_label_question() {
+        let msg = make_question("feat-config", "anything?");
+        assert_eq!(msg.status_label(), "question");
+    }
+
+    #[test]
+    fn agent_id_question() {
+        let msg = make_question("feat-config", "anything?");
+        assert_eq!(msg.agent_id(), "feat-config");
+    }
+
+    #[test]
+    fn from_json_unknown_type_rejected() {
+        let json = r#"{"type":"agent.unknown","agent_id":"x","payload":{}}"#;
+        assert!(BrokerMessage::from_json(json).is_err());
     }
 
     #[test]

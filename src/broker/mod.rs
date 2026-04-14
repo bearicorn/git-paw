@@ -14,7 +14,9 @@
 
 pub mod delivery;
 pub mod messages;
+pub mod publish;
 pub mod server;
+pub mod watcher;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -27,6 +29,19 @@ use serde::Serialize;
 
 use crate::config::BrokerConfig;
 pub use messages::BrokerMessage;
+
+/// Worktree to watch for git-status changes.
+///
+/// The broker spawns one [`watcher::watch_worktree`] task per target.
+#[derive(Debug, Clone)]
+pub struct WatchTarget {
+    /// Agent identifier (slugified branch name) that owns this worktree.
+    pub agent_id: String,
+    /// CLI name running in this agent's pane (e.g. `"claude"`).
+    pub cli: String,
+    /// Absolute path to the worktree root.
+    pub worktree_path: PathBuf,
+}
 
 /// Record of a known agent's latest state.
 #[derive(Debug, Clone)]
@@ -65,6 +80,8 @@ pub struct AgentStatusEntry {
 pub struct BrokerStateInner {
     /// Known agents keyed by agent ID.
     pub agents: HashMap<String, AgentRecord>,
+    /// CLI label per agent, populated from [`WatchTarget`] at broker start.
+    pub agent_clis: HashMap<String, String>,
     /// Per-agent message inboxes: `(sequence_number, message)`.
     pub queues: HashMap<String, Vec<(u64, BrokerMessage)>>,
     /// Append-only message log for disk flush.
@@ -85,6 +102,8 @@ pub struct BrokerState {
     next_seq: AtomicU64,
     /// Optional path for periodic log flush to disk.
     pub log_path: Option<PathBuf>,
+    /// Wall-clock instant the broker state was created; used for uptime reporting.
+    started_at: Instant,
 }
 
 impl BrokerState {
@@ -93,11 +112,13 @@ impl BrokerState {
         Self {
             inner: RwLock::new(BrokerStateInner {
                 agents: HashMap::new(),
+                agent_clis: HashMap::new(),
                 queues: HashMap::new(),
                 message_log: Vec::new(),
             }),
             next_seq: AtomicU64::new(0),
             log_path,
+            started_at: Instant::now(),
         }
     }
 
@@ -126,13 +147,9 @@ impl BrokerState {
 
     /// Returns the number of seconds since the broker was started.
     ///
-    /// Used by the HTTP `/status` handler to report uptime. This value is
-    /// informational only; callers should handle `0` gracefully.
+    /// Used by the HTTP `/status` handler to report uptime.
     pub fn uptime_seconds(&self) -> u64 {
-        // A dedicated `started_at` field would be more precise, but since
-        // `uptime_seconds` is a best-effort diagnostic metric we return 0 here
-        // to keep the struct lean.
-        0
+        self.started_at.elapsed().as_secs()
     }
 }
 
@@ -179,6 +196,8 @@ pub struct BrokerHandle {
     runtime: Option<tokio::runtime::Runtime>,
     /// Sends a shutdown signal to the server task.
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Broadcasts the watcher shutdown signal to all watcher tasks.
+    watcher_shutdown: Option<tokio::sync::watch::Sender<bool>>,
     /// The URL the broker is listening on.
     pub url: String,
     /// Flag to signal the flush thread to exit.
@@ -194,6 +213,7 @@ impl BrokerHandle {
             state,
             runtime: None,
             shutdown_tx: None,
+            watcher_shutdown: None,
             url,
             stop_flag: Arc::new(AtomicBool::new(false)),
             flush_thread: None,
@@ -208,11 +228,15 @@ impl Drop for BrokerHandle {
         if let Some(handle) = self.flush_thread.take() {
             let _ = handle.join();
         }
-        // 2. Signal shutdown to the server task.
+        // 2. Signal watcher tasks to stop.
+        if let Some(tx) = self.watcher_shutdown.take() {
+            let _ = tx.send(true);
+        }
+        // 3. Signal shutdown to the server task.
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        // 3. Give in-flight requests up to 2 seconds to drain, then drop runtime.
+        // 4. Give in-flight requests up to 2 seconds to drain, then drop runtime.
         if let Some(rt) = self.runtime.take() {
             rt.shutdown_timeout(std::time::Duration::from_secs(2));
         }
@@ -308,6 +332,7 @@ fn probe_existing_broker(url: &str) -> ProbeResult {
 pub fn start_broker(
     config: &BrokerConfig,
     state: BrokerState,
+    watch_targets: Vec<WatchTarget>,
 ) -> Result<BrokerHandle, BrokerError> {
     let url = config.url();
     let state = Arc::new(state);
@@ -380,10 +405,36 @@ pub fn start_broker(
             .ok();
     });
 
+    // Pre-populate the CLI label AND the inbox queue for every watched
+    // agent so (a) the dashboard shows the CLI before any status messages
+    // arrive, and (b) peer `agent.artifact` broadcasts — which only target
+    // already-existing queues — actually reach the watched agent even
+    // before it has published anything itself.
+    {
+        let mut inner = state.write();
+        for target in &watch_targets {
+            inner
+                .agent_clis
+                .insert(target.agent_id.clone(), target.cli.clone());
+            inner.queues.entry(target.agent_id.clone()).or_default();
+        }
+    }
+
+    // Spawn one watcher task per target. All watchers share a single
+    // `tokio::sync::watch` channel; flipping it to `true` on drop signals
+    // every watcher to exit on its next tick.
+    let (watcher_tx, watcher_rx) = tokio::sync::watch::channel(false);
+    for target in watch_targets {
+        let s = Arc::clone(&state);
+        let rx = watcher_rx.clone();
+        runtime.spawn(watcher::watch_worktree(s, target, rx));
+    }
+
     Ok(BrokerHandle {
         state,
         runtime: Some(runtime),
         shutdown_tx: Some(shutdown_tx),
+        watcher_shutdown: Some(watcher_tx),
         url,
         stop_flag,
         flush_thread,
@@ -437,7 +488,7 @@ mod tests {
             bind: "127.0.0.1".to_string(),
         };
         let state = BrokerState::new(None);
-        let handle = start_broker(&config, state);
+        let handle = start_broker(&config, state, Vec::new());
         // If the port happens to be in use, the test is inconclusive — not a failure.
         if let Ok(h) = handle {
             assert!(h.url.contains(&config.port.to_string()));
@@ -454,7 +505,7 @@ mod tests {
             bind: "127.0.0.1".to_string(),
         };
         let state = BrokerState::new(None);
-        if let Ok(handle) = start_broker(&config, state) {
+        if let Ok(handle) = start_broker(&config, state, Vec::new()) {
             assert!(handle.flush_thread.is_none());
             drop(handle);
         }
@@ -471,7 +522,7 @@ mod tests {
             bind: "127.0.0.1".to_string(),
         };
         let state = BrokerState::new(Some(log_path));
-        if let Ok(handle) = start_broker(&config, state) {
+        if let Ok(handle) = start_broker(&config, state, Vec::new()) {
             assert!(handle.flush_thread.is_some());
             drop(handle);
         }
