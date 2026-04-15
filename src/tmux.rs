@@ -105,6 +105,36 @@ impl TmuxSession {
         ]));
         self
     }
+
+    /// Queue a command to reapply the tiled layout after any resize operation.
+    ///
+    /// This ensures that the layout remains consistent even when tmux windows
+    /// are resized from unattached clients. Should be called after any operation
+    /// that might affect window dimensions.
+    pub fn reapply_tiled_layout(&mut self, session_name: &str) -> &mut Self {
+        self.commands.push(TmuxCommand::new(&[
+            "select-layout",
+            "-t",
+            session_name,
+            "tiled",
+        ]));
+        self
+    }
+
+    /// Queue a command to apply the main-horizontal layout for dashboard sessions.
+    ///
+    /// This layout puts the dashboard pane in a full-width row at the top,
+    /// with worktree panes tiled below. Should be used when a dashboard pane
+    /// is present (pane 0) and worktree panes follow.
+    pub fn apply_dashboard_layout(&mut self, session_name: &str) -> &mut Self {
+        self.commands.push(TmuxCommand::new(&[
+            "select-layout",
+            "-t",
+            session_name,
+            "main-horizontal",
+        ]));
+        self
+    }
 }
 
 /// Builder that accumulates tmux operations for creating and configuring a session.
@@ -315,13 +345,24 @@ impl TmuxSessionBuilder {
             ]));
         }
 
-        // 7. Final tiled layout for clean alignment
-        commands.push(TmuxCommand::new(&[
-            "select-layout",
-            "-t",
-            &session_name,
-            "tiled",
-        ]));
+        // 7. Final layout - use main-horizontal if we have a dashboard, otherwise tiled
+        if self.panes.len() > 1 && self.panes[0].branch == "dashboard" {
+            // Dashboard layout: dashboard pane takes full width at top, worktree panes tiled below
+            commands.push(TmuxCommand::new(&[
+                "select-layout",
+                "-t",
+                &session_name,
+                "main-horizontal",
+            ]));
+        } else {
+            // Standard tiled layout for sessions without dashboard
+            commands.push(TmuxCommand::new(&[
+                "select-layout",
+                "-t",
+                &session_name,
+                "tiled",
+            ]));
+        }
 
         Ok(TmuxSession {
             name: session_name,
@@ -406,6 +447,24 @@ pub fn kill_session(name: &str) -> Result<(), PawError> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(PawError::TmuxError(stderr.trim().to_owned()))
     }
+}
+
+/// Builds the argv for `tmux send-keys` that injects `text` into
+/// `<session_name>:0.<pane_index>` literally (`-l`) and *without* a trailing
+/// `Enter` key.
+///
+/// Pulled out as a free function so the manual-mode boot-block injection in
+/// `cmd_start` and tests share a single source of truth: the call must be
+/// `send-keys -l -t <target> <text>` (the `-l` flag must come *before* `-t`,
+/// otherwise tmux parses it as a key spec rather than the literal flag).
+pub fn build_boot_inject_args(session_name: &str, pane_index: usize, text: &str) -> Vec<String> {
+    vec![
+        "send-keys".to_string(),
+        "-l".to_string(),
+        "-t".to_string(),
+        format!("{session_name}:0.{pane_index}"),
+        text.to_string(),
+    ]
 }
 
 #[cfg(test)]
@@ -955,6 +1014,92 @@ mod tests {
         assert!(
             cmds.iter().any(|c| c.starts_with("tmux set-environment")),
             "dry-run output should include set-environment command"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC: Dashboard layout selection
+    // Behavioral: verifies the correct layout is chosen based on pane structure
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn session_without_dashboard_uses_tiled_layout() {
+        let session = TmuxSessionBuilder::new("proj")
+            .add_pane(make_pane("feat/a", "/tmp/a", "claude"))
+            .add_pane(make_pane("feat/b", "/tmp/b", "codex"))
+            .build()
+            .unwrap();
+
+        let cmds = session.command_strings();
+        let layout_cmds: Vec<&String> = cmds
+            .iter()
+            .filter(|c| c.contains("select-layout"))
+            .collect();
+        let final_layout = layout_cmds
+            .last()
+            .expect("should have at least one select-layout");
+        assert!(
+            final_layout.contains("tiled"),
+            "sessions without dashboard should use tiled layout, got: {final_layout}"
+        );
+    }
+
+    #[test]
+    fn session_with_dashboard_uses_main_horizontal_layout() {
+        let session = TmuxSessionBuilder::new("proj")
+            .add_pane(make_pane("dashboard", "/tmp/repo", "git-paw __dashboard"))
+            .add_pane(make_pane("feat/a", "/tmp/a", "claude"))
+            .add_pane(make_pane("feat/b", "/tmp/b", "codex"))
+            .build()
+            .unwrap();
+
+        let cmds = session.command_strings();
+        let layout_cmds: Vec<&String> = cmds
+            .iter()
+            .filter(|c| c.contains("select-layout"))
+            .collect();
+        let final_layout = layout_cmds
+            .last()
+            .expect("should have at least one select-layout");
+        assert!(
+            final_layout.contains("main-horizontal"),
+            "sessions with dashboard should use main-horizontal layout, got: {final_layout}"
+        );
+    }
+
+    #[test]
+    fn single_pane_session_uses_tiled_layout() {
+        let session = TmuxSessionBuilder::new("proj")
+            .add_pane(make_pane("main", "/tmp/wt", "claude"))
+            .build()
+            .unwrap();
+
+        let cmds = session.command_strings();
+        let layout_cmds: Vec<&String> = cmds
+            .iter()
+            .filter(|c| c.contains("select-layout"))
+            .collect();
+        let final_layout = layout_cmds
+            .last()
+            .expect("should have at least one select-layout");
+        assert!(
+            final_layout.contains("tiled"),
+            "single pane sessions should use tiled layout, got: {final_layout}"
+        );
+    }
+
+    #[test]
+    fn dashboard_layout_appears_in_dry_run_output() {
+        let session = TmuxSessionBuilder::new("proj")
+            .add_pane(make_pane("dashboard", "/tmp/repo", "git-paw __dashboard"))
+            .add_pane(make_pane("feat/a", "/tmp/a", "claude"))
+            .build()
+            .unwrap();
+
+        let cmds = session.command_strings();
+        assert!(
+            cmds.iter().any(|c| c.contains("main-horizontal")),
+            "dry-run output should include main-horizontal layout command"
         );
     }
 
