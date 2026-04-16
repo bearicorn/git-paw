@@ -50,6 +50,224 @@ pub struct LoggingConfig {
     pub enabled: bool,
 }
 
+/// Approval level governing how much autonomy an agent has when operating
+/// on the repository.
+///
+/// The variants are ordered from most conservative to most permissive:
+///
+/// - `Manual` — the agent must ask the user to approve every file write or
+///   shell command. Safest, but slowest.
+/// - `Auto` — the agent may perform routine edits without asking, but still
+///   defers for destructive or privileged operations. This is the default.
+/// - `FullAuto` — the agent is granted full unattended permissions,
+///   bypassing per-action approval. Only appropriate for trusted sandboxes.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalLevel {
+    /// Prompt the user for every write or command.
+    Manual,
+    /// Allow routine edits without prompting, defer for destructive ops.
+    #[default]
+    Auto,
+    /// Grant full unattended permissions (skip approvals entirely).
+    FullAuto,
+}
+
+/// Dashboard configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DashboardConfig {
+    /// Whether to show the broker messages panel in the dashboard.
+    #[serde(default)]
+    pub show_message_log: bool,
+}
+
+/// Supervisor mode configuration.
+///
+/// Supervisor mode puts git-paw in front of the agent CLI as a coordinating
+/// layer that can enforce approval policy and run a verification command
+/// after each agent completes a task.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SupervisorConfig {
+    /// Whether supervisor mode is enabled by default for this repo.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Override the CLI used when launching the supervisor (e.g. `"claude"`).
+    /// `None` resolves to the normal CLI selection flow at runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli: Option<String>,
+    /// Test command to run after each agent completes (e.g. `"just check"`).
+    /// `None` skips the verification step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_command: Option<String>,
+    /// Approval policy applied to agent actions.
+    #[serde(default)]
+    pub agent_approval: ApprovalLevel,
+    /// Auto-approval configuration for safe permission prompts.
+    ///
+    /// When present, the supervisor automatically approves stalled agents
+    /// whose pending command matches an entry in the safe-command whitelist.
+    /// See [`AutoApproveConfig`] for the per-field semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_approve: Option<AutoApproveConfig>,
+}
+
+/// Coarse-grained policy preset that maps onto a known [`AutoApproveConfig`]
+/// shape.
+///
+/// The presets exist so users do not have to hand-craft a whitelist when
+/// they just want a sensible default for the project. The mapping is:
+///
+/// - `Off` — auto-approval is disabled regardless of other fields.
+/// - `Conservative` — auto-approve `cargo`/`git commit` style commands but
+///   strip `git push` and `curl` from the effective whitelist.
+/// - `Safe` — the built-in default; auto-approve everything in
+///   [`default_safe_commands()`](crate::supervisor::auto_approve::default_safe_commands).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalLevelPreset {
+    /// Disable auto-approval entirely.
+    Off,
+    /// Approve only the most uncontroversial commands (no push/curl).
+    Conservative,
+    /// Approve every entry in the built-in safe-command list.
+    #[default]
+    Safe,
+}
+
+/// Configuration for the supervisor auto-approval feature.
+///
+/// Auto-approval detects permission prompts in stalled agent panes via
+/// `tmux capture-pane`, classifies the pending command, and dispatches the
+/// `BTab Down Enter` keystroke sequence when the command matches the
+/// whitelist.
+///
+/// Embedded as `Option<AutoApproveConfig>` on [`SupervisorConfig`] so
+/// existing configs without an `[supervisor.auto_approve]` table continue
+/// to round-trip identically.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutoApproveConfig {
+    /// Master enable flag. When `false`, no detection or approval runs.
+    #[serde(default = "AutoApproveConfig::default_enabled")]
+    pub enabled: bool,
+    /// Project-specific safe-command prefixes appended to the built-in
+    /// defaults from
+    /// [`default_safe_commands()`](crate::supervisor::auto_approve::default_safe_commands).
+    #[serde(default)]
+    pub safe_commands: Vec<String>,
+    /// Threshold (in seconds) of `last_seen` staleness before an agent in
+    /// `working` status is treated as stalled by the poll loop.
+    #[serde(default = "AutoApproveConfig::default_stall_threshold_seconds")]
+    pub stall_threshold_seconds: u64,
+    /// Coarse policy preset applied on top of the explicit fields.
+    ///
+    /// When the preset is `Off`, [`Self::enabled`] is forced to `false` by
+    /// [`Self::resolved`]. When the preset is `Conservative`, the effective
+    /// whitelist is the built-in defaults minus `git push` and `curl`
+    /// entries.
+    #[serde(default)]
+    pub approval_level: ApprovalLevelPreset,
+}
+
+impl Default for AutoApproveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            safe_commands: Vec::new(),
+            stall_threshold_seconds: Self::default_stall_threshold_seconds(),
+            approval_level: ApprovalLevelPreset::Safe,
+        }
+    }
+}
+
+impl AutoApproveConfig {
+    /// Minimum stall threshold in seconds. Anything lower is clamped to
+    /// avoid pathological poll loops.
+    pub const MIN_STALL_THRESHOLD_SECONDS: u64 = 5;
+
+    fn default_enabled() -> bool {
+        true
+    }
+
+    fn default_stall_threshold_seconds() -> u64 {
+        30
+    }
+
+    /// Returns a copy of this config with preset rules applied and the
+    /// stall threshold floor enforced.
+    ///
+    /// - When `approval_level == Off`, `enabled` is forced to `false`.
+    /// - When `stall_threshold_seconds < MIN_STALL_THRESHOLD_SECONDS`, the
+    ///   value is clamped and a warning is written to stderr.
+    #[must_use]
+    pub fn resolved(&self) -> Self {
+        let mut out = self.clone();
+        if out.approval_level == ApprovalLevelPreset::Off {
+            out.enabled = false;
+        }
+        if out.stall_threshold_seconds < Self::MIN_STALL_THRESHOLD_SECONDS {
+            eprintln!(
+                "warning: [supervisor.auto_approve] stall_threshold_seconds = {} clamped to {}s minimum",
+                out.stall_threshold_seconds,
+                Self::MIN_STALL_THRESHOLD_SECONDS
+            );
+            out.stall_threshold_seconds = Self::MIN_STALL_THRESHOLD_SECONDS;
+        }
+        out
+    }
+
+    /// Returns the effective whitelist for this config, applying the preset
+    /// to the union of built-in defaults and user-configured `safe_commands`.
+    ///
+    /// - `Off` and `Safe` both return defaults plus configured extras.
+    /// - `Conservative` returns the same union with `git push` and any
+    ///   `curl` entries filtered out.
+    #[must_use]
+    pub fn effective_whitelist(&self) -> Vec<String> {
+        let mut out: Vec<String> = crate::supervisor::auto_approve::default_safe_commands()
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        for extra in &self.safe_commands {
+            if !out.iter().any(|e| e == extra) {
+                out.push(extra.clone());
+            }
+        }
+        if self.approval_level == ApprovalLevelPreset::Conservative {
+            out.retain(|cmd| !cmd.starts_with("git push") && !cmd.starts_with("curl"));
+        }
+        out
+    }
+}
+
+/// Returns the CLI-specific permission flag for `cli` at the given approval
+/// `level`, or an empty string if the combination has no mapped flag.
+///
+/// # Examples
+///
+/// ```
+/// use git_paw::config::{approval_flags, ApprovalLevel};
+///
+/// assert_eq!(
+///     approval_flags("claude", &ApprovalLevel::FullAuto),
+///     "--dangerously-skip-permissions",
+/// );
+/// assert_eq!(
+///     approval_flags("codex", &ApprovalLevel::Auto),
+///     "--approval-mode=auto-edit",
+/// );
+/// assert_eq!(approval_flags("claude", &ApprovalLevel::Manual), "");
+/// assert_eq!(approval_flags("some-agent", &ApprovalLevel::FullAuto), "");
+/// ```
+#[must_use]
+pub fn approval_flags(cli: &str, level: &ApprovalLevel) -> &'static str {
+    match (cli, level) {
+        ("claude", ApprovalLevel::FullAuto) => "--dangerously-skip-permissions",
+        ("codex", ApprovalLevel::FullAuto) => "--approval-mode=full-auto",
+        ("codex", ApprovalLevel::Auto) => "--approval-mode=auto-edit",
+        _ => "",
+    }
+}
+
 /// HTTP broker configuration for agent coordination.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BrokerConfig {
@@ -126,9 +344,17 @@ pub struct PawConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logging: Option<LoggingConfig>,
 
+    /// Dashboard configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashboard: Option<DashboardConfig>,
+
     /// HTTP broker configuration.
     #[serde(default)]
     pub broker: BrokerConfig,
+
+    /// Supervisor mode configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<SupervisorConfig>,
 }
 
 impl PawConfig {
@@ -166,17 +392,27 @@ impl PawConfig {
             presets,
             specs: overlay.specs.clone().or_else(|| self.specs.clone()),
             logging: overlay.logging.clone().or_else(|| self.logging.clone()),
+            dashboard: overlay.dashboard.clone().or_else(|| self.dashboard.clone()),
             broker: if overlay.broker == BrokerConfig::default() {
                 self.broker.clone()
             } else {
                 overlay.broker.clone()
             },
+            supervisor: overlay
+                .supervisor
+                .clone()
+                .or_else(|| self.supervisor.clone()),
         }
     }
 
     /// Returns a preset by name, if it exists.
     pub fn get_preset(&self, name: &str) -> Option<&Preset> {
         self.presets.get(name)
+    }
+
+    /// Returns the dashboard configuration, if it exists.
+    pub fn get_dashboard(&self) -> Option<&DashboardConfig> {
+        self.dashboard.as_ref()
     }
 }
 
@@ -313,8 +549,12 @@ pub fn generate_default_config() -> String {
 # Omit to prompt or use per-spec paw_cli fields.
 # default_spec_cli = ""
 
-# Prefix for spec-derived branch names (default: "spec/").
+# Prefix for spec-derived branch names (default: "spec/" ).
 # branch_prefix = "spec/"
+
+# Dashboard message log configuration.
+# [dashboard]
+# show_message_log = false
 
 # Spec scanning configuration.
 # [specs]
@@ -339,6 +579,15 @@ pub fn generate_default_config() -> String {
 # enabled = true
 # port = 9119
 # bind = "127.0.0.1"
+
+# Supervisor mode — git-paw acts as a coordinating layer in front of the
+# agent CLI, enforcing approval policy and optionally running a test
+# command after each agent completes.
+# [supervisor]
+# enabled = true
+# cli = "claude"
+# test_command = "just check"
+# agent_approval = "auto"  # one of: "manual", "auto", "full-auto"
 
 # Custom CLI definitions.
 # [clis.my-agent]
@@ -777,7 +1026,9 @@ enabled = true
             )]),
             specs: None,
             logging: None,
+            dashboard: None,
             broker: BrokerConfig::default(),
+            supervisor: None,
         };
 
         save_config_to(&config_path, &original).unwrap();
@@ -948,6 +1199,265 @@ enabled = true
         assert_eq!(config.broker.bind, "127.0.0.1");
     }
 
+    // --- SupervisorConfig ---
+
+    #[test]
+    fn supervisor_is_none_when_section_absent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "default_cli = \"claude\"\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        assert!(config.supervisor.is_none());
+    }
+
+    #[test]
+    fn parses_full_supervisor_section() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\n\
+             enabled = true\n\
+             cli = \"claude\"\n\
+             test_command = \"just check\"\n\
+             agent_approval = \"full-auto\"\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert!(supervisor.enabled);
+        assert_eq!(supervisor.cli.as_deref(), Some("claude"));
+        assert_eq!(supervisor.test_command.as_deref(), Some("just check"));
+        assert_eq!(supervisor.agent_approval, ApprovalLevel::FullAuto);
+    }
+
+    #[test]
+    fn parses_partial_supervisor_section() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[supervisor]\nenabled = true\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert!(supervisor.enabled);
+        assert_eq!(supervisor.cli, None);
+        assert_eq!(supervisor.test_command, None);
+        assert_eq!(supervisor.agent_approval, ApprovalLevel::Auto);
+    }
+
+    #[test]
+    fn rejects_invalid_approval_level() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[supervisor]\nagent_approval = \"yolo\"\n");
+
+        let err = load_config_file(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("yolo"),
+            "error should mention invalid value, got: {err}"
+        );
+    }
+
+    #[test]
+    fn supervisor_round_trips_through_save_and_load() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        let original = PawConfig {
+            supervisor: Some(SupervisorConfig {
+                enabled: true,
+                cli: Some("claude".into()),
+                test_command: Some("just check".into()),
+                agent_approval: ApprovalLevel::FullAuto,
+                auto_approve: None,
+            }),
+            ..Default::default()
+        };
+
+        save_config_to(&config_path, &original).unwrap();
+        let loaded = load_config_file(&config_path).unwrap().unwrap();
+        assert_eq!(loaded.supervisor, original.supervisor);
+    }
+
+    #[test]
+    fn existing_v030_config_loads_without_supervisor() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "default_cli = \"claude\"\n\
+             mouse = true\n\
+             [broker]\n\
+             enabled = true\n\
+             [logging]\n\
+             enabled = false\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        assert_eq!(config.default_cli.as_deref(), Some("claude"));
+        assert!(config.broker.enabled);
+        assert!(config.supervisor.is_none());
+    }
+
+    #[test]
+    fn generated_default_config_contains_commented_supervisor_section() {
+        let output = generate_default_config();
+        assert!(output.contains("[supervisor]"));
+        assert!(output.contains("enabled"));
+        assert!(output.contains("test_command"));
+        assert!(output.contains("agent_approval"));
+    }
+
+    // --- DashboardConfig ---
+
+    #[test]
+    fn dashboard_config_defaults_to_disabled() {
+        let config = DashboardConfig::default();
+        assert!(!config.show_message_log);
+    }
+
+    #[test]
+    fn parses_dashboard_section_with_show_message_log() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[dashboard]\nshow_message_log = true\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let dashboard = config.dashboard.unwrap();
+        assert!(dashboard.show_message_log);
+    }
+
+    #[test]
+    fn dashboard_is_none_when_section_absent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "default_cli = \"claude\"\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        assert!(config.dashboard.is_none());
+    }
+
+    #[test]
+    fn dashboard_merge_repo_wins() {
+        let tmp = TempDir::new().unwrap();
+        let global_path = tmp.path().join("global").join("config.toml");
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+
+        write_file(&global_path, "[dashboard]\nshow_message_log = false\n");
+        write_file(
+            &repo_config_path(&repo_root),
+            "[dashboard]\nshow_message_log = true\n",
+        );
+
+        let config = load_config_from(&global_path, &repo_root).unwrap();
+        let dashboard = config.dashboard.unwrap();
+        assert!(dashboard.show_message_log);
+    }
+
+    #[test]
+    fn dashboard_round_trip_through_save_and_load() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        let original = PawConfig {
+            dashboard: Some(DashboardConfig {
+                show_message_log: true,
+            }),
+            ..Default::default()
+        };
+
+        save_config_to(&config_path, &original).unwrap();
+        let loaded = load_config_file(&config_path).unwrap().unwrap();
+        assert_eq!(loaded.dashboard, original.dashboard);
+        assert!(loaded.dashboard.unwrap().show_message_log);
+    }
+
+    #[test]
+    fn get_dashboard_returns_none_when_not_configured() {
+        let config = PawConfig::default();
+        assert!(config.get_dashboard().is_none());
+    }
+
+    #[test]
+    fn get_dashboard_returns_config_when_present() {
+        let config = PawConfig {
+            dashboard: Some(DashboardConfig {
+                show_message_log: true,
+            }),
+            ..Default::default()
+        };
+        let dashboard = config.get_dashboard().unwrap();
+        assert!(dashboard.show_message_log);
+    }
+
+    // --- approval_flags mapping ---
+
+    #[test]
+    fn approval_flags_claude_full_auto() {
+        assert_eq!(
+            approval_flags("claude", &ApprovalLevel::FullAuto),
+            "--dangerously-skip-permissions"
+        );
+    }
+
+    #[test]
+    fn approval_flags_codex_auto() {
+        assert_eq!(
+            approval_flags("codex", &ApprovalLevel::Auto),
+            "--approval-mode=auto-edit"
+        );
+    }
+
+    #[test]
+    fn approval_flags_codex_full_auto() {
+        assert_eq!(
+            approval_flags("codex", &ApprovalLevel::FullAuto),
+            "--approval-mode=full-auto"
+        );
+    }
+
+    #[test]
+    fn approval_flags_unknown_cli_is_empty() {
+        assert_eq!(approval_flags("some-agent", &ApprovalLevel::FullAuto), "");
+    }
+
+    #[test]
+    fn approval_flags_manual_is_empty() {
+        assert_eq!(approval_flags("claude", &ApprovalLevel::Manual), "");
+        assert_eq!(approval_flags("codex", &ApprovalLevel::Manual), "");
+    }
+
+    #[test]
+    fn approval_flags_is_deterministic() {
+        let first = approval_flags("claude", &ApprovalLevel::FullAuto);
+        let second = approval_flags("claude", &ApprovalLevel::FullAuto);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn supervisor_merge_repo_wins() {
+        let tmp = TempDir::new().unwrap();
+        let global_path = tmp.path().join("global").join("config.toml");
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+
+        write_file(
+            &global_path,
+            "[supervisor]\nenabled = false\nagent_approval = \"manual\"\n",
+        );
+        write_file(
+            &repo_config_path(&repo_root),
+            "[supervisor]\nenabled = true\nagent_approval = \"full-auto\"\n",
+        );
+
+        let config = load_config_from(&global_path, &repo_root).unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert!(supervisor.enabled);
+        assert_eq!(supervisor.agent_approval, ApprovalLevel::FullAuto);
+    }
+
     #[test]
     fn broker_config_round_trip() {
         let tmp = TempDir::new().unwrap();
@@ -967,5 +1477,214 @@ enabled = true
         assert_eq!(loaded.broker.enabled, original.broker.enabled);
         assert_eq!(loaded.broker.port, original.broker.port);
         assert_eq!(loaded.broker.bind, original.broker.bind);
+    }
+
+    // --- AutoApproveConfig (auto-approve-patterns / approval-configuration) ---
+
+    #[test]
+    fn auto_approve_defaults_match_spec() {
+        let cfg = AutoApproveConfig::default();
+        assert!(cfg.enabled, "enabled defaults to true");
+        assert!(
+            cfg.safe_commands.is_empty(),
+            "safe_commands defaults to empty"
+        );
+        assert_eq!(cfg.stall_threshold_seconds, 30);
+        assert_eq!(cfg.approval_level, ApprovalLevelPreset::Safe);
+    }
+
+    #[test]
+    fn auto_approve_section_absent_keeps_supervisor_simple() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[supervisor]\nenabled = true\n");
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert!(supervisor.auto_approve.is_none());
+    }
+
+    #[test]
+    fn auto_approve_section_parses_full_body() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\n\
+             enabled = true\n\
+             [supervisor.auto_approve]\n\
+             enabled = false\n\
+             safe_commands = [\"just smoke\"]\n\
+             stall_threshold_seconds = 60\n\
+             approval_level = \"conservative\"\n",
+        );
+        let config = load_config_file(&path).unwrap().unwrap();
+        let aa = config.supervisor.unwrap().auto_approve.unwrap();
+        assert!(!aa.enabled);
+        assert_eq!(aa.safe_commands, vec!["just smoke".to_string()]);
+        assert_eq!(aa.stall_threshold_seconds, 60);
+        assert_eq!(aa.approval_level, ApprovalLevelPreset::Conservative);
+    }
+
+    #[test]
+    fn auto_approve_enabled_defaults_to_true_when_omitted() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\n[supervisor.auto_approve]\nstall_threshold_seconds = 30\n",
+        );
+        let config = load_config_file(&path).unwrap().unwrap();
+        let aa = config.supervisor.unwrap().auto_approve.unwrap();
+        assert!(aa.enabled, "enabled should default to true");
+    }
+
+    #[test]
+    fn auto_approve_off_preset_forces_disabled() {
+        let cfg = AutoApproveConfig {
+            enabled: true,
+            approval_level: ApprovalLevelPreset::Off,
+            ..AutoApproveConfig::default()
+        };
+        let resolved = cfg.resolved();
+        assert!(!resolved.enabled, "Off preset must force enabled = false");
+    }
+
+    #[test]
+    fn auto_approve_threshold_floor_clamps() {
+        let cfg = AutoApproveConfig {
+            stall_threshold_seconds: 0,
+            ..AutoApproveConfig::default()
+        };
+        let resolved = cfg.resolved();
+        assert_eq!(
+            resolved.stall_threshold_seconds,
+            AutoApproveConfig::MIN_STALL_THRESHOLD_SECONDS
+        );
+    }
+
+    #[test]
+    fn auto_approve_safe_preset_keeps_defaults() {
+        let cfg = AutoApproveConfig {
+            approval_level: ApprovalLevelPreset::Safe,
+            ..AutoApproveConfig::default()
+        };
+        let wl = cfg.effective_whitelist();
+        assert!(wl.iter().any(|c| c == "cargo test"));
+        assert!(wl.iter().any(|c| c == "git push"));
+        assert!(wl.iter().any(|c| c.starts_with("curl")));
+    }
+
+    #[test]
+    fn auto_approve_conservative_drops_push_and_curl() {
+        let cfg = AutoApproveConfig {
+            approval_level: ApprovalLevelPreset::Conservative,
+            ..AutoApproveConfig::default()
+        };
+        let wl = cfg.effective_whitelist();
+        assert!(wl.iter().any(|c| c == "cargo test"));
+        assert!(
+            !wl.iter().any(|c| c.starts_with("git push")),
+            "conservative drops git push"
+        );
+        assert!(
+            !wl.iter().any(|c| c.starts_with("curl")),
+            "conservative drops curl"
+        );
+    }
+
+    #[test]
+    fn auto_approve_extras_are_unioned_with_defaults() {
+        let cfg = AutoApproveConfig {
+            safe_commands: vec!["just lint".to_string(), "just test".to_string()],
+            ..AutoApproveConfig::default()
+        };
+        let wl = cfg.effective_whitelist();
+        assert!(wl.iter().any(|c| c == "cargo fmt"));
+        assert!(wl.iter().any(|c| c == "just lint"));
+        assert!(wl.iter().any(|c| c == "just test"));
+    }
+
+    #[test]
+    fn auto_approve_empty_extras_keep_defaults() {
+        let cfg = AutoApproveConfig::default();
+        let wl = cfg.effective_whitelist();
+        assert!(wl.iter().any(|c| c == "cargo test"));
+    }
+
+    /// Spec scenario `auto-approve-patterns/safe-command-classification`:
+    /// "Config adds project-specific patterns" — a TOML config with
+    /// `safe_commands = ["just smoke"]` must yield an effective whitelist
+    /// such that `is_safe_command("just smoke -v", &whitelist)` is true.
+    /// "Config does not weaken defaults" — `safe_commands = []` must keep
+    /// the built-in defaults available to `is_safe_command`.
+    #[test]
+    fn toml_extras_classify_via_is_safe_command_and_empty_extras_keep_defaults() {
+        use crate::supervisor::auto_approve::is_safe_command;
+
+        // (1) Extras case: a project-specific entry parsed from TOML must
+        //     classify a command using that prefix as safe.
+        let tmp = TempDir::new().unwrap();
+        let extras_path = tmp.path().join("extras.toml");
+        write_file(
+            &extras_path,
+            "[supervisor]\n\
+             enabled = true\n\
+             [supervisor.auto_approve]\n\
+             safe_commands = [\"just smoke\"]\n",
+        );
+        let extras_config = load_config_file(&extras_path).unwrap().unwrap();
+        let extras_aa = extras_config.supervisor.unwrap().auto_approve.unwrap();
+        let extras_whitelist = extras_aa.effective_whitelist();
+        assert!(
+            is_safe_command("just smoke -v", &extras_whitelist),
+            "TOML extra `just smoke` must accept `just smoke -v`"
+        );
+        // The defaults must still be present alongside the extra.
+        assert!(
+            is_safe_command("cargo test", &extras_whitelist),
+            "extras must not displace built-in defaults"
+        );
+
+        // (2) Empty extras: the effective whitelist must still classify the
+        //     built-in defaults (e.g. `cargo test`) as safe.
+        let empty_path = tmp.path().join("empty.toml");
+        write_file(
+            &empty_path,
+            "[supervisor]\n\
+             enabled = true\n\
+             [supervisor.auto_approve]\n\
+             safe_commands = []\n",
+        );
+        let empty_config = load_config_file(&empty_path).unwrap().unwrap();
+        let empty_aa = empty_config.supervisor.unwrap().auto_approve.unwrap();
+        let empty_whitelist = empty_aa.effective_whitelist();
+        assert!(
+            is_safe_command("cargo test", &empty_whitelist),
+            "empty safe_commands must keep built-in defaults"
+        );
+        assert!(
+            is_safe_command("cargo fmt --check", &empty_whitelist),
+            "empty safe_commands must keep `cargo fmt` default"
+        );
+        // A command outside the defaults must still be rejected.
+        assert!(
+            !is_safe_command("rm -rf /tmp/foo", &empty_whitelist),
+            "empty safe_commands must not whitelist arbitrary commands"
+        );
+    }
+
+    #[test]
+    fn v030_config_loads_without_auto_approve() {
+        // Backward-compat: an existing v0.3.0 config that has neither
+        // [supervisor] nor [supervisor.auto_approve] must parse cleanly.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "default_cli = \"claude\"\nmouse = true\n[broker]\nenabled = true\n",
+        );
+        let config = load_config_file(&path).unwrap().unwrap();
+        assert!(config.supervisor.is_none());
+        assert!(config.broker.enabled);
     }
 }

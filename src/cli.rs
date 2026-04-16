@@ -48,7 +48,8 @@ pub enum Command {
                       git paw start --from-specs\n  \
                       git paw start --from-specs --cli claude\n  \
                       git paw start --dry-run\n  \
-                      git paw start --preset backend"
+                      git paw start --preset backend\n  \
+                      git paw start --supervisor   # auto-approve safe prompts via [supervisor.auto_approve]"
     )]
     Start {
         /// AI CLI to use (e.g., claude, codex, gemini). Skips CLI picker if provided.
@@ -77,6 +78,18 @@ pub enum Command {
         /// Use a named preset from config.
         #[arg(long, help = "Use a named preset from config")]
         preset: Option<String>,
+
+        /// Enable supervisor mode for this session.
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Enable supervisor mode for this session"
+        )]
+        supervisor: bool,
+
+        /// Bypass uncommitted-spec validation warning.
+        #[arg(long, help = "Bypass uncommitted-spec validation warning")]
+        force: bool,
     },
 
     /// Stop the session (kills tmux, keeps worktrees and state)
@@ -239,12 +252,16 @@ mod tests {
                 from_specs,
                 dry_run,
                 preset,
+                supervisor,
+                force,
             } => {
                 assert!(cli.is_none());
                 assert!(branches.is_none());
                 assert!(!from_specs);
                 assert!(!dry_run);
                 assert!(preset.is_none());
+                assert!(!supervisor);
+                assert!(!force);
             }
             other => panic!("expected Start, got {other:?}"),
         }
@@ -287,6 +304,62 @@ mod tests {
             Command::Start { preset, .. } => assert_eq!(preset.as_deref(), Some("backend")),
             other => panic!("expected Start, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn start_with_supervisor_flag() {
+        let cli = parse(&["start", "--supervisor"]);
+        match cli.command.unwrap() {
+            Command::Start { supervisor, .. } => assert!(supervisor),
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_without_supervisor_defaults_false() {
+        let cli = parse(&["start", "--cli", "claude"]);
+        match cli.command.unwrap() {
+            Command::Start { supervisor, .. } => assert!(!supervisor),
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_with_supervisor_and_other_flags() {
+        let cli = parse(&[
+            "start",
+            "--supervisor",
+            "--cli",
+            "claude",
+            "--branches",
+            "feat/a,feat/b",
+        ]);
+        match cli.command.unwrap() {
+            Command::Start {
+                supervisor,
+                cli,
+                branches,
+                ..
+            } => {
+                assert!(supervisor);
+                assert_eq!(cli.as_deref(), Some("claude"));
+                assert_eq!(branches.unwrap(), vec!["feat/a", "feat/b"]);
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_help_shows_supervisor_flag() {
+        let result = Cli::try_parse_from(["git-paw", "start", "--help"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(
+            help.contains("--supervisor"),
+            "start --help should contain --supervisor"
+        );
     }
 
     #[test]
