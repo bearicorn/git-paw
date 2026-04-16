@@ -685,4 +685,38 @@ mod tests {
             SessionStatus::Stopped
         );
     }
+
+    // -- Recovery with broker enabled --
+
+    #[test]
+    fn session_with_broker_enabled_has_recovery_data() {
+        let dir = TempDir::new().unwrap();
+        let mut session = sample_session();
+        session.broker_port = Some(9119);
+        session.broker_bind = Some("127.0.0.1".to_string());
+        save_session_in(&session, dir.path()).unwrap();
+
+        let recovered = load_session_from("paw-my-project", dir.path())
+            .unwrap()
+            .expect("session should load");
+
+        // Broker fields are preserved for recovery
+        assert_eq!(recovered.broker_port, Some(9119));
+        assert_eq!(recovered.broker_bind.as_deref(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn session_without_broker_has_no_recovery_data() {
+        let dir = TempDir::new().unwrap();
+        let session = sample_session(); // broker fields are None by default
+        save_session_in(&session, dir.path()).unwrap();
+
+        let recovered = load_session_from("paw-my-project", dir.path())
+            .unwrap()
+            .expect("session should load");
+
+        // No broker fields to recover
+        assert!(recovered.broker_port.is_none());
+        assert!(recovered.broker_bind.is_none());
+    }
 }

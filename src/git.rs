@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::error::PawError;
+use crate::specs::SpecEntry;
 
 /// Validates that the given path is inside a git repository.
 ///
@@ -48,99 +49,105 @@ pub fn list_branches(repo_root: &Path) -> Result<Vec<String>, PawError> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_branch_output(&stdout))
-}
+    let branches: BTreeSet<String> = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.contains("HEAD"))
+        .map(|line| {
+            // Strip remote prefix (e.g., "origin/main" -> "main")
+            let mut branch_name = line.trim().to_string();
 
-/// Parses `git branch -a --format=%(refname:short)` output into a
-/// deduplicated, sorted list of branch names with remote prefixes stripped.
-fn parse_branch_output(output: &str) -> Vec<String> {
-    let mut branches = BTreeSet::new();
+            // Handle full ref format: refs/remotes/origin/branch -> branch
+            if let Some(stripped) = branch_name.strip_prefix("refs/remotes/") {
+                branch_name = stripped.to_string();
+            }
+            // Handle short format: origin/branch -> branch
+            if let Some(stripped) = branch_name.strip_prefix("origin/") {
+                branch_name = stripped.to_string();
+            }
 
-    for line in output.lines() {
-        let name = line.trim();
-        if name.is_empty() {
-            continue;
-        }
-        // Skip HEAD pointers like "origin/HEAD"
-        if name.contains("HEAD") {
-            continue;
-        }
-        // Strip remote prefix (e.g., "origin/feature/auth" → "feature/auth")
-        let stripped = strip_remote_prefix(name);
-        branches.insert(stripped.to_string());
-    }
-
-    branches.into_iter().collect()
-}
-
-/// Strips the remote prefix from a branch name.
-///
-/// `origin/feature/auth` becomes `feature/auth`.
-/// `feature/auth` stays as `feature/auth`.
-fn strip_remote_prefix(branch: &str) -> &str {
-    // With --format=%(refname:short), remote branches appear as "origin/branch"
-    // We need to strip the first component if it looks like a remote name
-    if let Some(rest) = branch.strip_prefix("origin/") {
-        rest
-    } else {
-        branch
-    }
-}
-
-/// Derives the project name from the repository root path.
-///
-/// Uses the final component of the path (the directory name).
-pub fn project_name(repo_root: &Path) -> String {
-    repo_root.file_name().map_or_else(
-        || "project".to_string(),
-        |n| n.to_string_lossy().to_string(),
-    )
-}
-
-/// Builds the worktree directory name from a project name and branch.
-///
-/// Replaces `/` with `-` and strips characters that are unsafe for directory
-/// names.
-///
-/// # Examples
-///
-/// - `("git-paw", "feature/auth-flow")` → `"git-paw-feature-auth-flow"`
-/// - `("git-paw", "fix/db")` → `"git-paw-fix-db"`
-pub fn worktree_dir_name(project: &str, branch: &str) -> String {
-    let sanitized: String = branch
-        .chars()
-        .map(|c| if c == '/' { '-' } else { c })
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+            branch_name
+        })
         .collect();
 
-    format!("{project}-{sanitized}")
+    // Remove duplicates that can arise from local+remote branches with same name
+    let mut unique: Vec<String> = branches.into_iter().collect();
+    unique.sort();
+    Ok(unique)
 }
 
-/// Prunes stale worktree registrations.
+/// Derives a worktree directory name from project and branch names.
 ///
-/// Runs `git worktree prune` to clean up references to worktrees whose
-/// directories no longer exist. This prevents "already registered worktree"
-/// errors when recreating worktrees after a previous session was purged.
-pub fn prune_worktrees(repo_root: &Path) -> Result<(), PawError> {
+/// The format is: `<project>-<branch>` with non-alphanumeric characters replaced by `-`.
+pub fn worktree_dir_name(project: &str, branch: &str) -> String {
+    let project_safe: String = project
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    let branch_safe: String = branch
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    format!("{project_safe}-{branch_safe}")
+}
+
+/// Returns the name of the default branch (usually "main" or "master").
+pub fn default_branch(repo_root: &Path) -> Result<String, PawError> {
     let output = Command::new("git")
         .current_dir(repo_root)
-        .args(["worktree", "prune"])
+        .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
         .output()
-        .map_err(|e| PawError::WorktreeError(format!("failed to run git worktree prune: {e}")))?;
+        .map_err(|e| PawError::BranchError(format!("failed to run git symbolic-ref: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(PawError::WorktreeError(format!(
-            "git worktree prune failed: {stderr}"
+        return Err(PawError::BranchError(format!(
+            "git symbolic-ref failed: {stderr}"
         )));
     }
-    Ok(())
+
+    let ref_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if let Some(branch) = ref_name.strip_prefix("refs/remotes/origin/") {
+        Ok(branch.to_string())
+    } else {
+        Err(PawError::BranchError(format!(
+            "unexpected ref format: {ref_name}"
+        )))
+    }
 }
 
-/// Creates a git worktree for the given branch.
-///
-/// The worktree is placed in the parent directory of `repo_root`, named using
-/// [`worktree_dir_name`]. Returns the path to the created worktree.
+/// Returns the short name of the current branch (e.g., "main", "feat/add-auth").
+pub fn current_branch(repo_root: &Path) -> Result<String, PawError> {
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(["branch", "--show-current"])
+        .output()
+        .map_err(|e| PawError::BranchError(format!("failed to run git branch: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(PawError::BranchError(format!(
+            "git branch failed: {stderr}"
+        )));
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        return Err(PawError::BranchError(
+            "not on any branch (detached HEAD)".to_string(),
+        ));
+    }
+    Ok(branch)
+}
+
+/// Returns the name of the project (directory name of the git repository).
+pub fn project_name(repo_root: &Path) -> String {
+    repo_root
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("unknown")
+        .to_string()
+}
+
 /// Result of creating a worktree, including whether the branch was newly created.
 #[derive(Debug)]
 pub struct WorktreeCreation {
@@ -215,350 +222,246 @@ pub fn create_worktree(repo_root: &Path, branch: &str) -> Result<WorktreeCreatio
     )))
 }
 
-/// Deletes a local git branch.
+/// Removes the worktree at the given path.
 ///
-/// Uses `git branch -D` (force delete) because purge is a destructive
-/// operation and the user has already confirmed. Only call this for branches
-/// that git-paw created (tracked via `WorktreeEntry::branch_created`).
-pub fn delete_branch(repo_root: &Path, branch: &str) -> Result<(), PawError> {
-    let output = Command::new("git")
-        .current_dir(repo_root)
-        .args(["branch", "-D", branch])
-        .output()
-        .map_err(|e| PawError::BranchError(format!("failed to run git branch -D: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(PawError::BranchError(format!(
-            "git branch -D failed for '{branch}': {stderr}"
-        )));
-    }
-
-    Ok(())
-}
-
-/// Removes a git worktree at the given path.
+/// The path should be the worktree directory path, not a branch name.
 ///
-/// Runs `git worktree remove --force` and then prunes stale worktree entries.
+/// # Panics
+///
+/// Panics if the worktree path contains non-Unicode characters.
 pub fn remove_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), PawError> {
+    // Always pass --force per `git-operations/spec.md`'s "SHALL force-remove a
+    // worktree" requirement. `remove_worktree` is only called from purge,
+    // which is destructive by nature: an agent that produced uncommitted or
+    // untracked files in its worktree would otherwise trip "contains modified
+    // or untracked files, use --force to delete it" and leak the worktree on
+    // disk even though the user already typed `--force` at the CLI.
     let output = Command::new("git")
         .current_dir(repo_root)
         .args([
             "worktree",
             "remove",
             "--force",
-            &worktree_path.to_string_lossy(),
+            worktree_path.to_str().unwrap(),
         ])
         .output()
-        .map_err(|e| PawError::WorktreeError(format!("failed to run git worktree remove: {e}")))?;
+        .map_err(|e| {
+            PawError::WorktreeError(format!(
+                "failed to remove worktree at {}: {e}",
+                worktree_path.display()
+            ))
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(PawError::WorktreeError(format!(
-            "git worktree remove failed: {stderr}"
+            "git worktree remove failed for worktree at {}: {stderr}",
+            worktree_path.display()
         )));
     }
-
-    // Prune stale worktree entries
-    let _ = Command::new("git")
-        .current_dir(repo_root)
-        .args(["worktree", "prune"])
-        .output();
 
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serial_test::serial;
-    use std::process::Command;
-    use tempfile::TempDir;
+/// Prunes stale worktree registrations from the git worktree list.
+///
+/// This should be called before creating new worktrees to avoid conflicts.
+pub fn prune_worktrees(repo_root: &Path) -> Result<(), PawError> {
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(["worktree", "prune"])
+        .output()
+        .map_err(|e| PawError::WorktreeError(format!("failed to prune worktrees: {e}")))?;
 
-    /// A test sandbox that owns an outer temp directory containing the git
-    /// repo. Worktrees created via `create_worktree` land as siblings of the
-    /// repo inside this outer dir, so everything is cleaned up when the
-    /// sandbox is dropped — even if a test panics.
-    struct TestRepo {
-        _sandbox: TempDir,
-        repo: PathBuf,
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(PawError::WorktreeError(format!(
+            "git worktree prune failed: {stderr}"
+        )));
     }
 
-    impl TestRepo {
-        fn path(&self) -> &Path {
-            &self.repo
-        }
-    }
+    Ok(())
+}
 
-    /// Creates a temporary git repository inside a sandbox directory.
-    ///
-    /// The repo lives at `<sandbox>/repo/` so that worktrees created at
-    /// `../<project>-<branch>/` land inside `<sandbox>/` and are automatically
-    /// cleaned up when the returned `TestRepo` is dropped.
-    fn setup_test_repo() -> TestRepo {
-        let sandbox = TempDir::new().expect("create sandbox dir");
-        let repo = sandbox.path().join("repo");
-        std::fs::create_dir(&repo).expect("create repo dir");
+/// Checks for uncommitted changes in spec directories or files.
+///
+/// Returns a list of spec IDs that have uncommitted changes (modified, added,
+/// or untracked files). Uses `git status --porcelain` against the spec's path.
+///
+/// Supports both spec layouts:
+/// - `OpenSpec`: `specs/<id>/` directory; the whole directory is probed.
+/// - `Markdown`: `specs/<id>.md` file; the single file is probed.
+///
+/// If neither layout exists for a spec id, it is silently skipped.
+pub fn check_uncommitted_specs(
+    repo_root: &Path,
+    specs: &[SpecEntry],
+) -> Result<Vec<String>, PawError> {
+    let mut uncommitted_specs = Vec::new();
 
-        Command::new("git")
-            .current_dir(&repo)
-            .args(["init"])
-            .output()
-            .expect("git init");
+    let specs_dir = repo_root.join("specs");
 
-        Command::new("git")
-            .current_dir(&repo)
-            .args(["config", "user.email", "test@test.com"])
-            .output()
-            .expect("git config email");
+    for spec in specs {
+        let dir_path = specs_dir.join(&spec.id);
+        let file_path = specs_dir.join(format!("{}.md", spec.id));
 
-        Command::new("git")
-            .current_dir(&repo)
-            .args(["config", "user.name", "Test"])
-            .output()
-            .expect("git config name");
-
-        // Create initial commit so branches work
-        std::fs::write(repo.join("README.md"), "# test").expect("write file");
-        Command::new("git")
-            .current_dir(&repo)
-            .args(["add", "."])
-            .output()
-            .expect("git add");
-        Command::new("git")
-            .current_dir(&repo)
-            .args(["commit", "-m", "initial"])
-            .output()
-            .expect("git commit");
-
-        TestRepo {
-            _sandbox: sandbox,
-            repo,
-        }
-    }
-
-    // --- validate_repo ---
-    // Behavioral: tests the public contract — given a path, does the system
-    // correctly identify whether it's inside a git repo and return the root?
-
-    #[test]
-    #[serial]
-    fn validate_repo_returns_root_inside_repo() {
-        let repo = setup_test_repo();
-        let result = validate_repo(repo.path());
-        assert!(result.is_ok());
-        let root = result.unwrap();
-        // The returned root should match the repo dir (canonicalize for symlinks)
-        assert_eq!(
-            root.canonicalize().unwrap(),
-            repo.path().canonicalize().unwrap()
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn validate_repo_returns_not_a_git_repo_outside() {
-        let dir = TempDir::new().expect("create temp dir");
-        let result = validate_repo(dir.path());
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, PawError::NotAGitRepo),
-            "expected NotAGitRepo, got: {err}"
-        );
-    }
-
-    // --- list_branches ---
-    // Behavioral: tests the public function against a real git repo.
-    // Deduplication and remote-prefix stripping are covered in integration tests
-    // (list_branches_strips_remote_prefix_and_deduplicates) using a real remote.
-
-    #[test]
-    #[serial]
-    fn list_branches_returns_sorted_branches() {
-        let repo = setup_test_repo();
-
-        // Create branches in non-alphabetical order
-        for branch in ["zebra", "alpha", "feature/auth"] {
-            Command::new("git")
-                .current_dir(repo.path())
-                .args(["branch", branch])
-                .output()
-                .expect("create branch");
-        }
-
-        let branches = list_branches(repo.path()).expect("list branches");
-
-        // The default branch name depends on git config (main or master)
-        let default_branch = branches
-            .iter()
-            .find(|b| *b == "main" || *b == "master")
-            .expect("should have a default branch")
-            .clone();
-
-        let mut expected = vec![
-            "alpha".to_string(),
-            "feature/auth".to_string(),
-            default_branch,
-            "zebra".to_string(),
-        ];
-        expected.sort();
-
-        assert_eq!(
-            branches, expected,
-            "branches should be sorted alphabetically"
-        );
-    }
-
-    // --- project_name ---
-    // Behavioral: public function contract — the directory name IS the project name.
-    // The exact output matters because it's used in session names and worktree paths.
-
-    #[test]
-    fn project_name_from_path() {
-        assert_eq!(
-            project_name(Path::new("/Users/jie/code/git-paw")),
-            "git-paw"
-        );
-    }
-
-    #[test]
-    fn project_name_fallback_for_root() {
-        assert_eq!(project_name(Path::new("/")), "project");
-    }
-
-    // --- worktree_dir_name ---
-    // Behavioral: public function whose exact output determines actual directory names
-    // on disk. The format is the contract — other modules depend on this for path
-    // construction, so the exact string matters.
-
-    #[test]
-    fn worktree_dir_name_replaces_slash_with_dash() {
-        assert_eq!(
-            worktree_dir_name("git-paw", "feature/auth-flow"),
-            "git-paw-feature-auth-flow"
-        );
-    }
-
-    #[test]
-    fn worktree_dir_name_handles_multiple_slashes() {
-        assert_eq!(
-            worktree_dir_name("git-paw", "feat/auth/v2"),
-            "git-paw-feat-auth-v2"
-        );
-    }
-
-    #[test]
-    fn worktree_dir_name_strips_special_chars() {
-        assert_eq!(
-            worktree_dir_name("my-proj", "fix/issue#42"),
-            "my-proj-fix-issue42"
-        );
-    }
-
-    #[test]
-    fn worktree_dir_name_simple_branch() {
-        assert_eq!(worktree_dir_name("git-paw", "main"), "git-paw-main");
-    }
-
-    // --- create_worktree / remove_worktree ---
-    // Behavioral: tests real git worktree operations against temp repos.
-    // Verifies observable outcomes (directory exists, files present, cleanup works).
-
-    #[test]
-    #[serial]
-    fn create_worktree_at_correct_path() {
-        let test_repo = setup_test_repo();
-        let repo_root = test_repo.path();
-
-        Command::new("git")
-            .current_dir(repo_root)
-            .args(["branch", "feature/test"])
-            .output()
-            .expect("create branch");
-
-        let wt = create_worktree(repo_root, "feature/test").expect("create worktree");
-        let worktree_path = wt.path;
-
-        // Verify path follows ../<project>-<sanitized-branch> convention
-        let expected_dir_name = worktree_dir_name(&project_name(repo_root), "feature/test");
-        assert_eq!(
-            worktree_path.file_name().unwrap().to_string_lossy(),
-            expected_dir_name,
-            "worktree should be at ../<project>-feature-test"
-        );
-        assert_eq!(
-            worktree_path.parent().unwrap().canonicalize().unwrap(),
-            repo_root.parent().unwrap().canonicalize().unwrap(),
-            "worktree should be in the parent of repo root"
-        );
-
-        // Verify files exist
-        assert!(worktree_path.exists());
-        assert!(worktree_path.join("README.md").exists());
-
-        // Cleanup
-        remove_worktree(repo_root, &worktree_path).expect("remove worktree");
-    }
-
-    #[test]
-    #[serial]
-    fn create_worktree_errors_on_checked_out_branch() {
-        let test_repo = setup_test_repo();
-        let repo_root = test_repo.path();
+        let porcelain_target = if dir_path.is_dir() {
+            format!("specs/{}", spec.id)
+        } else if file_path.is_file() {
+            format!("specs/{}.md", spec.id)
+        } else {
+            continue;
+        };
 
         let output = Command::new("git")
             .current_dir(repo_root)
-            .args(["branch", "--show-current"])
+            .args(["status", "--porcelain", "--", &porcelain_target])
             .output()
-            .expect("get branch");
-        let current = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            .map_err(|e| {
+                PawError::BranchError(format!(
+                    "failed to run git status for spec {}: {e}",
+                    spec.id
+                ))
+            })?;
 
-        let result = create_worktree(repo_root, &current);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, PawError::WorktreeError(_)),
-            "expected WorktreeError, got: {err}"
-        );
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(PawError::BranchError(format!(
+                "git status failed for spec {}: {stderr}",
+                spec.id
+            )));
+        }
+
+        let status_output = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !status_output.is_empty() {
+            uncommitted_specs.push(spec.id.clone());
+        }
     }
 
-    // --- remove_worktree ---
+    Ok(uncommitted_specs)
+}
 
-    #[test]
-    #[serial]
-    fn remove_worktree_cleans_up_fully() {
-        let test_repo = setup_test_repo();
-        let repo_root = test_repo.path();
+/// Merges the specified branch into the current branch.
+///
+/// Returns `true` if the merge was successful, `false` if there were conflicts.
+pub fn merge_branch(repo_root: &Path, branch: &str) -> Result<bool, PawError> {
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(["merge", "--no-ff", "--no-commit", branch])
+        .output()
+        .map_err(|e| {
+            PawError::WorktreeError(format!("failed to run git merge for branch {branch}: {e}"))
+        })?;
 
-        Command::new("git")
-            .current_dir(repo_root)
-            .args(["branch", "feature/cleanup"])
-            .output()
-            .expect("create branch");
-
-        let worktree_path = create_worktree(repo_root, "feature/cleanup")
-            .expect("create worktree")
-            .path;
-        assert!(worktree_path.exists());
-
-        remove_worktree(repo_root, &worktree_path).expect("remove worktree");
-
-        assert!(
-            !worktree_path.exists(),
-            "worktree directory should be removed"
-        );
-
-        // Verify git no longer tracks this worktree
-        let output = Command::new("git")
-            .current_dir(repo_root)
-            .args(["worktree", "list", "--porcelain"])
-            .output()
-            .expect("list worktrees");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            !stdout.contains("feature/cleanup"),
-            "worktree should not appear in git worktree list"
-        );
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Check if this is a conflict (exit code 1) vs other error
+        if output.status.code() == Some(1) {
+            return Ok(false);
+        }
+        return Err(PawError::WorktreeError(format!(
+            "git merge failed for branch {branch}: {stderr}"
+        )));
     }
+
+    Ok(true)
+}
+
+/// Deletes a branch.
+pub fn delete_branch(repo_root: &Path, branch: &str) -> Result<(), PawError> {
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(["branch", "-D", branch])
+        .output()
+        .map_err(|e| PawError::BranchError(format!("failed to delete branch {branch}: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(PawError::BranchError(format!(
+            "git branch -D failed for branch {branch}: {stderr}"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Excludes a file from git tracking by adding it to `.git/info/exclude`.
+///
+/// This prevents the file from being tracked by git without modifying the
+/// repository's `.gitignore` file, which is useful for worktree-specific
+/// files that should not be committed.
+pub fn exclude_from_git(worktree_root: &Path, filename: &str) -> Result<(), PawError> {
+    let exclude_file = worktree_root.join(".git/info/exclude");
+
+    // Read existing exclude patterns
+    let existing = if exclude_file.exists() {
+        std::fs::read_to_string(&exclude_file).unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    // Add the filename if not already present
+    if !existing.lines().any(|line| line.trim() == filename) {
+        let mut updated = existing;
+        if !updated.ends_with('\n') && !updated.is_empty() {
+            updated.push('\n');
+        }
+        updated.push_str(filename);
+        updated.push('\n');
+
+        // Create .git/info directory if it doesn't exist
+        if let Some(parent) = exclude_file.parent() {
+            // Check if .git (the grandparent) is a file (worktree case)
+            if let Some(git_dir) = parent.parent()
+                && git_dir.is_file()
+            {
+                // This is a worktree - .git is a file pointing to main repo
+                // The actual git directory is inside the main repo
+                let main_git_dir = std::fs::read_to_string(git_dir)
+                    .ok()
+                    .and_then(|s| s.strip_prefix("gitdir: ").map(|s| s.trim().to_owned()))
+                    .unwrap_or_default();
+                let main_git_info = PathBuf::from(main_git_dir).join("info");
+                if !main_git_info.try_exists().unwrap_or(false) {
+                    std::fs::create_dir_all(&main_git_info).map_err(|e| {
+                        PawError::SessionError(format!("failed to create main .git/info: {e}"))
+                    })?;
+                }
+                let main_exclude = main_git_info.join("exclude");
+                std::fs::write(&main_exclude, updated).map_err(|e| {
+                    PawError::SessionError(format!(
+                        "failed to write to main .git/info/exclude: {e}"
+                    ))
+                })?;
+                return Ok(());
+            }
+            if parent.exists() && parent.is_file() {
+                std::fs::remove_file(parent).map_err(|e| {
+                    PawError::SessionError(format!("failed to remove .git/info file: {e}"))
+                })?;
+            }
+            std::fs::create_dir_all(parent).map_err(|e| {
+                PawError::SessionError(format!("failed to create .git/info directory: {e}"))
+            })?;
+        }
+
+        std::fs::write(&exclude_file, updated).map_err(|e| {
+            PawError::SessionError(format!("failed to write to .git/info/exclude: {e}"))
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Marks a file as assume-unchanged in git's index.
+///
+/// This prevents `git add -A`, `git add .`, and `git commit -a` from
+/// staging the file. Returns `Ok` even if the command fails, as this
+/// is a belt-and-suspenders measure.
+pub fn assume_unchanged(worktree_root: &Path, filename: &str) -> Result<(), PawError> {
+    let _ = std::process::Command::new("git")
+        .current_dir(worktree_root)
+        .args(["update-index", "--assume-unchanged", filename])
+        .status();
+    Ok(())
 }

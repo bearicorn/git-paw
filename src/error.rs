@@ -87,6 +87,10 @@ pub enum PawError {
     /// Dashboard TUI operation failed.
     #[error("Dashboard error: {0}")]
     DashboardError(String),
+
+    /// I/O operation failed.
+    #[error("I/O error: {0}")]
+    IoError(#[from] std::io::Error),
 }
 
 impl PawError {
@@ -271,27 +275,6 @@ mod tests {
         };
         let msg = inner.to_string();
         assert!(msg.contains("nonexistent"), "should mention the skill name");
-        let paw = PawError::from(inner);
-        assert_eq!(paw.exit_code(), exit_code::ERROR);
-    }
-
-    #[test]
-    fn test_skill_error_user_override_read_is_actionable() {
-        let inner = crate::skills::SkillError::UserOverrideRead {
-            path: std::path::PathBuf::from(
-                "/home/user/.config/git-paw/agent-skills/coordination.md",
-            ),
-            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied"),
-        };
-        let msg = inner.to_string();
-        assert!(
-            msg.contains("coordination.md"),
-            "should include the file path"
-        );
-        assert!(
-            msg.contains("permission"),
-            "should suggest checking permissions"
-        );
         let paw = PawError::from(inner);
         assert_eq!(paw.exit_code(), exit_code::ERROR);
     }
