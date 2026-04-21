@@ -416,3 +416,18 @@ display_name = "Agent {i}"
         assert_eq!(cli.display_name, Some(format!("Agent {i}")));
     }
 }
+
+// Supervisor mode config migration tests
+//
+// The earlier `test_migrate_*` tests in this file did `load_config` +
+// `save_repo_config` and asserted on the round-trip; they never invoked
+// `migrate_existing_config`, so they only verified TOML round-tripping
+// (already covered by `config::tests`). Behavioral coverage of the actual
+// migration code path now lives in `src/init.rs::tests`:
+//
+//   * `migrate_preserves_existing_supervisor_and_custom_broker_port`
+//   * `migrate_appends_supervisor_section_when_missing_and_keeps_broker_port`
+//   * `migrate_existing_config_is_idempotent`
+//
+// Those tests call `migrate_existing_config` directly against a temp config
+// and assert on the resulting file contents and parsed `PawConfig`.

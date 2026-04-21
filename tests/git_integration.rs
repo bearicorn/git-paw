@@ -153,6 +153,34 @@ fn create_and_remove_worktree() {
 }
 
 #[test]
+fn remove_worktree_force_removes_dirty_worktree() {
+    // Regression: prior to passing --force, a worktree with uncommitted or
+    // untracked content tripped "contains modified or untracked files, use
+    // --force to delete it" and leaked the directory on disk even when the
+    // user invoked `git paw purge --force`. The spec at
+    // openspec/specs/git-operations/spec.md:113 mandates that
+    // `remove_worktree` SHALL force-remove a worktree.
+    let tr = setup_test_repo();
+    create_branch(tr.path(), "feature/dirty");
+
+    let wt = git::create_worktree(tr.path(), "feature/dirty").expect("create worktree");
+
+    // Make the worktree dirty in two ways: modify a tracked file AND add a
+    // brand-new untracked file. Both individually trip non-force removal.
+    std::fs::write(wt.path.join("README.md"), "modified by agent\n")
+        .expect("modify tracked file in worktree");
+    std::fs::write(wt.path.join("scratch.txt"), "untracked agent output\n")
+        .expect("write untracked file in worktree");
+
+    git::remove_worktree(tr.path(), &wt.path)
+        .expect("remove worktree must succeed even when dirty");
+    assert!(
+        !wt.path.exists(),
+        "dirty worktree directory must be removed when --force is passed"
+    );
+}
+
+#[test]
 fn worktree_placed_as_sibling_of_repo() {
     let tr = setup_test_repo();
     create_branch(tr.path(), "feature/sibling");
@@ -314,6 +342,7 @@ fn agents_md_injection_not_staged_by_git_add_in_worktree() {
         spec_content: Some("Implement the widget.\n".to_string()),
         owned_files: Some(vec!["src/widget.rs".to_string()]),
         skill_content: None,
+        inter_agent_rules: None,
     };
     git_paw::agents::setup_worktree_agents_md(tr.path(), &wt.path, &assignment)
         .expect("inject agents md");

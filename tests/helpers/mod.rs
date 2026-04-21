@@ -23,15 +23,6 @@ impl TestRepo {
     pub fn path(&self) -> &Path {
         &self.repo
     }
-
-    /// Creates a branch in the test repository.
-    pub fn create_branch(&self, name: &str) {
-        Command::new("git")
-            .current_dir(&self.repo)
-            .args(["branch", name])
-            .output()
-            .unwrap_or_else(|_| panic!("failed to create branch '{name}'"));
-    }
 }
 
 /// Creates a temporary git repository with an initial commit.
@@ -79,21 +70,4 @@ pub fn setup_test_repo() -> TestRepo {
         _sandbox: sandbox,
         repo,
     }
-}
-
-/// Creates a temporary directory with fake executable binaries.
-///
-/// Returns the `TempDir` (must be held alive) and its path.
-pub fn fake_path_with_binaries(names: &[&str]) -> (TempDir, PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = TempDir::new().expect("create temp dir");
-    for name in names {
-        let bin_path = dir.path().join(name);
-        std::fs::write(&bin_path, "#!/bin/sh\n").expect("write fake binary");
-        std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755))
-            .expect("set permissions");
-    }
-    let path = dir.path().to_path_buf();
-    (dir, path)
 }
