@@ -1053,8 +1053,8 @@ fn broker_session_full_lifecycle() {
         "AGENTS.md should contain 'Coordination Skills', got:\n{agents_content}"
     );
     assert!(
-        agents_content.contains("${GIT_PAW_BROKER_URL}"),
-        "AGENTS.md should contain '${{GIT_PAW_BROKER_URL}}', got:\n{agents_content}"
+        agents_content.contains(&format!("http://127.0.0.1:{broker_port}")),
+        "AGENTS.md should contain the pre-expanded broker URL, got:\n{agents_content}"
     );
     // Check the slugified branch name appears (feat-smoke-a or feat-smoke-b)
     let has_slug =

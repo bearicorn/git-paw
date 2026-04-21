@@ -318,7 +318,7 @@ where
             port,
             bind: "127.0.0.1".to_string(),
         };
-        match git_paw::broker::start_broker(&config, make_state()) {
+        match git_paw::broker::start_broker(&config, make_state(), Vec::new()) {
             Ok(handle) => {
                 let url = config.url();
                 return (handle, url);
@@ -512,6 +512,81 @@ fn full_orchestration_publish_poll_status_via_http() {
 }
 
 // ---------------------------------------------------------------------------
+// Supervisor messages: agent.verified and agent.feedback end-to-end
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn http_publish_and_poll_verified_and_feedback() {
+    let (handle, url) = spawn_test_broker_with(|| git_paw::broker::BrokerState::new(None));
+
+    // Register three agents via agent.status so their inboxes exist.
+    for agent in ["feat-errors", "feat-detect", "supervisor"] {
+        let body = format!(
+            r#"{{"type":"agent.status","agent_id":"{agent}","payload":{{"status":"working","modified_files":[]}}}}"#
+        );
+        let (status, _) = http_req(
+            &url,
+            "POST",
+            "/publish",
+            &[("Content-Type", "application/json")],
+            &body,
+        );
+        assert_eq!(status, 202);
+    }
+
+    // Publish agent.verified from supervisor for feat-errors.
+    let (status, _) = http_req(
+        &url,
+        "POST",
+        "/publish",
+        &[("Content-Type", "application/json")],
+        r#"{"type":"agent.verified","agent_id":"feat-errors","payload":{"verified_by":"supervisor","message":"all tests pass"}}"#,
+    );
+    assert_eq!(status, 202, "verified publish should return 202");
+
+    // Publish agent.feedback from supervisor for feat-errors.
+    let (status, _) = http_req(
+        &url,
+        "POST",
+        "/publish",
+        &[("Content-Type", "application/json")],
+        r#"{"type":"agent.feedback","agent_id":"feat-errors","payload":{"from":"supervisor","errors":["missing doc comment"]}}"#,
+    );
+    assert_eq!(status, 202, "feedback publish should return 202");
+
+    // feat-errors should receive both the broadcast verified and the targeted feedback.
+    let (status, body) = http_req(&url, "GET", "/messages/feat-errors?since=0", &[], "");
+    assert_eq!(status, 200);
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    let messages = json["messages"].as_array().expect("messages is array");
+    assert_eq!(messages.len(), 2, "feat-errors should have 2 messages");
+    let types: Vec<&str> = messages.iter().filter_map(|m| m["type"].as_str()).collect();
+    assert!(types.contains(&"agent.verified"));
+    assert!(types.contains(&"agent.feedback"));
+
+    // feat-detect should only receive the broadcast verified, not the feedback.
+    let (status, body) = http_req(&url, "GET", "/messages/feat-detect?since=0", &[], "");
+    assert_eq!(status, 200);
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    let messages = json["messages"].as_array().expect("messages is array");
+    assert_eq!(messages.len(), 1, "feat-detect should only see verified");
+    assert_eq!(messages[0]["type"], "agent.verified");
+
+    // supervisor (sender) should receive neither message.
+    let (status, body) = http_req(&url, "GET", "/messages/supervisor?since=0", &[], "");
+    assert_eq!(status, 200);
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    let messages = json["messages"].as_array().expect("messages is array");
+    assert!(
+        messages.is_empty(),
+        "supervisor should not receive its own messages"
+    );
+
+    drop(handle);
+}
+
+// ---------------------------------------------------------------------------
 // Test 2: __dashboard subcommand — TMUX env var path
 // ---------------------------------------------------------------------------
 
@@ -588,6 +663,7 @@ fn broker_log_flush_on_shutdown() {
         match git_paw::broker::start_broker(
             &config,
             git_paw::broker::BrokerState::new(Some(log_path.clone())),
+            Vec::new(),
         ) {
             Ok(h) => {
                 let u = config.url();

@@ -23,7 +23,7 @@ fn spawn_test_broker() -> (broker::BrokerHandle, String) {
             port,
             bind: "127.0.0.1".to_string(),
         };
-        match broker::start_broker(&config, BrokerState::new(None)) {
+        match broker::start_broker(&config, BrokerState::new(None), Vec::new()) {
             Ok(handle) => {
                 let url = config.url();
                 return (handle, url);
@@ -345,7 +345,7 @@ fn second_broker_on_same_port_reattaches() {
     };
 
     // Starting a second broker on the same port should reattach.
-    let handle2 = broker::start_broker(&config, BrokerState::new(None))
+    let handle2 = broker::start_broker(&config, BrokerState::new(None), Vec::new())
         .expect("second broker should reattach");
 
     // The reattached handle should have the same URL.
