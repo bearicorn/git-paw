@@ -34,6 +34,6 @@ When `skill_content` is `None`, the generated section SHALL be identical to the 
 - **WHEN** `generate_worktree_section()` is called with skill content that was rendered via `skills::render` for branch `feat/http-broker`
 - **THEN** the skill section in the output contains `feat-http-broker` (the slugified branch) and does not contain the literal `{{BRANCH_ID}}`
 
-#### Scenario: Skill content preserves broker URL placeholder
+#### Scenario: Skill content contains rendered broker URL
 - **WHEN** `generate_worktree_section()` is called with skill content rendered via `skills::render`
-- **THEN** the skill section in the output contains the literal `${GIT_PAW_BROKER_URL}` (not substituted)
+- **THEN** the skill section in the output contains the literal broker URL (e.g., `http://127.0.0.1:9119`) and no placeholder

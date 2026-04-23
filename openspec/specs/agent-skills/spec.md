@@ -14,7 +14,7 @@ The embedded coordination skill content SHALL contain `curl` commands matching t
 - A `POST /publish` example for `agent.artifact`
 - A `POST /publish` example for `agent.blocked`
 
-The embedded content SHALL use `{{BRANCH_ID}}` as the agent identity placeholder and `${GIT_PAW_BROKER_URL}` as the broker URL placeholder.
+The embedded content SHALL use `{{BRANCH_ID}}` as the agent identity placeholder and `{{GIT_PAW_BROKER_URL}}` as the broker URL placeholder. Both are substituted at render time (see the Skill template rendering requirement below) so the rendered output contains a literal, fully-qualified broker URL with no shell variable expansion at execution time.
 
 #### Scenario: Embedded coordination skill is reachable without any user files
 
@@ -29,7 +29,7 @@ The embedded content SHALL use `{{BRANCH_ID}}` as the agent identity placeholder
 - **THEN** it contains the substring `agent.status`
 - **AND** it contains the substring `agent.artifact`
 - **AND** it contains the substring `agent.blocked`
-- **AND** it contains the substring `${GIT_PAW_BROKER_URL}/messages/{{BRANCH_ID}}`
+- **AND** it contains the substring `{{GIT_PAW_BROKER_URL}}/messages/{{BRANCH_ID}}`
 
 ### Requirement: Skill resolution order
 
@@ -107,44 +107,61 @@ When a user override file exists but cannot be read (permission denied, I/O erro
 
 ### Requirement: Skill template rendering
 
-The system SHALL provide a function `pub fn render(template: &SkillTemplate, branch: &str, broker_url: &str) -> String` that produces the final text to embed into a worktree's `AGENTS.md`. The function SHALL apply the following substitutions to `template.content`:
+The system SHALL provide a function `pub fn render(template: &SkillTemplate, branch: &str, broker_url: &str, project: &str, test_command: Option<&str>) -> String` that produces the final text to embed into a worktree's `AGENTS.md`. The function SHALL apply the following substitutions to `template.content`:
 
 1. Every literal occurrence of `{{BRANCH_ID}}` SHALL be replaced with `slugify_branch(branch)` from the `broker-messages` capability
-2. Every literal occurrence of `${GIT_PAW_BROKER_URL}` SHALL be preserved unchanged so it is expanded by the agent's shell at command-execution time
+2. Every literal occurrence of `{{PROJECT_NAME}}` SHALL be replaced with `project`
+3. Every literal occurrence of `{{GIT_PAW_BROKER_URL}}` SHALL be replaced with `broker_url` verbatim, so the rendered output contains a literal URL and no shell variable expansion is required at command-execution time
+4. Every literal occurrence of `{{TEST_COMMAND}}` SHALL be replaced with `test_command` when `Some(...)`, or with the literal string `(not configured)` when `None`. The supervisor skill template references this placeholder so the rendered AGENTS.md tells the supervisor agent which command to run between merges.
 
-The function SHALL be deterministic: the same `(template, branch, broker_url)` input SHALL always produce the same output. The function MUST NOT perform any I/O.
+The function SHALL be deterministic: the same `(template, branch, broker_url, project, test_command)` input SHALL always produce the same output. The function MUST NOT perform any I/O.
 
-The `broker_url` parameter is accepted by the function signature for future use (e.g., embedding the URL at render time as an alternative substitution mode) but MUST NOT be substituted into the output in v0.3.0; the literal `${GIT_PAW_BROKER_URL}` string SHALL be preserved.
+Pre-expanding `{{GIT_PAW_BROKER_URL}}` at render time is mandatory, not optional: some agent CLIs gate shell-variable expansion behind separate permission prompts, which breaks the "don't ask again for `curl:*`" allowlist flow. Leaving the URL as a shell variable in the rendered AGENTS.md reintroduces that friction.
 
 #### Scenario: Branch ID placeholder is substituted
 
 - **GIVEN** a `SkillTemplate` whose content contains the literal text `agent_id":"{{BRANCH_ID}}"`
-- **WHEN** `render(template, "feat/http-broker", "http://127.0.0.1:9119")` is called
+- **WHEN** `render(template, "feat/http-broker", "http://127.0.0.1:9119", "proj", None)` is called
 - **THEN** the resulting string contains `agent_id":"feat-http-broker"`
 - **AND** the resulting string contains no occurrence of the literal `{{BRANCH_ID}}`
 
-#### Scenario: Broker URL placeholder is preserved verbatim
+#### Scenario: Test-command placeholder is substituted when set
 
-- **GIVEN** a `SkillTemplate` whose content contains the literal text `curl ${GIT_PAW_BROKER_URL}/status`
-- **WHEN** `render(template, "feat/x", "http://127.0.0.1:9119")` is called
-- **THEN** the resulting string contains the literal text `curl ${GIT_PAW_BROKER_URL}/status`
+- **GIVEN** a `SkillTemplate` whose content contains the literal text `Run \`{{TEST_COMMAND}}\` after each merge.`
+- **WHEN** `render(template, "supervisor", "http://127.0.0.1:9119", "proj", Some("just check"))` is called
+- **THEN** the resulting string contains `Run \`just check\` after each merge.`
+- **AND** the resulting string contains no occurrence of the literal `{{TEST_COMMAND}}`
+
+#### Scenario: Test-command placeholder falls back when unset
+
+- **GIVEN** a `SkillTemplate` whose content contains the literal text `Baseline: {{TEST_COMMAND}}`
+- **WHEN** `render(template, "supervisor", "http://127.0.0.1:9119", "proj", None)` is called
+- **THEN** the resulting string contains `Baseline: (not configured)`
+- **AND** the resulting string contains no occurrence of the literal `{{TEST_COMMAND}}`
+
+#### Scenario: Broker URL placeholder is substituted with a literal URL
+
+- **GIVEN** a `SkillTemplate` whose content contains the literal text `curl {{GIT_PAW_BROKER_URL}}/status`
+- **WHEN** `render(template, "feat/x", "http://127.0.0.1:9119", "proj")` is called
+- **THEN** the resulting string contains the literal text `curl http://127.0.0.1:9119/status`
+- **AND** the resulting string contains no occurrence of `{{GIT_PAW_BROKER_URL}}`
 
 #### Scenario: Branch slugification matches broker-messages
 
 - **GIVEN** a `SkillTemplate` whose content is `id={{BRANCH_ID}}`
-- **WHEN** `render(template, "Feature/HTTP_Broker", "http://127.0.0.1:9119")` is called
+- **WHEN** `render(template, "Feature/HTTP_Broker", "http://127.0.0.1:9119", "proj")` is called
 - **THEN** the resulting string is `id=feature-http_broker`
 - **AND** the substitution matches what `slugify_branch("Feature/HTTP_Broker")` from the `broker-messages` capability would produce
 
 #### Scenario: Render is deterministic
 
-- **WHEN** `render(template, "feat/x", "http://127.0.0.1:9119")` is called twice with the same arguments
+- **WHEN** `render(template, "feat/x", "http://127.0.0.1:9119", "proj")` is called twice with the same arguments
 - **THEN** both calls produce identical output strings
 
 #### Scenario: Render performs no I/O
 
 - **GIVEN** a `SkillTemplate` whose `source = Source::User`
-- **WHEN** `render(template, "feat/x", "http://127.0.0.1:9119")` is called
+- **WHEN** `render(template, "feat/x", "http://127.0.0.1:9119", "proj")` is called
 - **AND** the original user override file is deleted between resolution and rendering
 - **THEN** the call still succeeds and returns content based on the in-memory template
 
@@ -157,14 +174,14 @@ This protects users who add typos like `{{GIT_PAW_BROKER_URL}}` (incorrect doubl
 #### Scenario: Unknown placeholder triggers a warning
 
 - **GIVEN** a `SkillTemplate` whose content contains the literal text `url={{UNKNOWN_PLACEHOLDER}}`
-- **WHEN** `render(template, "feat/x", "http://127.0.0.1:9119")` is called
+- **WHEN** `render(template, "feat/x", "http://127.0.0.1:9119", "proj")` is called
 - **THEN** the function returns a string still containing `{{UNKNOWN_PLACEHOLDER}}`
 - **AND** a warning has been written to standard error mentioning `UNKNOWN_PLACEHOLDER`
 
 #### Scenario: No warning when only known placeholders are present
 
-- **GIVEN** a `SkillTemplate` whose content contains only `{{BRANCH_ID}}` and `${GIT_PAW_BROKER_URL}`
-- **WHEN** `render(template, "feat/x", "http://127.0.0.1:9119")` is called
+- **GIVEN** a `SkillTemplate` whose content contains only `{{BRANCH_ID}}`, `{{PROJECT_NAME}}`, and `{{GIT_PAW_BROKER_URL}}`
+- **WHEN** `render(template, "feat/x", "http://127.0.0.1:9119", "proj")` is called
 - **THEN** no warning is written to standard error
 
 ### Requirement: SkillTemplate value type

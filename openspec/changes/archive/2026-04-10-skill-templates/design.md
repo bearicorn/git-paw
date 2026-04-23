@@ -24,7 +24,7 @@ This change (`skill-templates`) is purely additive: it provides the loader and r
 - Ship the v0.3.0 coordination skill embedded in the binary so `git paw` works out of the box without any user setup
 - Allow users to override any embedded skill by dropping a same-named file in `~/.config/git-paw/agent-skills/`
 - Substitute `{{BRANCH_ID}}` at git-paw render time using the slug rule from `message-types`
-- Pass `${GIT_PAW_BROKER_URL}` through unchanged so the agent's shell expands it at runtime
+- Substitute `{{GIT_PAW_BROKER_URL}}` at git-paw render time so the agent's curl commands contain a literal URL
 - Leave the public API stable enough that future skills are zero-friction additions
 
 **Non-Goals:**
@@ -34,7 +34,7 @@ This change (`skill-templates`) is purely additive: it provides the loader and r
 - Watch-and-reload of user override files. Skill content is read once per session at launch; users must restart the session to pick up changes
 - Validating skill content against any schema. Skill files are free-form Markdown; the only contract is the substitution placeholders
 - The actual injection of skill text into worktree `AGENTS.md` (owned by `skill-injection` in Wave 2)
-- The mechanism by which `${GIT_PAW_BROKER_URL}` is set in pane environments (owned by `broker-integration` in Wave 2)
+- The mechanism by which the broker URL is set in pane environments (owned by `broker-integration` in Wave 2)
 
 ## Decisions
 
@@ -125,23 +125,23 @@ pub fn render(template: &SkillTemplate, branch: &str, broker_url: &str) -> Strin
 }
 ```
 
-**Wait** — re-read this. The proposal says `${GIT_PAW_BROKER_URL}` is passed through verbatim. Two cases:
+**Wait** — re-read this. The proposal says `{{GIT_PAW_BROKER_URL}}` is substituted at render time. Two cases:
 
 - `{{BRANCH_ID}}` — substituted at render time (git-paw replaces it)
-- `${GIT_PAW_BROKER_URL}` — left untouched in the rendered output, expanded later by the agent's shell when it runs `curl`
+- `{{GIT_PAW_BROKER_URL}}` — substituted at render time (git-paw replaces it)
 
-So `render` only substitutes `{{BRANCH_ID}}`. The `${GIT_PAW_BROKER_URL}` literal is preserved unchanged.
+So `render` substitutes both placeholders. The broker URL is embedded directly.
 
 **Why:**
 - Branch ID is known at render time, embed it directly
-- Broker URL is also known at render time but embedding it would tie each rendered skill to a specific port; using `${GIT_PAW_BROKER_URL}` keeps the rendered text identical across repos with different ports and lets the broker be restarted on a different port without re-rendering AGENTS.md
+- Broker URL is also known at render time and embedding it means the agent's curl commands contain a literal URL, which keeps allowlist-style permission prompts (e.g. "don't ask again for `curl:*`") working cleanly. Some CLI tools gate shell-variable expansion behind extra permission prompts, which breaks the allowlist flow.
 - Plain string `replace` is sufficient for two placeholders; pulling in a templating crate (handlebars, tera, etc.) is overkill
 
 **Alternatives considered:**
 - *`handlebars` or `tera`*. Both add a dependency, both support features we don't need (loops, conditionals, helpers). Rejected.
-- *Substitute both `{{BRANCH_ID}}` and `${GIT_PAW_BROKER_URL}` at render time*. Loses the per-session URL stability (every rebind of the broker port would force a re-render). Rejected.
+- *Pass `${GIT_PAW_BROKER_URL}` through unchanged*. Would require shell expansion at runtime, which reintroduces permission-prompt friction. Rejected.
 
-**Update to proposal:** the proposal already says `${GIT_PAW_BROKER_URL}` is preserved verbatim. Spec scenarios will assert this explicitly.
+**Update to proposal:** the proposal already says `{{GIT_PAW_BROKER_URL}}` is substituted at render time. Spec scenarios will assert this explicitly.
 
 ### Decision 6: `assets/agent-skills/coordination.md` has a frozen content shape
 
@@ -151,27 +151,27 @@ The default coordination skill content (committed to the repo) is:
 ## Coordination Skills
 
 You are running inside a git-paw worktree as agent `{{BRANCH_ID}}`. The git-paw broker
-is reachable at `${GIT_PAW_BROKER_URL}`. Use the following `curl` commands to coordinate
+is reachable at `{{GIT_PAW_BROKER_URL}}`. Use the following `curl` commands to coordinate
 with peer agents.
 
 ### Report progress (after each commit)
 
-curl -s -X POST ${GIT_PAW_BROKER_URL}/publish \
+curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
   -H "Content-Type: application/json" \
   -d '{"type":"agent.status","agent_id":"{{BRANCH_ID}}","payload":{"status":"working","modified_files":[]}}'
 
 ### Check for messages from peers (before starting new work)
 
-curl -s ${GIT_PAW_BROKER_URL}/messages/{{BRANCH_ID}}
+curl -s {{GIT_PAW_BROKER_URL}}/messages/{{BRANCH_ID}}
 
 The response includes a `last_seq` field. To see only new messages on subsequent polls,
 pass `?since=<last_seq>` from the previous response:
 
-curl -s ${GIT_PAW_BROKER_URL}/messages/{{BRANCH_ID}}?since=<last_seq>
+curl -s {{GIT_PAW_BROKER_URL}}/messages/{{BRANCH_ID}}?since=<last_seq>
 
 ### Report completion (when done)
 
-curl -s -X POST ${GIT_PAW_BROKER_URL}/publish \
+curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
   -H "Content-Type: application/json" \
   -d '{"type":"agent.artifact","agent_id":"{{BRANCH_ID}}","payload":{"status":"done","exports":[]}}'
 
@@ -185,7 +185,7 @@ curl -s -X POST ${GIT_PAW_BROKER_URL}/publish \
 **Why:**
 - Matches the wire format defined in `message-types` exactly (the four operations correspond to the three message variants plus a poll)
 - All four `curl` examples are self-contained — an agent can copy any one and run it
-- Uses `${GIT_PAW_BROKER_URL}` everywhere so multi-repo users get correct URLs automatically
+- Uses `{{GIT_PAW_BROKER_URL}}` everywhere so multi-repo users get correct URLs automatically
 - The `## Coordination Skills` heading is a clear section marker that `skill-injection` can append under and that the user can visually identify in their worktree `AGENTS.md`
 
 The content is in `assets/agent-skills/coordination.md` as a tracked file so it can be reviewed in PRs and edited without touching Rust code. The file is `include_str!`'d into the binary at build time.

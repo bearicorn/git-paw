@@ -11,7 +11,7 @@ The embedded coordination skill content SHALL contain `curl` commands matching t
 - A `POST /publish` example for `agent.artifact`
 - A `POST /publish` example for `agent.blocked`
 
-The embedded content SHALL use `{{BRANCH_ID}}` as the agent identity placeholder and `${GIT_PAW_BROKER_URL}` as the broker URL placeholder.
+The embedded content SHALL use `{{BRANCH_ID}}` as the agent identity placeholder and `{{GIT_PAW_BROKER_URL}}` as the broker URL placeholder.
 
 #### Scenario: Embedded coordination skill is reachable without any user files
 
@@ -26,7 +26,7 @@ The embedded content SHALL use `{{BRANCH_ID}}` as the agent identity placeholder
 - **THEN** it contains the substring `agent.status`
 - **AND** it contains the substring `agent.artifact`
 - **AND** it contains the substring `agent.blocked`
-- **AND** it contains the substring `${GIT_PAW_BROKER_URL}/messages/{{BRANCH_ID}}`
+- **AND** it contains the substring `{{GIT_PAW_BROKER_URL}}/messages/{{BRANCH_ID}}`
 
 ### Requirement: Skill resolution order
 
@@ -107,11 +107,11 @@ When a user override file exists but cannot be read (permission denied, I/O erro
 The system SHALL provide a function `pub fn render(template: &SkillTemplate, branch: &str, broker_url: &str) -> String` that produces the final text to embed into a worktree's `AGENTS.md`. The function SHALL apply the following substitutions to `template.content`:
 
 1. Every literal occurrence of `{{BRANCH_ID}}` SHALL be replaced with `slugify_branch(branch)` from the `broker-messages` capability
-2. Every literal occurrence of `${GIT_PAW_BROKER_URL}` SHALL be preserved unchanged so it is expanded by the agent's shell at command-execution time
+2. Every literal occurrence of `{{GIT_PAW_BROKER_URL}}` SHALL be replaced with `broker_url` verbatim, so the rendered output contains a literal URL and no shell variable expansion is required at command-execution time
 
 The function SHALL be deterministic: the same `(template, branch, broker_url)` input SHALL always produce the same output. The function MUST NOT perform any I/O.
 
-The `broker_url` parameter is accepted by the function signature for future use (e.g., embedding the URL at render time as an alternative substitution mode) but MUST NOT be substituted into the output in v0.3.0; the literal `${GIT_PAW_BROKER_URL}` string SHALL be preserved.
+Pre-expanding `{{GIT_PAW_BROKER_URL}}` at render time is mandatory, not optional: some agent CLIs gate shell-variable expansion behind separate permission prompts, which breaks the "don't ask again for `curl:*`" allowlist flow. Leaving the URL as a shell variable in the rendered AGENTS.md reintroduces that friction.
 
 #### Scenario: Branch ID placeholder is substituted
 
@@ -120,11 +120,11 @@ The `broker_url` parameter is accepted by the function signature for future use 
 - **THEN** the resulting string contains `agent_id":"feat-http-broker"`
 - **AND** the resulting string contains no occurrence of the literal `{{BRANCH_ID}}`
 
-#### Scenario: Broker URL placeholder is preserved verbatim
+#### Scenario: Broker URL placeholder is substituted with a literal URL
 
-- **GIVEN** a `SkillTemplate` whose content contains the literal text `curl ${GIT_PAW_BROKER_URL}/status`
+- **GIVEN** a `SkillTemplate` whose content contains the literal text `curl {{GIT_PAW_BROKER_URL}}/status`
 - **WHEN** `render(template, "feat/x", "http://127.0.0.1:9119")` is called
-- **THEN** the resulting string contains the literal text `curl ${GIT_PAW_BROKER_URL}/status`
+- **THEN** the resulting string contains the literal text `curl http://127.0.0.1:9119/status`
 
 #### Scenario: Branch slugification matches broker-messages
 
@@ -160,7 +160,7 @@ This protects users who add typos like `{{GIT_PAW_BROKER_URL}}` (incorrect doubl
 
 #### Scenario: No warning when only known placeholders are present
 
-- **GIVEN** a `SkillTemplate` whose content contains only `{{BRANCH_ID}}` and `${GIT_PAW_BROKER_URL}`
+- **GIVEN** a `SkillTemplate` whose content contains only `{{BRANCH_ID}}` and `{{GIT_PAW_BROKER_URL}}`
 - **WHEN** `render(template, "feat/x", "http://127.0.0.1:9119")` is called
 - **THEN** no warning is written to standard error
 
