@@ -52,16 +52,16 @@
 - [ ] 8.1 Implement `pub fn render(template: &SkillTemplate, branch: &str, broker_url: &str) -> String`:
   - Call `crate::broker::messages::slugify_branch(branch)` to get the `branch_id`
   - Replace all occurrences of `{{BRANCH_ID}}` in `template.content` with `branch_id`
-  - Leave `${GIT_PAW_BROKER_URL}` untouched (do NOT substitute `broker_url` into the output in v0.3.0)
+  - Replace all occurrences of `{{GIT_PAW_BROKER_URL}}` in `template.content` with `broker_url`
 - [ ] 8.2 After substitution, scan the rendered output for any remaining `{{...}}` patterns using a simple regex or string search
 - [ ] 8.3 If unknown `{{...}}` placeholders remain, write a warning to stderr via `eprintln!` identifying each unknown placeholder
-- [ ] 8.4 Add doc comment explaining the `broker_url` parameter is accepted for forward compatibility but not used in v0.3.0
+- [ ] 8.4 Add doc comment explaining the `broker_url` parameter is used to substitute `{{GIT_PAW_BROKER_URL}}` at render time
 
 ## 9. Unit tests
 
 - [ ] 9.1 Add `#[cfg(test)] mod tests` block at the bottom of `src/skills.rs`
 - [ ] 9.2 Test: embedded coordination skill is reachable without any user files — `resolve("coordination")` returns `Ok` with `Source::Embedded` and non-empty content
-- [ ] 9.3 Test: embedded coordination skill contains all four operations — assert content contains `agent.status`, `agent.artifact`, `agent.blocked`, `${GIT_PAW_BROKER_URL}/messages/{{BRANCH_ID}}`
+- [ ] 9.3 Test: embedded coordination skill contains all four operations — assert content contains `agent.status`, `agent.artifact`, `agent.blocked`, `{{GIT_PAW_BROKER_URL}}/messages/{{BRANCH_ID}}`
 - [ ] 9.4 Test: user override is preferred — create a `tempdir` as config_dir, write `coordination.md` to it, call `try_load_user_override` and assert it returns the custom content (use a test helper that temporarily overrides the config dir path)
 - [ ] 9.5 Test: missing user config directory falls through — `try_load_user_override` returns `Ok(None)` when config_dir is a nonexistent path
 - [ ] 9.6 Test: missing agent-skills subdirectory falls through — `try_load_user_override` returns `Ok(None)`
@@ -69,7 +69,7 @@
 - [ ] 9.8 Test: unreadable user override returns hard error — create file with `0o000` permissions, assert `try_load_user_override` returns `Err(SkillError::UserOverrideRead { .. })`
 - [ ] 9.9 Test: unknown skill name returns error — `resolve("nonexistent")` returns `Err(SkillError::UnknownSkill { .. })`
 - [ ] 9.10 Test: `{{BRANCH_ID}}` is substituted — render a template containing `{{BRANCH_ID}}` with branch `"feat/http-broker"`, assert output contains `feat-http-broker` and no `{{BRANCH_ID}}`
-- [ ] 9.11 Test: `${GIT_PAW_BROKER_URL}` is preserved verbatim — render a template containing `${GIT_PAW_BROKER_URL}`, assert the literal string survives in the output
+- [ ] 9.11 Test: `{{GIT_PAW_BROKER_URL}}` is substituted at render time — render a template containing `{{GIT_PAW_BROKER_URL}}`, assert the literal URL is present and no placeholder remains
 - [ ] 9.12 Test: slug substitution matches `slugify_branch` — render with branch `"Feature/HTTP_Broker"` and assert the substitution equals `slugify_branch("Feature/HTTP_Broker")`
 - [ ] 9.13 Test: render is deterministic — call render twice with the same inputs, assert outputs are identical
 - [ ] 9.14 Test: render performs no I/O — resolve a template, then (simulated) confirm render succeeds without any filesystem access

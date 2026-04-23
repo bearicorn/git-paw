@@ -110,7 +110,7 @@ Test: `git::tests::create_worktree_errors_on_checked_out_branch`
 
 ### Requirement: Remove worktrees and prune stale entries
 
-The system SHALL force-remove a worktree and prune stale git worktree metadata.
+The system SHALL force-remove a worktree and prune stale git worktree metadata. `remove_worktree` SHALL pass `--force` to `git worktree remove` so a worktree containing uncommitted modifications, untracked files, or both is still deleted; the function is only called from the destructive `purge` path, where leaving worktree directories on disk after the user already opted into a destructive operation is the wrong behaviour.
 
 #### Scenario: Worktree fully cleaned up after removal
 - **GIVEN** an existing worktree
@@ -118,6 +118,15 @@ The system SHALL force-remove a worktree and prune stale git worktree metadata.
 - **THEN** the directory SHALL be deleted and git SHALL no longer track it
 
 Test: `git::tests::remove_worktree_cleans_up_fully`
+
+#### Scenario: Dirty worktree is force-removed
+- **GIVEN** an existing worktree containing both a modified tracked file and an untracked file
+- **WHEN** `remove_worktree()` is called
+- **THEN** the call SHALL succeed
+- **AND** the worktree directory SHALL be deleted from disk
+- **AND** git SHALL no longer track the worktree
+
+Test: `git_integration::remove_worktree_force_removes_dirty_worktree`
 
 ### Requirement: Repository validation SHALL work against real git repos
 

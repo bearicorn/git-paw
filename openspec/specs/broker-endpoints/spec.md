@@ -163,9 +163,38 @@ The handler MUST be safe to call concurrently. The handler MUST NOT block for mo
 - **THEN** all ten responses are `200`
 - **AND** all ten bodies contain `"git_paw": true`
 
+### Requirement: GET /log returns the full broker message log
+
+The system SHALL expose `GET /log` returning the broker's complete `message_log` filtered to entries with sequence number greater than the optional `since` query parameter (defaulting to `0`, i.e. every message).
+
+The response body SHALL be JSON of the shape `{"entries": [...], "last_seq": N}`. Each entry SHALL have the fields `seq: u64`, `timestamp_unix_secs: u64`, and `message: BrokerMessage`. Entries SHALL appear in chronological order (oldest first) so callers can replay them into a fresh `BrokerState` to reconstruct broker state from outside the dashboard process.
+
+This endpoint is the IPC seam used by `cmd_supervisor` (which runs in a different process from the broker) to (a) build the dependency graph for merge ordering from `agent.blocked` messages, and (b) populate broker state for the session-summary write so per-agent records reflect what actually happened during the session.
+
+#### Scenario: GET /log returns all messages chronologically when since is absent
+
+- **GIVEN** a broker with three published `agent.status` messages
+- **WHEN** `GET /log` is sent
+- **THEN** the response status is `200`
+- **AND** `entries.length` is `3`
+- **AND** `entries[0].seq < entries[1].seq < entries[2].seq`
+- **AND** `last_seq` equals `entries[2].seq`
+
+#### Scenario: GET /log?since=N filters out messages with seq <= N
+
+- **GIVEN** a broker with three published messages at seq 1, 2, 3
+- **WHEN** `GET /log?since=2` is sent
+- **THEN** `entries.length` is `1`
+- **AND** `entries[0].seq` is `3`
+
+#### Scenario: GET /log with non-numeric since returns 400
+
+- **WHEN** `GET /log?since=notanumber` is sent
+- **THEN** the response status is `400`
+
 ### Requirement: Unknown routes return 404
 
-The system SHALL respond with HTTP `404 Not Found` for any request whose path does not match one of the three documented routes (`POST /publish`, `GET /messages/:agent_id`, `GET /status`).
+The system SHALL respond with HTTP `404 Not Found` for any request whose path does not match one of the four documented routes (`POST /publish`, `GET /messages/:agent_id`, `GET /status`, `GET /log`).
 
 #### Scenario: Unknown path returns 404
 

@@ -234,3 +234,56 @@ The system SHALL display a title line above the agent table containing the text 
 - **WHEN** the dashboard renders a frame
 - **THEN** the rendered output includes the text `"git-paw dashboard"`
 
+### Requirement: Dashboard pane layout
+
+The system SHALL arrange tmux panes with the dashboard in a full-width top row and worktree panes tiled below. This layout SHALL be applied automatically when the dashboard starts and maintained throughout the session.
+
+#### Scenario: Dashboard takes full width at top
+
+- **GIVEN** a tmux session with dashboard pane and 3 worktree panes
+- **WHEN** the dashboard applies its layout
+- **THEN** the dashboard pane occupies the full window width as the top row
+- **AND** the worktree panes are arranged in a tiled layout below the dashboard
+
+#### Scenario: Layout is maintained after tmux operations
+
+- **GIVEN** dashboard with proper layout applied
+- **WHEN** a tmux operation occurs that might disrupt layout (e.g., window resize)
+- **THEN** the system re-applies the correct layout on next render cycle
+
+### Requirement: Committed status in counter and symbols
+
+The system SHALL extend agent status tracking to include the "committed" state in both the counter display and status symbol mapping.
+
+#### Scenario: Status counter includes committed count
+
+- **WHEN** `format_status_line(5, 2, 1, 1, 1)` is called (total, working, done, blocked, committed)
+- **THEN** the result is `"5 agents: 2 working, 1 done, 1 blocked, 1 committed"`
+
+#### Scenario: Status symbol for committed
+
+- **WHEN** `status_symbol("committed")` is called
+- **THEN** the result is `"🟣"`
+
+### Requirement: Broker messages panel (config-gated)
+
+When the configuration option `[dashboard] show_message_log = true` is enabled, the system SHALL display an additional panel showing a scrolling tail of recent broker messages.
+
+#### Scenario: Message log panel is hidden by default
+
+- **GIVEN** default configuration (show_message_log not set)
+- **WHEN** the dashboard renders
+- **THEN** no message log panel is displayed
+
+#### Scenario: Message log panel shows when enabled
+
+- **GIVEN** configuration with `show_message_log = true`
+- **WHEN** the dashboard renders
+- **THEN** a message log panel is displayed showing recent broker messages
+
+#### Scenario: Message log shows various message types
+
+- **GIVEN** broker messages of types status, artifact, blocked, question
+- **WHEN** the message log panel renders
+- **THEN** all message types are displayed with appropriate formatting
+
