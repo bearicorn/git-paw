@@ -65,7 +65,9 @@ git-paw lets you run multiple AI coding assistants in parallel, each in its own 
 - **Standards-based** — uses `AGENTS.md` following the Linux Foundation standard for AI agent instructions
 - **Agent coordination** — built-in HTTP broker lets agents share status, artifacts, and blocked requests
 - **Dashboard TUI** — live status table in pane 0 shows agent progress at a glance
+- **Broker messages panel** — optional dashboard section showing real-time agent communication (configurable via `[dashboard] show_message_log = true`)
 - **Skill templates** — coordination instructions auto-injected into each agent's AGENTS.md
+- **Boot-prompt injection** — standardized boot instructions automatically prepended to all agent prompts, ensuring reliable self-reporting (register, done, blocked, question operations) — always enabled for broker sessions
 - **Cursor-based messaging** — lossless message polling with sequence tracking
 
 > **Tip:** git-paw uses `AGENTS.md` as the standard agent instruction file. If your AI CLI reads a different file (e.g., `CLAUDE.md`, `GEMINI.md`), you can symlink it:
@@ -116,6 +118,16 @@ git paw
 ```
 
 Result: a tmux session where `feat/auth` runs Claude and `feat/api` runs Gemini, side by side.
+
+## Quick Start: Supervisor Mode
+
+Run an unattended supervisor agent that orchestrates the worker agents on your behalf:
+
+```bash
+git paw start --supervisor
+```
+
+The supervisor agent runs in its own pane, polls each worker agent for progress and artifacts via the broker, runs the configured test command between merges, and writes a session summary when work completes. Use this mode when you want to leave a multi-branch session running without continually steering each agent yourself.
 
 ## Installation
 
@@ -299,6 +311,11 @@ type = "openspec"  # or "markdown"
 # Session logging
 [logging]
 enabled = true
+
+# Dashboard configuration
+[dashboard]
+# Show broker messages panel for real-time agent communication
+show_message_log = true
 
 [presets.backend]
 branches = ["feat/api", "fix/db"]

@@ -5,6 +5,7 @@
 - [Installation](installation.md)
 - [Quick Start: Same CLI Mode](quick-start-same-cli.md)
 - [Quick Start: Per-Branch CLI Mode](quick-start-per-branch.md)
+- [Quick Start: Supervisor Mode](quick-start-supervisor.md)
 - [User Guide](user-guide/README.md)
   - [Spec-Driven Launch](user-guide/spec-driven-launch.md)
   - [Session Logging](user-guide/session-logging.md)

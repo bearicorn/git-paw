@@ -8,89 +8,17 @@ Repository: `bearicorn/git-paw`
 Crate: `git-paw`
 Binary: `git-paw` (invokable as `git paw` via git subcommand convention)
 
-## Command Set
+## General Workflow
 
-```
-git paw                        # Smart start (default)
-git paw start                  # Same — reattach / recover / launch new
-git paw start --cli claude     # Skip CLI picker
-git paw start --cli claude --branches feat/a,feat/b  # Fully non-interactive
-git paw start --from-specs     # Launch from spec files
-git paw start --from-specs --cli claude  # Spec-driven, single CLI
-git paw start --dry-run        # Preview without executing
-git paw start --preset backend # Use config preset
-git paw init                   # Initialize .git-paw/, config, gitignore
-git paw stop                   # Kill tmux, keep worktrees + state for later
-git paw purge                  # Nuclear: kill tmux, remove worktrees, delete state
-git paw purge --force          # Skip confirmation
-git paw status                 # Show session state for current repo
-git paw replay --list          # List available session logs
-git paw replay <branch>        # View session log, ANSI stripped
-git paw replay <branch> --color # View session log with colors via less -R
-git paw list-clis              # Show detected + custom CLIs
-git paw add-cli <name> <cmd>   # Register a custom CLI globally
-git paw remove-cli <name>      # Unregister a custom CLI
-```
+This project follows a spec-driven development approach where all changes must be defined in OpenSpec format before implementation. The AGENTS.md file describes the general workflow and standards that apply to all changes, regardless of specific features.
 
-One session per repo. `start` is smart — it reattaches if active, recovers if stopped/crashed, or launches new if nothing exists.
+## Project Structure
 
-## Architecture
+The project follows a modular architecture with clear separation of concerns. Detailed architecture documentation can be found in the technical documentation.
 
-```
-src/
-├── main.rs           # Entry point, command dispatch, session orchestration
-├── cli.rs            # Clap derive structs and subcommands
-├── config.rs         # .git-paw/config.toml and global config parsing
-├── detect.rs         # AI CLI detection (scans PATH + custom CLIs)
-├── git.rs            # Git operations (branches, worktrees, prune)
-├── tmux.rs           # Tmux session/pane orchestration (builder pattern)
-├── session.rs        # Session state persistence (~/.local/share/git-paw/)
-├── interactive.rs    # Dialoguer prompts (branch picker, CLI picker, resolution chain)
-├── error.rs          # PawError enum (thiserror)
-├── init.rs           # git paw init — project bootstrapping
-├── agents.rs         # Per-worktree AGENTS.md generation and injection
-├── specs/            # Spec scanning and discovery
-│   ├── mod.rs        # SpecEntry, SpecBackend trait, scan_specs()
-│   ├── openspec.rs   # OpenSpec format backend (changes/ directory)
-│   └── markdown.rs   # Markdown format backend (frontmatter-based)
-├── logging.rs        # Session logging via tmux pipe-pane
-├── replay.rs         # Replay captured session logs (ANSI/OSC stripping)
-├── broker/           # v0.3.0 — HTTP broker for agent coordination
-│   ├── mod.rs        # Module root, BrokerState, BrokerHandle, start_broker()
-│   ├── messages.rs   # BrokerMessage enum, payloads, validation, slugify_branch()
-│   ├── server.rs     # axum router, HTTP endpoint handlers
-│   └── delivery.rs   # Message routing, cursor-based polling, log flush
-├── skills.rs         # v0.3.0 — Agent skill template loading and rendering
-└── dashboard.rs      # v0.3.0 — ratatui TUI status table for pane 0
-```
+## Development Tools
 
-## Development Commands
-
-Use `just` recipes — they mirror what CI runs:
-
-```bash
-just check                     # fmt + clippy + test — run this before pushing
-just test                      # Run all tests (including tmux-dependent)
-just lint                      # Format check + clippy with --all-targets
-just deny                      # License, advisory, and duplicate dep checks
-just audit                     # Vulnerability scan
-just coverage                  # Generate HTML coverage report
-just docs                      # Build mdBook and open
-just api-docs                  # Build and open Rustdoc
-just changelog                 # Regenerate CHANGELOG.md
-just build                     # Release build
-just install                   # Install from local source
-just clean                     # Clean build artifacts
-```
-
-### Required dev tools
-
-- [just](https://github.com/casey/just) — task runner
-- [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) — license/advisory checks
-- [cargo-audit](https://github.com/rustsec/rustsec) — vulnerability scanning
-- [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) — code coverage
-- [mdbook](https://github.com/rust-lang/mdBook) — docs site
-- [git-cliff](https://github.com/orhun/git-cliff) — changelog generation
+The project uses standard Rust development tools along with additional quality assurance tools. Refer to CONTRIBUTING.md for detailed setup instructions and development workflows.
 
 ## Conventions
 
@@ -121,7 +49,7 @@ This project follows **Conventional Commits** (Commitizen compatible).
 Format: `<type>(<scope>): <description>`
 
 Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `ci`, `chore`, `perf`
-Scopes: `detect`, `git`, `tmux`, `session`, `config`, `interactive`, `error`, `cli`, `docs`, `ci`, `specs`, `agents`, `logging`, `replay`, `init`, `broker`, `dashboard`, `skills`
+Scopes: `detect`, `git`, `tmux`, `session`, `config`, `interactive`, `error`, `cli`, `docs`, `ci`, `specs`, `agents`, `logging`, `replay`, `init`, `broker`, `dashboard`, `skills`, `supervisor`, `merge-loop`
 
 Examples:
 ```
@@ -130,6 +58,12 @@ fix(git): prune stale worktree registrations
 test(e2e): add integration tests for init and replay
 docs(readme): add quick start section
 ```
+
+**Commit message rules:**
+- Do not reference TODO.md, MILESTONE.md, or other project management files
+- Focus on the technical change, not the task tracking
+- Reference specifications and requirements directly (e.g., "Implements openspec/specs/dashboard/spec.md:239")
+- Keep messages concise and technical
 
 Breaking changes: add `!` after type/scope and `BREAKING CHANGE:` footer.
 All commit messages must be lowercase descriptions (no period at end).
@@ -176,47 +110,17 @@ Dev: `assert_cmd`, `predicates`, `tempfile`, `serial_test`, `tower`, `hyper`, `h
 
 Do not add other dependencies without explicit approval.
 
-## Config Fields
+## Configuration
 
-All fields in `PawConfig` (`src/config.rs`):
+Project configuration follows standard patterns with a main configuration file. Refer to the technical documentation for specific configuration options and their purposes.
 
-| Field | Type | Purpose |
-|-------|------|---------|
-| `default_cli` | `Option<String>` | Pre-select CLI in interactive picker |
-| `default_spec_cli` | `Option<String>` | Bypass CLI picker for `--from-specs` |
-| `branch_prefix` | `Option<String>` | Prefix for spec-derived branches (default: `"spec/"`) |
-| `mouse` | `Option<bool>` | Enable tmux mouse mode (default: `true`) |
-| `specs` | `Option<SpecsConfig>` | `[specs]` section: `dir`, `type` |
-| `logging` | `Option<LoggingConfig>` | `[logging]` section: `enabled` |
-| `broker` | `BrokerConfig` | `[broker]` section: `enabled`, `port`, `bind` |
-| `clis` | `HashMap<String, CustomCli>` | Custom CLI definitions |
-| `presets` | `HashMap<String, Preset>` | Named presets (branches + cli) |
+## External Dependencies
 
-## External Tool Dependencies
+The project has external tool dependencies that are required for core functionality. These tools must be available on the system PATH for the application to work properly.
 
-git-paw has two hard runtime dependencies:
+### Tool Integration
 
-- **tmux** — required for all session operations (start, stop, purge, status). Not optional.
-- **git** — required for worktree and branch operations. Must support `git worktree` (v2.5+).
-
-Both are expected to be on PATH. All tests run normally, including tmux-dependent ones.
-
-### Git
-- Call via `std::process::Command::new("git")`
-- Always capture stderr for error messages
-- Parse stdout for branch lists, worktree info
-- Run `git worktree prune` before creating new worktrees
-
-### Tmux
-- Call via `std::process::Command::new("tmux")`
-- Builder pattern: accumulate ops, execute or return as strings (for testing/dry-run)
-- Session names: `paw-<project-name>`
-- Use `-c` flag on `new-session` to set pane 0's working directory
-- **Critical: apply `tiled` layout before each new split**, not just at the end
-- Apply final `tiled` layout after all panes for clean alignment
-- Enable `mouse on` per-session (not globally)
-- Set pane titles to `<branch> → <cli>` via `select-pane -T`
-- Enable `pane-border-status top` and `pane-border-format " #{pane_title} "` per-session
+External tools are integrated using standard process invocation patterns. Error handling and output parsing follow consistent conventions throughout the codebase.
 
 ## Change Checklist
 
@@ -273,6 +177,7 @@ Requirements include GIVEN/WHEN/THEN scenarios. Each scenario maps to at least o
 - Every OpenSpec scenario maps to at least one test
 - `tempfile` for filesystem tests
 - No system side effects
+- Each unit test MUST test behavior and not implmentation
 
 ### Integration Tests
 - In `tests/` directory
@@ -322,3 +227,7 @@ Commits should not include any reference to AI assistants. It should also be one
 **Every commit must be buildable and releasable.** `just check` must pass at each commit. Do not commit code that breaks the build, fails tests, or deviates from specs with the intent to "fix it later." If your implementation doesn't match the spec, fix it before committing — or update the spec first if the deviation is intentional.
 
 **Match specs exactly.** Field names, function signatures, and wire formats must match the OpenSpec requirements precisely. If the spec says `exports: Vec<String>`, use that name. Read the spec before coding, not after.
+
+## MCP
+When you need to search docs, use `context7` tools.
+

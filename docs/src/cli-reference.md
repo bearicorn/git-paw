@@ -61,6 +61,9 @@ Options:
       --from-specs             Launch from spec files (reads [specs] config)
       --dry-run                Preview the session plan without executing
       --preset <PRESET>        Use a named preset from config
+      --supervisor             Run the session in supervisor mode (auto-start agents,
+                                run test_command between merges, write session summary)
+      --force                  With `--from-specs`, bypass the uncommitted-spec warning
   -h, --help                   Print help
 ```
 

@@ -240,6 +240,96 @@ port = 9120
 
 See [Agent Coordination](../user-guide/coordination.md) for usage details.
 
+## Supervisor
+
+Configure the supervisor agent for orchestrating parallel coding sessions. When enabled, the supervisor monitors agents, runs tests, verifies work, and coordinates merges.
+
+```toml
+[supervisor]
+enabled = true
+cli = "claude"
+test_command = "just check"
+agent_approval = "auto"
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Whether to use supervisor mode by default (can also use `--supervisor` flag) |
+| `cli` | (uses `default_cli`) | CLI binary for the supervisor agent |
+| `test_command` | (none) | Command to run after an agent reports done (e.g. `"just check"`, `"cargo test"`) |
+| `agent_approval` | `"auto"` | Permission level for coding agents: `"manual"`, `"auto"`, or `"full-auto"` |
+
+**Approval levels:**
+
+| Level | Behavior |
+|-------|----------|
+| `manual` | Agents prompt for every action (safest, slowest) |
+| `auto` | CLI default behavior — some prompts, some auto-approved |
+| `full-auto` | Skip all permission prompts (fastest, agents run unattended) |
+
+The supervisor translates the approval level into CLI-specific flags at launch (e.g. `--dangerously-skip-permissions` for Claude in full-auto mode).
+
+### Auto-approve safe permission prompts
+
+When supervisor mode is enabled, git-paw can automatically approve common,
+known-safe permission prompts (`cargo test`, `git commit`, broker `curl` calls, etc.)
+in stalled agent panes so the supervisor does not have to dismiss every prompt by hand.
+
+```toml
+[supervisor.auto_approve]
+enabled = true
+safe_commands = ["just lint", "just test"]
+stall_threshold_seconds = 30
+approval_level = "safe"
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `true` | Master switch for auto-approval. Set to `false` to disable. |
+| `safe_commands` | `[]` | Project-specific command prefixes appended to the built-in defaults. |
+| `stall_threshold_seconds` | `30` | Seconds an agent's `last_seen` must lag before its pane is polled (minimum `5`). |
+| `approval_level` | `"safe"` | Coarse preset: `"off"`, `"conservative"`, or `"safe"`. |
+
+**Built-in safe commands:** `cargo fmt`, `cargo clippy`, `cargo test`, `cargo build`,
+`git commit`, `git push`, `curl http://127.0.0.1:`.
+
+**Approval-level presets:**
+
+| Preset | Behavior |
+|--------|----------|
+| `off` | Forces `enabled = false`. No detection or approval runs. |
+| `conservative` | Drops `git push` and `curl` from the effective whitelist. |
+| `safe` (default) | Approve every entry in the built-in whitelist plus configured extras. |
+
+**How it works:** when an agent's status is non-terminal (`done`, `verified`, `blocked`,
+`committed` are skipped) and its `last_seen` exceeds the threshold, git-paw runs
+`tmux capture-pane`, classifies the pending command, and either dispatches
+`BTab Down Enter` (if safe) or publishes an `agent.question` to the supervisor inbox
+(if not).
+
+git-paw also seeds `.claude/settings.json::allowed_bash_prefixes` with the broker
+endpoints (`/publish`, `/status`, `/poll`, `/feedback`) so the first broker call
+never hits a permission prompt. Existing entries in that file are preserved.
+
+## Dashboard
+
+Configure the dashboard TUI rendered in pane 0 when the broker is enabled.
+
+```toml
+[dashboard]
+show_message_log = true
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `show_message_log` | `false` | When `true`, the dashboard renders a scrolling broker-message panel above the prompts section. Useful for watching live agent traffic; leave `false` for a more compact layout. |
+
+See [Dashboard](../user-guide/dashboard.md) for details.
+
+### Multi-repo configuration
+
+Each repository can have its own dashboard settings in `.git-paw/config.toml`. The repo-level config overrides the global config.
+
 ## Merging Rules
 
 When both global and repo configs exist, they merge with these rules:
@@ -255,6 +345,8 @@ When both global and repo configs exist, they merge with these rules:
 | `specs` | Repo wins |
 | `logging` | Repo wins |
 | `broker` | Repo wins |
+| `supervisor` | Repo wins |
+| `dashboard` | Repo wins |
 
 **Example:** If global config defines `[clis.my-agent]` and repo config defines `[clis.my-agent]` with a different command, the repo version wins. But a `[clis.other-tool]` in global config still appears — maps are merged, not replaced.
 
