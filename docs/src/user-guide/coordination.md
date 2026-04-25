@@ -19,6 +19,69 @@ git-paw sets the `GIT_PAW_BROKER_URL` environment variable in every agent pane. 
 
 When skill templates are enabled (the default), each agent's `AGENTS.md` also contains curl commands for interacting with the broker, so agents know how to use it without any manual setup.
 
+## Boot-Prompt Injection
+
+To ensure reliable agent self-reporting, git-paw automatically injects a standardized boot instruction block into every agent's initial prompt. This boot block contains pre-expanded curl commands for four essential operations:
+
+### 1. REGISTER - Immediate Status Publication
+
+Agents automatically publish their working status with a "booting" message as their very first action:
+
+```bash
+curl -s -X POST http://127.0.0.1:9119/publish \
+  -H "Content-Type: application/json" \
+  -d '{"type":"agent.status","agent_id":"feat-auth","payload":{"status":"working","message":"booting","modified_files":[]}}'
+```
+
+### 2. DONE - Task Completion Reporting
+
+Agents know how to report task completion:
+
+```bash
+curl -s -X POST http://127.0.0.1:9119/publish \
+  -H "Content-Type: application/json" \
+  -d '{"type":"agent.artifact","agent_id":"feat-auth","payload":{"status":"done","exports":[],"modified_files":[]}}'
+```
+
+### 3. BLOCKED - Dependency Waiting Notification
+
+Agents can properly declare when they're waiting on dependencies:
+
+```bash
+curl -s -X POST http://127.0.0.1:9119/publish \
+  -H "Content-Type: application/json" \
+  -d '{"type":"agent.blocked","agent_id":"feat-api","payload":{"needs":"auth token format","from":"feat-auth"}}'
+```
+
+### 4. QUESTION - Uncertainty Escalation (Critical)
+
+Agents are instructed to publish questions and wait for answers rather than guessing:
+
+```bash
+curl -s -X POST http://127.0.0.1:9119/publish \
+  -H "Content-Type: application/json" \
+  -d '{"type":"agent.question","agent_id":"feat-auth","payload":{"question":"Should the JWT use RS256 or HS256 signing?"}}'
+```
+
+**IMPORTANT**: The boot block explicitly instructs agents: "DO NOT CONTINUE UNTIL YOU RECEIVE AN ANSWER!"
+
+### Boot Block Injection Modes
+
+- **Supervisor Mode**: Boot block is prepended to each agent's task prompt before injection
+- **Manual Broker Mode**: Boot block is pre-filled into each agent pane's input line (user pastes task after boot instructions)
+
+### Paste Handling
+
+The boot block includes instructions for proper paste handling, particularly the requirement to send an additional Enter key after paste operations to ensure full content processing.
+
+### Benefits
+
+- **Reliable Monitoring**: Agents self-report immediately on boot
+- **Consistent Behavior**: All agents follow the same coordination pattern
+- **No Permission Prompts**: Pre-expanded curl commands avoid shell variable expansion issues
+- **Supervisor Visibility**: Questions and blockers surface to the dashboard promptly
+- **Audit Trail**: All boot operations are logged in the broker log
+
 ## Message Types
 
 Agents communicate through three message types:

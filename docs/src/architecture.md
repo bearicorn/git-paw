@@ -43,7 +43,7 @@ This chapter covers git-paw's internal architecture: module structure, data flow
 | **Error** | `src/error.rs` | `PawError` enum with thiserror. Actionable error messages and distinct exit codes. |
 | **Broker** | `src/broker/` | HTTP coordination server (axum). Receives status, artifact, and blocked messages from agents. Provides cursor-based polling. |
 | **Dashboard** | `src/dashboard.rs` | Ratatui TUI running in pane 0. Renders live agent status table. Embeds the broker via shared state. |
-| **Skills** | `src/skills.rs` | Loads skill templates from defaults or `~/.config/git-paw/agent-skills/`. Injects coordination instructions into worktree AGENTS.md files. |
+| **Skills** | `src/skills.rs` | Loads standardized agent skills from `.agents/skills/` following the [agentskills.io specification](https://agentskills.io). Injects coordination instructions into worktree AGENTS.md files. |
 
 ## Start Flow
 
