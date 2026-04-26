@@ -29,6 +29,8 @@ fn sample_session() -> Session {
         repo_path: PathBuf::from("/tmp/demo"),
         project_name: "demo".to_string(),
         // Fixed start time so total-duration formatting is deterministic.
+        // Seconds is the canonical unit for unix timestamps.
+        #[allow(clippy::duration_suboptimal_units)]
         created_at: UNIX_EPOCH + Duration::from_secs(1_711_200_000),
         status: SessionStatus::Active,
         worktrees: vec![

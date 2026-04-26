@@ -377,6 +377,10 @@ mod tests {
             session_name: "paw-my-project".to_string(),
             repo_path: PathBuf::from("/Users/test/code/my-project"),
             project_name: "my-project".to_string(),
+            // Fixed unix epoch (2024-03-23 13:20:00 UTC); seconds is the
+            // canonical unit for unix timestamps so the literal stays
+            // human-readable as a date.
+            #[allow(clippy::duration_suboptimal_units)]
             created_at: UNIX_EPOCH + Duration::from_secs(1_711_200_000),
             status: SessionStatus::Active,
             worktrees: vec![

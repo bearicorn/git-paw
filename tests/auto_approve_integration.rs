@@ -19,15 +19,13 @@ fn tmux_available() -> bool {
     Command::new("tmux")
         .arg("-V")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 fn unique_session_name(tag: &str) -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     format!("paw-aa-{tag}-{nanos}")
 }
 

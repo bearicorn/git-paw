@@ -586,13 +586,11 @@ fn handle_key_with_sender(
 ) -> KeyAction {
     match code {
         KeyCode::Char('q') => return KeyAction::Quit,
-        KeyCode::Tab => {
-            if !questions.is_empty() {
-                *focused_question = Some(match *focused_question {
-                    Some(i) => (i + 1) % questions.len(),
-                    None => 0,
-                });
-            }
+        KeyCode::Tab if !questions.is_empty() => {
+            *focused_question = Some(match *focused_question {
+                Some(i) => (i + 1) % questions.len(),
+                None => 0,
+            });
         }
         KeyCode::Backspace => {
             input_buffer.pop();
@@ -1037,17 +1035,17 @@ mod tests {
 
     #[test]
     fn format_age_three_minutes() {
-        assert_eq!(format_age(Duration::from_secs(180)), "3m ago");
+        assert_eq!(format_age(Duration::from_mins(3)), "3m ago");
     }
 
     #[test]
     fn format_age_one_hour_exact() {
-        assert_eq!(format_age(Duration::from_secs(3600)), "1h 0m ago");
+        assert_eq!(format_age(Duration::from_hours(1)), "1h 0m ago");
     }
 
     #[test]
     fn format_age_one_hour_fifteen_minutes() {
-        assert_eq!(format_age(Duration::from_secs(4500)), "1h 15m ago");
+        assert_eq!(format_age(Duration::from_mins(75)), "1h 15m ago");
     }
 
     // -----------------------------------------------------------------------
@@ -1070,7 +1068,7 @@ mod tests {
                 agent_id: "feat-b".to_string(),
                 cli: "cursor".to_string(),
                 status: "done".to_string(),
-                last_seen: now.checked_sub(Duration::from_secs(60)).unwrap(),
+                last_seen: now.checked_sub(Duration::from_mins(1)).unwrap(),
                 last_seen_seconds: 60,
                 summary: "msg b".to_string(),
             },
@@ -1078,7 +1076,7 @@ mod tests {
                 agent_id: "feat-c".to_string(),
                 cli: "claude".to_string(),
                 status: "blocked".to_string(),
-                last_seen: now.checked_sub(Duration::from_secs(300)).unwrap(),
+                last_seen: now.checked_sub(Duration::from_mins(5)).unwrap(),
                 last_seen_seconds: 300,
                 summary: String::new(),
             },
@@ -1097,7 +1095,7 @@ mod tests {
             agent_id: "feat-errors".to_string(),
             cli: "claude".to_string(),
             status: "done".to_string(),
-            last_seen: now.checked_sub(Duration::from_secs(180)).unwrap(),
+            last_seen: now.checked_sub(Duration::from_mins(3)).unwrap(),
             last_seen_seconds: 180,
             summary: "finished".to_string(),
         }];
@@ -1116,7 +1114,7 @@ mod tests {
                 agent_id: "feat-committed".to_string(),
                 cli: "claude".to_string(),
                 status: "committed".to_string(),
-                last_seen: now.checked_sub(Duration::from_secs(60)).unwrap(),
+                last_seen: now.checked_sub(Duration::from_mins(1)).unwrap(),
                 last_seen_seconds: 60,
                 summary: "changes committed".to_string(),
             },

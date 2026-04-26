@@ -31,6 +31,10 @@ GEMINI.md
 .cursor/
 .aider*
 .codex/
+.vibe/
+.cline/
+.clinerules/
+.opencode/
 
 # mdBook build output
 docs/book/
@@ -38,3 +42,8 @@ docs/book/
 # Added by cargo
 
 /target
+.git-paw/logs/
+
+# Project management files (not tracked)
+TODO.md
+MILESTONE.md

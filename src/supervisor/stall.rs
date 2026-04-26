@@ -74,9 +74,7 @@ mod tests {
     #[test]
     fn stale_working_agent_is_stalled() {
         let state = BrokerState::new(None);
-        let past = Instant::now()
-            .checked_sub(Duration::from_secs(120))
-            .unwrap();
+        let past = Instant::now().checked_sub(Duration::from_mins(2)).unwrap();
         insert_record(&state, "agent-stuck", "working", past);
         let stalled = detect_stalled_agents(&state, Duration::from_secs(30));
         assert_eq!(stalled, vec!["agent-stuck".to_string()]);
@@ -85,9 +83,7 @@ mod tests {
     #[test]
     fn terminal_status_done_is_skipped_even_if_stale() {
         let state = BrokerState::new(None);
-        let past = Instant::now()
-            .checked_sub(Duration::from_secs(600))
-            .unwrap();
+        let past = Instant::now().checked_sub(Duration::from_mins(10)).unwrap();
         insert_record(&state, "agent-done", "done", past);
         let stalled = detect_stalled_agents(&state, Duration::from_secs(30));
         assert!(stalled.is_empty(), "done is terminal — never stalled");
@@ -96,9 +92,7 @@ mod tests {
     #[test]
     fn terminal_statuses_are_all_skipped() {
         let state = BrokerState::new(None);
-        let past = Instant::now()
-            .checked_sub(Duration::from_secs(600))
-            .unwrap();
+        let past = Instant::now().checked_sub(Duration::from_mins(10)).unwrap();
         for status in TERMINAL_STATUSES {
             insert_record(&state, &format!("a-{status}"), status, past);
         }
@@ -111,9 +105,7 @@ mod tests {
         // A future status label we have not seen before should be treated
         // as non-terminal so the supervisor still notices it stalled.
         let state = BrokerState::new(None);
-        let past = Instant::now()
-            .checked_sub(Duration::from_secs(120))
-            .unwrap();
+        let past = Instant::now().checked_sub(Duration::from_mins(2)).unwrap();
         insert_record(&state, "agent-x", "researching", past);
         let stalled = detect_stalled_agents(&state, Duration::from_secs(30));
         assert_eq!(stalled, vec!["agent-x".to_string()]);

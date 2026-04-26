@@ -34,9 +34,14 @@ pub fn setup_test_repo() -> TestRepo {
     let repo = sandbox.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo dir");
 
+    // Force `main` as the initial branch — Ubuntu CI defaults to `master`
+    // unless `init.defaultBranch` is set, and the production
+    // `resolve_default_branch` falls back to `"main"` when there is no
+    // remote, so the unmerged-commits warning silently no-ops on a
+    // master-default repo.
     Command::new("git")
         .current_dir(&repo)
-        .args(["init"])
+        .args(["init", "-b", "main"])
         .output()
         .expect("git init");
 
