@@ -36,6 +36,11 @@ dir = "openspec/changes"
 enabled = true
 port = 9119
 
+# Dashboard configuration
+[dashboard]
+# Show broker messages panel for observability (default: false)
+# show_message_log = true
+
 # Custom CLI definitions.
 # [clis.my-agent]
 # command = "/usr/local/bin/my-agent"

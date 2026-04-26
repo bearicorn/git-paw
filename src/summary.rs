@@ -213,10 +213,8 @@ fn estimated_blocked_time(log: &[(u64, SystemTime, BrokerMessage)], agent_id: &s
             continue;
         }
         match msg {
-            BrokerMessage::Blocked { .. } => {
-                if blocked_at.is_none() {
-                    blocked_at = Some(*ts);
-                }
+            BrokerMessage::Blocked { .. } if blocked_at.is_none() => {
+                blocked_at = Some(*ts);
             }
             BrokerMessage::Status { .. } | BrokerMessage::Artifact { .. } => {
                 if let Some(start) = blocked_at.take()
@@ -259,8 +257,7 @@ fn format_duration(d: Duration) -> String {
 fn format_date(time: SystemTime) -> String {
     let secs = time
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
 
     // Algorithm from Howard Hinnant (matches session.rs).
     #[allow(clippy::cast_possible_wrap)]
@@ -292,6 +289,10 @@ mod tests {
             session_name: "paw-demo".to_string(),
             repo_path: PathBuf::from("/tmp/demo"),
             project_name: "demo".to_string(),
+            // Fixed unix epoch (2024-03-23 13:20:00 UTC); seconds is the
+            // canonical unit for unix timestamps so the literal stays
+            // human-readable as a date.
+            #[allow(clippy::duration_suboptimal_units)]
             created_at: UNIX_EPOCH + Duration::from_secs(1_711_200_000),
             status: SessionStatus::Active,
             worktrees: vec![

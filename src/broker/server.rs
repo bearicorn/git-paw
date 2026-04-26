@@ -188,8 +188,7 @@ async fn log(State(state): State<Arc<BrokerState>>, Query(params): Query<PollQue
             seq,
             timestamp_unix_secs: ts
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+                .map_or(0, |d| d.as_secs()),
             message,
         })
         .collect();

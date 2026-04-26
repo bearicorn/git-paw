@@ -20,10 +20,14 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1.2"
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "process"] }
 axum = "0.8"
 ratatui = "0.29"
 crossterm = "0.28"
+schemars = "0.8"
+serde_yaml = "0.9"
+chrono = "0.4"
+regex = "1"
 
 [[bin]]
 name = "git-paw"

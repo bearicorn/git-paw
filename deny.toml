@@ -4,6 +4,14 @@ ignore = [
     # ratatui — no security risk, just an unmaintained notice. Ratatui upstream
     # will migrate to pastey in a future release.
     "RUSTSEC-2024-0436",
+
+    # lru 0.12.5 has an `unsound` IterMut that violates Stacked Borrows
+    # (RUSTSEC-2026-0002, 2026-01-07). Pulled in transitively via
+    # ratatui 0.29.0. git-paw does not construct `lru::IterMut` directly —
+    # ratatui uses lru internally for its own caches. Re-evaluate when
+    # ratatui publishes a release with a fixed lru version. Ignored on
+    # 2026-04-14 during the v0.4.0 release audit.
+    "RUSTSEC-2026-0002",
 ]
 
 [licenses]
@@ -15,7 +23,6 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
     "Zlib",
 ]
 

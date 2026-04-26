@@ -398,11 +398,19 @@ fn build_post_commit_dispatcher_hook() -> String {
 }
 
 fn build_pre_push_hook() -> String {
+    // Only reject when the calling worktree is an agent worktree — i.e.
+    // a `paw-agent-id` marker exists in this worktree's gitdir. The hook
+    // installs into the common gitdir (shared with the main repo and all
+    // linked worktrees), so without this gate the hook would also block
+    // legitimate pushes from the main repo. Mirror the post-commit
+    // dispatcher's gate at line 388 so behaviour is consistent.
     format!(
         "#!/bin/sh\n\
          {HOOK_START_MARKER}\n\
+         if [ -n \"$GIT_DIR\" ] && [ -f \"$GIT_DIR/paw-agent-id\" ]; then\n\
          echo 'error: git-paw agents must not push. The supervisor handles merges.' >&2\n\
          exit 1\n\
+         fi\n\
          {HOOK_END_MARKER}\n"
     )
 }
@@ -1314,10 +1322,19 @@ mod tests {
     }
 
     #[test]
-    fn pre_push_hook_exits_with_error() {
+    fn pre_push_hook_only_rejects_agent_worktrees() {
         let script = build_pre_push_hook();
+        // The reject path must still be there so agent worktrees can't push.
         assert!(script.contains("exit 1"));
         assert!(script.contains("must not push"));
+        // But it MUST be gated on the agent marker so the main repo and
+        // non-agent worktrees can still push freely.
+        assert!(
+            script.contains("paw-agent-id"),
+            "pre-push hook must gate the reject on $GIT_DIR/paw-agent-id; \
+             without the gate, every push from this gitdir is blocked, \
+             including legitimate pushes from the main repo"
+        );
     }
 
     #[test]
