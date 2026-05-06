@@ -2,10 +2,23 @@
 
 git-paw includes the following third-party software.
 
-{{#each licenses}}
-{{#if first_of_kind}}
-## {{name}} ({{id}})
+## Summary
 
+{{#each overview}}
+- {{count}} crates under {{{name}}} (`{{id}}`)
+{{/each}}
+
+## License notices
+
+Each section below covers crates that share an identical license-text
+variant. License-IDs with multiple copyright holders therefore appear
+more than once, with the relevant crates and copyright notice grouped
+together.
+
+{{#each licenses}}
+### {{{name}}} (`{{id}}`)
+
+Used by:
 {{#each used_by}}
 - {{crate.name}} {{crate.version}}
 {{/each}}
@@ -19,5 +32,4 @@ git-paw includes the following third-party software.
 
 </details>
 
-{{/if}}
 {{/each}}
