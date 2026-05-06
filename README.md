@@ -401,8 +401,16 @@ completed OpenSpec changes (moving them under
 [`cargo-dist`](https://github.com/axodotdev/cargo-dist) on GitHub Actions to
 build cross-platform binaries and update the Homebrew tap.
 
+After the tag, the maintainer publishes to crates.io **manually** (it is not
+wired into cargo-dist):
+
+```bash
+cargo publish --dry-run   # verify
+cargo publish             # upload vX.Y.Z
+```
+
 The full procedure (archive ordering, changelog regeneration, tag rules,
-recovery from a botched prep commit) lives in
+crates.io publish step, recovery from a botched prep commit) lives in
 [`AGENTS.md` § Release & Distribution](AGENTS.md#release--distribution).
 
 ## License

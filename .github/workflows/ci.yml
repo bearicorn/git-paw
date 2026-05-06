@@ -99,8 +99,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y tmux
       - uses: taiki-e/install-action@mdbook
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Install cargo-about
-        run: cargo install cargo-about
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
       - name: Generate third-party licenses
         run: cargo about generate about.hbs -o docs/src/licenses.md
       - name: Build book

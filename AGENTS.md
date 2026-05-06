@@ -214,6 +214,9 @@ Handled by cargo-dist. Config: `[workspace.metadata.dist]` in `Cargo.toml`.
 - **Trigger:** push tag `v*`
 - **Automatic:** cross-platform binaries, checksums, shell installer, Homebrew formula
 - **Homebrew tap:** `bearicorn/homebrew-tap`
+- **Manual:** `cargo publish` to crates.io is **not** wired into cargo-dist
+  (`dist-workspace.toml` lists only `publish-jobs = ["homebrew"]`). The
+  maintainer runs `cargo publish` locally after the tag — see step 7 below.
 
 ### Cutting a release
 
@@ -282,13 +285,47 @@ on `main`, mirroring the v0.2.0, v0.3.0, and v0.4.0 prep commits.
    `main` doesn't include the prep commit yet, cargo-dist sees a
    mismatched manifest version and the release fails.
 
-7. **Verify** the release at `https://github.com/bearicorn/git-paw/releases`
-   and the published Homebrew formula at `bearicorn/homebrew-tap`.
+7. **Publish to crates.io** (manual — not part of cargo-dist):
+
+   ```bash
+   cargo publish --dry-run   # verify package contents
+   cargo publish             # upload vX.Y.Z to crates.io
+   ```
+
+   Requires `cargo login` with a token from
+   `https://crates.io/settings/tokens` (one-time per machine). The
+   working tree should be clean and on the prep commit; cargo runs its
+   own packaging build, so a stale `target/release/` is fine.
+
+   Publishing is **irreversible**: a published version can only be
+   yanked, never deleted, and the same `vX.Y.Z` can never be re-uploaded.
+   Always run `--dry-run` first.
+
+8. **Verify** the release on every channel:
+   - GitHub: `https://github.com/bearicorn/git-paw/releases` shows the
+     new tag with binaries for `aarch64-apple-darwin`,
+     `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`,
+     `x86_64-unknown-linux-gnu`, plus checksums and the shell installer.
+   - Homebrew tap: `bearicorn/homebrew-tap` has a commit bumping the
+     formula to `vX.Y.Z`.
+   - crates.io: `https://crates.io/crates/git-paw` shows `vX.Y.Z` as
+     `max_version`.
+
+   Then sanity-check each install path resolves to the new version:
+
+   ```bash
+   cargo install git-paw                      # crates.io
+   curl --proto '=https' --tlsv1.2 -LsSf \
+     https://github.com/bearicorn/git-paw/releases/latest/download/git-paw-installer.sh | sh
+   brew install bearicorn/tap/git-paw         # Homebrew
+   git-paw --version                          # should print X.Y.Z
+   ```
 
 If the prep commit needs to be amended (e.g. a missed archive, a typo in
 the changelog), do it **before** tagging. Once `vX.Y.Z` is pushed,
 treat it as immutable: ship a `vX.Y.Z+1` follow-up rather than
-re-tagging.
+re-tagging. The same applies to `cargo publish` — a botched upload
+means cutting `vX.Y.Z+1`, not re-publishing `vX.Y.Z`.
 
 ### Historical archives are pruned at release time, not gitignored
 
