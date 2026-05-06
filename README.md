@@ -391,6 +391,20 @@ git paw purge  → removes everything
 
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
+## Releases
+
+Releases follow a single `chore: prepare vX.Y.Z release` commit on `main` that
+bumps `Cargo.toml`, regenerates `CHANGELOG.md` via `git cliff`, and archives
+completed OpenSpec changes (moving them under
+`openspec/changes/archive/<date>-<change>/` and syncing their delta specs into
+`openspec/specs/`). Pushing the `vX.Y.Z` tag triggers
+[`cargo-dist`](https://github.com/axodotdev/cargo-dist) on GitHub Actions to
+build cross-platform binaries and update the Homebrew tap.
+
+The full procedure (archive ordering, changelog regeneration, tag rules,
+recovery from a botched prep commit) lives in
+[`AGENTS.md` § Release & Distribution](AGENTS.md#release--distribution).
+
 ## License
 
 [MIT](LICENSE) — Copyright 2026 bearicorn

@@ -4,42 +4,46 @@ Generate and write per-worktree AGENTS.md files that combine the root repository
 ## Requirements
 ### Requirement: Generate worktree assignment section
 
-The system SHALL generate a marker-delimited section containing the worktree's branch assignment, CLI name, optional spec content, optional file ownership, and optional coordination skill content.
+The `WorktreeAssignment` struct SHALL support an optional `inter_agent_rules: Option<String>` field. When provided, the system SHALL append a `## Inter-Agent Rules` subsection inside the git-paw markers after the skill content (or after the assignment if no skill content is present).
 
-When `skill_content` is provided on `WorktreeAssignment`, the rendered skill text SHALL be appended inside the markers after the file ownership subsection (or after the spec subsection if no file ownership is present, or after the assignment if neither is present) and before the end marker.
+The inter-agent rules section SHALL be rendered verbatim from the `inter_agent_rules` string. The supervisor populates this field with rules about file ownership, commit behavior, status publishing requirements, and cherry-pick instructions.
 
-When `skill_content` is `None`, the generated section SHALL be identical to the v0.2.0 output.
+When `inter_agent_rules` is `None`, the generated section SHALL be identical to the pre-supervisor output. No `## Inter-Agent Rules` section SHALL appear.
 
-#### Scenario: Assignment with all fields including skill content
-- **WHEN** `generate_worktree_section()` is called with branch, CLI, spec content, owned files, and skill content
-- **THEN** the result SHALL contain `<!-- git-paw:start -->` and `<!-- git-paw:end -->` markers, the branch name, CLI name, spec content, file ownership list, and the skill content
-- **AND** the skill content appears after the file ownership section and before `<!-- git-paw:end -->`
+#### Scenario: Assignment with inter-agent rules section
 
-#### Scenario: Assignment with skill content but no spec or files
-- **WHEN** `generate_worktree_section()` is called with branch, CLI, and skill content, but no spec content and no owned files
-- **THEN** the result SHALL contain the branch, CLI, and skill content
-- **AND** the skill content appears after the assignment and before `<!-- git-paw:end -->`
+- **WHEN** `generate_worktree_section()` is called with `inter_agent_rules = Some(rules_text)`
+- **THEN** the result SHALL contain `## Inter-Agent Rules` followed by the rules text
+- **AND** the rules section SHALL appear after the skill content (if present) and before `<!-- git-paw:end -->`
 
-#### Scenario: Assignment without skill content matches v0.2.0
-- **WHEN** `generate_worktree_section()` is called with branch, CLI, spec content, and owned files, but `skill_content = None`
-- **THEN** the result SHALL be identical to the v0.2.0 output (no skill section present)
+#### Scenario: Assignment without inter-agent rules has no rules section
 
-#### Scenario: Assignment without spec content
-- **WHEN** `generate_worktree_section()` is called with branch and CLI but no spec content
-- **THEN** the result SHALL contain the branch and CLI but omit the Spec section
+- **WHEN** `generate_worktree_section()` is called with `inter_agent_rules = None`
+- **THEN** the result SHALL NOT contain `## Inter-Agent Rules`
 
-#### Scenario: Assignment without file ownership
-- **WHEN** `generate_worktree_section()` is called with branch and CLI but no owned files
-- **THEN** the result SHALL contain the branch and CLI but omit the File Ownership section
+#### Scenario: Inter-agent rules include file ownership constraint
 
-#### Scenario: Skill content contains rendered BRANCH_ID
-- **WHEN** `generate_worktree_section()` is called with skill content that was rendered via `skills::render` for branch `feat/http-broker`
-- **THEN** the skill section in the output contains `feat-http-broker` (the slugified branch) and does not contain the literal `{{BRANCH_ID}}`
+- **GIVEN** the supervisor provides standard inter-agent rules
+- **WHEN** the rules are inspected
+- **THEN** they SHALL include a statement that agents MUST NOT edit files owned by other agents
 
-#### Scenario: Skill content contains the rendered broker URL
-- **WHEN** `generate_worktree_section()` is called with skill content rendered via `skills::render` with a broker URL of `http://127.0.0.1:9119`
-- **THEN** the skill section in the output contains the literal text `http://127.0.0.1:9119`
-- **AND** the skill section contains no occurrence of `{{GIT_PAW_BROKER_URL}}`
+#### Scenario: Inter-agent rules include never-push constraint
+
+- **GIVEN** the supervisor provides standard inter-agent rules
+- **WHEN** the rules are inspected
+- **THEN** they SHALL include a statement that agents MUST commit to their worktree branch and MUST NOT push
+
+#### Scenario: Inter-agent rules include proactive status publishing requirement
+
+- **GIVEN** the supervisor provides standard inter-agent rules
+- **WHEN** the rules are inspected
+- **THEN** they SHALL state that `agent.status` MUST be published when starting work, editing files, and after each commit
+
+#### Scenario: Inter-agent rules include match-spec requirement
+
+- **GIVEN** the supervisor provides standard inter-agent rules
+- **WHEN** the rules are inspected
+- **THEN** they SHALL state that agents MUST match spec field names exactly
 
 ### Requirement: Combine root content with worktree assignment
 

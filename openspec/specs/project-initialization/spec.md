@@ -1,9 +1,7 @@
 ## Purpose
 
 Bootstrap a repository for git-paw by creating the `.git-paw/` directory structure, generating a default config file, updating `.gitignore`, and reporting actions taken, with idempotent behavior on repeated runs.
-
 ## Requirements
-
 ### Requirement: Init creates .git-paw directory structure
 
 The system SHALL create the `.git-paw/` directory and `.git-paw/logs/` subdirectory in the repository root when `git paw init` is run.
@@ -30,23 +28,19 @@ The system SHALL create `.git-paw/config.toml` with sensible defaults and commen
 
 ### Requirement: Init appends logs directory to .gitignore
 
-The system SHALL ensure `.git-paw/logs/` is listed in the repo's `.gitignore`.
+The system SHALL also ensure `.git-paw/session-summary.md` is listed in the repo's `.gitignore`, in addition to `.git-paw/logs/`.
 
-#### Scenario: Gitignore does not exist
-- **WHEN** `git paw init` is run and no `.gitignore` exists
-- **THEN** `.gitignore` SHALL be created containing `.git-paw/logs/`
+#### Scenario: Gitignore includes session-summary.md after init
 
-#### Scenario: Gitignore exists without the entry
-- **WHEN** `git paw init` is run and `.gitignore` exists but does not contain `.git-paw/logs/`
-- **THEN** `.git-paw/logs/` SHALL be appended to `.gitignore`
+- **GIVEN** `git paw init` is run in a repo without `.git-paw/session-summary.md` in `.gitignore`
+- **WHEN** init completes
+- **THEN** `.gitignore` SHALL contain `.git-paw/session-summary.md`
 
-#### Scenario: Gitignore already contains the entry
-- **WHEN** `git paw init` is run and `.gitignore` already contains `.git-paw/logs/`
-- **THEN** `.gitignore` SHALL NOT be modified
+#### Scenario: Gitignore not duplicated on repeated init
 
-#### Scenario: Gitignore without trailing newline
-- **WHEN** `git paw init` is run and `.gitignore` exists without a trailing newline
-- **THEN** a newline SHALL be prepended before appending `.git-paw/logs/`
+- **GIVEN** `.gitignore` already contains `.git-paw/session-summary.md`
+- **WHEN** `git paw init` is run again
+- **THEN** `.git-paw/session-summary.md` SHALL appear exactly once in `.gitignore`
 
 ### Requirement: Init is idempotent
 
@@ -75,3 +69,30 @@ The system SHALL print a summary of actions taken (directories created, files wr
 #### Scenario: Init in already-initialized repo shows skips
 - **WHEN** `git paw init` is run in an already-initialized repo
 - **THEN** stdout SHALL report that existing files were skipped
+
+### Requirement: Init merges new config fields without mutating existing ones
+
+When `git paw init` runs on a repo with an existing `.git-paw/config.toml`, the system SHALL compare the generated default config against the existing file and append only sections that are absent. The system SHALL NOT modify or remove any existing content.
+
+This makes `init` a safe upgrade path for every version bump — users run `git paw init` after upgrading and new config sections are added without touching their customized settings.
+
+#### Scenario: Init preserves existing broker config while adding supervisor
+
+- **GIVEN** a `.git-paw/config.toml` with `[broker]` section containing `port = 9200` (non-default) but no `[supervisor]` section
+- **WHEN** `git paw init` is run
+- **THEN** the `[broker]` section SHALL still contain `port = 9200`
+- **AND** a `[supervisor]` section SHALL be appended
+
+#### Scenario: Init does not duplicate existing sections
+
+- **GIVEN** a `.git-paw/config.toml` that already has both `[broker]` and `[supervisor]` sections
+- **WHEN** `git paw init` is run
+- **THEN** no sections SHALL be added or modified
+- **AND** the file content SHALL be unchanged
+
+#### Scenario: Init on a completely empty config file adds all sections
+
+- **GIVEN** a `.git-paw/config.toml` that exists but is empty
+- **WHEN** `git paw init` is run
+- **THEN** all default sections SHALL be appended (commented out)
+

@@ -5,31 +5,47 @@ TBD - created by archiving change skill-templates. Update Purpose after archive.
 ## Requirements
 ### Requirement: Embedded coordination skill
 
-The system SHALL embed the v0.3.0 coordination skill at compile time via `include_str!` from the file `assets/agent-skills/coordination.md`. The embedded content SHALL always be available regardless of how git-paw was installed and SHALL never depend on a runtime file lookup for fallback.
+The embedded `coordination.md` skill content SHALL reflect the v0.4 state in which `agent.status` publishing is automated by the filesystem watcher and `agent.artifact` publishing is automated by the post-commit git hook. The embedded content SHALL therefore:
 
-The embedded coordination skill content SHALL contain `curl` commands matching the broker wire format from the `broker-messages` capability:
+1. NOT contain the legacy "MUST publish agent.status" instruction. Status publishing is automatic — agents do not curl `/publish` for `agent.status` themselves.
+2. Include a note explaining that git-paw automatically publishes the agent's working status when the agent edits files and automatically publishes an `agent.artifact` when the agent runs `git commit`. The note SHALL state that agents only need to publish manually if they are blocked or want to announce explicit exports.
+3. Retain the `agent.blocked` curl example as an opt-in operation for blocked agents.
+4. Retain the `agent.artifact` curl example with `exports`, documented as the manual escape hatch when the agent wants to advertise specific exports beyond what the post-commit hook captures automatically.
+5. Include a `### Cherry-pick peer commits` section that gives the exact `git cherry-pick` command an agent should run when a peer's `agent.artifact` arrives in the agent's inbox.
+6. Include a `### Messages you may receive` section that documents the two supervisor-originated message variants:
+   - `agent.verified` — the agent's work has been verified by the supervisor. No action required.
+   - `agent.feedback` — the agent's work has issues. The `errors` field lists problems to fix; the agent SHALL address them and re-publish `agent.artifact`.
+7. Continue to use `{{BRANCH_ID}}` and `{{GIT_PAW_BROKER_URL}}` placeholders, retaining the existing polling example `GET ${GIT_PAW_BROKER_URL}/messages/{{BRANCH_ID}}`.
 
-- A `POST /publish` example for `agent.status`
-- A `GET /messages/{{BRANCH_ID}}` example for polling
-- A `POST /publish` example for `agent.artifact`
-- A `POST /publish` example for `agent.blocked`
-
-The embedded content SHALL use `{{BRANCH_ID}}` as the agent identity placeholder and `{{GIT_PAW_BROKER_URL}}` as the broker URL placeholder. Both are substituted at render time (see the Skill template rendering requirement below) so the rendered output contains a literal, fully-qualified broker URL with no shell variable expansion at execution time.
-
-#### Scenario: Embedded coordination skill is reachable without any user files
-
-- **GIVEN** no `~/.config/git-paw/agent-skills/` directory exists
-- **WHEN** `skills::resolve("coordination")` is called
-- **THEN** the result is `Ok(SkillTemplate)` with `source = Source::Embedded`
-- **AND** the template content is non-empty
-
-#### Scenario: Embedded coordination skill contains all four operations
+#### Scenario: Coordination skill documents automatic status publishing
 
 - **WHEN** the embedded coordination skill is inspected
-- **THEN** it contains the substring `agent.status`
-- **AND** it contains the substring `agent.artifact`
-- **AND** it contains the substring `agent.blocked`
-- **AND** it contains the substring `{{GIT_PAW_BROKER_URL}}/messages/{{BRANCH_ID}}`
+- **THEN** it contains text indicating that `agent.status` publishing is automatic
+- **AND** it does NOT contain the substring "MUST publish agent.status"
+
+#### Scenario: Coordination skill retains blocked and artifact curl examples
+
+- **WHEN** the embedded coordination skill is inspected
+- **THEN** it contains a `curl` example for publishing `agent.blocked`
+- **AND** it contains a `curl` example for publishing `agent.artifact`
+
+#### Scenario: Coordination skill contains cherry-pick instructions
+
+- **WHEN** the embedded coordination skill is inspected
+- **THEN** it contains the substring `git cherry-pick`
+- **AND** the cherry-pick guidance is reachable under a `Cherry-pick peer commits` heading or equivalent
+
+#### Scenario: Coordination skill documents verification and feedback messages
+
+- **WHEN** the embedded coordination skill is inspected
+- **THEN** it contains the substring `agent.verified`
+- **AND** it contains the substring `agent.feedback`
+- **AND** it contains guidance describing how to handle feedback (fix the listed errors and re-publish `agent.artifact`)
+
+#### Scenario: Coordination skill retains polling reference
+
+- **WHEN** the embedded coordination skill is inspected
+- **THEN** it contains `${GIT_PAW_BROKER_URL}/messages/{{BRANCH_ID}}`
 
 ### Requirement: Skill resolution order
 
@@ -107,63 +123,23 @@ When a user override file exists but cannot be read (permission denied, I/O erro
 
 ### Requirement: Skill template rendering
 
-The system SHALL provide a function `pub fn render(template: &SkillTemplate, branch: &str, broker_url: &str, project: &str, test_command: Option<&str>) -> String` that produces the final text to embed into a worktree's `AGENTS.md`. The function SHALL apply the following substitutions to `template.content`:
+The `render()` function SHALL accept an additional `project: &str` parameter and substitute `{{PROJECT_NAME}}` with the project name alongside the existing `{{BRANCH_ID}}` substitution.
 
-1. Every literal occurrence of `{{BRANCH_ID}}` SHALL be replaced with `slugify_branch(branch)` from the `broker-messages` capability
-2. Every literal occurrence of `{{PROJECT_NAME}}` SHALL be replaced with `project`
-3. Every literal occurrence of `{{GIT_PAW_BROKER_URL}}` SHALL be replaced with `broker_url` verbatim, so the rendered output contains a literal URL and no shell variable expansion is required at command-execution time
-4. Every literal occurrence of `{{TEST_COMMAND}}` SHALL be replaced with `test_command` when `Some(...)`, or with the literal string `(not configured)` when `None`. The supervisor skill template references this placeholder so the rendered AGENTS.md tells the supervisor agent which command to run between merges.
+The function signature SHALL be: `pub fn render(template: &SkillTemplate, branch: &str, broker_url: &str, project: &str) -> String`
 
-The function SHALL be deterministic: the same `(template, branch, broker_url, project, test_command)` input SHALL always produce the same output. The function MUST NOT perform any I/O.
+#### Scenario: PROJECT_NAME placeholder is substituted
 
-Pre-expanding `{{GIT_PAW_BROKER_URL}}` at render time is mandatory, not optional: some agent CLIs gate shell-variable expansion behind separate permission prompts, which breaks the "don't ask again for `curl:*`" allowlist flow. Leaving the URL as a shell variable in the rendered AGENTS.md reintroduces that friction.
+- **GIVEN** a `SkillTemplate` whose content contains `paw-{{PROJECT_NAME}}`
+- **WHEN** `render(template, "feat/x", "http://127.0.0.1:9119", "my-app")` is called
+- **THEN** the resulting string contains `paw-my-app`
+- **AND** the resulting string contains no `{{PROJECT_NAME}}`
 
-#### Scenario: Branch ID placeholder is substituted
+#### Scenario: Both BRANCH_ID and PROJECT_NAME substituted
 
-- **GIVEN** a `SkillTemplate` whose content contains the literal text `agent_id":"{{BRANCH_ID}}"`
-- **WHEN** `render(template, "feat/http-broker", "http://127.0.0.1:9119", "proj", None)` is called
-- **THEN** the resulting string contains `agent_id":"feat-http-broker"`
-- **AND** the resulting string contains no occurrence of the literal `{{BRANCH_ID}}`
-
-#### Scenario: Test-command placeholder is substituted when set
-
-- **GIVEN** a `SkillTemplate` whose content contains the literal text `Run \`{{TEST_COMMAND}}\` after each merge.`
-- **WHEN** `render(template, "supervisor", "http://127.0.0.1:9119", "proj", Some("just check"))` is called
-- **THEN** the resulting string contains `Run \`just check\` after each merge.`
-- **AND** the resulting string contains no occurrence of the literal `{{TEST_COMMAND}}`
-
-#### Scenario: Test-command placeholder falls back when unset
-
-- **GIVEN** a `SkillTemplate` whose content contains the literal text `Baseline: {{TEST_COMMAND}}`
-- **WHEN** `render(template, "supervisor", "http://127.0.0.1:9119", "proj", None)` is called
-- **THEN** the resulting string contains `Baseline: (not configured)`
-- **AND** the resulting string contains no occurrence of the literal `{{TEST_COMMAND}}`
-
-#### Scenario: Broker URL placeholder is substituted with a literal URL
-
-- **GIVEN** a `SkillTemplate` whose content contains the literal text `curl {{GIT_PAW_BROKER_URL}}/status`
-- **WHEN** `render(template, "feat/x", "http://127.0.0.1:9119", "proj")` is called
-- **THEN** the resulting string contains the literal text `curl http://127.0.0.1:9119/status`
-- **AND** the resulting string contains no occurrence of `{{GIT_PAW_BROKER_URL}}`
-
-#### Scenario: Branch slugification matches broker-messages
-
-- **GIVEN** a `SkillTemplate` whose content is `id={{BRANCH_ID}}`
-- **WHEN** `render(template, "Feature/HTTP_Broker", "http://127.0.0.1:9119", "proj")` is called
-- **THEN** the resulting string is `id=feature-http_broker`
-- **AND** the substitution matches what `slugify_branch("Feature/HTTP_Broker")` from the `broker-messages` capability would produce
-
-#### Scenario: Render is deterministic
-
-- **WHEN** `render(template, "feat/x", "http://127.0.0.1:9119", "proj")` is called twice with the same arguments
-- **THEN** both calls produce identical output strings
-
-#### Scenario: Render performs no I/O
-
-- **GIVEN** a `SkillTemplate` whose `source = Source::User`
-- **WHEN** `render(template, "feat/x", "http://127.0.0.1:9119", "proj")` is called
-- **AND** the original user override file is deleted between resolution and rendering
-- **THEN** the call still succeeds and returns content based on the in-memory template
+- **GIVEN** a template containing both `{{BRANCH_ID}}` and `{{PROJECT_NAME}}`
+- **WHEN** `render(template, "feat/http-broker", "url", "git-paw")` is called
+- **THEN** the output contains `feat-http-broker` and `git-paw`
+- **AND** no `{{...}}` placeholders remain (except `{{TEST_COMMAND}}` which is handled externally)
 
 ### Requirement: Unknown placeholder warning
 
@@ -206,4 +182,31 @@ The system SHALL define a public type `SkillTemplate` with at least these fields
 - **GIVEN** a `SkillTemplate` returned by `skills::resolve`
 - **WHEN** `template.clone()` is called
 - **THEN** the clone has identical `name`, `content`, and `source` fields
+
+### Requirement: Embedded supervisor skill
+
+The embedded supervisor skill SHALL include a "Spec Audit Procedure" section that instructs the supervisor to verify implementation matches spec before publishing `agent.verified`. The procedure SHALL include:
+
+- How to locate spec files for a given change
+- How to extract WHEN/THEN scenarios from spec files
+- How to search the codebase for matching tests
+- How to verify struct fields, function signatures, and types match SHALL/MUST requirements
+- How to compile gaps into an `agent.feedback` error list
+- When to publish `agent.verified` (no gaps) vs `agent.feedback` (gaps found)
+
+The spec audit SHALL run after the test command passes and before `agent.verified` is published.
+
+#### Scenario: Supervisor skill contains spec audit procedure
+
+- **WHEN** the embedded supervisor skill is inspected
+- **THEN** it contains the substring `Spec Audit`
+- **AND** it contains instructions to read `openspec/changes/` spec files
+- **AND** it contains instructions to grep for matching tests
+- **AND** it contains instructions to verify field names match spec
+
+#### Scenario: Spec audit runs after tests, before verified
+
+- **WHEN** the embedded supervisor skill workflow is inspected
+- **THEN** the spec audit step appears after the test command step
+- **AND** the spec audit step appears before the `agent.verified` publish step
 

@@ -215,6 +215,101 @@ Handled by cargo-dist. Config: `[workspace.metadata.dist]` in `Cargo.toml`.
 - **Automatic:** cross-platform binaries, checksums, shell installer, Homebrew formula
 - **Homebrew tap:** `bearicorn/homebrew-tap`
 
+### Cutting a release
+
+The release flow follows a single `chore: prepare vX.Y.Z release` commit
+on `main`, mirroring the v0.2.0, v0.3.0, and v0.4.0 prep commits.
+
+1. **Merge the feature branch into `main`** (rebase-merge or fast-forward
+   so the per-commit history is preserved).
+
+2. **Archive completed OpenSpec changes** in dependency order. The
+   `feat/vX.Y.0-*` branch should ship a
+   `openspec/changes/_release-notes/vX.Y.0-archive-order.md` plan
+   identifying the safe archive sequence. For each change:
+
+   ```bash
+   openspec archive <change-name> -y
+   ```
+
+   When a delta references a requirement that doesn't exist in the
+   target spec (or duplicates one), fix the delta header
+   (`## ADDED Requirements` vs `## MODIFIED Requirements`) before
+   re-running the archive. As a last resort,
+   `openspec archive <change> -y --skip-specs` archives the change
+   without touching main specs — only use when the implementation is
+   already in code and the spec content is informational.
+
+3. **Bump the version** in `Cargo.toml`, then `cargo build` to refresh
+   `Cargo.lock`.
+
+4. **Regenerate the changelog** with `git cliff`:
+
+   ```bash
+   just changelog vX.Y.Z   # writes CHANGELOG.md
+   ```
+
+   The justfile recipe expands to
+   `git cliff --tag vX.Y.Z -o CHANGELOG.md`. The new section appears
+   under a `## [X.Y.Z] - YYYY-MM-DD` header at the top.
+
+5. **One commit captures the whole release prep**:
+
+   ```bash
+   git add Cargo.toml Cargo.lock CHANGELOG.md openspec/
+   git commit -m "chore: prepare vX.Y.Z release
+
+   Bump version to X.Y.Z. Archive N OpenSpec changes and sync delta
+   specs to main specs:
+   - <list of capabilities>"
+   ```
+
+   Do **not** split this into separate "bump", "changelog", "archive"
+   commits — the changelog should describe the contents of the release,
+   the archive moves are part of "what shipped in vX.Y.Z", and reviewers
+   read this commit as a single release-readiness checkpoint.
+
+6. **Tag and push**:
+
+   ```bash
+   git tag vX.Y.Z
+   git push origin main vX.Y.Z
+   ```
+
+   Pushing the tag triggers cargo-dist on GitHub Actions, which builds
+   cross-platform binaries, publishes the release, and updates the
+   Homebrew tap. Do **not** push the tag separately from `main`; if
+   `main` doesn't include the prep commit yet, cargo-dist sees a
+   mismatched manifest version and the release fails.
+
+7. **Verify** the release at `https://github.com/bearicorn/git-paw/releases`
+   and the published Homebrew formula at `bearicorn/homebrew-tap`.
+
+If the prep commit needs to be amended (e.g. a missed archive, a typo in
+the changelog), do it **before** tagging. Once `vX.Y.Z` is pushed,
+treat it as immutable: ship a `vX.Y.Z+1` follow-up rather than
+re-tagging.
+
+### Historical archives are pruned at release time, not gitignored
+
+`openspec/changes/archive/` and `openspec/changes/_release-notes/` are
+**tracked** during a release cycle so contributors share the same
+archive state and review the planning docs together — gitignoring them
+would silently diverge each contributor's local archive view.
+
+The deletion happens **only at release-prep time**, as part of the
+`chore: prepare vX.Y.Z release` commit. After that commit, the canonical
+post-archive state lives in `openspec/specs/`, the prep-commit body
+lists which changes were archived, and the next development cycle starts
+with a clean `openspec/changes/` directory. New `openspec archive`
+runs during the next cycle re-create `archive/` (and `_release-notes/`
+if you write a new plan) and those new files **are** committed and
+shared with the team — the cycle repeats.
+
+If you need to refer back to a prior release's archive content, check
+out the relevant `vX.Y.Z` tag's parent commit — the archive is in the
+git history before the prep commit pruned it.
+
 ## Project Metadata
 
 - License: MIT

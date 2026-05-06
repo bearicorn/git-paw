@@ -25,49 +25,29 @@ The system SHALL also accept a hidden `__dashboard` subcommand that does not app
 
 ### Requirement: Start subcommand with optional flags
 
-The `start` subcommand SHALL accept `--cli`, `--branches` (comma-separated), `--dry-run`, and `--preset` flags, all optional.
+The `start` subcommand SHALL be extended to accept a `--supervisor` flag (boolean, defaults to `false`). The flag MAY be combined with any other `start` flags.
 
-#### Scenario: Start with no flags
-- **GIVEN** `start` is passed with no flags
+When `--supervisor` is passed, the parsed `StartArgs` struct SHALL have `supervisor: bool` set to `true`.
+
+#### Scenario: Start with --supervisor flag
+
+- **GIVEN** `start --supervisor`
 - **WHEN** the CLI is parsed
-- **THEN** all optional fields SHALL be `None` / `false`
+- **THEN** `supervisor` SHALL be `true`
 
-Test: `cli::tests::start_with_no_flags`
+#### Scenario: Start with --supervisor combined with other flags
 
-#### Scenario: Start with --cli flag
+- **GIVEN** `start --supervisor --cli claude --branches feat/a,feat/b`
+- **WHEN** the CLI is parsed
+- **THEN** `supervisor` SHALL be `true`
+- **AND** `cli` SHALL be `Some("claude")`
+- **AND** `branches` SHALL be `["feat/a", "feat/b"]`
+
+#### Scenario: Start without --supervisor defaults to false
+
 - **GIVEN** `start --cli claude`
 - **WHEN** the CLI is parsed
-- **THEN** `cli` SHALL be `Some("claude")`
-
-Test: `cli::tests::start_with_cli_flag`
-
-#### Scenario: Start with comma-separated --branches flag
-- **GIVEN** `start --branches feat/a,feat/b,fix/c`
-- **WHEN** the CLI is parsed
-- **THEN** `branches` SHALL be `["feat/a", "feat/b", "fix/c"]`
-
-Test: `cli::tests::start_with_branches_flag_comma_separated`
-
-#### Scenario: Start with --dry-run flag
-- **GIVEN** `start --dry-run`
-- **WHEN** the CLI is parsed
-- **THEN** `dry_run` SHALL be `true`
-
-Test: `cli::tests::start_with_dry_run`
-
-#### Scenario: Start with --preset flag
-- **GIVEN** `start --preset backend`
-- **WHEN** the CLI is parsed
-- **THEN** `preset` SHALL be `Some("backend")`
-
-Test: `cli::tests::start_with_preset`
-
-#### Scenario: Start with all flags combined
-- **GIVEN** `start --cli gemini --branches a,b --dry-run --preset dev`
-- **WHEN** the CLI is parsed
-- **THEN** all fields SHALL be populated correctly
-
-Test: `cli::tests::start_with_all_flags`
+- **THEN** `supervisor` SHALL be `false`
 
 ### Requirement: Stop subcommand
 
@@ -187,42 +167,13 @@ Test: `cli::tests::unknown_subcommand_is_rejected`
 
 ### Requirement: Help output contains all subcommands and quick start
 
-The `--help` output SHALL list all subcommands and include a Quick Start section.
+The `start --help` output SHALL list the `--supervisor` flag with a description.
 
-#### Scenario: Help lists all subcommands
-- **GIVEN** `--help` is passed
-- **WHEN** the binary runs
-- **THEN** stdout SHALL contain start, stop, purge, status, list-clis, add-cli, remove-cli, init, and replay
+#### Scenario: Start help shows --supervisor flag
 
-Test: `cli_tests::help_shows_all_subcommands`
-
-#### Scenario: Help contains Quick Start
-- **GIVEN** `--help` is passed
-- **WHEN** the binary runs
-- **THEN** stdout SHALL contain "Quick Start"
-
-Test: `cli_tests::help_contains_quick_start`
-
-#### Scenario: Start help shows all flags
 - **GIVEN** `start --help` is passed
 - **WHEN** the binary runs
-- **THEN** stdout SHALL contain --cli, --branches, --dry-run, and --preset
-
-Test: `cli_tests::start_help_shows_flags`
-
-#### Scenario: Purge help shows --force flag
-- **GIVEN** `purge --help` is passed
-- **WHEN** the binary runs
-- **THEN** stdout SHALL contain --force
-
-Test: `cli_tests::purge_help_shows_force_flag`
-
-#### Scenario: Add-CLI help shows arguments
-- **GIVEN** `add-cli --help` is passed
-- **WHEN** the binary runs
-- **THEN** stdout SHALL contain --display-name, name, and command arguments
-
-Test: `cli_tests::add_cli_help_shows_arguments`
+- **THEN** stdout SHALL contain `--supervisor`
 
 ### Requirement: Version output includes binary name
 
