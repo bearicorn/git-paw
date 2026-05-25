@@ -393,6 +393,41 @@ pub fn build_boot_block(branch_id: &str, broker_url: &str) -> String {
         .replace("{{GIT_PAW_BROKER_URL}}", broker_url)
 }
 
+/// Borrowed view of the seven gate-command templates substituted by
+/// [`render`] into the supervisor skill.
+///
+/// Each field maps to a `{{...}}` placeholder in the skill template (see
+/// [`render`] for the full list). `None` renders as the literal
+/// `(not configured)` so the rendered prose stays readable and the
+/// supervisor agent can machine-check the value to decide whether to skip
+/// the tooling invocation for that gate.
+///
+/// `{{CHANGE_ID}}` is NOT a field here: it is a per-invocation placeholder
+/// substituted by the supervisor agent at verification time (using the
+/// change being audited), not by `render` at session boot.
+///
+/// Use [`SupervisorConfig::gate_commands`](crate::config::SupervisorConfig::gate_commands)
+/// to build one from a config.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GateCommands<'a> {
+    /// Renders into `{{TEST_COMMAND}}`. Gate 1 test runner.
+    pub test_command: Option<&'a str>,
+    /// Renders into `{{LINT_COMMAND}}`. Gate 1 lint sub-step.
+    pub lint_command: Option<&'a str>,
+    /// Renders into `{{BUILD_COMMAND}}`. Gate 1 build sub-step.
+    pub build_command: Option<&'a str>,
+    /// Renders into `{{DOC_BUILD_COMMAND}}`. Gate 4 doc builder.
+    pub doc_build_command: Option<&'a str>,
+    /// Renders into `{{SPEC_VALIDATE_COMMAND}}`. Gate 3 spec validator.
+    /// MAY contain a `{{CHANGE_ID}}` substring that the supervisor agent
+    /// expands at verification time — `render` does NOT substitute it.
+    pub spec_validate_command: Option<&'a str>,
+    /// Renders into `{{FMT_CHECK_COMMAND}}`. Gate 1 format check.
+    pub fmt_check_command: Option<&'a str>,
+    /// Renders into `{{SECURITY_AUDIT_COMMAND}}`. Gate 5 security tooling.
+    pub security_audit_command: Option<&'a str>,
+}
+
 /// Renders a skill template for a specific worktree.
 ///
 /// Substitutes the following placeholders at render time:
@@ -410,9 +445,23 @@ pub fn build_boot_block(branch_id: &str, broker_url: &str) -> String {
 ///   `"just check"`). When `test_command` is `None`, the placeholder
 ///   substitutes to the literal `"(not configured)"` so the rendered prose
 ///   stays readable.
+/// - `{{LINT_COMMAND}}`, `{{BUILD_COMMAND}}`, `{{DOC_BUILD_COMMAND}}`,
+///   `{{SPEC_VALIDATE_COMMAND}}`, `{{FMT_CHECK_COMMAND}}`,
+///   `{{SECURITY_AUDIT_COMMAND}}` — the five additional gate commands
+///   from `[supervisor]` config. `None` renders as `(not configured)`,
+///   identical to `{{TEST_COMMAND}}` behaviour.
+///
+/// `{{CHANGE_ID}}` is **not** substituted here. The spec-validate command
+/// typically embeds `{{CHANGE_ID}}` as a per-invocation placeholder that
+/// the supervisor agent expands at verification time using the change name
+/// being audited. Substituting it at render time would freeze the rendered
+/// skill to a single change, which is wrong — the supervisor verifies
+/// many changes over a session lifetime.
 ///
 /// Any remaining `{{...}}` placeholder after substitution is logged as a
-/// warning to stderr but does not cause `render` to fail.
+/// warning to stderr but does not cause `render` to fail. The
+/// `{{CHANGE_ID}}` form is whitelisted from this warning since the spec
+/// expects it to survive intact (see the `agent-skills` spec delta).
 ///
 /// For standardized skills, additional metadata placeholders may be available:
 /// - `{{SKILL_NAME}}` — the skill name from metadata
@@ -422,18 +471,53 @@ pub fn render(
     branch: &str,
     broker_url: &str,
     project: &str,
-    test_command: Option<&str>,
+    gates: &GateCommands<'_>,
 ) -> String {
+    const NOT_CONFIGURED: &str = "(not configured)";
     let branch_id = slugify_branch(branch);
-    let test_command_value = test_command.unwrap_or("(not configured)");
 
-    // Start with basic substitutions
+    // Start with basic substitutions. Gate-command placeholders use the
+    // literal `(not configured)` when the source value is `None` so the
+    // rendered prose remains readable AND the supervisor agent can branch
+    // on it to skip the tooling invocation.
     let mut output = template
         .content
         .replace("{{BRANCH_ID}}", &branch_id)
         .replace("{{PROJECT_NAME}}", project)
         .replace("{{GIT_PAW_BROKER_URL}}", broker_url)
-        .replace("{{TEST_COMMAND}}", test_command_value);
+        .replace(
+            "{{TEST_COMMAND}}",
+            gates.test_command.unwrap_or(NOT_CONFIGURED),
+        )
+        .replace(
+            "{{LINT_COMMAND}}",
+            gates.lint_command.unwrap_or(NOT_CONFIGURED),
+        )
+        .replace(
+            "{{BUILD_COMMAND}}",
+            gates.build_command.unwrap_or(NOT_CONFIGURED),
+        )
+        .replace(
+            "{{DOC_BUILD_COMMAND}}",
+            gates.doc_build_command.unwrap_or(NOT_CONFIGURED),
+        )
+        .replace(
+            "{{SPEC_VALIDATE_COMMAND}}",
+            gates.spec_validate_command.unwrap_or(NOT_CONFIGURED),
+        )
+        .replace(
+            "{{FMT_CHECK_COMMAND}}",
+            gates.fmt_check_command.unwrap_or(NOT_CONFIGURED),
+        )
+        .replace(
+            "{{SECURITY_AUDIT_COMMAND}}",
+            gates.security_audit_command.unwrap_or(NOT_CONFIGURED),
+        );
+
+    // `{{CHANGE_ID}}` is intentionally NOT substituted: it is a
+    // per-invocation placeholder owned by the supervisor agent at
+    // verification time. It survives render verbatim and is expanded
+    // when the supervisor runs spec-validate against a specific change.
 
     // Add metadata substitutions for standardized skills
     if let Some(metadata) = &template.metadata {
@@ -442,16 +526,19 @@ pub fn render(
             .replace("{{SKILL_DESCRIPTION}}", &metadata.description);
     }
 
-    // Warn about any remaining {{...}} placeholders that were not consumed.
+    // Warn about any remaining {{...}} placeholders that were not consumed,
+    // except `{{CHANGE_ID}}` which is whitelisted (see comment above).
     let mut start = 0;
     while let Some(open) = output[start..].find("{{") {
         let abs_open = start + open;
         if let Some(close) = output[abs_open..].find("}}") {
             let placeholder = &output[abs_open..abs_open + close + 2];
-            eprintln!(
-                "warning: unsubstituted placeholder {placeholder} in skill '{}'",
-                template.name
-            );
+            if placeholder != "{{CHANGE_ID}}" {
+                eprintln!(
+                    "warning: unsubstituted placeholder {placeholder} in skill '{}'",
+                    template.name
+                );
+            }
             start = abs_open + close + 2;
         } else {
             break;
@@ -459,6 +546,67 @@ pub fn render(
     }
 
     output
+}
+
+/// Canonical doc names for the `[governance]` paths, in the order they
+/// appear in the supervisor boot prompt: `adr`, `test_strategy`, `security`,
+/// `dod`, `constitution`. The canonical name is what shows up before the
+/// path in each bullet (`- adr: docs/adr/`).
+const GOVERNANCE_CANONICAL_NAMES: [&str; 5] =
+    ["adr", "test_strategy", "security", "dod", "constitution"];
+
+/// Renders the supervisor boot-prompt's `## Governance documents` section
+/// from the five governance path fields, in canonical order.
+///
+/// Returns an empty `String` when every path is `None`. When at least one
+/// path is set, the result is a self-contained block:
+///
+/// ```text
+/// ## Governance documents
+///
+/// The supervisor consults these documents during spec audit.
+///
+/// - adr: docs/adr/
+/// - dod: docs/dod.md
+/// ```
+///
+/// The bullet list is built from the configured paths only — fields whose
+/// value is `None` are skipped entirely (no placeholder line). The section
+/// does not include any "gates" sub-line or per-doc enforcement metadata;
+/// the `governance-config` capability dropped per-doc gate flags so there
+/// is nothing to convey here beyond the paths themselves.
+///
+/// The caller is responsible for the blank line separating the section
+/// from preceding boot-prompt content. When this function returns the
+/// empty string, the boot prompt remains byte-identical to its v0.4
+/// shape.
+pub fn governance_section_paths(
+    adr: Option<&Path>,
+    test_strategy: Option<&Path>,
+    security: Option<&Path>,
+    dod: Option<&Path>,
+    constitution: Option<&Path>,
+) -> String {
+    let bullets: [Option<&Path>; 5] = [adr, test_strategy, security, dod, constitution];
+    if bullets.iter().all(Option::is_none) {
+        return String::new();
+    }
+
+    let mut out = String::with_capacity(192);
+    out.push_str("## Governance documents\n");
+    out.push('\n');
+    out.push_str("The supervisor consults these documents during spec audit.\n");
+    out.push('\n');
+    for (name, path) in GOVERNANCE_CANONICAL_NAMES.iter().zip(bullets.iter()) {
+        if let Some(p) = path {
+            use std::fmt::Write as _;
+            // `writeln!` into a `String` never fails — formatting to a
+            // growable buffer cannot run out of capacity. The `let _ =`
+            // discards the `fmt::Result` without panicking.
+            let _ = writeln!(out, "- {name}: {}", p.display());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -493,6 +641,183 @@ mod tests {
         assert!(tmpl.content.contains("agent.verified"));
         assert!(tmpl.content.contains("agent.feedback"));
         assert!(tmpl.content.contains("re-publish"));
+    }
+
+    // === forward-coordination: existing-scenario coverage gaps ===
+
+    #[test]
+    fn coordination_skill_documents_automatic_status_publishing() {
+        let tmpl = resolve("coordination").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("publishes your status automatically")
+                || lowered.contains("status publishing is automatic")
+                || lowered.contains("publishes status automatically"),
+            "coordination skill should indicate that agent.status publishing is automatic"
+        );
+        assert!(
+            !tmpl.content.contains("MUST publish agent.status"),
+            "coordination skill must not contain the legacy 'MUST publish agent.status' instruction"
+        );
+    }
+
+    #[test]
+    fn coordination_skill_contains_cherry_pick_instructions() {
+        let tmpl = resolve("coordination").unwrap();
+        assert!(
+            tmpl.content.contains("git cherry-pick"),
+            "coordination skill should contain the literal 'git cherry-pick' command"
+        );
+        assert!(
+            tmpl.content.contains("Cherry-pick peer commits"),
+            "coordination skill should contain a 'Cherry-pick peer commits' heading"
+        );
+    }
+
+    // === forward-coordination: agent.intent skill content ===
+
+    #[test]
+    fn coordination_skill_contains_before_you_start_editing_heading() {
+        let tmpl = resolve("coordination").unwrap();
+        assert!(
+            tmpl.content.contains("Before you start editing"),
+            "coordination skill should contain 'Before you start editing' heading"
+        );
+    }
+
+    #[test]
+    fn coordination_skill_contains_agent_intent_curl_example() {
+        let tmpl = resolve("coordination").unwrap();
+        let curl_pos = tmpl
+            .content
+            .find("agent.intent")
+            .expect("coordination skill should mention agent.intent");
+        // Look at a window around the intent example and assert all required
+        // payload fields appear there.
+        let window_start = curl_pos.saturating_sub(200);
+        let window_end = (curl_pos + 800).min(tmpl.content.len());
+        let window = &tmpl.content[window_start..window_end];
+        assert!(
+            window.contains("curl"),
+            "agent.intent example should be a curl invocation"
+        );
+        assert!(
+            window.contains("\"files\""),
+            "agent.intent example should include the files field"
+        );
+        assert!(
+            window.contains("\"summary\""),
+            "agent.intent example should include the summary field"
+        );
+        assert!(
+            window.contains("\"valid_for_seconds\""),
+            "agent.intent example should include valid_for_seconds"
+        );
+    }
+
+    #[test]
+    fn coordination_skill_contains_while_youre_editing_heading() {
+        let tmpl = resolve("coordination").unwrap();
+        assert!(
+            tmpl.content.contains("While you're editing"),
+            "coordination skill should contain 'While you're editing' heading"
+        );
+    }
+
+    #[test]
+    fn coordination_skill_instructs_republish_on_scope_growth() {
+        let tmpl = resolve("coordination").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("scope grows") || lowered.contains("scope grow"),
+            "coordination skill should instruct re-publishing when scope grows"
+        );
+        assert!(
+            lowered.contains("re-publish"),
+            "coordination skill should mention re-publishing the intent"
+        );
+    }
+
+    #[test]
+    fn coordination_skill_instructs_question_on_peer_intent_overlap() {
+        let tmpl = resolve("coordination").unwrap();
+        // The skill should tell agents to send agent.question on overlap, not
+        // race the peer.
+        assert!(
+            tmpl.content.contains("agent.question"),
+            "coordination skill should reference agent.question"
+        );
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("overlap") || lowered.contains("overlapping"),
+            "coordination skill should call out overlap as the trigger for agent.question"
+        );
+    }
+
+    #[test]
+    fn coordination_skill_contains_must_not_anti_pattern_statements() {
+        let tmpl = resolve("coordination").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("must not"),
+            "coordination skill should contain explicit MUST NOT statements"
+        );
+        assert!(
+            lowered.contains("pairwise"),
+            "coordination skill should reject pairwise check-ins"
+        );
+        assert!(
+            lowered.contains("go-ahead") || lowered.contains("go ahead"),
+            "coordination skill should reject waiting for go-ahead"
+        );
+        assert!(
+            lowered.contains("broker silence") || lowered.contains("silence"),
+            "coordination skill should reject blocking on broker silence"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_contains_watch_peer_intents_section() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            tmpl.content.contains("Watch peer intents"),
+            "supervisor skill should contain 'Watch peer intents' heading"
+        );
+        assert!(
+            tmpl.content.contains("agent.intent"),
+            "supervisor skill should mention agent.intent"
+        );
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("not part of this release") || lowered.contains("conflict-detection"),
+            "supervisor skill should note that automatic conflict-warning logic is not part of this release"
+        );
+    }
+
+    /// `supervisor-bugfixes-v0-5-x` §3.10: the rendered supervisor skill SHALL
+    /// invoke `.git-paw/scripts/sweep.sh` for snapshot / capture / approve /
+    /// verified / feedback-gate, and SHALL NOT include legacy multi-pane
+    /// `for p in …; do tmux capture-pane` loops.
+    #[test]
+    fn supervisor_skill_references_bundled_sweep_helper() {
+        let tmpl = resolve("supervisor").unwrap();
+        let required = [
+            ".git-paw/scripts/sweep.sh snapshot",
+            ".git-paw/scripts/sweep.sh capture",
+            ".git-paw/scripts/sweep.sh approve",
+            ".git-paw/scripts/sweep.sh verified",
+            ".git-paw/scripts/sweep.sh feedback-gate",
+        ];
+        for needle in required {
+            assert!(
+                tmpl.content.contains(needle),
+                "supervisor skill should reference {needle:?}; content does not"
+            );
+        }
+        assert!(
+            !tmpl.content.contains("for p in 2 3 4 5"),
+            "supervisor skill should not contain legacy `for p in 2 3 4 5` capture-pane loops"
+        );
     }
 
     // 9.4: Standard location skill loading
@@ -551,7 +876,7 @@ mod tests {
             "feat/http-broker",
             "http://127.0.0.1:9119",
             "git-paw",
-            None,
+            &GateCommands::default(),
         );
         assert!(output.contains("feat-http-broker"));
         assert!(!output.contains("{{BRANCH_ID}}"));
@@ -568,7 +893,13 @@ mod tests {
             metadata: None,
             resource_paths: None,
         };
-        let output = render(&tmpl, "feat/x", "http://127.0.0.1:9119", "git-paw", None);
+        let output = render(
+            &tmpl,
+            "feat/x",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+        );
         assert!(output.contains("http://127.0.0.1:9119/status"));
         assert!(!output.contains("{{GIT_PAW_BROKER_URL}}"));
     }
@@ -589,7 +920,7 @@ mod tests {
             "Feature/HTTP_Broker",
             "http://127.0.0.1:9119",
             "git-paw",
-            None,
+            &GateCommands::default(),
         );
         let expected = slugify_branch("Feature/HTTP_Broker");
         assert_eq!(output, format!("id={expected}"));
@@ -599,8 +930,20 @@ mod tests {
     #[test]
     fn render_is_deterministic() {
         let tmpl = resolve("coordination").unwrap();
-        let a = render(&tmpl, "feat/x", "http://127.0.0.1:9119", "git-paw", None);
-        let b = render(&tmpl, "feat/x", "http://127.0.0.1:9119", "git-paw", None);
+        let a = render(
+            &tmpl,
+            "feat/x",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+        );
+        let b = render(
+            &tmpl,
+            "feat/x",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+        );
         assert_eq!(a, b);
     }
 
@@ -630,7 +973,13 @@ mod tests {
 
         // Delete the skill directory — render must still succeed from in-memory content
         std::fs::remove_dir_all(skill_dir).unwrap();
-        let output = render(&tmpl, "feat/x", "http://127.0.0.1:9119", "git-paw", None);
+        let output = render(
+            &tmpl,
+            "feat/x",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+        );
         assert!(output.contains("feat-x"));
 
         // Restore original directory
@@ -648,7 +997,13 @@ mod tests {
             metadata: None,
             resource_paths: None,
         };
-        let output = render(&tmpl, "feat/x", "http://127.0.0.1:9119", "git-paw", None);
+        let output = render(
+            &tmpl,
+            "feat/x",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+        );
         assert!(
             output.contains("{{UNKNOWN_THING}}"),
             "unknown placeholder should survive in output"
@@ -659,7 +1014,13 @@ mod tests {
     #[test]
     fn no_unknown_placeholders_after_render() {
         let tmpl = resolve("coordination").unwrap();
-        let output = render(&tmpl, "feat/x", "http://127.0.0.1:9119", "git-paw", None);
+        let output = render(
+            &tmpl,
+            "feat/x",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+        );
         assert!(
             !output.contains("{{"),
             "no double-curly placeholders should remain: {output}"
@@ -694,6 +1055,140 @@ mod tests {
         let tmpl = resolve("supervisor").unwrap();
         assert!(tmpl.content.contains("agent.verified"));
         assert!(tmpl.content.contains("agent.feedback"));
+    }
+
+    /// Returns the substring containing the supervisor skill's `agent.verified`
+    /// curl example body (the JSON payload region), used to scope wire-format
+    /// assertions to the verified example without picking up other prose.
+    fn verified_curl_example_body(content: &str) -> &str {
+        let start = content
+            .find("\"type\":\"agent.verified\"")
+            .expect("supervisor skill should contain an agent.verified curl example");
+        let rest = &content[start..];
+        let end = rest
+            .find("}}'")
+            .expect("agent.verified curl example should terminate with the closing payload `}}'`");
+        &rest[..end + 3]
+    }
+
+    /// Returns the substring containing the supervisor skill's `agent.feedback`
+    /// curl example body (the JSON payload region).
+    fn feedback_curl_example_body(content: &str) -> &str {
+        let start = content
+            .find("\"type\":\"agent.feedback\"")
+            .expect("supervisor skill should contain an agent.feedback curl example");
+        let rest = &content[start..];
+        let end = rest
+            .find("}}'")
+            .expect("agent.feedback curl example should terminate with the closing payload `}}'`");
+        &rest[..end + 3]
+    }
+
+    #[test]
+    fn supervisor_verified_example_uses_correct_payload_fields() {
+        let tmpl = resolve("supervisor").unwrap();
+        let example = verified_curl_example_body(&tmpl.content);
+        assert!(
+            example.contains("verified_by"),
+            "agent.verified example must use the `verified_by` payload field: {example}"
+        );
+        assert!(
+            example.contains("message"),
+            "agent.verified example must use the `message` payload field: {example}"
+        );
+        for wrong in ["\"target\"", "\"result\"", "\"notes\""] {
+            assert!(
+                !example.contains(wrong),
+                "agent.verified example must not contain the stale field key {wrong}: {example}"
+            );
+        }
+    }
+
+    #[test]
+    fn supervisor_feedback_example_uses_correct_payload_fields() {
+        let tmpl = resolve("supervisor").unwrap();
+        let example = feedback_curl_example_body(&tmpl.content);
+        assert!(
+            example.contains("\"from\""),
+            "agent.feedback example must use the `from` payload field: {example}"
+        );
+        assert!(
+            example.contains("\"errors\""),
+            "agent.feedback example must use the `errors` payload field: {example}"
+        );
+        assert!(
+            example.contains('['),
+            "agent.feedback example's errors field must be a JSON array (contains `[`): {example}"
+        );
+        assert!(
+            example.contains(']'),
+            "agent.feedback example's errors field must be a JSON array (contains `]`): {example}"
+        );
+        for wrong in ["\"target\"", "\"message\""] {
+            assert!(
+                !example.contains(wrong),
+                "agent.feedback example must not contain the stale field key {wrong}: {example}"
+            );
+        }
+    }
+
+    #[test]
+    fn supervisor_examples_clarify_recipient_vs_sender() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+
+        // Verified-section clarification (between the verified heading and the
+        // feedback heading).
+        let verified_start = tmpl
+            .content
+            .find("### Publish verification outcome")
+            .expect("verified heading should be present");
+        let feedback_start = tmpl
+            .content
+            .find("### Publish feedback to a peer agent")
+            .expect("feedback heading should be present");
+        let verified_section = tmpl.content[verified_start..feedback_start].to_lowercase();
+        assert!(
+            verified_section.contains("recipient") && verified_section.contains("sender"),
+            "verified section should clarify recipient-vs-sender semantics, got: {verified_section}"
+        );
+
+        // Feedback-section clarification (between the feedback heading and the
+        // next `### ` heading).
+        let after_feedback =
+            &tmpl.content[feedback_start + "### Publish feedback to a peer agent".len()..];
+        let feedback_end_rel = after_feedback
+            .find("\n### ")
+            .unwrap_or(after_feedback.len());
+        let feedback_section = after_feedback[..feedback_end_rel].to_lowercase();
+        assert!(
+            feedback_section.contains("recipient") && feedback_section.contains("sender"),
+            "feedback section should clarify recipient-vs-sender semantics, got: {feedback_section}"
+        );
+
+        // Defensive sanity: the words exist somewhere in the document.
+        assert!(lowered.contains("recipient"));
+        assert!(lowered.contains("sender"));
+    }
+
+    #[test]
+    fn supervisor_workflow_prose_drops_legacy_verified_fields() {
+        let tmpl = resolve("supervisor").unwrap();
+        // Strip whitespace inside the matches so a stray space doesn't hide a
+        // regression like `result : "pass"` or `notes : ""`.
+        let condensed: String = tmpl
+            .content
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            !condensed.contains("result:\"pass\""),
+            "workflow prose must not reference `result:\"pass\"` as the verified payload"
+        );
+        assert!(
+            !condensed.contains("notes:\"\""),
+            "workflow prose must not reference `notes:\"\"` as the verified payload"
+        );
     }
 
     // Supervisor skill contains tmux commands targeting the session name
@@ -738,6 +1233,472 @@ mod tests {
         );
     }
 
+    // Paste-buffer recovery sub-case under stall detection (prompt-submit-fix).
+
+    #[test]
+    fn supervisor_skill_mentions_paste_buffer_recovery() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("paste-buffer") || lowered.contains("paste buffer"),
+            "supervisor skill should contain paste-buffer recovery sub-case"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_mentions_pasted_text_indicator() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            tmpl.content.contains("Pasted text"),
+            "supervisor skill should mention the Claude Code 'Pasted text' indicator"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_paste_buffer_recovery_uses_tmux() {
+        let tmpl = resolve("supervisor").unwrap();
+        let start = tmpl
+            .content
+            .to_lowercase()
+            .find("paste-buffer recovery")
+            .or_else(|| tmpl.content.to_lowercase().find("paste buffer recovery"))
+            .expect("paste-buffer recovery sub-case heading should be present");
+        // Take a window around the heading large enough to cover the
+        // recovery example (a couple thousand chars now that the sub-case
+        // also references the proactive launch-time sweep).
+        let window_end = (start + 2200).min(tmpl.content.len());
+        let window = &tmpl.content[start..window_end];
+        // The inspect step now goes through `sweep.sh capture <pane>`; the
+        // earlier shape `tmux capture-pane …` is still acceptable for
+        // historical content. Either form satisfies the inspect contract.
+        assert!(
+            window.contains(".git-paw/scripts/sweep.sh capture")
+                || window.contains("tmux capture-pane"),
+            "paste-buffer recovery should reference a pane-capture command (sweep.sh capture or tmux capture-pane)"
+        );
+        assert!(
+            window.contains("tmux send-keys"),
+            "paste-buffer recovery should reference tmux send-keys for the Enter recovery"
+        );
+        assert!(
+            window.contains("Enter"),
+            "paste-buffer recovery should specify Enter as the recovery keystroke"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_mentions_launch_time_sweep() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("launch-time pane sweep")
+                || lowered.contains("launch time pane sweep")
+                || lowered.contains("launch sweep"),
+            "supervisor skill should contain a launch-time pane sweep heading"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_launch_sweep_lists_four_pane_categories() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        let start = lowered
+            .find("launch-time pane sweep")
+            .or_else(|| lowered.find("launch sweep"))
+            .expect("launch-time pane sweep heading should be present");
+        let window_end = (start + 2500).min(lowered.len());
+        let window = &lowered[start..window_end];
+        assert!(
+            window.contains("paste-buffer") || window.contains("paste buffer"),
+            "launch sweep should enumerate paste-buffer category"
+        );
+        assert!(
+            window.contains("permission prompt"),
+            "launch sweep should enumerate permission-prompt category"
+        );
+        assert!(
+            window.contains("working"),
+            "launch sweep should enumerate working category"
+        );
+        assert!(
+            window.contains("idle"),
+            "launch sweep should enumerate idle category"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_launch_sweep_references_down_enter_keystroke() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        let start = lowered
+            .find("launch-time pane sweep")
+            .or_else(|| lowered.find("launch sweep"))
+            .expect("launch-time pane sweep heading should be present");
+        let window_end = (start + 2500).min(lowered.len());
+        let window = &lowered[start..window_end];
+        // Safe-command auto-approval uses Down to move to "Yes, don't ask
+        // again", then Enter to select it. Both keystrokes must be in the
+        // section so the supervisor agent knows the pattern.
+        assert!(
+            window.contains("down"),
+            "launch sweep should reference the Down keystroke for selecting 'don't ask again'"
+        );
+        assert!(
+            window.contains("enter"),
+            "launch sweep should reference the Enter keystroke for confirming approval"
+        );
+        // Confirm the "don't ask again" phrasing is present so future
+        // pattern allowlist behavior is documented in the skill.
+        assert!(
+            window.contains("don't ask again") || window.contains("don't ask"),
+            "launch sweep should mention the 'don't ask again' approval option"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_paste_buffer_recovery_is_safe_by_default() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        let start = lowered
+            .find("paste-buffer recovery")
+            .or_else(|| lowered.find("paste buffer recovery"))
+            .expect("paste-buffer recovery sub-case heading should be present");
+        let window_end = (start + 2200).min(lowered.len());
+        let window = &lowered[start..window_end];
+        let safe_phrasing = window.contains("safe-by-default")
+            || window.contains("safe by default")
+            || window.contains("no-op")
+            || window.contains("no harm");
+        assert!(
+            safe_phrasing,
+            "paste-buffer recovery should explicitly note the Enter is safe-by-default / no-op / no harm"
+        );
+    }
+
+    // Governance verification sub-step in the supervisor skill (governance-context §5).
+
+    #[test]
+    fn supervisor_skill_contains_governance_verification() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            tmpl.content.contains("Governance verification"),
+            "supervisor skill should contain 'Governance verification' heading"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_governance_is_substep_of_spec_audit() {
+        let tmpl = resolve("supervisor").unwrap();
+        let audit_pos = tmpl
+            .content
+            .find("### Spec Audit Procedure")
+            .expect("Spec Audit Procedure heading must exist");
+        let gov_pos = tmpl
+            .content
+            .find("Governance verification")
+            .expect("Governance verification must exist");
+        let conflict_pos = tmpl
+            .content
+            .find("### Conflict detection")
+            .unwrap_or(tmpl.content.len());
+        assert!(
+            gov_pos > audit_pos,
+            "Governance verification should appear inside Spec Audit Procedure (after its heading)"
+        );
+        assert!(
+            gov_pos < conflict_pos,
+            "Governance verification should appear before the next top-level subsection (Conflict detection), keeping it inside Spec Audit Procedure"
+        );
+        assert!(
+            !tmpl.content.contains("step 7.5"),
+            "Governance verification must not be framed as a separate 'step 7.5' flow step"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_governance_examples_cover_all_five_docs() {
+        let tmpl = resolve("supervisor").unwrap();
+        let gov_pos = tmpl
+            .content
+            .find("Governance verification")
+            .expect("Governance verification section must exist");
+        // Confine the search to the governance subsection (everything between
+        // the heading and the next `### ` top-level subsection or EOF).
+        let after = &tmpl.content[gov_pos..];
+        let end = after.find("\n### ").unwrap_or(after.len());
+        let section = &after[..end];
+        for needle in &["DoD", "ADR", "Security", "Test strategy", "Constitution"] {
+            assert!(
+                section.contains(needle),
+                "governance section should mention `{needle}` as a per-doc example, got:\n{section}"
+            );
+        }
+    }
+
+    #[test]
+    fn supervisor_skill_governance_findings_via_agent_feedback() {
+        let tmpl = resolve("supervisor").unwrap();
+        let gov_pos = tmpl
+            .content
+            .find("Governance verification")
+            .expect("Governance verification section must exist");
+        let after = &tmpl.content[gov_pos..];
+        let end = after.find("\n### ").unwrap_or(after.len());
+        let section = &after[..end];
+        assert!(
+            section.contains("agent.feedback"),
+            "governance section must state that findings flow through `agent.feedback`"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_no_governance_gate_tag() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            !tmpl.content.contains("[governance-gate:"),
+            "supervisor skill must not contain the dropped `[governance-gate:<doc>]` tag prefix"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_no_governance_gates_table() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            !tmpl.content.contains("[governance.gates]"),
+            "supervisor skill must not reference the dropped `[governance.gates]` table"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_no_gating_language() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            !lowered.contains("gating"),
+            "supervisor skill must not use the language of 'gating'"
+        );
+        assert!(
+            !lowered.contains("blocking on governance failures"),
+            "supervisor skill must not use the language of 'blocking on governance failures'"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_governance_missing_doc_handling() {
+        let tmpl = resolve("supervisor").unwrap();
+        let gov_pos = tmpl
+            .content
+            .find("Governance verification")
+            .expect("Governance verification section must exist");
+        let after = &tmpl.content[gov_pos..];
+        let end = after.find("\n### ").unwrap_or(after.len());
+        let section = &after[..end];
+        let lowered = section.to_lowercase();
+        assert!(
+            lowered.contains("missing"),
+            "governance section should describe missing-doc handling"
+        );
+        assert!(
+            section.contains("agent.feedback"),
+            "missing-doc handling should reference `agent.feedback` errors list"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_governance_missing_doc_is_not_distinct_failure_type() {
+        let tmpl = resolve("supervisor").unwrap();
+        let gov_pos = tmpl
+            .content
+            .find("Governance verification")
+            .expect("Governance verification section must exist");
+        let after = &tmpl.content[gov_pos..];
+        let end = after.find("\n### ").unwrap_or(after.len());
+        let section = &after[..end];
+        let lowered = section.to_lowercase();
+        assert!(
+            lowered.contains("not a distinct failure")
+                || lowered.contains("not a separate failure")
+                || lowered.contains("treat it as a finding"),
+            "governance section must state that missing files are findings, not a distinct failure type; got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_governance_states_activation_condition() {
+        let tmpl = resolve("supervisor").unwrap();
+        let gov_pos = tmpl
+            .content
+            .find("Governance verification")
+            .expect("Governance verification section must exist");
+        let after = &tmpl.content[gov_pos..];
+        let end = after.find("\n### ").unwrap_or(after.len());
+        let section = &after[..end];
+        let lowered = section.to_lowercase();
+        assert!(
+            lowered.contains("skip"),
+            "governance section must instruct the supervisor to skip the sub-step when the boot prompt has no `## Governance documents` section; got:\n{section}"
+        );
+        assert!(
+            section.contains("## Governance documents"),
+            "governance section must reference the boot-prompt heading explicitly as its activation condition; got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_governance_examples_state_they_are_illustrative() {
+        let tmpl = resolve("supervisor").unwrap();
+        let gov_pos = tmpl
+            .content
+            .find("Governance verification")
+            .expect("Governance verification section must exist");
+        let after = &tmpl.content[gov_pos..];
+        let end = after.find("\n### ").unwrap_or(after.len());
+        let section = &after[..end];
+        let lowered = section.to_lowercase();
+        assert!(
+            lowered.contains("illustrative") || lowered.contains("not exhaustive"),
+            "governance section must state per-doc examples are illustrative / not exhaustive rubrics; got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_governance_states_judgment_per_project_conventions() {
+        let tmpl = resolve("supervisor").unwrap();
+        let gov_pos = tmpl
+            .content
+            .find("Governance verification")
+            .expect("Governance verification section must exist");
+        let after = &tmpl.content[gov_pos..];
+        let end = after.find("\n### ").unwrap_or(after.len());
+        let section = &after[..end];
+        let lowered = section.to_lowercase();
+        assert!(
+            lowered.contains("judgment"),
+            "governance section must state the supervisor applies judgment; got:\n{section}"
+        );
+        assert!(
+            lowered.contains("convention") || lowered.contains("project"),
+            "governance section must reference the project's conventions / process when describing judgment; got:\n{section}"
+        );
+    }
+
+    // governance_section_paths renderer (governance-context §1, §3).
+
+    #[test]
+    fn governance_section_empty_when_all_paths_none() {
+        let out = governance_section_paths(None, None, None, None, None);
+        assert!(
+            out.is_empty(),
+            "governance_section_paths should return empty string when all paths are None, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn governance_section_one_path_only_dod() {
+        let dod = Path::new("docs/dod.md");
+        let out = governance_section_paths(None, None, None, Some(dod), None);
+        assert!(
+            out.contains("## Governance documents"),
+            "section should include the canonical heading, got:\n{out}"
+        );
+        assert!(
+            out.contains("- dod: docs/dod.md"),
+            "section should include the dod bullet, got:\n{out}"
+        );
+        for unset in [
+            "- adr:",
+            "- test_strategy:",
+            "- security:",
+            "- constitution:",
+        ] {
+            assert!(
+                !out.contains(unset),
+                "section should not mention `{unset}` when its path is None, got:\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn governance_section_lists_all_five_in_canonical_order() {
+        let adr = Path::new("docs/adr/");
+        let test_strategy = Path::new("docs/test-strategy.md");
+        let security = Path::new("docs/security.md");
+        let dod = Path::new("docs/dod.md");
+        let constitution = Path::new("docs/constitution.md");
+        let out = governance_section_paths(
+            Some(adr),
+            Some(test_strategy),
+            Some(security),
+            Some(dod),
+            Some(constitution),
+        );
+
+        let order = [
+            "- adr: docs/adr/",
+            "- test_strategy: docs/test-strategy.md",
+            "- security: docs/security.md",
+            "- dod: docs/dod.md",
+            "- constitution: docs/constitution.md",
+        ];
+        let mut last_pos = 0usize;
+        for bullet in order {
+            let idx = out
+                .find(bullet)
+                .unwrap_or_else(|| panic!("bullet `{bullet}` not found in:\n{out}"));
+            assert!(
+                idx >= last_pos,
+                "bullets must appear in canonical adr -> test_strategy -> security -> dod -> constitution order; `{bullet}` came before a previous bullet in:\n{out}"
+            );
+            last_pos = idx;
+        }
+    }
+
+    #[test]
+    fn governance_section_has_no_gates_text() {
+        let out = governance_section_paths(
+            Some(Path::new("docs/adr/")),
+            Some(Path::new("docs/test-strategy.md")),
+            Some(Path::new("docs/security.md")),
+            Some(Path::new("docs/dod.md")),
+            Some(Path::new("docs/constitution.md")),
+        );
+        let lowered = out.to_lowercase();
+        assert!(
+            !lowered.contains("gated docs"),
+            "section should not contain a 'Gated docs' line, got:\n{out}"
+        );
+        assert!(
+            !lowered.contains("governance gates"),
+            "section should not contain a 'Governance gates' sub-section, got:\n{out}"
+        );
+        assert!(
+            !out.contains("[governance.gates]"),
+            "section should not reference the dropped [governance.gates] table, got:\n{out}"
+        );
+        assert!(
+            !out.contains("[governance-gate:"),
+            "section should not introduce the dropped [governance-gate:<doc>] tag, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn governance_section_has_preamble_line() {
+        let out = governance_section_paths(None, None, None, Some(Path::new("docs/dod.md")), None);
+        let preamble = "The supervisor consults these documents during spec audit.";
+        assert!(
+            out.contains(preamble),
+            "section should include the preamble line; got:\n{out}"
+        );
+        // Preamble must come before bullets and after the heading.
+        let heading_pos = out.find("## Governance documents").unwrap();
+        let preamble_pos = out.find(preamble).unwrap();
+        let bullet_pos = out.find("- dod:").unwrap();
+        assert!(
+            heading_pos < preamble_pos && preamble_pos < bullet_pos,
+            "section layout should be heading -> preamble -> bullets; got:\n{out}"
+        );
+    }
+
     // {{PROJECT_NAME}} is substituted by render
     #[test]
     fn project_name_is_substituted() {
@@ -749,7 +1710,13 @@ mod tests {
             metadata: None,
             resource_paths: None,
         };
-        let output = render(&tmpl, "feat/x", "http://127.0.0.1:9119", "my-app", None);
+        let output = render(
+            &tmpl,
+            "feat/x",
+            "http://127.0.0.1:9119",
+            "my-app",
+            &GateCommands::default(),
+        );
         assert!(output.contains("paw-my-app"));
         assert!(!output.contains("{{PROJECT_NAME}}"));
     }
@@ -765,7 +1732,13 @@ mod tests {
             metadata: None,
             resource_paths: None,
         };
-        let output = render(&tmpl, "feat/http-broker", "url", "git-paw", None);
+        let output = render(
+            &tmpl,
+            "feat/http-broker",
+            "url",
+            "git-paw",
+            &GateCommands::default(),
+        );
         assert!(output.contains("feat-http-broker"));
         assert!(output.contains("paw-git-paw"));
         assert!(!output.contains("{{BRANCH_ID}}"));
@@ -884,7 +1857,13 @@ mod tests {
             resource_paths: None,
         };
 
-        let output = render(&tmpl, "feat/x", "http://127.0.0.1:9119", "git-paw", None);
+        let output = render(
+            &tmpl,
+            "feat/x",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+        );
         assert!(output.contains("Name: test-skill, Desc: Test description"));
         assert!(!output.contains("{{SKILL_NAME}}"));
         assert!(!output.contains("{{SKILL_DESCRIPTION}}"));
@@ -905,7 +1884,10 @@ mod tests {
             "supervisor",
             "http://127.0.0.1:9119",
             "git-paw",
-            Some("just check"),
+            &GateCommands {
+                test_command: Some("just check"),
+                ..Default::default()
+            },
         );
         assert_eq!(output, "Run `just check` after each merge.");
         assert!(!output.contains("{{TEST_COMMAND}}"));
@@ -926,7 +1908,7 @@ mod tests {
             "supervisor",
             "http://127.0.0.1:9119",
             "git-paw",
-            None,
+            &GateCommands::default(),
         );
         assert_eq!(output, "Baseline: (not configured)");
         assert!(!output.contains("{{TEST_COMMAND}}"));
@@ -938,21 +1920,466 @@ mod tests {
         // test_command must NOT leave {{TEST_COMMAND}} in the output. Captured
         // during a live dogfood run that produced the warning
         // "unsubstituted placeholder {{TEST_COMMAND}} in skill 'supervisor'".
+        //
+        // `{{CHANGE_ID}}` is a per-invocation placeholder (substituted by the
+        // supervisor agent, not by render) and is therefore expected to
+        // survive a render pass.
         let tmpl = resolve("supervisor").expect("supervisor skill resolves");
         let output = render(
             &tmpl,
             "supervisor",
             "http://127.0.0.1:9119",
             "git-paw",
-            Some("just check"),
+            &GateCommands {
+                test_command: Some("just check"),
+                ..Default::default()
+            },
         );
         assert!(
             !output.contains("{{TEST_COMMAND}}"),
             "supervisor template still contains a literal {{TEST_COMMAND}} after render"
         );
+        let remaining: String = output.replace("{{CHANGE_ID}}", "").chars().collect();
         assert!(
-            !output.contains("{{"),
-            "supervisor template has unsubstituted {{...}} placeholder after render"
+            !remaining.contains("{{"),
+            "supervisor template has unsubstituted {{...}} placeholder (other than {{CHANGE_ID}}) after render"
+        );
+    }
+
+    // --- Gate-command placeholder substitution (supervisor-gate-templating-v0-5-x) ---
+
+    /// Helper: render `template` with all gate placeholders set to the same
+    /// `Some(value)` or all `None`.
+    fn render_with_gates_uniform(template: &str, value: Option<&str>) -> String {
+        let tmpl = SkillTemplate {
+            name: "supervisor".into(),
+            content: template.into(),
+            source: Source::Embedded,
+            format: SkillFormat::Standardized,
+            metadata: None,
+            resource_paths: None,
+        };
+        let gates = GateCommands {
+            test_command: value,
+            lint_command: value,
+            build_command: value,
+            doc_build_command: value,
+            spec_validate_command: value,
+            fmt_check_command: value,
+            security_audit_command: value,
+        };
+        render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &gates,
+        )
+    }
+
+    #[test]
+    fn render_test_command_placeholder_substitutes_from_config() {
+        let tmpl = SkillTemplate {
+            name: "supervisor".into(),
+            content: "Run {{TEST_COMMAND}}.".into(),
+            source: Source::Embedded,
+            format: SkillFormat::Standardized,
+            metadata: None,
+            resource_paths: None,
+        };
+        let gates = GateCommands {
+            test_command: Some("just check"),
+            ..Default::default()
+        };
+        let output = render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &gates,
+        );
+        assert!(
+            output.contains("Run just check."),
+            "expected 'Run just check.' in: {output}"
+        );
+    }
+
+    #[test]
+    fn render_test_command_placeholder_none_renders_not_configured() {
+        let output = render_with_gates_uniform("Run {{TEST_COMMAND}}.", None);
+        assert!(
+            output.contains("Run (not configured)."),
+            "expected 'Run (not configured).' in: {output}"
+        );
+    }
+
+    #[test]
+    fn render_lint_command_placeholder_substitutes_and_none_fallback() {
+        let tmpl = SkillTemplate {
+            name: "supervisor".into(),
+            content: "Run {{LINT_COMMAND}}.".into(),
+            source: Source::Embedded,
+            format: SkillFormat::Standardized,
+            metadata: None,
+            resource_paths: None,
+        };
+        let gates = GateCommands {
+            lint_command: Some("cargo clippy -- -D warnings"),
+            ..Default::default()
+        };
+        let output = render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &gates,
+        );
+        assert!(
+            output.contains("Run cargo clippy -- -D warnings."),
+            "expected substitution in: {output}"
+        );
+
+        let none_output = render_with_gates_uniform("Run {{LINT_COMMAND}}.", None);
+        assert!(
+            none_output.contains("Run (not configured)."),
+            "expected '(not configured)' fallback in: {none_output}"
+        );
+    }
+
+    #[test]
+    fn render_build_command_placeholder_substitutes_and_none_fallback() {
+        let tmpl = SkillTemplate {
+            name: "supervisor".into(),
+            content: "Run {{BUILD_COMMAND}}.".into(),
+            source: Source::Embedded,
+            format: SkillFormat::Standardized,
+            metadata: None,
+            resource_paths: None,
+        };
+        let gates = GateCommands {
+            build_command: Some("cargo build"),
+            ..Default::default()
+        };
+        let output = render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &gates,
+        );
+        assert!(output.contains("Run cargo build."), "got: {output}");
+
+        let none_output = render_with_gates_uniform("Run {{BUILD_COMMAND}}.", None);
+        assert!(
+            none_output.contains("Run (not configured)."),
+            "got: {none_output}"
+        );
+    }
+
+    #[test]
+    fn render_doc_build_command_placeholder_substitutes_and_none_fallback() {
+        let tmpl = SkillTemplate {
+            name: "supervisor".into(),
+            content: "Run {{DOC_BUILD_COMMAND}}.".into(),
+            source: Source::Embedded,
+            format: SkillFormat::Standardized,
+            metadata: None,
+            resource_paths: None,
+        };
+        let gates = GateCommands {
+            doc_build_command: Some("mdbook build docs/"),
+            ..Default::default()
+        };
+        let output = render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &gates,
+        );
+        assert!(output.contains("Run mdbook build docs/."), "got: {output}");
+
+        let none_output = render_with_gates_uniform("Run {{DOC_BUILD_COMMAND}}.", None);
+        assert!(
+            none_output.contains("Run (not configured)."),
+            "got: {none_output}"
+        );
+    }
+
+    #[test]
+    fn render_spec_validate_command_placeholder_substitutes_and_none_fallback() {
+        let tmpl = SkillTemplate {
+            name: "supervisor".into(),
+            content: "Run {{SPEC_VALIDATE_COMMAND}}.".into(),
+            source: Source::Embedded,
+            format: SkillFormat::Standardized,
+            metadata: None,
+            resource_paths: None,
+        };
+        let gates = GateCommands {
+            spec_validate_command: Some("openspec validate {{CHANGE_ID}} --strict"),
+            ..Default::default()
+        };
+        let output = render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &gates,
+        );
+        assert!(
+            output.contains("Run openspec validate {{CHANGE_ID}} --strict."),
+            "got: {output}"
+        );
+
+        let none_output = render_with_gates_uniform("Run {{SPEC_VALIDATE_COMMAND}}.", None);
+        assert!(
+            none_output.contains("Run (not configured)."),
+            "got: {none_output}"
+        );
+    }
+
+    #[test]
+    fn render_fmt_check_command_placeholder_substitutes_and_none_fallback() {
+        let tmpl = SkillTemplate {
+            name: "supervisor".into(),
+            content: "Run {{FMT_CHECK_COMMAND}}.".into(),
+            source: Source::Embedded,
+            format: SkillFormat::Standardized,
+            metadata: None,
+            resource_paths: None,
+        };
+        let gates = GateCommands {
+            fmt_check_command: Some("cargo fmt --check"),
+            ..Default::default()
+        };
+        let output = render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &gates,
+        );
+        assert!(output.contains("Run cargo fmt --check."), "got: {output}");
+
+        let none_output = render_with_gates_uniform("Run {{FMT_CHECK_COMMAND}}.", None);
+        assert!(
+            none_output.contains("Run (not configured)."),
+            "got: {none_output}"
+        );
+    }
+
+    #[test]
+    fn render_security_audit_command_placeholder_substitutes_and_none_fallback() {
+        let tmpl = SkillTemplate {
+            name: "supervisor".into(),
+            content: "Run {{SECURITY_AUDIT_COMMAND}}.".into(),
+            source: Source::Embedded,
+            format: SkillFormat::Standardized,
+            metadata: None,
+            resource_paths: None,
+        };
+        let gates = GateCommands {
+            security_audit_command: Some("cargo audit"),
+            ..Default::default()
+        };
+        let output = render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &gates,
+        );
+        assert!(output.contains("Run cargo audit."), "got: {output}");
+
+        let none_output = render_with_gates_uniform("Run {{SECURITY_AUDIT_COMMAND}}.", None);
+        assert!(
+            none_output.contains("Run (not configured)."),
+            "got: {none_output}"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_renders_with_all_six_gate_placeholders_set() {
+        // With distinct Some("CMD-N") values, the rendered supervisor skill
+        // contains each CMD-N value (proving the gate prose references the
+        // placeholders, not hardcoded git-paw commands).
+        let tmpl = resolve("supervisor").expect("supervisor skill resolves");
+        let gates = GateCommands {
+            test_command: Some("CMD-TEST"),
+            lint_command: Some("CMD-LINT"),
+            build_command: Some("CMD-BUILD"),
+            doc_build_command: Some("CMD-DOC"),
+            spec_validate_command: Some("CMD-SPEC"),
+            fmt_check_command: Some("CMD-FMT"),
+            security_audit_command: Some("CMD-SEC"),
+        };
+        let output = render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &gates,
+        );
+        for needle in [
+            "CMD-TEST",
+            "CMD-LINT",
+            "CMD-BUILD",
+            "CMD-DOC",
+            "CMD-SPEC",
+            "CMD-FMT",
+            "CMD-SEC",
+        ] {
+            assert!(
+                output.contains(needle),
+                "rendered supervisor skill should contain '{needle}'; not found"
+            );
+        }
+    }
+
+    #[test]
+    fn supervisor_skill_renders_not_configured_in_each_gate_when_none() {
+        // With all placeholders None, every gate section in the rendered
+        // skill must show '(not configured)' so the supervisor agent can
+        // recognise the gate as having no tooling-aided phase.
+        let tmpl = resolve("supervisor").expect("supervisor skill resolves");
+        let output = render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+        );
+
+        // Gate 1 (Testing) section.
+        let testing_start = output.find("**Testing**").expect("Testing gate present");
+        let testing_end = output[testing_start..]
+            .find("**Regression analysis**")
+            .map(|p| testing_start + p)
+            .expect("Regression follows Testing");
+        let testing_section = &output[testing_start..testing_end];
+        assert!(
+            testing_section.contains("(not configured)"),
+            "Testing gate should render '(not configured)' when gate fields are None; got:\n{testing_section}"
+        );
+
+        // Gate 3 (Spec audit).
+        let spec_start = output.find("**Spec audit**").expect("Spec audit present");
+        let spec_end = output[spec_start..]
+            .find("**Doc audit**")
+            .map(|p| spec_start + p)
+            .expect("Doc audit follows Spec audit");
+        let spec_section = &output[spec_start..spec_end];
+        assert!(
+            spec_section.contains("(not configured)"),
+            "Spec audit gate should render '(not configured)' when None; got:\n{spec_section}"
+        );
+
+        // Gate 4 (Doc audit).
+        let doc_start = output.find("**Doc audit**").expect("Doc audit present");
+        let doc_end = output[doc_start..]
+            .find("**Security audit**")
+            .map(|p| doc_start + p)
+            .expect("Security audit follows Doc audit");
+        let doc_section = &output[doc_start..doc_end];
+        assert!(
+            doc_section.contains("(not configured)"),
+            "Doc audit gate should render '(not configured)' when None; got:\n{doc_section}"
+        );
+
+        // Gate 5 (Security audit).
+        let security_start = output
+            .find("**Security audit**")
+            .expect("Security audit present");
+        let security_end = output[security_start..]
+            .find("**Verify or feedback**")
+            .map(|p| security_start + p)
+            .expect("Verify-or-feedback follows Security audit");
+        let security_section = &output[security_start..security_end];
+        assert!(
+            security_section.contains("(not configured)"),
+            "Security audit gate should render '(not configured)' when None; got:\n{security_section}"
+        );
+    }
+
+    /// Pre-render audit: the embedded supervisor template must not hardcode
+    /// `just check`, `cargo test`, `cargo clippy`, `cargo audit`,
+    /// `cargo fmt --check`, `mdbook build`, or `openspec validate` in its
+    /// gate prose. Matches inside fenced code blocks demonstrating example
+    /// config values (e.g. `# test_command = "just check"`) are tolerated:
+    /// the audit windows are the §4-§7 gate-prose paragraphs only.
+    #[test]
+    fn supervisor_template_gate_prose_has_no_hardcoded_git_paw_commands() {
+        let tmpl = resolve("supervisor").expect("supervisor skill resolves");
+        let content = &tmpl.content;
+        let start = content
+            .find("Steps 4-7 below are the **five first-class verification gates**")
+            .expect("five-gate intro present");
+        let end = content
+            .find("### Spec Audit Procedure")
+            .expect("Spec Audit Procedure heading present");
+        let gate_prose = &content[start..end];
+        for needle in [
+            "just check",
+            "cargo test",
+            "cargo clippy",
+            "cargo audit",
+            "cargo fmt --check",
+            "mdbook build",
+        ] {
+            // The §7 agent.feedback example body intentionally contains the
+            // string `cargo test failed: ...` as an illustration of error
+            // reporting. The example may be written either with brackets
+            // (`[testing] cargo test failed`, the historical wire-format
+            // shape) or via the helper invocation
+            // (`feedback-gate ... testing "cargo test failed`, the v0.5.0
+            // helper-call shape). We allow both.
+            if needle == "cargo test"
+                && (gate_prose.contains("[testing] cargo test failed")
+                    || gate_prose.contains("testing \"cargo test failed"))
+            {
+                let cleaned = gate_prose.replace("cargo test failed", "<failure>");
+                assert!(
+                    !cleaned.contains("cargo test"),
+                    "gate prose must not contain hardcoded 'cargo test' outside the §7 example"
+                );
+                continue;
+            }
+            assert!(
+                !gate_prose.contains(needle),
+                "gate prose must not contain hardcoded '{needle}'; replace with the matching placeholder"
+            );
+        }
+    }
+
+    #[test]
+    fn render_change_id_placeholder_passes_through() {
+        let tmpl = SkillTemplate {
+            name: "supervisor".into(),
+            content: "Run {{SPEC_VALIDATE_COMMAND}}.".into(),
+            source: Source::Embedded,
+            format: SkillFormat::Standardized,
+            metadata: None,
+            resource_paths: None,
+        };
+        let gates = GateCommands {
+            spec_validate_command: Some("openspec validate {{CHANGE_ID}} --strict"),
+            ..Default::default()
+        };
+        let output = render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &gates,
+        );
+        assert!(
+            output.contains("Run openspec validate {{CHANGE_ID}} --strict."),
+            "outer placeholder substituted but inner {{CHANGE_ID}} preserved; got: {output}"
+        );
+        assert!(
+            output.contains("{{CHANGE_ID}}"),
+            "{{CHANGE_ID}} must survive verbatim (not substituted at render time); got: {output}"
         );
     }
 
@@ -1096,6 +2523,1330 @@ mod tests {
         assert!(
             block.contains("\"agent_id\":\"feat-test\""),
             "Agent ID not substituted in curl commands"
+        );
+    }
+
+    fn done_section_body(block: &str) -> String {
+        let start = block
+            .find("### 2. DONE")
+            .expect("rendered boot block should contain the DONE section heading");
+        let end = block
+            .find("### 3. BLOCKED")
+            .expect("rendered boot block should contain the BLOCKED section heading");
+        block[start..end].to_string()
+    }
+
+    #[test]
+    fn boot_block_done_section_leads_with_commit_instruction() {
+        let block = build_boot_block("feat/test", "http://127.0.0.1:9119");
+        let done_body = done_section_body(&block);
+
+        let commit_idx = done_body
+            .find("commit your work")
+            .or_else(|| done_body.find("git commit"))
+            .expect("DONE section should lead with a commit-first instruction");
+
+        let manual_done_idx = done_body
+            .find("\"status\":\"done\"")
+            .expect("DONE section should still contain the manual done curl as a fallback");
+
+        assert!(
+            commit_idx < manual_done_idx,
+            "commit-first instruction (byte {commit_idx}) must appear before the manual done curl (byte {manual_done_idx})"
+        );
+    }
+
+    #[test]
+    fn boot_block_done_section_names_committed_status_published_by_hook() {
+        let block = build_boot_block("feat/test", "http://127.0.0.1:9119");
+        let done_body = done_section_body(&block);
+
+        assert!(
+            done_body.contains("status: \"committed\"")
+                || done_body.contains("status:\"committed\""),
+            "DONE section should name the `status: \"committed\"` event published by the hook"
+        );
+        assert!(
+            done_body.contains("post-commit hook"),
+            "DONE section should mention the post-commit hook that publishes on the agent's behalf"
+        );
+    }
+
+    #[test]
+    fn boot_block_done_section_scopes_manual_done_to_code_less_tasks() {
+        let block = build_boot_block("feat/test", "http://127.0.0.1:9119");
+        let done_body = done_section_body(&block);
+
+        let hits = ["docs-only", "planning", "exploration"]
+            .iter()
+            .filter(|needle| done_body.contains(*needle))
+            .count();
+        assert!(
+            hits >= 2,
+            "DONE section should enumerate at least two code-less task examples \
+             (docs-only / planning / exploration); only {hits} present"
+        );
+    }
+
+    #[test]
+    fn boot_block_done_section_warns_against_manual_done_with_uncommitted_changes() {
+        let block = build_boot_block("feat/test", "http://127.0.0.1:9119");
+        let done_body = done_section_body(&block);
+
+        assert!(
+            done_body.contains("uncommitted"),
+            "DONE section should warn about uncommitted changes"
+        );
+        assert!(
+            done_body.contains("manual `done`") || done_body.contains("manual done"),
+            "DONE section warning should reference manual `done`"
+        );
+        assert!(
+            done_body.contains("**WARNING") || done_body.contains("**DO NOT"),
+            "DONE section warning should be emphasised with bold markers (**...**)"
+        );
+    }
+
+    #[test]
+    fn boot_block_done_section_retains_manual_done_curl() {
+        let block = build_boot_block("feat/test", "http://127.0.0.1:9119");
+        let done_body = done_section_body(&block);
+
+        assert!(
+            done_body.contains("curl -s -X POST http://127.0.0.1:9119/publish"),
+            "DONE section should retain the pre-expanded broker curl"
+        );
+        assert!(
+            done_body.contains("\"type\":\"agent.artifact\""),
+            "DONE section curl should publish an agent.artifact event"
+        );
+        assert!(
+            done_body.contains("\"status\":\"done\""),
+            "DONE section curl should still publish status: done as the manual fallback"
+        );
+        assert!(
+            done_body.contains("\"exports\":[]"),
+            "DONE section curl should retain the exports field"
+        );
+        assert!(
+            done_body.contains("\"modified_files\":[]"),
+            "DONE section curl should retain the modified_files field"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // conflict-detection skill content (v0.5.0)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn supervisor_skill_contains_conflict_detector_tag() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            tmpl.content.contains("[conflict-detector]"),
+            "supervisor skill should reference the [conflict-detector] tag"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_documents_broker_side_detection() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("auto-detect") || lowered.contains("auto-emit"),
+            "skill should mention auto-detection/auto-emission by the broker"
+        );
+        assert!(
+            lowered.contains("forward conflict"),
+            "skill should mention forward conflict"
+        );
+        assert!(
+            lowered.contains("in-flight conflict"),
+            "skill should mention in-flight conflict"
+        );
+        assert!(
+            lowered.contains("ownership violation"),
+            "skill should mention ownership violation"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_removes_v04_manual_conflict_detection() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            !tmpl
+                .content
+                .contains("Compare the `modified_files` arrays from every `agent.artifact` event"),
+            "supervisor skill should no longer contain the v0.4 manual conflict-comparison instructions"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_mentions_agent_intent() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(tmpl.content.contains("agent.intent"));
+        assert!(
+            tmpl.content.contains("Watch peer intents")
+                || tmpl
+                    .content
+                    .contains("Watch peer intents and broker-side conflict detection"),
+            "skill should contain a 'Watch peer intents' heading"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_focuses_on_question_escalations() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        // The supervisor agent's role on detector output is to react to
+        // agent.question escalations and follow up on repeat offenders.
+        assert!(
+            lowered.contains("agent.question")
+                && (lowered.contains("escalation") || lowered.contains("escalat")),
+            "skill should direct the supervisor agent at agent.question escalations"
+        );
+        assert!(
+            lowered.contains("do not") && lowered.contains("manually"),
+            "skill should tell the supervisor not to duplicate by manual comparison"
+        );
+    }
+
+    // --- Spec Kit consolidated worktree section (`spec-kit-format` change) ---
+
+    #[test]
+    fn embedded_coordination_mentions_spec_kit_consolidated_worktrees() {
+        let tmpl = resolve("coordination").unwrap();
+        assert!(
+            tmpl.content.contains("Spec Kit")
+                && (tmpl.content.contains("consolidated") || tmpl.content.contains("phase/")),
+            "coordination skill should mention Spec Kit consolidated worktrees"
+        );
+    }
+
+    #[test]
+    fn embedded_coordination_instructs_sequential_work_and_writeback() {
+        let tmpl = resolve("coordination").unwrap();
+        assert!(
+            tmpl.content.contains("sequential") || tmpl.content.contains("Sequential"),
+            "should instruct sequential execution"
+        );
+        assert!(
+            tmpl.content.contains("`- [x]`") || tmpl.content.contains("- [x]"),
+            "should mention - [x] writeback"
+        );
+        assert!(
+            tmpl.content.contains("tasks.md"),
+            "should reference tasks.md as writeback target"
+        );
+    }
+
+    #[test]
+    fn embedded_coordination_states_agent_done_timing_for_consolidated() {
+        let tmpl = resolve("coordination").unwrap();
+        assert!(
+            tmpl.content.contains("agent.done"),
+            "should mention agent.done"
+        );
+        let lower = tmpl.content.to_lowercase();
+        assert!(
+            lower.contains("every task")
+                || lower.contains("all listed tasks")
+                || lower.contains("all tasks"),
+            "should tie agent.done to completion of all listed tasks"
+        );
+    }
+
+    #[test]
+    fn embedded_coordination_clarifies_p_worktrees_follow_standard_pattern() {
+        let tmpl = resolve("coordination").unwrap();
+        assert!(
+            tmpl.content.contains("[P]") || tmpl.content.contains("task/"),
+            "should distinguish [P] / task/ worktrees from consolidated ones"
+        );
+        assert!(
+            tmpl.content.contains("standard"),
+            "should reference the standard before/while-editing pattern"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // supervisor-as-pane (v0.5.0) — interactive user input + merge orchestration
+    // -----------------------------------------------------------------------
+
+    /// section heading.
+    #[test]
+    fn supervisor_skill_has_user_input_section() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            tmpl.content.contains("When the user types in your pane"),
+            "supervisor skill should include the 'When the user types in your pane' section"
+        );
+    }
+
+    /// 8.2 — user-input section maps directives to `agent.feedback`.
+    #[test]
+    fn supervisor_skill_user_input_uses_agent_feedback_for_directives() {
+        let tmpl = resolve("supervisor").unwrap();
+        let start = tmpl
+            .content
+            .find("When the user types in your pane")
+            .expect("user-input section heading present");
+        let window = &tmpl.content[start..];
+        assert!(
+            window.contains("agent.feedback"),
+            "user-input directives section should reference agent.feedback"
+        );
+    }
+
+    /// 8.3 — user-input section maps judgment-call asks to `agent.question`.
+    #[test]
+    fn supervisor_skill_user_input_uses_agent_question_for_judgment_calls() {
+        let tmpl = resolve("supervisor").unwrap();
+        let start = tmpl
+            .content
+            .find("When the user types in your pane")
+            .expect("user-input section heading present");
+        let window = &tmpl.content[start..];
+        assert!(
+            window.contains("agent.question"),
+            "user-input judgment-call section should reference agent.question"
+        );
+    }
+
+    /// 8.4 — user-input section states the autonomous loop continues.
+    #[test]
+    fn supervisor_skill_user_input_states_loop_continues() {
+        let tmpl = resolve("supervisor").unwrap();
+        let start = tmpl
+            .content
+            .find("When the user types in your pane")
+            .expect("user-input section heading present");
+        let window = &tmpl.content[start..];
+        assert!(
+            window.to_lowercase().contains("autonomous"),
+            "user-input section should state the autonomous loop continues alongside user input"
+        );
+    }
+
+    /// 8.5 — supervisor skill contains the "Merge orchestration" section.
+    #[test]
+    fn supervisor_skill_has_merge_orchestration_section() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            tmpl.content.contains("Merge orchestration"),
+            "supervisor skill should include the 'Merge orchestration' section"
+        );
+    }
+
+    /// 8.6 — merge orchestration uses `git merge --ff-only`.
+    #[test]
+    fn supervisor_skill_merge_uses_ff_only() {
+        let tmpl = resolve("supervisor").unwrap();
+        let start = tmpl
+            .content
+            .find("Merge orchestration")
+            .expect("merge orchestration section present");
+        let window = &tmpl.content[start..];
+        assert!(
+            window.contains("git merge --ff-only"),
+            "merge orchestration should specify git merge --ff-only"
+        );
+    }
+
+    /// revert.
+    #[test]
+    fn supervisor_skill_merge_reverts_via_reset_hard() {
+        let tmpl = resolve("supervisor").unwrap();
+        let start = tmpl
+            .content
+            .find("Merge orchestration")
+            .expect("merge orchestration section present");
+        let window = &tmpl.content[start..];
+        assert!(
+            window.contains("git reset --hard"),
+            "merge orchestration should describe regression revert via git reset --hard"
+        );
+    }
+
+    /// `agent.question`.
+    #[test]
+    fn supervisor_skill_merge_cycle_uses_agent_question() {
+        let tmpl = resolve("supervisor").unwrap();
+        let start = tmpl
+            .content
+            .find("Merge orchestration")
+            .expect("merge orchestration section present");
+        let window = &tmpl.content[start..];
+        assert!(
+            window.contains("agent.question") && window.to_lowercase().contains("cycle"),
+            "merge orchestration cycle handling should publish agent.question"
+        );
+    }
+
+    /// 8.9 — merge orchestration ends with a final `agent.status` summary.
+    #[test]
+    fn supervisor_skill_merge_publishes_final_status_summary() {
+        let tmpl = resolve("supervisor").unwrap();
+        let start = tmpl
+            .content
+            .find("Merge orchestration")
+            .expect("merge orchestration section present");
+        let window = &tmpl.content[start..];
+        assert!(
+            window.contains("agent.status") && window.to_lowercase().contains("summary"),
+            "merge orchestration should end with a final agent.status summary"
+        );
+    }
+
+    // === coordination-skill-followups: drift 34, 37, 54, 55, 56, 57 ===
+
+    /// drift 54 — coordination skill names both `agent_id` and `slugify_branch` in a
+    /// references/terminology section.
+    #[test]
+    fn coordination_skill_documents_slugify_terminology() {
+        let tmpl = resolve("coordination").unwrap();
+        assert!(
+            tmpl.content.contains("agent_id"),
+            "coordination skill should mention the agent_id identifier form"
+        );
+        assert!(
+            tmpl.content.contains("slugify_branch"),
+            "coordination skill should name slugify_branch as the canonical conversion"
+        );
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("references & terminology")
+                || lowered.contains("references and terminology")
+                || lowered.contains("terminology"),
+            "coordination skill should contain a references/terminology heading"
+        );
+    }
+
+    /// drift 57 — coordination skill documents stash-hygiene rules.
+    #[test]
+    fn coordination_skill_documents_stash_hygiene() {
+        let tmpl = resolve("coordination").unwrap();
+        assert!(
+            tmpl.content.contains("git stash list"),
+            "stash-hygiene section should reference `git stash list`"
+        );
+        assert!(
+            tmpl.content.contains("git stash show -p"),
+            "stash-hygiene section should reference `git stash show -p`"
+        );
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("stash hygiene") || lowered.contains("stash safety"),
+            "coordination skill should contain a stash-hygiene heading"
+        );
+        assert!(
+            lowered.contains("pop only") || lowered.contains("only pop"),
+            "coordination skill should instruct agents to pop only their own stashes"
+        );
+    }
+
+    /// drift 55 — supervisor skill documents publishing agent.intent for main-side
+    /// work with `agent_id` = "supervisor".
+    #[test]
+    fn supervisor_skill_documents_main_side_intent() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("supervisor publishes agent.intent")
+                || lowered.contains("publish intent")
+                || lowered.contains("main-side work"),
+            "supervisor skill should contain a heading naming supervisor-side intent publishing"
+        );
+        let start = tmpl
+            .content
+            .find("Supervisor publishes agent.intent")
+            .expect("supervisor-publishes-intent heading present");
+        let window = &tmpl.content[start..];
+        assert!(
+            window.contains("agent.intent"),
+            "section should mention agent.intent"
+        );
+        assert!(
+            window.contains("\"supervisor\""),
+            "section should show agent_id = \"supervisor\" in the example"
+        );
+        assert!(
+            window.contains("\"files\"")
+                && window.contains("\"summary\"")
+                && window.contains("\"valid_for_seconds\""),
+            "section should include a curl example with files, summary, valid_for_seconds"
+        );
+    }
+
+    /// drift 34 — supervisor skill instructs `tmux send-keys` alongside
+    /// `agent.feedback` answers, with the "agents do not poll" rationale.
+    #[test]
+    fn supervisor_skill_documents_tmux_send_keys_alongside_feedback() {
+        let tmpl = resolve("supervisor").unwrap();
+        let start = tmpl
+            .content
+            .find("Send the answer to the agent pane too")
+            .expect("drift-34 subsection should be present");
+        let next_heading = tmpl.content[start + 1..]
+            .find("\n### ")
+            .map_or(tmpl.content.len(), |off| start + 1 + off);
+        let section = &tmpl.content[start..next_heading];
+        assert!(
+            section.contains("tmux send-keys"),
+            "section should contain `tmux send-keys`"
+        );
+        assert!(
+            section.contains("agent.feedback"),
+            "section should reference agent.feedback in the same section"
+        );
+        let lowered_section = section.to_lowercase();
+        assert!(
+            lowered_section.contains("do not poll") || lowered_section.contains("don't poll"),
+            "section should state the rationale (agents do not poll their inbox)"
+        );
+    }
+
+    /// drift 37 — coordination skill documents the working-heartbeat cadence and
+    /// the filesystem-watcher rationale.
+    #[test]
+    fn coordination_skill_documents_working_heartbeat() {
+        let tmpl = resolve("coordination").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("working heartbeat") || lowered.contains("heartbeat"),
+            "coordination skill should contain a working-heartbeat heading"
+        );
+        assert!(
+            tmpl.content.contains("every 5 tool uses"),
+            "coordination skill should state the cadence as 'every 5 tool uses'"
+        );
+        assert!(
+            tmpl.content.contains("agent.status"),
+            "heartbeat reuses the agent.status shape — substring should be present"
+        );
+        let start = tmpl
+            .content
+            .find("Working heartbeat")
+            .expect("Working heartbeat heading present");
+        let next_heading = tmpl.content[start + 1..]
+            .find("\n### ")
+            .map_or(tmpl.content.len(), |off| start + 1 + off);
+        let section = &tmpl.content[start..next_heading].to_lowercase();
+        assert!(
+            section.contains("filesystem watcher") || section.contains("watcher"),
+            "heartbeat section should explain why the filesystem watcher is insufficient"
+        );
+    }
+
+    /// drift 56 — supervisor skill documents the accept-edits `modified_files` audit
+    /// step with explicit non-silent-approval guidance.
+    #[test]
+    fn supervisor_skill_documents_accept_edits_audit() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("accept-edits commits") || lowered.contains("accept edits"),
+            "supervisor skill should contain an accept-edits audit heading"
+        );
+        assert!(
+            tmpl.content.contains("modified_files"),
+            "audit section should reference the modified_files payload field"
+        );
+        let start = tmpl
+            .content
+            .find("Verify accept-edits commits before merge")
+            .expect("accept-edits audit heading present");
+        let next_heading = tmpl.content[start + 1..]
+            .find("\n### ")
+            .map_or(tmpl.content.len(), |off| start + 1 + off);
+        let section_lower = tmpl.content[start..next_heading].to_lowercase();
+        assert!(
+            section_lower.contains("out-of-scope"),
+            "audit section should call out 'out-of-scope' edits"
+        );
+        assert!(
+            section_lower.contains("shall not be silently")
+                || section_lower.contains("not be silently auto-approved")
+                || section_lower.contains("silently auto-approved"),
+            "audit section should forbid silent auto-approval"
+        );
+    }
+
+    /// drift 54 (optional 3.5) — coordination skill describes the slugify rule's
+    /// effect: lowercase, non-allowed-char replacement, and `agent` fallback.
+    #[test]
+    fn coordination_skill_describes_slugify_rule() {
+        let tmpl = resolve("coordination").unwrap();
+        let start = tmpl
+            .content
+            .find("slugify_branch")
+            .expect("slugify_branch should be named in the references section");
+        let next_heading = tmpl.content[start + 1..]
+            .find("\n### ")
+            .map_or(tmpl.content.len(), |off| start + 1 + off);
+        let section_lower = tmpl.content[start..next_heading].to_lowercase();
+        assert!(
+            section_lower.contains("lowercase"),
+            "slugify rule should mention lowercase step"
+        );
+        assert!(
+            tmpl.content[start..next_heading].contains("[a-z0-9_]"),
+            "slugify rule should describe the allowed char class"
+        );
+        assert!(
+            (section_lower.contains("fallback") || section_lower.contains("fall back"))
+                && section_lower.contains("agent"),
+            "slugify rule should describe the empty-fallback to `agent`"
+        );
+    }
+
+    // --- test-coverage-v0-5-0 -------------------------------------------------
+    //
+    // The following tests close per-scenario coverage gaps from the v0.5.0
+    // archived spec set. See `openspec/changes/test-coverage-v0-5-0/tasks.md`.
+
+    // Renders the supervisor skill with a representative set of substitutions.
+    // Tests assert against the rendered output so any post-render
+    // transformation regressions are caught.
+    fn rendered_supervisor() -> String {
+        let tmpl = resolve("supervisor").expect("supervisor skill resolves");
+        render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+        )
+    }
+
+    fn rendered_coordination() -> String {
+        let tmpl = resolve("coordination").expect("coordination skill resolves");
+        render(
+            &tmpl,
+            "feat/x",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+        )
+    }
+
+    // Maps to scenario `Supervisor skill — lenient indicator framing` from
+    // prompt-submit-fix. (task 3.3)
+    #[test]
+    fn supervisor_skill_paste_buffer_framing_is_lenient() {
+        let content = rendered_supervisor();
+        let lowered = content.to_lowercase();
+        assert!(
+            lowered.contains("even if"),
+            "supervisor skill should frame recovery as attempted even when indicator absent; got:\n{content}"
+        );
+        assert!(
+            lowered.contains("judgment"),
+            "supervisor skill should describe applying judgment; got:\n{content}"
+        );
+        assert!(
+            lowered.contains("long buffered text"),
+            "supervisor skill should mention the long-buffered-text heuristic; got:\n{content}"
+        );
+    }
+
+    // Maps to scenario `Coordination skill rejects pairwise over-coordination
+    // patterns` from forward-coordination. (task 4.1)
+    #[test]
+    fn coordination_skill_rejects_pairwise_overcoordination() {
+        let content = rendered_coordination();
+        assert!(
+            content.contains("pairwise"),
+            "coordination skill should name `pairwise` under a MUST-NOT clause; got:\n{content}"
+        );
+        let lowered = content.to_lowercase();
+        assert!(
+            lowered.contains("explicit go-ahead"),
+            "coordination skill should reject waiting for an explicit go-ahead; got:\n{content}"
+        );
+        assert!(
+            lowered.contains("broker silence") || lowered.contains("block on broker silence"),
+            "coordination skill should reject blocking on broker silence; got:\n{content}"
+        );
+    }
+
+    // Maps to scenario `Verification/feedback wording separability` from
+    // forward-coordination. (task 4.3)
+    //
+    // The two message types must be separately reachable — i.e. each lives in
+    // its own bullet or heading. We assert their distinct anchor lines:
+    // `- **agent.verified**` and `- **agent.feedback**`.
+    #[test]
+    fn coordination_skill_verified_and_feedback_substrings_independent() {
+        let content = rendered_coordination();
+        let verified_anchor = "- **`agent.verified`**";
+        let feedback_anchor = "- **`agent.feedback`**";
+        assert!(
+            content.contains(verified_anchor),
+            "coordination skill should anchor `agent.verified` in its own bullet; got:\n{content}"
+        );
+        assert!(
+            content.contains(feedback_anchor),
+            "coordination skill should anchor `agent.feedback` in its own bullet; got:\n{content}"
+        );
+        // The two anchors must not be on the same line.
+        let v = content.find(verified_anchor).unwrap();
+        let f = content.find(feedback_anchor).unwrap();
+        let between = if v < f {
+            &content[v..f]
+        } else {
+            &content[f..v]
+        };
+        assert!(
+            between.contains('\n'),
+            "the verified and feedback bullets must be on separate lines; got slice:\n{between}"
+        );
+    }
+
+    // Maps to scenario `Supervisor skill specifies the ordering` from
+    // governance-context. (task 10.1)
+    //
+    // Ordering invariant: Spec Audit Procedure < Governance verification <
+    // the publish step that emits `agent.verified`.
+    #[test]
+    fn supervisor_skill_governance_after_spec_audit_before_verified() {
+        let content = rendered_supervisor();
+        let spec_audit = content
+            .find("Spec Audit Procedure")
+            .expect("Spec Audit Procedure heading present in supervisor skill");
+        let governance = content
+            .find("Governance verification")
+            .expect("Governance verification heading present in supervisor skill");
+        // The closest publish step emitting `agent.verified` after the
+        // governance heading is the next occurrence of `agent.verified`.
+        let verified_after = content[governance..]
+            .find("agent.verified")
+            .map(|o| governance + o)
+            .expect("agent.verified mention after Governance verification");
+
+        assert!(
+            spec_audit < governance,
+            "Spec Audit Procedure should appear before Governance verification \
+             (spec_audit={spec_audit}, governance={governance})"
+        );
+        assert!(
+            governance < verified_after,
+            "Governance verification should appear before the next agent.verified \
+             publish step (governance={governance}, verified_after={verified_after})"
+        );
+    }
+
+    // Maps to scenario `Coordination skill states agent.done timing for
+    // consolidated worktrees` from spec-kit-format. (task 11.6)
+    #[test]
+    fn coordination_skill_consolidated_agent_done_timing() {
+        let content = rendered_coordination();
+        let start = content
+            .find("consolidated worktree")
+            .or_else(|| content.find("Consolidated worktree"))
+            .expect("coordination skill should have a consolidated-worktree section");
+        let section = &content[start..];
+        let lowered = section.to_lowercase();
+        assert!(
+            lowered.contains("agent.done") || lowered.contains("agent.artifact"),
+            "consolidated-worktree section should describe agent.done timing; got:\n{section}"
+        );
+        assert!(
+            section.contains("- [x]"),
+            "consolidated-worktree section should require every task to show - [x]; got:\n{section}"
+        );
+        assert!(
+            lowered.contains("every task") || lowered.contains("every"),
+            "consolidated-worktree section should make the rule cover every task; got:\n{section}"
+        );
+    }
+
+    /// drift 55 (optional 3.6) — supervisor-publishes-intent section cross-references
+    /// the agent-side `Before you start editing` flow in `coordination.md`.
+    #[test]
+    fn supervisor_skill_cross_references_agent_intent_flow() {
+        let tmpl = resolve("supervisor").unwrap();
+        let start = tmpl
+            .content
+            .find("Supervisor publishes agent.intent")
+            .expect("supervisor-publishes-intent heading present");
+        let next_heading = tmpl.content[start + 1..]
+            .find("\n### ")
+            .map_or(tmpl.content.len(), |off| start + 1 + off);
+        let section = &tmpl.content[start..next_heading];
+        assert!(
+            section.contains("Before you start editing"),
+            "supervisor-publishes-intent section should cross-reference the agent-side \
+             `Before you start editing` heading"
+        );
+        assert!(
+            section.contains("coordination.md"),
+            "cross-reference should name the coordination skill file"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // supervisor-as-pane-followups: skill-content tests
+    // (tasks 8.3, 8.4, 8a.4-8a.7, 8b.7-8b.12)
+    // ---------------------------------------------------------------------------
+
+    fn render_supervisor() -> String {
+        let tmpl = resolve("supervisor").expect("resolve supervisor template");
+        render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands {
+                test_command: Some("just check"),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// 8.3 — resolved supervisor skill contains a curl publishing an
+    /// `agent.status` for `agent_id = "supervisor"` AND including a `cli`
+    /// field in the payload JSON.
+    #[test]
+    fn supervisor_skill_self_register_curl_includes_cli_field() {
+        let rendered = render_supervisor();
+        let start = rendered
+            .find("Bootstrap")
+            .expect("Bootstrap section heading present");
+        let next = rendered[start..]
+            .find("### Poll session status and messages")
+            .map_or(rendered.len(), |p| start + p);
+        let section = &rendered[start..next];
+        assert!(
+            section.contains("agent.status"),
+            "bootstrap section must publish agent.status; got:\n{section}"
+        );
+        assert!(
+            section.contains("\"agent_id\":\"supervisor\""),
+            "bootstrap curl must use agent_id=\"supervisor\"; got:\n{section}"
+        );
+        assert!(
+            section.contains("\"cli\""),
+            "bootstrap payload must include a cli field; got:\n{section}"
+        );
+    }
+
+    /// 8.4 — bootstrap section names this as the FIRST action after
+    /// reading the skill / AGENTS.md, not a "you may" suggestion.
+    #[test]
+    fn supervisor_skill_self_register_is_first_action() {
+        let rendered = render_supervisor();
+        let pos_bootstrap = rendered
+            .find("Bootstrap")
+            .expect("Bootstrap heading present");
+        let section_end = rendered[pos_bootstrap..]
+            .find("### Poll session status and messages")
+            .map_or(rendered.len(), |p| pos_bootstrap + p);
+        let section = &rendered[pos_bootstrap..section_end];
+        let lower = section.to_lowercase();
+        assert!(
+            lower.contains("first action") || lower.contains("very first"),
+            "bootstrap section must state this is the agent's first action; got:\n{section}"
+        );
+    }
+
+    /// 8a.4 — Watch section explicitly mentions per-iteration sweeping.
+    #[test]
+    fn supervisor_skill_watch_mentions_per_iteration_sweep() {
+        let rendered = render_supervisor();
+        let start = rendered
+            .find("**Watch**")
+            .expect("Watch step heading present");
+        let end = rendered[start..]
+            .find("Stall detection")
+            .map_or(rendered.len(), |p| start + p);
+        let section = &rendered[start..end];
+        let lower = section.to_lowercase();
+        assert!(
+            lower.contains("every iteration")
+                || lower.contains("every monitoring")
+                || lower.contains("each monitoring")
+                || lower.contains("each iteration"),
+            "Watch section must mention per-iteration sweeping; got:\n{section}"
+        );
+    }
+
+    /// 8a.5 — Rules section bullet mentions absorbing routine approvals
+    /// AND at least three routine command families.
+    #[test]
+    fn supervisor_skill_rules_bullet_mentions_routine_absorption() {
+        let rendered = render_supervisor();
+        let start = rendered.find("### Rules").expect("Rules section present");
+        let end = rendered[start..]
+            .find("### Auto-approve permission prompts")
+            .map_or(rendered.len(), |p| start + p);
+        let section = &rendered[start..end];
+        let lower = section.to_lowercase();
+        assert!(
+            lower.contains("absorb routine approval") || lower.contains("rubber-stamp"),
+            "Rules must include the routine-approval absorption framing; got:\n{section}"
+        );
+        let mut family_hits = 0;
+        for family in ["cargo", "git commit", "mdbook", "git stash", "git restore"] {
+            if section.contains(family) {
+                family_hits += 1;
+            }
+        }
+        assert!(
+            family_hits >= 3,
+            "Rules bullet must enumerate at least 3 routine families; only {family_hits} found in:\n{section}",
+        );
+    }
+
+    /// 8a.6 — Rules bullet also enumerates at least two non-routine
+    /// escalation cases.
+    #[test]
+    fn supervisor_skill_rules_bullet_enumerates_escalation_cases() {
+        let rendered = render_supervisor();
+        let start = rendered.find("### Rules").expect("Rules section present");
+        let end = rendered[start..]
+            .find("### Auto-approve permission prompts")
+            .map_or(rendered.len(), |p| start + p);
+        let section = &rendered[start..end];
+        let lower = section.to_lowercase();
+        let mut hits = 0;
+        for case in [
+            "cross-agent conflict",
+            "destructive",
+            "scope",
+            "spec decisions",
+            "novel",
+        ] {
+            if lower.contains(case) {
+                hits += 1;
+            }
+        }
+        assert!(
+            hits >= 2,
+            "Rules bullet must enumerate at least 2 escalation cases; only {hits} found in:\n{section}",
+        );
+    }
+
+    /// 8a.7 — Watch section contains the phrase "every iteration" or
+    /// "every monitoring" (verbatim).
+    #[test]
+    fn supervisor_skill_contains_every_iteration_phrase() {
+        let rendered = render_supervisor();
+        let lower = rendered.to_lowercase();
+        assert!(
+            lower.contains("every iteration") || lower.contains("every monitoring"),
+            "skill must contain 'every iteration' or 'every monitoring' phrasing somewhere",
+        );
+    }
+
+    /// 8b.7 — supervisor skill contains the five gate names in order.
+    #[test]
+    fn supervisor_skill_enumerates_five_gates_in_order() {
+        let rendered = render_supervisor();
+        let pos = |needle: &str| {
+            rendered
+                .find(needle)
+                .unwrap_or_else(|| panic!("gate '{needle}' not found in supervisor skill"))
+        };
+        let pos_testing = pos("**Testing**");
+        let pos_regression = pos("**Regression analysis**");
+        let pos_spec = pos("**Spec audit**");
+        let pos_doc = pos("**Doc audit**");
+        let pos_security = pos("**Security audit**");
+        assert!(
+            pos_testing < pos_regression
+                && pos_regression < pos_spec
+                && pos_spec < pos_doc
+                && pos_doc < pos_security,
+            "five gates must appear in order Testing < Regression < Spec < Doc < Security; \
+             got positions Testing={pos_testing} Regression={pos_regression} \
+             Spec={pos_spec} Doc={pos_doc} Security={pos_security}",
+        );
+    }
+
+    /// 8b.8 — §7 Verify-or-feedback's `agent.verified` example body
+    /// mentions all five gate names.
+    #[test]
+    fn supervisor_skill_verified_message_enumerates_five_gates() {
+        let rendered = render_supervisor();
+        // Anchor on §7 specifically — the supervisor skill has an earlier
+        // `agent.verified` example near the top of the file that pre-dates
+        // the five-gate restructure.
+        let verify_start = rendered
+            .find("**Verify or feedback**")
+            .expect("Verify or feedback step present");
+        let window = &rendered[verify_start..];
+        let lower = window.to_lowercase();
+        for needle in [
+            "testing",
+            "regression",
+            "spec audit",
+            "doc audit",
+            "security audit",
+        ] {
+            assert!(
+                lower.contains(needle),
+                "§7 Verify-or-feedback must mention '{needle}'; got window:\n{window}",
+            );
+        }
+    }
+
+    /// 8b.9 — §7's `agent.feedback` examples mention the gate-name
+    /// convention with at least three of the five gates shown. The
+    /// supervisor skill now wraps feedback through
+    /// `.git-paw/scripts/sweep.sh feedback-gate <agent> <gate> <msg>`,
+    /// so a gate name passed as the second argument satisfies the
+    /// convention equivalently to a bracketed `[gate]` prefix.
+    #[test]
+    fn supervisor_skill_feedback_example_uses_gate_name_prefixes() {
+        let rendered = render_supervisor();
+        let verify_start = rendered
+            .find("**Verify or feedback**")
+            .expect("Verify or feedback step present");
+        // Cap the window at the next top-level section so we don't bleed
+        // into "Spec Audit Procedure".
+        let end = rendered[verify_start..]
+            .find("\n### ")
+            .map_or(rendered.len(), |p| verify_start + p);
+        let window = &rendered[verify_start..end];
+        let mut hits = 0;
+        for (bracketed, helper_arg) in [
+            ("[testing]", " testing "),
+            ("[regression]", " regression "),
+            ("[spec audit]", " \"spec audit\" "),
+            ("[doc audit]", " \"doc audit\" "),
+            ("[security audit]", " \"security audit\" "),
+        ] {
+            if window.contains(bracketed)
+                || window.contains(&format!("feedback-gate __FILL_IN_AGENT_ID__{helper_arg}"))
+            {
+                hits += 1;
+            }
+        }
+        assert!(
+            hits >= 3,
+            "§7 agent.feedback example must show at least 3 gates (bracketed or helper-arg); \
+             only {hits} found in:\n{window}",
+        );
+    }
+
+    /// 8b.10 — Doc audit gate enumerates at least 4 of 5 doc surfaces.
+    #[test]
+    fn supervisor_skill_doc_audit_enumerates_surfaces() {
+        let rendered = render_supervisor();
+        let start = rendered
+            .find("**Doc audit**")
+            .expect("Doc audit gate present");
+        let end = rendered[start..]
+            .find("**Security audit**")
+            .map(|p| start + p)
+            .expect("Security audit follows Doc audit");
+        let section = &rendered[start..end];
+        let mut hits = 0;
+        for surface in ["docs/src/", "README.md", "AGENTS.md", "--help", "rustdoc"] {
+            if section.contains(surface) {
+                hits += 1;
+            }
+        }
+        assert!(
+            hits >= 4,
+            "Doc audit must enumerate at least 4 of 5 doc surfaces; only {hits} found in:\n{section}",
+        );
+    }
+
+    /// 8b.11 — Security audit gate enumerates at least 4 of 6 OWASP
+    /// categories AND mentions the `unwrap()`/`expect()` rule.
+    #[test]
+    fn supervisor_skill_security_audit_enumerates_owasp_categories() {
+        let rendered = render_supervisor();
+        let start = rendered
+            .find("**Security audit**")
+            .expect("Security audit gate present");
+        let end = rendered[start..]
+            .find("**Verify or feedback**")
+            .map_or(rendered.len(), |p| start + p);
+        let section = &rendered[start..end];
+        let lower = section.to_lowercase();
+        let mut hits = 0;
+        for cat in [
+            "command injection",
+            "xss",
+            "sql injection",
+            "path traversal",
+            "unvalidated external input",
+            "secret leakage",
+        ] {
+            if lower.contains(cat) {
+                hits += 1;
+            }
+        }
+        assert!(
+            hits >= 4,
+            "Security audit must enumerate at least 4 of 6 OWASP categories; only {hits} found in:\n{section}",
+        );
+        assert!(
+            section.contains("unwrap()") || section.contains("expect()"),
+            "Security audit must mention the unwrap()/expect() rule; got:\n{section}",
+        );
+    }
+
+    /// 8b.12 — Governance verification sub-step is preserved (`DoD`,
+    /// ADRs, `security.md`, `test-strategy.md`, `constitution.md` still present).
+    #[test]
+    fn supervisor_skill_governance_verification_substep_preserved() {
+        let rendered = render_supervisor();
+        let start = rendered
+            .find("Governance verification")
+            .expect("Governance verification sub-step still present");
+        let end = (start + 2000).min(rendered.len());
+        let section = &rendered[start..end];
+        for needle in [
+            "DoD",
+            "ADR",
+            "security.md",
+            "test-strategy.md",
+            "constitution.md",
+        ] {
+            assert!(
+                section.contains(needle),
+                "governance sub-step must still reference '{needle}'; got:\n{section}",
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // coordination-skill-followups-2: skill-content tests
+    // (tasks 1.3, 2.3, 2.4, 3.3)
+    // ---------------------------------------------------------------------------
+
+    /// 1.3 — coordination skill teaches a per-group commit cadence with
+    /// conventional-commit examples.
+    #[test]
+    fn coordination_skill_documents_commit_cadence() {
+        let tmpl = resolve("coordination").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("commit cadence") || lowered.contains("per-group commit cadence"),
+            "coordination skill should have a heading naming the commit-cadence concept; \
+             got:\n{}",
+            tmpl.content
+        );
+        assert!(
+            lowered.contains("group") || lowered.contains("section"),
+            "commit-cadence section should mention the GROUP/section grain"
+        );
+        let has_conventional_prefix = ["feat(", "fix(", "docs(", "test(", "chore("]
+            .iter()
+            .any(|p| tmpl.content.contains(p));
+        assert!(
+            has_conventional_prefix,
+            "commit-cadence section should show at least one conventional-commit prefix example"
+        );
+    }
+
+    /// 2.3 — coordination skill explicitly forbids the coding agent from
+    /// invoking `/opsx:verify` and `/opsx:archive`.
+    #[test]
+    fn coordination_skill_forbids_opsx_verify_and_archive() {
+        let tmpl = resolve("coordination").unwrap();
+        assert!(
+            tmpl.content.contains("/opsx:verify"),
+            "coordination skill should name `/opsx:verify` literally"
+        );
+        assert!(
+            tmpl.content.contains("/opsx:archive"),
+            "coordination skill should name `/opsx:archive` literally"
+        );
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("off-limits")
+                || lowered.contains("do not invoke")
+                || lowered.contains("shall not")
+                || lowered.contains("supervisor's job"),
+            "coordination skill should state both are not the coding agent's responsibility"
+        );
+    }
+
+    /// 2.4 — coordination skill names `agent.artifact` as the terminal action
+    /// with status "done" or "committed".
+    #[test]
+    fn coordination_skill_names_terminal_action() {
+        let tmpl = resolve("coordination").unwrap();
+        assert!(
+            tmpl.content.contains("agent.artifact"),
+            "coordination skill should name `agent.artifact` as the terminal publish"
+        );
+        assert!(
+            tmpl.content.contains("\"done\"") || tmpl.content.contains("\"committed\""),
+            "coordination skill should reference status: \"done\" or \"committed\""
+        );
+    }
+
+    /// 3.3 — supervisor skill teaches `pane_current_path` as the canonical
+    /// pane→agent resolution mechanism.
+    #[test]
+    fn supervisor_skill_documents_pane_current_path_resolution() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            tmpl.content.contains("tmux display-message"),
+            "supervisor skill should show the tmux display-message command"
+        );
+        assert!(
+            tmpl.content.contains("pane_current_path"),
+            "supervisor skill should name pane_current_path literally"
+        );
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("not alphabetical")
+                || lowered.contains("not sorted alphabetically")
+                || lowered.contains("are not alphabetical"),
+            "supervisor skill should warn against alphabetical pane-index assumptions"
+        );
+        assert!(
+            lowered.contains("cli-argument order")
+                || lowered.contains("cli argument order")
+                || lowered.contains("argument order"),
+            "supervisor skill should warn against CLI-argument-order pane-index assumptions"
+        );
+    }
+
+    // prompt-submit-fix coverage: ensure the supervisor skill's launch-time
+    // pane sweep section continues to teach the three timing/escalation/
+    // cross-reference contracts that the prompt-submit-fix change locked in.
+
+    #[test]
+    fn supervisor_skill_documents_proactive_launch_sweep() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        let start = lowered
+            .find("launch-time pane sweep")
+            .or_else(|| lowered.find("launch sweep"))
+            .expect("launch-time pane sweep heading should be present");
+        let window_end = (start + 2500).min(lowered.len());
+        let window = &lowered[start..window_end];
+        assert!(
+            window.contains("immediately after attaching")
+                || window.contains("before the poll thread")
+                || window.contains("first-few-seconds")
+                || window.contains("first few seconds"),
+            "launch sweep should link the sweep to the first-few-seconds-after-attach window",
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_launch_sweep_escalates_unknown_via_agent_question() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        let start = lowered
+            .find("launch-time pane sweep")
+            .or_else(|| lowered.find("launch sweep"))
+            .expect("launch-time pane sweep heading should be present");
+        let window_end = (start + 2500).min(lowered.len());
+        let window = &lowered[start..window_end];
+        assert!(
+            window.contains("unknown") || window.contains("wider scope"),
+            "launch sweep should classify a third category for unknown/wider-scope prompts",
+        );
+        assert!(
+            window.contains("agent.question"),
+            "launch sweep should instruct agent.question escalation for unknown prompts",
+        );
+        assert!(
+            window.contains("escalate"),
+            "launch sweep should use the word 'escalate' alongside the agent.question instruction",
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_launch_sweep_complements_auto_approve_thread() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        let start = lowered
+            .find("launch-time pane sweep")
+            .or_else(|| lowered.find("launch sweep"))
+            .expect("launch-time pane sweep heading should be present");
+        let window_end = (start + 2500).min(lowered.len());
+        let window = &lowered[start..window_end];
+        assert!(
+            window.contains("complements"),
+            "launch sweep should describe itself as complementing the auto-approve thread",
+        );
+        assert!(
+            window.contains("does not replace")
+                || window.contains("not replace")
+                || window.contains("does **not** replace"),
+            "launch sweep should explicitly say it does NOT replace the auto-approve thread",
+        );
+        assert!(
+            window.contains("[supervisor.auto_approve]") || window.contains("auto_approve"),
+            "launch sweep should cross-reference the [supervisor.auto_approve] poll thread",
+        );
+    }
+
+    // coordination-skill-followups: when the supervisor sends an
+    // `agent.feedback` answer to a peer's `agent.question`, it must
+    // dual-write via `tmux send-keys` AND cross-reference the
+    // paste-buffer recovery sub-case for long answers. The test below
+    // asserts that cross-reference is present in the send-keys section.
+    // v0-5-0-audit-cleanup task 8.1.
+
+    #[test]
+    fn supervisor_skill_paste_buffer_cross_ref_in_send_keys_section() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        // Anchor on the "send the answer to the agent pane too" heading
+        // — that's the section drift-34 owns. Fall back to a substring
+        // unique to the section if the heading wording shifts.
+        let start = lowered
+            .find("send the answer to the agent pane")
+            .or_else(|| lowered.find("agents do not poll their inbox"))
+            .expect("send-keys-alongside-agent.feedback section should be present");
+        let window_end = (start + 2200).min(lowered.len());
+        let window = &lowered[start..window_end];
+
+        assert!(
+            window.contains("paste-buffer")
+                || window.contains("paste buffer")
+                || window.contains("follow-up enter")
+                || window.contains("follow-up `enter`"),
+            "send-keys-alongside-feedback section must cross-reference paste-buffer recovery / follow-up Enter for long answers",
+        );
+    }
+
+    // coordination-skill-followups-2: the `pane_current_path` resolution
+    // section must contain a warning against using `git paw status`
+    // output order as a pane→agent mapping source. The dashboard and
+    // status output are alphabetically sorted by the broker and have no
+    // relationship to the launcher's pane assignment.
+    // v0-5-0-audit-cleanup task 8.2.
+
+    #[test]
+    fn supervisor_skill_warns_against_git_paw_status_ordering() {
+        let tmpl = resolve("supervisor").unwrap();
+        // Case-sensitive search first for the literal `git paw status`
+        // substring, then case-insensitive for the surrounding warning.
+        assert!(
+            tmpl.content.contains("git paw status"),
+            "supervisor skill should reference `git paw status` by name when warning against using its ordering as a mapping source",
+        );
+
+        let lowered = tmpl.content.to_lowercase();
+        let start = lowered
+            .find("pane_current_path")
+            .expect("pane_current_path resolution section should be present");
+        let window_end = (start + 2500).min(lowered.len());
+        let window = &lowered[start..window_end];
+
+        assert!(
+            window.contains("git paw status"),
+            "the warning against `git paw status` ordering must appear within the pane_current_path resolution section",
+        );
+        assert!(
+            window.contains("shall not be inferred")
+                || window.contains("must not")
+                || window.contains("not be inferred")
+                || window.contains("not used as a mapping")
+                || window.contains("no relationship"),
+            "section must forbid using `git paw status` order as a mapping source",
         );
     }
 }
