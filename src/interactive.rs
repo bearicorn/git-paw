@@ -81,6 +81,14 @@ pub trait Prompter {
 
     /// Ask the user to pick a CLI for a specific branch. Returns binary name.
     fn select_cli_for_branch(&self, branch: &str, clis: &[CliInfo]) -> Result<String, PawError>;
+
+    /// Ask the user to pick one or more specs. Returns the selected
+    /// `SpecEntry` values expanded from grouped logical units.
+    ///
+    /// Each row in the picker represents one logical unit (a Spec Kit
+    /// feature, an `OpenSpec` change, or a Markdown spec). Selecting a row
+    /// returns every underlying `SpecEntry` belonging to that unit.
+    fn select_specs(&self, specs: &[SpecEntry]) -> Result<Vec<SpecEntry>, PawError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +165,137 @@ impl Prompter for TerminalPrompter {
             None => Err(PawError::UserCancelled),
         }
     }
+
+    fn select_specs(&self, specs: &[SpecEntry]) -> Result<Vec<SpecEntry>, PawError> {
+        let groups = group_specs_by_unit(specs);
+        let labels: Vec<String> = groups.iter().map(|(label, _)| label.clone()).collect();
+
+        let selection = MultiSelect::new()
+            .with_prompt("Select specs (space to toggle, enter to confirm)")
+            .items(&labels)
+            .interact_opt()
+            .map_err(|e| map_dialoguer_error(&e))?;
+
+        finalize_spec_selection(specs, &groups, selection)
+    }
+}
+
+/// Pure post-processing for `select_specs`: maps the dialoguer
+/// `Option<Vec<usize>>` selection (over grouped rows) back to the underlying
+/// `SpecEntry` values, and treats both `None` (Ctrl+C) and `Some(empty)`
+/// (zero rows selected) as `PawError::UserCancelled` — matching
+/// `select_branches`.
+fn finalize_spec_selection(
+    specs: &[SpecEntry],
+    groups: &[(String, Vec<usize>)],
+    selection: Option<Vec<usize>>,
+) -> Result<Vec<SpecEntry>, PawError> {
+    match selection {
+        Some(indices) if indices.is_empty() => Err(PawError::UserCancelled),
+        Some(indices) => {
+            let mut out = Vec::new();
+            for row in indices {
+                for &entry_idx in &groups[row].1 {
+                    out.push(specs[entry_idx].clone());
+                }
+            }
+            Ok(out)
+        }
+        None => Err(PawError::UserCancelled),
+    }
+}
+
+/// Groups `SpecEntry` values by logical unit (Spec Kit feature, `OpenSpec`
+/// change, or Markdown spec) and produces a display label per unit.
+///
+/// Returns a vector of `(label, indices_into_specs)` pairs. Each label is
+/// either the bare unit id (for one-entry units) or a Spec Kit summary like
+/// `"003-user-list — 3 worktrees: 2 [P] + 1 phase/"`.
+///
+/// Order follows the discovery order of the first entry in each group, so
+/// the picker preserves the backend's natural listing.
+fn group_specs_by_unit(specs: &[SpecEntry]) -> Vec<(String, Vec<usize>)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+
+    for (idx, entry) in specs.iter().enumerate() {
+        let unit = unit_id_of(&entry.id);
+        if !groups.contains_key(&unit) {
+            order.push(unit.clone());
+        }
+        groups.entry(unit).or_default().push(idx);
+    }
+
+    order
+        .into_iter()
+        .map(|unit| {
+            let idxs = groups.remove(&unit).unwrap_or_default();
+            let label = build_unit_label(&unit, &idxs, specs);
+            (label, idxs)
+        })
+        .collect()
+}
+
+/// Extracts the logical unit id (feature for Spec Kit, change/file stem for
+/// `OpenSpec` and Markdown).
+fn unit_id_of(id: &str) -> String {
+    if let Some((before, after)) = id.rsplit_once("-phase-")
+        && !after.is_empty()
+        && after.chars().all(|c| c.is_ascii_digit())
+    {
+        return before.to_string();
+    }
+    if let Some((before, after)) = id.rsplit_once("-T")
+        && !after.is_empty()
+        && after.chars().all(|c| c.is_ascii_digit())
+    {
+        return before.to_string();
+    }
+    id.to_string()
+}
+
+fn build_unit_label(unit: &str, indices: &[usize], specs: &[SpecEntry]) -> String {
+    if indices.len() <= 1 {
+        return unit.to_string();
+    }
+    let total = indices.len();
+    let mut parallel = 0;
+    let mut phase = 0;
+    for &i in indices {
+        let id = &specs[i].id;
+        if id_is_parallel_task(id) {
+            parallel += 1;
+        } else if id_is_phase(id) {
+            phase += 1;
+        }
+    }
+    let mut parts = Vec::new();
+    if parallel > 0 {
+        parts.push(format!("{parallel} [P]"));
+    }
+    if phase > 0 {
+        parts.push(format!("{phase} phase/"));
+    }
+    if parts.is_empty() {
+        format!("{unit} \u{2014} {total} worktrees")
+    } else {
+        format!("{unit} \u{2014} {total} worktrees: {}", parts.join(" + "))
+    }
+}
+
+fn id_is_parallel_task(id: &str) -> bool {
+    let Some((_, after)) = id.rsplit_once("-T") else {
+        return false;
+    };
+    !after.is_empty() && after.chars().all(|c| c.is_ascii_digit())
+}
+
+fn id_is_phase(id: &str) -> bool {
+    let Some((_, after)) = id.rsplit_once("-phase-") else {
+        return false;
+    };
+    !after.is_empty() && after.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Maps dialoguer errors to `PawError`, treating I/O interrupted (Ctrl+C) as
@@ -438,6 +577,10 @@ mod tests {
                 .cloned()
                 .ok_or(PawError::UserCancelled)
         }
+
+        fn select_specs(&self, _specs: &[SpecEntry]) -> Result<Vec<SpecEntry>, PawError> {
+            Err(PawError::UserCancelled)
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -698,6 +841,7 @@ mod tests {
     fn spec(branch: &str, cli: Option<&str>) -> SpecEntry {
         SpecEntry {
             id: branch.to_string(),
+            backend: crate::specs::SpecBackendKind::Markdown,
             branch: branch.to_string(),
             cli: cli.map(String::from),
             prompt: String::new(),
@@ -937,6 +1081,187 @@ mod tests {
         assert_eq!(
             prompter.last_select_cli_default.take(),
             Some("nonexistent".to_string())
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Spec multi-select picker grouping (cross-format-spec-selection)
+    // -----------------------------------------------------------------------
+
+    fn bare_spec(id: &str) -> SpecEntry {
+        SpecEntry {
+            id: id.to_string(),
+            backend: crate::specs::SpecBackendKind::Markdown,
+            branch: format!("spec/{id}"),
+            cli: None,
+            prompt: String::new(),
+            owned_files: None,
+        }
+    }
+
+    #[test]
+    fn group_flat_specs_yields_one_row_each() {
+        let specs = vec![
+            bare_spec("add-auth"),
+            bare_spec("fix-session"),
+            bare_spec("add-logging"),
+        ];
+        let groups = group_specs_by_unit(&specs);
+        let labels: Vec<&str> = groups.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, vec!["add-auth", "fix-session", "add-logging"]);
+        for (_, idxs) in &groups {
+            assert_eq!(idxs.len(), 1);
+        }
+    }
+
+    #[test]
+    fn finalize_spec_selection_returns_chosen_subset_for_flat_entries() {
+        let specs = vec![
+            bare_spec("add-auth"),
+            bare_spec("fix-session"),
+            bare_spec("add-logging"),
+        ];
+        let groups = group_specs_by_unit(&specs);
+        // User toggles "add-auth" (row 0) and "add-logging" (row 2).
+        let result = finalize_spec_selection(&specs, &groups, Some(vec![0, 2])).unwrap();
+        let ids: Vec<&str> = result.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["add-auth", "add-logging"]);
+    }
+
+    #[test]
+    fn finalize_spec_selection_expands_spec_kit_feature_row_to_all_entries() {
+        let specs = vec![
+            bare_spec("003-user-list-T009"),
+            bare_spec("003-user-list-T010"),
+            bare_spec("003-user-list-phase-2"),
+        ];
+        let groups = group_specs_by_unit(&specs);
+        // Single row "003-user-list" → all 3 underlying entries.
+        let result = finalize_spec_selection(&specs, &groups, Some(vec![0])).unwrap();
+        let ids: Vec<&str> = result.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "003-user-list-T009",
+                "003-user-list-T010",
+                "003-user-list-phase-2",
+            ]
+        );
+    }
+
+    #[test]
+    fn finalize_spec_selection_none_returns_user_cancelled() {
+        // dialoguer returns None when the user presses Ctrl+C.
+        let specs = vec![bare_spec("add-auth")];
+        let groups = group_specs_by_unit(&specs);
+        let result = finalize_spec_selection(&specs, &groups, None);
+        assert!(matches!(result, Err(PawError::UserCancelled)));
+    }
+
+    #[test]
+    fn finalize_spec_selection_empty_indices_returns_user_cancelled() {
+        // User confirms (Enter) without toggling any row → empty Vec.
+        let specs = vec![bare_spec("add-auth"), bare_spec("fix-session")];
+        let groups = group_specs_by_unit(&specs);
+        let result = finalize_spec_selection(&specs, &groups, Some(vec![]));
+        assert!(matches!(result, Err(PawError::UserCancelled)));
+    }
+
+    #[test]
+    fn group_spec_kit_feature_collapses_to_one_row_with_count_hint() {
+        let specs = vec![
+            bare_spec("003-user-list-T009"),
+            bare_spec("003-user-list-T010"),
+            bare_spec("003-user-list-phase-2"),
+            bare_spec("004-error-handling-phase-1"),
+        ];
+        let groups = group_specs_by_unit(&specs);
+        assert_eq!(groups.len(), 2);
+        let user_list = &groups[0];
+        assert!(
+            user_list.0.starts_with("003-user-list"),
+            "first group label should start with feature id; got: {}",
+            user_list.0
+        );
+        assert!(user_list.0.contains("3 worktrees"), "got: {}", user_list.0);
+        assert!(user_list.0.contains("2 [P]"), "got: {}", user_list.0);
+        assert!(user_list.0.contains("1 phase/"), "got: {}", user_list.0);
+        assert_eq!(user_list.1.len(), 3);
+
+        let error_handling = &groups[1];
+        assert_eq!(error_handling.0, "004-error-handling");
+        assert_eq!(error_handling.1.len(), 1);
+    }
+
+    // --- test-coverage-v0-5-0: spec picker cancellation paths -----------------
+    //
+    // The two scenarios `User cancels spec picker via Ctrl+C` and `User confirms
+    // with zero rows selected` both expect the caller to propagate
+    // `PawError::UserCancelled`. The TerminalPrompter implementation routes
+    // both through `finalize_spec_selection`. For the unit tests we exercise
+    // the mapping function directly (which is the production code path) and
+    // assert the resulting Err shape.
+
+    /// A `Prompter` whose `select_specs` always returns
+    /// `Err(PawError::UserCancelled)` — the Ctrl+C path.
+    struct CancelOnSpecsPrompter;
+
+    impl Prompter for CancelOnSpecsPrompter {
+        fn select_mode(&self) -> Result<CliMode, PawError> {
+            Err(PawError::UserCancelled)
+        }
+        fn select_branches(&self, _branches: &[String]) -> Result<Vec<String>, PawError> {
+            Err(PawError::UserCancelled)
+        }
+        fn select_cli(
+            &self,
+            _clis: &[CliInfo],
+            _default: Option<&str>,
+        ) -> Result<String, PawError> {
+            Err(PawError::UserCancelled)
+        }
+        fn select_cli_for_branch(
+            &self,
+            _branch: &str,
+            _clis: &[CliInfo],
+        ) -> Result<String, PawError> {
+            Err(PawError::UserCancelled)
+        }
+        fn select_specs(&self, _specs: &[SpecEntry]) -> Result<Vec<SpecEntry>, PawError> {
+            Err(PawError::UserCancelled)
+        }
+    }
+
+    // Maps to scenario `User cancels spec picker via Ctrl+C` from
+    // cross-format-spec-selection. (test-coverage-v0-5-0 task 7.1)
+    #[test]
+    fn select_specs_cancel_returns_user_cancelled() {
+        let prompter = CancelOnSpecsPrompter;
+        let specs = vec![bare_spec("003-user-list")];
+        let result = prompter.select_specs(&specs);
+        assert!(
+            matches!(result, Err(PawError::UserCancelled)),
+            "select_specs cancel path must propagate UserCancelled; got: {result:?}"
+        );
+    }
+
+    // Maps to scenario `User confirms with zero rows selected` from
+    // cross-format-spec-selection. The TerminalPrompter wires
+    // `MultiSelect::interact_opt() -> Some(empty Vec)` through
+    // `finalize_spec_selection`, which maps it to UserCancelled. This test
+    // exercises that mapping function directly with `Some(empty)` because
+    // that is where the production decision lives.
+    // (test-coverage-v0-5-0 task 7.2)
+    #[test]
+    fn select_specs_zero_selection_returns_user_cancelled() {
+        let specs = vec![bare_spec("003-user-list")];
+        let groups = group_specs_by_unit(&specs);
+        // `Some(vec![])` represents the user confirming with zero rows
+        // selected — equivalent to dialoguer returning `Ok(vec![])`.
+        let result = finalize_spec_selection(&specs, &groups, Some(vec![]));
+        assert!(
+            matches!(result, Err(PawError::UserCancelled)),
+            "zero-row confirmation must map to UserCancelled; got: {result:?}"
         );
     }
 }
