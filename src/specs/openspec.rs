@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::error::PawError;
-use crate::specs::{SpecBackend, SpecEntry};
+use crate::specs::{SpecBackend, SpecBackendKind, SpecEntry};
 
 /// Backend for the `OpenSpec` directory-based spec format.
 ///
@@ -88,6 +88,7 @@ impl SpecBackend for OpenSpecBackend {
 
             specs.push(SpecEntry {
                 id,
+                backend: SpecBackendKind::OpenSpec,
                 branch: String::new(), // Filled in by scan_specs.
                 cli,
                 prompt,
@@ -414,5 +415,75 @@ mod tests {
         assert!(!result[0].prompt.contains("---"));
         assert!(!result[0].prompt.contains("paw_cli"));
         assert_eq!(result[0].prompt, "Actual prompt");
+    }
+
+    // openspec-apply-boot-prompt backend tagging — every entry returned
+    // from OpenSpec's scan() MUST carry `backend == SpecBackendKind::OpenSpec`
+    // so downstream code can dispatch on backend without re-scanning.
+    // v0-5-0-audit-cleanup tasks 6.1–6.3.
+
+    #[test]
+    fn scan_returns_entries_with_openspec_backend_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in &["change-one", "change-two"] {
+            let d = tmp.path().join(name);
+            fs::create_dir(&d).unwrap();
+            fs::write(d.join("tasks.md"), format!("task for {name}")).unwrap();
+        }
+
+        let backend = OpenSpecBackend;
+        let result = backend.scan(tmp.path()).unwrap();
+        assert_eq!(result.len(), 2, "expected two entries from two changes");
+        for entry in &result {
+            assert_eq!(
+                entry.backend,
+                SpecBackendKind::OpenSpec,
+                "entry {} must carry backend == OpenSpec; got {:?}",
+                entry.id,
+                entry.backend,
+            );
+        }
+    }
+
+    #[test]
+    fn scan_backend_tag_independent_of_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let change = tmp.path().join("frontmatter-change");
+        fs::create_dir(&change).unwrap();
+        fs::write(
+            change.join("tasks.md"),
+            "---\npaw_cli: gemini\n---\nDo the thing\n\nFiles owned:\n- src/a.rs\n- src/b.rs\n",
+        )
+        .unwrap();
+
+        let backend = OpenSpecBackend;
+        let result = backend.scan(tmp.path()).unwrap();
+        assert_eq!(result.len(), 1);
+        // Frontmatter + body-derived fields are present...
+        assert_eq!(result[0].cli.as_deref(), Some("gemini"));
+        assert!(result[0].owned_files.is_some());
+        // ...but the backend tag is fixed to OpenSpec regardless.
+        assert_eq!(
+            result[0].backend,
+            SpecBackendKind::OpenSpec,
+            "frontmatter / body fields must NOT influence the backend tag",
+        );
+    }
+
+    #[test]
+    fn scan_single_entry_carries_openspec_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let change = tmp.path().join("solo");
+        fs::create_dir(&change).unwrap();
+        fs::write(change.join("tasks.md"), "just one task").unwrap();
+
+        let backend = OpenSpecBackend;
+        let result = backend.scan(tmp.path()).unwrap();
+        assert_eq!(result.len(), 1, "expected exactly one entry");
+        assert_eq!(
+            result[0].backend,
+            SpecBackendKind::OpenSpec,
+            "single-entry scan must still tag the entry as OpenSpec",
+        );
     }
 }
