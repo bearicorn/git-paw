@@ -4,18 +4,104 @@
 //! and `/status`. All handlers follow the lock discipline documented in
 //! [`super`] — no `RwLock` guard is held across an `.await` boundary.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use super::BrokerState;
 use super::delivery;
 use super::messages::BrokerMessage;
+
+/// Compiled-once regex matching the only `agent_id` shapes the broker accepts:
+/// `"supervisor"`, or a `feat-{name}` / `feat/{name}` slug whose `{name}`
+/// begins with `[a-z0-9]` and consists of `[a-z0-9-]+`. See
+/// `supervisor-bugfixes-v0-5-x` §4 + `broker-messages` spec.
+fn agent_id_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^(supervisor|feat/[a-z0-9][a-z0-9-]+|feat-[a-z0-9][a-z0-9-]+)$")
+            .expect("AGENT_ID_RE compiles")
+    })
+}
+
+/// Compiled-once regex matching unfilled placeholder strings — exact match
+/// `<anything>` from start to end.
+fn placeholder_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^<.*>$").expect("PLACEHOLDER_RE compiles"))
+}
+
+/// Build the HTTP 400 response for an `agent_id` that did not match
+/// [`agent_id_regex`].
+fn agent_id_rejection(value: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        axum::Json(serde_json::json!({
+            "error": "invalid agent_id",
+            "value": value,
+            "detail": "agent_id must be 'supervisor' or match feat-{name} / feat/{name}",
+        })),
+    )
+        .into_response()
+}
+
+/// Build the HTTP 400 response for a payload string that looks like an
+/// unfilled placeholder (`<…>`).
+fn placeholder_rejection(field: &str, value: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        axum::Json(serde_json::json!({
+            "error": "field looks like an unfilled placeholder",
+            "field": field,
+            "value": value,
+            "detail": "substitute the real value before publishing",
+        })),
+    )
+        .into_response()
+}
+
+/// Returns `Some(response)` if any tracked payload string field of `msg`
+/// matches [`placeholder_regex`]; otherwise `None`.
+///
+/// Per `supervisor-bugfixes-v0-5-x` design D5, the placeholder check covers
+/// only the fields the supervisor skill's example curls populate:
+/// `payload.question`, `payload.needs`, and each string element of
+/// `payload.errors[]`. Other free-form string fields (`StatusPayload.message`,
+/// `VerifiedPayload.message`) are left alone — real human content sometimes
+/// uses angle brackets inline.
+fn check_placeholder_fields(msg: &BrokerMessage) -> Option<Response> {
+    let re = placeholder_regex();
+    match msg {
+        BrokerMessage::Question { payload, .. } => {
+            if re.is_match(&payload.question) {
+                return Some(placeholder_rejection("question", &payload.question));
+            }
+        }
+        BrokerMessage::Blocked { payload, .. } => {
+            if re.is_match(&payload.needs) {
+                return Some(placeholder_rejection("needs", &payload.needs));
+            }
+        }
+        BrokerMessage::Feedback { payload, .. } => {
+            for err in &payload.errors {
+                if re.is_match(err) {
+                    return Some(placeholder_rejection("errors", err));
+                }
+            }
+        }
+        BrokerMessage::Status { .. }
+        | BrokerMessage::Artifact { .. }
+        | BrokerMessage::Verified { .. }
+        | BrokerMessage::Intent { .. } => {}
+    }
+    None
+}
 
 /// Query parameters for the `GET /messages/:agent_id` endpoint.
 #[derive(Deserialize)]
@@ -100,6 +186,18 @@ async fn publish(
     // Parse and validate
     match BrokerMessage::from_json(&body) {
         Ok(msg) => {
+            // Validate the top-level agent_id against the broker regex.
+            // Phantom debris (`"a"`, `"<agent-id>"`, empty strings) is
+            // rejected at the API boundary so it cannot leak into
+            // `/status`.
+            if !agent_id_regex().is_match(msg.agent_id()) {
+                return agent_id_rejection(msg.agent_id());
+            }
+            // Reject obviously-unfilled placeholder strings in the few
+            // payload fields the supervisor skill's examples touch.
+            if let Some(rejection) = check_placeholder_fields(&msg) {
+                return rejection;
+            }
             delivery::publish_message(&state, &msg);
             StatusCode::ACCEPTED.into_response()
         }
@@ -237,7 +335,7 @@ mod tests {
                     .uri("/publish")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"type":"agent.status","agent_id":"feat-x","payload":{"status":"idle","modified_files":[]}}"#,
+                        r#"{"type":"agent.status","agent_id":"feat-xx","payload":{"status":"idle","modified_files":[]}}"#,
                     ))
                     .unwrap(),
             )
@@ -330,6 +428,160 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // -----------------------------------------------------------------------
+    // supervisor-bugfixes-v0-5-x §4 — broker validates agent_id + payload
+    // placeholder syntax. The unit-test matrix below covers the spec scenarios
+    // for invalid + valid agent_ids and the placeholder rejection rules.
+    // -----------------------------------------------------------------------
+
+    /// Helper: POST a body to `/publish` and return (status, body-bytes).
+    async fn post_publish(body: &'static str) -> (StatusCode, axum::body::Bytes) {
+        let app = test_router();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/publish")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, bytes)
+    }
+
+    #[tokio::test]
+    async fn agent_id_rejects_single_letter() {
+        let (status, body) = post_publish(
+            r#"{"type":"agent.status","agent_id":"a","payload":{"status":"working","modified_files":[]}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("invalid agent_id"),
+            "body should mention 'invalid agent_id'; got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_id_rejects_placeholder() {
+        let (status, body) = post_publish(
+            r#"{"type":"agent.status","agent_id":"<agent-id>","payload":{"status":"working","modified_files":[]}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("invalid agent_id"), "body: {text}");
+    }
+
+    #[tokio::test]
+    async fn agent_id_rejects_empty() {
+        let (status, body) = post_publish(
+            r#"{"type":"agent.status","agent_id":"","payload":{"status":"working","modified_files":[]}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // The empty-string case is caught either by from_json's
+        // EmptyAgentId validation or by the regex — both surface as 400.
+        let _ = body;
+    }
+
+    #[tokio::test]
+    async fn agent_id_accepts_supervisor() {
+        let (status, _) = post_publish(
+            r#"{"type":"agent.status","agent_id":"supervisor","payload":{"status":"working","modified_files":[]}}"#,
+        )
+        .await;
+        assert!(
+            status == StatusCode::ACCEPTED || status == StatusCode::OK,
+            "supervisor should be accepted; got: {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_id_accepts_feat_dash() {
+        let (status, _) = post_publish(
+            r#"{"type":"agent.status","agent_id":"feat-test-branch","payload":{"status":"working","modified_files":[]}}"#,
+        )
+        .await;
+        assert!(
+            status == StatusCode::ACCEPTED || status == StatusCode::OK,
+            "feat-test-branch should be accepted; got: {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_id_accepts_feat_slash() {
+        let (status, _) = post_publish(
+            r#"{"type":"agent.status","agent_id":"feat/test-branch","payload":{"status":"working","modified_files":[]}}"#,
+        )
+        .await;
+        assert!(
+            status == StatusCode::ACCEPTED || status == StatusCode::OK,
+            "feat/test-branch should be accepted; got: {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn payload_question_rejects_placeholder() {
+        let (status, body) = post_publish(
+            r#"{"type":"agent.question","agent_id":"feat-test-branch","payload":{"question":"<your specific question>"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("placeholder") && text.contains("question"),
+            "body should mention both 'placeholder' and 'question'; got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn payload_question_accepts_real_content() {
+        let (status, _) = post_publish(
+            r#"{"type":"agent.question","agent_id":"feat-test-branch","payload":{"question":"Should we use bcrypt or argon2?"}}"#,
+        )
+        .await;
+        assert!(
+            status == StatusCode::ACCEPTED || status == StatusCode::OK,
+            "real human content should be accepted; got: {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn payload_blocked_rejects_placeholder_needs() {
+        let (status, body) = post_publish(
+            r#"{"type":"agent.blocked","agent_id":"feat-test-branch","payload":{"needs":"<what>","from":"feat-other"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("placeholder") && text.contains("needs"),
+            "body: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn payload_feedback_rejects_placeholder_error_entry() {
+        let (status, body) = post_publish(
+            r#"{"type":"agent.feedback","agent_id":"feat-test-branch","payload":{"from":"supervisor","errors":["<error 1>"]}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("placeholder") && text.contains("errors"),
+            "body: {text}"
+        );
     }
 
     #[tokio::test]
@@ -513,6 +765,7 @@ mod tests {
                     status: status_label.to_string(),
                     modified_files: vec![],
                     message: None,
+                    ..Default::default()
                 },
             };
             delivery::publish_message(&state, &msg);
@@ -553,6 +806,7 @@ mod tests {
                     status: "working".to_string(),
                     modified_files: vec![],
                     message: None,
+                    ..Default::default()
                 },
             };
             delivery::publish_message(&state, &msg);

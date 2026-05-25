@@ -24,7 +24,8 @@ fn sender_id(msg: &BrokerMessage) -> &str {
         BrokerMessage::Status { agent_id, .. }
         | BrokerMessage::Artifact { agent_id, .. }
         | BrokerMessage::Blocked { agent_id, .. }
-        | BrokerMessage::Question { agent_id, .. } => agent_id,
+        | BrokerMessage::Question { agent_id, .. }
+        | BrokerMessage::Intent { agent_id, .. } => agent_id,
         BrokerMessage::Verified { payload, .. } => &payload.verified_by,
         BrokerMessage::Feedback { payload, .. } => &payload.from,
     }
@@ -55,6 +56,18 @@ fn update_agent_record(inner: &mut BrokerStateInner, msg: &BrokerMessage) {
     record.last_seen = std::time::Instant::now();
     record.last_message = Some(msg.clone());
 
+    // Upsert the CLI map from any `agent.status` payload that names a CLI.
+    // This is how the supervisor's CLI lands in `agent_clis` — coding agents
+    // already populate the map from `WatchTarget` at broker start, but the
+    // supervisor is not a watch target and self-registers with `cli`
+    // populated in the status payload (supervisor-as-pane-followups D2).
+    if let BrokerMessage::Status { payload, .. } = msg
+        && let Some(cli) = payload.cli.as_ref()
+        && !cli.is_empty()
+    {
+        inner.agent_clis.insert(agent_id.clone(), cli.clone());
+    }
+
     // Ensure inbox exists for the sender
     inner.queues.entry(agent_id).or_default();
 }
@@ -70,16 +83,31 @@ fn update_agent_record(inner: &mut BrokerStateInner, msg: &BrokerMessage) {
 /// - Appends the message to the in-memory log
 pub fn publish_message(state: &Arc<BrokerState>, msg: &BrokerMessage) {
     let seq = state.next_seq();
-    let mut inner = state.write();
+    {
+        let mut inner = state.write();
 
-    update_agent_record(&mut inner, msg);
+        update_agent_record(&mut inner, msg);
 
-    // Append to the in-memory message log
-    inner
-        .message_log
-        .push((seq, SystemTime::now(), msg.clone()));
+        // Append to the in-memory message log
+        inner
+            .message_log
+            .push((seq, SystemTime::now(), msg.clone()));
 
-    // Route based on message type
+        // Route based on message type
+        route_message(&mut inner, msg, seq);
+    }
+
+    // Forward to the learnings aggregator after delivery completes. The
+    // aggregator only writes to a markdown file — it does NOT publish back
+    // into the broker.
+    if let Some(agg) = state.learnings.as_ref()
+        && let Ok(mut a) = agg.lock()
+    {
+        a.observe(msg);
+    }
+}
+
+fn route_message(inner: &mut BrokerStateInner, msg: &BrokerMessage, seq: u64) {
     match msg {
         BrokerMessage::Status { .. } => {
             // Status messages are informational only -- not routed to inboxes
@@ -132,6 +160,22 @@ pub fn publish_message(state: &Arc<BrokerState>, msg: &BrokerMessage) {
             // Do NOT enqueue in sender's or any other agent's inbox.
             let inbox = inner.queues.entry("supervisor".to_string()).or_default();
             inbox.push((seq, msg.clone()));
+        }
+        BrokerMessage::Intent { agent_id, .. } => {
+            // Broadcast to every other registered agent's inbox, skipping
+            // the sender. Agents without an existing inbox are silently
+            // skipped — same pattern as Artifact / Verified.
+            let targets: Vec<String> = inner
+                .queues
+                .keys()
+                .filter(|id| id.as_str() != agent_id)
+                .cloned()
+                .collect();
+            for target in targets {
+                if let Some(inbox) = inner.queues.get_mut(&target) {
+                    inbox.push((seq, msg.clone()));
+                }
+            }
         }
     }
 }
@@ -235,6 +279,7 @@ pub fn agent_status_snapshot(state: &Arc<BrokerState>) -> Vec<AgentStatusEntry> 
                     last_seen_seconds: 0,
                     summary: String::new(),
                     last_seen: std::time::Instant::now(),
+                    phase: None,
                 },
             )
         })
@@ -245,6 +290,13 @@ pub fn agent_status_snapshot(state: &Arc<BrokerState>) -> Vec<AgentStatusEntry> 
             .get(&r.agent_id)
             .cloned()
             .unwrap_or_default();
+        // Pull the most-recent `payload.phase` (if any) so the dashboard
+        // can prefer it over the message-type-derived status label.
+        let phase = if let Some(BrokerMessage::Status { payload, .. }) = r.last_message.as_ref() {
+            payload.phase.clone()
+        } else {
+            None
+        };
         entries.insert(
             r.agent_id.clone(),
             AgentStatusEntry {
@@ -254,6 +306,7 @@ pub fn agent_status_snapshot(state: &Arc<BrokerState>) -> Vec<AgentStatusEntry> 
                 last_seen_seconds: r.last_seen.elapsed().as_secs(),
                 summary: String::new(),
                 last_seen: r.last_seen,
+                phase,
             },
         );
     }
@@ -338,8 +391,8 @@ fn flush_entries(state: &Arc<BrokerState>, log_path: &std::path::Path, last_flus
 mod tests {
     use super::*;
     use crate::broker::messages::{
-        ArtifactPayload, BlockedPayload, FeedbackPayload, QuestionPayload, StatusPayload,
-        VerifiedPayload,
+        ArtifactPayload, BlockedPayload, FeedbackPayload, IntentPayload, QuestionPayload,
+        StatusPayload, VerifiedPayload,
     };
     use crate::broker::start_broker;
     use crate::config::BrokerConfig;
@@ -351,6 +404,7 @@ mod tests {
                 status: status.to_string(),
                 modified_files: vec![],
                 message: None,
+                ..Default::default()
             },
         }
     }
@@ -401,6 +455,17 @@ mod tests {
             agent_id: agent_id.to_string(),
             payload: QuestionPayload {
                 question: question.to_string(),
+            },
+        }
+    }
+
+    fn make_intent(agent_id: &str, files: &[&str], summary: &str, ttl: u64) -> BrokerMessage {
+        BrokerMessage::Intent {
+            agent_id: agent_id.to_string(),
+            payload: IntentPayload {
+                files: files.iter().map(|s| (*s).to_string()).collect(),
+                summary: summary.to_string(),
+                valid_for_seconds: ttl,
             },
         }
     }
@@ -716,6 +781,147 @@ mod tests {
         assert_eq!(inner.message_log[0].2.status_label(), "question");
     }
 
+    // === Intent broadcast (forward-coordination) ===
+
+    #[test]
+    fn intent_broadcast_reaches_all_peers() {
+        let state = fresh_state();
+        publish_message(&state, &make_status("feat-auth", "working"));
+        publish_message(&state, &make_status("feat-detect", "working"));
+        publish_message(&state, &make_status("supervisor", "working"));
+
+        publish_message(
+            &state,
+            &make_intent("feat-auth", &["src/a.rs"], "wire AuthClient", 600),
+        );
+
+        let (detect_msgs, _) = poll_messages(&state, "feat-detect", 0);
+        let (sup_msgs, _) = poll_messages(&state, "supervisor", 0);
+        assert!(
+            detect_msgs
+                .iter()
+                .any(|m| matches!(m, BrokerMessage::Intent { .. }))
+        );
+        assert!(
+            sup_msgs
+                .iter()
+                .any(|m| matches!(m, BrokerMessage::Intent { .. }))
+        );
+    }
+
+    #[test]
+    fn intent_broadcast_skips_sender() {
+        let state = fresh_state();
+        publish_message(&state, &make_status("feat-auth", "working"));
+        publish_message(&state, &make_status("feat-detect", "working"));
+
+        publish_message(
+            &state,
+            &make_intent("feat-auth", &["src/a.rs"], "wire AuthClient", 600),
+        );
+
+        let (own_msgs, _) = poll_messages(&state, "feat-auth", 0);
+        assert!(
+            !own_msgs
+                .iter()
+                .any(|m| matches!(m, BrokerMessage::Intent { .. }))
+        );
+    }
+
+    #[test]
+    fn intent_broadcast_skips_unregistered_agents() {
+        let state = fresh_state();
+        publish_message(&state, &make_status("feat-auth", "working"));
+
+        publish_message(
+            &state,
+            &make_intent("feat-auth", &["src/a.rs"], "wire AuthClient", 600),
+        );
+
+        let inner = state.read();
+        assert!(!inner.queues.contains_key("feat-detect"));
+    }
+
+    #[test]
+    fn intent_updates_sender_record_status_to_intent() {
+        let state = fresh_state();
+        publish_message(
+            &state,
+            &make_intent("feat-auth", &["src/a.rs"], "wire AuthClient", 600),
+        );
+        let inner = state.read();
+        let record = inner.agents.get("feat-auth").expect("record exists");
+        assert_eq!(record.status, "intent");
+    }
+
+    // === Question coverage (v040-hardening) ===
+
+    #[test]
+    fn question_updates_sender_status_to_question() {
+        let state = fresh_state();
+        publish_message(&state, &make_question("feat-x", "Should I rebase?"));
+
+        let inner = state.read();
+        let record = inner
+            .agents
+            .get("feat-x")
+            .expect("sender record should exist after publishing");
+        assert_eq!(record.status, "question");
+    }
+
+    #[test]
+    fn question_updates_sender_last_seen() {
+        let state = fresh_state();
+        let before = std::time::Instant::now();
+        publish_message(&state, &make_question("feat-x", "Should I rebase?"));
+        let after = std::time::Instant::now();
+
+        let inner = state.read();
+        let record = inner
+            .agents
+            .get("feat-x")
+            .expect("sender record should exist after publishing");
+        // last_seen must lie inside the publish window — proves it was set
+        // by this publish, not left at some pre-existing default.
+        assert!(record.last_seen >= before);
+        assert!(record.last_seen <= after);
+    }
+
+    #[test]
+    fn question_vs_blocked_inbox_creation_differs() {
+        // The spec calls out that `Question` creates the supervisor inbox if
+        // it is missing, whereas `Blocked` silently drops when its target
+        // inbox is missing. This test pins both behaviours in one place so
+        // any regression on either side is loud.
+        let state = fresh_state();
+
+        // Blocked with a non-existent target: nothing should be enqueued, and
+        // no inbox should be created for the missing target.
+        publish_message(
+            &state,
+            &make_blocked("feat-x", "needs types", "feat-missing"),
+        );
+        {
+            let inner = state.read();
+            assert!(
+                !inner.queues.contains_key("feat-missing"),
+                "Blocked must not create the target inbox when it is missing"
+            );
+        }
+
+        // Question without any pre-existing supervisor inbox: the inbox must
+        // be created and the message must be enqueued there.
+        publish_message(&state, &make_question("feat-x", "anything?"));
+        let inner = state.read();
+        assert!(
+            inner.queues.contains_key("supervisor"),
+            "Question must create the supervisor inbox when it is missing"
+        );
+        let (msgs, _) = poll_messages(&state, "supervisor", 0);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].status_label(), "question");
+    }
+
     // === Task 6: poll_messages ===
 
     #[test]
@@ -810,6 +1016,69 @@ mod tests {
         let state = fresh_state();
         let snap = agent_status_snapshot(&state);
         assert!(snap.is_empty());
+    }
+
+    // === supervisor-as-pane-followups: cli + phase plumbing ===
+
+    #[test]
+    fn snapshot_carries_phase_from_most_recent_status_message() {
+        let state = fresh_state();
+        let msg = BrokerMessage::Status {
+            agent_id: "supervisor".to_string(),
+            payload: StatusPayload {
+                status: "working".to_string(),
+                modified_files: vec![],
+                message: None,
+                cli: Some("claude".to_string()),
+                phase: Some("merging".to_string()),
+            },
+        };
+        publish_message(&state, &msg);
+
+        let snap = agent_status_snapshot(&state);
+        let entry = snap.iter().find(|e| e.agent_id == "supervisor").unwrap();
+        assert_eq!(entry.phase.as_deref(), Some("merging"));
+        assert_eq!(entry.cli, "claude");
+    }
+
+    #[test]
+    fn snapshot_phase_is_none_when_last_message_is_not_status() {
+        let state = fresh_state();
+        publish_message(&state, &make_status("supervisor", "working"));
+        publish_message(
+            &state,
+            &make_feedback("feat-x", "supervisor", &["bad test"]),
+        );
+
+        let snap = agent_status_snapshot(&state);
+        let entry = snap.iter().find(|e| e.agent_id == "supervisor").unwrap();
+        assert_eq!(
+            entry.phase, None,
+            "Feedback as last_message must not carry over a phase"
+        );
+    }
+
+    #[test]
+    fn supervisor_cli_lands_in_agent_clis_via_status_payload() {
+        let state = fresh_state();
+        let msg = BrokerMessage::Status {
+            agent_id: "supervisor".to_string(),
+            payload: StatusPayload {
+                status: "working".to_string(),
+                modified_files: vec![],
+                message: None,
+                cli: Some("claude".to_string()),
+                phase: Some("baseline".to_string()),
+            },
+        };
+        publish_message(&state, &msg);
+
+        let inner = state.read();
+        assert_eq!(
+            inner.agent_clis.get("supervisor").map(String::as_str),
+            Some("claude"),
+            "supervisor's cli must be upserted into agent_clis from the status payload",
+        );
     }
 
     // === Task 8: Log flush thread ===
@@ -1139,5 +1408,49 @@ mod tests {
         // Verify status remains "blocked" (protected)
         let inner = state.read();
         assert_eq!(inner.agents["feat-ui"].status, "blocked");
+    }
+
+    // Maps to scenario `Question creates supervisor inbox when absent` from
+    // v040-hardening. (test-coverage-v0-5-0 task 8.1)
+    #[test]
+    fn question_creates_supervisor_inbox_when_absent() {
+        let state = fresh_state();
+        // Register feat-x but no supervisor inbox.
+        publish_message(&state, &make_status("feat-x", "working"));
+        {
+            let inner = state.read();
+            assert!(
+                !inner.queues.contains_key("supervisor"),
+                "supervisor inbox must be absent before publishing the question"
+            );
+        }
+
+        publish_message(&state, &make_question("feat-x", "How should I proceed?"));
+
+        {
+            let inner = state.read();
+            assert!(
+                inner.queues.contains_key("supervisor"),
+                "publishing an agent.question must create the supervisor inbox; got queues: {:?}",
+                inner.queues.keys().collect::<Vec<_>>()
+            );
+        }
+
+        let (messages, last_seq) = poll_messages(&state, "supervisor", 0);
+        assert_eq!(
+            messages.len(),
+            1,
+            "supervisor inbox should contain the published question"
+        );
+        assert!(
+            matches!(&messages[0], BrokerMessage::Question { agent_id, payload }
+                if agent_id == "feat-x" && payload.question == "How should I proceed?"),
+            "supervisor inbox should hold the original question; got: {:?}",
+            messages[0]
+        );
+        assert!(
+            last_seq > 0,
+            "poll_messages should return a non-zero cursor"
+        );
     }
 }

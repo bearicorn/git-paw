@@ -108,6 +108,7 @@ pub async fn watch_worktree(
                 status: "working".to_string(),
                 modified_files: current.clone(),
                 message: None,
+                ..Default::default()
             },
         };
         delivery::publish_message(&state, &msg);
