@@ -113,17 +113,39 @@ fn no_args_behaves_like_start() {
 
 #[test]
 fn stop_runs_without_error() {
-    cmd().arg("stop").assert().success();
+    // HOME override: stop reads the user's sessions dir to find a session
+    // for the current working directory. Without isolation a CI/dev run
+    // could discover (and try to stop!) a real session whose repo_path
+    // happens to match. see openspec/changes/test-tmux-isolation
+    let home = TempDir::new().expect("home tempdir");
+    cmd()
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .arg("stop")
+        .assert()
+        .success();
 }
 
 #[test]
 fn status_runs_without_error() {
-    cmd().arg("status").assert().success();
+    let home = TempDir::new().expect("home tempdir");
+    cmd()
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .arg("status")
+        .assert()
+        .success();
 }
 
 #[test]
 fn list_clis_runs_without_error() {
-    cmd().arg("list-clis").assert().success();
+    let home = TempDir::new().expect("home tempdir");
+    cmd()
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .arg("list-clis")
+        .assert()
+        .success();
 }
 
 // ---------------------------------------------------------------------------
@@ -194,7 +216,7 @@ fn remove_cli_requires_argument() {
 use std::path::Path;
 use std::time::SystemTime;
 
-use git_paw::session::{Session, SessionStatus, WorktreeEntry, save_session_in};
+use git_paw::session::{Session, SessionMode, SessionStatus, WorktreeEntry, save_session_in};
 
 /// XDG data-dir layout used by the binary, mirroring `dirs::data_dir()`.
 fn sessions_dir_under_home(home: &Path) -> std::path::PathBuf {
@@ -227,7 +249,8 @@ fn make_session_with_worktree(
     extra_commit: bool,
 ) -> (Session, std::path::PathBuf) {
     let canonical_repo = git_paw::git::validate_repo(repo).expect("validate repo");
-    let wt = git_paw::git::create_worktree(&canonical_repo, branch).expect("create worktree");
+    let wt =
+        git_paw::git::create_worktree(&canonical_repo, branch, false).expect("create worktree");
     if extra_commit {
         std::fs::write(wt.path.join("change.txt"), "x").unwrap();
         std::process::Command::new("git")
@@ -256,6 +279,8 @@ fn make_session_with_worktree(
         broker_port: None,
         broker_bind: None,
         broker_log_path: None,
+        mode: SessionMode::Bare,
+        dashboard_pane: None,
     };
     (session, wt.path)
 }

@@ -8,12 +8,23 @@
 //!
 //! tmux is a hard dependency of git-paw, so these tests run normally and
 //! are not gated behind `#[ignore]`.
+//!
+//! tmux socket isolation: every test sets `TMUX_TMPDIR` on the current
+//! process via `helpers::tmux_test_env().apply_to_process()` so the
+//! in-process library calls (e.g. `capture_pane`, `auto_approve_pane`)
+//! and the direct `Command::new("tmux")` invocations all share a
+//! test-owned socket. The tests are `#[serial]` because they mutate
+//! the process env. see openspec/changes/test-tmux-isolation
 
 use std::process::Command;
 use std::time::Duration;
 
+use serial_test::serial;
+
 use git_paw::supervisor::approve::{ApprovalRequest, TmuxKeyDispatcher, auto_approve_pane};
 use git_paw::supervisor::permission_prompt::{PermissionType, capture_pane};
+
+mod helpers;
 
 fn tmux_available() -> bool {
     Command::new("tmux")
@@ -58,11 +69,15 @@ fn create_detached_session(name: &str) {
 }
 
 #[test]
+#[serial]
 fn safe_prompt_dispatches_btab_down_enter_against_real_tmux() {
     if !tmux_available() {
         eprintln!("skipping: tmux not available");
         return;
     }
+    let tmux_env = helpers::tmux_test_env();
+    let _proc_env = tmux_env.apply_to_process();
+
     let session = unique_session_name("safe");
     create_detached_session(&session);
 
@@ -109,11 +124,15 @@ fn safe_prompt_dispatches_btab_down_enter_against_real_tmux() {
 }
 
 #[test]
+#[serial]
 fn unsafe_prompt_is_noop_against_real_tmux() {
     if !tmux_available() {
         eprintln!("skipping: tmux not available");
         return;
     }
+    let tmux_env = helpers::tmux_test_env();
+    let _proc_env = tmux_env.apply_to_process();
+
     let session = unique_session_name("unsafe");
     create_detached_session(&session);
 
@@ -145,11 +164,15 @@ fn unsafe_prompt_is_noop_against_real_tmux() {
 }
 
 #[test]
+#[serial]
 fn disabled_config_is_noop_against_real_tmux() {
     if !tmux_available() {
         eprintln!("skipping: tmux not available");
         return;
     }
+    let tmux_env = helpers::tmux_test_env();
+    let _proc_env = tmux_env.apply_to_process();
+
     let session = unique_session_name("disabled");
     create_detached_session(&session);
 

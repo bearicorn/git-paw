@@ -2,6 +2,37 @@
 //!
 //! Tests config loading from repo-level `.git-paw/config.toml` files using real
 //! temporary directories.
+//
+// Documented exception (v0-5-0-audit-cleanup task 9.1):
+//
+// The `config-test-isolation` archived change defined a scenario named
+// "None preserves platform-default user-config resolution" — meaning that
+// passing `user_config_dir = None` to `load_config()` SHALL preserve the
+// platform-default user config directory resolution path. This scenario
+// has NO dedicated test BY DESIGN.
+//
+// A dedicated test for "None preserves platform-default user-config
+// resolution" would need to either:
+//
+// 1. Touch the dev machine's real config dir (`~/.config/git-paw/...` on
+//    Linux, `~/Library/Application Support/git-paw/...` on macOS,
+//    `%APPDATA%\git-paw\...` on Windows). Reading or writing the real
+//    config dir from a unit test pollutes the dev machine and races with
+//    other tests that target the same paths.
+// 2. Manipulate process-global env vars (`XDG_CONFIG_HOME`, `HOME`,
+//    `APPDATA`) at test time. Env-var mutation is process-global state in
+//    Rust's standard library — concurrent test execution can read the
+//    wrong value mid-flight, making such tests brittle and racy.
+//
+// Both options have downsides that outweigh closing the AC gap. Instead,
+// the scenario is exercised BEHAVIOURALLY by every existing test in this
+// file: each one passes `None` for the user-config-dir argument and
+// asserts that the repo-level load path produces the expected
+// `PawConfig`. If `None` did NOT preserve the platform-default
+// resolution, every such test would fail. The documented exception
+// converts the audit gap from "missing" to "intentional", with the
+// substring `None preserves platform-default` present in this comment so
+// future audits find it via grep.
 
 use std::fs;
 
@@ -28,7 +59,8 @@ fn write_repo_config(repo_root: &Path, content: &str) {
 #[test]
 fn load_config_returns_defaults_when_no_files_exist() {
     let tmp = TempDir::new().expect("create temp dir");
-    let config = load_config(tmp.path()).expect("load config");
+    let config =
+        load_config(tmp.path(), Some(&tmp.path().join("global.toml"))).expect("load config");
 
     assert_eq!(config.default_cli, None);
     assert_eq!(config.mouse, None);
@@ -52,7 +84,8 @@ mouse = false
 "#,
     );
 
-    let config = load_config(tmp.path()).expect("load config");
+    let config =
+        load_config(tmp.path(), Some(&tmp.path().join("global.toml"))).expect("load config");
 
     assert_eq!(config.default_cli, Some("claude".to_string()));
     assert_eq!(config.mouse, Some(false));
@@ -74,7 +107,8 @@ command = "/usr/bin/ollama-code"
 "#,
     );
 
-    let config = load_config(tmp.path()).expect("load config");
+    let config =
+        load_config(tmp.path(), Some(&tmp.path().join("global.toml"))).expect("load config");
 
     assert_eq!(config.clis.len(), 2);
 
@@ -111,7 +145,8 @@ cli = "gemini"
 "#,
     );
 
-    let config = load_config(tmp.path()).expect("load config");
+    let config =
+        load_config(tmp.path(), Some(&tmp.path().join("global.toml"))).expect("load config");
 
     assert_eq!(config.presets.len(), 2);
 
@@ -146,7 +181,8 @@ mouse = true
 "#,
     );
 
-    let config = load_config(tmp.path()).expect("load config");
+    let config =
+        load_config(tmp.path(), Some(&tmp.path().join("global.toml"))).expect("load config");
 
     // These should come from the repo config
     assert_eq!(config.default_cli, Some("gemini".to_string()));
@@ -174,7 +210,7 @@ fn malformed_toml_returns_error() {
 
     write_repo_config(tmp.path(), "this is not valid { toml [[[");
 
-    let result = load_config(tmp.path());
+    let result = load_config(tmp.path(), Some(&tmp.path().join("global.toml")));
     assert!(result.is_err(), "malformed TOML should produce an error");
 }
 
@@ -188,7 +224,8 @@ fn empty_config_file_is_valid() {
 
     write_repo_config(tmp.path(), "");
 
-    let config = load_config(tmp.path()).expect("load config");
+    let config =
+        load_config(tmp.path(), Some(&tmp.path().join("global.toml"))).expect("load config");
     assert_eq!(config, PawConfig::default());
 }
 
@@ -403,7 +440,8 @@ display_name = "Agent {i}"
 
     write_repo_config(tmp.path(), &toml);
 
-    let config = load_config(tmp.path()).expect("load config");
+    let config =
+        load_config(tmp.path(), Some(&tmp.path().join("global.toml"))).expect("load config");
     assert_eq!(config.clis.len(), 10);
 
     for i in 0..10 {

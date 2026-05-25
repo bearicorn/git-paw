@@ -32,6 +32,7 @@ fn watcher_working_status(agent_id: &str, modified_files: &[&str]) -> BrokerMess
             status: "working".to_string(),
             modified_files: modified_files.iter().map(|s| (*s).to_string()).collect(),
             message: None,
+            ..Default::default()
         },
     }
 }

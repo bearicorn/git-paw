@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use serial_test::serial;
+use tempfile::TempDir;
 
 mod helpers;
 use helpers::*;
@@ -54,6 +55,7 @@ fn skip_if_no_tmux() -> bool {
     false
 }
 
+#[allow(dead_code)]
 fn kill_session(name: &str) {
     let _ = StdCommand::new("tmux")
         .args(["kill-session", "-t", name])
@@ -143,6 +145,8 @@ fn manual_mode_boot_block_lands_in_agent_pane() {
     }
 
     let tr = setup_test_repo();
+    let fake_home = TempDir::new().expect("home tempdir");
+    let tmux_env = tmux_test_env();
     let project_name = unique_project_name("manual");
     let repo = rename_repo_basename(&tr, &project_name);
 
@@ -162,13 +166,20 @@ fn manual_mode_boot_block_lands_in_agent_pane() {
     // Run `git paw start`. tmux attach at the very end will fail without a
     // TTY, but the session has been created and the boot block sent before
     // attach is reached.
-    let _ = cmd()
+    let mut start_cmd = cmd();
+    start_cmd
         .current_dir(&repo)
+        .env("HOME", fake_home.path())
+        .env_remove("XDG_DATA_HOME");
+    tmux_env.apply_assert(&mut start_cmd);
+    let _ = start_cmd
         .args(["start", "--cli", "sh", "--branches", "feat/x"])
         .output()
         .expect("run start");
 
-    let session_alive = StdCommand::new("tmux")
+    let mut has_session_cmd = StdCommand::new("tmux");
+    tmux_env.apply(&mut has_session_cmd);
+    let session_alive = has_session_cmd
         .args(["has-session", "-t", &session_name])
         .status()
         .expect("tmux has-session")
@@ -186,7 +197,9 @@ fn manual_mode_boot_block_lands_in_agent_pane() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut buffer = String::new();
     while Instant::now() < deadline {
-        if let Ok(out) = StdCommand::new("tmux")
+        let mut capture_cmd = StdCommand::new("tmux");
+        tmux_env.apply(&mut capture_cmd);
+        if let Ok(out) = capture_cmd
             .args(["capture-pane", "-t", &agent_target, "-p", "-S", "-2000"])
             .output()
             && out.status.success()
@@ -201,7 +214,11 @@ fn manual_mode_boot_block_lands_in_agent_pane() {
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    kill_session(&session_name);
+    let mut kill_cmd = StdCommand::new("tmux");
+    tmux_env.apply(&mut kill_cmd);
+    let _ = kill_cmd
+        .args(["kill-session", "-t", &session_name])
+        .status();
 
     // The boot block must contain at minimum: the section header for
     // REGISTER (one of the four mandated essential events) and the

@@ -2,7 +2,32 @@
 //!
 //! Provides utilities used across multiple integration test files, such as
 //! temporary git repository creation and PATH manipulation helpers.
+//!
+//! Each integration test binary compiles its own copy of this module via
+//! `mod helpers;`. Not every binary uses every helper, so dead-code lints
+//! are silenced at the module level rather than per-item.
+#![allow(dead_code)]
+//!
+//! # tmux test isolation
+//!
+//! Every integration test that spawns `tmux` (directly via
+//! [`std::process::Command::new("tmux")`] or transitively through a `git paw`
+//! subcommand) MUST use [`tmux_test_env`] to point that subprocess at a
+//! test-owned tmux socket directory. Without the helper the subprocess uses
+//! the user's default tmux socket, where a test-induced server crash or
+//! `kill-session` collision can destroy the live `paw-git-paw` supervisor
+//! session.
+//!
+//! The collision-guard [`guard_against_live_session`] runs as the first
+//! statement of [`setup_test_repo`] and panics fast if a `paw-*` session is
+//! live on the default socket. Export `GIT_PAW_ALLOW_LIVE_SESSION=1` to opt
+//! out (e.g. when you have verified that every test in the targeted run is
+//! already socket-isolated).
+//!
+//! see openspec/changes/test-tmux-isolation
 
+use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -25,11 +50,241 @@ impl TestRepo {
     }
 }
 
+/// Per-test tmux socket isolation.
+///
+/// Owns a [`TempDir`] under which tmux creates its socket
+/// (`<socket_dir>/tmux-<uid>/default`). Every `Command` builder that will
+/// spawn tmux (directly, or transitively via a `git paw` subcommand) MUST
+/// have [`TmuxTestEnv::apply`] called on it so the child process sees the
+/// test-owned socket directory instead of the user's default socket.
+///
+/// Callers MUST keep the [`TmuxTestEnv`] alive for at least as long as the
+/// tmux server it isolates — dropping the struct removes the socket
+/// directory, which kills the server.
+///
+/// see openspec/changes/test-tmux-isolation
+pub struct TmuxTestEnv {
+    socket_dir: TempDir,
+}
+
+impl TmuxTestEnv {
+    /// Creates a fresh tmux socket directory under [`std::env::temp_dir`].
+    pub fn new() -> Self {
+        let socket_dir = TempDir::new().expect("create tmux socket tempdir");
+        Self { socket_dir }
+    }
+
+    /// Returns the test-owned socket directory.
+    ///
+    /// The directory's lifetime is tied to this `TmuxTestEnv`; keep the
+    /// owning value bound to a local variable.
+    pub fn socket_dir(&self) -> &Path {
+        self.socket_dir.path()
+    }
+
+    /// Configures `cmd` so the spawned tmux subprocess uses this test's
+    /// socket directory and behaves as a standalone outer client.
+    ///
+    /// Sets `TMUX_TMPDIR` to [`Self::socket_dir`] and removes `TMUX` and
+    /// `TMUX_PANE` from the child environment so the subprocess does not
+    /// mistake itself for an inside-tmux client of an outer server.
+    ///
+    /// Callers MUST keep the [`TmuxTestEnv`] alive for at least as long as
+    /// the tmux server the spawned command starts — when the helper is
+    /// dropped the socket directory is removed and any live tmux server
+    /// inside it dies with it.
+    pub fn apply<'a>(&self, cmd: &'a mut Command) -> &'a mut Command {
+        cmd.env("TMUX_TMPDIR", self.socket_dir.path())
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+    }
+
+    /// Variant of [`Self::apply`] for `assert_cmd::Command` (the test
+    /// harness wrapper around `std::process::Command`).
+    pub fn apply_assert<'a>(
+        &self,
+        cmd: &'a mut assert_cmd::Command,
+    ) -> &'a mut assert_cmd::Command {
+        cmd.env("TMUX_TMPDIR", self.socket_dir.path())
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+    }
+
+    /// Apply the same env mutations to the **current process** for tests
+    /// that exercise in-process library code which itself spawns tmux
+    /// (e.g. `git_paw::dashboard::send_reply_to_pane`).
+    ///
+    /// Returns a guard that restores the previous `TMUX_TMPDIR`, `TMUX`,
+    /// and `TMUX_PANE` values when dropped.
+    ///
+    /// Callers MUST gate the test with `#[serial_test::serial]` (or
+    /// otherwise serialise it) because this mutates global process state.
+    /// The struct's `Drop` impl uses `std::env::set_var` /
+    /// `std::env::remove_var` under the same serialisation contract.
+    pub fn apply_to_process(&self) -> ProcessTmuxEnvGuard {
+        ProcessTmuxEnvGuard::set(self.socket_dir.path())
+    }
+}
+
+/// RAII guard returned by [`TmuxTestEnv::apply_to_process`]. Restores the
+/// previous `TMUX_TMPDIR`, `TMUX`, and `TMUX_PANE` values on drop.
+///
+/// see openspec/changes/test-tmux-isolation
+#[allow(clippy::struct_field_names)]
+pub struct ProcessTmuxEnvGuard {
+    previous_tmpdir: Option<OsString>,
+    previous_tmux: Option<OsString>,
+    previous_pane: Option<OsString>,
+}
+
+impl ProcessTmuxEnvGuard {
+    fn set(socket_dir: &Path) -> Self {
+        let previous_tmpdir = std::env::var_os("TMUX_TMPDIR");
+        let previous_tmux = std::env::var_os("TMUX");
+        let previous_pane = std::env::var_os("TMUX_PANE");
+        // SAFETY: callers MUST gate the test with `#[serial]` so the env
+        // mutation cannot race with other threads inspecting the env.
+        unsafe {
+            std::env::set_var("TMUX_TMPDIR", socket_dir);
+            std::env::remove_var("TMUX");
+            std::env::remove_var("TMUX_PANE");
+        }
+        Self {
+            previous_tmpdir,
+            previous_tmux,
+            previous_pane,
+        }
+    }
+}
+
+impl Drop for ProcessTmuxEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: same as `set` — caller's `#[serial]` gate serialises env
+        // mutation.
+        unsafe {
+            match &self.previous_tmpdir {
+                Some(v) => std::env::set_var("TMUX_TMPDIR", v),
+                None => std::env::remove_var("TMUX_TMPDIR"),
+            }
+            if let Some(v) = &self.previous_tmux {
+                std::env::set_var("TMUX", v);
+            }
+            if let Some(v) = &self.previous_pane {
+                std::env::set_var("TMUX_PANE", v);
+            }
+        }
+    }
+}
+
+impl Default for TmuxTestEnv {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Thin constructor wrapper so callers can write
+/// `let tmux_env = helpers::tmux_test_env();`.
+///
+/// see openspec/changes/test-tmux-isolation
+pub fn tmux_test_env() -> TmuxTestEnv {
+    TmuxTestEnv::new()
+}
+
+/// Fails fast if a `paw-*` tmux session is live on the user's **default**
+/// tmux socket.
+///
+/// The check runs `tmux ls` without applying [`TmuxTestEnv`], so it inspects
+/// the real default socket (the same socket the user's supervisor session
+/// lives on). If any session whose name starts with `paw-` is present, the
+/// function panics with a message naming the offending session(s) and
+/// recommending one of:
+///
+/// - `tmux kill-session -t <name>` — kill the live session before re-running
+///   the test suite.
+/// - `cargo test --test <name>` — run a targeted test that does not depend
+///   on `setup_test_repo()`.
+/// - `GIT_PAW_ALLOW_LIVE_SESSION=1 cargo test ...` — explicitly opt out of
+///   the guard (only safe when you have verified every test in the run is
+///   socket-isolated).
+///
+/// Returns silently if:
+///
+/// - `GIT_PAW_ALLOW_LIVE_SESSION=1` is set (escape hatch).
+/// - `tmux ls` exits non-zero with the "no server running" message
+///   (the expected state on a fresh dev machine or in CI).
+/// - `tmux ls` succeeds but no session name starts with `paw-`.
+///
+/// see openspec/changes/test-tmux-isolation
+pub fn guard_against_live_session() {
+    if std::env::var_os("GIT_PAW_ALLOW_LIVE_SESSION").is_some() {
+        return;
+    }
+
+    let Ok(output) = Command::new("tmux").arg("ls").output() else {
+        // tmux not installed → nothing to guard against
+        return;
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("no server running") || output.stdout.is_empty() {
+            return;
+        }
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let offending: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| {
+            // `tmux ls` format: "<name>: <windows> windows (created ...) ..."
+            let name = line.split(':').next()?.trim();
+            if name.starts_with("paw-") {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if offending.is_empty() {
+        return;
+    }
+
+    let mut msg = String::from(
+        "Refusing to run integration tests while a paw-* tmux session is live on the default socket.\n\n\
+         The test suite spawns tmux against the default socket by default; running it concurrently with a live\n\
+         supervisor session has crashed the tmux server in the past, killing every pane.\n\n\
+         Offending session(s):\n",
+    );
+    for name in &offending {
+        let _ = writeln!(msg, "  - {name}");
+    }
+    msg.push_str(
+        "\nRemediation options:\n\
+         \n\
+         1. Kill the live session(s) and re-run:\n",
+    );
+    for name in &offending {
+        let _ = writeln!(msg, "       tmux kill-session -t {name}");
+    }
+    msg.push_str(
+        "\n\
+         2. Run a targeted test file that does not depend on setup_test_repo():\n\
+                cargo test --test <name>\n\
+         \n\
+         3. Opt out (only when every test in the run is socket-isolated):\n\
+                GIT_PAW_ALLOW_LIVE_SESSION=1 cargo test ...\n",
+    );
+    panic!("{msg}");
+}
+
 /// Creates a temporary git repository with an initial commit.
 ///
 /// The repo is nested inside a sandbox directory so worktrees land as siblings
 /// and are cleaned up automatically.
 pub fn setup_test_repo() -> TestRepo {
+    guard_against_live_session();
+
     let sandbox = TempDir::new().expect("create sandbox dir");
     let repo = sandbox.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo dir");
@@ -74,5 +329,174 @@ pub fn setup_test_repo() -> TestRepo {
     TestRepo {
         _sandbox: sandbox,
         repo,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use std::panic;
+
+    struct AllowLiveSessionGuard {
+        previous: Option<OsString>,
+    }
+
+    impl AllowLiveSessionGuard {
+        fn set(value: &str) -> Self {
+            let previous = std::env::var_os("GIT_PAW_ALLOW_LIVE_SESSION");
+            unsafe {
+                std::env::set_var("GIT_PAW_ALLOW_LIVE_SESSION", value);
+            }
+            Self { previous }
+        }
+
+        fn unset() -> Self {
+            let previous = std::env::var_os("GIT_PAW_ALLOW_LIVE_SESSION");
+            unsafe {
+                std::env::remove_var("GIT_PAW_ALLOW_LIVE_SESSION");
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for AllowLiveSessionGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(v) => std::env::set_var("GIT_PAW_ALLOW_LIVE_SESSION", v),
+                    None => std::env::remove_var("GIT_PAW_ALLOW_LIVE_SESSION"),
+                }
+            }
+        }
+    }
+
+    fn tmux_available() -> bool {
+        Command::new("tmux")
+            .arg("-V")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    #[test]
+    fn tmux_test_env_sets_expected_env_vars() {
+        let env = tmux_test_env();
+        let mut cmd = Command::new("/usr/bin/env");
+        env.apply(&mut cmd);
+
+        let output = cmd.output().expect("run /usr/bin/env");
+        assert!(output.status.success(), "env should succeed");
+        let stdout = String::from_utf8(output.stdout).expect("utf8");
+
+        let expected_tmpdir = env
+            .socket_dir()
+            .to_str()
+            .expect("socket_dir is utf8")
+            .to_string();
+        let tmux_tmpdir_line = stdout
+            .lines()
+            .find(|line| line.starts_with("TMUX_TMPDIR="))
+            .unwrap_or_else(|| panic!("TMUX_TMPDIR missing from child env: {stdout}"));
+        assert_eq!(
+            tmux_tmpdir_line,
+            format!("TMUX_TMPDIR={expected_tmpdir}"),
+            "TMUX_TMPDIR should point at the helper's socket_dir"
+        );
+
+        assert!(
+            !stdout.lines().any(|line| line.starts_with("TMUX=")),
+            "TMUX should be removed from child env, got:\n{stdout}"
+        );
+        assert!(
+            !stdout.lines().any(|line| line.starts_with("TMUX_PANE=")),
+            "TMUX_PANE should be removed from child env, got:\n{stdout}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn guard_returns_when_no_tmux_server() {
+        if !tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        let socket_env = tmux_test_env();
+        let _tmpdir_guard = socket_env.apply_to_process();
+
+        // Sanity: no server on this freshly-created socket dir.
+        let ls = Command::new("tmux")
+            .arg("ls")
+            .output()
+            .expect("run tmux ls");
+        assert!(
+            !ls.status.success(),
+            "tmux ls should fail on an empty socket dir"
+        );
+
+        guard_against_live_session();
+    }
+
+    #[test]
+    #[serial]
+    fn guard_panics_when_live_paw_session_exists() {
+        if !tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        // Force the escape hatch off even if the parent cargo run set it.
+        let _no_allow = AllowLiveSessionGuard::unset();
+        let socket_env = tmux_test_env();
+        let _tmpdir_guard = socket_env.apply_to_process();
+
+        let status = Command::new("tmux")
+            .args(["new-session", "-d", "-s", "paw-guard-test", "sh"])
+            .status()
+            .expect("tmux new-session");
+        assert!(status.success(), "create paw-guard-test session");
+
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(guard_against_live_session));
+
+        // Always clean up before asserting.
+        let _ = Command::new("tmux")
+            .args(["kill-session", "-t", "paw-guard-test"])
+            .status();
+
+        let err = result.expect_err("guard should panic when paw-* session is live");
+        let msg = if let Some(s) = err.downcast_ref::<String>() {
+            s.clone()
+        } else if let Some(s) = err.downcast_ref::<&str>() {
+            (*s).to_string()
+        } else {
+            String::new()
+        };
+        assert!(
+            msg.contains("paw-guard-test"),
+            "panic message should name the offending session, got: {msg}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn guard_honours_allow_live_session_env() {
+        if !tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        let socket_env = tmux_test_env();
+        let _tmpdir_guard = socket_env.apply_to_process();
+        let _allow_guard = AllowLiveSessionGuard::set("1");
+
+        let status = Command::new("tmux")
+            .args(["new-session", "-d", "-s", "paw-guard-escape", "sh"])
+            .status()
+            .expect("tmux new-session");
+        assert!(status.success(), "create paw-guard-escape session");
+
+        // No panic expected.
+        guard_against_live_session();
+
+        let _ = Command::new("tmux")
+            .args(["kill-session", "-t", "paw-guard-escape"])
+            .status();
     }
 }
