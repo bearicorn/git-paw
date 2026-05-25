@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::error::PawError;
-use crate::specs::{SpecBackend, SpecEntry, parse_frontmatter};
+use crate::specs::{SpecBackend, SpecBackendKind, SpecEntry, parse_frontmatter};
 
 /// Backend for scanning Markdown files with YAML frontmatter.
 ///
@@ -63,6 +63,7 @@ impl SpecBackend for MarkdownBackend {
 
             entries.push(SpecEntry {
                 id,
+                backend: SpecBackendKind::Markdown,
                 branch: String::new(), // filled in by scan_specs
                 cli,
                 prompt: body.to_string(),
@@ -245,5 +246,71 @@ mod tests {
         assert_eq!(entries[0].cli.as_deref(), Some("claude"));
         assert_eq!(entries[0].prompt, "the prompt");
         assert!(entries[0].owned_files.is_none());
+    }
+
+    // openspec-apply-boot-prompt backend tagging — every entry returned
+    // from MarkdownBackend's scan() MUST carry
+    // `backend == SpecBackendKind::Markdown` so downstream code can
+    // dispatch on backend without re-scanning. v0-5-0-audit-cleanup tasks
+    // 6.4–6.6.
+
+    #[test]
+    fn scan_returns_entries_with_markdown_backend_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 1..=2 {
+            write_spec(
+                tmp.path(),
+                &format!("spec-{i}.md"),
+                &pending_spec(None, None, "body"),
+            );
+        }
+        let entries = MarkdownBackend.scan(tmp.path()).unwrap();
+        assert_eq!(entries.len(), 2, "expected two pending entries");
+        for entry in &entries {
+            assert_eq!(
+                entry.backend,
+                SpecBackendKind::Markdown,
+                "entry {} must carry backend == Markdown; got {:?}",
+                entry.id,
+                entry.backend,
+            );
+        }
+    }
+
+    #[test]
+    fn scan_filters_non_pending_then_applies_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_spec(tmp.path(), "pending.md", &pending_spec(None, None, "body"));
+        write_spec(tmp.path(), "done.md", "---\npaw_status: done\n---\nbody");
+        write_spec(
+            tmp.path(),
+            "in-progress.md",
+            "---\npaw_status: in-progress\n---\nbody",
+        );
+
+        let entries = MarkdownBackend.scan(tmp.path()).unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "non-pending entries must be filtered out before tagging",
+        );
+        assert_eq!(
+            entries[0].backend,
+            SpecBackendKind::Markdown,
+            "the surviving pending entry must carry the Markdown backend tag",
+        );
+    }
+
+    #[test]
+    fn scan_single_pending_carries_markdown_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_spec(tmp.path(), "solo.md", &pending_spec(None, None, "body"));
+        let entries = MarkdownBackend.scan(tmp.path()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].backend,
+            SpecBackendKind::Markdown,
+            "single-entry scan must still tag the entry as Markdown",
+        );
     }
 }

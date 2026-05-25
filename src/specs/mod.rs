@@ -6,6 +6,8 @@
 
 mod markdown;
 mod openspec;
+pub mod resolve;
+pub mod speckit;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -14,15 +16,21 @@ use std::path::Path;
 use crate::config::PawConfig;
 use crate::error::PawError;
 use openspec::OpenSpecBackend;
+use speckit::SpecKitBackend;
 
 /// A discovered spec ready for session launch.
 ///
 /// Represents a single pending spec with all the information needed
-/// to create a worktree and launch an AI coding session.
-#[derive(Debug)]
+/// to create a worktree and launch an AI coding session. The `backend`
+/// field identifies the `SpecBackend` implementation that produced the
+/// entry, so downstream consumers (notably `build_task_prompt`) can
+/// dispatch behaviour per backend without re-reading configuration.
+#[derive(Debug, Clone)]
 pub struct SpecEntry {
     /// Unique identifier (folder name or filename).
     pub id: String,
+    /// The `SpecBackend` implementation that produced this entry.
+    pub backend: SpecBackendKind,
     /// Derived branch name: `branch_prefix` + `id`.
     pub branch: String,
     /// Per-spec CLI override (from `paw_cli` frontmatter).
@@ -40,6 +48,30 @@ pub struct SpecEntry {
 pub trait SpecBackend: fmt::Debug {
     /// Scans `dir` for pending specs and returns them as `SpecEntry` values.
     fn scan(&self, dir: &Path) -> Result<Vec<SpecEntry>, PawError>;
+}
+
+/// The per-entry tag a `SpecBackend` implementation sets on every
+/// `SpecEntry` it returns.
+///
+/// Downstream consumers (notably `build_task_prompt`) dispatch on this
+/// field so per-backend behaviour does not have to re-read configuration
+/// or maintain a parallel map of entry → backend identity.
+// NOTE: tasks.md 1.3 of the `openspec-apply-boot-prompt` change predicted
+// that the `SpecKit` variant would be added by the `spec-kit-format`
+// change. That change shipped before this one and did not extend the
+// enum, so we add the variant here to keep the field non-optional across
+// every backend the codebase actually carries today. The Spec Kit branch
+// of `build_task_prompt` falls through to the generic AGENTS.md pointer
+// (same shape as `Markdown`); the `/speckit:apply` slash-command shape,
+// if it ever lands, will replace that branch in a follow-up change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecBackendKind {
+    /// Produced by `OpenSpecBackend` (`openspec/changes/<id>/` layout).
+    OpenSpec,
+    /// Produced by `MarkdownBackend` (flat `.md` files with frontmatter).
+    Markdown,
+    /// Produced by `SpecKitBackend` (`.specify/specs/<feature>/` layout).
+    SpecKit,
 }
 
 use markdown::MarkdownBackend;
@@ -105,6 +137,7 @@ fn backend_for_type(spec_type: &str) -> Result<Box<dyn SpecBackend>, PawError> {
     match spec_type {
         "openspec" => Ok(Box::new(OpenSpecBackend)),
         "markdown" => Ok(Box::new(MarkdownBackend)),
+        "speckit" => Ok(Box::new(SpecKitBackend)),
         _ => Err(PawError::SpecError(format!(
             "unknown spec type: {spec_type}"
         ))),
@@ -122,19 +155,65 @@ fn derive_branch(prefix: &str, id: &str) -> String {
     }
 }
 
+/// Resolves the effective spec configuration with auto-detection and CLI
+/// override applied.
+///
+/// Precedence (highest to lowest):
+/// 1. `format_override` (typically the `--specs-format` CLI value).
+/// 2. Explicit `[specs]` section in TOML config.
+/// 3. Auto-detection of `.specify/specs/` at the repo root → Spec Kit defaults.
+///
+/// Returns `None` when no source resolves a usable configuration.
+fn resolve_specs_config(
+    config: &PawConfig,
+    repo_root: &Path,
+    format_override: Option<&str>,
+) -> Option<crate::config::SpecsConfig> {
+    if let Some(format) = format_override {
+        let mut base = config.specs.clone().unwrap_or_default();
+        base.spec_type = Some(format.to_string());
+        if base.dir.is_none() && format == "speckit" {
+            base.dir = Some(".specify/specs".to_string());
+        }
+        return Some(base);
+    }
+
+    if config.specs.is_some() {
+        return config.specs.clone();
+    }
+
+    // Auto-detect Spec Kit when `.specify/specs/` exists at the repo root.
+    let specify = repo_root.join(".specify");
+    if specify.is_dir() && specify.join("specs").is_dir() {
+        return Some(crate::config::SpecsConfig {
+            dir: Some(".specify/specs".to_string()),
+            spec_type: Some("speckit".to_string()),
+        });
+    }
+
+    None
+}
+
 /// Scans for pending specs using the configuration from `[specs]`.
 ///
 /// Reads the spec directory and format type from `config`, selects the
 /// appropriate backend, scans for pending specs, and derives branch names.
 ///
 /// Returns an error if:
-/// - No `[specs]` section exists in config
+/// - No `[specs]` section exists in config and no `.specify/` is auto-detected
 /// - The spec directory does not exist or is not a directory
 /// - The spec type is unknown
 pub fn scan_specs(config: &PawConfig, repo_root: &Path) -> Result<Vec<SpecEntry>, PawError> {
-    let specs_config = config
-        .specs
-        .as_ref()
+    scan_specs_with_override(config, repo_root, None)
+}
+
+/// Like [`scan_specs`], but honours a CLI `--specs-format` override.
+pub fn scan_specs_with_override(
+    config: &PawConfig,
+    repo_root: &Path,
+    format_override: Option<&str>,
+) -> Result<Vec<SpecEntry>, PawError> {
+    let specs_config = resolve_specs_config(config, repo_root, format_override)
         .ok_or_else(|| PawError::SpecError("no [specs] section in config".to_string()))?;
 
     let dir = specs_config.dir.as_deref().unwrap_or("specs");
@@ -159,8 +238,13 @@ pub fn scan_specs(config: &PawConfig, repo_root: &Path) -> Result<Vec<SpecEntry>
     let branch_prefix = config.branch_prefix.as_deref().unwrap_or("spec/");
     let mut entries = backend.scan(&specs_dir)?;
 
+    // Backends that set their own branch name (e.g. SpecKit's `task/` and
+    // `phase/` prefixes) keep it. Backends that leave `branch` empty get the
+    // `<branch_prefix><id>` convention applied here.
     for entry in &mut entries {
-        entry.branch = derive_branch(branch_prefix, &entry.id);
+        if entry.branch.is_empty() {
+            entry.branch = derive_branch(branch_prefix, &entry.id);
+        }
     }
 
     Ok(entries)
@@ -176,12 +260,14 @@ mod tests {
     fn spec_entry_all_fields() {
         let entry = SpecEntry {
             id: "add-auth".to_string(),
+            backend: SpecBackendKind::OpenSpec,
             branch: "spec/add-auth".to_string(),
             cli: Some("claude".to_string()),
             prompt: "implement auth".to_string(),
             owned_files: Some(vec!["src/auth.rs".to_string()]),
         };
         assert_eq!(entry.id, "add-auth");
+        assert_eq!(entry.backend, SpecBackendKind::OpenSpec);
         assert_eq!(entry.branch, "spec/add-auth");
         assert_eq!(entry.cli.as_deref(), Some("claude"));
         assert_eq!(entry.prompt, "implement auth");
@@ -192,11 +278,13 @@ mod tests {
     fn spec_entry_optional_fields_absent() {
         let entry = SpecEntry {
             id: "fix-bug".to_string(),
+            backend: SpecBackendKind::Markdown,
             branch: "spec/fix-bug".to_string(),
             cli: None,
             prompt: "fix the bug".to_string(),
             owned_files: None,
         };
+        assert_eq!(entry.backend, SpecBackendKind::Markdown);
         assert!(entry.cli.is_none());
         assert!(entry.owned_files.is_none());
     }
@@ -224,6 +312,11 @@ mod tests {
     #[test]
     fn backend_for_type_markdown() {
         assert!(backend_for_type("markdown").is_ok());
+    }
+
+    #[test]
+    fn backend_for_type_speckit() {
+        assert!(backend_for_type("speckit").is_ok());
     }
 
     #[test]
@@ -288,5 +381,168 @@ mod tests {
         };
         let entries = scan_specs(&config, tmp.path()).unwrap();
         assert!(entries.is_empty());
+    }
+
+    // --- Auto-detection of .specify/ ---
+
+    #[test]
+    fn auto_detect_specify_activates_speckit() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".specify").join("specs")).unwrap();
+        let config = PawConfig::default();
+        // The path exists but has no features — backend returns empty Vec.
+        let entries = scan_specs(&config, tmp.path()).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn auto_detect_skipped_when_specs_section_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".specify").join("specs")).unwrap();
+        fs::create_dir(tmp.path().join("my-specs")).unwrap();
+        let config = PawConfig {
+            specs: Some(SpecsConfig {
+                dir: Some("my-specs".to_string()),
+                spec_type: Some("markdown".to_string()),
+            }),
+            ..Default::default()
+        };
+        let resolved = resolve_specs_config(&config, tmp.path(), None).unwrap();
+        assert_eq!(resolved.spec_type.as_deref(), Some("markdown"));
+        assert_eq!(resolved.dir.as_deref(), Some("my-specs"));
+    }
+
+    #[test]
+    fn auto_detect_skipped_when_no_specify_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = PawConfig::default();
+        assert!(resolve_specs_config(&config, tmp.path(), None).is_none());
+    }
+
+    #[test]
+    fn auto_detect_skipped_when_specify_missing_specs_subdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".specify").join("memory")).unwrap();
+        let config = PawConfig::default();
+        assert!(resolve_specs_config(&config, tmp.path(), None).is_none());
+    }
+
+    // Maps to scenario `Explicit config in TOML wins over auto-detection`
+    // from spec-kit-format. The repo has BOTH a `.specify/specs/` directory
+    // (which would normally auto-activate the SpecKit backend) AND an
+    // explicit `[specs] type = "markdown"` config. The explicit config
+    // must win: the Markdown backend is selected, not SpecKit.
+    // (test-coverage-v0-5-0 task 11.5)
+    #[test]
+    fn explicit_config_wins_over_auto_detection() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Seed `.specify/specs/` so the auto-detection branch *would* fire.
+        fs::create_dir_all(tmp.path().join(".specify").join("specs")).unwrap();
+        // Seed a markdown specs directory the explicit config points at.
+        let md_dir = tmp.path().join("specs");
+        fs::create_dir(&md_dir).unwrap();
+
+        let config = PawConfig {
+            specs: Some(SpecsConfig {
+                dir: Some("specs".to_string()),
+                spec_type: Some("markdown".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        // resolve_specs_config must select the explicit config without
+        // falling through to auto-detection.
+        let resolved = resolve_specs_config(&config, tmp.path(), None)
+            .expect("explicit config should resolve");
+        assert_eq!(
+            resolved.spec_type.as_deref(),
+            Some("markdown"),
+            "explicit type = markdown must win over the auto-detected speckit"
+        );
+        assert_eq!(
+            resolved.dir.as_deref(),
+            Some("specs"),
+            "explicit dir = specs must win over the auto-detected .specify/specs"
+        );
+
+        // End-to-end: scan_specs must run the Markdown backend and NOT the
+        // SpecKit backend. With an empty markdown specs/ dir the result is
+        // an empty entry list; with SpecKit on the `.specify/specs/` dir
+        // we would similarly get zero entries — but a SpecKit-routed scan
+        // would set up the `.specify/specs/` dir as its source. We assert
+        // success on the markdown path explicitly.
+        let entries = scan_specs(&config, tmp.path()).unwrap();
+        assert!(
+            entries.is_empty(),
+            "empty markdown specs dir should produce no entries; got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn format_override_wins_over_specs_config_and_auto_detection() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".specify").join("specs")).unwrap();
+        let config = PawConfig {
+            specs: Some(SpecsConfig {
+                dir: Some("my-specs".to_string()),
+                spec_type: Some("markdown".to_string()),
+            }),
+            ..Default::default()
+        };
+        let resolved = resolve_specs_config(&config, tmp.path(), Some("openspec")).unwrap();
+        assert_eq!(resolved.spec_type.as_deref(), Some("openspec"));
+        assert_eq!(resolved.dir.as_deref(), Some("my-specs"));
+    }
+
+    #[test]
+    fn format_override_speckit_supplies_default_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = PawConfig::default();
+        let resolved = resolve_specs_config(&config, tmp.path(), Some("speckit")).unwrap();
+        assert_eq!(resolved.spec_type.as_deref(), Some("speckit"));
+        assert_eq!(resolved.dir.as_deref(), Some(".specify/specs"));
+    }
+
+    #[test]
+    fn scan_specs_with_override_routes_to_speckit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let specify = tmp.path().join(".specify").join("specs");
+        let feat = specify.join("001-feature");
+        fs::create_dir_all(&feat).unwrap();
+        fs::write(
+            feat.join("tasks.md"),
+            "## Phase 1: Setup\n- [ ] T001 do thing\n",
+        )
+        .unwrap();
+
+        let config = PawConfig::default();
+        let entries = scan_specs_with_override(&config, tmp.path(), Some("speckit")).unwrap();
+        assert_eq!(entries.len(), 1);
+        // SpecKit-supplied branch name is preserved (not overwritten with `spec/...`).
+        assert!(
+            entries[0].branch.starts_with("phase/"),
+            "got branch: {}",
+            entries[0].branch
+        );
+    }
+
+    #[test]
+    fn scan_specs_openspec_still_gets_branch_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let specs_dir = tmp.path().join("specs");
+        let change = specs_dir.join("add-auth");
+        fs::create_dir_all(&change).unwrap();
+        fs::write(change.join("tasks.md"), "implement auth").unwrap();
+
+        let config = PawConfig {
+            specs: Some(SpecsConfig {
+                dir: Some("specs".to_string()),
+                spec_type: Some("openspec".to_string()),
+            }),
+            ..Default::default()
+        };
+        let entries = scan_specs(&config, tmp.path()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].branch, "spec/add-auth");
     }
 }
