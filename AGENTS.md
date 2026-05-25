@@ -49,7 +49,9 @@ This project follows **Conventional Commits** (Commitizen compatible).
 Format: `<type>(<scope>): <description>`
 
 Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `ci`, `chore`, `perf`
-Scopes: `detect`, `git`, `tmux`, `session`, `config`, `interactive`, `error`, `cli`, `docs`, `ci`, `specs`, `agents`, `logging`, `replay`, `init`, `broker`, `dashboard`, `skills`, `supervisor`, `merge-loop`
+Scopes: `detect`, `git`, `tmux`, `session`, `config`, `interactive`, `error`, `cli`, `docs`, `ci`, `specs`, `agents`, `logging`, `replay`, `init`, `broker`, `dashboard`, `skills`, `supervisor`, `merge-loop`, `user-guide`, `worktree`, `governance`, `learnings`, `pause`
+
+Compound scopes are written as `(scope1,scope2,...)` when a single change cuts across multiple scopes. Example: `feat(cli,config): add new flag with config wiring`.
 
 Examples:
 ```
@@ -100,15 +102,22 @@ Only add dependencies listed in the approved set:
 | `anyhow` | Application error handling |
 | `serde` + `serde_json` | Session state serialization |
 | `toml` + `serde` | Config file parsing |
-| `dirs` | Platform XDG directories |
 | `tokio` | Async runtime (broker HTTP server) |
 | `axum` | HTTP server framework (broker endpoints) |
 | `ratatui` | TUI framework (dashboard) |
 | `crossterm` | Terminal backend for ratatui |
+| `schemars` | JSON Schema derivation for governance config |
+| `serde_yaml` | Spec Kit frontmatter parsing |
+| `chrono` | ISO timestamp formatting in broker messages and learnings aggregator |
+| `regex` | Broker `agent_id` validation + supervisor `sweep.sh` phantom filter |
 
 Dev: `assert_cmd`, `predicates`, `tempfile`, `serial_test`, `tower`, `hyper`, `hyper-util`, `http-body-util`
 
 Do not add other dependencies without explicit approval.
+
+#### Notable exclusions
+
+- `dirs` — Replaced by homegrown `src/dirs.rs` because the upstream crate's license is not FOSS-compatible. Do not re-add.
 
 ## Configuration
 
@@ -170,6 +179,21 @@ This project uses OpenSpec-style specifications in `openspec/changes/`.
 Specs use RFC 2119 keywords: **SHALL/MUST** (mandatory), **SHOULD** (recommended), **MAY** (optional).
 Requirements include GIVEN/WHEN/THEN scenarios. Each scenario maps to at least one test.
 
+### opsx skills are the canonical interface
+
+Agents MUST drive the OpenSpec workflow through the `opsx:*` slash-command skills, not hand-rolled file writes:
+
+| Stage | Skill | When to invoke |
+|---|---|---|
+| Start a new change | `/opsx:new <kebab-name>` | Creating a new change directory + scaffold |
+| Create next artifact (proposal → specs → design → tasks) | `/opsx:continue <change>` | After the previous artifact lands; ONE artifact per invocation |
+| Generate all artifacts in one pass | `/opsx:ff <change>` | When you know the change shape up-front and want to skip the per-artifact prompt cycle |
+| Implement tasks | `/opsx:apply <change>` | After tasks.md is complete; walks tasks one at a time and marks `- [ ]` → `- [x]` |
+| Verify before archive | `/opsx:verify <change>` | **Supervisor-only.** Coding agents do NOT invoke this — verification is supervisor responsibility (five-gate framework). |
+| Archive a complete change | `/opsx:archive <change>` | **Supervisor-only**, post-cherry-pick on the release branch. Coding agents do NOT invoke this. |
+
+Direct file writes to `openspec/changes/<change>/{proposal,design,tasks}.md` or `specs/<capability>/spec.md` are reserved for amendments to an already-validated change (e.g. folding new findings into an in-flight change) — they SHALL NOT be the primary authoring path. When in doubt, run `/opsx:continue` and let the skill prompt.
+
 ## Testing Conventions
 
 ### Unit Tests
@@ -220,28 +244,47 @@ Handled by cargo-dist. Config: `[workspace.metadata.dist]` in `Cargo.toml`.
 
 ### Cutting a release
 
-The release flow follows a single `chore: prepare vX.Y.Z release` commit
-on `main`, mirroring the v0.2.0, v0.3.0, and v0.4.0 prep commits.
+The release flow assumes **every OpenSpec change for this release has
+already been applied + archived** on the feature branch (or on `main`
+if changes landed continuously). The `chore: prepare vX.Y.Z release`
+commit only bumps the version, refreshes `Cargo.lock`, and regenerates
+the changelog. Archives are NOT part of the prep commit.
 
-1. **Merge the feature branch into `main`** (rebase-merge or fast-forward
-   so the per-commit history is preserved).
+Rationale (changed during v0.5.0 cycle): the v0.2.0-v0.4.0 prep
+commits bundled archive moves with the version bump. This made the
+commit reviewable as a single release-readiness checkpoint but had
+real downsides — archive moves at release time meant validation errors
+surfaced under deadline pressure; the commit body had to list every
+archived change, which got long; and it gave the false impression that
+the work being released was happening now (it was not, it had landed
+incrementally). v0.5.0 onwards: archive each change as part of its
+own merge into the release branch.
 
-2. **Archive completed OpenSpec changes** in dependency order. The
-   `feat/vX.Y.0-*` branch should ship a
-   `openspec/changes/_release-notes/vX.Y.0-archive-order.md` plan
-   identifying the safe archive sequence. For each change:
+1. **Merge each feature branch into `feat/vX.Y.0-*` (or `main`)** with
+   the change's implementation commits. Then in the SAME branch
+   immediately archive the change:
 
    ```bash
    openspec archive <change-name> -y
+   git add openspec/
+   git commit -m "chore(specs): archive <change-name>; sync deltas to main specs"
    ```
 
-   When a delta references a requirement that doesn't exist in the
-   target spec (or duplicates one), fix the delta header
-   (`## ADDED Requirements` vs `## MODIFIED Requirements`) before
-   re-running the archive. As a last resort,
+   The archive commit is a sibling of the implementation commits and
+   lands well before release prep. If a delta references a requirement
+   that doesn't exist in the target spec (or duplicates one), fix the
+   delta header (`## ADDED Requirements` vs `## MODIFIED Requirements`)
+   before re-running the archive. As a last resort,
    `openspec archive <change> -y --skip-specs` archives the change
    without touching main specs — only use when the implementation is
    already in code and the spec content is informational.
+
+2. **Verify the archive backlog is empty** before starting release
+   prep: `openspec list` SHALL show no pending changes for this
+   release. If pending changes remain that you intentionally want to
+   defer (e.g. spec-only changes that will land in vX.Y.Z+1), move
+   their directories out of `openspec/changes/` (or document the
+   deferral in `MILESTONE.md`'s v0.5.0 implementation-status table).
 
 3. **Bump the version** in `Cargo.toml`, then `cargo build` to refresh
    `Cargo.lock`.
@@ -256,21 +299,20 @@ on `main`, mirroring the v0.2.0, v0.3.0, and v0.4.0 prep commits.
    `git cliff --tag vX.Y.Z -o CHANGELOG.md`. The new section appears
    under a `## [X.Y.Z] - YYYY-MM-DD` header at the top.
 
-5. **One commit captures the whole release prep**:
+5. **One commit captures version + changelog only** (NOT archives):
 
    ```bash
-   git add Cargo.toml Cargo.lock CHANGELOG.md openspec/
+   git add Cargo.toml Cargo.lock CHANGELOG.md
    git commit -m "chore: prepare vX.Y.Z release
 
-   Bump version to X.Y.Z. Archive N OpenSpec changes and sync delta
-   specs to main specs:
-   - <list of capabilities>"
+   Bump version to X.Y.Z. The changelog summarises what was archived
+   into openspec/specs/ across this cycle."
    ```
 
-   Do **not** split this into separate "bump", "changelog", "archive"
-   commits — the changelog should describe the contents of the release,
-   the archive moves are part of "what shipped in vX.Y.Z", and reviewers
-   read this commit as a single release-readiness checkpoint.
+   `openspec/` SHALL NOT appear in this commit's diff. If `git status`
+   shows pending `openspec/specs/` changes here, an archive step was
+   skipped earlier — back up and archive it as its own commit before
+   continuing.
 
 6. **Tag and push**:
 
@@ -362,4 +404,5 @@ Commits should not include any reference to AI assistants. It should also be one
 
 ## MCP
 When you need to search docs, use `context7` tools.
+
 

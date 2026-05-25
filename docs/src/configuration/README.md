@@ -17,7 +17,7 @@ Both files are optional. git-paw works with sensible defaults when no config exi
 # Default CLI used when --cli flag is not provided
 default_cli = "my-cli"
 
-# Default CLI for --from-specs mode (bypasses picker when set)
+# Default CLI for spec-mode launches (--from-all-specs, --specs); bypasses picker when set
 # default_spec_cli = "my-cli"
 
 # Prefix for spec-derived branch names (default: "spec/")
@@ -47,7 +47,7 @@ cli = "codex"
 # Spec scanning configuration
 # [specs]
 # dir = "specs"
-# type = "openspec"    # "openspec" or "markdown"
+# type = "openspec"    # "openspec", "markdown", or "speckit"
 
 # Session logging
 # [logging]
@@ -58,6 +58,14 @@ cli = "codex"
 # enabled = false
 # port = 9119
 # bind = "127.0.0.1"
+
+# Pointers to user-maintained governance docs (all optional)
+# [governance]
+# adr = "docs/adr"
+# test_strategy = "docs/test-strategy.md"
+# security = "docs/security-checklist.md"
+# dod = "docs/definition-of-done.md"
+# constitution = ".specify/memory/constitution.md"
 ```
 
 ## Settings Reference
@@ -72,7 +80,7 @@ default_cli = "my-cli"
 
 ### `default_spec_cli`
 
-The AI CLI to use by default when launching with `--from-specs`. When set, skips the CLI picker for any specs that don't have a `paw_cli` override.
+The AI CLI to use by default when launching with `--from-all-specs` or `--specs`. When set, skips the CLI picker for any specs that don't have a `paw_cli` override.
 
 ```toml
 default_spec_cli = "my-cli"
@@ -173,18 +181,23 @@ This skips all interactive prompts and launches with the preset's branches and C
 
 ## Specs
 
-Configure spec file scanning for `--from-specs` mode.
+Configure spec file scanning for `--from-all-specs` and `--specs` mode.
 
 ```toml
 [specs]
 dir = "specs"         # Directory containing spec files (relative to repo root)
-type = "openspec"     # "openspec" (directory-based) or "markdown" (file-based)
+type = "openspec"     # "openspec" (OpenSpec changes), "markdown" (flat .md files), or "speckit" (GitHub Spec Kit)
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `dir` | `"specs"` | Directory to scan for spec files |
-| `type` | `"openspec"` | Spec format: `"openspec"` for directory-based, `"markdown"` for file-based |
+| `type` | `"openspec"` | Spec backend: `"openspec"` (directory-based OpenSpec changes), `"markdown"` (flat `.md` files with YAML frontmatter), or `"speckit"` ([GitHub Spec Kit](https://github.com/github/spec-kit) `.specify/specs/<feature>/`) |
+
+When `[specs]` is omitted and `.specify/specs/` exists at the repo root, the
+spec backend auto-detects to `type = "speckit"` with
+`dir = ".specify/specs"`. Use the `--specs-format` CLI flag to override both
+the config value and the auto-detection for a single launch.
 
 See [Spec-Driven Launch](../user-guide/spec-driven-launch.md) for format details.
 
@@ -249,15 +262,53 @@ Configure the supervisor agent for orchestrating parallel coding sessions. When 
 enabled = true
 cli = "claude"
 test_command = "just check"
+lint_command = "cargo clippy -- -D warnings"
+build_command = "cargo build"
+fmt_check_command = "cargo fmt --check"
+doc_build_command = "mdbook build docs/"
+spec_validate_command = "openspec validate {{CHANGE_ID}} --strict"
+security_audit_command = "cargo audit"
 agent_approval = "auto"
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `enabled` | `false` | Whether to use supervisor mode by default (can also use `--supervisor` flag) |
+| `enabled` | `false` | Whether to use supervisor mode by default (can also use `--supervisor` flag, or override with `--no-supervisor` for a single session) |
 | `cli` | (uses `default_cli`) | CLI binary for the supervisor agent |
-| `test_command` | (none) | Command to run after an agent reports done (e.g. `"just check"`, `"cargo test"`) |
+| `test_command` | (none) | Test runner — gate 1 (e.g. `"just check"`, `"cargo test"`, `"npm test"`, `"pytest"`) |
+| `lint_command` | (none) | Lint check — gate 1 (e.g. `"cargo clippy -- -D warnings"`, `"npm run lint"`, `"ruff check ."`, `"golangci-lint run"`) |
+| `build_command` | (none) | Compile step — gate 1 when build is distinct from test (e.g. `"cargo build"`, `"npm run build"`, `"mvn package"`, `"go build ./..."`) |
+| `fmt_check_command` | (none) | Formatter check — gate 1 (e.g. `"cargo fmt --check"`, `"prettier --check ."`, `"gofmt -l ."`, `"black --check ."`) |
+| `doc_build_command` | (none) | Documentation build — gate 4 (e.g. `"mdbook build docs/"`, `"sphinx-build"`, `"mkdocs build"`) |
+| `spec_validate_command` | (none) | Spec validator — gate 3 (e.g. `"openspec validate {{CHANGE_ID}} --strict"` for OpenSpec). `{{CHANGE_ID}}` is substituted by the supervisor agent at verification time with the change name being audited; it is **not** expanded at config load |
+| `security_audit_command` | (none) | Security audit tooling — gate 5 (e.g. `"cargo audit"`, `"npm audit"`, `"bandit -r ."`, `"gosec ./..."`) |
 | `agent_approval` | `"auto"` | Permission level for coding agents: `"manual"`, `"auto"`, or `"full-auto"` |
+
+**Gate-command templating.** The seven `*_command` keys feed the supervisor
+skill's five verification gates (testing, regression analysis, spec audit, doc
+audit, security audit). For each key set on this section, the supervisor skill
+substitutes the matching `{{...}}` placeholder at session boot and the
+supervisor agent runs the literal command during that gate. For each key
+**omitted**, the placeholder renders as `(not configured)` and the supervisor
+agent skips that tooling step — the gate's manual review still applies (e.g.
+the OWASP-category diff scan for the security gate, the spec scenario
+coverage check for the spec gate). Pre-v0.5.x configs that did not name any
+of the six new keys continue to work; they just run a less-rigorous
+verification cycle until the keys are filled in. A user wanting to explicitly
+opt out of a single gate's tooling can set the field to `"(not configured)"`
+verbatim — the supervisor agent recognises that as the same skip token.
+
+**Resolution chain** — git-paw picks supervisor mode using the first matching rule:
+
+1. `--no-supervisor` → off (highest precedence; overrides everything below).
+2. `--supervisor` → on.
+3. `[supervisor] enabled = true` → on.
+4. `[supervisor] enabled = false` → off.
+5. No `[supervisor]` section + `--dry-run` → off.
+6. No `[supervisor]` section + interactive TTY → prompts you.
+7. No `[supervisor]` section + non-TTY → off.
+
+`--supervisor` and `--no-supervisor` are mutually exclusive — passing both produces a parse error.
 
 **Approval levels:**
 
@@ -311,6 +362,151 @@ git-paw also seeds `.claude/settings.json::allowed_bash_prefixes` with the broke
 endpoints (`/publish`, `/status`, `/poll`, `/feedback`) so the first broker call
 never hits a permission prompt. Existing entries in that file are preserved.
 
+### Common dev-command allowlist
+
+On every supervisor session start, git-paw seeds a curated preset of dev-loop
+prefix patterns into `.claude/settings.json::allowed_bash_prefixes` so agents
+do not hit a permission prompt for each variant of `cargo build`, `git commit`,
+`just check`, `mdbook build`, etc. The mechanism is the same one Claude uses
+for its "Yes, don't ask again" flow — but seeded up-front rather than approved
+one-by-one.
+
+```toml
+[supervisor.common_dev_allowlist]
+enabled = true
+extra = ["pnpm test", "deno fmt"]
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `true` | Master switch for the seeder. Set to `false` to skip seeding entirely. |
+| `extra` | `[]` | Additional project-specific prefix patterns appended to the built-in preset. |
+
+**Built-in preset (all v0.5.0 entries):**
+
+- **Cargo**: `cargo build`, `cargo test`, `cargo clippy`, `cargo fmt`,
+  `cargo check`, `cargo tree`, `cargo deny`, `cargo update`
+- **Git (read)**: `git status`, `git log`, `git diff`, `git show`, `git fetch`
+- **Git (write, non-destructive)**: `git commit`, `git push`, `git pull`,
+  `git merge`, `git stash`, `git add`, `git restore`, `git rm`
+- **Just**: `just` (any recipe)
+- **mdBook**: `mdbook build`
+- **OpenSpec**: `openspec validate`, `openspec new`, `openspec archive`,
+  `openspec list`, `openspec status`, `openspec instructions`
+- **Search (read-only)**: `find`, `grep`, `sed -n`
+
+**Intentional exclusions:** `cargo install`, `cargo run`, `cargo bench`,
+`git rebase`, `git reset`, `git checkout`, `git push --force`, `sed` without
+`-n`, and non-cargo package managers (`npm`, `pnpm`, `yarn`, `deno`, `bun`,
+`uv`, `pip`, `pipx`, `gem`). Add them via `extra` if you accept the wider
+surface for your project.
+
+**Behaviour:**
+
+- Independent of broker status — non-broker supervisor sessions still benefit.
+- Idempotent: re-seeding on session re-attach never duplicates entries.
+- Non-fatal: write failures log a warning to stderr and session start continues.
+- Targets `<repo>/.claude/settings.json` always; also writes
+  `~/.claude-oss/settings.json` when that directory pre-exists (the alt-config
+  dogfood pattern) but never creates the directory.
+- Entries persist after `git paw stop` — prune `.claude/settings.json` manually
+  if you want a clean slate.
+
+### Conflict detector tuning
+
+When supervisor mode is enabled, the broker runs an in-process conflict
+detector that auto-emits `agent.feedback` (and optionally `agent.question`)
+on forward, in-flight, and ownership conflicts. See
+[Agent Coordination § Automatic Conflict Detection](../user-guide/coordination.md#automatic-conflict-detection-v050) for the runtime semantics; the table below
+documents the configuration surface.
+
+```toml
+[supervisor.conflict]
+window_seconds = 120
+warn_on_intent_overlap = true
+escalate_on_violation = true
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `window_seconds` | `120` | Seconds the detector waits before escalating an unresolved in-flight conflict to the supervisor inbox via `agent.question`. |
+| `warn_on_intent_overlap` | `true` | Master switch for forward-conflict feedback. When `false`, two agents declaring overlapping `agent.intent` files no longer trigger `agent.feedback`, but the intent tracker still records them (so in-flight and ownership detection continue to work). |
+| `escalate_on_violation` | `true` | Whether ownership violations escalate to the supervisor inbox. When `false`, the violator still receives `agent.feedback`, but no follow-up `agent.question` lands in the supervisor inbox. |
+
+The `[supervisor.conflict]` table is fully optional. A v0.4 config with
+`[supervisor]` and no `[supervisor.conflict]` loads cleanly with every field
+at the defaults above. Setting `[supervisor] enabled = false` (or omitting
+the section) disables the detector subsystem entirely — no auto-emitted
+warnings fire regardless of the values here.
+
+### Learnings mode tuning
+
+When supervisor mode is active, the parent `[supervisor] learnings = true`
+flag (default `false`) activates the learnings subsystem. Entries are
+appended to `.git-paw/session-learnings.md` covering the five deterministic
+categories tracked in v0.5.0 (stuck duration, recovery-cycle count, forward
+conflicts, in-flight conflicts, ownership violations). The
+`[supervisor.learnings_config]` sub-table tunes the flush cadence; the
+master switch lives on the parent table.
+
+```toml
+[supervisor]
+learnings = true
+
+[supervisor.learnings_config]
+flush_interval_seconds = 60
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `flush_interval_seconds` | `60` | How often the learnings aggregator flushes accumulated entries from memory to `.git-paw/session-learnings.md`. The file is append-only across sessions; a longer interval batches more entries per write. |
+
+See the [Learnings Mode chapter](../user-guide/learnings.md) for the
+category-by-category walkthrough, the output-file format, and the v0.6.0
+roadmap for programmatic access via the `agent.learning` broker variant.
+
+## Governance
+
+Point git-paw at your project's existing governance documents so the supervisor can read them as context. All fields are optional — list only the docs you have.
+
+```toml
+[governance]
+adr = "docs/adr"                          # directory of ADR files
+test_strategy = "docs/test-strategy.md"   # single Markdown file
+security = "docs/security-checklist.md"   # single Markdown file
+dod = "docs/definition-of-done.md"        # single Markdown file
+constitution = ".specify/memory/constitution.md"  # single Markdown file
+```
+
+| Field | Kind | Description |
+|-------|------|-------------|
+| `adr` | directory | Architecture Decision Records. git-paw does not care which convention (Nygard, MADR, `adr-tools`) — point at the folder where they live. |
+| `test_strategy` | file | The team's test-strategy document. |
+| `security` | file | Security checklist (OWASP-style, project-specific, whatever the team uses). |
+| `dod` | file | Definition of Done for completed work. |
+| `constitution` | file | Project constitution. Spec Kit users normally let this auto-wire (see below). |
+
+git-paw does not dictate the structure, format, or rubric of any of these documents. The supervisor LLM reads them as context and applies judgment during its existing audit flow. There is no `[governance.gates]` table and no per-doc enforcement switch — gating-per-doc would require git-paw to define "failure" for each doc type, and that is a process choice your team owns.
+
+Paths are stored verbatim and resolved against the repository root at use time. Relative paths point at files inside the repo; absolute paths are accepted as-is. A path that does not exist still loads cleanly — git-paw does not stat the filesystem at config-load. If you point at a missing file, the runtime consumer flags it.
+
+### Spec Kit constitution auto-wiring
+
+When `governance.constitution` is unset AND `[specs] type = "speckit"`, git-paw probes for `<specs_dir>/../memory/constitution.md` and, if present, populates `governance.constitution` automatically. This means a typical Spec Kit project (with `.specify/specs/` and `.specify/memory/constitution.md`) gets the constitution wired up without any `[governance]` entry.
+
+Explicit values always win. If `governance.constitution` is set to anything — including a path that does not exist or an empty string — auto-wiring is skipped:
+
+```toml
+[governance]
+constitution = ""   # disables auto-wiring without deleting the slot
+```
+
+Auto-wiring only runs for the Spec Kit backend. With `[specs] type = "openspec"`, `type = "markdown"`, or no `[specs]` section, `governance.constitution` stays whatever the TOML says (defaulting to `None`).
+
+### What the supervisor does with these paths
+
+This `[governance]` table is the storage slot. The runtime consumer — boot-prompt injection so the supervisor can read each doc and apply it to its audit — lives in the parallel `governance-context` capability. See the [Governance](../user-guide/governance.md) chapter of the user guide for what that looks like end-to-end.
+
 ## Dashboard
 
 Configure the dashboard TUI rendered in pane 0 when the broker is enabled.
@@ -347,6 +543,7 @@ When both global and repo configs exist, they merge with these rules:
 | `broker` | Repo wins |
 | `supervisor` | Repo wins |
 | `dashboard` | Repo wins |
+| `governance` | Per-field merge (repo wins on each set field, unset fields fall back to global) |
 
 **Example:** If global config defines `[clis.my-agent]` and repo config defines `[clis.my-agent]` with a different command, the repo version wins. But a `[clis.other-tool]` in global config still appears — maps are merged, not replaced.
 

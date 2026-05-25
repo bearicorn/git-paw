@@ -58,6 +58,40 @@ Skills support these placeholders that get replaced at runtime:
 - `{{SKILL_NAME}}` - Name from YAML frontmatter
 - `{{SKILL_DESCRIPTION}}` - Description from YAML frontmatter
 
+### Supervisor gate-command placeholders
+
+The embedded supervisor skill uses seven additional placeholders fed from
+`[supervisor].*_command` keys in `.git-paw/config.toml`. Each gate-command
+template renders verbatim into the skill prose where the supervisor agent
+reads it:
+
+- `{{TEST_COMMAND}}` ← `[supervisor].test_command` — gate 1 (Testing) test runner
+- `{{LINT_COMMAND}}` ← `[supervisor].lint_command` — gate 1 lint sub-step
+- `{{BUILD_COMMAND}}` ← `[supervisor].build_command` — gate 1 build sub-step
+- `{{FMT_CHECK_COMMAND}}` ← `[supervisor].fmt_check_command` — gate 1 formatter check
+- `{{DOC_BUILD_COMMAND}}` ← `[supervisor].doc_build_command` — gate 4 (Doc audit)
+- `{{SPEC_VALIDATE_COMMAND}}` ← `[supervisor].spec_validate_command` — gate 3 (Spec audit)
+- `{{SECURITY_AUDIT_COMMAND}}` ← `[supervisor].security_audit_command` — gate 5 (Security audit)
+
+**`(not configured)` graceful skip.** When a key is omitted from
+`[supervisor]`, the matching placeholder substitutes to the literal string
+`(not configured)` in the rendered skill. The supervisor agent treats that
+sentinel as "skip the tooling invocation for this gate" and continues with
+the gate's manual review only (e.g. the OWASP-category diff scan still runs
+for the security gate, the spec scenario coverage check still runs for the
+spec gate). Pre-v0.5.x configs that only set `test_command` continue to
+render the remaining gates as `(not configured)` and the supervisor agent
+runs them as manual-only — no behavior change for those configs.
+
+**`{{CHANGE_ID}}` is per-invocation, not per-render.** Spec validators
+typically take a change name as argument (e.g. `openspec validate
+my-change-id --strict`). To support that, the `spec_validate_command`
+template MAY embed the literal substring `{{CHANGE_ID}}`. git-paw does
+**not** substitute `{{CHANGE_ID}}` at session boot — it passes through the
+render verbatim. The supervisor agent expands it at verification time using
+the change name it is currently auditing. This matches how `{{BRANCH_ID}}`
+behaves for coding agents (per-agent, not per-render).
+
 ## Resource Subdirectories
 
 Skills can include optional resource subdirectories:

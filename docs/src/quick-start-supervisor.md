@@ -54,9 +54,22 @@ agent_approval = "auto"
 git paw start --supervisor
 ```
 
-git-paw creates a worktree per spec, opens a tmux session with the dashboard in pane 0, the supervisor in pane 1, and one coding agent per spec in the remaining panes. The supervisor injects its boot prompt automatically; you only need to chat with it for high-level approvals.
+git-paw creates a worktree per spec, opens a tmux session with the supervisor in pane 0, the dashboard in pane 1, and one coding agent per spec in the remaining panes (pane 2 onwards). The supervisor injects its boot prompt automatically; you only need to chat with it for high-level approvals.
 
 When every agent has reported `verified` and the supervisor has merged each branch in topological order, git-paw writes `.git-paw/session-summary.md` and exits.
+
+## Skipping Supervisor for One Session
+
+If your project sets `[supervisor] enabled = true` (the recommended setup for active development), the supervisor runs by default for every `git paw start`. To skip the supervisor for a single session — e.g. for a quick debug-only run or a one-off branch flip — without editing the config, pass `--no-supervisor`:
+
+```bash
+# Project config says [supervisor] enabled = true, but we want a plain session
+git paw start --no-supervisor --cli claude --branches feat/quick-fix
+```
+
+`--no-supervisor` is the highest-precedence step in the [supervisor mode resolution chain](configuration/README.md#supervisor) — it wins over both `[supervisor] enabled = true` in config and any prompt. It is mutually exclusive with `--supervisor`; passing both fails at parse time.
+
+The flag only affects the current session. Your config is untouched, so the next `git paw start` returns to supervisor mode as configured.
 
 ## Key Config Knobs
 
@@ -71,29 +84,67 @@ The full reference lives in [Configuration → Supervisor](configuration/README.
 | `[supervisor.auto_approve].enabled` | Master switch for git-paw's safe-prompt auto-dismisser. |
 | `[supervisor.auto_approve].safe_commands` | Project-specific command prefixes appended to the built-in safe list. |
 | `[supervisor.auto_approve].approval_level` | `"off"`, `"conservative"`, or `"safe"` preset for the auto-approve whitelist. |
+| `[supervisor.common_dev_allowlist].enabled` | Seeds Claude's `allowed_bash_prefixes` with a curated preset of safe dev-loop commands on supervisor start. Default `true`. |
+| `[supervisor.common_dev_allowlist].extra` | Project-specific prefix patterns appended to the built-in preset (e.g. `["pnpm test", "deno fmt"]`). |
 
 See [Configuration → Broker](configuration/README.md#broker) for `[broker]` settings and [Configuration → Dashboard](configuration/README.md#dashboard) if you want the live broker-message panel turned on.
 
-## What's NOT Yet Supported in v0.4.0
+## Broker Wire Format
 
-A few items in the supervisor roadmap explicitly do **not** ship in v0.4.0. See [`MILESTONE.md`](https://github.com/bearicorn/git-paw/blob/main/MILESTONE.md) for the authoritative list.
+Every coordination message the supervisor and its agents exchange goes through
+the broker as a JSON envelope of the form
+`{"type": "agent.<variant>", "agent_id": "<slug>", "payload": {...}}`. The
+canonical examples below come from `src/broker/messages.rs`. `agent_id` slugs
+must be lowercase alphanumeric + `-` / `_` (no slashes — `feat/auth` is the
+git branch name; `feat-auth` is the slug form the broker accepts).
 
-- **Per-CLI hook providers** (e.g. `.claude/hooks.json`, `.gemini/settings.json`, `.codex/hooks.json`). v0.4.0 ships a single CLI-agnostic auto-approve mechanism that works against any CLI via `tmux capture-pane` + `tmux send-keys`. Per-CLI hook providers are deferred to v1.0.0 (see `MILESTONE.md` → "v0.4.0 Deviations from this Milestone" → "Scope reductions / deferrals").
-- **Cross-agent conflict detection** (warn when two agents modify the same file). Deferred to v0.5.0 as part of Learnings Mode (see `MILESTONE.md` → "v0.5.0 — Supervisor Learnings + Governance Docs").
-- **Learnings mode** — supervisor tracking of stuck patterns, ownership violations, and ADR / policy suggestions. Ships in v0.5.0 (see `MILESTONE.md` → "Feature: Learnings Mode").
+`agent.status` (auto-published by the filesystem watcher whenever an agent's
+worktree changes; the manual form below is an escape hatch):
+
+```bash
+curl -s -X POST "$GIT_PAW_BROKER_URL/publish" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"agent.status","agent_id":"feat-auth","payload":{"status":"working","modified_files":["src/auth.rs"],"message":"wiring JWT verifier"}}'
+```
+
+`agent.artifact` (auto-published by the post-commit hook with the committed
+files; manual form is the escape hatch for code-less tasks):
+
+```bash
+curl -s -X POST "$GIT_PAW_BROKER_URL/publish" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"agent.artifact","agent_id":"feat-auth","payload":{"status":"done","exports":["AuthClient"],"modified_files":[]}}'
+```
+
+`agent.blocked`, `agent.intent`, `agent.question`, `agent.feedback`, and
+`agent.verified` round out the seven shipped variants — see the full reference
+with payload-field semantics in [Agent Coordination](user-guide/coordination.md).
 
 ## Where to Look When Things Go Wrong
 
 When a supervisor run misbehaves, three places have everything you need:
 
-1. **Dashboard pane (pane 0).** With `[broker] enabled = true` the dashboard runs in pane 0 and updates every second. Use it to spot which agent is `blocked`, which is `working`, and how long it has been since each agent's last status update. See the [Dashboard chapter](user-guide/dashboard.md) for status-symbol meanings and controls.
-2. **`.git-paw/session-summary.md`.** Written by the supervisor when the run exits. Contains per-branch test results, merge order, and any agents that were skipped. If the supervisor exited early, this file tells you why.
-3. **`.git-paw/broker.log`.** A JSONL audit trail of every message the broker handled — `agent.register`, `agent.done`, `agent.blocked`, `agent.verified`, `agent.feedback`, etc. Tail it live with `tail -f .git-paw/broker.log` to watch coordination as it happens. The file is flushed every five seconds; see [Agent Coordination → Audit Trail](user-guide/coordination.md) for the full schema.
+1. **Dashboard pane (pane 1).** With `[broker] enabled = true` the dashboard runs in pane 1 of the supervisor session and updates every second. Use it to spot which agent is `blocked`, which is `working`, and how long it has been since each agent's last status update. See the [Dashboard chapter](user-guide/dashboard.md) for status-symbol meanings and controls.
+2. **Supervisor pane (pane 0).** The supervisor CLI runs here and prints feedback inline as it walks agents through the merge plan. Scroll back with tmux's copy mode if you need to inspect earlier reasoning.
+3. **`.git-paw/session-summary.md`.** Written by the supervisor when the run exits. Contains per-branch test results, merge order, and any agents that were skipped. If the supervisor exited early, this file tells you why.
+4. **`.git-paw/broker.log`.** A JSONL audit trail of every message the broker handled — `agent.status`, `agent.artifact`, `agent.blocked`, `agent.intent`, `agent.question`, `agent.feedback`, and `agent.verified`. Tail it live with `tail -f .git-paw/broker.log` to watch coordination as it happens. The file is flushed every five seconds; see [Agent Coordination](user-guide/coordination.md) for the full schema.
 
 If you need to inspect an individual agent's pane history, run `tmux capture-pane -p -t <session>:<window>.<pane>` against the session printed at launch.
+
+## Governance
+
+If your project has existing governance docs (ADRs, DoD, security checklist,
+test strategy, constitution), point the supervisor at them via the
+`[governance]` table in `.git-paw/config.toml`. When set, those paths are
+injected into the supervisor's boot prompt and the supervisor consults each doc
+as a sub-step of its spec-audit step. Findings flow through the existing
+`agent.feedback` errors path — no new wire format. See the [Governance
+chapter](user-guide/governance.md) for the full config, what the supervisor
+checks per doc, and illustrative starting-point examples for each doc type.
 
 ## What's Next
 
 - [User Guide → Agent Coordination](user-guide/coordination.md) — broker message types and how agents talk to each other.
-- [User Guide → Dashboard](user-guide/dashboard.md) — pane 0 status table, controls, and configuration.
+- [User Guide → Dashboard](user-guide/dashboard.md) — dashboard pane status table (pane 1 in supervisor mode, pane 0 otherwise), controls, and configuration.
+- [User Guide → Governance](user-guide/governance.md) — pointing the supervisor at your project's existing governance docs.
 - [Configuration → Supervisor](configuration/README.md#supervisor) — every supervisor and `auto_approve` field with defaults.
