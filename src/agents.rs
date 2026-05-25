@@ -7,9 +7,23 @@
 use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use crate::error::PawError;
 use crate::git::{assume_unchanged, exclude_from_git};
+
+/// Matches `PAW_SUPERVISOR_PID=<digits>` lines inside the agent marker file.
+///
+/// Compiled once on first use via `LazyLock`. The `expect` is allowed by the
+/// project's panic-surface rules because the pattern is a static literal and
+/// the failure is unreachable at runtime.
+static SUPERVISOR_PID_REGEX: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"PAW_SUPERVISOR_PID=\d+").expect("static regex compiles"));
+
+/// Matches `PAW_LAST_VERIFIED_COMMIT=<value>` lines inside the agent marker file.
+static LAST_VERIFIED_COMMIT_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"PAW_LAST_VERIFIED_COMMIT=[^\n]+").expect("static regex compiles")
+});
 
 /// Start marker prefix used for detection (ignores trailing comment text).
 const START_MARKER_PREFIX: &str = "<!-- git-paw:start";
@@ -320,11 +334,6 @@ pub fn build_agent_marker(
 /// Updates an existing agent marker file with additional fields.
 ///
 /// This allows adding supervisor-specific information after the initial marker creation.
-///
-/// # Panics
-///
-/// Panics if the marker file contains malformed content that cannot be processed by
-/// the regex replacement logic.
 pub fn update_agent_marker(
     marker_path: &Path,
     supervisor_pid: Option<u32>,
@@ -339,8 +348,7 @@ pub fn update_agent_marker(
     if let Some(pid) = supervisor_pid {
         if updated.contains("PAW_SUPERVISOR_PID=") {
             // Replace existing PID
-            updated = regex::Regex::new(r"PAW_SUPERVISOR_PID=\d+")
-                .unwrap()
+            updated = SUPERVISOR_PID_REGEX
                 .replace(&updated, &format!("PAW_SUPERVISOR_PID={pid}"))
                 .to_string();
         } else {
@@ -353,8 +361,7 @@ pub fn update_agent_marker(
     if let Some(commit) = last_verified_commit {
         if updated.contains("PAW_LAST_VERIFIED_COMMIT=") {
             // Replace existing commit
-            updated = regex::Regex::new(r"PAW_LAST_VERIFIED_COMMIT=[^\n]+")
-                .unwrap()
+            updated = LAST_VERIFIED_COMMIT_REGEX
                 .replace(&updated, &format!("PAW_LAST_VERIFIED_COMMIT={commit}"))
                 .to_string();
         } else {
@@ -592,6 +599,107 @@ pub fn inject_section_into_file(path: &Path, section: &str) -> Result<(), PawErr
 
     fs::write(path, &output)
         .map_err(|e| PawError::AgentsMdError(format!("failed to write '{}': {e}", path.display())))
+}
+
+/// Removes the git-paw managed block (start marker through end marker,
+/// inclusive — plus any blank lines immediately adjacent) from `content`.
+///
+/// If `content` has no start marker, returns `content` unchanged. This makes
+/// the helper safe to call unconditionally during teardown.
+///
+/// Adjacency rule: the helper consumes ONE leading blank line and ONE trailing
+/// blank line that surround the block, restoring the file to its
+/// pre-injection shape (`inject_into_content` inserts a leading blank line
+/// when appending to a non-empty file).
+pub fn remove_git_paw_section(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+
+    let Some(start_idx) = lines
+        .iter()
+        .position(|l| l.starts_with(START_MARKER_PREFIX))
+    else {
+        // No marker — preserve content byte-for-byte.
+        return content.to_string();
+    };
+
+    let end_idx = lines[start_idx..]
+        .iter()
+        .position(|l| l.contains(END_MARKER))
+        .map(|rel| start_idx + rel);
+
+    // Compute the range to delete: [delete_start, delete_end_exclusive).
+    let delete_start = start_idx;
+    let delete_end_exclusive = end_idx.map_or(lines.len(), |e| e + 1);
+
+    // Consume at most ONE adjacent blank line to avoid collapsing the
+    // surrounding paragraph spacing. Prefer the trailing blank because
+    // `inject_into_content` inserts a leading blank when appending the
+    // block, so the trailing blank is more likely to be vestigial.
+    // If only a leading blank exists, fall back to that.
+    let mut delete_end = delete_end_exclusive;
+    let mut adjusted_start = delete_start;
+    if delete_end < lines.len() && lines[delete_end].is_empty() {
+        delete_end += 1;
+    } else if adjusted_start > 0 && lines[adjusted_start - 1].is_empty() {
+        adjusted_start -= 1;
+    }
+    let delete_start = adjusted_start;
+
+    let mut result = String::new();
+    for line in &lines[..delete_start] {
+        result.push_str(line);
+        result.push('\n');
+    }
+    for line in &lines[delete_end..] {
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    // Preserve trailing-newline behaviour of the original file when the
+    // result is not already terminated with one.
+    if content.ends_with('\n') && !result.ends_with('\n') && !result.is_empty() {
+        result.push('\n');
+    }
+
+    // If the original file lacked a trailing newline AND the result
+    // gained one from our line-by-line reconstruction, trim it back.
+    if !content.ends_with('\n') && result.ends_with('\n') {
+        result.pop();
+    }
+
+    result
+}
+
+/// Reads `path` (treating a missing file as empty), removes any
+/// git-paw managed block, and writes the result back. Idempotent: a file
+/// with no markers is a no-op and the original content is preserved
+/// byte-for-byte.
+///
+/// v0-5-0-audit-cleanup Bug E — `cmd_stop` and `cmd_purge` invoke this
+/// against the repo-root `AGENTS.md` after teardown so the supervisor-
+/// pane boot block does not accumulate across sessions.
+pub fn remove_session_boot_block(repo_root: &Path) -> Result<(), PawError> {
+    let agents_md = repo_root.join("AGENTS.md");
+    let content = match fs::read_to_string(&agents_md) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(PawError::AgentsMdError(format!(
+                "failed to read '{}': {e}",
+                agents_md.display()
+            )));
+        }
+    };
+
+    let new_content = remove_git_paw_section(&content);
+    if new_content == content {
+        // No marker block — nothing to write.
+        return Ok(());
+    }
+
+    fs::write(&agents_md, &new_content).map_err(|e| {
+        PawError::AgentsMdError(format!("failed to write '{}': {e}", agents_md.display()))
+    })
 }
 
 #[cfg(test)]
@@ -1588,6 +1696,30 @@ mod tests {
     }
 
     #[test]
+    fn update_agent_marker_reuses_lazy_regex_across_calls() {
+        // Smoke test for the LazyLock<Regex> hoisting: invoking
+        // `update_agent_marker` twice in succession must not panic and the
+        // second call must replace the first call's substituted value.
+        // Reaching this point at all proves both regexes initialised cleanly.
+        let tmp = tempfile::tempdir().unwrap();
+        let marker_path = tmp.path().join("test-marker");
+
+        let initial = "PAW_AGENT_ID=test\nPAW_BROKER_URL=http://localhost:9119\nPAW_SUPERVISOR_PID=111\nPAW_LAST_VERIFIED_COMMIT=abc\n";
+        fs::write(&marker_path, initial).unwrap();
+
+        update_agent_marker(&marker_path, Some(222), Some("def")).unwrap();
+        update_agent_marker(&marker_path, Some(333), Some("ghi")).unwrap();
+
+        let updated = fs::read_to_string(&marker_path).unwrap();
+        assert!(updated.contains("PAW_SUPERVISOR_PID=333"));
+        assert!(updated.contains("PAW_LAST_VERIFIED_COMMIT=ghi"));
+        assert!(!updated.contains("PAW_SUPERVISOR_PID=111"));
+        assert!(!updated.contains("PAW_SUPERVISOR_PID=222"));
+        assert!(!updated.contains("PAW_LAST_VERIFIED_COMMIT=abc"));
+        assert!(!updated.contains("PAW_LAST_VERIFIED_COMMIT=def"));
+    }
+
+    #[test]
     fn get_agent_marker_path_returns_correct_path() {
         let tmp = tempfile::tempdir().unwrap();
         let worktree = tmp.path();
@@ -1595,5 +1727,86 @@ mod tests {
 
         let marker_path = get_agent_marker_path(worktree).unwrap();
         assert!(marker_path.ends_with(".git/paw-agent-id"));
+    }
+
+    // v0-5-0-audit-cleanup §9c (Bug E) — remove_session_boot_block must
+    // strip a marker-delimited block from AGENTS.md byte-for-byte and
+    // remain a no-op for files without markers.
+
+    #[test]
+    fn remove_session_boot_block_strips_marked_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path();
+        let agents_md = repo_root.join("AGENTS.md");
+
+        let header = "# Project AGENTS";
+        let footer = "## Footer\n";
+        let original = format!(
+            "{header}\n\n<!-- git-paw:start — managed by git-paw, do not edit manually -->\n## boot block\nsome content\n<!-- git-paw:end -->\n\n{footer}"
+        );
+        fs::write(&agents_md, &original).unwrap();
+
+        remove_session_boot_block(repo_root).unwrap();
+
+        let after = fs::read_to_string(&agents_md).unwrap();
+        let expected = format!("{header}\n\n{footer}");
+        assert_eq!(
+            after, expected,
+            "after removal the file must match HEADER + blank + FOOTER byte-for-byte; got:\n{after:?}",
+        );
+        assert!(
+            !after.contains("git-paw:start"),
+            "no git-paw:start marker may remain after removal",
+        );
+    }
+
+    #[test]
+    fn remove_session_boot_block_no_marker_is_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path();
+        let agents_md = repo_root.join("AGENTS.md");
+
+        let original = "# Project AGENTS\n\nNo boot block here.\n";
+        fs::write(&agents_md, original).unwrap();
+
+        remove_session_boot_block(repo_root).unwrap();
+
+        let after = fs::read_to_string(&agents_md).unwrap();
+        assert_eq!(
+            after, original,
+            "files without a boot-block marker must be preserved byte-for-byte",
+        );
+    }
+
+    #[test]
+    fn remove_session_boot_block_missing_agents_md_is_noop() {
+        // The helper SHALL be idempotent — calling it against a repo
+        // root that has no AGENTS.md at all is not an error.
+        let tmp = tempfile::tempdir().unwrap();
+        remove_session_boot_block(tmp.path()).unwrap();
+        assert!(
+            !tmp.path().join("AGENTS.md").exists(),
+            "remove_session_boot_block must not create AGENTS.md when none exists",
+        );
+    }
+
+    #[test]
+    fn remove_session_boot_block_preserves_no_trailing_newline() {
+        // If the original file lacks a trailing newline, the helper
+        // must preserve that shape.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path();
+        let agents_md = repo_root.join("AGENTS.md");
+
+        let original = "# Header no newline";
+        fs::write(&agents_md, original).unwrap();
+
+        remove_session_boot_block(repo_root).unwrap();
+
+        let after = fs::read_to_string(&agents_md).unwrap();
+        assert_eq!(
+            after, original,
+            "file without trailing newline must be preserved exactly"
+        );
     }
 }

@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 /// Returns the user's home directory, or `None` if it cannot be determined.
-fn home_dir() -> Option<PathBuf> {
+pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
