@@ -449,7 +449,17 @@ mod tests {
         let _tmpdir_guard = socket_env.apply_to_process();
 
         let status = Command::new("tmux")
-            .args(["new-session", "-d", "-s", "paw-guard-test", "sh"])
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                "paw-guard-test",
+                "-x",
+                "200",
+                "-y",
+                "50",
+                "sh",
+            ])
             .status()
             .expect("tmux new-session");
         assert!(status.success(), "create paw-guard-test session");
@@ -487,7 +497,17 @@ mod tests {
         let _allow_guard = AllowLiveSessionGuard::set("1");
 
         let status = Command::new("tmux")
-            .args(["new-session", "-d", "-s", "paw-guard-escape", "sh"])
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                "paw-guard-escape",
+                "-x",
+                "200",
+                "-y",
+                "50",
+                "sh",
+            ])
             .status()
             .expect("tmux new-session");
         assert!(status.success(), "create paw-guard-escape session");

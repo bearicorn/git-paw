@@ -242,17 +242,37 @@ impl TmuxSessionBuilder {
             .unwrap_or_else(|| format!("paw-{}", self.project_name));
         let mut commands = Vec::new();
 
-        // 1. Create detached session (pane 0 is implicit)
+        // 1. Create detached session (pane 0 is implicit).
         // Use -c to set pane 0's working directory directly, avoiding a race
         // condition where send-keys fires before the shell is ready.
+        // -x/-y give tmux explicit dimensions so it can start without an
+        // attached client — required in non-TTY environments (CI, integration
+        // tests). The user's real terminal resizes the session on attach.
         let first_worktree = &self.panes[0].worktree;
         commands.push(TmuxCommand::new(&[
             "new-session",
             "-d",
             "-s",
             &session_name,
+            "-x",
+            "200",
+            "-y",
+            "50",
             "-c",
             first_worktree,
+        ]));
+
+        // 2. Pin default-size globally so subsequent split-window operations
+        // have a fallback size context. On Linux tmux 3.4+, `-x/-y` on
+        // new-session alone is insufficient — subsequent splits still fail
+        // with `size missing` because the per-session dimensions aren't
+        // propagated to the layout engine when no client is attached.
+        // set-option requires a running server (new-session above starts it).
+        commands.push(TmuxCommand::new(&[
+            "set-option",
+            "-g",
+            "default-size",
+            "200x50",
         ]));
 
         // 2. Mouse mode
@@ -580,6 +600,9 @@ pub fn build_supervisor_session(
     };
 
     // 1. Create the detached session with pane 0 = supervisor.
+    // -x/-y give tmux explicit dimensions so it can start without an attached
+    // client (required in non-TTY environments like CI). The real terminal
+    // resizes the session on attach.
     push(
         &mut commands,
         &[
@@ -587,9 +610,23 @@ pub fn build_supervisor_session(
             "-d",
             "-s",
             &session_name,
+            "-x",
+            "200",
+            "-y",
+            "50",
             "-c",
             &supervisor.worktree,
         ],
+    );
+
+    // 2. Pin default-size globally so subsequent split-window operations
+    // have a fallback size context. On Linux tmux 3.4+, `-x/-y` on
+    // new-session alone is insufficient — subsequent splits fail with
+    // `size missing` because the per-session dimensions aren't propagated
+    // to the layout engine when no client is attached.
+    push(
+        &mut commands,
+        &["set-option", "-g", "default-size", "200x50"],
     );
 
     // 2. Mouse + pane border config.
@@ -948,6 +985,56 @@ mod tests {
         );
     }
 
+    /// AC: Session creation passes explicit dimensions for headless environments
+    /// — basic builder.
+    #[test]
+    fn new_session_passes_explicit_x_and_y() {
+        let session = TmuxSessionBuilder::new("app")
+            .add_pane(make_pane("main", "/tmp/wt", "claude"))
+            .build()
+            .unwrap();
+
+        let cmds = session.command_strings();
+        let new_session_cmd = cmds
+            .iter()
+            .find(|c| c.contains("new-session"))
+            .expect("new-session command present");
+        assert!(
+            new_session_cmd.contains("-x 200"),
+            "new-session must pass -x 200; got: {new_session_cmd}"
+        );
+        assert!(
+            new_session_cmd.contains("-y 50"),
+            "new-session must pass -y 50; got: {new_session_cmd}"
+        );
+    }
+
+    /// AC: Session creation sets global default-size after new-session
+    /// — basic builder.
+    #[test]
+    fn basic_builder_sets_default_size_after_new_session() {
+        let session = TmuxSessionBuilder::new("app")
+            .add_pane(make_pane("main", "/tmp/wt", "claude"))
+            .build()
+            .unwrap();
+
+        let cmds = session.command_strings();
+        let new_session_idx = cmds
+            .iter()
+            .position(|c| c.contains("new-session"))
+            .expect("new-session in command list");
+        let default_size_idx = cmds
+            .iter()
+            .position(|c| {
+                c.contains("set-option") && c.contains("default-size") && c.contains("200x50")
+            })
+            .expect("set-option default-size 200x50 in command list");
+        assert!(
+            default_size_idx > new_session_idx,
+            "set-option default-size must come AFTER new-session (set-option needs a running server); got order new={new_session_idx}, default-size={default_size_idx}"
+        );
+    }
+
     #[test]
     fn session_name_override_replaces_default() {
         let session = TmuxSessionBuilder::new("my-project")
@@ -1201,7 +1288,7 @@ mod tests {
     /// Helper to create a detached tmux session for testing.
     fn create_test_session(name: &str) {
         let output = std::process::Command::new("tmux")
-            .args(["new-session", "-d", "-s", name])
+            .args(["new-session", "-d", "-s", name, "-x", "200", "-y", "50"])
             .output()
             .expect("create tmux session");
         assert!(
@@ -1559,7 +1646,7 @@ mod tests {
                 .map_or(0, |d| d.as_nanos());
             let name = format!("paw-pause-test-{label}-{pid}-{nanos}");
             let output = std::process::Command::new("tmux")
-                .args(["new-session", "-d", "-s", &name])
+                .args(["new-session", "-d", "-s", &name, "-x", "200", "-y", "50"])
                 .output()
                 .expect("create tmux test session");
             assert!(
@@ -1967,6 +2054,47 @@ mod tests {
         assert!(
             h_split.contains(":0.0") || h_split.contains("split-window -h -t paw-proj"),
             "horizontal split should target the supervisor pane; got: {h_split}"
+        );
+    }
+
+    /// AC: Supervisor session passes -x/-y to new-session for headless
+    /// environments.
+    #[test]
+    fn supervisor_new_session_passes_explicit_x_and_y() {
+        let session = build_for(2);
+        let cmds = session.command_strings();
+        let new_session_cmd = cmds
+            .iter()
+            .find(|c| c.contains("new-session"))
+            .expect("supervisor build emits a new-session command");
+        assert!(
+            new_session_cmd.contains("-x 200"),
+            "supervisor new-session must pass -x 200; got: {new_session_cmd}"
+        );
+        assert!(
+            new_session_cmd.contains("-y 50"),
+            "supervisor new-session must pass -y 50; got: {new_session_cmd}"
+        );
+    }
+
+    /// AC: Supervisor session sets global default-size after new-session.
+    #[test]
+    fn supervisor_sets_default_size_after_new_session() {
+        let session = build_for(2);
+        let cmds = session.command_strings();
+        let new_session_idx = cmds
+            .iter()
+            .position(|c| c.contains("new-session"))
+            .expect("new-session in command list");
+        let default_size_idx = cmds
+            .iter()
+            .position(|c| {
+                c.contains("set-option") && c.contains("default-size") && c.contains("200x50")
+            })
+            .expect("set-option default-size 200x50 in command list");
+        assert!(
+            default_size_idx > new_session_idx,
+            "set-option default-size must come AFTER new-session; got order new={new_session_idx}, default-size={default_size_idx}"
         );
     }
 
