@@ -16,15 +16,17 @@ This makes you visible in the dashboard immediately.
 
 ### 2. DONE: Task completion reporting
 
-When you complete your assigned task, publish an artifact with done status:
+When you finish your task, commit your work via `git commit`. The git-paw post-commit hook auto-publishes `agent.artifact { status: "committed" }` with the committed files attached, so you SHALL NOT publish anything manually for tasks that produce code changes.
+
+**WARNING: Do NOT publish manual `done` while your worktree has uncommitted changes — commit instead.** The post-commit hook will publish on your behalf with the authoritative `modified_files` list derived from the commit.
+
+**Fallback for code-less tasks only:** if your task produces no code changes (docs-only updates handled outside this worktree, planning notes, exploration tasks where the artifact is information reported to the broker), publish `agent.artifact { status: "done" }` manually with the curl below. Include specific exports if you want to announce public API items for peers to cherry-pick.
 
 ```bash
 curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
   -H "Content-Type: application/json" \
   -d '{"type":"agent.artifact","agent_id":"{{BRANCH_ID}}","payload":{"status":"done","exports":[],"modified_files":[]}}'
 ```
-
-Include specific exports if you want to announce public API items for peers to cherry-pick.
 
 ### 3. BLOCKED: Dependency waiting notification
 
