@@ -24,14 +24,34 @@ use crate::error::PawError;
 pub enum SessionStatus {
     /// Tmux session is (believed to be) running.
     Active,
+    /// Soft-stopped: tmux session and CLI panes remain running, but the
+    /// user's client is detached and the broker has been shut down. A
+    /// subsequent `git paw start` re-attaches and restarts the broker
+    /// without respawning any CLI processes.
+    Paused,
     /// Tmux session has been stopped or crashed; state is recoverable.
     Stopped,
+}
+
+/// Pane-layout shape used when the session was created. Drives recovery so
+/// `recover_session` rebuilds with the same layout it was launched with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionMode {
+    /// Bare-start mode: dashboard at pane 0 (when broker enabled), agents at
+    /// pane 1+. Same as v0.4.
+    #[default]
+    Bare,
+    /// Supervisor-as-pane mode (v0.5.0+): supervisor at pane 0, dashboard at
+    /// pane 1, agents at pane 2+.
+    Supervisor,
 }
 
 impl fmt::Display for SessionStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Active => write!(f, "active"),
+            Self::Paused => write!(f, "paused"),
             Self::Stopped => write!(f, "stopped"),
         }
     }
@@ -84,19 +104,34 @@ pub struct Session {
     /// Path to the broker log file (when broker is enabled).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broker_log_path: Option<PathBuf>,
+
+    /// Pane-layout shape this session was launched with. Missing on sessions
+    /// saved by v0.4 binaries, in which case [`SessionMode::Bare`] is assumed
+    /// for backwards compatibility.
+    #[serde(default)]
+    pub mode: SessionMode,
+
+    /// Pane index of the dashboard pane (when broker is enabled). Used by the
+    /// restart-from-pause flow to recreate the dashboard pane in its original
+    /// position. `None` on v0.4-saved sessions; consumers SHALL default to `0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashboard_pane: Option<u32>,
 }
 
 impl Session {
     /// Returns the effective status by combining the on-disk status with a
     /// tmux liveness check.
     ///
-    /// If the recorded status is `Active` but the tmux session is not alive,
-    /// returns `Stopped`.
+    /// `Active` or `Paused` downgrade to `Stopped` when tmux is not alive
+    /// (a paused session whose tmux server died has no live CLI panes to
+    /// resume into). `Stopped` is unchanged regardless of tmux liveness.
     pub fn effective_status(&self, is_tmux_alive: impl Fn(&str) -> bool) -> SessionStatus {
-        if self.status == SessionStatus::Active && !is_tmux_alive(&self.session_name) {
-            return SessionStatus::Stopped;
+        match self.status {
+            SessionStatus::Active | SessionStatus::Paused if !is_tmux_alive(&self.session_name) => {
+                SessionStatus::Stopped
+            }
+            _ => self.status.clone(),
         }
-        self.status.clone()
     }
 }
 
@@ -406,6 +441,8 @@ mod tests {
             broker_port: None,
             broker_bind: None,
             broker_log_path: None,
+            mode: SessionMode::Bare,
+            dashboard_pane: None,
         }
     }
 
@@ -558,7 +595,101 @@ mod tests {
     #[test]
     fn session_status_displays_as_lowercase_string() {
         assert_eq!(SessionStatus::Active.to_string(), "active");
+        assert_eq!(SessionStatus::Paused.to_string(), "paused");
         assert_eq!(SessionStatus::Stopped.to_string(), "stopped");
+    }
+
+    // -- Paused variant: round-trip + effective_status --
+
+    #[test]
+    fn paused_status_serializes_lowercase() {
+        let dir = TempDir::new().unwrap();
+        let mut session = sample_session();
+        session.status = SessionStatus::Paused;
+        save_session_in(&session, dir.path()).unwrap();
+
+        let json = std::fs::read_to_string(dir.path().join("paw-my-project.json")).unwrap();
+        assert!(
+            json.contains("\"status\": \"paused\""),
+            "JSON should contain `\"status\": \"paused\"`, got: {json}"
+        );
+    }
+
+    #[test]
+    fn paused_session_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let mut session = sample_session();
+        session.status = SessionStatus::Paused;
+        save_session_in(&session, dir.path()).unwrap();
+
+        let loaded = load_session_from("paw-my-project", dir.path())
+            .unwrap()
+            .expect("session should exist");
+        assert_eq!(loaded.status, SessionStatus::Paused);
+    }
+
+    #[test]
+    fn effective_status_paused_alive_remains_paused() {
+        let mut session = sample_session();
+        session.status = SessionStatus::Paused;
+        assert_eq!(session.effective_status(|_| true), SessionStatus::Paused);
+    }
+
+    #[test]
+    fn effective_status_paused_dead_downgrades_to_stopped() {
+        let mut session = sample_session();
+        session.status = SessionStatus::Paused;
+        assert_eq!(session.effective_status(|_| false), SessionStatus::Stopped);
+    }
+
+    // -- dashboard_pane field --
+
+    #[test]
+    fn dashboard_pane_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let mut session = sample_session();
+        session.dashboard_pane = Some(1);
+        save_session_in(&session, dir.path()).unwrap();
+
+        let loaded = load_session_from("paw-my-project", dir.path())
+            .unwrap()
+            .expect("session should exist");
+        assert_eq!(loaded.dashboard_pane, Some(1));
+    }
+
+    #[test]
+    fn v04_session_without_dashboard_pane_loads_as_none() {
+        let dir = TempDir::new().unwrap();
+        let json = r#"{
+            "session_name": "paw-legacy-dashboard",
+            "repo_path": "/tmp/legacy-repo",
+            "project_name": "legacy",
+            "created_at": "2024-03-23T12:00:00Z",
+            "status": "active",
+            "worktrees": []
+        }"#;
+        std::fs::write(dir.path().join("paw-legacy-dashboard.json"), json).unwrap();
+
+        let loaded = load_session_from("paw-legacy-dashboard", dir.path())
+            .unwrap()
+            .expect("session should load");
+        assert!(
+            loaded.dashboard_pane.is_none(),
+            "v0.4 session should load with dashboard_pane = None"
+        );
+    }
+
+    #[test]
+    fn dashboard_pane_none_is_omitted_from_json() {
+        let dir = TempDir::new().unwrap();
+        let session = sample_session(); // dashboard_pane is None by default
+        save_session_in(&session, dir.path()).unwrap();
+
+        let json = std::fs::read_to_string(dir.path().join("paw-my-project.json")).unwrap();
+        assert!(
+            !json.contains("dashboard_pane"),
+            "JSON should not include dashboard_pane when None, got: {json}"
+        );
     }
 
     // -- Recovery: save → tmux dies → state has everything to reconstruct --
