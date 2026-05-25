@@ -1,10 +1,9 @@
 //! Helpers for constructing and publishing `BrokerMessage` values to a
 //! running broker over HTTP.
 //!
-//! The supervisor command (in `main.rs`) and the merge loop both need to
-//! publish status messages to the broker running in the dashboard pane.
-//! These helpers live in the library so both call sites share the same
-//! wire format and error handling.
+//! These helpers live in the library so any caller outside the broker
+//! process (e.g. `cmd_supervisor` self-registration) can publish messages
+//! using the same wire format and error handling.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -18,10 +17,22 @@ use crate::error::PawError;
 /// The `modified_files` list is always empty; this helper is intended for
 /// status pings (boot announcements, merge results, supervisor heartbeats),
 /// not for artifact-style messages.
+///
+/// `cli` populates the optional `StatusPayload.cli` field — set it when the
+/// caller knows which CLI is publishing (typically the supervisor self-
+/// registration path, where the CLI name is resolved from
+/// `[supervisor].cli`). Pass `None` for coding-agent paths, which rely on
+/// the broker's watch-target map to populate the dashboard CLI column.
+///
+/// `phase` is intentionally not exposed through this helper. Callers that
+/// want to publish a phase label SHALL construct the
+/// [`BrokerMessage::Status`] directly with a fully-populated
+/// [`StatusPayload`].
 pub fn build_status_message(
     agent_id: &str,
     status: &str,
     message: Option<String>,
+    cli: Option<&str>,
 ) -> BrokerMessage {
     BrokerMessage::Status {
         agent_id: agent_id.to_string(),
@@ -29,6 +40,8 @@ pub fn build_status_message(
             status: status.to_string(),
             modified_files: Vec::new(),
             message,
+            cli: cli.map(str::to_string),
+            phase: None,
         },
     }
 }
@@ -87,14 +100,11 @@ pub fn publish_to_broker_http(broker_url: &str, msg: &BrokerMessage) -> Result<(
 /// Fetches the broker's full message log over HTTP via `GET /log`.
 ///
 /// Returns the parsed `BrokerMessage` entries in chronological order
-/// (oldest first). Used by `cmd_supervisor` to reconstruct broker state
-/// from outside the dashboard process so it can build the dependency graph
-/// for merge ordering and write a real session summary instead of an
-/// empty one.
+/// (oldest first). Useful for any code that needs to read broker state
+/// from outside the dashboard process.
 ///
-/// Errors are returned but the caller decides whether to fail or fall back
-/// to an empty log (in which case the merge order is alphabetical and the
-/// session summary contains only what came back from `MergeResults`).
+/// Errors are returned; the caller decides whether to fail or fall back
+/// to an empty log.
 pub fn fetch_log_over_http(broker_url: &str) -> Result<Vec<BrokerMessage>, PawError> {
     let addr = broker_url.strip_prefix("http://").unwrap_or(broker_url);
     let socket_addr = if let Ok(a) = addr.parse() {
@@ -160,4 +170,47 @@ pub fn fetch_log_over_http(broker_url: &str) -> Result<Vec<BrokerMessage>, PawEr
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_status_message_with_explicit_cli_populates_cli_field() {
+        let msg = build_status_message(
+            "supervisor",
+            "working",
+            Some("Supervisor booting".to_string()),
+            Some("claude"),
+        );
+        let BrokerMessage::Status { agent_id, payload } = msg else {
+            panic!("expected BrokerMessage::Status");
+        };
+        assert_eq!(agent_id, "supervisor");
+        assert_eq!(payload.status, "working");
+        assert_eq!(payload.message.as_deref(), Some("Supervisor booting"));
+        assert_eq!(payload.cli.as_deref(), Some("claude"));
+        assert_eq!(payload.phase, None);
+    }
+
+    #[test]
+    fn build_status_message_with_none_cli_omits_cli_key_from_json() {
+        let msg = build_status_message("feat-x", "working", None, None);
+        let BrokerMessage::Status { ref payload, .. } = msg else {
+            panic!("expected BrokerMessage::Status");
+        };
+        assert_eq!(payload.cli, None);
+        assert_eq!(payload.phase, None);
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            !json.contains("\"cli\""),
+            "cli key must be omitted from JSON when None; got {json}"
+        );
+        assert!(
+            !json.contains("\"phase\""),
+            "phase key must be omitted from JSON when None; got {json}"
+        );
+    }
 }

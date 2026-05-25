@@ -12,7 +12,9 @@
 //! `read()` / `write()` methods to obtain guards inside synchronous closures
 //! only.
 
+pub mod conflict;
 pub mod delivery;
+pub mod learnings;
 pub mod messages;
 pub mod publish;
 pub mod server;
@@ -27,7 +29,7 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use crate::config::BrokerConfig;
+use crate::config::{BrokerConfig, ConflictConfig};
 pub use messages::BrokerMessage;
 
 /// Worktree to watch for git-status changes.
@@ -73,6 +75,11 @@ pub struct AgentStatusEntry {
     /// When the agent was last seen (for age calculations in the dashboard).
     #[serde(skip)]
     pub last_seen: Instant,
+    /// Most recently published `payload.phase` on an `agent.status`, if any.
+    /// The dashboard prefers this label over the message-type-derived
+    /// `status_label()` when rendering the agent's row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
 }
 
 /// Mutable broker state protected by an `RwLock`.
@@ -104,6 +111,9 @@ pub struct BrokerState {
     pub log_path: Option<PathBuf>,
     /// Wall-clock instant the broker state was created; used for uptime reporting.
     started_at: Instant,
+    /// Optional learnings aggregator. Populated when supervisor + learnings
+    /// mode is active; the publish path forwards every observed message.
+    pub learnings: Option<learnings::SharedLearnings>,
 }
 
 impl BrokerState {
@@ -119,7 +129,15 @@ impl BrokerState {
             next_seq: AtomicU64::new(0),
             log_path,
             started_at: Instant::now(),
+            learnings: None,
         }
+    }
+
+    /// Attaches a learnings aggregator. Replaces any previously attached
+    /// instance. Must be called before [`start_broker`] so the publish path
+    /// observes every message from the first one.
+    pub fn attach_learnings(&mut self, aggregator: learnings::SharedLearnings) {
+        self.learnings = Some(aggregator);
     }
 
     /// Acquires a read lock on the inner state.
@@ -204,6 +222,9 @@ pub struct BrokerHandle {
     stop_flag: Arc<AtomicBool>,
     /// Flush thread join handle (present only when `log_path` is `Some`).
     flush_thread: Option<JoinHandle<()>>,
+    /// Periodic flush thread for the learnings aggregator (present only
+    /// when `state.learnings.is_some()`).
+    learnings_thread: Option<JoinHandle<()>>,
 }
 
 impl BrokerHandle {
@@ -217,26 +238,32 @@ impl BrokerHandle {
             url,
             stop_flag: Arc::new(AtomicBool::new(false)),
             flush_thread: None,
+            learnings_thread: None,
         }
     }
 }
 
 impl Drop for BrokerHandle {
     fn drop(&mut self) {
-        // 1. Signal flush thread to stop and join it.
+        // 1. Signal both flush threads to stop and join the log flush thread.
         self.stop_flag.store(true, Ordering::Release);
         if let Some(handle) = self.flush_thread.take() {
             let _ = handle.join();
         }
-        // 2. Signal watcher tasks to stop.
+        // 2. Join the learnings flush thread — it performs the final
+        //    shutdown flush before returning.
+        if let Some(handle) = self.learnings_thread.take() {
+            let _ = handle.join();
+        }
+        // 3. Signal watcher tasks to stop.
         if let Some(tx) = self.watcher_shutdown.take() {
             let _ = tx.send(true);
         }
-        // 3. Signal shutdown to the server task.
+        // 4. Signal shutdown to the server task.
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        // 4. Give in-flight requests up to 2 seconds to drain, then drop runtime.
+        // 5. Give in-flight requests up to 2 seconds to drain, then drop runtime.
         if let Some(rt) = self.runtime.take() {
             rt.shutdown_timeout(std::time::Duration::from_secs(2));
         }
@@ -329,10 +356,35 @@ fn probe_existing_broker(url: &str) -> ProbeResult {
 /// - If nothing is listening, binds and starts the server.
 ///
 /// Also spawns the background flush thread if `state.log_path` is set.
+///
+/// Calls [`start_broker`] without a conflict-detector. Equivalent to
+/// `start_broker_with(config, state, watch_targets, None)`.
 pub fn start_broker(
     config: &BrokerConfig,
     state: BrokerState,
     watch_targets: Vec<WatchTarget>,
+) -> Result<BrokerHandle, BrokerError> {
+    start_broker_with(config, state, watch_targets, None, 60)
+}
+
+/// Starts the HTTP broker server with optional conflict-detector wiring
+/// and a configurable learnings-flush interval.
+///
+/// When `conflict` is `Some`, a background tokio task running the
+/// detector loop is spawned alongside the watcher tasks. The detector
+/// shuts down with the rest of the broker when [`BrokerHandle`] is
+/// dropped.
+///
+/// `learnings_flush_interval_seconds` controls how often the learnings
+/// aggregator flushes to `.git-paw/session-learnings.md` when
+/// `state.learnings` is `Some`. Default for [`start_broker`] is 60s;
+/// tests override to drive flush behaviour without waiting on real time.
+pub fn start_broker_with(
+    config: &BrokerConfig,
+    state: BrokerState,
+    watch_targets: Vec<WatchTarget>,
+    conflict: Option<ConflictConfig>,
+    learnings_flush_interval_seconds: u64,
 ) -> Result<BrokerHandle, BrokerError> {
     let url = config.url();
     let state = Arc::new(state);
@@ -361,6 +413,19 @@ pub fn start_broker(
         let f = Arc::clone(&stop_flag);
         Some(std::thread::spawn(move || {
             delivery::flush_loop(&s, &f);
+        }))
+    } else {
+        None
+    };
+
+    // Spawn learnings flush thread when an aggregator is attached. The
+    // thread performs a final `flush_at_shutdown` after the stop flag is
+    // raised so unresolved blocks and recovery cycles end up in the file.
+    let learnings_thread = if state.learnings.is_some() {
+        let s = Arc::clone(&state);
+        let f = Arc::clone(&stop_flag);
+        Some(std::thread::spawn(move || {
+            learnings_flush_loop(&s, &f, learnings_flush_interval_seconds);
         }))
     } else {
         None
@@ -422,12 +487,18 @@ pub fn start_broker(
 
     // Spawn one watcher task per target. All watchers share a single
     // `tokio::sync::watch` channel; flipping it to `true` on drop signals
-    // every watcher to exit on its next tick.
+    // every watcher to exit on its next tick. The conflict detector
+    // shares the same shutdown channel so it stops in lockstep.
     let (watcher_tx, watcher_rx) = tokio::sync::watch::channel(false);
     for target in watch_targets {
         let s = Arc::clone(&state);
         let rx = watcher_rx.clone();
         runtime.spawn(watcher::watch_worktree(s, target, rx));
+    }
+    if let Some(conflict_cfg) = conflict {
+        let s = Arc::clone(&state);
+        let rx = watcher_rx.clone();
+        runtime.spawn(conflict::run_detector_loop(s, conflict_cfg, rx));
     }
 
     Ok(BrokerHandle {
@@ -438,7 +509,42 @@ pub fn start_broker(
         url,
         stop_flag,
         flush_thread,
+        learnings_thread,
     })
+}
+
+/// Background loop driving the learnings aggregator's periodic flush.
+///
+/// Sleeps in small slices so it can react to the broker stop flag within
+/// ~100ms. When the stop flag is raised, it performs one final
+/// [`learnings::LearningsAggregator::flush_at_shutdown`] before exiting.
+fn learnings_flush_loop(
+    state: &Arc<BrokerState>,
+    stop: &Arc<AtomicBool>,
+    flush_interval_seconds: u64,
+) {
+    let Some(aggregator) = state.learnings.clone() else {
+        return;
+    };
+    let interval = std::time::Duration::from_secs(flush_interval_seconds.max(1));
+    let tick = std::time::Duration::from_millis(100);
+
+    loop {
+        let mut elapsed = std::time::Duration::ZERO;
+        while elapsed < interval {
+            if stop.load(Ordering::Acquire) {
+                if let Ok(mut agg) = aggregator.lock() {
+                    let _ = agg.flush_at_shutdown();
+                }
+                return;
+            }
+            std::thread::sleep(tick);
+            elapsed += tick;
+        }
+        if let Ok(mut agg) = aggregator.lock() {
+            let _ = agg.flush();
+        }
+    }
 }
 
 #[cfg(test)]
