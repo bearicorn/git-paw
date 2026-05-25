@@ -694,7 +694,16 @@ pub fn build_supervisor_session(
     //    pane is born in the first agent's worktree directly — this avoids
     //    the `cd <worktree> && <cli>` send-keys race that previously left
     //    resumed agent panes anchored in the supervisor's cwd.
-    let bottom_pct = (100u16 - u16::from(layout.top_row_pct)).to_string();
+    //
+    // Use `-l <N>%` (the modern tmux 3.1+ form) instead of the deprecated
+    // `-p <N>`. On Linux tmux 3.4 (Ubuntu 24.04 apt-package), `-p`
+    // resolves the percentage against the parent pane's laid-out size,
+    // which is empty on a detached server with no attached client — tmux
+    // bails with `cmd-split-window.c: "size missing"`. `-l <N>%` resolves
+    // against the window's `-y` dimension instead, which is the value we
+    // set on `new-session -x 200 -y 50`, so the split math succeeds in
+    // headless mode. macOS tmux 3.6a tolerates either form.
+    let bottom_pct = format!("{}%", 100u16 - u16::from(layout.top_row_pct));
     if let Some(first_agent) = agents.first() {
         push(
             &mut commands,
@@ -703,7 +712,7 @@ pub fn build_supervisor_session(
                 "-v",
                 "-t",
                 &supervisor_target,
-                "-p",
+                "-l",
                 &bottom_pct,
                 "-c",
                 &first_agent.worktree,
@@ -717,7 +726,7 @@ pub fn build_supervisor_session(
                 "-v",
                 "-t",
                 &supervisor_target,
-                "-p",
+                "-l",
                 &bottom_pct,
             ],
         );
@@ -725,6 +734,7 @@ pub fn build_supervisor_session(
 
     // 5. Split pane 0 horizontally -> creates the top-right pane (currently
     //    index 2, swapped to index 1 below) at 50% width.
+    // Same `-l <N>%` reasoning as step 4.
     push(
         &mut commands,
         &[
@@ -732,8 +742,8 @@ pub fn build_supervisor_session(
             "-h",
             "-t",
             &supervisor_target,
-            "-p",
-            "50",
+            "-l",
+            "50%",
             "-c",
             &dashboard.worktree,
         ],
@@ -2049,12 +2059,31 @@ mod tests {
         let cmds = session.command_strings();
         let h_split = cmds
             .iter()
-            .find(|c| c.contains("split-window") && c.contains("-h") && c.contains("-p 50"))
+            .find(|c| c.contains("split-window") && c.contains("-h") && c.contains("-l 50%"))
             .unwrap_or_else(|| panic!("expected horizontal 50% split; got cmds: {cmds:#?}"));
         assert!(
             h_split.contains(":0.0") || h_split.contains("split-window -h -t paw-proj"),
             "horizontal split should target the supervisor pane; got: {h_split}"
         );
+    }
+
+    /// AC: Supervisor splits use `-l <N>%` (tmux 3.1+ syntax), not the
+    /// deprecated `-p <N>` form. Headless Linux tmux 3.4 fails on `-p`
+    /// with `size missing` because the resolver consults pane geometry
+    /// (unresolved without an attached client) rather than window
+    /// geometry. Pin the convention so no future call site regresses.
+    #[test]
+    fn supervisor_splits_use_l_percent_not_p() {
+        let session = build_for(4);
+        let cmds = session.command_strings();
+        for cmd in &cmds {
+            if cmd.contains("split-window") {
+                assert!(
+                    !cmd.contains(" -p "),
+                    "split-window must not use deprecated -p flag (fails on Linux tmux 3.4 headless); got: {cmd}"
+                );
+            }
+        }
     }
 
     /// AC: Supervisor session passes -x/-y to new-session for headless
