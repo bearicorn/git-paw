@@ -7,13 +7,38 @@ TBD - created by archiving change supervisor-mode. Update Purpose after archive.
 
 The system SHALL determine whether to enter supervisor mode using the following resolution chain, evaluated in order:
 
-1. If `--supervisor` flag is present → enable supervisor mode (no prompt)
-2. If `[supervisor] enabled = true` in config → enable supervisor mode (no prompt)
-3. If `[supervisor] enabled = false` in config → disable supervisor mode (no prompt)
-4. If `[supervisor]` section is absent (`None`) → prompt "Start in supervisor mode? (y/n)"
-5. If `--dry-run` is present and step 4 would apply → assume no supervisor (skip prompt)
+1. If `--no-supervisor` flag is present → disable supervisor mode (no prompt, regardless of any other input)
+2. If `--supervisor` flag is present → enable supervisor mode (no prompt)
+3. If `[supervisor] enabled = true` in config → enable supervisor mode (no prompt)
+4. If `[supervisor] enabled = false` in config → disable supervisor mode (no prompt)
+5. If `[supervisor]` section is absent (`None`) → prompt "Start in supervisor mode? (y/n)"
+6. If `--dry-run` is present and step 5 would apply → assume no supervisor (skip prompt)
 
-When supervisor mode is enabled (steps 1 or 2), the system SHALL call `cmd_supervisor()`. When disabled (step 3 or 5), the system SHALL proceed with normal `cmd_start()`.
+`--no-supervisor` and `--supervisor` SHALL be mutually exclusive at parse time (per the `cli-parsing` requirement); the resolver therefore never sees both flags `true` simultaneously.
+
+When supervisor mode is enabled (steps 2 or 3), the system SHALL call `cmd_supervisor()`. When disabled (steps 1, 4, or 6), the system SHALL proceed with normal `cmd_start()`.
+
+#### Scenario: --no-supervisor disables regardless of config (config enabled)
+
+- **GIVEN** a config with `[supervisor] enabled = true`
+- **WHEN** `git paw start --no-supervisor` is run
+- **THEN** supervisor mode SHALL NOT be entered
+- **AND** `cmd_supervisor()` SHALL NOT be called
+- **AND** no interactive prompt SHALL be shown
+
+#### Scenario: --no-supervisor with no config section also disables
+
+- **GIVEN** a config with no `[supervisor]` section
+- **WHEN** `git paw start --no-supervisor` is run
+- **THEN** supervisor mode SHALL NOT be entered
+- **AND** no interactive prompt SHALL be shown
+
+#### Scenario: --no-supervisor with --dry-run also disables
+
+- **GIVEN** any config state
+- **WHEN** `git paw start --no-supervisor --dry-run` is run
+- **THEN** supervisor mode SHALL NOT be entered
+- **AND** the dry-run plan SHALL reflect supervisor-disabled state
 
 #### Scenario: --supervisor flag enables regardless of config
 
@@ -47,44 +72,6 @@ When supervisor mode is enabled (steps 1 or 2), the system SHALL call `cmd_super
 - **WHEN** `git paw start --dry-run` is run
 - **THEN** no interactive prompt SHALL be shown
 - **AND** supervisor mode SHALL NOT be entered
-
-### Requirement: Merge ordering from dependency signals
-
-The supervisor SHALL determine the safe merge order for worktree branches using the dependency graph built from `agent.blocked` messages in the broker's message log.
-
-The system SHALL:
-1. Build a directed graph where edge `A → B` means "agent A was blocked on agent B"
-2. Compute a topological sort of this graph (agents with no dependents first, agents others depend on first)
-3. Merge branches in the computed order
-4. Run the configured test command after each merge and verify it passes before proceeding
-
-When the dependency graph contains a cycle, the system SHALL log a warning and fall back to an arbitrary merge order rather than failing.
-
-#### Scenario: No dependencies yields arbitrary order
-
-- **GIVEN** three agents that never published `agent.blocked`
-- **WHEN** the supervisor computes merge order
-- **THEN** all three branches are in the merge order list
-- **AND** no error occurs
-
-#### Scenario: Dependency chain determines merge order
-
-- **GIVEN** agent A published `agent.blocked` with `from = "feat-b"` (A depends on B)
-- **WHEN** the supervisor computes merge order
-- **THEN** `feat-b` appears before `feat-a` in the merge order
-
-#### Scenario: Cycle in dependencies logs warning and falls back
-
-- **GIVEN** agent A is blocked on B and agent B is blocked on A
-- **WHEN** the supervisor computes merge order
-- **THEN** a warning SHALL be logged identifying the cycle
-- **AND** both branches SHALL still be included in the merge order
-
-#### Scenario: Test command runs after each merge
-
-- **GIVEN** a supervisor config with `test_command = "just check"`
-- **WHEN** the supervisor merges the first branch
-- **THEN** `just check` SHALL be run before merging the next branch
 
 ### Requirement: Validate specs are committed before launching
 
