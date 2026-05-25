@@ -31,6 +31,46 @@ pub struct Preset {
     pub cli: String,
 }
 
+/// Governance document paths.
+///
+/// Each field is a pointer to a user-maintained document or directory that
+/// describes some aspect of the project's governance (ADRs, test strategy,
+/// security checklist, Definition of Done, project constitution).
+///
+/// All fields are optional and stored as raw [`PathBuf`] values. Relative
+/// paths are resolved against the repository root at *use time* by
+/// downstream consumers, not at config-load time. Absolute paths are
+/// preserved as-is. No filesystem existence check is performed during
+/// config-load — pointing at a path that doesn't exist is a runtime
+/// concern, not a parse error.
+///
+/// This struct is storage-only: nothing in `git_paw::config` reads the
+/// referenced documents or enforces any rubric against them. The runtime
+/// consumer lives in the parallel `governance-context` capability.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GovernanceConfig {
+    /// Directory containing ADR files. Project chooses the convention
+    /// (Nygard, MADR, `adr-tools`, custom). git-paw does not dictate one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adr: Option<PathBuf>,
+    /// Single Markdown file describing the project's test strategy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_strategy: Option<PathBuf>,
+    /// Single Markdown file containing the project's security checklist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<PathBuf>,
+    /// Single Markdown file containing the project's Definition of Done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dod: Option<PathBuf>,
+    /// Single Markdown file containing the project's constitution
+    /// (`Spec Kit`'s `constitution.md` or any project's equivalent). May
+    /// be auto-populated from `.specify/memory/constitution.md` when the
+    /// `SpecKit` backend is active and the user has not set this field
+    /// explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constitution: Option<PathBuf>,
+}
+
 /// Spec scanning configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SpecsConfig {
@@ -99,6 +139,62 @@ pub struct SupervisorConfig {
     /// `None` skips the verification step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_command: Option<String>,
+    /// Pre-stage lint invocation for the five-gate verification workflow.
+    ///
+    /// Drives gate 1's lint sub-step. Example values per common stack:
+    /// `"cargo clippy -- -D warnings"` (Rust), `"npm run lint"` (Node),
+    /// `"ruff check ."` (Python), `"golangci-lint run"` (Go). When `None`,
+    /// the supervisor skill renders the placeholder as `(not configured)`
+    /// and the supervisor agent skips the tooling invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lint_command: Option<String>,
+    /// Compile-step command when build is distinct from test.
+    ///
+    /// Drives gate 1's compile sub-step. Example values: `"cargo build"`
+    /// (Rust), `"npm run build"` (Node), `"mvn package"` (Java), `"go
+    /// build ./..."` (Go). When `None`, the supervisor skill renders the
+    /// placeholder as `(not configured)` and the supervisor agent skips
+    /// the tooling invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_command: Option<String>,
+    /// Documentation-build command for gate 4 (doc audit).
+    ///
+    /// Example values: `"mdbook build docs/"` (`mdBook`), `"sphinx-build"`
+    /// (Sphinx), `"mkdocs build"` (`MkDocs`), `"npx typedoc"` (`TypeDoc`).
+    /// When `None`, the supervisor skill renders the placeholder as
+    /// `(not configured)` and the supervisor agent skips the tooling
+    /// invocation; the manual doc-surface review still applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_build_command: Option<String>,
+    /// Spec-validator command for gate 3 (spec audit).
+    ///
+    /// Typically takes a change name as argument; the supervisor agent
+    /// substitutes `{{CHANGE_ID}}` at verification time using the change
+    /// it is currently auditing. Example values: `"openspec validate
+    /// {{CHANGE_ID}} --strict"` (`OpenSpec`). When `None`, the supervisor
+    /// skill renders the placeholder as `(not configured)` and the
+    /// supervisor agent skips the tooling invocation; the manual
+    /// scenario-coverage check still applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_validate_command: Option<String>,
+    /// Formatter-check command for gate 1's pre-stage.
+    ///
+    /// Example values: `"cargo fmt --check"` (Rust), `"prettier --check
+    /// ."` (Node), `"gofmt -l ."` (Go), `"black --check ."` (Python).
+    /// When `None`, the supervisor skill renders the placeholder as
+    /// `(not configured)` and the supervisor agent skips the tooling
+    /// invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fmt_check_command: Option<String>,
+    /// Security-audit tooling for gate 5.
+    ///
+    /// Example values: `"cargo audit"` (Rust), `"npm audit"` (Node),
+    /// `"bandit -r ."` (Python), `"gosec ./..."` (Go). When `None`, the
+    /// supervisor skill renders the placeholder as `(not configured)`
+    /// and the supervisor agent skips the tooling invocation; the manual
+    /// OWASP-category diff review still applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_audit_command: Option<String>,
     /// Approval policy applied to agent actions.
     #[serde(default)]
     pub agent_approval: ApprovalLevel,
@@ -109,6 +205,174 @@ pub struct SupervisorConfig {
     /// See [`AutoApproveConfig`] for the per-field semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_approve: Option<AutoApproveConfig>,
+    /// Conflict detector configuration.
+    ///
+    /// Drives the broker-internal subsystem that auto-emits
+    /// `agent.feedback` and `agent.question` for forward, in-flight, and
+    /// ownership conflicts between agents. Active only when
+    /// [`SupervisorConfig::enabled`] is `true`; otherwise the detector
+    /// subsystem is not started and no auto-warnings fire.
+    #[serde(default)]
+    pub conflict: ConflictConfig,
+    /// Opt-in flag for the learnings aggregator subsystem (learnings-mode).
+    ///
+    /// When `true` (and `[broker] enabled = true`), the broker starts a
+    /// learnings aggregator that observes the session and appends
+    /// human-readable summaries to `.git-paw/session-learnings.md`. Defaults
+    /// to `false` — pre-v0.5 configs load without producing learnings.
+    #[serde(default)]
+    pub learnings: bool,
+    /// Tuning knobs for the learnings aggregator.
+    ///
+    /// Honoured only when [`Self::learnings`] is `true`. Missing fields fall
+    /// back to [`LearningsConfig::default`]. The TOML table key is
+    /// `[supervisor.learnings_config]` to avoid colliding with the boolean
+    /// `learnings` field.
+    #[serde(default)]
+    pub learnings_config: LearningsConfig,
+    /// Common dev-command allowlist configuration.
+    ///
+    /// Controls whether the supervisor seeds a curated preset of
+    /// dev-loop prefix patterns (`cargo build`, `git commit`, ...) into
+    /// `.claude/settings.json::allowed_bash_prefixes` on session start.
+    /// See [`CommonDevAllowlistConfig`] for field semantics.
+    #[serde(default)]
+    pub common_dev_allowlist: CommonDevAllowlistConfig,
+}
+
+impl SupervisorConfig {
+    /// Borrowed view of the seven gate-command templates suitable for
+    /// passing to [`crate::skills::render`]. Each field maps directly to
+    /// the matching `Option<String>` on this struct.
+    #[must_use]
+    pub fn gate_commands(&self) -> crate::skills::GateCommands<'_> {
+        crate::skills::GateCommands {
+            test_command: self.test_command.as_deref(),
+            lint_command: self.lint_command.as_deref(),
+            build_command: self.build_command.as_deref(),
+            doc_build_command: self.doc_build_command.as_deref(),
+            spec_validate_command: self.spec_validate_command.as_deref(),
+            fmt_check_command: self.fmt_check_command.as_deref(),
+            security_audit_command: self.security_audit_command.as_deref(),
+        }
+    }
+}
+
+/// Configuration for the common dev-command allowlist preset.
+///
+/// The preset is a curated set of safe, repeatedly-prompted dev-loop
+/// commands (cargo, git, just, mdbook, openspec, find, grep, sed -n)
+/// that the supervisor seeds into Claude's `allowed_bash_prefixes` so
+/// agents do not hit a permission prompt for each variant of these
+/// commands. See `src/supervisor/dev_allowlist.rs` for the preset
+/// constant and the merge implementation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommonDevAllowlistConfig {
+    /// Whether the dev-allowlist seeder runs on supervisor start.
+    ///
+    /// Defaults to `true` — the v0.5.0 dogfood evidence makes the
+    /// feature most useful when on by default. Opt out with
+    /// `[supervisor.common_dev_allowlist] enabled = false`.
+    #[serde(default = "CommonDevAllowlistConfig::default_enabled")]
+    pub enabled: bool,
+    /// Additional project-specific prefix patterns appended to the
+    /// built-in preset.
+    ///
+    /// Each entry is a raw string consumed by Claude's prefix matcher;
+    /// the seeder does not validate the strings. Duplicates of preset
+    /// entries are silently de-duplicated.
+    #[serde(default)]
+    pub extra: Vec<String>,
+}
+
+impl Default for CommonDevAllowlistConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            extra: Vec::new(),
+        }
+    }
+}
+
+impl CommonDevAllowlistConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+}
+
+/// Tuning knobs for the learnings aggregator.
+///
+/// The aggregator periodically flushes accumulated learnings to
+/// `.git-paw/session-learnings.md` plus one final flush at broker shutdown.
+/// `flush_interval_seconds` controls the periodic cadence; bursts of activity
+/// may flush sooner if the in-memory queue grows past the soft cap.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LearningsConfig {
+    /// Interval between periodic flushes to disk. Default: `60`.
+    #[serde(default = "LearningsConfig::default_flush_interval_seconds")]
+    pub flush_interval_seconds: u64,
+}
+
+impl Default for LearningsConfig {
+    fn default() -> Self {
+        Self {
+            flush_interval_seconds: Self::default_flush_interval_seconds(),
+        }
+    }
+}
+
+impl LearningsConfig {
+    fn default_flush_interval_seconds() -> u64 {
+        60
+    }
+}
+
+/// Configuration for the broker-internal conflict detector.
+///
+/// The detector observes `agent.intent` and `agent.status` events as they
+/// pass through the publish pipeline and emits `agent.feedback` /
+/// `agent.question` when one of three failure shapes triggers (forward,
+/// in-flight, ownership). All fields have defaults; an entirely absent
+/// `[supervisor.conflict]` section loads [`ConflictConfig::default`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConflictConfig {
+    /// Window after which an unresolved in-flight conflict escalates to
+    /// the supervisor inbox via `agent.question`. Default: `120`.
+    #[serde(default = "ConflictConfig::default_window_seconds")]
+    pub window_seconds: u64,
+    /// Master switch for forward-conflict warnings. When `false`, no
+    /// `agent.feedback` is emitted for overlapping `agent.intent`
+    /// declarations, but the tracker SHALL still record intents (so
+    /// in-flight and ownership detection remain functional). Default:
+    /// `true`.
+    #[serde(default = "ConflictConfig::default_true")]
+    pub warn_on_intent_overlap: bool,
+    /// Whether ownership violations escalate to the supervisor inbox via
+    /// `agent.question`. The violator-bound `agent.feedback` always fires
+    /// regardless of this flag — only the supervisor follow-up is gated.
+    /// Default: `true`.
+    #[serde(default = "ConflictConfig::default_true")]
+    pub escalate_on_violation: bool,
+}
+
+impl Default for ConflictConfig {
+    fn default() -> Self {
+        Self {
+            window_seconds: Self::default_window_seconds(),
+            warn_on_intent_overlap: true,
+            escalate_on_violation: true,
+        }
+    }
+}
+
+impl ConflictConfig {
+    fn default_window_seconds() -> u64 {
+        120
+    }
+
+    fn default_true() -> bool {
+        true
+    }
 }
 
 /// Coarse-grained policy preset that maps onto a known [`AutoApproveConfig`]
@@ -355,6 +619,14 @@ pub struct PawConfig {
     /// Supervisor mode configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supervisor: Option<SupervisorConfig>,
+
+    /// Governance document path pointers.
+    ///
+    /// All sub-fields are optional. Absence is equivalent to an empty
+    /// `[governance]` section; v0.4 configs (no `[governance]` at all) load
+    /// with `GovernanceConfig::default()` here.
+    #[serde(default)]
+    pub governance: GovernanceConfig,
 }
 
 impl PawConfig {
@@ -402,6 +674,33 @@ impl PawConfig {
                 .supervisor
                 .clone()
                 .or_else(|| self.supervisor.clone()),
+            governance: GovernanceConfig {
+                adr: overlay
+                    .governance
+                    .adr
+                    .clone()
+                    .or_else(|| self.governance.adr.clone()),
+                test_strategy: overlay
+                    .governance
+                    .test_strategy
+                    .clone()
+                    .or_else(|| self.governance.test_strategy.clone()),
+                security: overlay
+                    .governance
+                    .security
+                    .clone()
+                    .or_else(|| self.governance.security.clone()),
+                dod: overlay
+                    .governance
+                    .dod
+                    .clone()
+                    .or_else(|| self.governance.dod.clone()),
+                constitution: overlay
+                    .governance
+                    .constitution
+                    .clone()
+                    .or_else(|| self.governance.constitution.clone()),
+            },
         }
     }
 
@@ -445,24 +744,98 @@ fn load_config_file(path: &Path) -> Result<Option<PawConfig>, PawError> {
 ///
 /// Returns defaults if the file does not exist. Useful when you need to
 /// update and save repo-level settings without clobbering global values.
+///
+/// Applies post-deserialise auto-wiring for governance documents (see
+/// [`auto_wire_governance`]).
 pub fn load_repo_config(repo_root: &Path) -> Result<PawConfig, PawError> {
-    Ok(load_config_file(&repo_config_path(repo_root))?.unwrap_or_default())
+    let mut config = load_config_file(&repo_config_path(repo_root))?.unwrap_or_default();
+    auto_wire_governance(&mut config, repo_root);
+    Ok(config)
+}
+
+/// Populates `config.governance.constitution` from
+/// `git_paw::specs::speckit::detect_constitution` when:
+///
+/// 1. The user has not set `governance.constitution` explicitly
+///    (i.e. it is `None` after TOML deserialisation), AND
+/// 2. A `[specs]` section is present, AND
+/// 3. `specs.type == "speckit"`.
+///
+/// Explicit user values always win — even if the explicit value points
+/// at a path that does not exist. The check is `is_some()`, not
+/// `is_some_and(|p| p.exists())`, so an empty-string or invalid path
+/// still suppresses auto-wiring. This lets users disable the auto-wiring
+/// without deleting the constitution slot.
+///
+/// This function is intentionally a no-op when the `SpecKit` backend
+/// is not active. It is also a no-op when the configured `specs.dir`'s
+/// parent does not contain `memory/constitution.md`.
+fn auto_wire_governance(config: &mut PawConfig, repo_root: &Path) {
+    if config.governance.constitution.is_some() {
+        return;
+    }
+    let Some(specs_cfg) = config.specs.as_ref() else {
+        return;
+    };
+    let Some(spec_type) = specs_cfg.spec_type.as_deref() else {
+        return;
+    };
+    if spec_type != "speckit" {
+        return;
+    }
+    let dir = specs_cfg.dir.as_deref().unwrap_or("specs");
+    let specs_dir = repo_root.join(dir);
+    if let Some(detected) = crate::specs::speckit::detect_constitution(&specs_dir) {
+        config.governance.constitution = Some(detected);
+    }
 }
 
 /// Loads the merged configuration for a repository.
 ///
-/// Reads the global config and the per-repo config, merging them with
-/// repo settings taking precedence. Returns defaults if neither file exists.
-pub fn load_config(repo_root: &Path) -> Result<PawConfig, PawError> {
-    let global_path = global_config_path()?;
+/// Reads the user-level (global) config and the per-repo config, merging
+/// them with repo settings taking precedence. Returns defaults if neither
+/// file exists.
+///
+/// # Parameters
+///
+/// - `repo_root` — the repository root whose `.git-paw/config.toml` is the
+///   repo-level config.
+/// - `user_config_path` — controls which file is read as the user-level
+///   (global) config:
+///   - `None` resolves the user-level path via [`global_config_path`]
+///     (platform default: `crate::dirs::config_dir().join("git-paw/config.toml")`).
+///     This preserves v0.4 production behaviour and is what every internal
+///     caller passes.
+///   - `Some(p)` pins the user-level read to `p`. If `p` does not exist on
+///     disk, the user-level side of the merge is the default `PawConfig`,
+///     exactly as if no file existed at the platform-default path. This is
+///     the discoverable test-isolation hook — pass an unused `TempDir`-rooted
+///     path so the dev machine's real user-level config cannot leak into
+///     the merged result.
+///
+/// See [`load_config_from`] for the lower-level primitive that takes both
+/// paths explicitly (without the `Option` ergonomics).
+pub fn load_config(
+    repo_root: &Path,
+    user_config_path: Option<&Path>,
+) -> Result<PawConfig, PawError> {
+    let global_path = match user_config_path {
+        Some(p) => p.to_path_buf(),
+        None => global_config_path()?,
+    };
     load_config_from(&global_path, repo_root)
 }
 
 /// Loads merged config from an explicit global path and repo root.
+///
+/// Applies post-merge auto-wiring for governance documents (see
+/// [`auto_wire_governance`]).
 pub fn load_config_from(global_path: &Path, repo_root: &Path) -> Result<PawConfig, PawError> {
     let global = load_config_file(global_path)?.unwrap_or_default();
     let repo = load_config_file(&repo_config_path(repo_root))?.unwrap_or_default();
-    Ok(global.merged_with(&repo))
+    let mut merged = global.merged_with(&repo);
+    auto_wire_governance(&mut merged, repo_root);
+    Ok(merged)
 }
 
 /// Saves a [`PawConfig`] to the repo-level config file (`.git-paw/config.toml`).
@@ -581,13 +954,43 @@ pub fn generate_default_config() -> String {
 # bind = "127.0.0.1"
 
 # Supervisor mode — git-paw acts as a coordinating layer in front of the
-# agent CLI, enforcing approval policy and optionally running a test
-# command after each agent completes.
+# agent CLI, enforcing approval policy and running configured gate
+# commands during the five-gate verification workflow.
+#
+# Gate command templates feed the supervisor skill's five gates: gate 1
+# Testing (fmt_check / lint / build / test), gate 3 Spec audit
+# (spec_validate), gate 4 Doc audit (doc_build), gate 5 Security audit
+# (security_audit). When a key is omitted, the matching placeholder
+# renders as `(not configured)` in the supervisor skill and the agent
+# skips that tooling step (the gate's manual review still applies).
+# `{{CHANGE_ID}}` inside spec_validate_command is substituted by the
+# supervisor agent at verification time with the change name.
 # [supervisor]
 # enabled = true
 # cli = "claude"
-# test_command = "just check"
+# test_command = "just check"                                  # or: "cargo test", "npm test", "pytest"
+# lint_command = "cargo clippy -- -D warnings"                 # or: "npm run lint", "ruff check .", "golangci-lint run"
+# build_command = "cargo build"                                # or: "npm run build", "mvn package", "go build ./..."
+# fmt_check_command = "cargo fmt --check"                      # or: "prettier --check .", "gofmt -l ."
+# doc_build_command = "mdbook build docs/"                     # or: "sphinx-build", "mkdocs build"
+# spec_validate_command = "openspec validate {{CHANGE_ID}} --strict"  # OpenSpec only
+# security_audit_command = "cargo audit"                       # or: "npm audit", "bandit -r ."
 # agent_approval = "auto"  # one of: "manual", "auto", "full-auto"
+#
+# Conflict detector tuning. Active only when supervisor mode is enabled.
+# [supervisor.conflict]
+# window_seconds = 120          # escalate unresolved in-flight conflicts after this many seconds
+# warn_on_intent_overlap = true # emit feedback when two agent.intent declarations overlap
+# escalate_on_violation = true  # also publish agent.question to supervisor on ownership violations
+
+# Common dev-command allowlist. When supervisor mode starts a session,
+# git-paw seeds .claude/settings.json::allowed_bash_prefixes with a
+# curated preset (cargo, git, just, mdbook, openspec, find, grep, sed -n)
+# so agents do not hit a permission prompt for each variant. Opt out by
+# setting enabled = false; extend with project-specific prefixes via extra.
+# [supervisor.common_dev_allowlist]
+# enabled = true
+# extra = ["pnpm test", "deno fmt"]
 
 # Custom CLI definitions.
 # [clis.my-agent]
@@ -1029,6 +1432,7 @@ enabled = true
             dashboard: None,
             broker: BrokerConfig::default(),
             supervisor: None,
+            governance: GovernanceConfig::default(),
         };
 
         save_config_to(&config_path, &original).unwrap();
@@ -1269,8 +1673,18 @@ enabled = true
                 enabled: true,
                 cli: Some("claude".into()),
                 test_command: Some("just check".into()),
+                lint_command: None,
+                build_command: None,
+                doc_build_command: None,
+                spec_validate_command: None,
+                fmt_check_command: None,
+                security_audit_command: None,
                 agent_approval: ApprovalLevel::FullAuto,
                 auto_approve: None,
+                conflict: ConflictConfig::default(),
+                learnings: false,
+                learnings_config: LearningsConfig::default(),
+                common_dev_allowlist: CommonDevAllowlistConfig::default(),
             }),
             ..Default::default()
         };
@@ -1278,6 +1692,294 @@ enabled = true
         save_config_to(&config_path, &original).unwrap();
         let loaded = load_config_file(&config_path).unwrap().unwrap();
         assert_eq!(loaded.supervisor, original.supervisor);
+    }
+
+    // --- Gate-command fields (supervisor-gate-templating-v0-5-x) ---
+
+    #[test]
+    fn gate_command_fields_default_to_none() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[supervisor]\nenabled = true\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert_eq!(supervisor.test_command, None);
+        assert_eq!(supervisor.lint_command, None);
+        assert_eq!(supervisor.build_command, None);
+        assert_eq!(supervisor.doc_build_command, None);
+        assert_eq!(supervisor.spec_validate_command, None);
+        assert_eq!(supervisor.fmt_check_command, None);
+        assert_eq!(supervisor.security_audit_command, None);
+    }
+
+    #[test]
+    fn gate_command_fields_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        let original = PawConfig {
+            supervisor: Some(SupervisorConfig {
+                enabled: true,
+                cli: Some("claude".into()),
+                test_command: Some("just check".into()),
+                lint_command: Some("cargo clippy -- -D warnings".into()),
+                build_command: Some("cargo build".into()),
+                doc_build_command: Some("mdbook build docs/".into()),
+                spec_validate_command: Some("openspec validate {{CHANGE_ID}} --strict".into()),
+                fmt_check_command: Some("cargo fmt --check".into()),
+                security_audit_command: Some("cargo audit".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        save_config_to(&config_path, &original).unwrap();
+        let loaded = load_config_file(&config_path).unwrap().unwrap();
+        assert_eq!(loaded.supervisor, original.supervisor);
+    }
+
+    #[test]
+    fn gate_command_fields_omit_from_toml_when_none() {
+        let supervisor = SupervisorConfig {
+            enabled: true,
+            test_command: None,
+            lint_command: None,
+            build_command: None,
+            doc_build_command: None,
+            spec_validate_command: None,
+            fmt_check_command: None,
+            security_audit_command: None,
+            ..Default::default()
+        };
+        let serialized = toml::to_string_pretty(&supervisor).unwrap();
+        for key in [
+            "test_command",
+            "lint_command",
+            "build_command",
+            "doc_build_command",
+            "spec_validate_command",
+            "fmt_check_command",
+            "security_audit_command",
+        ] {
+            assert!(
+                !serialized.contains(key),
+                "TOML serialised with None gate fields should omit `{key}`; got:\n{serialized}",
+            );
+        }
+    }
+
+    // --- CommonDevAllowlistConfig ---
+
+    #[test]
+    fn supervisor_common_dev_allowlist_defaults_when_section_absent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[supervisor]\nenabled = true\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert!(supervisor.common_dev_allowlist.enabled);
+        assert!(supervisor.common_dev_allowlist.extra.is_empty());
+    }
+
+    #[test]
+    fn supervisor_common_dev_allowlist_disabled_opt_out() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\nenabled = true\n\
+             [supervisor.common_dev_allowlist]\nenabled = false\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert!(!supervisor.common_dev_allowlist.enabled);
+        // extra still defaults to empty.
+        assert!(supervisor.common_dev_allowlist.extra.is_empty());
+    }
+
+    #[test]
+    fn supervisor_common_dev_allowlist_extra_parsed() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\nenabled = true\n\
+             [supervisor.common_dev_allowlist]\nextra = [\"pnpm test\", \"deno fmt\"]\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert_eq!(
+            supervisor.common_dev_allowlist.extra,
+            vec!["pnpm test".to_string(), "deno fmt".to_string()],
+        );
+        // enabled stays at default true.
+        assert!(supervisor.common_dev_allowlist.enabled);
+    }
+
+    #[test]
+    fn supervisor_common_dev_allowlist_round_trips_through_save_and_load() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        let original = PawConfig {
+            supervisor: Some(SupervisorConfig {
+                enabled: true,
+                common_dev_allowlist: CommonDevAllowlistConfig {
+                    enabled: false,
+                    extra: vec!["pnpm test".into(), "uv pip install".into()],
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        save_config_to(&config_path, &original).unwrap();
+        let loaded = load_config_file(&config_path).unwrap().unwrap();
+        assert_eq!(loaded.supervisor, original.supervisor);
+    }
+
+    #[test]
+    fn existing_pre_v05_config_loads_with_default_common_dev_allowlist() {
+        // A pre-v0.5 supervisor config that omits the new sub-table must
+        // still load and yield the documented defaults.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\n\
+             enabled = true\n\
+             cli = \"claude\"\n\
+             test_command = \"just check\"\n\
+             agent_approval = \"auto\"\n\
+             [supervisor.conflict]\n\
+             window_seconds = 60\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert!(supervisor.common_dev_allowlist.enabled);
+        assert!(supervisor.common_dev_allowlist.extra.is_empty());
+    }
+
+    #[test]
+    fn generated_default_config_template_contains_common_dev_allowlist_section() {
+        let template = generate_default_config();
+        assert!(
+            template.contains("[supervisor.common_dev_allowlist]"),
+            "default template should document the new sub-table",
+        );
+        assert!(
+            template.contains("enabled = true"),
+            "template should show the enabled default",
+        );
+        assert!(
+            template.contains("extra ="),
+            "template should illustrate the extra field",
+        );
+    }
+
+    // --- LearningsConfig (learnings-mode) ---
+
+    #[test]
+    fn learnings_defaults_to_false_when_supervisor_section_absent_field() {
+        // [supervisor] present without `learnings` → learnings = false
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[supervisor]\nenabled = true\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert!(!supervisor.learnings);
+        assert_eq!(supervisor.learnings_config.flush_interval_seconds, 60);
+    }
+
+    #[test]
+    fn learnings_true_loads() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[supervisor]\nenabled = true\nlearnings = true\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert!(supervisor.learnings);
+        // Defaults still applied for the nested table.
+        assert_eq!(supervisor.learnings_config.flush_interval_seconds, 60);
+    }
+
+    #[test]
+    fn learnings_config_custom_flush_interval_is_honoured() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\n\
+             enabled = true\n\
+             learnings = true\n\
+             [supervisor.learnings_config]\n\
+             flush_interval_seconds = 30\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert!(supervisor.learnings);
+        assert_eq!(supervisor.learnings_config.flush_interval_seconds, 30);
+    }
+
+    #[test]
+    fn learnings_config_defaults_when_table_absent() {
+        // [supervisor.learnings_config] omitted → flush_interval_seconds = 60
+        let cfg = LearningsConfig::default();
+        assert_eq!(cfg.flush_interval_seconds, 60);
+    }
+
+    #[test]
+    fn pre_v050_config_loads_with_learnings_false() {
+        // A config produced before v0.5.0 (no `learnings` field, no
+        // `[supervisor.learnings_config]` table) parses cleanly and yields
+        // `learnings = false`.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "default_cli = \"claude\"\n\
+             [supervisor]\n\
+             enabled = true\n\
+             agent_approval = \"auto\"\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert!(!supervisor.learnings);
+        assert_eq!(supervisor.learnings_config.flush_interval_seconds, 60);
+    }
+
+    #[test]
+    fn learnings_round_trips_through_save_and_load() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        let original = PawConfig {
+            supervisor: Some(SupervisorConfig {
+                enabled: true,
+                learnings: true,
+                learnings_config: LearningsConfig {
+                    flush_interval_seconds: 90,
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        save_config_to(&config_path, &original).unwrap();
+        let loaded = load_config_file(&config_path).unwrap().unwrap();
+        assert_eq!(loaded.supervisor, original.supervisor);
+        let supervisor = loaded.supervisor.unwrap();
+        assert!(supervisor.learnings);
+        assert_eq!(supervisor.learnings_config.flush_interval_seconds, 90);
     }
 
     #[test]
@@ -1673,6 +2375,114 @@ enabled = true
         );
     }
 
+    // --- ConflictConfig (supervisor.conflict sub-table) ---
+
+    #[test]
+    fn conflict_config_defaults_match_spec() {
+        let cfg = ConflictConfig::default();
+        assert_eq!(cfg.window_seconds, 120);
+        assert!(cfg.warn_on_intent_overlap);
+        assert!(cfg.escalate_on_violation);
+    }
+
+    #[test]
+    fn supervisor_with_no_conflict_section_loads_defaults() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[supervisor]\nenabled = true\n");
+        let supervisor = load_config_file(&path)
+            .unwrap()
+            .unwrap()
+            .supervisor
+            .unwrap();
+        assert_eq!(supervisor.conflict.window_seconds, 120);
+        assert!(supervisor.conflict.warn_on_intent_overlap);
+        assert!(supervisor.conflict.escalate_on_violation);
+    }
+
+    #[test]
+    fn conflict_section_with_all_fields_overrides_defaults() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\n\
+             enabled = true\n\
+             [supervisor.conflict]\n\
+             window_seconds = 300\n\
+             warn_on_intent_overlap = false\n\
+             escalate_on_violation = false\n",
+        );
+        let conflict = load_config_file(&path)
+            .unwrap()
+            .unwrap()
+            .supervisor
+            .unwrap()
+            .conflict;
+        assert_eq!(conflict.window_seconds, 300);
+        assert!(!conflict.warn_on_intent_overlap);
+        assert!(!conflict.escalate_on_violation);
+    }
+
+    #[test]
+    fn conflict_section_with_partial_fields_keeps_other_defaults() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\n[supervisor.conflict]\nwindow_seconds = 60\n",
+        );
+        let conflict = load_config_file(&path)
+            .unwrap()
+            .unwrap()
+            .supervisor
+            .unwrap()
+            .conflict;
+        assert_eq!(conflict.window_seconds, 60);
+        assert!(conflict.warn_on_intent_overlap);
+        assert!(conflict.escalate_on_violation);
+    }
+
+    #[test]
+    fn pre_v05_config_without_conflict_section_loads() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        // A v0.4-style config: supervisor enabled but no [supervisor.conflict].
+        write_file(
+            &path,
+            "default_cli = \"claude\"\n\
+             [supervisor]\n\
+             enabled = true\n\
+             agent_approval = \"auto\"\n",
+        );
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert!(supervisor.enabled);
+        // The conflict sub-table defaults to ConflictConfig::default().
+        assert_eq!(supervisor.conflict, ConflictConfig::default());
+    }
+
+    #[test]
+    fn conflict_config_round_trips_through_save_and_load() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let original = PawConfig {
+            supervisor: Some(SupervisorConfig {
+                enabled: true,
+                conflict: ConflictConfig {
+                    window_seconds: 90,
+                    warn_on_intent_overlap: false,
+                    escalate_on_violation: true,
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        save_config_to(&config_path, &original).unwrap();
+        let loaded = load_config_file(&config_path).unwrap().unwrap();
+        assert_eq!(loaded.supervisor, original.supervisor);
+    }
+
     #[test]
     fn v030_config_loads_without_auto_approve() {
         // Backward-compat: an existing v0.3.0 config that has neither
@@ -1686,5 +2496,475 @@ enabled = true
         let config = load_config_file(&path).unwrap().unwrap();
         assert!(config.supervisor.is_none());
         assert!(config.broker.enabled);
+    }
+
+    // --- GovernanceConfig (governance-config v0.5.0) ---
+
+    /// Helper: lays out a repo with `.git-paw/config.toml` and an optional
+    /// `SpecKit` `memory/constitution.md` so the `load_config_from`
+    /// auto-wiring path can be exercised end-to-end.
+    fn write_repo_config(repo_root: &Path, toml: &str) {
+        write_file(&repo_config_path(repo_root), toml);
+    }
+
+    fn missing_global(tmp: &TempDir) -> PathBuf {
+        tmp.path().join("nonexistent-global").join("config.toml")
+    }
+
+    // 3.1 No [governance] section → all paths None.
+    #[test]
+    fn governance_defaults_to_all_none_when_section_absent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "default_cli = \"claude\"\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        assert!(config.governance.adr.is_none());
+        assert!(config.governance.test_strategy.is_none());
+        assert!(config.governance.security.is_none());
+        assert!(config.governance.dod.is_none());
+        assert!(config.governance.constitution.is_none());
+    }
+
+    // 3.2 All paths populated.
+    #[test]
+    fn governance_all_paths_populated() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[governance]\n\
+             adr = \"docs/adr\"\n\
+             test_strategy = \"docs/test-strategy.md\"\n\
+             security = \"docs/security-checklist.md\"\n\
+             dod = \"docs/definition-of-done.md\"\n\
+             constitution = \".specify/memory/constitution.md\"\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        assert_eq!(
+            config.governance.adr.as_deref(),
+            Some(Path::new("docs/adr"))
+        );
+        assert_eq!(
+            config.governance.test_strategy.as_deref(),
+            Some(Path::new("docs/test-strategy.md"))
+        );
+        assert_eq!(
+            config.governance.security.as_deref(),
+            Some(Path::new("docs/security-checklist.md"))
+        );
+        assert_eq!(
+            config.governance.dod.as_deref(),
+            Some(Path::new("docs/definition-of-done.md"))
+        );
+        assert_eq!(
+            config.governance.constitution.as_deref(),
+            Some(Path::new(".specify/memory/constitution.md"))
+        );
+    }
+
+    // 3.3 Partial paths.
+    #[test]
+    fn governance_partial_paths_only_some_fields_populated() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[governance]\n\
+             dod = \"docs/dod.md\"\n\
+             security = \"docs/security.md\"\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        assert_eq!(
+            config.governance.dod.as_deref(),
+            Some(Path::new("docs/dod.md"))
+        );
+        assert_eq!(
+            config.governance.security.as_deref(),
+            Some(Path::new("docs/security.md"))
+        );
+        assert!(config.governance.adr.is_none());
+        assert!(config.governance.test_strategy.is_none());
+        assert!(config.governance.constitution.is_none());
+    }
+
+    // 3.4 Absolute path preserved as-is.
+    #[test]
+    fn governance_absolute_path_preserved_as_is() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[governance]\nadr = \"/absolute/path/to/adr\"\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        assert_eq!(
+            config.governance.adr,
+            Some(PathBuf::from("/absolute/path/to/adr"))
+        );
+    }
+
+    // 3.5 Non-existent path loads cleanly without error.
+    #[test]
+    fn governance_nonexistent_path_loads_cleanly() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[governance]\ndod = \"docs/never-existed.md\"\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        assert_eq!(
+            config.governance.dod,
+            Some(PathBuf::from("docs/never-existed.md"))
+        );
+    }
+
+    // 3.6 Round-trip via save → load.
+    #[test]
+    fn governance_round_trips_through_save_and_load() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        let original = PawConfig {
+            governance: GovernanceConfig {
+                adr: Some(PathBuf::from("docs/adr")),
+                test_strategy: Some(PathBuf::from("docs/test-strategy.md")),
+                security: Some(PathBuf::from("docs/security.md")),
+                dod: Some(PathBuf::from("docs/dod.md")),
+                constitution: Some(PathBuf::from(".specify/memory/constitution.md")),
+            },
+            ..Default::default()
+        };
+
+        save_config_to(&config_path, &original).unwrap();
+        let loaded = load_config_file(&config_path).unwrap().unwrap();
+        assert_eq!(loaded.governance, original.governance);
+    }
+
+    // 3.7 v0.4 fixture (no [governance]) loads with defaults.
+    #[test]
+    fn governance_v04_config_without_section_loads_with_defaults() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "default_cli = \"claude\"\n\
+             mouse = true\n\
+             [broker]\n\
+             enabled = true\n\
+             [supervisor]\n\
+             enabled = true\n\
+             [specs]\n\
+             dir = \"specs\"\n\
+             type = \"openspec\"\n\
+             [clis.foo]\n\
+             command = \"/bin/foo\"\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        assert_eq!(config.governance, GovernanceConfig::default());
+        assert!(config.governance.adr.is_none());
+        assert!(config.governance.test_strategy.is_none());
+        assert!(config.governance.security.is_none());
+        assert!(config.governance.dod.is_none());
+        assert!(config.governance.constitution.is_none());
+    }
+
+    // 3.8 GovernanceConfig::default() exposes only the five path fields
+    // (no `gates` field) — compile-time-style assertion via destructuring.
+    #[test]
+    fn governance_default_has_only_five_path_fields() {
+        // If a future change adds a `gates` (or any other) field, this
+        // destructure stops compiling, forcing the change author to
+        // revisit the capability boundary explicitly.
+        let GovernanceConfig {
+            adr,
+            test_strategy,
+            security,
+            dod,
+            constitution,
+        } = GovernanceConfig::default();
+        assert!(adr.is_none());
+        assert!(test_strategy.is_none());
+        assert!(security.is_none());
+        assert!(dod.is_none());
+        assert!(constitution.is_none());
+    }
+
+    // 4.1 Auto-wires constitution when SpecKit detected + field unset.
+    #[test]
+    fn governance_auto_wires_constitution_when_speckit_detected() {
+        let tmp = TempDir::new().unwrap();
+        let repo_root = tmp.path().join("repo");
+        let specify = repo_root.join(".specify");
+        let specs = specify.join("specs");
+        let memory = specify.join("memory");
+        fs::create_dir_all(&specs).unwrap();
+        fs::create_dir_all(&memory).unwrap();
+        let constitution = memory.join("constitution.md");
+        fs::write(&constitution, "# Constitution\n").unwrap();
+
+        write_repo_config(
+            &repo_root,
+            "[specs]\n\
+             type = \"speckit\"\n\
+             dir = \".specify/specs\"\n",
+        );
+
+        let config = load_config_from(&missing_global(&tmp), &repo_root).unwrap();
+        assert_eq!(
+            config.governance.constitution.as_deref(),
+            Some(constitution.as_path())
+        );
+    }
+
+    // 4.2 Explicit governance.constitution preserved unchanged.
+    #[test]
+    fn governance_explicit_constitution_preserved_over_auto_wiring() {
+        let tmp = TempDir::new().unwrap();
+        let repo_root = tmp.path().join("repo");
+        let specify = repo_root.join(".specify");
+        let specs = specify.join("specs");
+        let memory = specify.join("memory");
+        fs::create_dir_all(&specs).unwrap();
+        fs::create_dir_all(&memory).unwrap();
+        fs::write(memory.join("constitution.md"), "# Constitution\n").unwrap();
+
+        write_repo_config(
+            &repo_root,
+            "[specs]\n\
+             type = \"speckit\"\n\
+             dir = \".specify/specs\"\n\
+             [governance]\n\
+             constitution = \"docs/principles.md\"\n",
+        );
+
+        let config = load_config_from(&missing_global(&tmp), &repo_root).unwrap();
+        assert_eq!(
+            config.governance.constitution,
+            Some(PathBuf::from("docs/principles.md"))
+        );
+    }
+
+    // 4.3 Auto-wiring skipped for non-speckit backends.
+    #[test]
+    fn governance_auto_wiring_skipped_when_specs_type_is_openspec() {
+        let tmp = TempDir::new().unwrap();
+        let repo_root = tmp.path().join("repo");
+        let specify = repo_root.join(".specify");
+        let memory = specify.join("memory");
+        fs::create_dir_all(&memory).unwrap();
+        fs::write(memory.join("constitution.md"), "# Constitution\n").unwrap();
+        fs::create_dir_all(repo_root.join("specs")).unwrap();
+
+        write_repo_config(
+            &repo_root,
+            "[specs]\n\
+             type = \"openspec\"\n\
+             dir = \"specs\"\n",
+        );
+
+        let config = load_config_from(&missing_global(&tmp), &repo_root).unwrap();
+        assert!(config.governance.constitution.is_none());
+    }
+
+    // 4.4 Auto-wiring skipped when [specs] is absent entirely.
+    #[test]
+    fn governance_auto_wiring_skipped_when_specs_section_absent() {
+        let tmp = TempDir::new().unwrap();
+        let repo_root = tmp.path().join("repo");
+        let memory = repo_root.join(".specify").join("memory");
+        fs::create_dir_all(&memory).unwrap();
+        fs::write(memory.join("constitution.md"), "# Constitution\n").unwrap();
+        fs::create_dir_all(repo_root.join(".git-paw")).unwrap();
+
+        write_repo_config(&repo_root, "default_cli = \"claude\"\n");
+
+        let config = load_config_from(&missing_global(&tmp), &repo_root).unwrap();
+        assert!(config.governance.constitution.is_none());
+    }
+
+    // 4.5 SpecKit active but constitution.md absent → stays None, no error.
+    #[test]
+    fn governance_auto_wiring_skipped_when_constitution_md_absent() {
+        let tmp = TempDir::new().unwrap();
+        let repo_root = tmp.path().join("repo");
+        let specs = repo_root.join(".specify").join("specs");
+        fs::create_dir_all(&specs).unwrap();
+        // No memory/constitution.md.
+
+        write_repo_config(
+            &repo_root,
+            "[specs]\n\
+             type = \"speckit\"\n\
+             dir = \".specify/specs\"\n",
+        );
+
+        let config = load_config_from(&missing_global(&tmp), &repo_root).unwrap();
+        assert!(config.governance.constitution.is_none());
+    }
+
+    // 4.6 Explicit empty-string constitution preserved as Some("").
+    #[test]
+    fn governance_explicit_empty_string_constitution_suppresses_auto_wiring() {
+        let tmp = TempDir::new().unwrap();
+        let repo_root = tmp.path().join("repo");
+        let specify = repo_root.join(".specify");
+        let specs = specify.join("specs");
+        let memory = specify.join("memory");
+        fs::create_dir_all(&specs).unwrap();
+        fs::create_dir_all(&memory).unwrap();
+        fs::write(memory.join("constitution.md"), "# Constitution\n").unwrap();
+
+        write_repo_config(
+            &repo_root,
+            "[specs]\n\
+             type = \"speckit\"\n\
+             dir = \".specify/specs\"\n\
+             [governance]\n\
+             constitution = \"\"\n",
+        );
+
+        let config = load_config_from(&missing_global(&tmp), &repo_root).unwrap();
+        assert_eq!(config.governance.constitution, Some(PathBuf::from("")));
+    }
+
+    // Merge: global and repo each contribute independent paths.
+    #[test]
+    fn governance_merge_fields_independently_across_global_and_repo() {
+        let tmp = TempDir::new().unwrap();
+        let global_path = tmp.path().join("global").join("config.toml");
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+
+        write_file(&global_path, "[governance]\nadr = \"docs/adr\"\n");
+        write_file(
+            &repo_config_path(&repo_root),
+            "[governance]\ndod = \"docs/dod.md\"\n",
+        );
+
+        let config = load_config_from(&global_path, &repo_root).unwrap();
+        assert_eq!(config.governance.adr, Some(PathBuf::from("docs/adr")));
+        assert_eq!(config.governance.dod, Some(PathBuf::from("docs/dod.md")));
+    }
+
+    // Merge precedence: repo wins per-field when both set.
+    #[test]
+    fn governance_merge_repo_wins_per_field_when_both_set() {
+        let tmp = TempDir::new().unwrap();
+        let global_path = tmp.path().join("global").join("config.toml");
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+
+        write_file(&global_path, "[governance]\nadr = \"docs/global-adr\"\n");
+        write_file(
+            &repo_config_path(&repo_root),
+            "[governance]\nadr = \"docs/repo-adr\"\n",
+        );
+
+        let config = load_config_from(&global_path, &repo_root).unwrap();
+        assert_eq!(config.governance.adr, Some(PathBuf::from("docs/repo-adr")));
+    }
+
+    // load_repo_config also applies auto-wiring.
+    #[test]
+    fn governance_load_repo_config_also_auto_wires_constitution() {
+        let tmp = TempDir::new().unwrap();
+        let repo_root = tmp.path().join("repo");
+        let specify = repo_root.join(".specify");
+        let specs = specify.join("specs");
+        let memory = specify.join("memory");
+        fs::create_dir_all(&specs).unwrap();
+        fs::create_dir_all(&memory).unwrap();
+        let constitution = memory.join("constitution.md");
+        fs::write(&constitution, "# Constitution\n").unwrap();
+
+        write_repo_config(
+            &repo_root,
+            "[specs]\n\
+             type = \"speckit\"\n\
+             dir = \".specify/specs\"\n",
+        );
+
+        let config = load_repo_config(&repo_root).unwrap();
+        assert_eq!(
+            config.governance.constitution.as_deref(),
+            Some(constitution.as_path())
+        );
+    }
+
+    // --- load_config user_config_path override (config-test-isolation) ---
+
+    #[test]
+    fn load_config_with_some_pins_global_to_override_path() {
+        let tmp = TempDir::new().unwrap();
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+
+        let global_a = tmp.path().join("global-A.toml");
+        let global_b = tmp.path().join("global-B.toml");
+        write_file(&global_a, "[clis.cli-A]\ncommand = \"/bin/a\"\n");
+        write_file(&global_b, "[clis.cli-B]\ncommand = \"/bin/b\"\n");
+
+        let config = load_config(&repo_root, Some(&global_a)).unwrap();
+        assert!(config.clis.contains_key("cli-A"));
+        assert!(!config.clis.contains_key("cli-B"));
+    }
+
+    #[test]
+    fn load_config_with_some_nonexistent_returns_defaults() {
+        let tmp = TempDir::new().unwrap();
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+        let missing = tmp.path().join("does-not-exist.toml");
+
+        let config = load_config(&repo_root, Some(&missing)).unwrap();
+        assert_eq!(config, PawConfig::default());
+    }
+
+    // Note: a `load_config_with_none_reads_platform_default_global` test is
+    // intentionally omitted. Asserting that `None` resolves to
+    // `global_config_path()` would require either writing to the dev
+    // machine's real `~/Library/Application Support/git-paw/config.toml`
+    // (polluting it) or `serial_test` + env-var manipulation of `HOME` /
+    // `XDG_CONFIG_HOME` (brittle, slows the suite). The `None` branch is
+    // covered behaviourally by the 8 production call sites in `src/main.rs`
+    // and the v0.4 test suite that continues to pass.
+
+    #[test]
+    fn load_config_override_does_not_affect_repo_resolution() {
+        let tmp = TempDir::new().unwrap();
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+        write_file(&repo_config_path(&repo_root), "default_cli = \"claude\"\n");
+
+        let global_path = tmp.path().join("global.toml");
+        write_file(&global_path, "default_cli = \"gemini\"\n");
+
+        let config = load_config(&repo_root, Some(&global_path)).unwrap();
+        assert_eq!(config.default_cli.as_deref(), Some("claude"));
+    }
+
+    // Maps to scenario "GovernanceConfig has no gates field" from
+    // governance-config. The struct does not enable `deny_unknown_fields`, so
+    // unknown sections deserialise silently; this test asserts the round-trip
+    // representation omits any `[governance.gates]` section and the loaded
+    // governance config keeps only the documented document-pointer fields.
+    // (test-coverage-v0-5-0 task 9.1)
+    #[test]
+    fn governance_config_rejects_gates_field() {
+        let toml_input = "[governance]\ndod = \"docs/dod.md\"\n[governance.gates]\ndod = true\n";
+        let cfg: PawConfig = toml::from_str(toml_input).expect("toml parse");
+        let gov = cfg.governance;
+        assert_eq!(gov.dod.as_deref(), Some(Path::new("docs/dod.md")));
+
+        let round_trip = toml::to_string(&gov).expect("serialise gov");
+        assert!(
+            !round_trip.contains("gates"),
+            "GovernanceConfig must not round-trip a `gates` field; got: {round_trip}"
+        );
+        assert!(
+            !round_trip.contains("[governance.gates]"),
+            "GovernanceConfig must not round-trip a `[governance.gates]` section; got: {round_trip}"
+        );
     }
 }
