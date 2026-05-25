@@ -3,7 +3,36 @@
 //! Defines the command-line interface using `clap` v4 with derive macros.
 //! All subcommands, flags, and options are declared here.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+/// Spec format selector for the `--specs-format` flag.
+///
+/// Three formats are supported:
+/// - `openspec` — `openspec/changes/<name>/` directory layout.
+/// - `markdown` — single-file Markdown specs with YAML frontmatter.
+/// - `speckit` — GitHub Spec Kit `.specify/specs/<feature>/` layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum SpecsFormat {
+    /// `OpenSpec` format (directory of `<change>/tasks.md`).
+    Openspec,
+    /// Markdown format (one `.md` file per spec with frontmatter).
+    Markdown,
+    /// Spec Kit format (`.specify/specs/<feature>/`).
+    Speckit,
+}
+
+impl SpecsFormat {
+    /// Returns the backend-dispatch string for this format.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Openspec => "openspec",
+            Self::Markdown => "markdown",
+            Self::Speckit => "speckit",
+        }
+    }
+}
 
 /// Parallel AI Worktrees — orchestrate multiple AI coding CLI sessions
 /// across git worktrees from a single terminal using tmux.
@@ -22,7 +51,9 @@ use clap::{Parser, Subcommand};
                   git paw start --cli claude --branches feat/auth,feat/api\n\n  \
                   # Check session status\n  \
                   git paw status\n\n  \
-                  # Stop session (preserves worktrees for later)\n  \
+                  # Pause session (detaches client, stops broker, keeps CLIs alive)\n  \
+                  git paw pause\n\n  \
+                  # Stop session (kills CLIs, preserves worktrees for later)\n  \
                   git paw stop\n\n  \
                   # Remove everything\n  \
                   git paw purge"
@@ -41,15 +72,27 @@ pub enum Command {
         about = "Launch a new session or reattach to an existing one",
         long_about = "Smart start: reattaches if a session is active, recovers if stopped/crashed, \
                       or launches a new interactive session.\n\n\
+                      By default, every existing agent branch is rebased onto the repository's \
+                      default branch (whatever `origin/HEAD` tracks — typically `main`) before \
+                      its worktree is opened, so agents always start from current main. Pass \
+                      `--no-rebase` to skip this step and reproduce the pre-v0.6 behaviour \
+                      (useful when you have local pinned SHAs or are deliberately working off a \
+                      stale baseline). If the rebase hits a conflict, the affected branch is \
+                      left at its pre-rebase HEAD and `git paw start` exits with an error \
+                      listing the conflicting files.\n\n\
                       Examples:\n  \
                       git paw start\n  \
                       git paw start --cli claude\n  \
                       git paw start --cli claude --branches feat/auth,feat/api\n  \
-                      git paw start --from-specs\n  \
-                      git paw start --from-specs --cli claude\n  \
+                      git paw start --from-all-specs\n  \
+                      git paw start --from-all-specs --cli claude\n  \
+                      git paw start --specs add-auth,fix-session\n  \
+                      git paw start --specs   # opens spec picker (TTY required)\n  \
                       git paw start --dry-run\n  \
                       git paw start --preset backend\n  \
-                      git paw start --supervisor   # auto-approve safe prompts via [supervisor.auto_approve]"
+                      git paw start --supervisor   # auto-approve safe prompts via [supervisor.auto_approve]\n  \
+                      git paw start --no-supervisor  # disable supervisor for this session (overrides config)\n  \
+                      git paw start --no-rebase   # skip rebasing agent branches onto the default branch"
     )]
     Start {
         /// AI CLI to use (e.g., claude, codex, gemini). Skips CLI picker if provided.
@@ -64,12 +107,43 @@ pub enum Command {
         )]
         branches: Option<Vec<String>>,
 
-        /// Launch from spec files instead of interactive selection.
+        /// Launch worktrees for every discovered spec across all configured formats.
         #[arg(
             long,
-            help = "Launch from spec files (reads .git-paw/config.toml [specs])"
+            alias = "from-specs",
+            help = "Launch from every discovered spec across all configured formats"
         )]
-        from_specs: bool,
+        from_all_specs: bool,
+
+        /// Narrow the session to named specs, or open the multi-select picker
+        /// when given without values.
+        ///
+        /// `--specs add-auth,fix-session` runs only those specs. Bare `--specs`
+        /// opens a multi-select picker; an interactive terminal is required
+        /// (otherwise the command exits with an actionable error pointing at
+        /// `--specs NAME[,NAME...]` and `--from-all-specs`).
+        ///
+        /// Mutually exclusive with `--from-all-specs`.
+        #[arg(
+            long,
+            value_delimiter = ',',
+            num_args = 0..,
+            conflicts_with = "from_all_specs",
+            help = "Comma-separated spec names; bare flag opens picker (TTY required)"
+        )]
+        specs: Option<Vec<String>>,
+
+        /// Override the spec format used for `--from-all-specs` / `--specs` scanning.
+        ///
+        /// Accepted values: `openspec`, `markdown`, `speckit`. Overrides both
+        /// the `[specs] type` setting in `.git-paw/config.toml` and the
+        /// auto-detection of `.specify/` at the repo root.
+        #[arg(
+            long,
+            value_enum,
+            help = "Override spec format (openspec, markdown, speckit)"
+        )]
+        specs_format: Option<SpecsFormat>,
 
         /// Preview the session plan without executing.
         #[arg(long, help = "Preview the session plan without executing")]
@@ -87,19 +161,73 @@ pub enum Command {
         )]
         supervisor: bool,
 
+        /// Disable supervisor mode for this session, overriding any config setting.
+        #[arg(
+            long,
+            conflicts_with = "supervisor",
+            default_value_t = false,
+            help = "Disable supervisor for this session, overriding any [supervisor] enabled = true in config"
+        )]
+        no_supervisor: bool,
+
         /// Bypass uncommitted-spec validation warning.
         #[arg(long, help = "Bypass uncommitted-spec validation warning")]
         force: bool,
+
+        /// Skip rebasing existing agent branches onto the default branch
+        /// before opening their worktrees.
+        ///
+        /// By default, `git paw start` rebases every existing agent branch
+        /// onto the repository's default branch (whatever `origin/HEAD`
+        /// tracks, typically `main`) before opening or reopening its
+        /// worktree, so agents always start from current `main`. Pass
+        /// `--no-rebase` to skip the rebase step entirely and reproduce the
+        /// pre-v0.6 behaviour. Newly created branches (no prior commits) are
+        /// not rebased regardless of this flag.
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Skip rebasing existing agent branches onto the default branch before opening worktrees"
+        )]
+        no_rebase: bool,
     },
+
+    /// Pause the session (detaches client, stops broker, leaves CLIs running)
+    #[command(
+        about = "Pause the session (detaches client, stops broker, leaves CLIs running)",
+        long_about = "Detaches the tmux client and stops the broker, but leaves all CLI \
+                      processes running in the background. This preserves agent conversation \
+                      state for instant resume via `git paw start`. RAM stays allocated \
+                      (~300 MB per Claude pane).\n\n\
+                      Use pause for short breaks (lunch, meetings, end-of-day). For longer \
+                      breaks, use `git paw stop` to kill the CLIs and release RAM (worktrees \
+                      preserved). A future `git paw hibernate` (v1.0.0) will snapshot state \
+                      to disk.\n\n\
+                      Example:\n  git paw pause"
+    )]
+    Pause,
 
     /// Stop the session (kills tmux, keeps worktrees and state)
     #[command(
         about = "Stop the session (kills tmux, keeps worktrees and state)",
-        long_about = "Kills the tmux session but preserves worktrees and session state on disk. \
-                      Run `git paw start` later to recover the session.\n\n\
-                      Example:\n  git paw stop"
+        long_about = "Kills the tmux session and every CLI pane process, but preserves \
+                      worktrees and session state on disk. CLI conversation context is lost. \
+                      Run `git paw start` later to recover the session with fresh CLI \
+                      processes.\n\n\
+                      Three teardown verbs:\n  \
+                      pause — soft stop (detach + broker stop; CLIs keep running, RAM held)\n  \
+                      stop  — kills CLI processes; preserves worktrees on disk (this command)\n  \
+                      purge — full reset; removes worktrees, branches, and state\n\n\
+                      `stop` prompts for confirmation in interactive terminals. Use \
+                      `--force` to skip the prompt (scripts) or pipe stdin from \
+                      `/dev/null` for non-interactive contexts.\n\n\
+                      Examples:\n  git paw stop\n  git paw stop --force"
     )]
-    Stop,
+    Stop {
+        /// Skip confirmation prompt.
+        #[arg(long, default_value_t = false, help = "Skip confirmation prompt")]
+        force: bool,
+    },
 
     /// Remove everything (tmux session, worktrees, and state)
     #[command(
@@ -249,19 +377,27 @@ mod tests {
             Command::Start {
                 cli,
                 branches,
-                from_specs,
+                from_all_specs,
+                specs,
+                specs_format,
                 dry_run,
                 preset,
                 supervisor,
+                no_supervisor,
                 force,
+                no_rebase,
             } => {
                 assert!(cli.is_none());
                 assert!(branches.is_none());
-                assert!(!from_specs);
+                assert!(!from_all_specs);
+                assert!(specs.is_none());
+                assert!(specs_format.is_none());
                 assert!(!dry_run);
                 assert!(preset.is_none());
                 assert!(!supervisor);
+                assert!(!no_supervisor);
                 assert!(!force);
+                assert!(!no_rebase);
             }
             other => panic!("expected Start, got {other:?}"),
         }
@@ -274,6 +410,187 @@ mod tests {
             Command::Start { cli, .. } => assert_eq!(cli.as_deref(), Some("claude")),
             other => panic!("expected Start, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn start_with_from_all_specs_sets_flag_and_leaves_specs_unset() {
+        let cli = parse(&["start", "--from-all-specs"]);
+        match cli.command.unwrap() {
+            Command::Start {
+                from_all_specs,
+                specs,
+                ..
+            } => {
+                assert!(from_all_specs);
+                assert!(specs.is_none());
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_with_from_specs_alias_parses_identically_to_from_all_specs() {
+        let alias_args = parse(&["start", "--from-specs"]);
+        let canonical_args = parse(&["start", "--from-all-specs"]);
+        match (alias_args.command.unwrap(), canonical_args.command.unwrap()) {
+            (
+                Command::Start {
+                    from_all_specs: a_all,
+                    specs: a_specs,
+                    supervisor: a_sup,
+                    ..
+                },
+                Command::Start {
+                    from_all_specs: c_all,
+                    specs: c_specs,
+                    supervisor: c_sup,
+                    ..
+                },
+            ) => {
+                assert_eq!(a_all, c_all);
+                assert_eq!(a_specs, c_specs);
+                assert_eq!(a_sup, c_sup);
+                assert!(a_all);
+            }
+            other => panic!("expected two Start variants, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_with_bare_specs_yields_empty_vec_picker_mode() {
+        let cli = parse(&["start", "--specs"]);
+        match cli.command.unwrap() {
+            Command::Start {
+                from_all_specs,
+                specs,
+                ..
+            } => {
+                assert!(!from_all_specs);
+                assert_eq!(specs, Some(Vec::<String>::new()));
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_with_specs_single_name() {
+        let cli = parse(&["start", "--specs", "add-auth"]);
+        match cli.command.unwrap() {
+            Command::Start { specs, .. } => {
+                assert_eq!(specs, Some(vec!["add-auth".to_string()]));
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_with_specs_two_comma_separated_names() {
+        let cli = parse(&["start", "--specs", "add-auth,fix-session"]);
+        match cli.command.unwrap() {
+            Command::Start { specs, .. } => {
+                assert_eq!(
+                    specs,
+                    Some(vec!["add-auth".to_string(), "fix-session".to_string()])
+                );
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_with_specs_three_comma_separated_names() {
+        let cli = parse(&["start", "--specs", "add-auth,fix-session,add-logging"]);
+        match cli.command.unwrap() {
+            Command::Start { specs, .. } => {
+                assert_eq!(
+                    specs,
+                    Some(vec![
+                        "add-auth".to_string(),
+                        "fix-session".to_string(),
+                        "add-logging".to_string(),
+                    ])
+                );
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_with_from_all_specs_and_specs_is_rejected() {
+        let result = Cli::try_parse_from([
+            "git-paw",
+            "start",
+            "--from-all-specs",
+            "--specs",
+            "add-auth",
+        ]);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("--from-all-specs"), "got: {err}");
+        assert!(err.contains("--specs"), "got: {err}");
+    }
+
+    #[test]
+    fn start_with_from_specs_alias_and_specs_is_rejected() {
+        let result =
+            Cli::try_parse_from(["git-paw", "start", "--from-specs", "--specs", "add-auth"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn start_with_from_all_specs_and_supervisor_sets_both_flags() {
+        let cli = parse(&["start", "--from-all-specs", "--supervisor"]);
+        match cli.command.unwrap() {
+            Command::Start {
+                from_all_specs,
+                specs,
+                supervisor,
+                ..
+            } => {
+                assert!(from_all_specs);
+                assert!(supervisor);
+                assert!(specs.is_none());
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_with_supervisor_only_leaves_spec_mode_unset() {
+        let cli = parse(&["start", "--supervisor"]);
+        match cli.command.unwrap() {
+            Command::Start {
+                from_all_specs,
+                specs,
+                supervisor,
+                ..
+            } => {
+                assert!(!from_all_specs);
+                assert!(specs.is_none());
+                assert!(supervisor);
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_help_contains_from_all_specs_and_specs_but_not_alias() {
+        let result = Cli::try_parse_from(["git-paw", "start", "--help"]);
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(
+            help.contains("--from-all-specs"),
+            "start --help should contain --from-all-specs; got: {help}"
+        );
+        assert!(
+            help.contains("--specs"),
+            "start --help should contain --specs; got: {help}"
+        );
+        assert!(
+            !help.contains("--from-specs"),
+            "start --help should NOT contain hidden alias --from-specs; got: {help}"
+        );
     }
 
     #[test]
@@ -349,6 +666,78 @@ mod tests {
         }
     }
 
+    // -- --specs-format flag --
+
+    #[test]
+    fn start_with_specs_format_speckit() {
+        let cli = parse(&["start", "--from-specs", "--specs-format", "speckit"]);
+        match cli.command.unwrap() {
+            Command::Start { specs_format, .. } => {
+                assert_eq!(specs_format, Some(SpecsFormat::Speckit));
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_with_specs_format_openspec() {
+        let cli = parse(&["start", "--from-specs", "--specs-format", "openspec"]);
+        match cli.command.unwrap() {
+            Command::Start { specs_format, .. } => {
+                assert_eq!(specs_format, Some(SpecsFormat::Openspec));
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_with_specs_format_markdown() {
+        let cli = parse(&["start", "--from-specs", "--specs-format", "markdown"]);
+        match cli.command.unwrap() {
+            Command::Start { specs_format, .. } => {
+                assert_eq!(specs_format, Some(SpecsFormat::Markdown));
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_rejects_unknown_specs_format() {
+        let result = Cli::try_parse_from([
+            "git-paw",
+            "start",
+            "--from-specs",
+            "--specs-format",
+            "unknown-value",
+        ]);
+        assert!(result.is_err(), "unknown value should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("openspec") && err.contains("markdown") && err.contains("speckit"),
+            "error should list all three valid values, got: {err}"
+        );
+    }
+
+    #[test]
+    fn specs_format_as_str_matches_backend_names() {
+        assert_eq!(SpecsFormat::Openspec.as_str(), "openspec");
+        assert_eq!(SpecsFormat::Markdown.as_str(), "markdown");
+        assert_eq!(SpecsFormat::Speckit.as_str(), "speckit");
+    }
+
+    #[test]
+    fn start_help_shows_specs_format_flag() {
+        let result = Cli::try_parse_from(["git-paw", "start", "--help"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(
+            help.contains("--specs-format"),
+            "start --help should contain --specs-format"
+        );
+    }
+
     #[test]
     fn start_help_shows_supervisor_flag() {
         let result = Cli::try_parse_from(["git-paw", "start", "--help"]);
@@ -359,6 +748,100 @@ mod tests {
         assert!(
             help.contains("--supervisor"),
             "start --help should contain --supervisor"
+        );
+    }
+
+    // -- --no-supervisor flag --
+
+    #[test]
+    fn start_with_no_supervisor_flag() {
+        let cli = parse(&["start", "--no-supervisor"]);
+        match cli.command.unwrap() {
+            Command::Start {
+                supervisor,
+                no_supervisor,
+                ..
+            } => {
+                assert!(no_supervisor);
+                assert!(!supervisor);
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_without_flags_leaves_no_supervisor_false() {
+        let cli = parse(&["start"]);
+        match cli.command.unwrap() {
+            Command::Start {
+                supervisor,
+                no_supervisor,
+                ..
+            } => {
+                assert!(!no_supervisor);
+                assert!(!supervisor);
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_with_supervisor_and_no_supervisor_is_rejected() {
+        let result = Cli::try_parse_from(["git-paw", "start", "--supervisor", "--no-supervisor"]);
+        assert!(
+            result.is_err(),
+            "--supervisor + --no-supervisor must be rejected by clap"
+        );
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--supervisor") && msg.contains("--no-supervisor"),
+            "error should mention both flags, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn start_with_no_supervisor_and_supervisor_reversed_is_also_rejected() {
+        // clap's conflicts_with is bidirectional; order of flags shouldn't matter.
+        let result = Cli::try_parse_from(["git-paw", "start", "--no-supervisor", "--supervisor"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn start_no_supervisor_combines_with_other_flags() {
+        let cli = parse(&[
+            "start",
+            "--no-supervisor",
+            "--cli",
+            "claude",
+            "--branches",
+            "feat/a,feat/b",
+        ]);
+        match cli.command.unwrap() {
+            Command::Start {
+                no_supervisor,
+                cli,
+                branches,
+                ..
+            } => {
+                assert!(no_supervisor);
+                assert_eq!(cli.as_deref(), Some("claude"));
+                assert_eq!(branches.unwrap(), vec!["feat/a", "feat/b"]);
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_help_shows_no_supervisor_flag() {
+        let result = Cli::try_parse_from(["git-paw", "start", "--help"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(
+            help.contains("--no-supervisor"),
+            "start --help should contain --no-supervisor, got: {help}"
         );
     }
 
@@ -391,12 +874,103 @@ mod tests {
         }
     }
 
+    // -- Pause subcommand --
+
+    #[test]
+    fn pause_parses() {
+        let cli = parse(&["pause"]);
+        assert!(matches!(cli.command.unwrap(), Command::Pause));
+    }
+
+    #[test]
+    fn pause_help_mentions_ram_tradeoff() {
+        let result = Cli::try_parse_from(["git-paw", "pause", "--help"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(
+            help.to_lowercase().contains("ram"),
+            "pause --help should mention RAM tradeoff, got: {help}"
+        );
+        assert!(
+            help.contains("stop"),
+            "pause --help should cross-reference stop, got: {help}"
+        );
+    }
+
+    #[test]
+    fn pause_rejects_unknown_flags() {
+        let result = Cli::try_parse_from(["git-paw", "pause", "--anything"]);
+        assert!(result.is_err(), "pause should reject unknown flags");
+    }
+
+    #[test]
+    fn root_help_lists_pause() {
+        let result = Cli::try_parse_from(["git-paw", "--help"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(
+            help.contains("pause"),
+            "root --help should list pause subcommand, got: {help}"
+        );
+        // Quick-start block should also reference pause.
+        assert!(
+            help.contains("git paw pause"),
+            "after_help quick-start should mention `git paw pause`"
+        );
+    }
+
     // -- Stop subcommand --
 
     #[test]
     fn stop_parses() {
         let cli = parse(&["stop"]);
-        assert!(matches!(cli.command.unwrap(), Command::Stop));
+        assert!(matches!(
+            cli.command.unwrap(),
+            Command::Stop { force: false }
+        ));
+    }
+
+    #[test]
+    fn stop_without_force() {
+        let cli = parse(&["stop"]);
+        match cli.command.unwrap() {
+            Command::Stop { force } => assert!(!force),
+            other => panic!("expected Stop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_with_force() {
+        let cli = parse(&["stop", "--force"]);
+        match cli.command.unwrap() {
+            Command::Stop { force } => assert!(force),
+            other => panic!("expected Stop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_help_mentions_pause_and_purge() {
+        let result = Cli::try_parse_from(["git-paw", "stop", "--help"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(
+            help.contains("pause"),
+            "stop --help should reference pause, got: {help}"
+        );
+        assert!(
+            help.contains("purge"),
+            "stop --help should reference purge, got: {help}"
+        );
+        assert!(
+            help.contains("--force"),
+            "stop --help should list --force, got: {help}"
+        );
     }
 
     // -- Purge subcommand --
@@ -625,6 +1199,55 @@ mod tests {
     fn dashboard_parses() {
         let cli = parse(&["__dashboard"]);
         assert!(matches!(cli.command.unwrap(), Command::Dashboard));
+    }
+
+    // -- --no-rebase flag --
+
+    #[test]
+    fn start_with_no_rebase_flag_sets_no_rebase_true() {
+        let cli = parse(&["start", "--no-rebase"]);
+        match cli.command.unwrap() {
+            Command::Start { no_rebase, .. } => assert!(no_rebase),
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_without_no_rebase_defaults_to_false() {
+        let cli = parse(&["start"]);
+        match cli.command.unwrap() {
+            Command::Start { no_rebase, .. } => assert!(!no_rebase),
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_no_rebase_combines_with_supervisor() {
+        let cli = parse(&["start", "--no-rebase", "--supervisor"]);
+        match cli.command.unwrap() {
+            Command::Start {
+                no_rebase,
+                supervisor,
+                ..
+            } => {
+                assert!(no_rebase);
+                assert!(supervisor);
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_help_shows_no_rebase_flag() {
+        let result = Cli::try_parse_from(["git-paw", "start", "--help"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(
+            help.contains("--no-rebase"),
+            "start --help should contain --no-rebase, got: {help}"
+        );
     }
 
     #[test]
