@@ -59,7 +59,7 @@ Test: a maintainer-run smoke check during the change rollout — capture `tmux l
 
 A helper `tests/helpers/mod.rs::guard_against_live_session()` SHALL be called as the first action of `tests/helpers/mod.rs::setup_test_repo()`. The guard SHALL:
 
-- Spawn `tmux ls` against the user's default socket (i.e. without applying `tmux_test_env()`).
+- Spawn `tmux ls` against the user's default socket. The `tmux ls` subprocess SHALL have `TMUX_TMPDIR`, `TMUX`, and `TMUX_PANE` explicitly removed via `Command::env_remove` so the guard always inspects the real default socket regardless of whether a parallel test in the same binary has mutated those env vars via `apply_to_process()`. This is required because Rust's test runner shares `std::env` across parallel test threads — without `env_remove`, a `#[serial]` test elsewhere in the binary that has called `apply_to_process()` would cause the guard to inspect its isolated socket instead, falsely reporting in-flight test sessions as default-socket leaks.
 - Parse the stdout for any line whose session-name field starts with `paw-` (e.g. `paw-git-paw`, `paw-other-project`).
 - If at least one such session is found, panic with a message that:
   - Names every offending session.

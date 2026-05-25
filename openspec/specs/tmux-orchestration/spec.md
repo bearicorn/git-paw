@@ -68,6 +68,15 @@ Additionally, immediately after the `new-session` command, both builders SHALL e
 
 Test: `tmux::tests::built_session_can_be_executed_and_killed`, `tmux::tests::supervisor_top_row_split_50_50`, and the `cli_supervisor_no_config::supervisor_without_section_uses_default_when_default_cli_present` integration test.
 
+#### Scenario: Supervisor splits use `-l <N>%` syntax (tmux 3.1+) not deprecated `-p <N>`
+- **GIVEN** a `build_supervisor_session` invocation with any agent count
+- **WHEN** the command list is built
+- **THEN** every emitted `split-window` command SHALL use the `-l <N>%` length flag, NOT the deprecated `-p <N>` percentage flag
+
+Rationale: Linux apt-tmux 3.4 (Ubuntu 24.04) emits `cmd-split-window.c: "size missing"` when `-p` cannot resolve the percentage against the parent pane's laid-out size — on a detached server with no attached client the pane geometry is unresolved. `-l <N>%` resolves against the window's `-y` dimension (set by `new-session -x 200 -y 50`) instead, which is well-defined in headless mode. macOS tmux 3.6a tolerates either form.
+
+Test: `tmux::tests::supervisor_splits_use_l_percent_not_p`.
+
 ### Requirement: Session name override via builder
 
 The builder SHALL support overriding the default `paw-<project>` session name with a custom name.

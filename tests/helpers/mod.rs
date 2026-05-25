@@ -220,7 +220,23 @@ pub fn guard_against_live_session() {
         return;
     }
 
-    let Ok(output) = Command::new("tmux").arg("ls").output() else {
+    // Strip `TMUX_TMPDIR`, `TMUX`, and `TMUX_PANE` before running `tmux ls`.
+    // The guard's contract is to inspect the user's REAL default socket —
+    // but a parallel `#[serial]` test elsewhere in the binary may have set
+    // `TMUX_TMPDIR` on the process via `apply_to_process()`, and Rust's
+    // test runner shares `std::env` across parallel test threads. Without
+    // stripping these, the guard inspects whatever isolated socket the
+    // parallel test happens to be using mid-execution and reports its
+    // in-flight sessions as "live default-socket sessions" — the exact
+    // false-positive that caused the v0.5.0 CI failure with
+    // `paw-test-repo` showing up across non-serial `from_specs_*` tests.
+    let Ok(output) = Command::new("tmux")
+        .arg("ls")
+        .env_remove("TMUX_TMPDIR")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+    else {
         // tmux not installed → nothing to guard against
         return;
     };
@@ -233,7 +249,23 @@ pub fn guard_against_live_session() {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let offending: Vec<&str> = stdout
+    if let Some(msg) = build_offending_session_message(&stdout) {
+        panic!("{msg}");
+    }
+}
+
+/// Pure parser: given the stdout of `tmux ls`, find any session whose name
+/// starts with `paw-` and build the guard's panic message. Returns `None`
+/// when no `paw-*` session is present.
+///
+/// Split out from [`guard_against_live_session`] so the matcher logic is
+/// testable without spawning a real tmux session on the default socket —
+/// previously, the integration test for the guard created `paw-guard-test`
+/// on the default socket, which then leaked across the test-binary
+/// boundary (cargo test compiles each `tests/*.rs` into its own binary
+/// and runs them in parallel, all sharing the same default socket).
+pub(crate) fn build_offending_session_message(tmux_ls_stdout: &str) -> Option<String> {
+    let offending: Vec<&str> = tmux_ls_stdout
         .lines()
         .filter_map(|line| {
             // `tmux ls` format: "<name>: <windows> windows (created ...) ..."
@@ -247,7 +279,7 @@ pub fn guard_against_live_session() {
         .collect();
 
     if offending.is_empty() {
-        return;
+        return None;
     }
 
     let mut msg = String::from(
@@ -275,7 +307,7 @@ pub fn guard_against_live_session() {
          3. Opt out (only when every test in the run is socket-isolated):\n\
                 GIT_PAW_ALLOW_LIVE_SESSION=1 cargo test ...\n",
     );
-    panic!("{msg}");
+    Some(msg)
 }
 
 /// Creates a temporary git repository with an initial commit.
@@ -436,53 +468,48 @@ mod tests {
         guard_against_live_session();
     }
 
+    /// Test the matcher logic via the pure-function helper instead of
+    /// creating a real `paw-*` session on the default tmux socket.
+    ///
+    /// Previously this test created `paw-guard-test` on the default socket,
+    /// which leaked across the test-binary boundary: cargo test compiles
+    /// each `tests/*.rs` into its own binary process, and those processes
+    /// run in parallel against the same default tmux socket. While the
+    /// guard test was mid-flight, other test binaries' `setup_test_repo()`
+    /// guards would see `paw-guard-test` and panic. Switching to a pure-
+    /// function test removes any default-socket footprint.
     #[test]
-    #[serial]
-    fn guard_panics_when_live_paw_session_exists() {
-        if !tmux_available() {
-            eprintln!("skipping: tmux not available");
-            return;
-        }
-        // Force the escape hatch off even if the parent cargo run set it.
-        let _no_allow = AllowLiveSessionGuard::unset();
-        let socket_env = tmux_test_env();
-        let _tmpdir_guard = socket_env.apply_to_process();
+    fn build_offending_session_message_detects_paw_sessions() {
+        // No paw-* session → returns None
+        let stdout = "0: 1 windows (created Wed May 21 14:00:00 2026) [80x24]\n\
+                      other-thing: 2 windows (created Wed May 21 14:00:00 2026)\n";
+        assert!(build_offending_session_message(stdout).is_none());
 
-        let status = Command::new("tmux")
-            .args([
-                "new-session",
-                "-d",
-                "-s",
-                "paw-guard-test",
-                "-x",
-                "200",
-                "-y",
-                "50",
-                "sh",
-            ])
-            .status()
-            .expect("tmux new-session");
-        assert!(status.success(), "create paw-guard-test session");
-
-        let result = panic::catch_unwind(panic::AssertUnwindSafe(guard_against_live_session));
-
-        // Always clean up before asserting.
-        let _ = Command::new("tmux")
-            .args(["kill-session", "-t", "paw-guard-test"])
-            .status();
-
-        let err = result.expect_err("guard should panic when paw-* session is live");
-        let msg = if let Some(s) = err.downcast_ref::<String>() {
-            s.clone()
-        } else if let Some(s) = err.downcast_ref::<&str>() {
-            (*s).to_string()
-        } else {
-            String::new()
-        };
+        // Single paw-* session → message names it
+        let stdout = "paw-test-fixture: 1 windows (created Wed May 21 14:00:00 2026) [80x24]\n";
+        let msg = build_offending_session_message(stdout)
+            .expect("paw-* session should produce a panic message");
         assert!(
-            msg.contains("paw-guard-test"),
-            "panic message should name the offending session, got: {msg}"
+            msg.contains("paw-test-fixture"),
+            "message should name the offending session, got:\n{msg}"
         );
+        assert!(
+            msg.contains("kill-session -t paw-test-fixture"),
+            "message should include the kill-session command, got:\n{msg}"
+        );
+        assert!(
+            msg.contains("GIT_PAW_ALLOW_LIVE_SESSION=1"),
+            "message should mention the escape hatch, got:\n{msg}"
+        );
+
+        // Multiple paw-* sessions → both named
+        let stdout = "paw-fixture-a: 1 windows\n\
+                      ignored-session: 1 windows\n\
+                      paw-fixture-b: 2 windows\n";
+        let msg = build_offending_session_message(stdout)
+            .expect("paw-* sessions should produce a panic message");
+        assert!(msg.contains("paw-fixture-a") && msg.contains("paw-fixture-b"));
+        assert!(!msg.contains("ignored-session"));
     }
 
     #[test]
