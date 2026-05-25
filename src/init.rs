@@ -17,11 +17,20 @@ use crate::git;
 /// Gitignore entries managed by init.
 const GITIGNORE_ENTRIES: &[&str] = &[".git-paw/logs/", ".git-paw/session-summary.md"];
 
+/// Bundled supervisor-sweep helper script, embedded at compile time and
+/// written to `<repo>/.git-paw/scripts/sweep.sh` by [`run_init`].
+const SWEEP_SCRIPT: &str = include_str!("../assets/scripts/sweep.sh");
+
 /// Runs the `git paw init` command.
 ///
 /// Creates `.git-paw/` directory structure, generates a default config,
-/// and manages `.gitignore`. Idempotent — running twice produces identical
-/// results.
+/// installs the bundled `sweep.sh` supervisor helper at
+/// `<repo>/.git-paw/scripts/sweep.sh` (executable mode `0o755` on Unix),
+/// and manages `.gitignore`. The script is overwritten on every invocation
+/// so re-running `git paw init` picks up updates that ship with new
+/// versions of the binary. Idempotent for the other side effects —
+/// running twice produces identical results for the directory tree,
+/// `config.toml`, and `.gitignore`.
 pub fn run_init() -> Result<(), PawError> {
     let cwd = std::env::current_dir()
         .map_err(|e| PawError::InitError(format!("cannot read current directory: {e}")))?;
@@ -29,6 +38,7 @@ pub fn run_init() -> Result<(), PawError> {
 
     let paw_dir = repo_root.join(".git-paw");
     let logs_dir = paw_dir.join("logs");
+    let scripts_dir = paw_dir.join("scripts");
     let config_path = paw_dir.join("config.toml");
 
     // 1. Create .git-paw/ directory
@@ -43,16 +53,36 @@ pub fn run_init() -> Result<(), PawError> {
         println!("  Created .git-paw/logs/");
     }
 
-    // 3. Generate or migrate config. For a fresh config, prompt for supervisor
-    //    preferences. For an existing config without a [supervisor] section,
-    //    append one (prompting if stdin is interactive). Init never mutates
-    //    existing sections — only appends missing ones.
+    // 3. Create .git-paw/scripts/ directory and install sweep.sh.
+    let created_scripts = create_dir_if_missing(&scripts_dir)?;
+    if created_scripts {
+        println!("  Created .git-paw/scripts/");
+    }
+    let sweep_path = scripts_dir.join("sweep.sh");
+    let sweep_existed = sweep_path.exists();
+    install_sweep_script(&sweep_path)?;
+    if sweep_existed {
+        println!("  Updated .git-paw/scripts/sweep.sh");
+    } else {
+        println!("  Created .git-paw/scripts/sweep.sh");
+    }
+
+    // 4. Generate or migrate config. For a fresh config, prompt for supervisor
+    //    preferences and auto-detect `.specify/` to pre-fill `[specs]`. For an
+    //    existing config without a [supervisor] section, append one (prompting
+    //    if stdin is interactive). Init never mutates existing sections — only
+    //    appends missing ones.
     let (created_config, migrated_config) = if config_path.exists() {
         let migrated = migrate_existing_config(&config_path)?;
         (false, migrated)
     } else {
         let supervisor_section = prompt_supervisor_section()?;
-        write_config_if_missing(&config_path, Some(&supervisor_section))?;
+        let specs_section = detect_speckit_section(&repo_root);
+        write_config_if_missing(
+            &config_path,
+            Some(&supervisor_section),
+            specs_section.as_deref(),
+        )?;
         (true, false)
     };
     if created_config {
@@ -61,7 +91,7 @@ pub fn run_init() -> Result<(), PawError> {
         println!("  Updated .git-paw/config.toml (added missing sections)");
     }
 
-    // 4. Manage .gitignore
+    // 5. Manage .gitignore
     let updated_gitignore = ensure_gitignore_entry(&repo_root)?;
     if updated_gitignore {
         println!("  Updated .gitignore");
@@ -71,6 +101,32 @@ pub fn run_init() -> Result<(), PawError> {
         println!("Already initialized. Nothing to do.");
     } else {
         println!("Initialized git-paw.");
+    }
+
+    Ok(())
+}
+
+/// Writes the bundled supervisor-sweep helper to `path` and marks it
+/// executable. Overwrites any existing file at `path` (the script is treated
+/// as binary-managed content — users with local edits SHALL back the file up
+/// before re-running `git paw init`).
+fn install_sweep_script(path: &Path) -> Result<(), PawError> {
+    fs::write(path, SWEEP_SCRIPT)
+        .map_err(|e| PawError::InitError(format!("failed to write '{}': {e}", path.display())))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)
+            .map_err(|e| PawError::InitError(format!("failed to stat '{}': {e}", path.display())))?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).map_err(|e| {
+            PawError::InitError(format!(
+                "failed to set executable bit on '{}': {e}",
+                path.display()
+            ))
+        })?;
     }
 
     Ok(())
@@ -131,9 +187,14 @@ fn has_section(content: &str, section: &str) -> bool {
 ///
 /// If `supervisor_section` is `Some`, it is appended to the generated config so
 /// the user's init-time choice is persisted.
+///
+/// If `specs_section` is `Some`, it is appended to the generated config. This
+/// is how Spec Kit auto-detection persists `[specs] type = "speckit"` at init
+/// time.
 fn write_config_if_missing(
     path: &Path,
     supervisor_section: Option<&str>,
+    specs_section: Option<&str>,
 ) -> Result<bool, PawError> {
     if path.exists() {
         return Ok(false);
@@ -142,9 +203,28 @@ fn write_config_if_missing(
     if let Some(section) = supervisor_section {
         content.push_str(section);
     }
+    if let Some(section) = specs_section {
+        content.push_str(section);
+    }
     fs::write(path, content)
         .map_err(|e| PawError::InitError(format!("failed to write config: {e}")))?;
     Ok(true)
+}
+
+/// Returns a TOML `[specs]` section for `speckit` if `.specify/specs/` is
+/// present at `repo_root`, otherwise `None`. The generated section locks the
+/// choice in the config so future runs do not depend on auto-detection.
+fn detect_speckit_section(repo_root: &Path) -> Option<String> {
+    let specify = repo_root.join(".specify");
+    if !specify.is_dir() || !specify.join("specs").is_dir() {
+        return None;
+    }
+    Some(
+        "\n[specs]\n\
+         type = \"speckit\"\n\
+         dir = \".specify/specs\"\n"
+            .to_string(),
+    )
 }
 
 /// Prompts the user for their supervisor preferences and returns a TOML
@@ -260,7 +340,7 @@ mod tests {
     fn writes_config_when_missing() {
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("config.toml");
-        assert!(write_config_if_missing(&config_path, None).unwrap());
+        assert!(write_config_if_missing(&config_path, None, None).unwrap());
         let content = fs::read_to_string(&config_path).unwrap();
         assert!(content.contains("default_cli"));
     }
@@ -270,7 +350,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("config.toml");
         fs::write(&config_path, "existing").unwrap();
-        assert!(!write_config_if_missing(&config_path, None).unwrap());
+        assert!(!write_config_if_missing(&config_path, None, None).unwrap());
         assert_eq!(fs::read_to_string(&config_path).unwrap(), "existing");
     }
 
@@ -279,7 +359,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("config.toml");
         let section = "\n[supervisor]\nenabled = true\ntest_command = \"just check\"\n";
-        assert!(write_config_if_missing(&config_path, Some(section)).unwrap());
+        assert!(write_config_if_missing(&config_path, Some(section), None).unwrap());
 
         let content = fs::read_to_string(&config_path).unwrap();
         let parsed: crate::config::PawConfig = toml::from_str(&content).unwrap();
@@ -289,11 +369,48 @@ mod tests {
     }
 
     #[test]
+    fn detect_speckit_section_returns_some_when_specify_present() {
+        let dir = setup_repo();
+        fs::create_dir_all(dir.path().join(".specify").join("specs")).unwrap();
+        let section = detect_speckit_section(dir.path()).expect("section");
+        assert!(section.contains("[specs]"));
+        assert!(section.contains("type = \"speckit\""));
+        assert!(section.contains("dir = \".specify/specs\""));
+    }
+
+    #[test]
+    fn detect_speckit_section_none_when_specify_missing() {
+        let dir = setup_repo();
+        assert!(detect_speckit_section(dir.path()).is_none());
+    }
+
+    #[test]
+    fn detect_speckit_section_none_when_specify_lacks_specs_subdir() {
+        let dir = setup_repo();
+        fs::create_dir_all(dir.path().join(".specify").join("memory")).unwrap();
+        assert!(detect_speckit_section(dir.path()).is_none());
+    }
+
+    #[test]
+    fn write_config_appends_specs_section_when_provided() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let specs_section = "\n[specs]\ntype = \"speckit\"\ndir = \".specify/specs\"\n";
+        assert!(write_config_if_missing(&config_path, None, Some(specs_section)).unwrap());
+
+        let content = fs::read_to_string(&config_path).unwrap();
+        let parsed: crate::config::PawConfig = toml::from_str(&content).unwrap();
+        let specs = parsed.specs.expect("specs section parsed");
+        assert_eq!(specs.spec_type.as_deref(), Some("speckit"));
+        assert_eq!(specs.dir.as_deref(), Some(".specify/specs"));
+    }
+
+    #[test]
     fn appends_disabled_supervisor_section() {
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("config.toml");
         let section = "\n[supervisor]\nenabled = false\n";
-        assert!(write_config_if_missing(&config_path, Some(section)).unwrap());
+        assert!(write_config_if_missing(&config_path, Some(section), None).unwrap());
 
         let content = fs::read_to_string(&config_path).unwrap();
         let parsed: crate::config::PawConfig = toml::from_str(&content).unwrap();
@@ -466,6 +583,88 @@ cli = "echo"
 
         assert!(!modified, "second migrate must be a no-op");
         assert_eq!(first, second);
+    }
+
+    /// Bug F (v0-5-0-audit-cleanup §9d) — a config with an UNCOMMENTED
+    /// `[supervisor]` block must survive migrate without growing a
+    /// duplicate header. `has_section` is comment-aware: it only
+    /// matches active headers, so the uncommented user block is
+    /// detected and no stanza is appended. The file MUST still parse as
+    /// valid TOML afterwards (no `duplicate key` error).
+    #[test]
+    fn migrate_against_uncommented_supervisor_does_not_create_duplicate() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let initial = r#"# user-authored config
+branch_prefix = "feat/"
+
+[supervisor]
+enabled = true
+cli = "claude-oss"
+test_command = "just check"
+"#;
+        fs::write(&config_path, initial).unwrap();
+
+        let modified = migrate_existing_config(&config_path).unwrap();
+        assert!(
+            !modified,
+            "migrate must be a no-op when an uncommented [supervisor] block already exists"
+        );
+
+        let after = fs::read_to_string(&config_path).unwrap();
+        let header_count = after.lines().filter(|l| l.trim() == "[supervisor]").count();
+        assert_eq!(
+            header_count, 1,
+            "exactly one [supervisor] header must exist; found {header_count} in:\n{after}"
+        );
+
+        // Crucially, the file must parse without a duplicate-key error.
+        let parsed: crate::config::PawConfig = toml::from_str(&after).expect(
+            "config with uncommented [supervisor] must parse cleanly after migrate (no duplicate key)",
+        );
+        let supervisor = parsed.supervisor.expect("supervisor present");
+        assert!(supervisor.enabled);
+        assert_eq!(supervisor.cli.as_deref(), Some("claude-oss"));
+        assert_eq!(supervisor.test_command.as_deref(), Some("just check"));
+    }
+
+    /// 9d.7 sibling — when a user writes `branch_prefix = "feat/"` only
+    /// (no sections), running migrate appends the disabled
+    /// `[supervisor]` opt-out and preserves the user's `branch_prefix`.
+    /// The file parses as valid TOML.
+    ///
+    /// NOTE: the wider variant of 9d.7 (also appending commented
+    /// stanzas for `[broker]`, `[dashboard]`, etc.) is intentionally
+    /// deferred — it is a feature addition (richer migration), not a
+    /// bug fix. The current scope of `migrate_existing_config` is
+    /// limited to the `[supervisor]` section per the existing tests in
+    /// this module.
+    #[test]
+    fn migrate_against_branch_prefix_only_preserves_user_field() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "branch_prefix = \"feat/\"\n").unwrap();
+
+        let modified = migrate_existing_config(&config_path).unwrap();
+        assert!(
+            modified,
+            "migrate must append the missing [supervisor] section"
+        );
+
+        let after = fs::read_to_string(&config_path).unwrap();
+        assert!(
+            after.contains("branch_prefix = \"feat/\""),
+            "user branch_prefix must be preserved verbatim; got:\n{after}"
+        );
+        assert!(
+            after.contains("[supervisor]"),
+            "supervisor section must be appended; got:\n{after}"
+        );
+
+        // Most importantly: the result parses as valid TOML.
+        let parsed: crate::config::PawConfig = toml::from_str(&after)
+            .expect("config with branch_prefix + appended supervisor must parse cleanly");
+        assert_eq!(parsed.branch_prefix.as_deref(), Some("feat/"));
     }
 
     // --- Idempotency ---
