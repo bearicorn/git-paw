@@ -5,45 +5,98 @@ This chapter covers git-paw's internal architecture: module structure, data flow
 ## Module Diagram
 
 ```
-┌─────────────────────────────────────────────────┐
-│                    main.rs                       │
-│              (entry point, dispatch)             │
-├────────┬──────────┬───────────┬─────────────────┤
-│        │          │           │                  │
-│   cli.rs    interactive.rs  config.rs   error.rs │
-│  (clap)    (dialoguer UI)   (TOML)    (PawError) │
-│        │          │           │                  │
-├────────┴──────────┴───────────┴─────────────────┤
-│                                                   │
-│   detect.rs      git.rs      tmux.rs  session.rs │
-│  (PATH scan)   (worktrees)  (builder)  (JSON)    │
-│                                                   │
-├─────────────────────────────────────────────────┤
-│                                                   │
-│   broker/         skills.rs   dashboard.rs       │
-│   ├── mod.rs       (template   (ratatui TUI,     │
-│   ├── server.rs     injection)  pane 0 status)   │
-│   ├── state.rs                                   │
-│   └── flush.rs                                   │
-│                                                   │
-└───────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                              main.rs                             │
+│                       (entry point, dispatch)                    │
+├──────────┬──────────────┬──────────────┬─────────────┬───────────┤
+│  cli.rs  │ interactive  │   config.rs  │  error.rs   │  dirs.rs  │
+│  (clap)  │ (dialoguer)  │    (TOML)    │ (PawError)  │  (XDG)    │
+├──────────┴──────────────┴──────────────┴─────────────┴───────────┤
+│                                                                   │
+│  detect.rs    git.rs      tmux.rs    session.rs    logging.rs    │
+│  (PATH scan)  (worktrees) (builder)  (JSON state)  (pane logs)   │
+│                                                                   │
+│  agents.rs    skills.rs   init.rs    replay.rs                   │
+│  (AGENTS.md)  (skill      (project    (log                       │
+│               templates)  bootstrap)  playback)                  │
+├───────────────────────────────────────────────────────────────────┤
+│  broker/                  supervisor/             specs/         │
+│  ├── mod.rs               ├── mod.rs              ├── mod.rs     │
+│  ├── server.rs            ├── approve.rs          ├── openspec.rs│
+│  ├── messages.rs          ├── auto_approve.rs     ├── markdown.rs│
+│  ├── delivery.rs          ├── curl_allowlist.rs   ├── speckit.rs │
+│  ├── conflict.rs          ├── dev_allowlist.rs    └── resolve.rs │
+│  ├── learnings.rs         ├── layout.rs                          │
+│  ├── watcher.rs           ├── permission_prompt.rs               │
+│  └── publish.rs           ├── poll.rs                            │
+│                           └── stall.rs                           │
+└───────────────────────────────────────────────────────────────────┘
 ```
 
 ### Module Responsibilities
 
 | Module | File | Purpose |
 |--------|------|---------|
-| **CLI** | `src/cli.rs` | Argument parsing with clap v4 derive macros. Defines all subcommands, flags, and help text. |
-| **Detection** | `src/detect.rs` | Scans PATH for 8 known AI CLI binaries. Resolves custom CLIs from config. Merges and deduplicates. |
+| **CLI** | `src/cli.rs` | Argument parsing with clap v4 derive macros. Defines all subcommands, flags (`--from-all-specs`, `--specs`, `--specs-format`, `--supervisor`, `--no-supervisor`, `--force`, ...), and help text. |
+| **Detection** | `src/detect.rs` | Scans `PATH` for known AI CLI binaries (`KNOWN_CLIS`). Resolves custom CLIs from config. Merges and deduplicates. |
 | **Git** | `src/git.rs` | Validates git repos, lists branches (local + remote, deduplicated), creates/removes worktrees, derives safe directory names. |
-| **Tmux** | `src/tmux.rs` | Builder pattern for tmux operations. Creates sessions, splits panes, sends commands, applies tiled layout, sets pane titles. |
+| **Tmux** | `src/tmux.rs` | Builder pattern for tmux operations. Creates sessions, splits panes, sends commands, applies the supervisor-as-pane layout, sets pane titles. |
 | **Session** | `src/session.rs` | Persists session state to JSON files under `~/.local/share/git-paw/sessions/`. Atomic writes, crash recovery. |
 | **Config** | `src/config.rs` | Parses TOML from global (`~/.config/git-paw/config.toml`) and per-repo (`.git-paw/config.toml`). Merges with repo-wins semantics. |
 | **Interactive** | `src/interactive.rs` | Terminal prompts via dialoguer. Mode picker, branch multi-select, CLI picker. Skips prompts when flags are provided. |
 | **Error** | `src/error.rs` | `PawError` enum with thiserror. Actionable error messages and distinct exit codes. |
-| **Broker** | `src/broker/` | HTTP coordination server (axum). Receives status, artifact, and blocked messages from agents. Provides cursor-based polling. |
-| **Dashboard** | `src/dashboard.rs` | Ratatui TUI running in pane 0. Renders live agent status table. Embeds the broker via shared state. |
-| **Skills** | `src/skills.rs` | Loads standardized agent skills from `.agents/skills/` following the [agentskills.io specification](https://agentskills.io). Injects coordination instructions into worktree AGENTS.md files. |
+| **Dirs** | `src/dirs.rs` | In-tree platform XDG path helper. Replaces the upstream `dirs` crate (removed in v0.5.0 for license reasons); see `AGENTS.md § Dependencies`. |
+| **Agents** | `src/agents.rs` | Generates worktree `AGENTS.md` files; manages the `<!-- git-paw:start … end -->` marker region; supports the boot-prompt-full-body model. |
+| **Skills** | `src/skills.rs` | Loads standardized agent skills from `.agents/skills/` following the [agentskills.io specification](https://agentskills.io). Injects coordination + supervisor instructions into worktree `AGENTS.md`. |
+| **Init** | `src/init.rs` | `git paw init` bootstrap. Creates `.git-paw/`, default config, logs directory, gitignore entries. Auto-detects `.specify/` for Spec Kit. |
+| **Replay** | `src/replay.rs` | `git paw replay`. Reads pane logs from `.git-paw/logs/` and either strips ANSI or pipes through `less -R`. |
+| **Logging** | `src/logging.rs` | Per-pane log capture via `tmux pipe-pane`. Files at `.git-paw/logs/<session>/<branch>.log`. |
+| **Broker** | `src/broker/` | HTTP coordination server (axum) with watcher + conflict detector + learnings subsystems. Detail below. |
+| **Supervisor** | `src/supervisor/` | Supervisor-mode subsystems (auto-approve, dev allowlist, stall sweeps, permission prompts, pane layout). Detail below. |
+| **Specs** | `src/specs/` | Spec scanning. Three backends (`openspec`, `markdown`, `speckit`); `resolve.rs` is the dispatch entry point. |
+
+### `src/broker/` modules
+
+| File | Purpose |
+|------|---------|
+| `src/broker/mod.rs` | Public surface (start/stop entry points, shared state types). |
+| `src/broker/server.rs` | `axum` HTTP server: `/publish`, `/messages/:agent_id`, `/status`. |
+| `src/broker/messages.rs` | `BrokerMessage` enum + payload types + slug validation. Source of truth for the wire format used in user-facing examples. |
+| `src/broker/publish.rs` | Validation + sequence assignment for incoming `/publish` calls. |
+| `src/broker/delivery.rs` | Routing layer: which inboxes a message lands in (broadcast, supervisor inbox, targeted delivery). |
+| `src/broker/watcher.rs` | Filesystem watcher that auto-publishes `agent.status` (with `modified_files`) whenever a tracked file changes in a worktree. |
+| `src/broker/conflict.rs` | Forward / in-flight / ownership conflict detection. Auto-emits `[conflict-detector]`-tagged `agent.feedback` and escalates via `agent.question`. |
+| `src/broker/learnings.rs` | Opt-in learnings subsystem. Aggregates the five deterministic categories and flushes to `.git-paw/session-learnings.md`. |
+
+`src/dashboard.rs` (top-level, not inside `src/broker/`) renders the dashboard
+pane — the live status table and the optional message-log panel — by reading
+the shared broker state. The dashboard pane sits at pane index 1 in supervisor
+mode (see the layout diagram below) and at pane 0 in non-supervisor broker
+mode.
+
+### `src/supervisor/` modules
+
+| File | Purpose |
+|------|---------|
+| `src/supervisor/mod.rs` | Supervisor boot — composes the subsystems below and drives the supervisor pane. |
+| `src/supervisor/approve.rs` | Generic approval/feedback decision plumbing shared by the auto-approver. |
+| `src/supervisor/auto_approve.rs` | Safe-command auto-approver against stalled panes (`approval_level`, `safe_commands`, sweeps). |
+| `src/supervisor/curl_allowlist.rs` | Seeds the broker `curl` endpoints into `.claude/settings.json::allowed_bash_prefixes` so the first broker call never hits a permission prompt. |
+| `src/supervisor/dev_allowlist.rs` | Seeds the curated `[supervisor.common_dev_allowlist]` preset (cargo / git / just / mdBook / OpenSpec) into `.claude/settings.json`. |
+| `src/supervisor/layout.rs` | Supervisor-as-pane tmux layout: pane 0 supervisor, pane 1 dashboard, agent panes 2 onwards in the bottom-row grid (row-height proportions documented below). |
+| `src/supervisor/permission_prompt.rs` | Pane classification for permission-prompt detection (`tmux capture-pane` parsing). |
+| `src/supervisor/poll.rs` | Stalled-pane polling loop driving the auto-approver. |
+| `src/supervisor/stall.rs` | Stall heuristics (last-seen window, approval-level filter). |
+
+### `src/specs/` modules
+
+| File | Purpose |
+|------|---------|
+| `src/specs/mod.rs` | Public surface for the spec subsystem. |
+| `src/specs/resolve.rs` | Dispatch entry point. Picks the backend from `[specs] type`, the `--specs-format` CLI override, or `.specify/` auto-detection. |
+| `src/specs/openspec.rs` | OpenSpec backend: scans `<dir>/<change>/tasks.md` directories, skips `<dir>/archive/`. |
+| `src/specs/markdown.rs` | Markdown backend: scans flat `.md` files with YAML frontmatter; only `paw_status: pending` is picked up. |
+| `src/specs/speckit.rs` | Spec Kit backend: scans `.specify/specs/<feature>/`, decomposes the current phase into `[P]`-task worktrees plus one consolidated `phase/…` worktree; probes `<dir>/../memory/constitution.md` for the governance auto-wire. |
 
 ## Start Flow
 
@@ -101,12 +154,18 @@ git paw start
 └──────────────────────────────────────────────────────┘
      │
      ▼
-┌─ Broker enabled? ───────────────────────────────────┐
-│  yes → Pane 0 runs `git paw __dashboard`             │
-│         ├─ Starts axum HTTP server on configured port│
-│         ├─ Injects GIT_PAW_BROKER_URL into all panes │
-│         └─ Renders ratatui status table              │
-│  no  → Pane 0 runs the first agent CLI (v0.2 path)  │
+┌─ Mode? ─────────────────────────────────────────────┐
+│  supervisor   → Pane 0 = supervisor CLI              │
+│                 Pane 1 = `git paw __dashboard`       │
+│                 Pane 2..N = per-spec agent CLIs      │
+│  broker-only  → Pane 0 = `git paw __dashboard`       │
+│                 Pane 1..N = per-branch agent CLIs    │
+│  no broker    → Pane 0..N = per-branch agent CLIs    │
+│                                                       │
+│  In every broker mode the dashboard pane:            │
+│   ├─ Starts axum HTTP server on configured port      │
+│   ├─ Injects GIT_PAW_BROKER_URL into all agent panes │
+│   └─ Renders the ratatui status table                │
 └──────────────────────────────────────────────────────┘
      │
      ▼
@@ -122,30 +181,101 @@ git paw start
 
 ## Broker Architecture
 
-When `[broker] enabled = true`, pane 0 runs `git paw __dashboard` instead of an agent CLI. This single process hosts both the HTTP broker and the dashboard TUI.
+When `[broker] enabled = true`, the dashboard pane runs `git paw __dashboard`. This single process hosts both the HTTP broker and the dashboard TUI. The dashboard pane sits at pane 1 in supervisor mode and at pane 0 in non-supervisor broker mode.
 
 ```
-Pane 0 process (git paw __dashboard):
+Dashboard pane process (git paw __dashboard):
 ├── tokio runtime (background threads)
-│   └── axum HTTP server on localhost:9119
-│       ├── POST /publish
-│       ├── GET /messages/:agent_id?since=N
-│       └── GET /status
+│   ├── axum HTTP server on localhost:9119
+│   │   ├── POST /publish
+│   │   ├── GET /messages/:agent_id?since=N
+│   │   └── GET /status
+│   ├── Filesystem watcher (src/broker/watcher.rs)
+│   │   └── Auto-publishes agent.status on file changes
+│   ├── Conflict detector (src/broker/conflict.rs)
+│   │   └── Forward / in-flight / ownership shapes
+│   └── Learnings aggregator (src/broker/learnings.rs)
+│       └── Opt-in; flushes to .git-paw/session-learnings.md
 ├── Flush thread (std::thread, 5s interval)
 │   └── Appends to broker.log
 └── Main thread
     └── ratatui dashboard (1s tick)
 ```
 
-### BrokerState
+### Broker state
 
-The `BrokerState` struct (in `src/broker/state.rs`) is wrapped in `Arc<Mutex<...>>` and shared between the axum server handlers and the ratatui dashboard render loop. The server writes incoming messages; the dashboard reads the latest state on each tick.
+The broker state is held in `Arc<Mutex<...>>` by `src/broker/mod.rs` and shared
+between the axum server handlers, the watcher, the conflict detector, the
+learnings aggregator, and the ratatui dashboard render loop. The server writes
+incoming messages (validated and sequenced by `src/broker/publish.rs`, routed
+by `src/broker/delivery.rs`); the dashboard reads the latest snapshot each
+tick.
 
-The flush thread periodically serializes the message log to `.git-paw/broker.log` as a JSONL audit trail. This runs on a plain `std::thread` to avoid contention with the tokio runtime.
+The flush thread periodically serializes the message log to
+`.git-paw/broker.log` as a JSONL audit trail. This runs on a plain
+`std::thread` to avoid contention with the tokio runtime.
 
 ### Environment injection
 
 When the broker is enabled, git-paw sets `GIT_PAW_BROKER_URL=http://127.0.0.1:<port>` in the tmux environment for the session. Each agent pane inherits this variable and can use it to communicate with the broker.
+
+## Supervisor Mode Layout
+
+When `--supervisor` is active (or `[supervisor] enabled = true`), the tmux
+session is laid out as a 50/50 top row plus a row-major agent grid below.
+This is the canonical v0.5.0 supervisor-as-pane layout established by the
+`supervisor-as-pane` archive.
+
+```
+┌──────────────────────────┬──────────────────────────┐
+│  pane 0: supervisor      │  pane 1: dashboard       │
+├──┬──┬──┬──┬──┬───────────┴──────────────────────────┤
+│ 2│ 3│ 4│ 5│ 6│  agent grid (row 1)                  │
+├──┴──┴──┴──┴──┤                                      │
+│ 7│..│..│..│ N│  agent grid (row 2..M)               │
+└──┴──┴──┴──┴──┴──────────────────────────────────────┘
+```
+
+Pane 0 always hosts the supervisor CLI; pane 1 always hosts the dashboard.
+Pane indices 2 onwards host one CLI per agent. The supervisor reads agent
+state via the broker and the dashboard; the dashboard reads the same broker
+state for its status table.
+
+### Row-height proportions
+
+The top row is fixed at 50% of the supervisor pane width and the agent rows
+share the remaining vertical space. Row-height proportions for the agent
+grid depend on how many bottom rows the layout produces:
+
+| Agent rows | Bottom-row heights |
+|------------|--------------------|
+| 1 | 60% (top row 40%) |
+| 2 | 40% / 30% / 30%  (top + 2 bottom rows) |
+| 3 | 28% / 24% / 24% / 24% |
+| 4 | 28% / 18% / 18% / 18% / 18% |
+| 5 | 28% / 14.4% / 14.4% / 14.4% / 14.4% / 14.4% |
+
+The agent-grid columns within each row are split evenly via tmux's tiled
+layout. `src/supervisor/layout.rs` is the source of truth.
+
+## Non-Supervisor Layout
+
+When supervisor mode is OFF and the broker is on, the dashboard occupies
+pane 0 and the agent CLIs occupy panes 1 onwards in a single row-major
+grid (no top row):
+
+```
+┌───────────────────────────────────────────────────────┐
+│  pane 0: dashboard                                    │
+├──┬──┬──┬──┬──┬────────────────────────────────────────┤
+│ 1│ 2│ 3│ 4│ 5│  agent grid (row 1)                   │
+├──┴──┴──┴──┴──┤                                       │
+│ 6│..│..│..│ N│  agent grid (row 2..M)                │
+└──┴──┴──┴──┴──┴───────────────────────────────────────┘
+```
+
+When the broker is disabled too, every pane (0..N) is an agent CLI and
+there is no dashboard pane.
 
 ## Worktree Lifecycle
 

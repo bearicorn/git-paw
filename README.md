@@ -49,7 +49,7 @@ git-paw lets you run multiple AI coding assistants in parallel, each in its own 
 
 - **Parallel AI sessions** — run Claude, Codex, Gemini, or any AI CLI across multiple branches simultaneously
 - **Git worktree isolation** — each branch gets its own working directory, no stashing or switching needed
-- **Smart session management** — reattach to active sessions, auto-recover after crashes or reboots
+- **Smart session management** — reattach to active sessions, auto-recover after crashes or reboots, and rebase existing agent branches onto the repository's default branch on every `git paw start` so agents never drift behind supervisor commits on `main` (pass `--no-rebase` to opt out)
 - **Interactive or scripted** — fuzzy branch picker and CLI selector, or pass `--cli` and `--branches` flags
 - **Per-branch CLI assignment** — use Claude on one branch and Gemini on another in the same session
 - **Presets** — save branch + CLI combos in config for one-command launches
@@ -57,7 +57,7 @@ git-paw lets you run multiple AI coding assistants in parallel, each in its own 
 - **Session persistence** — state saved to disk, survives tmux crashes and system reboots
 - **Dry run** — preview the session plan before executing with `--dry-run`
 - **Mouse-friendly tmux** — click to switch panes, drag borders to resize, scroll with mouse wheel
-- **Spec-driven launch** — auto-discover specs and launch sessions with `--from-specs`
+- **Spec-driven launch** — auto-discover specs and launch sessions with `--from-all-specs` (or narrow to a subset via `--specs NAME[,NAME...]`)
 - **AGENTS.md integration** — auto-inject session context into worktree AGENTS.md files
 - **Session logging** — capture raw terminal output per pane for later review
 - **Replay** — view session logs with ANSI stripping or colored output via `less -R`
@@ -69,6 +69,17 @@ git-paw lets you run multiple AI coding assistants in parallel, each in its own 
 - **Skill templates** — coordination instructions auto-injected into each agent's AGENTS.md
 - **Boot-prompt injection** — standardized boot instructions automatically prepended to all agent prompts, ensuring reliable self-reporting (register, done, blocked, question operations) — always enabled for broker sessions
 - **Cursor-based messaging** — lossless message polling with sequence tracking
+- **Spec Kit backend** — first-class support for [GitHub Spec Kit](https://github.com/github/spec-kit) projects via `[specs] type = "speckit"`; `.specify/specs/` is auto-detected at the repo root and the `[P]`/non-`[P]` task split decomposes into per-task and consolidated worktrees
+- **`--specs-format` override** — force-select the spec backend (`openspec`, `markdown`, `speckit`) on the command line, overriding both `[specs] type` in config and the `.specify/` auto-detection
+- **`--no-supervisor`** — single-session override of `[supervisor] enabled = true` for plain (non-supervisor) operation without editing config
+- **`start --force`** — bypass the uncommitted-spec validation warning when launching with `--from-all-specs` or `--specs`
+- **Forward coordination** — agents publish `agent.intent` before they begin editing so peers (and the broker conflict detector) see the planned file set ahead of the first commit
+- **Automatic conflict detection** — the broker auto-emits `[conflict-detector]`-tagged `agent.feedback` for forward (overlapping intents), in-flight (overlapping `modified_files`), and ownership-violation conflicts; unresolved in-flight overlaps escalate to the supervisor inbox via `agent.question`
+- **Learnings mode** — opt-in `[supervisor] learnings = true` collects deterministic friction signals (stuck duration, recovery cycles, forward conflicts, in-flight conflicts, ownership violations) into `.git-paw/session-learnings.md` for post-session review
+- **Governance pointers** — point the supervisor at your existing ADRs, test strategy, security checklist, DoD, and constitution via the `[governance]` config table; Spec Kit projects auto-wire `.specify/memory/constitution.md` when present
+- **Auto-approval policy** — `[supervisor.auto_approve]` controls safe-command prefixes and approval level for stalled-pane sweeps; `[supervisor.common_dev_allowlist]` seeds a curated dev-loop preset into `.claude/settings.json` so common build/test/git commands bypass per-prompt approval
+- **Conflict-detector tuning** — `[supervisor.conflict]` exposes the in-flight escalation window (`window_seconds`), the intent-overlap warning toggle (`warn_on_intent_overlap`), and the ownership-violation escalation toggle (`escalate_on_violation`)
+- **Learnings flush cadence** — `[supervisor.learnings_config] flush_interval_seconds` (default 60) controls how often learnings entries are flushed from memory to `.git-paw/session-learnings.md`
 
 > **Tip:** git-paw uses `AGENTS.md` as the standard agent instruction file. If your AI CLI reads a different file (e.g., `CLAUDE.md`, `GEMINI.md`), you can symlink it:
 > ```bash
@@ -125,9 +136,20 @@ Run an unattended supervisor agent that orchestrates the worker agents on your b
 
 ```bash
 git paw start --supervisor
+
+# Skip supervisor for a single run even when [supervisor] enabled = true is set
+git paw start --no-supervisor
+
+# Bypass the uncommitted-spec validation warning when launching from specs
+git paw start --from-all-specs --force
+git paw start --supervisor --force
 ```
 
 The supervisor agent runs in its own pane, polls each worker agent for progress and artifacts via the broker, runs the configured test command between merges, and writes a session summary when work completes. Use this mode when you want to leave a multi-branch session running without continually steering each agent yourself.
+
+In v0.5.0 supervisor mode also seeds a curated dev-command allowlist into `.claude/settings.json` on session start so common dev-loop commands (`cargo build`, `git commit`, `just`, `mdbook build`, `openspec validate`, ...) bypass per-prompt approval. Opt out with `[supervisor.common_dev_allowlist] enabled = false`; extend with `extra = [...]`.
+
+`--no-supervisor` is the highest-precedence step in the supervisor-mode resolution chain — it wins over both `[supervisor] enabled = true` in config and any interactive prompt. It is mutually exclusive with `--supervisor`; passing both fails at parse time. `--force` only matters for spec-mode launches (`--from-all-specs` / `--specs`) and bypasses the warning when uncommitted spec changes are detected on disk.
 
 ## Installation
 
@@ -200,15 +222,25 @@ git paw start
 # Specify CLI and branches
 git paw start --cli claude --branches feat/auth,feat/api
 
-# Launch from spec files (OpenSpec or Markdown)
-git paw start --from-specs
-git paw start --from-specs --cli claude
+# Launch every discovered spec (OpenSpec, Markdown, or Spec Kit)
+git paw start --from-all-specs
+git paw start --from-all-specs --cli claude
+
+# Force-select the spec backend, overriding [specs] type and .specify/ auto-detection
+git paw start --from-all-specs --specs-format speckit
+
+# Narrow to specific specs, or open a multi-select picker
+git paw start --specs add-auth,fix-session
+git paw start --specs   # interactive picker (requires a TTY)
 
 # Use a preset from config
 git paw start --preset backend
 
 # Preview without executing
 git paw start --dry-run
+
+# Bypass the uncommitted-spec validation warning
+git paw start --from-all-specs --force
 ```
 
 Smart behavior:
@@ -216,13 +248,22 @@ Smart behavior:
 - **Stopped/crashed session** → auto-recovers (reuses worktrees, relaunches CLIs)
 - **No session** → full interactive launch
 
-### `stop` — Pause session
+### `pause` — Soft-stop the session (v0.5.0+)
 
 ```bash
-git paw stop
+git paw pause
 ```
 
-Kills the tmux session but preserves worktrees and state. Run `git paw start` later to pick up where you left off.
+Detaches the tmux client, stops the broker, and leaves every CLI pane running. Preserves agent conversation state for instant resume via `git paw start`. Holds RAM (~300 MB per Claude pane), so use it for short breaks (lunch, meetings, end-of-day). See [Pause and Resume](docs/src/user-guide/pause.md) for the full trade-off.
+
+### `stop` — Kill the CLIs, keep the worktrees
+
+```bash
+git paw stop          # prompts for confirmation in a TTY
+git paw stop --force  # skip the prompt (scripts)
+```
+
+Kills the tmux session and every CLI pane process but preserves worktrees and state on disk. CLI conversation context is lost. Run `git paw start` later to recover with fresh CLI processes.
 
 ### `purge` — Remove everything
 
@@ -297,7 +338,7 @@ Requires session logging to be enabled in config.
 default_cli = "my-cli"
 mouse = true
 
-# Bypass picker entirely for --from-specs mode
+# Bypass picker entirely for spec-mode launches (--from-all-specs, --specs)
 default_spec_cli = "my-cli"
 
 # Prefix for spec-derived branches (default: "spec/")
@@ -306,7 +347,7 @@ branch_prefix = "spec/"
 # Spec scanning
 [specs]
 dir = "specs"
-type = "openspec"  # or "markdown"
+type = "openspec"  # "openspec", "markdown", or "speckit"
 
 # Session logging
 [logging]
@@ -345,15 +386,27 @@ Per-repo config overrides global config for overlapping fields.
 
 ## Supported AI CLIs
 
-| CLI | Binary | Link |
-|-----|--------|------|
-| Claude Code | `claude` | [claude.ai](https://claude.ai/download) |
-| OpenAI Codex | `codex` | [github.com/openai/codex](https://github.com/openai/codex) |
-| Google Gemini CLI | `gemini` | [github.com/google-gemini/gemini-cli](https://github.com/google-gemini/gemini-cli) |
-| Aider | `aider` | [aider.chat](https://aider.chat) |
-| Vibe | `vibe` | [docs.mistral.ai/capabilities/vibe](https://docs.mistral.ai/capabilities/vibe/) |
-| Qwen | `qwen` | [github.com/QwenLM/qwen-agent](https://github.com/QwenLM/qwen-agent) |
-| Amp | `amp` | [amp.dev](https://amp.dev) |
+git-paw auto-detects the following AI coding CLIs when they are on `PATH`. The list reflects `src/detect.rs::KNOWN_CLIS` at the time of this release; the table grows as binaries land in upstream releases.
+
+| CLI | Binary |
+|-----|--------|
+| Claude Code | `claude` |
+| OpenAI Codex | `codex` |
+| Google Gemini CLI | `gemini` |
+| Aider | `aider` |
+| Vibe | `vibe` |
+| Qwen | `qwen` |
+| Amp | `amp` |
+| opencode | `opencode` |
+| Cline | `cline` |
+| Droid | `droid` |
+| Pi | `pi` |
+| Junie | `junie` |
+| Cursor Agent | `cursor` |
+| GitHub Copilot CLI | `copilot` |
+| cn | `cn` |
+| Kilo Code | `kilo` |
+| Kimi | `kimi` |
 
 Don't see your CLI? Register it:
 
@@ -382,8 +435,9 @@ git paw start
     ├─ 7. Save session state to disk
     └─ 8. Attach to tmux session
 
-git paw stop   → kills tmux, keeps worktrees + state
-git paw start  → auto-recovers from saved state
+git paw pause  → soft stop (detach + broker stop; CLIs keep running)
+git paw stop   → kills CLIs, keeps worktrees + state
+git paw start  → auto-recovers (or restarts a paused session)
 git paw purge  → removes everything
 ```
 

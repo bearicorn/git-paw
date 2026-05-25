@@ -13,12 +13,15 @@ Usage: git-paw [COMMAND]
 
 Commands:
   start       Launch a new session or reattach to an existing one
+  pause       Soft-stop: detach client, stop broker, keep CLIs running
   stop        Stop the session (kills tmux, keeps worktrees and state)
   purge       Remove everything (tmux session, worktrees, and state)
   status      Show session state for the current repo
   list-clis   List detected and custom AI CLIs
   add-cli     Register a custom AI CLI
   remove-cli  Unregister a custom AI CLI
+  init        Initialize the repository for git-paw (creates .git-paw/)
+  replay      Replay a captured pane log (requires session logging)
   help        Print this message or the help of the given subcommand(s)
 
 Options:
@@ -58,14 +61,36 @@ Usage: git-paw start [OPTIONS]
 Options:
       --cli <CLI>              AI CLI to use (skips CLI picker)
       --branches <BRANCHES>    Comma-separated branches (skips branch picker)
-      --from-specs             Launch from spec files (reads [specs] config)
+      --from-all-specs         Launch from every discovered spec across all configured formats
+      --specs [<NAMES>...]     Comma-separated spec names; bare flag opens picker (TTY required)
+      --specs-format <FORMAT>  Override spec backend: openspec, markdown, speckit
       --dry-run                Preview the session plan without executing
       --preset <PRESET>        Use a named preset from config
       --supervisor             Run the session in supervisor mode (auto-start agents,
                                 run test_command between merges, write session summary)
-      --force                  With `--from-specs`, bypass the uncommitted-spec warning
+      --no-supervisor          Disable supervisor for this session, overriding any
+                                `[supervisor] enabled = true` in config
+      --force                  With `--from-all-specs`/`--specs`, bypass the uncommitted-spec warning
+      --no-rebase              Skip rebasing existing agent branches onto the default branch
   -h, --help                   Print help
 ```
+
+| Flag | Accepted values | Purpose |
+|------|-----------------|---------|
+| `--cli` | name of a detected or custom CLI | Skip the interactive CLI picker; assign this CLI to every agent that doesn't otherwise pin one. |
+| `--branches` | comma-separated branches | Skip the interactive branch picker; launch one worktree per branch. |
+| `--from-all-specs` | (flag) | Launch every discovered spec across the configured backend. Mutually exclusive with `--specs`. |
+| `--specs` | comma-separated spec names; bare flag opens a multi-select picker (TTY required) | Narrow the session to named specs or open the picker. Mutually exclusive with `--from-all-specs`. |
+| `--specs-format` | `openspec`, `markdown`, `speckit` | Override `[specs] type` in config and the `.specify/` auto-detection for this launch. |
+| `--dry-run` | (flag) | Print the session plan; create no worktrees and run no tmux commands. |
+| `--preset` | preset name from config | Use a named `[presets.<name>]` entry. |
+| `--supervisor` | (flag) | Force supervisor mode on. Mutually exclusive with `--no-supervisor`. |
+| `--no-supervisor` | (flag) | Force supervisor mode off (highest precedence in the resolution chain). Mutually exclusive with `--supervisor`. |
+| `--force` | (flag) | Bypass the uncommitted-spec validation warning when launching from specs. |
+| `--no-rebase` | (flag) | Skip the default-on rebase of existing agent branches onto the repository's default branch. |
+
+`--from-all-specs` and `--specs` are mutually exclusive — one launches every
+discovered spec, the other narrows to a subset or opens the picker.
 
 **Examples:**
 ```bash
@@ -75,20 +100,44 @@ git paw start --cli claude --branches feat/auth,feat/api
 git paw start --dry-run
 git paw start --preset backend
 
-# Launch from spec files
-git paw start --from-specs
-git paw start --from-specs --cli claude
-git paw start --from-specs --dry-run
+# Launch every discovered spec
+git paw start --from-all-specs
+git paw start --from-all-specs --cli claude
+git paw start --from-all-specs --dry-run
+
+# Narrow to specific specs or open the multi-select picker
+git paw start --specs add-auth,fix-session
+git paw start --specs   # interactive picker (requires a TTY)
+
+# Skip supervisor for this session even when `[supervisor] enabled = true` is set
+git paw start --no-supervisor
+git paw start --from-all-specs --no-supervisor
 ```
+
+### Supervisor mode resolution chain
+
+git-paw decides whether to enter supervisor mode using this order (first match wins):
+
+1. `--no-supervisor` flag present → supervisor disabled (no prompt, regardless of config).
+2. `--supervisor` flag present → supervisor enabled (no prompt).
+3. `[supervisor] enabled = true` in config → supervisor enabled (no prompt).
+4. `[supervisor] enabled = false` in config → supervisor disabled (no prompt).
+5. No `[supervisor]` section + `--dry-run` → supervisor disabled (skip prompt).
+6. No `[supervisor]` section + interactive TTY → prompt "Start in supervisor mode?".
+7. No `[supervisor]` section + non-TTY → supervisor disabled (fallback).
+
+`--supervisor` and `--no-supervisor` are mutually exclusive at parse time; passing both is rejected by clap before any command runs.
 
 See [Spec-Driven Launch](user-guide/spec-driven-launch.md) for details on spec formats and configuration.
 
-## `git paw stop`
+## `git paw pause`
 
-Kills the tmux session but preserves worktrees and session state on disk. Run `git paw start` later to recover the session.
+Soft-stops the session: detaches the tmux client, stops the broker, and leaves every CLI pane running in the background. Preserves agent conversation state for instant resume via `git paw start`. RAM stays allocated (~300 MB per Claude pane).
+
+Use pause for short breaks (lunch, meetings, end-of-day). For longer breaks, use `git paw stop` to kill the CLIs and release RAM. See [Pause and Resume](user-guide/pause.md) for the full trade-off discussion.
 
 ```
-Usage: git-paw stop
+Usage: git-paw pause
 
 Options:
   -h, --help  Print help
@@ -96,8 +145,32 @@ Options:
 
 **Example:**
 ```bash
-git paw stop
+git paw pause
 ```
+
+Idempotent: pausing an already-paused or already-stopped session is a friendly no-op.
+
+## `git paw stop`
+
+Kills the tmux session and every CLI pane process, but preserves worktrees and session state on disk. CLI conversation context is lost. Run `git paw start` later to recover the session with fresh CLI processes.
+
+**v0.5.0 change:** `stop` now prompts for confirmation when stdin is a TTY. Pass `--force` to skip the prompt (scripts); non-TTY contexts (CI, pipes) bypass the prompt automatically for v0.4 back-compat.
+
+```
+Usage: git-paw stop [OPTIONS]
+
+Options:
+      --force  Skip confirmation prompt
+  -h, --help   Print help
+```
+
+**Examples:**
+```bash
+git paw stop          # prompts in TTY, bypasses in non-TTY
+git paw stop --force  # always bypasses the prompt
+```
+
+When the session is currently paused, the confirmation prompt additionally warns that continuing will kill the still-running CLIs.
 
 ## `git paw purge`
 

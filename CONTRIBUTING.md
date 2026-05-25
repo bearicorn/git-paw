@@ -78,6 +78,37 @@ test(session): add recovery round-trip test
 - Every public item needs a `///` doc comment
 - Every module needs a `//!` module doc comment
 
+### Testing Conventions
+
+Every integration test in `tests/` that spawns `tmux` — directly via
+`std::process::Command::new("tmux")` or indirectly through a `git paw`
+subcommand (e.g. `git paw start`) — MUST apply
+`helpers::tmux_test_env()` to its `Command` builder, or
+`apply_to_process()` for tests that exercise in-process library code.
+The helper points the child process at a per-test tmux socket
+directory (`TMUX_TMPDIR`) so a test-induced server crash cannot kill
+the user's live `paw-git-paw` supervisor session.
+
+The collision-guard `helpers::guard_against_live_session()` runs as
+the first action of `helpers::setup_test_repo()` and panics fast if a
+`paw-*` session is live on the user's default tmux socket. Export
+`GIT_PAW_ALLOW_LIVE_SESSION=1` to opt out of the guard for targeted
+runs where you have verified every test is socket-isolated. **The
+escape hatch disables the safety check** — only use it when you have
+already confirmed the test set you are running honours the
+`tmux_test_env` invariant.
+
+Tests that invoke `git paw` subcommands against the binary (via the
+test-helper `cmd()` function) MUST also chain
+`.env("HOME", fake_home.path()).env_remove("XDG_DATA_HOME")` so the
+subprocess reads/writes its sessions directory inside a `TempDir`
+instead of the user's real `~/Library/Application Support/git-paw/`
+(macOS) or `~/.local/share/git-paw/` (Linux). The `cmd_iso` helper
+in `tests/e2e_tests.rs` bundles both overrides into one call site.
+
+see `openspec/changes/test-tmux-isolation` for the rationale and
+historical context.
+
 ## Pull Request Process
 
 1. Fork the repo and create your branch from `main`
