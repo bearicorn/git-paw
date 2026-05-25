@@ -58,9 +58,13 @@ commit_parsers = [
     { message = "^docs", group = "<!-- 4 -->Documentation" },
     { message = "^test", group = "<!-- 5 -->Testing" },
     { message = "^ci", group = "<!-- 6 -->CI/CD" },
-    { message = "^chore\\(release\\)", skip = true },
-    { message = "^chore\\(deps\\)", skip = true },
-    { message = "^chore|^style", group = "<!-- 7 -->Miscellaneous" },
+    # All chore: commits are skipped from the changelog (Keep a Changelog
+    # convention: chore work is internal maintenance, not user-facing).
+    # This also handles the stale-tag bleed where v0.4.0's prep commit
+    # lives on a divergent lineage and would otherwise leak into the
+    # next version's "unreleased" section.
+    { message = "^chore", skip = true },
+    { message = "^style", group = "<!-- 7 -->Miscellaneous" },
 ]
 
 [bump]
