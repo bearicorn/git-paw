@@ -120,12 +120,17 @@ fn build_simulated_session(
     );
 
     // Pane 0: dashboard (runs the broker subprocess).
+    // -x/-y required when tmux runs without an attached client (CI).
     let st = StdCommand::new("tmux")
         .args([
             "new-session",
             "-d",
             "-s",
             session_name,
+            "-x",
+            "200",
+            "-y",
+            "50",
             "-c",
             repo_path.to_str().unwrap(),
         ])
@@ -373,6 +378,10 @@ fn pause_idempotent_on_already_paused() {
             "-d",
             "-s",
             &session_name,
+            "-x",
+            "200",
+            "-y",
+            "50",
             "-c",
             repo.to_str().unwrap(),
         ])
@@ -452,6 +461,10 @@ fn stop_after_pause_kills_remaining_panes() {
             "-d",
             "-s",
             &session_name,
+            "-x",
+            "200",
+            "-y",
+            "50",
             "-c",
             repo.to_str().unwrap(),
         ])

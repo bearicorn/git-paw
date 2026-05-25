@@ -623,10 +623,15 @@ pub fn exclude_from_git(worktree_root: &Path, filename: &str) -> Result<(), PawE
 /// staging the file. Returns `Ok` even if the command fails, as this
 /// is a belt-and-suspenders measure.
 pub fn assume_unchanged(worktree_root: &Path, filename: &str) -> Result<(), PawError> {
+    // `.output()` rather than `.status()` so git's "fatal: Unable to mark
+    // file" stderr (emitted when the file isn't tracked) doesn't bleed
+    // through to the parent process. This is belt-and-suspenders — failure
+    // is silent by design because `exclude_from_git` is the primary
+    // protection for untracked AGENTS.md.
     let _ = std::process::Command::new("git")
         .current_dir(worktree_root)
         .args(["update-index", "--assume-unchanged", filename])
-        .status();
+        .output();
     Ok(())
 }
 

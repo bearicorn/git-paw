@@ -31,6 +31,43 @@ Test: `tmux::tests::session_is_named_after_project`
 
 Test: `tmux::tests::session_creation_command_uses_session_name`
 
+### Requirement: Session creation passes explicit dimensions for headless environments
+
+Both session builders (the basic `TmuxSessionBuilder` and `build_supervisor_session`) SHALL emit `tmux new-session` with `-x 200 -y 50` so the session has explicit window dimensions when created without an attached client. The user's real terminal resizes the session on `tmux attach`.
+
+Without explicit dimensions, tmux on Linux (apt-shipped tmux 3.4+) errors with `size missing` on subsequent `split-window` operations because the layout engine can't resolve percentages without a known window size.
+
+Additionally, immediately after the `new-session` command, both builders SHALL emit `tmux set-option -g default-size 200x50`. This pins the global default-size so subsequent split-window / resize-pane operations have a fallback size context even when no client is attached. macOS tmux honours per-session `-x/-y` for splits; Linux tmux 3.4+ requires the server-level fallback.
+
+#### Scenario: Basic session passes -x/-y to new-session
+- **GIVEN** any `TmuxSessionBuilder` with one or more panes
+- **WHEN** `command_strings()` is invoked
+- **THEN** the first command in the output SHALL be a `new-session` containing the substrings `-x 200` and `-y 50`
+
+#### Scenario: Basic session sets global default-size after new-session
+- **GIVEN** any `TmuxSessionBuilder` with one or more panes
+- **WHEN** `command_strings()` is invoked
+- **THEN** the second command in the output SHALL be `set-option -g default-size 200x50`
+
+#### Scenario: Supervisor session passes -x/-y to new-session
+- **GIVEN** a `build_supervisor_session` invocation with supervisor + dashboard + N agent panes
+- **WHEN** the command list is built
+- **THEN** the first emitted command SHALL be a `new-session` containing `-x 200` and `-y 50`
+
+#### Scenario: Supervisor session sets global default-size after new-session
+- **GIVEN** a `build_supervisor_session` invocation
+- **WHEN** the command list is built
+- **THEN** the second emitted command SHALL be `set-option -g default-size 200x50`
+
+#### Scenario: Headless supervisor launch succeeds under socket isolation
+- **GIVEN** a cold tmux server (no pre-existing client, isolated socket via `TMUX_TMPDIR`)
+- **WHEN** `git paw start --supervisor --branches a,b` is invoked
+- **THEN** the supervisor session SHALL launch successfully
+- **AND** stderr SHALL NOT contain `Tmux error: size missing`
+- **AND** the exit code SHALL be 0
+
+Test: `tmux::tests::built_session_can_be_executed_and_killed`, `tmux::tests::supervisor_top_row_split_50_50`, and the `cli_supervisor_no_config::supervisor_without_section_uses_default_when_default_cli_present` integration test.
+
 ### Requirement: Session name override via builder
 
 The builder SHALL support overriding the default `paw-<project>` session name with a custom name.

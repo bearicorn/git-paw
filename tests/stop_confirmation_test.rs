@@ -89,12 +89,17 @@ fn setup_active_session(
     let session_name = format!("paw-{project}");
 
     // Spawn a real tmux session so stop has something to kill.
+    // -x/-y are required when tmux runs without an attached client (CI).
     let st = StdCommand::new("tmux")
         .args([
             "new-session",
             "-d",
             "-s",
             &session_name,
+            "-x",
+            "200",
+            "-y",
+            "50",
             "-c",
             repo.to_str().unwrap(),
         ])
