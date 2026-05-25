@@ -54,6 +54,7 @@ mod tests {
                         status: status.to_string(),
                         modified_files: Vec::new(),
                         message: None,
+                        ..Default::default()
                     },
                 }),
             },

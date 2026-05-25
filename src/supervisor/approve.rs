@@ -104,7 +104,7 @@ pub fn auto_approve_pane<D: KeyDispatcher>(
             || "auto_approved".to_string(),
             |e| format!("auto_approved: matched {e}"),
         );
-        let msg = build_status_message(req.agent_id, "auto_approved", Some(summary));
+        let msg = build_status_message(req.agent_id, "auto_approved", Some(summary), None);
         if let Err(e) = publish_to_broker_http(url, &msg) {
             eprintln!(
                 "warning: failed to publish auto-approve status for {}: {e}",

@@ -7,6 +7,8 @@
 pub mod approve;
 pub mod auto_approve;
 pub mod curl_allowlist;
+pub mod dev_allowlist;
+pub mod layout;
 pub mod permission_prompt;
 pub mod poll;
 pub mod stall;

@@ -385,6 +385,7 @@ mod tests {
                         status: "working".to_string(),
                         modified_files: Vec::new(),
                         message: None,
+                        ..Default::default()
                     },
                 }),
             },
