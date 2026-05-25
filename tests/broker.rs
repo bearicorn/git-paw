@@ -149,7 +149,7 @@ fn publish_valid_agent_status_returns_202() {
         "POST",
         "/publish",
         &[("Content-Type", "application/json")],
-        r#"{"type":"agent.status","agent_id":"feat-x","payload":{"status":"idle","modified_files":[]}}"#,
+        r#"{"type":"agent.status","agent_id":"feat-xx","payload":{"status":"idle","modified_files":[]}}"#,
     );
     assert_eq!(resp.status, 202);
 }
@@ -362,8 +362,8 @@ fn publish_and_poll_roundtrip() {
 
     // Register two agents
     for payload in [
-        r#"{"type":"agent.status","agent_id":"a","payload":{"status":"working","modified_files":[]}}"#,
-        r#"{"type":"agent.status","agent_id":"b","payload":{"status":"working","modified_files":[]}}"#,
+        r#"{"type":"agent.status","agent_id":"feat-a-x","payload":{"status":"working","modified_files":[]}}"#,
+        r#"{"type":"agent.status","agent_id":"feat-b-x","payload":{"status":"working","modified_files":[]}}"#,
     ] {
         let resp = http_request(
             &url,
@@ -381,12 +381,12 @@ fn publish_and_poll_roundtrip() {
         "POST",
         "/publish",
         &[("Content-Type", "application/json")],
-        r#"{"type":"agent.artifact","agent_id":"a","payload":{"status":"done","exports":[],"modified_files":["src/lib.rs"]}}"#,
+        r#"{"type":"agent.artifact","agent_id":"feat-a-x","payload":{"status":"done","exports":[],"modified_files":["src/lib.rs"]}}"#,
     );
     assert_eq!(resp.status, 202);
 
     // Poll b's inbox
-    let resp = http_request(&url, "GET", "/messages/b", &[], "");
+    let resp = http_request(&url, "GET", "/messages/feat-b-x", &[], "");
     assert_eq!(resp.status, 200);
     let json = resp.json();
     let msgs = json["messages"].as_array().unwrap();
@@ -401,8 +401,8 @@ fn poll_with_since_returns_only_newer() {
 
     // Register agents
     for payload in [
-        r#"{"type":"agent.status","agent_id":"a","payload":{"status":"working","modified_files":[]}}"#,
-        r#"{"type":"agent.status","agent_id":"b","payload":{"status":"working","modified_files":[]}}"#,
+        r#"{"type":"agent.status","agent_id":"feat-a-x","payload":{"status":"working","modified_files":[]}}"#,
+        r#"{"type":"agent.status","agent_id":"feat-b-x","payload":{"status":"working","modified_files":[]}}"#,
     ] {
         http_request(
             &url,
@@ -420,12 +420,12 @@ fn poll_with_since_returns_only_newer() {
             "POST",
             "/publish",
             &[("Content-Type", "application/json")],
-            r#"{"type":"agent.artifact","agent_id":"a","payload":{"status":"done","exports":[],"modified_files":[]}}"#,
+            r#"{"type":"agent.artifact","agent_id":"feat-a-x","payload":{"status":"done","exports":[],"modified_files":[]}}"#,
         );
     }
 
     // Poll all first
-    let resp = http_request(&url, "GET", "/messages/b", &[], "");
+    let resp = http_request(&url, "GET", "/messages/feat-b-x", &[], "");
     let json = resp.json();
     let first_seq = json["last_seq"].as_u64().unwrap();
     assert_eq!(json["messages"].as_array().unwrap().len(), 3);
@@ -436,11 +436,11 @@ fn poll_with_since_returns_only_newer() {
         "POST",
         "/publish",
         &[("Content-Type", "application/json")],
-        r#"{"type":"agent.artifact","agent_id":"a","payload":{"status":"done","exports":[],"modified_files":[]}}"#,
+        r#"{"type":"agent.artifact","agent_id":"feat-a-x","payload":{"status":"done","exports":[],"modified_files":[]}}"#,
     );
 
     // Poll with since=first_seq
-    let path = format!("/messages/b?since={first_seq}");
+    let path = format!("/messages/feat-b-x?since={first_seq}");
     let resp = http_request(&url, "GET", &path, &[], "");
     let json = resp.json();
     assert_eq!(json["messages"].as_array().unwrap().len(), 1);

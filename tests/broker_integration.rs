@@ -10,7 +10,8 @@ use serial_test::serial;
 use tempfile::TempDir;
 
 use git_paw::session::{
-    Session, SessionStatus, WorktreeEntry, delete_session_in, load_session_from, save_session_in,
+    Session, SessionMode, SessionStatus, WorktreeEntry, delete_session_in, load_session_from,
+    save_session_in,
 };
 
 // ---------------------------------------------------------------------------
@@ -33,6 +34,8 @@ fn make_session_with_broker(suffix: &str) -> Session {
         broker_port: Some(9119),
         broker_bind: Some("127.0.0.1".to_string()),
         broker_log_path: Some(PathBuf::from(format!("/tmp/broker-{suffix}.log"))),
+        mode: SessionMode::Bare,
+        dashboard_pane: Some(0),
     }
 }
 
@@ -52,6 +55,8 @@ fn make_session_without_broker(suffix: &str) -> Session {
         broker_port: None,
         broker_bind: None,
         broker_log_path: None,
+        mode: SessionMode::Bare,
+        dashboard_pane: None,
     }
 }
 
@@ -425,13 +430,13 @@ fn decode_chunked_body(body: &str) -> String {
 fn full_orchestration_publish_poll_status_via_http() {
     let (handle, url) = spawn_test_broker_with(|| git_paw::broker::BrokerState::new(None));
 
-    // Step 1: POST agent.status for agent "alpha"
+    // Step 1: POST agent.status for agent "feat-alpha"
     let (status, _) = http_req(
         &url,
         "POST",
         "/publish",
         &[("Content-Type", "application/json")],
-        r#"{"type":"agent.status","agent_id":"alpha","payload":{"status":"working","modified_files":[]}}"#,
+        r#"{"type":"agent.status","agent_id":"feat-alpha","payload":{"status":"working","modified_files":[]}}"#,
     );
     assert_eq!(status, 202, "status publish should return 202");
 
@@ -441,7 +446,7 @@ fn full_orchestration_publish_poll_status_via_http() {
         "POST",
         "/publish",
         &[("Content-Type", "application/json")],
-        r#"{"type":"agent.status","agent_id":"beta","payload":{"status":"idle","modified_files":[]}}"#,
+        r#"{"type":"agent.status","agent_id":"feat-beta","payload":{"status":"idle","modified_files":[]}}"#,
     );
     assert_eq!(status, 202, "second agent status should return 202");
 
@@ -451,12 +456,12 @@ fn full_orchestration_publish_poll_status_via_http() {
         "POST",
         "/publish",
         &[("Content-Type", "application/json")],
-        r#"{"type":"agent.artifact","agent_id":"alpha","payload":{"status":"done","exports":[],"modified_files":["src/lib.rs"]}}"#,
+        r#"{"type":"agent.artifact","agent_id":"feat-alpha","payload":{"status":"done","exports":[],"modified_files":["src/lib.rs"]}}"#,
     );
     assert_eq!(status, 202, "artifact publish should return 202");
 
-    // Step 3: GET /messages/beta?since=0 — verify the artifact is in beta's inbox
-    let (status, body) = http_req(&url, "GET", "/messages/beta?since=0", &[], "");
+    // Step 3: GET /messages/feat-beta?since=0 — verify the artifact is in beta's inbox
+    let (status, body) = http_req(&url, "GET", "/messages/feat-beta?since=0", &[], "");
     assert_eq!(status, 200);
     let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON from /messages");
     let messages = json["messages"].as_array().expect("messages is array");
@@ -464,8 +469,8 @@ fn full_orchestration_publish_poll_status_via_http() {
     let last_seq = json["last_seq"].as_u64().expect("last_seq is number");
     assert!(last_seq > 0, "last_seq should be positive");
 
-    // Step 4: GET /messages/beta?since=<last_seq> — should be empty (cursor advanced)
-    let path = format!("/messages/beta?since={last_seq}");
+    // Step 4: GET /messages/feat-beta?since=<last_seq> — should be empty (cursor advanced)
+    let path = format!("/messages/feat-beta?since={last_seq}");
     let (status, body) = http_req(&url, "GET", &path, &[], "");
     assert_eq!(status, 200);
     let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
@@ -487,12 +492,12 @@ fn full_orchestration_publish_poll_status_via_http() {
     // Check that alpha has status "done" (updated by artifact) and beta has "idle"
     let alpha_entry = agents
         .iter()
-        .find(|a| a["agent_id"] == "alpha")
+        .find(|a| a["agent_id"] == "feat-alpha")
         .expect("alpha should be in agents list");
     assert_eq!(alpha_entry["status"], "done");
     let beta_entry = agents
         .iter()
-        .find(|a| a["agent_id"] == "beta")
+        .find(|a| a["agent_id"] == "feat-beta")
         .expect("beta should be in agents list");
     assert_eq!(beta_entry["status"], "idle");
 
@@ -681,10 +686,10 @@ fn broker_log_flush_on_shutdown() {
     for i in 0..5 {
         let body = if i == 0 {
             // First message registers the agent
-            r#"{"type":"agent.status","agent_id":"flush-agent","payload":{"status":"working","modified_files":[]}}"#
+            r#"{"type":"agent.status","agent_id":"feat-flush","payload":{"status":"working","modified_files":[]}}"#
                 .to_string()
         } else {
-            r#"{"type":"agent.artifact","agent_id":"flush-agent","payload":{"status":"done","exports":[],"modified_files":["src/lib.rs"]}}"#
+            r#"{"type":"agent.artifact","agent_id":"feat-flush","payload":{"status":"done","exports":[],"modified_files":["src/lib.rs"]}}"#
                 .to_string()
         };
         let (status, _) = http_req(
@@ -719,8 +724,8 @@ fn broker_log_flush_on_shutdown() {
             "line {i} should start with {expected_seq}, got: {line}"
         );
         assert!(
-            line.contains("[flush-agent]"),
-            "line {i} should contain [flush-agent], got: {line}"
+            line.contains("[feat-flush]"),
+            "line {i} should contain [feat-flush], got: {line}"
         );
     }
 }

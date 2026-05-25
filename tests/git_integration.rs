@@ -136,7 +136,7 @@ fn create_and_remove_worktree() {
     create_branch(tr.path(), "feature/test-wt");
 
     // Create worktree
-    let wt = git::create_worktree(tr.path(), "feature/test-wt").expect("create worktree");
+    let wt = git::create_worktree(tr.path(), "feature/test-wt", false).expect("create worktree");
     assert!(wt.path.exists(), "worktree directory should exist");
     assert!(
         wt.path.join("README.md").exists(),
@@ -163,7 +163,7 @@ fn remove_worktree_force_removes_dirty_worktree() {
     let tr = setup_test_repo();
     create_branch(tr.path(), "feature/dirty");
 
-    let wt = git::create_worktree(tr.path(), "feature/dirty").expect("create worktree");
+    let wt = git::create_worktree(tr.path(), "feature/dirty", false).expect("create worktree");
 
     // Make the worktree dirty in two ways: modify a tracked file AND add a
     // brand-new untracked file. Both individually trip non-force removal.
@@ -185,7 +185,7 @@ fn worktree_placed_as_sibling_of_repo() {
     let tr = setup_test_repo();
     create_branch(tr.path(), "feature/sibling");
 
-    let wt = git::create_worktree(tr.path(), "feature/sibling").expect("create worktree");
+    let wt = git::create_worktree(tr.path(), "feature/sibling", false).expect("create worktree");
 
     // Worktree should be in the same parent directory as the repo
     assert_eq!(
@@ -210,8 +210,120 @@ fn create_worktree_fails_for_checked_out_branch() {
         .expect("get current branch");
     let current = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-    let result = git::create_worktree(tr.path(), &current);
+    let result = git::create_worktree(tr.path(), &current, false);
     assert!(result.is_err(), "should fail for checked-out branch");
+}
+
+// ---------------------------------------------------------------------------
+// Idempotent resume
+// ---------------------------------------------------------------------------
+
+#[test]
+fn create_worktree_resume_returns_success_when_worktree_already_exists() {
+    let tr = setup_test_repo();
+    create_branch(tr.path(), "feature/resume");
+
+    // First call: fresh creation.
+    let first = git::create_worktree(tr.path(), "feature/resume", false).expect("first create");
+    let first_head = read_head_sha(&first.path);
+
+    // Second call: same branch, worktree already on disk. Must succeed
+    // without re-running `git worktree add`. The HEAD SHA should be
+    // unchanged (the worktree is reused, not recreated).
+    let second = git::create_worktree(tr.path(), "feature/resume", false).expect("resume create");
+    assert_eq!(
+        second.path, first.path,
+        "resume should return the same worktree path"
+    );
+    assert!(
+        !second.branch_created,
+        "resume should report branch_created=false (it was reused, not freshly created)"
+    );
+    let second_head = read_head_sha(&second.path);
+    assert_eq!(
+        first_head, second_head,
+        "resume must not modify the existing worktree's HEAD"
+    );
+
+    // Clean up.
+    git::remove_worktree(tr.path(), &first.path).expect("remove worktree");
+}
+
+#[test]
+fn create_worktree_resume_falls_through_when_path_exists_but_unrelated() {
+    let tr = setup_test_repo();
+    // Pre-create a regular directory (not a git worktree) at the expected
+    // location so `create_worktree` finds the path but no registered
+    // worktree.
+    let project = tr.path().file_name().unwrap().to_string_lossy().to_string();
+    let dir_name = format!("{project}-feature-collision");
+    let path = tr.path().parent().unwrap().join(&dir_name);
+    std::fs::create_dir_all(&path).expect("create collision dir");
+    std::fs::write(path.join("README.md"), "not a worktree").expect("write file");
+
+    let result = git::create_worktree(tr.path(), "feature/collision", false);
+    let err = result.expect_err("should fall through to git worktree add error");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("already exists"),
+        "expected v0.4 'already exists' error contract, got: {msg}"
+    );
+}
+
+#[test]
+fn create_worktree_resume_falls_through_when_path_registered_for_different_branch() {
+    let tr = setup_test_repo();
+    create_branch(tr.path(), "feature/owner");
+    let wt =
+        git::create_worktree(tr.path(), "feature/owner", false).expect("create owner worktree");
+
+    // Create a second branch on the side, then attempt to `create_worktree`
+    // for the second branch — but force the directory name to collide with
+    // the first worktree's path. We do this by computing the same dir name
+    // git-paw would have used for the second branch, copying the dir, and
+    // calling create_worktree.
+    //
+    // Simpler form: try to create a worktree for a branch when a worktree
+    // already exists at a path git-paw doesn't expect — should fall
+    // through cleanly. Test via a different branch name whose computed
+    // directory collides.
+    create_branch(tr.path(), "feature/colliding");
+
+    // Hand-construct a directory at the path git-paw expects for
+    // feature/colliding and put a worktree-shaped file there pointing at
+    // feature/owner. This is contrived but exercises the porcelain
+    // mismatch case.
+    let project = tr.path().file_name().unwrap().to_string_lossy().to_string();
+    let dir_name = format!("{project}-feature-colliding");
+    let collide_path = tr.path().parent().unwrap().join(&dir_name);
+    // Move the owner worktree's directory to the colliding path.
+    std::fs::rename(&wt.path, &collide_path).expect("rename worktree dir");
+
+    // Now create_worktree for feature/colliding should fall through to
+    // `git worktree add` because the porcelain pre-check won't find a
+    // match for refs/heads/feature/colliding at this path (the worktree
+    // metadata still points at the original path).
+    let result = git::create_worktree(tr.path(), "feature/colliding", false);
+    assert!(
+        result.is_err(),
+        "expected fall-through to git worktree add error when path is registered for a different branch"
+    );
+
+    // Clean up: prune the orphaned worktree entry.
+    let _ = Command::new("git")
+        .current_dir(tr.path())
+        .args(["worktree", "prune"])
+        .output();
+}
+
+/// Helper: read the HEAD SHA of a worktree by running `git rev-parse HEAD`.
+fn read_head_sha(worktree_path: &Path) -> String {
+    let output = Command::new("git")
+        .current_dir(worktree_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("rev-parse HEAD");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -333,7 +445,8 @@ fn agents_md_injection_not_staged_by_git_add_in_worktree() {
 
     // Create a real worktree (this is what git paw start does)
     create_branch(tr.path(), "feat/test-injection");
-    let wt = git::create_worktree(tr.path(), "feat/test-injection").expect("create worktree");
+    let wt =
+        git::create_worktree(tr.path(), "feat/test-injection", false).expect("create worktree");
 
     // Inject session content (this is what setup_worktree_agents_md does)
     let assignment = git_paw::agents::WorktreeAssignment {

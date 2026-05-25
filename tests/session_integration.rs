@@ -10,8 +10,8 @@ use std::time::SystemTime;
 use tempfile::TempDir;
 
 use git_paw::session::{
-    Session, SessionStatus, WorktreeEntry, delete_session_in, find_session_for_repo_in,
-    load_session_from, save_session_in,
+    Session, SessionMode, SessionStatus, WorktreeEntry, delete_session_in,
+    find_session_for_repo_in, load_session_from, save_session_in,
 };
 
 // ---------------------------------------------------------------------------
@@ -42,6 +42,8 @@ fn make_session(suffix: &str) -> Session {
         broker_port: None,
         broker_bind: None,
         broker_log_path: None,
+        mode: SessionMode::Bare,
+        dashboard_pane: None,
     }
 }
 

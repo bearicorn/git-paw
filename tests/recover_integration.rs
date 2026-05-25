@@ -42,6 +42,7 @@ fn skip_if_no_tmux() -> bool {
     false
 }
 
+#[allow(dead_code)]
 fn kill_tmux_session(name: &str) {
     let _ = StdCommand::new("tmux")
         .args(["kill-session", "-t", name])
@@ -160,6 +161,7 @@ fn recover_session_reconstructs_dashboard_and_watchers() {
     }
 
     let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
     let project = unique_project_name("recover");
     let repo = rename_repo_basename(&tr, &project);
     let canonical_repo = canonical_repo_root(&repo);
@@ -221,31 +223,39 @@ fn recover_session_reconstructs_dashboard_and_watchers() {
     // Drive recovery via `git paw start`. cmd_start finds the saved session,
     // sees no live tmux session, and calls recover_session. Attach at the
     // end will fail without a TTY, but recover_session has executed.
-    let _start_output = cmd()
+    let mut start_cmd = cmd();
+    start_cmd
         .current_dir(&repo)
         .env("HOME", fake_home.path())
-        .env_remove("XDG_DATA_HOME")
-        .args(["start"])
-        .output()
-        .expect("run start");
+        .env_remove("XDG_DATA_HOME");
+    tmux_env.apply_assert(&mut start_cmd);
+    let _start_output = start_cmd.args(["start"]).output().expect("run start");
 
     // ---------------------------------------------------------------------
     // Assertion 1: the tmux session exists with the saved name.
     // ---------------------------------------------------------------------
-    let alive = StdCommand::new("tmux")
+    let mut has_session_cmd = StdCommand::new("tmux");
+    tmux_env.apply(&mut has_session_cmd);
+    let alive = has_session_cmd
         .args(["has-session", "-t", &session_name])
         .status()
         .expect("tmux has-session")
         .success();
     if !alive {
-        kill_tmux_session(&session_name);
+        let mut kill_cmd = StdCommand::new("tmux");
+        tmux_env.apply(&mut kill_cmd);
+        let _ = kill_cmd
+            .args(["kill-session", "-t", &session_name])
+            .status();
         panic!("recover_session did not create tmux session '{session_name}'");
     }
 
     // ---------------------------------------------------------------------
     // Assertion 2: dashboard pane is pane 0, agent pane is pane 1.
     // ---------------------------------------------------------------------
-    let pane_listing = StdCommand::new("tmux")
+    let mut list_panes_cmd = StdCommand::new("tmux");
+    tmux_env.apply(&mut list_panes_cmd);
+    let pane_listing = list_panes_cmd
         .args([
             "list-panes",
             "-t",
@@ -258,7 +268,11 @@ fn recover_session_reconstructs_dashboard_and_watchers() {
     let listing = String::from_utf8_lossy(&pane_listing.stdout).to_string();
     let pane_count = listing.lines().count();
     if pane_count != 2 {
-        kill_tmux_session(&session_name);
+        let mut kill_cmd = StdCommand::new("tmux");
+        tmux_env.apply(&mut kill_cmd);
+        let _ = kill_cmd
+            .args(["kill-session", "-t", &session_name])
+            .status();
         panic!(
             "expected 2 panes (dashboard + 1 agent); got {pane_count}\n\
              listing:\n{listing}"
@@ -288,7 +302,11 @@ fn recover_session_reconstructs_dashboard_and_watchers() {
     }
 
     // Tear down before assertion failure messages.
-    kill_tmux_session(&session_name);
+    let mut kill_cmd = StdCommand::new("tmux");
+    tmux_env.apply(&mut kill_cmd);
+    let _ = kill_cmd
+        .args(["kill-session", "-t", &session_name])
+        .status();
 
     assert!(
         found_status,

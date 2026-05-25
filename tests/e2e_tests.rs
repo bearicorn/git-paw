@@ -1,6 +1,15 @@
 //! End-to-end tests.
 //!
 //! Tests the `git-paw` binary and tmux orchestration in realistic scenarios.
+//!
+//! Test isolation: every `cmd()` builder that runs a `git paw` subcommand
+//! against the binary applies a per-test HOME/XDG override so the subprocess
+//! reads from and writes to a `TempDir` instead of the user's real
+//! `~/Library/Application Support/git-paw/sessions/`. Tests that actually
+//! spawn tmux (via `git paw start` without `--dry-run`, or via library
+//! functions like `TmuxSessionBuilder::execute`) also apply
+//! `helpers::tmux_test_env()` so the tmux server runs on a test-owned
+//! socket. see openspec/changes/test-tmux-isolation
 
 use std::fmt::Write as _;
 use std::fs;
@@ -15,8 +24,21 @@ use git_paw::tmux::{
     PaneSpec, TmuxSessionBuilder, attach, ensure_tmux_installed, is_session_alive, kill_session,
 };
 
+mod helpers;
+
 fn cmd() -> Command {
     Command::cargo_bin("git-paw").expect("binary exists")
+}
+
+/// Returns a `Command` builder for the `git-paw` binary with HOME/XDG
+/// pointed at `fake_home` and TMUX socket pointed at `tmux_env`. Callers
+/// MUST keep `fake_home` and `tmux_env` alive for the lifetime of the
+/// subprocess.
+fn cmd_iso(fake_home: &Path, tmux_env: &helpers::TmuxTestEnv) -> Command {
+    let mut c = cmd();
+    c.env("HOME", fake_home).env_remove("XDG_DATA_HOME");
+    tmux_env.apply_assert(&mut c);
+    c
 }
 
 // ---------------------------------------------------------------------------
@@ -35,6 +57,8 @@ impl TestRepo {
 }
 
 fn setup_test_repo() -> TestRepo {
+    helpers::guard_against_live_session();
+
     let sandbox = TempDir::new().expect("create temp dir");
     let repo = sandbox.path().join("test-repo");
     fs::create_dir_all(&repo).expect("create repo dir");
@@ -75,6 +99,8 @@ fn run_git(dir: &Path, args: &[&str]) {
 #[test]
 fn dry_run_with_flags_shows_plan() {
     let tr = setup_test_repo();
+    let fake_home = TempDir::new().expect("home tempdir");
+    let tmux_env = helpers::tmux_test_env();
     run_git(tr.path(), &["branch", "feat/a"]);
     run_git(tr.path(), &["branch", "feat/b"]);
 
@@ -83,7 +109,7 @@ fn dry_run_with_flags_shows_plan() {
     fs::create_dir_all(config.parent().unwrap()).expect("create config dir");
     fs::write(&config, "[clis.echo]\ncommand = \"/bin/echo\"\n").expect("write config");
 
-    cmd()
+    cmd_iso(fake_home.path(), &tmux_env)
         .current_dir(tr.path())
         .args([
             "start",
@@ -371,6 +397,9 @@ fn cleanup_session(name: &str) {
 fn tmux_session_create_and_kill_lifecycle() {
     ensure_tmux_installed().expect("tmux must be installed to run this test");
 
+    let tmux_env = helpers::tmux_test_env();
+    let _proc_env = tmux_env.apply_to_process();
+
     let session_name = "paw-e2e-lifecycle-test";
     cleanup_session(session_name);
 
@@ -405,6 +434,9 @@ fn tmux_session_create_and_kill_lifecycle() {
 #[serial]
 fn tmux_session_with_five_panes_and_different_clis() {
     ensure_tmux_installed().expect("tmux must be installed to run this test");
+
+    let tmux_env = helpers::tmux_test_env();
+    let _proc_env = tmux_env.apply_to_process();
 
     let session_name = "paw-e2e-multipane-test";
     cleanup_session(session_name);
@@ -473,6 +505,9 @@ fn tmux_session_with_five_panes_and_different_clis() {
 fn tmux_mouse_mode_enabled_by_default() {
     ensure_tmux_installed().expect("tmux must be installed to run this test");
 
+    let tmux_env = helpers::tmux_test_env();
+    let _proc_env = tmux_env.apply_to_process();
+
     let session_name = "paw-e2e-mouse-test";
     cleanup_session(session_name);
 
@@ -507,6 +542,9 @@ fn tmux_mouse_mode_enabled_by_default() {
 #[serial]
 fn tmux_is_session_alive_returns_false_for_nonexistent() {
     ensure_tmux_installed().expect("tmux must be installed to run this test");
+
+    let tmux_env = helpers::tmux_test_env();
+    let _proc_env = tmux_env.apply_to_process();
 
     let alive = is_session_alive("paw-definitely-does-not-exist-xyz").expect("check session");
     assert!(!alive);
@@ -548,6 +586,9 @@ fn error_exit_code_is_1_for_preset_not_found() {
 #[serial]
 fn attach_fails_for_nonexistent_session() {
     ensure_tmux_installed().expect("tmux must be installed to run this test");
+
+    let tmux_env = helpers::tmux_test_env();
+    let _proc_env = tmux_env.apply_to_process();
 
     let result = attach("paw-e2e-attach-nonexistent-xyz");
     assert!(result.is_err(), "attach to nonexistent session should fail");
@@ -681,6 +722,9 @@ fn from_specs_skips_done_markdown_specs() {
 #[serial]
 fn attach_succeeds_for_live_session() {
     ensure_tmux_installed().expect("tmux must be installed to run this test");
+
+    let tmux_env = helpers::tmux_test_env();
+    let _proc_env = tmux_env.apply_to_process();
 
     let session_name = "paw-e2e-attach-test";
     cleanup_session(session_name);
@@ -836,6 +880,14 @@ fn find_free_port() -> u16 {
 fn broker_session_full_lifecycle() {
     ensure_tmux_installed().expect("tmux must be installed to run this test");
 
+    // Per-test HOME isolation plugs the v0.5.0 leak that wrote
+    // paw-repo.json into the user's real sessions dir. Per-test tmux socket
+    // isolation keeps the live `paw-git-paw` server safe from a tmux server
+    // crash under load.
+    let fake_home = TempDir::new().expect("home tempdir");
+    let tmux_env = helpers::tmux_test_env();
+    let _proc_env = tmux_env.apply_to_process();
+
     let session_name = "paw-test-repo";
 
     // Cleanup guard: ensure the session is killed even on panic
@@ -871,7 +923,7 @@ fn broker_session_full_lifecycle() {
     // -----------------------------------------------------------------------
     // Step 2: Start — launch the session (will fail to attach but session is created)
     // -----------------------------------------------------------------------
-    let _start_output = cmd()
+    let _start_output = cmd_iso(fake_home.path(), &tmux_env)
         .current_dir(tr.path())
         .args([
             "start",
@@ -1067,7 +1119,11 @@ fn broker_session_full_lifecycle() {
     // -----------------------------------------------------------------------
     // Step 9: Stop — kill the tmux session and verify broker port is freed
     // -----------------------------------------------------------------------
-    cmd().current_dir(tr.path()).arg("stop").assert().success();
+    cmd_iso(fake_home.path(), &tmux_env)
+        .current_dir(tr.path())
+        .arg("stop")
+        .assert()
+        .success();
 
     // Wait for broker to shut down
     std::thread::sleep(std::time::Duration::from_secs(3));
@@ -1083,7 +1139,7 @@ fn broker_session_full_lifecycle() {
     // -----------------------------------------------------------------------
     // Step 10: Purge — remove worktrees and branches
     // -----------------------------------------------------------------------
-    cmd()
+    cmd_iso(fake_home.path(), &tmux_env)
         .current_dir(tr.path())
         .args(["purge", "--force"])
         .assert()
