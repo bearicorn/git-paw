@@ -42,6 +42,7 @@ pub fn build_status_message(
             message,
             cli: cli.map(str::to_string),
             phase: None,
+            detail: None,
         },
     }
 }

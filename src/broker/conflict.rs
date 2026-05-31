@@ -29,10 +29,149 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::messages::{
-    BrokerMessage, FeedbackPayload, IntentPayload, QuestionPayload, StatusPayload,
+    BrokerMessage, FeedbackPayload, FileIntent, IntentPayload, QuestionPayload, Region,
+    StatusPayload,
 };
 use super::{BrokerState, delivery};
 use crate::config::ConflictConfig;
+
+/// Detector-internal normalised form of one `files` entry.
+///
+/// Both wire shapes ([`FileIntent::Path`] and [`FileIntent::Detailed`])
+/// collapse into this single shape so the detector never branches on the
+/// publisher's wire form. `regions: None` means file-level intent (the
+/// v0.5.0 default and the safe fallback); `Some(..)` carries declared
+/// regions. An empty `regions` vec on the wire collapses to `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedFileIntent {
+    /// The file path.
+    pub path: String,
+    /// Declared regions, or `None` for a file-level intent.
+    pub regions: Option<Vec<Region>>,
+}
+
+impl From<FileIntent> for NormalizedFileIntent {
+    fn from(fi: FileIntent) -> Self {
+        match fi {
+            FileIntent::Path(path) => Self {
+                path,
+                regions: None,
+            },
+            FileIntent::Detailed { path, regions } => Self {
+                path,
+                // An empty regions vec is equivalent to no regions declared.
+                regions: if regions.is_empty() {
+                    None
+                } else {
+                    Some(regions)
+                },
+            },
+        }
+    }
+}
+
+/// One file's contribution to a forward conflict between two intents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileConflict {
+    /// The shared file path.
+    pub path: String,
+    /// Intersecting regions naming why the file conflicts. Empty means a
+    /// file-level conflict (at least one side declared no regions).
+    pub regions: Vec<Region>,
+    /// `true` when at least one intersecting pair was a conservative
+    /// cross-kind match (a named region vs a line range).
+    pub cross_kind: bool,
+}
+
+/// A forward conflict between the queried agent and one other agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardConflict {
+    /// The other agent whose intent overlaps.
+    pub other_agent: String,
+    /// The conflicting files (each with its intersecting regions).
+    pub files: Vec<FileConflict>,
+}
+
+/// Returns `true` when two inclusive line intervals overlap.
+fn ranges_overlap(s1: u32, e1: u32, s2: u32, e2: u32) -> bool {
+    s1 <= e2 && s2 <= e1
+}
+
+/// Computes the intersection of two region sets per the detector rules:
+///
+/// - Same kind + matching name (function / class / block) → intersect,
+///   contributing that region.
+/// - Two ranges with overlapping intervals → intersect, contributing the
+///   overlapping sub-range.
+/// - A named region vs a range (either order) → conservative intersect
+///   (we can't resolve a name to lines without source parsing); contributes
+///   both regions and sets the cross-kind flag.
+/// - Named regions of differing kinds, or same kind with differing names →
+///   no intersection.
+///
+/// Returns the de-duplicated list of intersecting regions (sorted for
+/// deterministic output) and whether any cross-kind match occurred.
+fn regions_intersect(a: &[Region], b: &[Region]) -> (Vec<Region>, bool) {
+    let mut hits: Vec<Region> = Vec::new();
+    let mut cross_kind = false;
+    let push = |r: Region, hits: &mut Vec<Region>| {
+        if !hits.contains(&r) {
+            hits.push(r);
+        }
+    };
+    for ra in a {
+        for rb in b {
+            match (ra, rb) {
+                (Region::Function { name: n1 }, Region::Function { name: n2 })
+                | (Region::Class { name: n1 }, Region::Class { name: n2 })
+                | (Region::Block { anchor: n1 }, Region::Block { anchor: n2 })
+                    if n1 == n2 =>
+                {
+                    push(ra.clone(), &mut hits);
+                }
+                (
+                    Region::Range {
+                        start_line: s1,
+                        end_line: e1,
+                    },
+                    Region::Range {
+                        start_line: s2,
+                        end_line: e2,
+                    },
+                ) if ranges_overlap(*s1, *e1, *s2, *e2) => {
+                    push(
+                        Region::Range {
+                            start_line: (*s1).max(*s2),
+                            end_line: (*e1).min(*e2),
+                        },
+                        &mut hits,
+                    );
+                }
+                // Cross-kind: a named region vs a range, in either order.
+                // We can't resolve the name to lines without source parsing,
+                // so we intersect conservatively and name both regions.
+                (
+                    Region::Range { .. },
+                    Region::Function { .. } | Region::Class { .. } | Region::Block { .. },
+                )
+                | (
+                    Region::Function { .. } | Region::Class { .. } | Region::Block { .. },
+                    Region::Range { .. },
+                ) => {
+                    cross_kind = true;
+                    push(ra.clone(), &mut hits);
+                    push(rb.clone(), &mut hits);
+                }
+                // Same-shape named regions with differing names, or differing
+                // named kinds: no intersection.
+                _ => {}
+            }
+        }
+    }
+    hits.sort_by_key(Region::to_string);
+    hits.dedup();
+    (hits, cross_kind)
+}
 
 /// Sender identifier used for all auto-emitted detector messages. Lets
 /// recipients (and the dashboard) treat detector output the same as
@@ -49,8 +188,9 @@ pub const CONFLICT_DETECTOR_TAG: &str = "[conflict-detector]";
 pub struct IntentRecord {
     /// Publishing agent's ID.
     pub agent_id: String,
-    /// File paths the agent intends to modify.
-    pub files: HashSet<String>,
+    /// File paths the agent intends to modify, each mapped to its declared
+    /// regions (`None` = file-level intent / no regions declared).
+    pub files: HashMap<String, Option<Vec<Region>>>,
     /// Human-readable summary of the planned change.
     pub summary: String,
     /// When the intent was received.
@@ -58,6 +198,15 @@ pub struct IntentRecord {
     /// Relative TTL — the entry is dropped when
     /// `now - received_at > valid_for`.
     pub valid_for: Duration,
+}
+
+impl IntentRecord {
+    /// Returns `true` if this intent declares the given file path (at any
+    /// granularity).
+    #[must_use]
+    pub fn claims_path(&self, path: &str) -> bool {
+        self.files.contains_key(path)
+    }
 }
 
 impl IntentRecord {
@@ -116,15 +265,21 @@ impl ConflictTracker {
     pub fn insert_intent(
         &mut self,
         agent_id: &str,
-        files: Vec<String>,
+        files: Vec<NormalizedFileIntent>,
         summary: String,
         ttl: Duration,
         now: Instant,
     ) {
-        let normalized: HashSet<String> = files
+        let normalized: HashMap<String, Option<Vec<Region>>> = files
             .into_iter()
-            .map(|f| f.trim().to_string())
-            .filter(|f| !f.is_empty())
+            .filter_map(|nfi| {
+                let path = nfi.path.trim().to_string();
+                if path.is_empty() {
+                    None
+                } else {
+                    Some((path, nfi.regions))
+                }
+            })
             .collect();
         let files_changed = self
             .intents
@@ -198,12 +353,20 @@ impl ConflictTracker {
     // Read-only queries
     // ====================================================================
 
-    /// Returns every overlap between `x_id`'s intent and every other
-    /// non-expired intent in the tracker as `(other_agent, overlap_files)`
-    /// tuples. Caller is responsible for dedup against
-    /// `warned_intent_pairs`.
+    /// Returns every forward conflict between `x_id`'s intent and every other
+    /// non-expired intent in the tracker.
+    ///
+    /// For each file shared by both intents:
+    /// - If either side declared no regions (`None`), the file is a
+    ///   file-level conflict (v0.5.0 fallback) — reported with empty
+    ///   `regions`.
+    /// - If both sides declared regions, the file conflicts only when the
+    ///   region sets intersect; the intersecting regions are reported.
+    ///
+    /// A pair appears in the output only when at least one file conflicts.
+    /// Caller is responsible for dedup against `warned_intent_pairs`.
     #[must_use]
-    pub fn forward_overlaps(&self, x_id: &str) -> Vec<(String, Vec<String>)> {
+    pub fn forward_overlaps(&self, x_id: &str) -> Vec<ForwardConflict> {
         let Some(x) = self.intents.get(x_id) else {
             return Vec::new();
         };
@@ -212,13 +375,44 @@ impl ConflictTracker {
             if other_id == x_id {
                 continue;
             }
-            let mut overlap: Vec<String> = x.files.intersection(&y.files).cloned().collect();
-            if !overlap.is_empty() {
-                overlap.sort();
-                out.push((other_id.clone(), overlap));
+            let mut shared: Vec<&String> = x
+                .files
+                .keys()
+                .filter(|path| y.files.contains_key(*path))
+                .collect();
+            shared.sort();
+            let mut file_conflicts = Vec::new();
+            for path in shared {
+                match (&x.files[path], &y.files[path]) {
+                    (Some(xr), Some(yr)) => {
+                        let (regions, cross_kind) = regions_intersect(xr, yr);
+                        if !regions.is_empty() {
+                            file_conflicts.push(FileConflict {
+                                path: path.clone(),
+                                regions,
+                                cross_kind,
+                            });
+                        }
+                    }
+                    // At least one side omitted regions → file-level conflict
+                    // (preserves the v0.5.0 safety net).
+                    _ => {
+                        file_conflicts.push(FileConflict {
+                            path: path.clone(),
+                            regions: Vec::new(),
+                            cross_kind: false,
+                        });
+                    }
+                }
+            }
+            if !file_conflicts.is_empty() {
+                out.push(ForwardConflict {
+                    other_agent: other_id.clone(),
+                    files: file_conflicts,
+                });
             }
         }
-        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out.sort_by(|a, b| a.other_agent.cmp(&b.other_agent));
         out
     }
 
@@ -261,19 +455,19 @@ impl ConflictTracker {
         let Some(x_files) = self.current_files.get(x_id) else {
             return Vec::new();
         };
-        let x_intent_files: Option<&HashSet<String>> = self.intents.get(x_id).map(|r| &r.files);
+        let x_intent = self.intents.get(x_id);
         let mut out = Vec::new();
         let mut sorted_files: Vec<&String> = x_files.iter().collect();
         sorted_files.sort();
         for file in sorted_files {
-            if x_intent_files.is_some_and(|f| f.contains(file)) {
+            if x_intent.is_some_and(|r| r.claims_path(file)) {
                 continue;
             }
             for (other_id, other) in &self.intents {
                 if other_id == x_id {
                     continue;
                 }
-                if other.files.contains(file) {
+                if other.claims_path(file) {
                     out.push((file.clone(), other_id.clone()));
                 }
             }
@@ -382,13 +576,45 @@ impl ConflictTracker {
 // Auto-emit helpers and detector loop
 // =========================================================================
 
+/// Hint appended to a forward-conflict warning when a conservative
+/// cross-kind region match (a named region vs a line range) drove the
+/// conflict. Teaches the user why the warning fired and how to narrow it.
+pub const CROSS_KIND_HINT: &str = "Note: one side declared named regions and the other declared line ranges; \
+     these always intersect conservatively. If you want narrower conflict matching, \
+     both sides should use the same region kind.";
+
+/// Renders one conflicting file for warning text: bare path for a
+/// file-level conflict, or `path (regions: <list>)` when regions
+/// intersected.
+fn describe_file_conflict(fc: &FileConflict) -> String {
+    if fc.regions.is_empty() {
+        fc.path.clone()
+    } else {
+        let regions: Vec<String> = fc.regions.iter().map(Region::to_string).collect();
+        format!("{} (regions: {})", fc.path, regions.join(", "))
+    }
+}
+
 /// Builds a forward-conflict feedback error string addressed to one
 /// publisher of an overlapping intent pair.
-fn forward_conflict_error(other_agent: &str, files: &[String]) -> String {
-    let list = files.join(", ");
-    format!(
-        "{CONFLICT_DETECTOR_TAG} forward conflict: agent {other_agent} also intends to modify these files: {list}",
-    )
+///
+/// When any conflicting file carries intersecting regions, those regions are
+/// named explicitly (kind + name, or range). When a cross-kind conservative
+/// match contributed to the conflict, the [`CROSS_KIND_HINT`] is appended.
+fn forward_conflict_error(other_agent: &str, files: &[FileConflict]) -> String {
+    let list = files
+        .iter()
+        .map(describe_file_conflict)
+        .collect::<Vec<_>>()
+        .join("; ");
+    let mut text = format!(
+        "{CONFLICT_DETECTOR_TAG} forward conflict: agent {other_agent} also intends to modify: {list}",
+    );
+    if files.iter().any(|fc| fc.cross_kind) {
+        text.push(' ');
+        text.push_str(CROSS_KIND_HINT);
+    }
+    text
 }
 
 /// Builds an in-flight-conflict feedback error string addressed to one
@@ -487,29 +713,31 @@ pub fn process_message(
                 summary,
                 valid_for_seconds,
             } = payload.clone();
+            let normalized: Vec<NormalizedFileIntent> =
+                files.into_iter().map(NormalizedFileIntent::from).collect();
             tracker.insert_intent(
                 agent_id,
-                files,
+                normalized,
                 summary,
                 Duration::from_secs(valid_for_seconds),
                 now,
             );
             if config.warn_on_intent_overlap {
-                for (other_id, overlap_files) in tracker.forward_overlaps(agent_id) {
-                    if tracker.was_intent_pair_warned(agent_id, &other_id) {
+                for conflict in tracker.forward_overlaps(agent_id) {
+                    if tracker.was_intent_pair_warned(agent_id, &conflict.other_agent) {
                         continue;
                     }
                     emit_feedback(
                         state,
                         agent_id,
-                        forward_conflict_error(&other_id, &overlap_files),
+                        forward_conflict_error(&conflict.other_agent, &conflict.files),
                     );
                     emit_feedback(
                         state,
-                        &other_id,
-                        forward_conflict_error(agent_id, &overlap_files),
+                        &conflict.other_agent,
+                        forward_conflict_error(agent_id, &conflict.files),
                     );
-                    tracker.mark_intent_pair_warned(agent_id, &other_id);
+                    tracker.mark_intent_pair_warned(agent_id, &conflict.other_agent);
                     emitted += 2;
                 }
             }
@@ -651,6 +879,29 @@ mod tests {
         list.iter().map(|s| (*s).to_string()).collect()
     }
 
+    /// File-level normalised intents (no regions) from a path list — the
+    /// v0.5.0 shape, used by the tracker tests that exercise file-level
+    /// behaviour.
+    fn nfi(list: &[&str]) -> Vec<NormalizedFileIntent> {
+        list.iter()
+            .map(|s| NormalizedFileIntent {
+                path: (*s).to_string(),
+                regions: None,
+            })
+            .collect()
+    }
+
+    /// File-level `FileIntent` wire entries (plain strings) from a path list.
+    fn fi(list: &[&str]) -> Vec<FileIntent> {
+        list.iter().map(|s| FileIntent::from(*s)).collect()
+    }
+
+    fn func(name: &str) -> Region {
+        Region::Function {
+            name: name.to_string(),
+        }
+    }
+
     // Maps to scenario `Detector stops cleanly when broker stops` from
     // conflict-detection. Spawns the detector via its existing constructor
     // and asserts the task exits within one poll interval + slack after
@@ -688,7 +939,31 @@ mod tests {
         BrokerMessage::Intent {
             agent_id: agent_id.to_string(),
             payload: IntentPayload {
-                files: files(files_list),
+                files: fi(files_list),
+                summary: summary.to_string(),
+                valid_for_seconds: ttl,
+            },
+        }
+    }
+
+    /// Builds an intent message whose `files` carry explicit region-bearing
+    /// entries. Each `(path, regions)` pair becomes a `FileIntent::Detailed`.
+    fn intent_msg_with_regions(
+        agent_id: &str,
+        files_list: &[(&str, Vec<Region>)],
+        summary: &str,
+        ttl: u64,
+    ) -> BrokerMessage {
+        BrokerMessage::Intent {
+            agent_id: agent_id.to_string(),
+            payload: IntentPayload {
+                files: files_list
+                    .iter()
+                    .map(|(path, regions)| FileIntent::Detailed {
+                        path: (*path).to_string(),
+                        regions: regions.clone(),
+                    })
+                    .collect(),
                 summary: summary.to_string(),
                 valid_for_seconds: ttl,
             },
@@ -741,14 +1016,14 @@ mod tests {
         let now = Instant::now();
         t.insert_intent(
             "feat-x",
-            files(&["src/a.rs", "src/b.rs"]),
+            nfi(&["src/a.rs", "src/b.rs"]),
             "x".into(),
             ttl_secs(60),
             now,
         );
         let r = t.intent_for("feat-x").unwrap();
-        assert!(r.files.contains("src/a.rs"));
-        assert!(r.files.contains("src/b.rs"));
+        assert!(r.files.contains_key("src/a.rs"));
+        assert!(r.files.contains_key("src/b.rs"));
         assert_eq!(r.valid_for, ttl_secs(60));
     }
 
@@ -758,14 +1033,14 @@ mod tests {
         let now = Instant::now();
         t.insert_intent(
             "feat-x",
-            files(&["src/a.rs"]),
+            nfi(&["src/a.rs"]),
             "old".into(),
             ttl_secs(60),
             now,
         );
         t.insert_intent(
             "feat-x",
-            files(&["src/a.rs", "src/b.rs"]),
+            nfi(&["src/a.rs", "src/b.rs"]),
             "new".into(),
             ttl_secs(60),
             now,
@@ -779,7 +1054,7 @@ mod tests {
     fn tracker_expire_stale_intents_drops_aged_entries() {
         let mut t = fresh();
         let now = Instant::now();
-        t.insert_intent("feat-x", files(&["a"]), "x".into(), ttl_secs(1), now);
+        t.insert_intent("feat-x", nfi(&["a"]), "x".into(), ttl_secs(1), now);
         let later = now + Duration::from_secs(2);
         t.expire_stale_intents(later);
         assert!(t.intent_for("feat-x").is_none());
@@ -789,12 +1064,16 @@ mod tests {
     fn tracker_forward_overlaps_returns_overlap_files() {
         let mut t = fresh();
         let now = Instant::now();
-        t.insert_intent("feat-x", files(&["a", "b"]), "x".into(), ttl_secs(60), now);
-        t.insert_intent("feat-y", files(&["b", "c"]), "y".into(), ttl_secs(60), now);
+        t.insert_intent("feat-x", nfi(&["a", "b"]), "x".into(), ttl_secs(60), now);
+        t.insert_intent("feat-y", nfi(&["b", "c"]), "y".into(), ttl_secs(60), now);
         let overlaps = t.forward_overlaps("feat-x");
         assert_eq!(overlaps.len(), 1);
-        assert_eq!(overlaps[0].0, "feat-y");
-        assert_eq!(overlaps[0].1, vec!["b".to_string()]);
+        assert_eq!(overlaps[0].other_agent, "feat-y");
+        // File-level conflict (no regions declared on either side): one
+        // conflicting file, "b", with empty regions.
+        assert_eq!(overlaps[0].files.len(), 1);
+        assert_eq!(overlaps[0].files[0].path, "b");
+        assert!(overlaps[0].files[0].regions.is_empty());
     }
 
     #[test]
@@ -810,12 +1089,12 @@ mod tests {
     fn tracker_insert_intent_clears_prior_pair_dedupe() {
         let mut t = fresh();
         let now = Instant::now();
-        t.insert_intent("feat-x", files(&["a"]), "x".into(), ttl_secs(60), now);
-        t.insert_intent("feat-y", files(&["a"]), "y".into(), ttl_secs(60), now);
+        t.insert_intent("feat-x", nfi(&["a"]), "x".into(), ttl_secs(60), now);
+        t.insert_intent("feat-y", nfi(&["a"]), "y".into(), ttl_secs(60), now);
         t.mark_intent_pair_warned("feat-x", "feat-y");
         assert!(t.was_intent_pair_warned("feat-x", "feat-y"));
         // New intent from x must clear the pair entry so subsequent overlaps re-warn.
-        t.insert_intent("feat-x", files(&["a", "b"]), "x2".into(), ttl_secs(60), now);
+        t.insert_intent("feat-x", nfi(&["a", "b"]), "x2".into(), ttl_secs(60), now);
         assert!(!t.was_intent_pair_warned("feat-x", "feat-y"));
     }
 
@@ -870,13 +1149,7 @@ mod tests {
     fn tracker_ownership_violations_file_inside_other_intent() {
         let mut t = fresh();
         let now = Instant::now();
-        t.insert_intent(
-            "feat-x",
-            files(&["src/a.rs"]),
-            "x".into(),
-            ttl_secs(60),
-            now,
-        );
+        t.insert_intent("feat-x", nfi(&["src/a.rs"]), "x".into(), ttl_secs(60), now);
         t.update_status("feat-y", files(&["src/a.rs"]));
         let v = t.ownership_violations("feat-y");
         assert_eq!(v.len(), 1);
@@ -887,13 +1160,7 @@ mod tests {
     fn tracker_ownership_violations_inside_own_intent_is_ok() {
         let mut t = fresh();
         let now = Instant::now();
-        t.insert_intent(
-            "feat-y",
-            files(&["src/a.rs"]),
-            "y".into(),
-            ttl_secs(60),
-            now,
-        );
+        t.insert_intent("feat-y", nfi(&["src/a.rs"]), "y".into(), ttl_secs(60), now);
         t.update_status("feat-y", files(&["src/a.rs"]));
         assert!(t.ownership_violations("feat-y").is_empty());
     }
@@ -1499,6 +1766,354 @@ mod tests {
             assert!(payload.question.contains(CONFLICT_DETECTOR_TAG));
         } else {
             panic!("expected Question");
+        }
+    }
+
+    // ====================================================================
+    // NormalizedFileIntent conversion (task 2.2)
+    // ====================================================================
+
+    #[test]
+    fn normalized_from_path_has_no_regions() {
+        let n: NormalizedFileIntent = FileIntent::Path("src/a.rs".to_string()).into();
+        assert_eq!(n.path, "src/a.rs");
+        assert_eq!(n.regions, None);
+    }
+
+    #[test]
+    fn normalized_from_detailed_with_regions_is_some() {
+        let n: NormalizedFileIntent = FileIntent::Detailed {
+            path: "src/a.rs".to_string(),
+            regions: vec![func("validate_token")],
+        }
+        .into();
+        assert_eq!(n.regions, Some(vec![func("validate_token")]));
+    }
+
+    #[test]
+    fn normalized_from_detailed_empty_regions_collapses_to_none() {
+        let n: NormalizedFileIntent = FileIntent::Detailed {
+            path: "src/a.rs".to_string(),
+            regions: vec![],
+        }
+        .into();
+        assert_eq!(
+            n.regions, None,
+            "an empty regions vec is equivalent to no regions"
+        );
+    }
+
+    // ====================================================================
+    // regions_intersect unit coverage (task 3.3)
+    // ====================================================================
+
+    #[test]
+    fn regions_intersect_same_function_name() {
+        let (hits, cross) = regions_intersect(&[func("a")], &[func("a")]);
+        assert_eq!(hits, vec![func("a")]);
+        assert!(!cross);
+    }
+
+    #[test]
+    fn regions_intersect_different_function_names_empty() {
+        let (hits, cross) = regions_intersect(&[func("a")], &[func("b")]);
+        assert!(hits.is_empty());
+        assert!(!cross);
+    }
+
+    #[test]
+    fn regions_intersect_different_named_kinds_empty() {
+        // function "a" vs class "a" — different kinds, no intersection.
+        let class_a = Region::Class {
+            name: "a".to_string(),
+        };
+        let (hits, cross) = regions_intersect(&[func("a")], &[class_a]);
+        assert!(hits.is_empty());
+        assert!(!cross);
+    }
+
+    #[test]
+    fn regions_intersect_overlapping_ranges() {
+        let r1 = Region::Range {
+            start_line: 10,
+            end_line: 30,
+        };
+        let r2 = Region::Range {
+            start_line: 25,
+            end_line: 45,
+        };
+        let (hits, cross) = regions_intersect(&[r1], &[r2]);
+        assert_eq!(
+            hits,
+            vec![Region::Range {
+                start_line: 25,
+                end_line: 30
+            }]
+        );
+        assert!(!cross);
+    }
+
+    #[test]
+    fn regions_intersect_non_overlapping_ranges_empty() {
+        let r1 = Region::Range {
+            start_line: 10,
+            end_line: 20,
+        };
+        let r2 = Region::Range {
+            start_line: 30,
+            end_line: 40,
+        };
+        let (hits, _) = regions_intersect(&[r1], &[r2]);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn regions_intersect_cross_kind_is_conservative() {
+        let range = Region::Range {
+            start_line: 10,
+            end_line: 50,
+        };
+        let (hits, cross) =
+            regions_intersect(&[func("validate_token")], std::slice::from_ref(&range));
+        assert!(cross, "named-vs-range must flag cross_kind");
+        assert!(hits.contains(&func("validate_token")));
+        assert!(hits.contains(&range));
+    }
+
+    // ====================================================================
+    // Region-aware detector scenarios (task 3.6 / spec.md)
+    // ====================================================================
+
+    fn run_two_intents(
+        a: &BrokerMessage,
+        b: &BrokerMessage,
+    ) -> (Arc<BrokerState>, ConflictTracker) {
+        let state = fresh_state();
+        let mut t = ConflictTracker::new();
+        delivery::publish_message(&state, &status_msg("feat-x", &[]));
+        delivery::publish_message(&state, &status_msg("feat-y", &[]));
+        let now = Instant::now();
+        let cfg = default_config();
+        process_message(&state, &mut t, a, &cfg, now);
+        process_message(&state, &mut t, b, &cfg, now);
+        (state, t)
+    }
+
+    #[test]
+    fn detector_non_overlapping_functions_no_conflict() {
+        // Spec: Non-overlapping functions in the same file do not conflict.
+        let a = intent_msg_with_regions(
+            "feat-x",
+            &[("src/auth.rs", vec![func("validate_token")])],
+            "x",
+            600,
+        );
+        let b = intent_msg_with_regions(
+            "feat-y",
+            &[("src/auth.rs", vec![func("refresh_session")])],
+            "y",
+            600,
+        );
+        let (state, _) = run_two_intents(&a, &b);
+        assert!(supervisor_feedbacks_in_inbox(&state, "feat-x").is_empty());
+        assert!(supervisor_feedbacks_in_inbox(&state, "feat-y").is_empty());
+    }
+
+    #[test]
+    fn detector_overlapping_functions_conflict_names_function() {
+        // Spec: Overlapping functions in the same file conflict; warning names
+        // the intersecting function.
+        let a = intent_msg_with_regions(
+            "feat-x",
+            &[("src/auth.rs", vec![func("validate_token")])],
+            "x",
+            600,
+        );
+        let b = intent_msg_with_regions(
+            "feat-y",
+            &[("src/auth.rs", vec![func("validate_token")])],
+            "y",
+            600,
+        );
+        let (state, _) = run_two_intents(&a, &b);
+        let x_fb = supervisor_feedbacks_in_inbox(&state, "feat-x");
+        assert_eq!(x_fb.len(), 1);
+        if let BrokerMessage::Feedback { payload, .. } = &x_fb[0] {
+            let err = &payload.errors[0];
+            assert!(err.contains("forward conflict"));
+            assert!(err.contains("feat-y"));
+            assert!(err.contains("function validate_token"));
+            assert!(err.contains("src/auth.rs"));
+        } else {
+            panic!("expected Feedback");
+        }
+        assert_eq!(supervisor_feedbacks_in_inbox(&state, "feat-y").len(), 1);
+    }
+
+    #[test]
+    fn detector_file_level_fallback_when_one_side_omits_regions() {
+        // Spec: File-level fallback when regions omitted. A declares regions,
+        // B is a plain string → file-level conflict.
+        let a = intent_msg_with_regions(
+            "feat-x",
+            &[("src/auth.rs", vec![func("validate_token")])],
+            "x",
+            600,
+        );
+        let b = intent_msg("feat-y", &["src/auth.rs"], "y", 600);
+        let (state, _) = run_two_intents(&a, &b);
+        let x_fb = supervisor_feedbacks_in_inbox(&state, "feat-x");
+        assert_eq!(x_fb.len(), 1, "file-level fallback must still warn");
+        if let BrokerMessage::Feedback { payload, .. } = &x_fb[0] {
+            // File-level conflict: names the path, no region detail.
+            assert!(payload.errors[0].contains("src/auth.rs"));
+            assert!(!payload.errors[0].contains("(regions:"));
+        }
+    }
+
+    #[test]
+    fn detector_cross_kind_conflict_includes_hint() {
+        // Spec: Cross-kind comparison intersects conservatively + hint.
+        let range = Region::Range {
+            start_line: 10,
+            end_line: 50,
+        };
+        let a = intent_msg_with_regions(
+            "feat-x",
+            &[("src/auth.rs", vec![func("validate_token")])],
+            "x",
+            600,
+        );
+        let b = intent_msg_with_regions("feat-y", &[("src/auth.rs", vec![range])], "y", 600);
+        let (state, _) = run_two_intents(&a, &b);
+        let x_fb = supervisor_feedbacks_in_inbox(&state, "feat-x");
+        assert_eq!(x_fb.len(), 1);
+        if let BrokerMessage::Feedback { payload, .. } = &x_fb[0] {
+            assert!(
+                payload.errors[0].contains(CROSS_KIND_HINT),
+                "cross-kind conflict must include the hint; got: {}",
+                payload.errors[0]
+            );
+        }
+    }
+
+    #[test]
+    fn detector_overlapping_ranges_conflict() {
+        // Spec: Overlapping ranges intersect.
+        let r1 = Region::Range {
+            start_line: 10,
+            end_line: 30,
+        };
+        let r2 = Region::Range {
+            start_line: 25,
+            end_line: 45,
+        };
+        let a = intent_msg_with_regions("feat-x", &[("src/auth.rs", vec![r1])], "x", 600);
+        let b = intent_msg_with_regions("feat-y", &[("src/auth.rs", vec![r2])], "y", 600);
+        let (state, _) = run_two_intents(&a, &b);
+        let x_fb = supervisor_feedbacks_in_inbox(&state, "feat-x");
+        assert_eq!(x_fb.len(), 1);
+        if let BrokerMessage::Feedback { payload, .. } = &x_fb[0] {
+            assert!(payload.errors[0].contains("range 25-30"));
+        }
+    }
+
+    #[test]
+    fn detector_non_overlapping_ranges_no_conflict() {
+        // Spec: Non-overlapping ranges do not intersect.
+        let r1 = Region::Range {
+            start_line: 10,
+            end_line: 20,
+        };
+        let r2 = Region::Range {
+            start_line: 30,
+            end_line: 40,
+        };
+        let a = intent_msg_with_regions("feat-x", &[("src/auth.rs", vec![r1])], "x", 600);
+        let b = intent_msg_with_regions("feat-y", &[("src/auth.rs", vec![r2])], "y", 600);
+        let (state, _) = run_two_intents(&a, &b);
+        assert!(supervisor_feedbacks_in_inbox(&state, "feat-x").is_empty());
+        assert!(supervisor_feedbacks_in_inbox(&state, "feat-y").is_empty());
+    }
+
+    #[test]
+    fn detector_warning_enumerates_multiple_intersecting_regions() {
+        // Spec: Detector warning identifies intersecting regions — both
+        // functions named.
+        let a = intent_msg_with_regions(
+            "feat-x",
+            &[(
+                "src/auth.rs",
+                vec![func("validate_token"), func("refresh_session")],
+            )],
+            "x",
+            600,
+        );
+        let b = intent_msg_with_regions(
+            "feat-y",
+            &[(
+                "src/auth.rs",
+                vec![func("validate_token"), func("refresh_session")],
+            )],
+            "y",
+            600,
+        );
+        let (state, _) = run_two_intents(&a, &b);
+        let x_fb = supervisor_feedbacks_in_inbox(&state, "feat-x");
+        assert_eq!(x_fb.len(), 1);
+        if let BrokerMessage::Feedback { payload, .. } = &x_fb[0] {
+            assert!(payload.errors[0].contains("function validate_token"));
+            assert!(payload.errors[0].contains("function refresh_session"));
+        }
+    }
+
+    #[test]
+    fn detector_v050_string_only_intents_behave_file_level() {
+        // Backwards compatibility: string-only intents (v0.5.0 shape) warn at
+        // file level exactly as before regions existed.
+        let a = intent_msg("feat-x", &["src/foo.rs", "src/bar.rs"], "x", 600);
+        let b = intent_msg("feat-y", &["src/bar.rs"], "y", 600);
+        let (state, _) = run_two_intents(&a, &b);
+        let x_fb = supervisor_feedbacks_in_inbox(&state, "feat-x");
+        assert_eq!(x_fb.len(), 1);
+        if let BrokerMessage::Feedback { payload, .. } = &x_fb[0] {
+            assert!(payload.errors[0].contains("src/bar.rs"));
+            assert!(!payload.errors[0].contains("(regions:"));
+        }
+    }
+
+    #[test]
+    fn detector_region_conflict_only_on_intersecting_file() {
+        // Two shared files: one with overlapping regions, one with disjoint
+        // regions. Only the intersecting file appears in the warning.
+        let a = intent_msg_with_regions(
+            "feat-x",
+            &[
+                ("src/auth.rs", vec![func("validate_token")]),
+                ("src/db.rs", vec![func("connect")]),
+            ],
+            "x",
+            600,
+        );
+        let b = intent_msg_with_regions(
+            "feat-y",
+            &[
+                ("src/auth.rs", vec![func("validate_token")]),
+                ("src/db.rs", vec![func("migrate")]),
+            ],
+            "y",
+            600,
+        );
+        let (state, _) = run_two_intents(&a, &b);
+        let x_fb = supervisor_feedbacks_in_inbox(&state, "feat-x");
+        assert_eq!(x_fb.len(), 1);
+        if let BrokerMessage::Feedback { payload, .. } = &x_fb[0] {
+            assert!(payload.errors[0].contains("src/auth.rs"));
+            assert!(
+                !payload.errors[0].contains("src/db.rs"),
+                "db.rs has disjoint functions and must not appear: {}",
+                payload.errors[0]
+            );
         }
     }
 }

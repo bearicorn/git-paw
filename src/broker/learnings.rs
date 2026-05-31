@@ -17,7 +17,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::messages::BrokerMessage;
+use std::hash::Hasher as _;
+
+use chrono::{TimeZone as _, Utc};
+
+use super::messages::{BrokerMessage, LearningPayload};
 
 /// Substring marker that conflict-detector-originated messages prepend to
 /// their `errors`/`question` text.
@@ -26,6 +30,147 @@ pub const CONFLICT_DETECTOR_TAG: &str = "[conflict-detector]";
 /// Default `count` threshold below which a permission-pattern entry is
 /// withheld at flush. See the `Permission-pattern signal` spec.
 pub const PERMISSION_PATTERN_THRESHOLD: u64 = 5;
+
+/// Category tag for conflict-detector-derived learnings.
+pub const CATEGORY_CONFLICT_EVENT: &str = "conflict_event";
+/// Category tag for stuck-duration learnings.
+pub const CATEGORY_STUCK_DURATION: &str = "stuck_duration";
+/// Category tag for recovery-cycle learnings.
+pub const CATEGORY_RECOVERY_CYCLES: &str = "recovery_cycles";
+/// Category tag for permission-pattern learnings.
+pub const CATEGORY_PERMISSION_PATTERN: &str = "permission_pattern";
+
+// --- Qualitative learning categories (v0.6.0) ---
+//
+// These four categories are NOT produced by the aggregator itself; they are
+// published by the supervisor LLM via the existing `agent.learning` wire
+// variant (no wire-format change — the open `category` enum from the
+// `agent-learning-variant` change carries them). The aggregator ingests them
+// on the publish path and routes each into its own file section. The broker
+// does NOT validate the bodies (consumer-side discipline, design D5); the
+// documented body shape below is what the supervisor skill teaches the LLM to
+// emit, and the file renderer tolerates drift by falling back to a JSON dump.
+
+/// Category tag for recurring-failure-shape learnings: the same error shape
+/// observed across multiple `agent.feedback` cycles from distinct branches.
+///
+/// Documented body shape (design D1):
+/// ```json
+/// { "shape": "import cycle in module X",
+///   "instances": [ { "branch_id": "feat/a", "feedback_id": "...", "excerpt": "..." } ] }
+/// ```
+/// Primary identifier (for within-session dedup): `shape`.
+pub const CATEGORY_RECURRING_FAILURE_SHAPE: &str = "recurring_failure_shape";
+/// Category tag for documentation-gap learnings: a spec assumes a convention
+/// that no checked-in doc explains.
+///
+/// Documented body shape (design D1):
+/// ```json
+/// { "convention": "agents run lint before commit",
+///   "evidence_paths": ["AGENTS.md"], "suggestion": "add to AGENTS.md" }
+/// ```
+/// Primary identifier: `convention`.
+pub const CATEGORY_DOC_GAP: &str = "doc_gap";
+/// Category tag for ADR / architectural-drift learnings: code introduces a
+/// decision (pattern, dependency, boundary) not reflected in the configured
+/// ADRs.
+///
+/// Documented body shape (design D1):
+/// ```json
+/// { "decision_area": "async runtime", "observed_pattern": "...",
+///   "configured_adr_path": "docs/adr", "candidate_adr_title": "ADR-NNNN: ..." }
+/// ```
+/// Primary identifier: `decision_area`.
+pub const CATEGORY_ADR_DRIFT: &str = "adr_drift";
+/// Category tag for scope-mistake learnings: two or more branches coordinated
+/// heavily because the original spec scope drew the boundary in the wrong
+/// place.
+///
+/// Documented body shape (design D1):
+/// ```json
+/// { "branches": ["feat/a", "feat/b"], "shared_files": ["src/foo"],
+///   "coordination_events": [], "suggestion": "merge feat/a and feat/b scopes" }
+/// ```
+/// Primary identifier: the `branches` set.
+pub const CATEGORY_SCOPE_MISTAKE: &str = "scope_mistake";
+
+/// Publishing `agent_id` for aggregator-produced learnings. The aggregator
+/// runs inside the broker/supervisor process, so every record is attributed
+/// to the supervisor regardless of which branch it concerns; per-branch
+/// scoping is carried by [`LearningRecord::branch_id`].
+pub const LEARNINGS_AGENT_ID: &str = "supervisor";
+
+/// One structured, emittable learning record — the single in-memory
+/// representation of a learning destined for the `agent.learning` wire
+/// variant.
+///
+/// The aggregator's working-state entry types ([`StuckDurationEntry`],
+/// [`RecoveryCycleEntry`], [`ConflictEvent`], and the permission counters)
+/// are projected into `LearningRecord`s at flush time. The broker payload is
+/// then produced solely by `From<&LearningRecord> for BrokerMessage` — there
+/// is no parallel wire-record data model (the
+/// `agent-learning-variant` "Internal model serialises directly" requirement).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LearningRecord {
+    /// Open category tag (see the `CATEGORY_*` constants).
+    pub category: String,
+    /// Publishing agent id (typically [`LEARNINGS_AGENT_ID`]).
+    pub agent_id: String,
+    /// Branch the record is scoped to; `None` for cross-cutting records
+    /// (permission patterns, conflict pairs).
+    pub branch_id: Option<String>,
+    /// Short human-readable summary; mirrors the markdown bullet text.
+    pub title: String,
+    /// Category-specific structured body.
+    pub body: serde_json::Value,
+    /// When the record was committed; used for the hour bucket and the
+    /// emitted ISO-8601 wire timestamp.
+    pub timestamp: SystemTime,
+}
+
+impl LearningRecord {
+    /// Computes the deterministic dedup id: a stable 16-hex-char (64-bit)
+    /// hash of a canonical serialisation of `category`, `branch_id`, the
+    /// `body` (object keys sorted), and the UTC hour bucket (`YYYY-MM-DDTHH`).
+    ///
+    /// Uses the std-library [`DefaultHasher`](std::collections::hash_map::DefaultHasher)
+    /// — no external crypto dependency. The id is not a security primitive;
+    /// it only needs to be deterministic for the same canonical input so
+    /// consumers can dedupe. Re-publishing the same logical record within one
+    /// UTC hour yields the same id; across an hour boundary the id changes so
+    /// a genuine recurrence registers.
+    #[must_use]
+    pub fn deterministic_id(&self) -> String {
+        let mut canon = String::new();
+        canon.push_str(&self.category);
+        canon.push('|');
+        canon.push_str(self.branch_id.as_deref().unwrap_or(""));
+        canon.push('|');
+        canonical_value(&self.body, &mut canon);
+        canon.push('|');
+        canon.push_str(&hour_bucket(self.timestamp));
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        hasher.write(canon.as_bytes());
+        format!("{:016x}", hasher.finish())
+    }
+}
+
+impl From<&LearningRecord> for BrokerMessage {
+    fn from(record: &LearningRecord) -> Self {
+        BrokerMessage::Learning {
+            payload: LearningPayload {
+                id: record.deterministic_id(),
+                agent_id: record.agent_id.clone(),
+                branch_id: record.branch_id.clone(),
+                category: record.category.clone(),
+                title: record.title.clone(),
+                body: record.body.clone(),
+                timestamp: format_iso8601_utc(record.timestamp),
+            },
+        }
+    }
+}
 
 /// A resolved-or-unresolved stuck-duration observation for one agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +206,11 @@ pub enum ConflictCategory {
         agents: Vec<String>,
         /// The shared spec id (e.g. `003-user-list`).
         spec_id: String,
+        /// Intersecting region descriptors (e.g. `function validate_token`)
+        /// when the forward conflict was detected at region granularity;
+        /// empty for a file-level conflict. See
+        /// `conflict-detector-fn-granularity`.
+        regions: Vec<String>,
     },
     /// Forward conflict spanning two `SpecEntry` families.
     ForwardConflictCrossSpec {
@@ -69,6 +219,9 @@ pub enum ConflictCategory {
         /// Spec ids for the agents, in the same order as `agents`. May be
         /// empty entries when the agent → spec mapping is not yet known.
         spec_ids: Vec<String>,
+        /// Intersecting region descriptors when detected at region
+        /// granularity; empty for a file-level conflict.
+        regions: Vec<String>,
     },
     /// In-flight conflict — both agents currently editing the same file.
     InFlightConflict {
@@ -139,6 +292,23 @@ pub struct LearningsAggregator {
     /// Cached set of known agent ids, used to extract the "other" agent
     /// id from conflict-detector message text.
     known_agents: Vec<String>,
+    /// When `true`, flushed entries are also projected into
+    /// [`LearningRecord`]s and queued in `pending_publish` for the flush loop
+    /// to emit as `agent.learning` broker messages. When `false`, the
+    /// aggregator is file-only (v0.5.0 behaviour) and never queues records.
+    broker_publish: bool,
+    /// Records committed during flushes, awaiting broker publish; drained by
+    /// [`Self::take_pending_publish`]. Always empty when `broker_publish` is
+    /// `false`.
+    pending_publish: Vec<LearningRecord>,
+    /// Qualitative learning records ingested from externally-published
+    /// `agent.learning` messages (the supervisor LLM), awaiting flush. Unlike
+    /// the deterministic event vectors above, these arrive fully-formed on the
+    /// publish path rather than being accumulated from raw broker traffic, and
+    /// are NEVER re-published (they already came from the broker).
+    qualitative_events: Vec<LearningPayload>,
+    /// Cursor: number of `qualitative_events` already written to the markdown.
+    qualitative_flushed: usize,
 }
 
 impl LearningsAggregator {
@@ -171,7 +341,33 @@ impl LearningsAggregator {
             spec_ids: HashMap::new(),
             file_path,
             known_agents: Vec::new(),
+            broker_publish: false,
+            pending_publish: Vec::new(),
+            qualitative_events: Vec::new(),
+            qualitative_flushed: 0,
         }
+    }
+
+    /// Enables or disables broker publication of flushed records. Off by
+    /// default (file-only, the v0.5.0 behaviour). The dual-output path is
+    /// gated on this so `[broker] enabled = false` or
+    /// `[supervisor.learnings] broker_publish = "force_off"` produce no
+    /// broker traffic at all.
+    pub fn set_broker_publish(&mut self, enabled: bool) {
+        self.broker_publish = enabled;
+    }
+
+    /// Returns whether broker publication of flushed records is enabled.
+    #[must_use]
+    pub fn broker_publish_enabled(&self) -> bool {
+        self.broker_publish
+    }
+
+    /// Drains the queue of [`LearningRecord`]s committed since the last call
+    /// so the flush loop can emit them as `agent.learning` messages. Always
+    /// empty when broker publish is disabled.
+    pub fn take_pending_publish(&mut self) -> Vec<LearningRecord> {
+        std::mem::take(&mut self.pending_publish)
     }
 
     /// Registers an agent so its id can be extracted from conflict-detector
@@ -294,7 +490,8 @@ impl LearningsAggregator {
         if text.contains("forward conflict") {
             if let Some(other) = others.first() {
                 let pair = sorted_pair(&target, other);
-                let category = self.classify_forward(&pair);
+                let regions = extract_regions(&text);
+                let category = self.classify_forward(&pair, regions);
                 if !self.has_conflict_category(&category) {
                     self.conflict_events.push(ConflictEvent { category });
                 }
@@ -357,7 +554,48 @@ impl LearningsAggregator {
                 // `agent.artifact` correlations can find it.
                 self.register_agent(agent_id);
             }
+            BrokerMessage::Learning { payload } => {
+                // `agent.learning` records flow back through the publish path.
+                // The aggregator's own deterministic-category records were
+                // already rendered by `write_flush`; re-aggregating them would
+                // double-render (and recurse), so they are ignored here. Any
+                // OTHER category is an externally-published (supervisor LLM)
+                // qualitative record the aggregator must route into a file
+                // section — see [`Self::record_qualitative`].
+                self.record_qualitative(payload);
+            }
+            // `supervisor.verify-now` is a broker-emitted operational nudge and
+            // `agent.advanced-main` is a supervisor-published merge notification
+            // — both are coordination signals, not agent learnings, and are
+            // ignored.
+            BrokerMessage::VerifyNow { .. } | BrokerMessage::AdvancedMain { .. } => {}
         }
+    }
+
+    /// Ingests an externally-published `agent.learning` record for file
+    /// rendering. Deterministic-category records (the aggregator's own,
+    /// flowing back through the publish path) are dropped to avoid
+    /// double-rendering. The remaining qualitative / unknown-category records
+    /// are accumulated for the next flush, after a within-session dedup pass
+    /// (design D3, belt-and-braces on top of the skill-level dedup): a record
+    /// whose `(category, primary identifier)` matches one already ingested
+    /// this session is suppressed.
+    ///
+    /// Ingested records are NEVER queued for publish — they already came from
+    /// the broker.
+    pub fn record_qualitative(&mut self, payload: &LearningPayload) {
+        if is_deterministic_category(&payload.category) {
+            return;
+        }
+        let key = qualitative_dedup_key(payload);
+        if self
+            .qualitative_events
+            .iter()
+            .any(|p| qualitative_dedup_key(p) == key)
+        {
+            return;
+        }
+        self.qualitative_events.push(payload.clone());
     }
 
     /// Appends accumulated entries (since the last flush) to the markdown
@@ -401,17 +639,19 @@ impl LearningsAggregator {
         self.write_flush(true)
     }
 
-    fn classify_forward(&self, pair: &[String]) -> ConflictCategory {
+    fn classify_forward(&self, pair: &[String], regions: Vec<String>) -> ConflictCategory {
         let spec_a = self.spec_ids.get(&pair[0]);
         let spec_b = self.spec_ids.get(&pair[1]);
         match (spec_a, spec_b) {
             (Some(a), Some(b)) if a == b => ConflictCategory::ForwardConflictIntraSpec {
                 agents: pair.to_vec(),
                 spec_id: a.clone(),
+                regions,
             },
             (Some(a), Some(b)) => ConflictCategory::ForwardConflictCrossSpec {
                 agents: pair.to_vec(),
                 spec_ids: vec![a.clone(), b.clone()],
+                regions,
             },
             _ => ConflictCategory::ForwardConflictCrossSpec {
                 agents: pair.to_vec(),
@@ -419,6 +659,7 @@ impl LearningsAggregator {
                     spec_a.cloned().unwrap_or_default(),
                     spec_b.cloned().unwrap_or_default(),
                 ],
+                regions,
             },
         }
     }
@@ -438,6 +679,7 @@ impl LearningsAggregator {
     }
 
     fn write_flush(&mut self, _shutdown: bool) -> std::io::Result<()> {
+        let broker_publish = self.broker_publish;
         let new_stuck = &self.stuck_events[self.stuck_flushed..];
         let new_recovery = &self.recovery_events[self.recovery_flushed..];
         let new_conflicts = &self.conflict_events[self.conflict_flushed..];
@@ -456,10 +698,13 @@ impl LearningsAggregator {
             entries
         };
 
+        let new_qualitative = &self.qualitative_events[self.qualitative_flushed..];
+
         let has_any = !new_stuck.is_empty()
             || !new_recovery.is_empty()
             || !new_conflicts.is_empty()
-            || !permission_entries.is_empty();
+            || !permission_entries.is_empty()
+            || !new_qualitative.is_empty();
         if !has_any {
             return Ok(());
         }
@@ -496,14 +741,47 @@ impl LearningsAggregator {
             }
         }
 
+        render_qualitative_sections(new_qualitative, &mut out);
+
+        // Project the newly-flushed entries into wire-bound `LearningRecord`s
+        // for the broker, when broker publish is active. This is purely
+        // additive: it reads the same slices used for the markdown above and
+        // does NOT alter the file output (which remains byte-for-byte the
+        // v0.5.0 shape). `now` stamps every record from this flush so they
+        // share one UTC hour bucket for id stability.
+        let records: Vec<LearningRecord> = if broker_publish {
+            let now = SystemTime::now();
+            let mut records =
+                Vec::with_capacity(new_conflicts.len() + new_stuck.len() + new_recovery.len());
+            for ev in new_conflicts {
+                records.push(record_from_conflict(&ev.category, now));
+            }
+            for ev in new_stuck {
+                records.push(record_from_stuck(ev, now));
+            }
+            for ev in new_recovery {
+                records.push(record_from_recovery(ev, now));
+            }
+            for (class, count) in &permission_entries {
+                records.push(record_from_permission(class, *count, now));
+            }
+            records
+        } else {
+            Vec::new()
+        };
+
         append_to_file(&self.file_path, &out)?;
 
         self.stuck_flushed = self.stuck_events.len();
         self.recovery_flushed = self.recovery_events.len();
         self.conflict_flushed = self.conflict_events.len();
+        self.qualitative_flushed = self.qualitative_events.len();
         for (class, count) in &permission_entries {
             self.permission_emitted.insert(class.clone(), *count);
         }
+        // Queue records only after the file write succeeded, so a failed
+        // append never publishes a record that isn't also in the file.
+        self.pending_publish.extend(records);
         Ok(())
     }
 
@@ -521,6 +799,11 @@ impl LearningsAggregator {
     fn conflict_events(&self) -> &[ConflictEvent] {
         &self.conflict_events
     }
+
+    #[cfg(test)]
+    fn qualitative_events(&self) -> &[LearningPayload] {
+        &self.qualitative_events
+    }
 }
 
 /// Reference-counted aggregator handle shared between the broker's publish
@@ -535,6 +818,118 @@ fn append_to_file(path: &Path, contents: &str) -> std::io::Result<()> {
     }
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     file.write_all(contents.as_bytes())
+}
+
+/// The Markdown H3 header under which `/tell` routing decisions are recorded
+/// (design D4).
+pub const ROUTING_SECTION_HEADER: &str = "### Supervisor routing";
+
+/// Maximum prompt length recorded verbatim in a routing entry; longer prompts
+/// are truncated with a trailing `…` (the full prompt rides the broker
+/// message).
+pub const ROUTING_PROMPT_MAX_CHARS: usize = 200;
+
+/// Formats one "Supervisor routing" log line for a `/tell` invocation
+/// (design D4).
+///
+/// `ts_iso` is the ISO-8601 UTC timestamp, `target` the agent identifier,
+/// `mode` the resolved delivery-mode label (`"feedback"` / `"send-keys"`), and
+/// `prompt` the user-typed prompt — truncated to
+/// [`ROUTING_PROMPT_MAX_CHARS`] characters with a trailing `…` when longer.
+#[must_use]
+pub fn format_routing_entry(ts_iso: &str, target: &str, mode: &str, prompt: &str) -> String {
+    let trimmed = prompt.trim();
+    let shown = if trimmed.chars().count() > ROUTING_PROMPT_MAX_CHARS {
+        let mut s: String = trimmed.chars().take(ROUTING_PROMPT_MAX_CHARS).collect();
+        s.push('…');
+        s
+    } else {
+        trimmed.to_string()
+    };
+    format!("- {ts_iso} — supervisor told `{target}` via {mode}: \"{shown}\"")
+}
+
+/// Appends a `/tell` routing decision to the "Supervisor routing" section of
+/// the learnings file, gated on `enabled` (design D4 / task 7).
+///
+/// Reuses the same [`append_to_file`] helper the aggregator uses for its
+/// flushes. When `enabled` is `false` this is a strict no-op — no file is
+/// created or written, honouring the `[supervisor] learnings = false`
+/// contract. The section header is written once, the first time a routing
+/// record lands in a file that does not already contain it.
+///
+/// # Errors
+/// Propagates any I/O error from reading or appending to the file.
+pub fn append_routing_record(
+    path: &Path,
+    enabled: bool,
+    ts_iso: &str,
+    target: &str,
+    mode: &str,
+    prompt: &str,
+) -> std::io::Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    let needs_header = match std::fs::read_to_string(path) {
+        Ok(existing) => !existing.contains(ROUTING_SECTION_HEADER),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => return Err(e),
+    };
+    let mut block = String::new();
+    if needs_header {
+        block.push('\n');
+        block.push_str(ROUTING_SECTION_HEADER);
+        block.push('\n');
+    }
+    block.push_str(&format_routing_entry(ts_iso, target, mode, prompt));
+    block.push('\n');
+    append_to_file(path, &block)
+}
+
+/// Appends a canonical, key-sorted serialisation of `value` to `out`.
+///
+/// Objects emit their keys in sorted order so that two logically-identical
+/// bodies (regardless of insertion order) produce byte-identical canonical
+/// strings — a precondition for the deterministic dedup id.
+fn canonical_value(value: &serde_json::Value, out: &mut String) {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (i, key) in keys.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(key);
+                out.push(':');
+                canonical_value(&map[*key], out);
+            }
+            out.push('}');
+        }
+        Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                canonical_value(item, out);
+            }
+            out.push(']');
+        }
+        other => out.push_str(&other.to_string()),
+    }
+}
+
+/// Formats `time` as a UTC hour bucket (`YYYY-MM-DDTHH`) for id hashing.
+fn hour_bucket(time: SystemTime) -> String {
+    let secs = time.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    Utc.timestamp_opt(i64::try_from(secs).unwrap_or(0), 0)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%dT%H").to_string())
+        .unwrap_or_default()
 }
 
 fn sorted_pair(a: &str, b: &str) -> Vec<String> {
@@ -587,6 +982,32 @@ fn extract_file_token(text: &str) -> Option<String> {
         })
 }
 
+/// Extracts intersecting region descriptors from a region-aware
+/// forward-conflict detector message.
+///
+/// The detector renders region-level conflicts as
+/// `... path (regions: function foo, range 10-30); ...`. This collects each
+/// comma-separated descriptor inside every `(regions: ...)` group, preserving
+/// order and de-duplicating. Returns an empty vec for a file-level conflict
+/// (no `(regions: ...)` group present), in which case the body omits the
+/// `regions` field.
+fn extract_regions(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("(regions: ") {
+        let after = &rest[start + "(regions: ".len()..];
+        let Some(end) = after.find(')') else { break };
+        for descriptor in after[..end].split(',') {
+            let trimmed = descriptor.trim();
+            if !trimmed.is_empty() && !out.iter().any(|d| d == trimmed) {
+                out.push(trimmed.to_string());
+            }
+        }
+        rest = &after[end..];
+    }
+    out
+}
+
 fn extract_command_class(message: Option<&str>) -> Option<String> {
     let msg = message?;
     msg.strip_prefix("auto_approved: matched ")
@@ -594,16 +1015,133 @@ fn extract_command_class(message: Option<&str>) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Projects a classified conflict event into a `conflict_event`
+/// [`LearningRecord`]. Conflicts are cross-cutting (they implicate a pair of
+/// branches), so `branch_id` is `None` and the involved agents live in the
+/// body.
+fn record_from_conflict(cat: &ConflictCategory, now: SystemTime) -> LearningRecord {
+    use serde_json::json;
+    let body = match cat {
+        ConflictCategory::ForwardConflictIntraSpec {
+            agents,
+            spec_id,
+            regions,
+        } => {
+            let mut b = json!({
+                "shape": "forward_intra_spec",
+                "agents": agents,
+                "spec_id": spec_id,
+            });
+            if !regions.is_empty() {
+                b["regions"] = json!(regions);
+            }
+            b
+        }
+        ConflictCategory::ForwardConflictCrossSpec {
+            agents,
+            spec_ids,
+            regions,
+        } => {
+            let mut b = json!({
+                "shape": "forward_cross_spec",
+                "agents": agents,
+                "spec_ids": spec_ids,
+            });
+            if !regions.is_empty() {
+                b["regions"] = json!(regions);
+            }
+            b
+        }
+        ConflictCategory::InFlightConflict { agents } => json!({
+            "shape": "in_flight",
+            "agents": agents,
+        }),
+        ConflictCategory::OwnershipViolation {
+            violator,
+            owner,
+            file,
+        } => json!({
+            "shape": "ownership_violation",
+            "violator": violator,
+            "owner": owner,
+            "file": file,
+        }),
+    };
+    LearningRecord {
+        category: CATEGORY_CONFLICT_EVENT.to_string(),
+        agent_id: LEARNINGS_AGENT_ID.to_string(),
+        branch_id: None,
+        title: render_conflict(cat),
+        body,
+        timestamp: now,
+    }
+}
+
+/// Projects a stuck-duration entry into a `stuck_duration` [`LearningRecord`]
+/// scoped to the blocked agent's branch.
+fn record_from_stuck(ev: &StuckDurationEntry, now: SystemTime) -> LearningRecord {
+    LearningRecord {
+        category: CATEGORY_STUCK_DURATION.to_string(),
+        agent_id: LEARNINGS_AGENT_ID.to_string(),
+        branch_id: Some(ev.agent_id.clone()),
+        title: render_stuck(ev),
+        body: serde_json::json!({
+            "agent_id": ev.agent_id,
+            "blocked_on": ev.blocked_on,
+            "duration_seconds": ev.duration_seconds,
+            "resolved": ev.resolved,
+        }),
+        timestamp: now,
+    }
+}
+
+/// Projects a recovery-cycle entry into a `recovery_cycles`
+/// [`LearningRecord`] scoped to the verifying agent's branch.
+fn record_from_recovery(ev: &RecoveryCycleEntry, now: SystemTime) -> LearningRecord {
+    LearningRecord {
+        category: CATEGORY_RECOVERY_CYCLES.to_string(),
+        agent_id: LEARNINGS_AGENT_ID.to_string(),
+        branch_id: Some(ev.agent_id.clone()),
+        title: render_recovery(ev),
+        body: serde_json::json!({
+            "agent_id": ev.agent_id,
+            "count": ev.count,
+        }),
+        timestamp: now,
+    }
+}
+
+/// Projects a permission-pattern entry into a `permission_pattern`
+/// [`LearningRecord`]. Permission patterns are cross-cutting (they describe
+/// the supervisor's auto-approve behaviour), so `branch_id` is `None`.
+fn record_from_permission(class: &str, count: u64, now: SystemTime) -> LearningRecord {
+    LearningRecord {
+        category: CATEGORY_PERMISSION_PATTERN.to_string(),
+        agent_id: LEARNINGS_AGENT_ID.to_string(),
+        branch_id: None,
+        title: render_permission(class, count),
+        body: serde_json::json!({
+            "command_class": class,
+            "count": count,
+        }),
+        timestamp: now,
+    }
+}
+
 fn render_conflict(cat: &ConflictCategory) -> String {
     match cat {
-        ConflictCategory::ForwardConflictIntraSpec { agents, spec_id } => {
+        ConflictCategory::ForwardConflictIntraSpec {
+            agents, spec_id, ..
+        } => {
             format!(
                 "forward-conflict-intra-spec: {} (spec {})",
                 agents.join(" and "),
                 spec_id
             )
         }
-        ConflictCategory::ForwardConflictCrossSpec { agents, spec_ids } => {
+        ConflictCategory::ForwardConflictCrossSpec {
+            agents, spec_ids, ..
+        } => {
             let specs: Vec<String> = spec_ids.iter().filter(|s| !s.is_empty()).cloned().collect();
             if specs.is_empty() {
                 format!("forward-conflict-cross-spec: {}", agents.join(" and "))
@@ -655,6 +1193,178 @@ fn render_recovery(ev: &RecoveryCycleEntry) -> String {
 
 fn render_permission(class: &str, count: u64) -> String {
     format!("`{class}` auto-approved {count} times")
+}
+
+// === Qualitative learnings (v0.6.0) ===
+
+/// The recognised qualitative categories paired with their file-section
+/// headers, in render order. Categories absent from this table fall through
+/// to the "Other learnings" section.
+const QUALITATIVE_SECTIONS: &[(&str, &str)] = &[
+    (CATEGORY_RECURRING_FAILURE_SHAPE, "Recurring failure shapes"),
+    (CATEGORY_DOC_GAP, "Documentation gaps"),
+    (CATEGORY_ADR_DRIFT, "ADR / architectural drift"),
+    (CATEGORY_SCOPE_MISTAKE, "Scope-mistake signals"),
+];
+
+/// Returns `true` for the four v0.5.0 deterministic categories the aggregator
+/// produces itself. Used to drop the aggregator's own records when they flow
+/// back through the publish path, so only externally-published qualitative
+/// records are ingested for file rendering.
+fn is_deterministic_category(category: &str) -> bool {
+    matches!(
+        category,
+        CATEGORY_CONFLICT_EVENT
+            | CATEGORY_STUCK_DURATION
+            | CATEGORY_RECOVERY_CYCLES
+            | CATEGORY_PERMISSION_PATTERN
+    )
+}
+
+/// Renders the qualitative records flushed this round into `out` (design D4):
+/// one section per recognised category in a fixed order, each emitted only
+/// when there is a record for it, followed by an "Other learnings" fallback
+/// that absorbs every unrecognised category so nothing is silently dropped.
+fn render_qualitative_sections(new_qualitative: &[LearningPayload], out: &mut String) {
+    for (category, header) in QUALITATIVE_SECTIONS {
+        let mut wrote_header = false;
+        for p in new_qualitative.iter().filter(|p| &p.category == category) {
+            if !wrote_header {
+                let _ = writeln!(out, "\n### {header}");
+                wrote_header = true;
+            }
+            out.push_str(&render_qualitative(p));
+        }
+    }
+    let mut wrote_other = false;
+    for p in new_qualitative
+        .iter()
+        .filter(|p| qualitative_section(&p.category).is_none())
+    {
+        if !wrote_other {
+            out.push_str("\n### Other learnings\n");
+            wrote_other = true;
+        }
+        out.push_str(&render_qualitative(p));
+    }
+}
+
+/// Returns the file-section header for a qualitative `category`, or `None`
+/// when the category is unrecognised (routes to "Other learnings").
+fn qualitative_section(category: &str) -> Option<&'static str> {
+    QUALITATIVE_SECTIONS
+        .iter()
+        .find(|(cat, _)| *cat == category)
+        .map(|(_, header)| *header)
+}
+
+/// Reads a string `key` from a JSON object body, if present and a string.
+fn string_field(body: &serde_json::Value, key: &str) -> Option<String> {
+    body.get(key).and_then(|v| v.as_str()).map(str::to_string)
+}
+
+/// Reads an array `key` from a JSON object body and returns its elements
+/// sorted and comma-joined, for use as a stable primary identifier. Non-string
+/// elements are serialised with their JSON representation.
+fn sorted_array_field(body: &serde_json::Value, key: &str) -> Option<String> {
+    let arr = body.get(key)?.as_array()?;
+    let mut items: Vec<String> = arr
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .map_or_else(|| v.to_string(), std::string::ToString::to_string)
+        })
+        .collect();
+    items.sort();
+    Some(items.join(","))
+}
+
+/// Computes the within-session dedup key for a qualitative record: its
+/// category plus the category's primary identifier (design D3). When the
+/// primary identifier is absent (malformed body) or the category is unknown,
+/// the publisher's deterministic `id` is used instead, so only exact
+/// duplicates are suppressed and distinct-but-malformed records survive.
+fn qualitative_dedup_key(p: &LearningPayload) -> String {
+    let primary = match p.category.as_str() {
+        CATEGORY_RECURRING_FAILURE_SHAPE => string_field(&p.body, "shape"),
+        CATEGORY_DOC_GAP => string_field(&p.body, "convention"),
+        CATEGORY_ADR_DRIFT => string_field(&p.body, "decision_area"),
+        CATEGORY_SCOPE_MISTAKE => sorted_array_field(&p.body, "branches"),
+        _ => None,
+    };
+    match primary {
+        Some(id) => format!("{}|{}", p.category, id),
+        None => format!("{}|#{}", p.category, p.id),
+    }
+}
+
+/// Serialises a JSON body compactly, falling back to its `Display` form if
+/// serialisation somehow fails (it cannot for an in-memory `Value`).
+fn compact_json(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+}
+
+/// Renders one qualitative record as a markdown bullet block (always ending
+/// in a newline). Well-formed bodies get a structured one-line summary; bodies
+/// that don't match the documented shape fall back to the title plus a JSON
+/// dump (design D5, tolerant rendering) so a record is never dropped.
+fn render_qualitative(p: &LearningPayload) -> String {
+    render_qualitative_structured(p).unwrap_or_else(|| render_qualitative_fallback(p))
+}
+
+/// Tolerant fallback: the record's `title` followed by its `body` serialised
+/// as compact JSON on an indented continuation line.
+fn render_qualitative_fallback(p: &LearningPayload) -> String {
+    format!("- {}\n  {}\n", p.title, compact_json(&p.body))
+}
+
+/// Structured rendering for a recognised, well-formed qualitative body.
+/// Returns `None` when a required field is missing so the caller falls back to
+/// [`render_qualitative_fallback`].
+fn render_qualitative_structured(p: &LearningPayload) -> Option<String> {
+    match p.category.as_str() {
+        CATEGORY_RECURRING_FAILURE_SHAPE => {
+            let shape = string_field(&p.body, "shape")?;
+            let instances = p.body.get("instances")?.as_array()?;
+            let branches: Vec<String> = instances
+                .iter()
+                .filter_map(|i| i.get("branch_id").and_then(|v| v.as_str()))
+                .map(str::to_string)
+                .collect();
+            let n = instances.len();
+            let noun = if n == 1 { "instance" } else { "instances" };
+            let across = if branches.is_empty() {
+                String::new()
+            } else {
+                format!(" across {}", branches.join(", "))
+            };
+            Some(format!("- {shape}: {n} {noun}{across}\n"))
+        }
+        CATEGORY_DOC_GAP => {
+            let convention = string_field(&p.body, "convention")?;
+            let suggestion = string_field(&p.body, "suggestion")?;
+            Some(format!("- {convention} — {suggestion}\n"))
+        }
+        CATEGORY_ADR_DRIFT => {
+            let area = string_field(&p.body, "decision_area")?;
+            let observed = string_field(&p.body, "observed_pattern")?;
+            Some(format!("- {area}: {observed}\n"))
+        }
+        CATEGORY_SCOPE_MISTAKE => {
+            let branches = p.body.get("branches")?.as_array()?;
+            let names: Vec<String> = branches
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect();
+            if names.is_empty() {
+                return None;
+            }
+            let suggestion = string_field(&p.body, "suggestion")?;
+            Some(format!("- {} — {suggestion}\n", names.join(" and ")))
+        }
+        _ => None,
+    }
 }
 
 fn format_duration(seconds: u64) -> String {
@@ -855,12 +1565,73 @@ mod tests {
         let events = a.conflict_events();
         assert_eq!(events.len(), 1);
         match &events[0].category {
-            ConflictCategory::ForwardConflictIntraSpec { agents, spec_id } => {
+            ConflictCategory::ForwardConflictIntraSpec {
+                agents, spec_id, ..
+            } => {
                 assert_eq!(agents, &vec!["feat-x".to_string(), "feat-y".to_string()]);
                 assert_eq!(spec_id, "003-user-list");
             }
             other => panic!("expected intra-spec, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn forward_conflict_region_aware_body_includes_regions() {
+        // A region-aware detector message yields a conflict_event body with a
+        // `regions` array naming the intersecting regions
+        // (conflict-detector-fn-granularity task 6.1).
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        a.register_agent("feat-x");
+        a.register_agent("feat-y");
+        a.record_detector_message(&feedback(
+            "feat-y",
+            &["[conflict-detector] forward conflict: agent feat-x also intends to modify: src/auth.rs (regions: function validate_token, function refresh_session)"],
+        ));
+        let events = a.conflict_events();
+        assert_eq!(events.len(), 1);
+        let record = record_from_conflict(&events[0].category, SystemTime::now());
+        let regions = record.body.get("regions").expect("regions field present");
+        assert_eq!(
+            regions,
+            &serde_json::json!(["function validate_token", "function refresh_session"])
+        );
+    }
+
+    #[test]
+    fn forward_conflict_file_level_body_omits_regions() {
+        // A file-level (regionless) forward conflict omits the `regions` field.
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        a.register_agent("feat-x");
+        a.register_agent("feat-y");
+        a.record_detector_message(&feedback(
+            "feat-y",
+            &["[conflict-detector] forward conflict: agent feat-x also intends to modify: src/main.rs"],
+        ));
+        let events = a.conflict_events();
+        assert_eq!(events.len(), 1);
+        let record = record_from_conflict(&events[0].category, SystemTime::now());
+        assert!(
+            record.body.get("regions").is_none(),
+            "file-level conflict must omit regions; got {:?}",
+            record.body
+        );
+    }
+
+    #[test]
+    fn extract_regions_parses_descriptors() {
+        assert_eq!(
+            extract_regions(
+                "foo src/a.rs (regions: function f, range 10-30); src/b.rs (regions: class C)"
+            ),
+            vec![
+                "function f".to_string(),
+                "range 10-30".to_string(),
+                "class C".to_string()
+            ]
+        );
+        assert!(extract_regions("no regions here, just src/a.rs").is_empty());
     }
 
     #[test]
@@ -884,7 +1655,9 @@ mod tests {
         let events = a.conflict_events();
         assert_eq!(events.len(), 1);
         match &events[0].category {
-            ConflictCategory::ForwardConflictCrossSpec { agents, spec_ids } => {
+            ConflictCategory::ForwardConflictCrossSpec {
+                agents, spec_ids, ..
+            } => {
                 assert_eq!(agents, &vec!["feat-x".to_string(), "feat-y".to_string()]);
                 assert!(spec_ids.iter().any(|s| s == "003-user-list"));
                 assert!(spec_ids.iter().any(|s| s == "004-error-handling"));
@@ -1184,91 +1957,40 @@ mod tests {
         assert!(md.contains("### Conflict events"));
     }
 
-    /// Spec scenario `No agent.learning broker variant in v0.5.0 / No
-    /// agent.learning variant exists in BrokerMessage in v0.5.0`:
-    /// inspect every variant of `BrokerMessage` and confirm none uses the
-    /// `agent.learning` serde tag.
+    /// Spec scenario (agent-learning-variant) `agent.learning broker message
+    /// variant`: the variant deferred in v0.5.0 now exists and round-trips.
+    /// This supersedes the v0.5.0 `broker_message_has_no_agent_learning_variant`
+    /// negative test, which asserted the variant's *absence*.
     #[test]
-    fn broker_message_has_no_agent_learning_variant() {
-        // Serialise one instance of every variant and assert the wire tag
-        // is one of the six known v0.4/v0.5 tags. Adding a new variant
-        // without updating this list (and the requirement) makes the test
-        // fail.
-        let allowed = [
-            "agent.status",
-            "agent.artifact",
-            "agent.blocked",
-            "agent.verified",
-            "agent.feedback",
-            "agent.question",
-        ];
-        let samples = [
-            (
-                "agent.status",
-                serde_json::to_string(&BrokerMessage::Status {
-                    agent_id: "x".to_string(),
-                    payload: crate::broker::messages::StatusPayload {
-                        status: "working".to_string(),
-                        modified_files: vec![],
-                        message: None,
-                        ..Default::default()
-                    },
-                })
-                .unwrap(),
-            ),
-            (
-                "agent.artifact",
-                serde_json::to_string(&BrokerMessage::Artifact {
-                    agent_id: "x".to_string(),
-                    payload: crate::broker::messages::ArtifactPayload {
-                        status: "done".to_string(),
-                        exports: vec![],
-                        modified_files: vec![],
-                    },
-                })
-                .unwrap(),
-            ),
-            (
-                "agent.blocked",
-                serde_json::to_string(&blocked("x", "y")).unwrap(),
-            ),
-            (
-                "agent.verified",
-                serde_json::to_string(&verified("x")).unwrap(),
-            ),
-            (
-                "agent.feedback",
-                serde_json::to_string(&feedback("x", &["e"])).unwrap(),
-            ),
-            (
-                "agent.question",
-                serde_json::to_string(&question("[conflict-detector] x")).unwrap(),
-            ),
-        ];
-        for (expected_tag, json) in &samples {
-            assert!(
-                json.contains(&format!("\"type\":\"{expected_tag}\"")),
-                "serialised {expected_tag} did not contain expected tag: {json}"
-            );
-            assert!(
-                !json.contains("agent.learning"),
-                "no variant should use the reserved agent.learning tag: {json}"
-            );
-        }
-        // Reject any unknown variant by trying to deserialise an
-        // `agent.learning` envelope.
-        let probe = r#"{"type":"agent.learning","agent_id":"x","payload":{}}"#;
-        let err = serde_json::from_str::<BrokerMessage>(probe);
-        assert!(
-            err.is_err(),
-            "deserialising agent.learning must fail — the variant must not exist"
-        );
-        // And the supervisor-config delta side: ensure the allowed list is
-        // a superset of nothing surprising. This is a guard that the test
-        // catches additions if someone adds a 7th variant.
-        for (tag, _) in &samples {
-            assert!(allowed.contains(tag));
-        }
+    fn broker_message_has_agent_learning_variant() {
+        use crate::broker::messages::LearningPayload;
+
+        // A well-formed `agent.learning` envelope now deserialises cleanly.
+        let probe = r#"{"type":"agent.learning","payload":{"id":"abc123def456abcd","agent_id":"supervisor","branch_id":"feat/x","category":"conflict_event","title":"forward conflict","body":{"shape":"forward"},"timestamp":"2026-05-28T12:01:01Z"}}"#;
+        let msg = BrokerMessage::from_json(probe)
+            .expect("a well-formed agent.learning envelope must deserialise");
+        let BrokerMessage::Learning { payload } = &msg else {
+            panic!("expected Learning, got {msg:?}");
+        };
+        assert_eq!(payload.category, "conflict_event");
+        assert_eq!(payload.agent_id, "supervisor");
+        assert_eq!(payload.branch_id.as_deref(), Some("feat/x"));
+        assert_eq!(msg.status_label(), "learning");
+
+        // And it re-serialises under the documented wire tag.
+        let round = BrokerMessage::Learning {
+            payload: LearningPayload {
+                id: "abc123def456abcd".to_string(),
+                agent_id: "supervisor".to_string(),
+                branch_id: None,
+                category: "permission_pattern".to_string(),
+                title: "`cargo check` auto-approved 23 times".to_string(),
+                body: serde_json::json!({"command_class": "cargo check", "count": 23}),
+                timestamp: "2026-05-28T12:01:01Z".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&round).unwrap();
+        assert!(json.contains("\"type\":\"agent.learning\""));
     }
 
     /// Spec scenario `Aggregator does not start when learnings flag is
@@ -1323,6 +2045,584 @@ mod tests {
         assert_eq!(
             cfg.flush_interval_seconds, 60,
             "LearningsConfig::default().flush_interval_seconds must be 60"
+        );
+    }
+
+    // === agent-learning-variant: deterministic id + record conversion ===
+
+    /// A timestamp at `YYYY-MM-DDTHH:MM` UTC for a fixed reference day so the
+    /// hour-bucket boundary behaviour can be exercised deterministically.
+    fn ts_at(hour: u64, minute: u64) -> SystemTime {
+        // 2026-05-28T00:00:00Z = 1_779_926_400 (days since epoch * 86400).
+        const DAY_START: u64 = 1_779_926_400;
+        UNIX_EPOCH + Duration::from_secs(DAY_START + hour * 3600 + minute * 60)
+    }
+
+    fn sample_record(category: &str, branch: Option<&str>, ts: SystemTime) -> LearningRecord {
+        LearningRecord {
+            category: category.to_string(),
+            agent_id: LEARNINGS_AGENT_ID.to_string(),
+            branch_id: branch.map(str::to_string),
+            title: "title".to_string(),
+            body: serde_json::json!({"agents": ["feat-x", "feat-y"], "files": ["src/a.rs"]}),
+            timestamp: ts,
+        }
+    }
+
+    // Task 2.3: same record at 13:30 and 13:59 produces the same id.
+    #[test]
+    fn same_record_within_the_hour_gets_same_id() {
+        let a = sample_record(CATEGORY_CONFLICT_EVENT, Some("feat-x"), ts_at(13, 30));
+        let b = sample_record(CATEGORY_CONFLICT_EVENT, Some("feat-x"), ts_at(13, 59));
+        assert_eq!(a.deterministic_id(), b.deterministic_id());
+        // The id is a 16-hex-char prefix.
+        assert_eq!(a.deterministic_id().len(), 16);
+        assert!(a.deterministic_id().chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // Task 2.4: same record at 13:59 and 14:01 produces different ids.
+    #[test]
+    fn same_record_across_hour_boundary_gets_different_ids() {
+        let a = sample_record(CATEGORY_CONFLICT_EVENT, Some("feat-x"), ts_at(13, 59));
+        let b = sample_record(CATEGORY_CONFLICT_EVENT, Some("feat-x"), ts_at(14, 1));
+        assert_ne!(a.deterministic_id(), b.deterministic_id());
+    }
+
+    // Task 2.5: different categories produce different ids even when the body
+    // is identical.
+    #[test]
+    fn different_categories_get_different_ids_with_identical_body() {
+        let ts = ts_at(13, 30);
+        let a = sample_record(CATEGORY_CONFLICT_EVENT, Some("feat-x"), ts);
+        let b = sample_record(CATEGORY_STUCK_DURATION, Some("feat-x"), ts);
+        assert_ne!(a.deterministic_id(), b.deterministic_id());
+    }
+
+    #[test]
+    fn id_is_independent_of_body_key_insertion_order() {
+        let ts = ts_at(13, 30);
+        let mut a = sample_record(CATEGORY_CONFLICT_EVENT, None, ts);
+        a.body = serde_json::json!({"alpha": 1, "beta": 2});
+        let mut b = sample_record(CATEGORY_CONFLICT_EVENT, None, ts);
+        b.body = serde_json::json!({"beta": 2, "alpha": 1});
+        assert_eq!(a.deterministic_id(), b.deterministic_id());
+    }
+
+    #[test]
+    fn branch_id_distinguishes_otherwise_identical_records() {
+        let ts = ts_at(13, 30);
+        let a = sample_record(CATEGORY_STUCK_DURATION, Some("feat-x"), ts);
+        let b = sample_record(CATEGORY_STUCK_DURATION, Some("feat-y"), ts);
+        assert_ne!(a.deterministic_id(), b.deterministic_id());
+    }
+
+    // Task 1.4: serialise + deserialise each of the four categories' records
+    // through the From<&LearningRecord> conversion and the wire envelope.
+    #[test]
+    fn all_four_categories_round_trip_through_broker_message() {
+        let now = ts_at(12, 1);
+        let records = [
+            record_from_conflict(
+                &ConflictCategory::InFlightConflict {
+                    agents: vec!["feat-x".to_string(), "feat-y".to_string()],
+                },
+                now,
+            ),
+            record_from_stuck(
+                &StuckDurationEntry {
+                    agent_id: "feat-x".to_string(),
+                    blocked_on: "feat-y".to_string(),
+                    duration_seconds: 672,
+                    resolved: true,
+                },
+                now,
+            ),
+            record_from_recovery(
+                &RecoveryCycleEntry {
+                    agent_id: "feat-x".to_string(),
+                    count: 3,
+                },
+                now,
+            ),
+            record_from_permission("cargo check", 23, now),
+        ];
+        let expected_categories = [
+            CATEGORY_CONFLICT_EVENT,
+            CATEGORY_STUCK_DURATION,
+            CATEGORY_RECOVERY_CYCLES,
+            CATEGORY_PERMISSION_PATTERN,
+        ];
+        for (record, expected_category) in records.iter().zip(expected_categories) {
+            let msg = BrokerMessage::from(record);
+            let json = serde_json::to_string(&msg).unwrap();
+            let back = BrokerMessage::from_json(&json)
+                .unwrap_or_else(|e| panic!("{expected_category} must round-trip: {e}"));
+            let BrokerMessage::Learning { payload } = back else {
+                panic!("expected Learning variant for {expected_category}");
+            };
+            assert_eq!(payload.category, expected_category);
+            assert_eq!(payload.id, record.deterministic_id());
+            assert_eq!(payload.agent_id, LEARNINGS_AGENT_ID);
+            assert!(!payload.title.is_empty());
+        }
+    }
+
+    #[test]
+    fn conflict_and_permission_records_are_cross_cutting_no_branch() {
+        let now = ts_at(12, 1);
+        let conflict = record_from_conflict(
+            &ConflictCategory::InFlightConflict {
+                agents: vec!["feat-x".to_string(), "feat-y".to_string()],
+            },
+            now,
+        );
+        let permission = record_from_permission("cargo check", 9, now);
+        assert_eq!(conflict.branch_id, None);
+        assert_eq!(permission.branch_id, None);
+    }
+
+    #[test]
+    fn stuck_and_recovery_records_are_branch_scoped() {
+        let now = ts_at(12, 1);
+        let stuck = record_from_stuck(
+            &StuckDurationEntry {
+                agent_id: "feat-x".to_string(),
+                blocked_on: "feat-y".to_string(),
+                duration_seconds: 60,
+                resolved: false,
+            },
+            now,
+        );
+        let recovery = record_from_recovery(
+            &RecoveryCycleEntry {
+                agent_id: "feat-z".to_string(),
+                count: 2,
+            },
+            now,
+        );
+        assert_eq!(stuck.branch_id.as_deref(), Some("feat-x"));
+        assert_eq!(recovery.branch_id.as_deref(), Some("feat-z"));
+    }
+
+    // === agent-learning-variant: dual-output gating ===
+
+    // Spec scenario `File-only output when broker is disabled`: with broker
+    // publish off (the default), a flush appends to the file and queues NO
+    // broker records.
+    #[test]
+    fn broker_publish_off_queues_no_records() {
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        assert!(!a.broker_publish_enabled());
+        for _ in 0..PERMISSION_PATTERN_THRESHOLD {
+            a.record_auto_approve("cargo check");
+        }
+        a.flush().unwrap();
+        assert!(read_md(a.file_path()).contains("`cargo check`"));
+        assert!(
+            a.take_pending_publish().is_empty(),
+            "no records should be queued when broker publish is disabled"
+        );
+    }
+
+    // Spec scenario `Both outputs when broker is enabled`: with broker publish
+    // on, a flush appends to the file AND queues a matching broker record.
+    #[test]
+    fn broker_publish_on_queues_records_matching_file() {
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        a.set_broker_publish(true);
+        a.register_agent("feat-x");
+        a.register_agent("feat-y");
+        a.record_detector_message(&feedback(
+            "feat-x",
+            &["[conflict-detector] in-flight conflict with feat-y on src/a.rs"],
+        ));
+        a.flush().unwrap();
+
+        let md = read_md(a.file_path());
+        assert!(md.contains("### Conflict events"));
+        let records = a.take_pending_publish();
+        assert_eq!(records.len(), 1, "one conflict record should be queued");
+        assert_eq!(records[0].category, CATEGORY_CONFLICT_EVENT);
+        // The record's title mirrors the markdown bullet text.
+        assert!(md.contains(&records[0].title));
+        // Draining empties the queue.
+        assert!(a.take_pending_publish().is_empty());
+    }
+
+    // === qualitative-learnings: ingestion, routing, tolerant rendering ===
+
+    use crate::broker::messages::LearningPayload;
+
+    /// Builds an externally-published `agent.learning` envelope with the given
+    /// category, title, and body — the shape the supervisor LLM publishes.
+    fn learning(category: &str, title: &str, body: serde_json::Value) -> BrokerMessage {
+        BrokerMessage::Learning {
+            payload: LearningPayload {
+                id: format!("id-{category}-{title}"),
+                agent_id: LEARNINGS_AGENT_ID.to_string(),
+                branch_id: None,
+                category: category.to_string(),
+                title: title.to_string(),
+                body,
+                timestamp: "2026-06-05T12:00:00Z".to_string(),
+            },
+        }
+    }
+
+    // Task 2.4: each new category routes to its own section header.
+    #[test]
+    fn each_qualitative_category_routes_to_its_section() {
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        a.observe(&learning(
+            CATEGORY_RECURRING_FAILURE_SHAPE,
+            "import cycle recurs",
+            serde_json::json!({
+                "shape": "import cycle in payments module",
+                "instances": [
+                    {"branch_id": "feat/a", "feedback_id": "f1", "excerpt": "..."},
+                    {"branch_id": "feat/b", "feedback_id": "f2", "excerpt": "..."}
+                ]
+            }),
+        ));
+        a.observe(&learning(
+            CATEGORY_DOC_GAP,
+            "lint-before-commit undocumented",
+            serde_json::json!({
+                "convention": "agents run lint before commit",
+                "evidence_paths": ["AGENTS.md"],
+                "suggestion": "add a Conventions section to AGENTS.md"
+            }),
+        ));
+        a.observe(&learning(
+            CATEGORY_ADR_DRIFT,
+            "async runtime undocumented",
+            serde_json::json!({
+                "decision_area": "async runtime",
+                "observed_pattern": "a background runtime added in the broker server",
+                "configured_adr_path": "docs/adr",
+                "candidate_adr_title": "ADR-0007: Adopt an async runtime"
+            }),
+        ));
+        a.observe(&learning(
+            CATEGORY_SCOPE_MISTAKE,
+            "two branches over-coordinated",
+            serde_json::json!({
+                "branches": ["feat/a", "feat/b"],
+                "shared_files": ["src/router"],
+                "coordination_events": [],
+                "suggestion": "merge the feat/a and feat/b scopes"
+            }),
+        ));
+        a.flush().unwrap();
+
+        let md = read_md(a.file_path());
+        assert!(md.contains("### Recurring failure shapes"), "{md}");
+        assert!(md.contains("import cycle in payments module: 2 instances across feat/a, feat/b"));
+        assert!(md.contains("### Documentation gaps"), "{md}");
+        assert!(
+            md.contains("- agents run lint before commit — add a Conventions section to AGENTS.md")
+        );
+        assert!(md.contains("### ADR / architectural drift"), "{md}");
+        assert!(md.contains("- async runtime: a background runtime added in the broker server"));
+        assert!(md.contains("### Scope-mistake signals"), "{md}");
+        assert!(md.contains("- feat/a and feat/b — merge the feat/a and feat/b scopes"));
+    }
+
+    // Task 2.4: a body that lacks a documented field renders as the title plus
+    // a JSON dump under the category's section (design D5).
+    #[test]
+    fn malformed_qualitative_body_renders_as_title_plus_json() {
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        // Lacks the documented `instances` field.
+        a.observe(&learning(
+            CATEGORY_RECURRING_FAILURE_SHAPE,
+            "vague shape with no instances",
+            serde_json::json!({"shape": "something fuzzy"}),
+        ));
+        a.flush().unwrap();
+
+        let md = read_md(a.file_path());
+        // Still under the recurring-failure-shape section.
+        assert!(md.contains("### Recurring failure shapes"), "{md}");
+        // Title line present.
+        assert!(md.contains("- vague shape with no instances"), "{md}");
+        // Body serialised as JSON present (not dropped).
+        assert!(md.contains(r#"{"shape":"something fuzzy"}"#), "{md}");
+    }
+
+    // Task 2.4: an unrecognised category lands under "Other learnings" and is
+    // not silently dropped.
+    #[test]
+    fn unknown_category_falls_through_to_other_learnings() {
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        a.observe(&learning(
+            "some_future_category",
+            "a future learning shape",
+            serde_json::json!({"note": "from a later version"}),
+        ));
+        a.flush().unwrap();
+
+        let md = read_md(a.file_path());
+        assert!(md.contains("### Other learnings"), "{md}");
+        assert!(md.contains("- a future learning shape"), "{md}");
+        assert!(md.contains(r#"{"note":"from a later version"}"#), "{md}");
+    }
+
+    // Task 2.4: ingested deterministic-category records (the aggregator's own,
+    // flowing back through the publish path) are ignored — no double render,
+    // no "Other learnings" leak.
+    #[test]
+    fn ingested_deterministic_learning_is_ignored() {
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        a.observe(&learning(
+            CATEGORY_CONFLICT_EVENT,
+            "forward conflict feat-x and feat-y",
+            serde_json::json!({"shape": "forward", "agents": ["feat-x", "feat-y"]}),
+        ));
+        assert!(a.qualitative_events().is_empty());
+        a.flush().unwrap();
+        // Nothing written: the record was dropped and there is no other signal.
+        assert_eq!(read_md(a.file_path()), "");
+    }
+
+    // Task 2.4: the v0.5.0 deterministic sections still render in their v0.5.0
+    // shape, even when qualitative records are present in the same flush.
+    #[test]
+    fn v0_5_0_sections_unchanged_alongside_qualitative() {
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        // A v0.5.0 deterministic signal.
+        for _ in 0..PERMISSION_PATTERN_THRESHOLD {
+            a.record_auto_approve("git status");
+        }
+        // A qualitative signal in the same flush.
+        a.observe(&learning(
+            CATEGORY_DOC_GAP,
+            "doc gap",
+            serde_json::json!({"convention": "c", "suggestion": "s"}),
+        ));
+        a.flush().unwrap();
+
+        let md = read_md(a.file_path());
+        // v0.5.0 permission-pattern section + bullet, byte-for-byte shape.
+        assert!(md.contains("### Permission patterns"));
+        assert!(md.contains("- `git status` auto-approved 5 times"));
+        // Qualitative section also present.
+        assert!(md.contains("### Documentation gaps"));
+    }
+
+    // Task 4 / 6.2: the same recurring_failure_shape published twice in a
+    // session is rendered once (skill-level dedup reinforced code-side).
+    #[test]
+    fn qualitative_dedup_suppresses_same_primary_identifier() {
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        let body = serde_json::json!({
+            "shape": "import cycle in payments module",
+            "instances": [{"branch_id": "feat/a"}, {"branch_id": "feat/b"}]
+        });
+        a.observe(&learning(
+            CATEGORY_RECURRING_FAILURE_SHAPE,
+            "first sighting",
+            body.clone(),
+        ));
+        // Same shape, different title/wording — must be suppressed.
+        a.observe(&learning(
+            CATEGORY_RECURRING_FAILURE_SHAPE,
+            "second sighting, reworded",
+            body,
+        ));
+        assert_eq!(
+            a.qualitative_events().len(),
+            1,
+            "near-duplicate not deduped"
+        );
+        a.flush().unwrap();
+        let md = read_md(a.file_path());
+        let occurrences = md.matches("import cycle in payments module").count();
+        assert_eq!(occurrences, 1, "shape rendered more than once:\n{md}");
+    }
+
+    // Distinct primary identifiers within the same category are NOT deduped.
+    #[test]
+    fn qualitative_dedup_keeps_distinct_identifiers() {
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        a.observe(&learning(
+            CATEGORY_DOC_GAP,
+            "gap one",
+            serde_json::json!({"convention": "lint before commit", "suggestion": "s1"}),
+        ));
+        a.observe(&learning(
+            CATEGORY_DOC_GAP,
+            "gap two",
+            serde_json::json!({"convention": "sign your commits", "suggestion": "s2"}),
+        ));
+        assert_eq!(a.qualitative_events().len(), 2);
+    }
+
+    // Two malformed records with the same category but no primary identifier
+    // are kept distinct via the publisher's deterministic id.
+    #[test]
+    fn qualitative_dedup_distinguishes_malformed_by_id() {
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        a.observe(&learning(
+            CATEGORY_SCOPE_MISTAKE,
+            "malformed one",
+            serde_json::json!({"note": "no branches a"}),
+        ));
+        a.observe(&learning(
+            CATEGORY_SCOPE_MISTAKE,
+            "malformed two",
+            serde_json::json!({"note": "no branches b"}),
+        ));
+        assert_eq!(a.qualitative_events().len(), 2);
+    }
+
+    // Spec scenario `Hour-bucket id collisions are independently handled`:
+    // two qualitative records with identical canonical input within the same
+    // UTC hour produce the same deterministic id, so a broker consumer can
+    // dedupe exact re-emissions even if the skill-level dedup misses.
+    #[test]
+    fn qualitative_records_get_identical_ids_within_the_hour() {
+        let body = serde_json::json!({
+            "shape": "import cycle in payments module",
+            "instances": [{"branch_id": "feat/a"}, {"branch_id": "feat/b"}]
+        });
+        let a = LearningRecord {
+            category: CATEGORY_RECURRING_FAILURE_SHAPE.to_string(),
+            agent_id: LEARNINGS_AGENT_ID.to_string(),
+            branch_id: None,
+            title: "first".to_string(),
+            body: body.clone(),
+            timestamp: ts_at(13, 5),
+        };
+        let b = LearningRecord {
+            timestamp: ts_at(13, 55),
+            title: "reworded".to_string(),
+            ..a.clone()
+        };
+        assert_eq!(a.deterministic_id(), b.deterministic_id());
+        assert_eq!(a.deterministic_id().len(), 16);
+    }
+
+    // Qualitative ingestion never queues a broker publish (the record already
+    // came from the broker) even when broker publish is enabled.
+    #[test]
+    fn qualitative_ingestion_does_not_republish() {
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        a.set_broker_publish(true);
+        a.observe(&learning(
+            CATEGORY_DOC_GAP,
+            "doc gap",
+            serde_json::json!({"convention": "c", "suggestion": "s"}),
+        ));
+        a.flush().unwrap();
+        assert!(read_md(a.file_path()).contains("### Documentation gaps"));
+        assert!(
+            a.take_pending_publish().is_empty(),
+            "ingested qualitative records must not be re-published"
+        );
+    }
+
+    // Task 7.4 (idempotency, unit level): two aggregators replaying the same
+    // input events within the same hour produce records with identical ids,
+    // so a consumer dedupes them to one.
+    #[test]
+    fn replayed_events_within_hour_produce_identical_ids() {
+        fn run() -> String {
+            let tmp = TempDir::new().unwrap();
+            let mut a = agg(&tmp);
+            a.set_broker_publish(true);
+            a.register_agent("feat-x");
+            a.register_agent("feat-y");
+            a.record_detector_message(&feedback(
+                "feat-x",
+                &["[conflict-detector] in-flight conflict with feat-y on src/a.rs"],
+            ));
+            a.flush().unwrap();
+            a.take_pending_publish()[0].deterministic_id()
+        }
+        // Both runs fall in the same wall-clock hour (the test runs in well
+        // under an hour), so the ids match.
+        assert_eq!(run(), run());
+    }
+
+    // --- Supervisor routing records (supervisor-tell change, design D4) ---
+
+    #[test]
+    fn format_routing_entry_shape() {
+        let line = format_routing_entry(
+            "2026-05-28T14:35:09Z",
+            "feat/x",
+            "feedback",
+            "rebase onto main before continuing",
+        );
+        assert_eq!(
+            line,
+            "- 2026-05-28T14:35:09Z — supervisor told `feat/x` via feedback: \"rebase onto main before continuing\""
+        );
+    }
+
+    #[test]
+    fn format_routing_entry_truncates_long_prompt() {
+        let prompt = "x".repeat(300);
+        let line = format_routing_entry("T", "feat/x", "send-keys", &prompt);
+        assert!(
+            line.ends_with("…\""),
+            "long prompt should end with …: {line}"
+        );
+        // 200 retained chars + the ellipsis.
+        assert_eq!(prompt.chars().take(ROUTING_PROMPT_MAX_CHARS).count(), 200);
+        assert!(line.contains(&"x".repeat(ROUTING_PROMPT_MAX_CHARS)));
+    }
+
+    #[test]
+    fn routing_record_with_learnings_enabled_writes_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("session-learnings.md");
+        append_routing_record(
+            &path,
+            true,
+            "2026-05-28T14:35:09Z",
+            "feat/auth",
+            "feedback",
+            "rebase onto main",
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains(ROUTING_SECTION_HEADER));
+        assert!(body.contains("feat/auth"));
+        assert!(body.contains("via feedback"));
+        assert!(body.contains("rebase onto main"));
+
+        // A second record reuses the existing section header (written once).
+        append_routing_record(&path, true, "T2", "feat/api", "send-keys", "run it").unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            body.matches(ROUTING_SECTION_HEADER).count(),
+            1,
+            "section header must be written exactly once"
+        );
+        assert!(body.contains("feat/api"));
+    }
+
+    #[test]
+    fn routing_record_with_learnings_disabled_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("session-learnings.md");
+        append_routing_record(&path, false, "T", "feat/auth", "feedback", "noop").unwrap();
+        assert!(
+            !path.exists(),
+            "learnings = false must not create or write the file"
         );
     }
 }
