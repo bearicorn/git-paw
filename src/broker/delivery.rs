@@ -4,7 +4,6 @@
 //! to agent inboxes, polling with cursor-based pagination, snapshot
 //! queries for the dashboard, and the background log flush thread.
 
-use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::Arc;
@@ -28,12 +27,54 @@ fn sender_id(msg: &BrokerMessage) -> &str {
         | BrokerMessage::Intent { agent_id, .. } => agent_id,
         BrokerMessage::Verified { payload, .. } => &payload.verified_by,
         BrokerMessage::Feedback { payload, .. } => &payload.from,
+        // The sender identity lives in the payload's `from` (typically
+        // "supervisor"), like Verified/Feedback.
+        BrokerMessage::AdvancedMain { payload } => &payload.from,
+        // The learning's sender lives in the payload (no envelope id).
+        BrokerMessage::Learning { payload } => &payload.agent_id,
+        // Broker-emitted; the branch it nudges is the closest identity.
+        BrokerMessage::VerifyNow { branch_id } => branch_id,
     }
 }
+/// Whether a message updates the agent roster (`/status` `agents[]`).
+///
+/// Only messages whose sender is the real top-level `agent_id` —
+/// `Status`, `Artifact`, `Blocked`, `Intent` — may mint or mutate a roster
+/// row. `Feedback`, `Question`, `Verified`, and `AdvancedMain` carry the
+/// sender's identity in *payload* fields (`from` / `verified_by`); harvesting
+/// those into the roster mints phantom rows (W15-16: a `from:"human"` feedback
+/// created a `"human"` agent that never heartbeats). `VerifyNow` is
+/// broker-internal. All excluded variants are still routed and stored by
+/// [`route_message`]; they just never touch the roster.
+fn upserts_roster(msg: &BrokerMessage) -> bool {
+    matches!(
+        msg,
+        BrokerMessage::Status { .. }
+            | BrokerMessage::Artifact { .. }
+            | BrokerMessage::Blocked { .. }
+            | BrokerMessage::Intent { .. }
+    )
+}
+
 /// Updates (or creates) the agent record and inbox for the message sender.
 fn update_agent_record(inner: &mut BrokerStateInner, msg: &BrokerMessage) {
+    // Roster is populated only from status-publishing senders (W15-16). The
+    // excluded variants — feedback/question/verified (payload identity
+    // fields) and the broker-internal verify-now nudge — are routed and
+    // stored by the caller but must not create or mutate a roster row.
+    if !upserts_roster(msg) {
+        return;
+    }
+
+    let ttl = inner.republish_working_ttl;
     let agent_id = sender_id(msg).to_string();
     let status = msg.status_label().to_string();
+    let now = std::time::Instant::now();
+
+    // Bug 8: an `agent.artifact status: "committed"` event stamps the record
+    // so the watcher can gate post-commit `working` re-entry against the TTL.
+    let is_committed_artifact =
+        matches!(msg, BrokerMessage::Artifact { payload, .. } if payload.status == "committed");
 
     let record = inner
         .agents
@@ -41,31 +82,49 @@ fn update_agent_record(inner: &mut BrokerStateInner, msg: &BrokerMessage) {
         .or_insert_with(|| AgentRecord {
             agent_id: agent_id.clone(),
             status: String::new(),
-            last_seen: std::time::Instant::now(),
+            last_seen: now,
             last_message: None,
+            last_committed_at: None,
         });
 
     // Make terminal states sticky: only update status if the new status is also terminal
-    // or if the current status is not terminal
+    // or if the current status is not terminal.
     let is_terminal_status = |s: &str| matches!(s, "done" | "verified" | "blocked" | "committed");
 
-    if !is_terminal_status(&record.status) || is_terminal_status(&status) {
+    // Bug 8: `committed` is transient — a `working` status observed within the
+    // configured TTL after the committed event re-enters the working state.
+    // With TTL == 0 the v0.5.0 "committed is terminal" behaviour is preserved.
+    let committed_reentry = record.status == "committed"
+        && status == "working"
+        && !ttl.is_zero()
+        && record.last_committed_at.is_some_and(|t| t.elapsed() <= ttl);
+
+    if committed_reentry || !is_terminal_status(&record.status) || is_terminal_status(&status) {
         record.status = status;
     }
 
-    record.last_seen = std::time::Instant::now();
+    if is_committed_artifact {
+        record.last_committed_at = Some(now);
+    }
+
+    record.last_seen = now;
     record.last_message = Some(msg.clone());
 
-    // Upsert the CLI map from any `agent.status` payload that names a CLI.
-    // This is how the supervisor's CLI lands in `agent_clis` — coding agents
-    // already populate the map from `WatchTarget` at broker start, but the
-    // supervisor is not a watch target and self-registers with `cli`
-    // populated in the status payload (supervisor-as-pane-followups D2).
+    // CLI is pre-filled authoritatively at launch — the supervisor from
+    // `[supervisor].cli`/`default_cli` via `with_seeded_cli`, and each coding
+    // agent from its `WatchTarget` (per-repo session JSON). The bundled skills
+    // do NOT make agents self-report their CLI (git-paw knows it; an agent
+    // would only be guessing). This block is a defensive fallback: if some
+    // `agent.status` ever does carry a `cli`, fill the map only when empty so
+    // it can never clobber the authoritative prefill.
     if let BrokerMessage::Status { payload, .. } = msg
         && let Some(cli) = payload.cli.as_ref()
         && !cli.is_empty()
     {
-        inner.agent_clis.insert(agent_id.clone(), cli.clone());
+        inner
+            .agent_clis
+            .entry(agent_id.clone())
+            .or_insert_with(|| cli.clone());
     }
 
     // Ensure inbox exists for the sender
@@ -104,6 +163,39 @@ pub fn publish_message(state: &Arc<BrokerState>, msg: &BrokerMessage) {
         && let Ok(mut a) = agg.lock()
     {
         a.observe(msg);
+    }
+
+    // Per-commit verification nudge: when an agent publishes a `committed`
+    // artifact and the feature is enabled, emit a `supervisor.verify-now`
+    // nudge so the supervisor verifies this commit on an explicit event
+    // rather than waiting to notice it during a sweep — and never batches it
+    // with another agent's commit. The nudge carries the committing branch
+    // verbatim. Emitted as a separate message (recursive publish) so it gets
+    // its own sequence number, lands in the log, and routes to the supervisor
+    // inbox; `update_agent_record` skips it so it does not perturb the
+    // committing agent's record.
+    if state.verify_on_commit_nudge
+        && let BrokerMessage::Artifact { agent_id, payload } = msg
+        && payload.status == "committed"
+    {
+        let nudge = BrokerMessage::VerifyNow {
+            branch_id: agent_id.clone(),
+        };
+        publish_message(state, &nudge);
+    }
+
+    // opsx role-gating guard: when a `committed` artifact arrives and a
+    // role-gating context is attached, classify the commit and publish
+    // feedback/learning if a non-supervisor agent performed archive activity
+    // under the OpenSpec engine. Runs after the write lock is released (it
+    // publishes its own messages, mirroring the verify-now nudge above). The
+    // guard itself re-checks activation, so this only filters on the cheap
+    // message shape here.
+    if let Some(ctx) = state.role_gating.as_ref()
+        && let BrokerMessage::Artifact { agent_id, payload } = msg
+        && payload.status == "committed"
+    {
+        crate::opsx::role_guard::run_guard(state, agent_id, payload, ctx);
     }
 }
 
@@ -155,10 +247,22 @@ fn route_message(inner: &mut BrokerStateInner, msg: &BrokerMessage, seq: u64) {
             }
             // Silently drop if target has no inbox (not yet registered)
         }
-        BrokerMessage::Question { .. } => {
+        BrokerMessage::Question { .. } | BrokerMessage::VerifyNow { .. } => {
             // Route to the supervisor inbox, creating it if absent.
             // Do NOT enqueue in sender's or any other agent's inbox.
+            // `VerifyNow` is broker-emitted; like a question it is a
+            // supervisor-directed signal.
             let inbox = inner.queues.entry("supervisor".to_string()).or_default();
+            inbox.push((seq, msg.clone()));
+        }
+        BrokerMessage::Learning { payload } => {
+            // A branch-scoped learning lands in that branch's inbox so it is
+            // retrievable via `messages/<branch_id>`; a cross-cutting learning
+            // (no `branch_id`) goes to the supervisor inbox. Either inbox is
+            // created if absent. The record is always retained in the message
+            // log (by the caller) regardless of routing.
+            let target = payload.branch_id.as_deref().unwrap_or("supervisor");
+            let inbox = inner.queues.entry(target.to_string()).or_default();
             inbox.push((seq, msg.clone()));
         }
         BrokerMessage::Intent { agent_id, .. } => {
@@ -169,6 +273,24 @@ fn route_message(inner: &mut BrokerStateInner, msg: &BrokerMessage, seq: u64) {
                 .queues
                 .keys()
                 .filter(|id| id.as_str() != agent_id)
+                .cloned()
+                .collect();
+            for target in targets {
+                if let Some(inbox) = inner.queues.get_mut(&target) {
+                    inbox.push((seq, msg.clone()));
+                }
+            }
+        }
+        BrokerMessage::AdvancedMain { payload } => {
+            // Broadcast to every other registered agent's inbox, skipping the
+            // publisher (`payload.from`). Every dependent agent learns the
+            // base moved on its next `/messages/<id>` poll without a special
+            // subscription — same broadcast pattern as Artifact / Intent.
+            let sender = payload.from.clone();
+            let targets: Vec<String> = inner
+                .queues
+                .keys()
+                .filter(|id| id.as_str() != sender.as_str())
                 .cloned()
                 .collect();
             for target in targets {
@@ -263,42 +385,30 @@ pub fn full_log(
 /// used for rendering or serialization without holding any lock.
 pub fn agent_status_snapshot(state: &Arc<BrokerState>) -> Vec<AgentStatusEntry> {
     let inner = state.read();
-    // Start from the watched-target CLI map so every known pane shows up
-    // even before it has published a status message, then overlay any
-    // agents that have actually published with their live status.
-    let mut entries: HashMap<String, AgentStatusEntry> = inner
-        .agent_clis
-        .iter()
-        .map(|(agent_id, cli)| {
-            (
-                agent_id.clone(),
-                AgentStatusEntry {
-                    agent_id: agent_id.clone(),
-                    cli: cli.clone(),
-                    status: "idle".to_string(),
-                    last_seen_seconds: 0,
-                    summary: String::new(),
-                    last_seen: std::time::Instant::now(),
-                    phase: None,
-                },
-            )
-        })
-        .collect();
-    for r in inner.agents.values() {
-        let cli = inner
-            .agent_clis
-            .get(&r.agent_id)
-            .cloned()
-            .unwrap_or_default();
-        // Pull the most-recent `payload.phase` (if any) so the dashboard
-        // can prefer it over the message-type-derived status label.
-        let phase = if let Some(BrokerMessage::Status { payload, .. }) = r.last_message.as_ref() {
-            payload.phase.clone()
-        } else {
-            None
-        };
-        entries.insert(
-            r.agent_id.clone(),
+    // A roster row appears only for an agent that has actually published
+    // (the `agents` map) — consistent with the status-publisher-only rule
+    // (W15-16), so an unstarted or aborted pane never shows a phantom row
+    // (supervisor included). The CLI column is filled from the authoritative
+    // `agent_clis` seed (supervisor from config, agents from their
+    // `WatchTarget`), so when a row does appear its CLI is the launcher-known
+    // value — never a self-reported guess and never blank for a known pane.
+    let mut out: Vec<AgentStatusEntry> = inner
+        .agents
+        .values()
+        .map(|r| {
+            let cli = inner
+                .agent_clis
+                .get(&r.agent_id)
+                .cloned()
+                .unwrap_or_default();
+            // Prefer the most-recent `payload.phase` (if any) so the dashboard
+            // can show it over the message-type-derived status label.
+            let phase = if let Some(BrokerMessage::Status { payload, .. }) = r.last_message.as_ref()
+            {
+                payload.phase.clone()
+            } else {
+                None
+            };
             AgentStatusEntry {
                 agent_id: r.agent_id.clone(),
                 cli,
@@ -307,13 +417,12 @@ pub fn agent_status_snapshot(state: &Arc<BrokerState>) -> Vec<AgentStatusEntry> 
                 summary: String::new(),
                 last_seen: r.last_seen,
                 phase,
-            },
-        );
-    }
+            }
+        })
+        .collect();
     // Sort by agent_id so the dashboard rows stay in a stable order across
     // ticks — otherwise HashMap iteration order makes rows jitter on every
     // redraw.
-    let mut out: Vec<AgentStatusEntry> = entries.into_values().collect();
     out.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
     out
 }
@@ -463,7 +572,10 @@ mod tests {
         BrokerMessage::Intent {
             agent_id: agent_id.to_string(),
             payload: IntentPayload {
-                files: files.iter().map(|s| (*s).to_string()).collect(),
+                files: files
+                    .iter()
+                    .map(|s| crate::broker::messages::FileIntent::from(*s))
+                    .collect(),
                 summary: summary.to_string(),
                 valid_for_seconds: ttl,
             },
@@ -656,7 +768,12 @@ mod tests {
     }
 
     #[test]
-    fn verified_updates_sender_record() {
+    fn verified_does_not_mutate_verifier_record() {
+        // W15-16: a `Verified` carries the verifier in `payload.verified_by`,
+        // not in a top-level agent_id. Harvesting that identity into the
+        // roster wrongly flips the verifier's own row to "verified". The
+        // roster is now status-publisher-only, so the verifier's record keeps
+        // its real status.
         let state = fresh_state();
         publish_message(&state, &make_status("supervisor", "working"));
 
@@ -667,7 +784,10 @@ mod tests {
             .agents
             .get("supervisor")
             .expect("supervisor record exists");
-        assert_eq!(record.status, "verified");
+        assert_eq!(
+            record.status, "working",
+            "a Verified message must not mutate the verifier's roster row",
+        );
     }
 
     #[test]
@@ -703,7 +823,11 @@ mod tests {
     }
 
     #[test]
-    fn feedback_updates_sender_record() {
+    fn feedback_does_not_mutate_sender_record() {
+        // W15-16: a `Feedback` carries its sender in `payload.from`, not a
+        // top-level agent_id. The roster is status-publisher-only, so a
+        // supervisor-originated feedback must not flip the supervisor's row to
+        // "feedback".
         let state = fresh_state();
         publish_message(&state, &make_status("supervisor", "working"));
 
@@ -717,7 +841,85 @@ mod tests {
             .agents
             .get("supervisor")
             .expect("supervisor record exists");
-        assert_eq!(record.status, "feedback");
+        assert_eq!(
+            record.status, "working",
+            "a Feedback message must not mutate the sender's roster row",
+        );
+    }
+
+    #[test]
+    fn feedback_from_non_agent_creates_no_phantom_row() {
+        // W15-16: the headline phantom — a `from:"human"` feedback minted a
+        // "human" agent that never heartbeats. The roster must contain only
+        // the real status publishers.
+        let state = fresh_state();
+        publish_message(&state, &make_status("feat-errors", "working"));
+        publish_message(&state, &make_status("supervisor", "working"));
+
+        publish_message(
+            &state,
+            &make_feedback("feat-errors", "human", &["fix the flaky test"]),
+        );
+
+        let inner = state.read();
+        assert!(
+            !inner.agents.contains_key("human"),
+            "a feedback's `from` identity must never mint a roster row",
+        );
+        assert_eq!(
+            inner.agents.len(),
+            2,
+            "roster holds exactly the two status publishers",
+        );
+        // ...and the feedback is still delivered to its target.
+        drop(inner);
+        let (msgs, _) = poll_messages(&state, "feat-errors", 0);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].status_label(), "feedback");
+    }
+
+    #[test]
+    fn fresh_broker_state_builds_roster_only_from_status_publishers() {
+        // W15-16: the roster is in-memory; a restart (a brand-new
+        // `BrokerState`, as every `git paw start` produces) carries no
+        // pre-existing phantom. After re-registration the roster holds only
+        // the fresh status publishers.
+        let state = fresh_state();
+        {
+            let inner = state.read();
+            assert!(inner.agents.is_empty(), "a fresh broker has no roster rows");
+        }
+        publish_message(&state, &make_status("feat-a", "working"));
+        publish_message(&state, &make_status("supervisor", "working"));
+        // Identity-bearing traffic that would have minted phantoms.
+        publish_message(&state, &make_feedback("feat-a", "human", &["nudge"]));
+
+        let inner = state.read();
+        let mut ids: Vec<&str> = inner.agents.keys().map(String::as_str).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["feat-a", "supervisor"]);
+    }
+
+    #[test]
+    fn question_and_verified_identities_create_no_phantom_rows() {
+        // W15-16 scenario 2: identities embedded in question/verified
+        // messages never appear as roster rows unless they independently
+        // publish agent.status.
+        let state = fresh_state();
+        publish_message(&state, &make_status("supervisor", "working"));
+
+        // A question/verified naming identities that never published status.
+        publish_message(&state, &make_verified("feat-x", "reviewer-bot", None));
+        publish_message(&state, &make_question("feat-x", "proceed?"));
+
+        let inner = state.read();
+        assert!(!inner.agents.contains_key("reviewer-bot"));
+        assert!(!inner.agents.contains_key("feat-x"));
+        assert_eq!(
+            inner.agents.len(),
+            1,
+            "only the status-publishing supervisor is a roster row",
+        );
     }
 
     // === Question routing ===
@@ -857,34 +1059,38 @@ mod tests {
     // === Question coverage (v040-hardening) ===
 
     #[test]
-    fn question_updates_sender_status_to_question() {
+    fn question_does_not_create_sender_roster_row() {
+        // W15-16: agent.question does not mint a roster row. A lone question
+        // from an agent that never published status leaves the roster empty
+        // (the question is still routed to the supervisor inbox).
         let state = fresh_state();
         publish_message(&state, &make_question("feat-x", "Should I rebase?"));
 
         let inner = state.read();
-        let record = inner
-            .agents
-            .get("feat-x")
-            .expect("sender record should exist after publishing");
-        assert_eq!(record.status, "question");
+        assert!(
+            !inner.agents.contains_key("feat-x"),
+            "a question must not create a roster row for its sender",
+        );
     }
 
     #[test]
-    fn question_updates_sender_last_seen() {
+    fn question_leaves_existing_sender_row_unchanged() {
+        // When the asker is already a roster row (it published status), a
+        // subsequent question does not overwrite that row's status with
+        // "question".
         let state = fresh_state();
-        let before = std::time::Instant::now();
+        publish_message(&state, &make_status("feat-x", "working"));
         publish_message(&state, &make_question("feat-x", "Should I rebase?"));
-        let after = std::time::Instant::now();
 
         let inner = state.read();
         let record = inner
             .agents
             .get("feat-x")
-            .expect("sender record should exist after publishing");
-        // last_seen must lie inside the publish window — proves it was set
-        // by this publish, not left at some pre-existing default.
-        assert!(record.last_seen >= before);
-        assert!(record.last_seen <= after);
+            .expect("sender record exists from its status publish");
+        assert_eq!(
+            record.status, "working",
+            "a question must not flip an existing row to status \"question\"",
+        );
     }
 
     #[test]
@@ -1031,6 +1237,7 @@ mod tests {
                 message: None,
                 cli: Some("claude".to_string()),
                 phase: Some("merging".to_string()),
+                detail: None,
             },
         };
         publish_message(&state, &msg);
@@ -1069,6 +1276,7 @@ mod tests {
                 message: None,
                 cli: Some("claude".to_string()),
                 phase: Some("baseline".to_string()),
+                detail: None,
             },
         };
         publish_message(&state, &msg);
@@ -1078,6 +1286,125 @@ mod tests {
             inner.agent_clis.get("supervisor").map(String::as_str),
             Some("claude"),
             "supervisor's cli must be upserted into agent_clis from the status payload",
+        );
+    }
+
+    #[test]
+    fn coding_agent_status_cli_appears_in_snapshot() {
+        // W15-15: a coding agent's boot `agent.status` carries its CLI, and
+        // the broker surfaces it in the `/status` snapshot row — not just for
+        // the supervisor.
+        let state = fresh_state();
+        let msg = BrokerMessage::Status {
+            agent_id: "feat-roster".to_string(),
+            payload: StatusPayload {
+                status: "working".to_string(),
+                modified_files: vec![],
+                message: None,
+                cli: Some("claude-oss".to_string()),
+                phase: None,
+                detail: None,
+            },
+        };
+        publish_message(&state, &msg);
+
+        let snap = agent_status_snapshot(&state);
+        let entry = snap.iter().find(|e| e.agent_id == "feat-roster").unwrap();
+        assert_eq!(
+            entry.cli, "claude-oss",
+            "a coding agent's cli must populate its snapshot row",
+        );
+    }
+
+    #[test]
+    fn seeded_cli_appears_only_after_the_pane_publishes() {
+        // A roster row appears only once the pane publishes (W15-16
+        // publisher-only rule) — a seeded-but-unpublished pane shows NO
+        // phantom row. When it does publish, its row carries the
+        // authoritatively-seeded CLI (not a self-reported value).
+        let state = Arc::new(BrokerState::new(None).with_seeded_cli("supervisor", "claude-oss"));
+
+        // Seeded but not yet published → no row.
+        let snap = agent_status_snapshot(&state);
+        assert!(
+            snap.iter().all(|e| e.agent_id != "supervisor"),
+            "a seeded-but-unpublished pane must not show a phantom row",
+        );
+
+        // After publishing (no cli in the payload), the row appears with the
+        // seeded cli.
+        publish_message(&state, &make_status("supervisor", "working"));
+        let snap = agent_status_snapshot(&state);
+        let entry = snap
+            .iter()
+            .find(|e| e.agent_id == "supervisor")
+            .expect("supervisor row appears once it publishes");
+        assert_eq!(
+            entry.cli, "claude-oss",
+            "the published row carries the authoritatively-seeded cli",
+        );
+    }
+
+    #[test]
+    fn seeded_cli_wins_over_a_wrong_self_report() {
+        // The launcher-authoritative seed (config/watch-target) must not be
+        // clobbered by an agent's self-reported guess. The supervisor reported
+        // `claude` while actually running `claude-oss`; the seeded value wins.
+        let state = Arc::new(BrokerState::new(None).with_seeded_cli("supervisor", "claude-oss"));
+        let msg = BrokerMessage::Status {
+            agent_id: "supervisor".to_string(),
+            payload: StatusPayload {
+                status: "working".to_string(),
+                modified_files: vec![],
+                message: None,
+                cli: Some("claude".to_string()),
+                phase: None,
+                detail: None,
+            },
+        };
+        publish_message(&state, &msg);
+
+        let snap = agent_status_snapshot(&state);
+        let entry = snap.iter().find(|e| e.agent_id == "supervisor").unwrap();
+        assert_eq!(
+            entry.cli, "claude-oss",
+            "the authoritative seed must win over a wrong self-reported cli",
+        );
+    }
+
+    #[test]
+    fn with_seeded_cli_ignores_blank_value() {
+        // A missing config value must never clobber the map or mint a blank
+        // row.
+        let state = Arc::new(BrokerState::new(None).with_seeded_cli("supervisor", ""));
+        let snap = agent_status_snapshot(&state);
+        assert!(
+            snap.iter().all(|e| e.agent_id != "supervisor"),
+            "a blank seed must not create a supervisor row",
+        );
+    }
+
+    #[test]
+    fn snapshot_resolves_cli_from_seeded_map_when_status_omits_it() {
+        // W15-15 fallback: when an agent's status payload has no `cli`, the
+        // broker still shows the CLI seeded from the per-repo session JSON
+        // (modelled here by the `agent_clis` map the watch-target seeding
+        // fills at broker start).
+        let state = fresh_state();
+        {
+            let mut inner = state.write();
+            inner
+                .agent_clis
+                .insert("feat-seeded".to_string(), "claude-oss".to_string());
+        }
+        // A cli-less status (e.g. the filesystem watcher's auto-publish).
+        publish_message(&state, &make_status("feat-seeded", "working"));
+
+        let snap = agent_status_snapshot(&state);
+        let entry = snap.iter().find(|e| e.agent_id == "feat-seeded").unwrap();
+        assert_eq!(
+            entry.cli, "claude-oss",
+            "snapshot must fall back to the seeded cli when status omits it",
         );
     }
 
@@ -1137,6 +1464,7 @@ mod tests {
             #[allow(clippy::cast_possible_truncation)]
             port: 19_300 + (std::process::id() as u16 % 100),
             bind: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         let handle = start_broker(
             &config,
@@ -1159,6 +1487,7 @@ mod tests {
             #[allow(clippy::cast_possible_truncation)]
             port: 19_400 + (std::process::id() as u16 % 100),
             bind: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         if let Ok(handle) = start_broker(&config, BrokerState::new(None), Vec::new()) {
             assert!(handle.flush_thread.is_none());
@@ -1357,7 +1686,11 @@ mod tests {
 
     #[test]
     fn all_terminal_states_are_protected() {
-        let terminal_states = ["done", "verified", "blocked", "committed"];
+        // `committed` is intentionally excluded: bug 8 makes it transient — a
+        // `working` status within the re-entry TTL re-enters working. The
+        // committed-specific transitions are covered by the dedicated tests
+        // below. `done` / `verified` / `blocked` remain fully terminal.
+        let terminal_states = ["done", "verified", "blocked"];
 
         for &terminal_state in &terminal_states {
             // Create a unique agent for each terminal state
@@ -1410,6 +1743,74 @@ mod tests {
         assert_eq!(inner.agents["feat-ui"].status, "blocked");
     }
 
+    // === Bug 8: committed -> working re-entry within TTL ===
+
+    #[test]
+    fn committed_artifact_stamps_last_committed_at() {
+        let state = fresh_state();
+        publish_message(&state, &make_artifact("feat-x", "committed", &[]));
+        let inner = state.read();
+        let rec = inner.agents.get("feat-x").expect("record exists");
+        assert_eq!(rec.status, "committed");
+        assert!(
+            rec.last_committed_at.is_some(),
+            "committed artifact must stamp last_committed_at"
+        );
+    }
+
+    #[test]
+    fn committed_reenters_working_within_ttl() {
+        // Default fresh_state TTL is 60s, so an immediate working re-enters.
+        let state = fresh_state();
+        publish_message(&state, &make_artifact("feat-x", "committed", &[]));
+        assert_eq!(state.read().agents["feat-x"].status, "committed");
+
+        publish_message(&state, &make_status("feat-x", "working"));
+        assert_eq!(
+            state.read().agents["feat-x"].status,
+            "working",
+            "a working status within the TTL must re-enter the working state"
+        );
+    }
+
+    #[test]
+    fn committed_stays_terminal_when_ttl_zero() {
+        // TTL == 0 restores v0.5.0: committed is terminal against working.
+        let state = fresh_state();
+        state.set_republish_working_ttl(Duration::ZERO);
+        publish_message(&state, &make_artifact("feat-x", "committed", &[]));
+        publish_message(&state, &make_status("feat-x", "working"));
+        assert_eq!(
+            state.read().agents["feat-x"].status,
+            "committed",
+            "with TTL=0, committed must stay terminal (v0.5.0 model)"
+        );
+    }
+
+    #[test]
+    fn committed_does_not_reenter_after_ttl_window() {
+        // A short TTL plus a back-dated committed timestamp simulates a write
+        // that arrives after the window has elapsed.
+        let state = fresh_state();
+        state.set_republish_working_ttl(Duration::from_secs(5));
+        publish_message(&state, &make_artifact("feat-x", "committed", &[]));
+        {
+            let mut inner = state.write();
+            let rec = inner.agents.get_mut("feat-x").unwrap();
+            rec.last_committed_at = Some(
+                std::time::Instant::now()
+                    .checked_sub(Duration::from_secs(90))
+                    .unwrap(),
+            );
+        }
+        publish_message(&state, &make_status("feat-x", "working"));
+        assert_eq!(
+            state.read().agents["feat-x"].status,
+            "committed",
+            "a working status past the TTL window must not re-enter working"
+        );
+    }
+
     // Maps to scenario `Question creates supervisor inbox when absent` from
     // v040-hardening. (test-coverage-v0-5-0 task 8.1)
     #[test]
@@ -1451,6 +1852,131 @@ mod tests {
         assert!(
             last_seq > 0,
             "poll_messages should return a non-zero cursor"
+        );
+    }
+
+    // === supervisor.verify-now nudge (per-commit-verification-v0-6-x) ===
+
+    fn nudge_state() -> Arc<BrokerState> {
+        Arc::new(BrokerState::new(None).with_verify_on_commit_nudge(true))
+    }
+
+    fn supervisor_verify_now_branches(state: &Arc<BrokerState>) -> Vec<String> {
+        let (msgs, _) = poll_messages(state, "supervisor", 0);
+        msgs.into_iter()
+            .filter_map(|m| match m {
+                BrokerMessage::VerifyNow { branch_id } => Some(branch_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Scenario: Nudge published on committed event.
+    #[test]
+    fn committed_artifact_publishes_verify_now_to_supervisor() {
+        let state = nudge_state();
+        publish_message(&state, &make_artifact("feat-foo", "committed", &[]));
+
+        assert_eq!(
+            supervisor_verify_now_branches(&state),
+            vec!["feat-foo".to_string()],
+            "a committed artifact must publish exactly one verify-now nudge carrying the branch"
+        );
+    }
+
+    // Scenario: Default config enables the nudge — a default SupervisorConfig
+    // resolves verify_on_commit_nudge to true, so a committed artifact through
+    // a broker wired from that default publishes the nudge.
+    #[test]
+    fn default_config_enables_the_nudge() {
+        let enabled = crate::config::SupervisorConfig::default().verify_on_commit_nudge_enabled();
+        let state = Arc::new(BrokerState::new(None).with_verify_on_commit_nudge(enabled));
+        publish_message(&state, &make_artifact("feat-foo", "committed", &[]));
+
+        assert_eq!(
+            supervisor_verify_now_branches(&state),
+            vec!["feat-foo".to_string()],
+            "the default config must enable the verify-now nudge"
+        );
+    }
+
+    // Scenario: the nudge carries the committing branch verbatim, including the
+    // slashed `feat/foo` form the post-commit hook may use.
+    #[test]
+    fn verify_now_carries_committing_branch_verbatim() {
+        let state = nudge_state();
+        publish_message(&state, &make_artifact("feat/foo", "committed", &[]));
+
+        assert_eq!(
+            supervisor_verify_now_branches(&state),
+            vec!["feat/foo".to_string()]
+        );
+    }
+
+    // Scenario: Nudge suppressed when disabled.
+    #[test]
+    fn committed_artifact_suppresses_nudge_when_disabled() {
+        // `fresh_state()` leaves verify_on_commit_nudge at its `false` default.
+        let state = fresh_state();
+        publish_message(&state, &make_artifact("feat-foo", "committed", &[]));
+
+        assert!(
+            supervisor_verify_now_branches(&state).is_empty(),
+            "no verify-now nudge may be published when the feature is disabled"
+        );
+    }
+
+    // A non-committed terminal status (e.g. `done`) must NOT trigger the nudge —
+    // the trigger is specifically the committed artifact event.
+    #[test]
+    fn done_artifact_does_not_trigger_nudge() {
+        let state = nudge_state();
+        publish_message(&state, &make_artifact("feat-foo", "done", &[]));
+
+        assert!(
+            supervisor_verify_now_branches(&state).is_empty(),
+            "only `committed` artifacts trigger the verify-now nudge, not `done`"
+        );
+    }
+
+    // The nudge must not perturb the committing agent's record: its sticky
+    // `committed` status and its own `last_message` are preserved.
+    #[test]
+    fn nudge_does_not_overwrite_committing_agent_record() {
+        let state = nudge_state();
+        publish_message(&state, &make_artifact("feat-foo", "committed", &["api_fn"]));
+
+        let inner = state.read();
+        let record = inner
+            .agents
+            .get("feat-foo")
+            .expect("committing record exists");
+        assert_eq!(record.status, "committed", "status must remain committed");
+        assert!(
+            matches!(record.last_message, Some(BrokerMessage::Artifact { .. })),
+            "last_message must remain the committing artifact, not the nudge"
+        );
+    }
+
+    // The nudge is logged with its own sequence number after the artifact.
+    #[test]
+    fn nudge_appears_in_message_log_after_artifact() {
+        let state = nudge_state();
+        publish_message(&state, &make_artifact("feat-foo", "committed", &[]));
+
+        let inner = state.read();
+        assert_eq!(inner.message_log.len(), 2, "artifact + nudge");
+        assert!(matches!(
+            inner.message_log[0].2,
+            BrokerMessage::Artifact { .. }
+        ));
+        assert!(matches!(
+            inner.message_log[1].2,
+            BrokerMessage::VerifyNow { .. }
+        ));
+        assert!(
+            inner.message_log[0].0 < inner.message_log[1].0,
+            "nudge sequence number must follow the artifact's"
         );
     }
 }

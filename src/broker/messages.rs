@@ -5,6 +5,7 @@
 
 use std::fmt;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Validation errors for broker messages.
@@ -54,6 +55,29 @@ pub enum MessageError {
     #[error("intent valid_for_seconds must be > 0")]
     ZeroValidForSeconds,
 
+    /// The advanced-main `merged_branch` field is empty or whitespace-only.
+    #[error("merged_branch field must not be empty")]
+    EmptyMergedBranch,
+
+    /// The advanced-main `new_main_sha` field is empty or whitespace-only.
+    #[error("new_main_sha field must not be empty")]
+    EmptyNewMainSha,
+
+    /// The advanced-main `base` field is empty or whitespace-only.
+    #[error("base field must not be empty")]
+    EmptyBase,
+    /// The learning `category` field is empty or whitespace-only.
+    #[error("learning category field must not be empty")]
+    EmptyCategory,
+
+    /// The learning `title` field is empty or whitespace-only.
+    #[error("learning title field must not be empty")]
+    EmptyTitle,
+
+    /// The learning `timestamp` field is empty or whitespace-only.
+    #[error("learning timestamp field must not be empty")]
+    EmptyTimestamp,
+
     /// JSON deserialization failed.
     #[error("invalid message JSON: {0}")]
     Deserialize(#[from] serde_json::Error),
@@ -61,10 +85,14 @@ pub enum MessageError {
 
 /// Payload for `agent.status` messages.
 ///
-/// `cli` and `phase` are optional and serialise with `skip_serializing_if =
-/// "Option::is_none"`, so legacy payloads without these fields deserialise as
-/// `None` and new payloads with `None` omit the field from the wire bytes.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// `cli`, `phase`, and `detail` are optional and serialise with
+/// `skip_serializing_if = "Option::is_none"`, so legacy payloads without these
+/// fields deserialise as `None` and new payloads with `None` omit the field
+/// from the wire bytes — preserving v0.5.0 wire compatibility byte-for-byte.
+///
+/// `Eq` is intentionally not derived: `detail` carries a
+/// [`serde_json::Value`], which is `PartialEq` but not `Eq`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StatusPayload {
     /// Current status label (e.g. `"working"`, `"idle"`).
     pub status: String,
@@ -79,11 +107,22 @@ pub struct StatusPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli: Option<String>,
     /// Optional free-form phase label (e.g. `"watching"`, `"merging"`) for
-    /// the publishing agent's current lifecycle phase. The dashboard prefers
-    /// this label over the message-type-derived `status_label()` when
-    /// rendering the agent's row.
+    /// the publishing agent's current lifecycle phase. An open string — the
+    /// broker does not validate the set of values, so the supervisor's phase
+    /// taxonomy (`sweep`, `audit`, `merge`, `feedback`, `intent_watch`,
+    /// `learnings`, `idle`, `checkpoint`) can grow without a wire change. The
+    /// dashboard prefers this label over the message-type-derived
+    /// `status_label()` when rendering the supervisor's row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    /// Optional phase-specific structured detail body. Free-form JSON; the
+    /// broker does not validate its shape. Populated by the supervisor's
+    /// introspection emissions (e.g. `{ "branch": "feat/x", "audit_step":
+    /// "tests" }` for `phase = "audit"`) and surfaced by the MCP
+    /// `get_session_status` tool. Consumers treat an unrecognised shape
+    /// gracefully — extracting documented fields and ignoring the rest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
 }
 
 /// Payload for `agent.artifact` messages.
@@ -126,17 +165,128 @@ pub struct QuestionPayload {
     pub question: String,
 }
 
+/// A declared region within a file an agent intends to touch.
+///
+/// Serialised as a `tag = "kind"` enum so each region carries an explicit
+/// `kind` discriminator on the wire (`{"kind": "function", "name": "..."}`).
+/// Tagged (not untagged) serialisation is deliberate: an unknown `kind` fails
+/// to deserialise loudly rather than silently falling through to whichever
+/// variant serde tries first — a dropped region would weaken the detector's
+/// signal. The set is closed at four kinds in v0.6.0; adding a kind is an
+/// additive wire change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Region {
+    /// A named function / method symbol.
+    Function {
+        /// The symbol name, compared as an opaque string (no source parsing).
+        name: String,
+    },
+    /// A named class / struct / type symbol.
+    Class {
+        /// The symbol name, compared as an opaque string.
+        name: String,
+    },
+    /// A prose / config landmark (Markdown heading, config block, etc.) for
+    /// files without code symbols.
+    Block {
+        /// The free-form landmark text.
+        anchor: String,
+    },
+    /// A line-range hint, used only when symbolic names don't fit.
+    Range {
+        /// First line of the range (1-based, inclusive).
+        start_line: u32,
+        /// Last line of the range (inclusive).
+        end_line: u32,
+    },
+}
+
+impl fmt::Display for Region {
+    /// Renders a region as `kind name` (or `range start-end`) for warning
+    /// text and dashboard summaries.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Function { name } => write!(f, "function {name}"),
+            Self::Class { name } => write!(f, "class {name}"),
+            Self::Block { anchor } => write!(f, "block {anchor}"),
+            Self::Range {
+                start_line,
+                end_line,
+            } => write!(f, "range {start_line}-{end_line}"),
+        }
+    }
+}
+
+/// One entry in an intent's `files` array.
+///
+/// Accepts EITHER the v0.5.0 plain-string shape (`"src/main.rs"` → file-level
+/// intent) OR the v0.6.0 object shape (`{ "path": "...", "regions": [...] }`).
+/// Both forms may appear in the same array. Serialised via an `untagged` enum
+/// so a [`FileIntent::Path`] round-trips to a bare JSON string — preserving
+/// v0.5.0 wire bytes for string-only publishers — while
+/// [`FileIntent::Detailed`] round-trips to an object. An empty `regions` vec
+/// is omitted from the wire bytes (a detailed entry with no regions is
+/// equivalent to the plain string form).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FileIntent {
+    /// File-level intent: just a path, no declared regions (v0.5.0 shape).
+    Path(String),
+    /// File intent with optional declared regions (v0.6.0 shape).
+    Detailed {
+        /// The file path.
+        path: String,
+        /// Declared regions within the file; empty / omitted means
+        /// file-level intent.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        regions: Vec<Region>,
+    },
+}
+
+impl FileIntent {
+    /// Returns the file path regardless of which shape this entry uses.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        match self {
+            Self::Path(p) | Self::Detailed { path: p, .. } => p,
+        }
+    }
+
+    /// Returns the declared regions, or `None` for a file-level intent.
+    ///
+    /// A plain-string entry and an object entry with an empty `regions` vec
+    /// both report `None` — both mean "file-level intent, no regions".
+    #[must_use]
+    pub fn regions(&self) -> Option<&[Region]> {
+        match self {
+            Self::Path(_) => None,
+            Self::Detailed { regions, .. } if regions.is_empty() => None,
+            Self::Detailed { regions, .. } => Some(regions),
+        }
+    }
+}
+
+impl From<&str> for FileIntent {
+    fn from(s: &str) -> Self {
+        Self::Path(s.to_string())
+    }
+}
+
 /// Payload for `agent.intent` messages.
 ///
 /// Wire format: `{"type": "agent.intent", "agent_id": "<slug>", "payload": {...}}`.
 /// `files` declares paths the agent plans to modify (relative to the repository
-/// root; globs are permitted but discouraged). `summary` is a one-line human
-/// description. `valid_for_seconds` is a relative TTL after which a consumer
-/// MAY treat the intent as stale.
+/// root; globs are permitted but discouraged). Each entry is a [`FileIntent`] —
+/// either a plain path string (v0.5.0 file-level intent) or an object carrying
+/// optional [`Region`] hints. `summary` is a one-line human description.
+/// `valid_for_seconds` is a relative TTL after which a consumer MAY treat the
+/// intent as stale.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntentPayload {
-    /// File paths the agent intends to modify.
-    pub files: Vec<String>,
+    /// File intents the agent intends to modify — plain paths or
+    /// `{ path, regions }` objects.
+    pub files: Vec<FileIntent>,
     /// One-line human description of the planned change.
     pub summary: String,
     /// Relative TTL in seconds (strictly positive).
@@ -152,13 +302,144 @@ pub struct FeedbackPayload {
     pub errors: Vec<String>,
 }
 
+/// Payload for `agent.advanced-main` messages.
+///
+/// Published by the supervisor after a successful merge to the repository's
+/// default branch so downstream agents learn the base moved without polling
+/// git directly. The wire shape is flat — the payload fields sit at the top
+/// level of the envelope alongside the `"type"` discriminator (see
+/// [`BrokerMessage::AdvancedMain`]'s `#[serde(flatten)]`), matching the curl
+/// example the supervisor skill teaches.
+///
+/// All fields are required except `summary`, which the publishing supervisor
+/// LLM populates with a one-line human-readable description and which
+/// serialises with `skip_serializing_if = "Option::is_none"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdvancedMainPayload {
+    /// Who advanced main — typically `"supervisor"`.
+    pub from: String,
+    /// The branch that was just merged.
+    pub merged_branch: String,
+    /// The new abbreviated SHA of the default branch (12+ chars by
+    /// convention; the broker does not validate length or existence).
+    pub new_main_sha: String,
+    /// The base branch that advanced — the resolved default-branch name
+    /// (typically `"main"`), carried explicitly so consumers need not look
+    /// up the session's default branch.
+    pub base: String,
+    /// When the merge landed, as a UTC timestamp.
+    pub merged_at: DateTime<Utc>,
+    /// Optional one-line human-readable summary of what merged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+impl AdvancedMainPayload {
+    /// Returns the deterministic dedup id for this advance event.
+    ///
+    /// Convenience wrapper over [`advanced_main_id`] using this payload's
+    /// fields. See that function for the canonical input and hashing
+    /// contract.
+    #[must_use]
+    pub fn deterministic_id(&self) -> String {
+        advanced_main_id(
+            &self.merged_branch,
+            &self.new_main_sha,
+            &self.base,
+            self.merged_at,
+        )
+    }
+}
+
+/// Computes the deterministic dedup `id` for an `agent.advanced-main` event.
+///
+/// Reuses the `agent.learning` id-hashing pattern from the
+/// `agent-learning-variant` capability — the std-hash shape (no third-party
+/// crates): a `std::collections::hash_map::DefaultHasher` over a canonical,
+/// newline-delimited serialisation of
+/// `merged_branch | new_main_sha | base | hour_bucket`, rendered as a
+/// zero-padded 16-hex-char (64-bit) string. `hour_bucket` is the UTC
+/// `YYYY-MM-DDTHH` truncation of `merged_at`.
+///
+/// The hour bucket is a deduplication safety net: re-emitting the same merge
+/// within the same UTC hour yields an identical id, while the same merge
+/// across an hour boundary yields a different id (matching the learning
+/// variant's recurrence-detection contract). Because `new_main_sha` is unique
+/// per merge, distinct merges effectively never collide regardless of bucket.
+///
+/// `DefaultHasher` is seeded with fixed keys, so the id is stable within a
+/// session and across processes built from the same toolchain — sufficient
+/// for in-session / in-log dedup, which is all this id is used for.
+#[must_use]
+pub fn advanced_main_id(
+    merged_branch: &str,
+    new_main_sha: &str,
+    base: &str,
+    merged_at: DateTime<Utc>,
+) -> String {
+    use std::hash::{Hash as _, Hasher as _};
+
+    let hour_bucket = merged_at.format("%Y-%m-%dT%H").to_string();
+    let canonical = format!("{merged_branch}\n{new_main_sha}\n{base}\n{hour_bucket}");
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    canonical.hash(&mut hasher);
+    // u64 -> zero-padded 16 hex chars, matching agent.learning's std-hash id.
+    format!("{:016x}", hasher.finish())
+}
+
+/// Payload for `agent.learning` messages.
+///
+/// Carries one structured learning record produced by the broker's learnings
+/// aggregator (see [`crate::broker::learnings`]). The shape is fixed across
+/// all categories: `category` is an *open* string tag (consumers filter on
+/// it; descendant changes may add values without a broker change), and `body`
+/// is a category-specific structured object typed as [`serde_json::Value`].
+///
+/// `branch_id` is optional and omitted from the wire bytes when `None`
+/// (cross-cutting records such as permission patterns and conflict pairs are
+/// not scoped to a single branch). The `id` is the deterministic dedup hash
+/// produced by [`crate::broker::learnings::LearningRecord::deterministic_id`].
+///
+/// Note: unlike the other `agent.*` variants, the sender `agent_id` lives in
+/// the payload rather than the envelope (this variant has no separate
+/// envelope `agent_id`). [`BrokerMessage::agent_id`] resolves it from here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LearningPayload {
+    /// Deterministic dedup id — a stable 16-hex-char (64-bit) hash over the
+    /// record's canonical serialisation. Stable for the same logical record
+    /// within a UTC hour.
+    pub id: String,
+    /// The publishing agent id (typically `"supervisor"`, since the
+    /// aggregator runs in the broker/supervisor context).
+    pub agent_id: String,
+    /// Branch the learning is scoped to; `None` (and omitted on the wire) for
+    /// cross-cutting records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_id: Option<String>,
+    /// Open category tag — one of `conflict_event`, `stuck_duration`,
+    /// `recovery_cycles`, `permission_pattern`, or any value added by a
+    /// descendant change.
+    pub category: String,
+    /// Short human-readable summary.
+    pub title: String,
+    /// Category-specific structured body.
+    pub body: serde_json::Value,
+    /// ISO 8601 UTC timestamp.
+    pub timestamp: String,
+}
+
 /// Envelope for all inter-agent messages.
 ///
 /// The wire format uses JSON with an internally tagged `"type"` discriminator
 /// whose values are `"agent.status"`, `"agent.artifact"`, `"agent.blocked"`,
-/// `"agent.verified"`, `"agent.feedback"`, `"agent.question"`, and
-/// `"agent.intent"`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `"agent.verified"`, `"agent.feedback"`, `"agent.question"`, `"agent.intent"`,
+/// `"agent.advanced-main"`, `"agent.learning"`, and `"supervisor.verify-now"`.
+/// The last is broker-emitted rather than agent-published; see
+/// [`BrokerMessage::VerifyNow`].
+///
+/// `Eq` is intentionally not derived: the `agent.learning` payload carries a
+/// [`serde_json::Value`] body, which is `PartialEq` but not `Eq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum BrokerMessage {
     /// Status heartbeat -- not routed to inboxes.
@@ -220,6 +501,52 @@ pub enum BrokerMessage {
         /// Intent payload.
         payload: IntentPayload,
     },
+    /// Main-advanced notification -- published by the supervisor after a
+    /// successful merge to the default branch, broadcast to every registered
+    /// agent's inbox so dependents learn the base moved.
+    ///
+    /// The payload is flattened into the envelope (its fields sit at the top
+    /// level alongside `"type"`, not nested under a `payload` key) so the
+    /// wire shape matches the curl example the supervisor skill teaches. The
+    /// sender identity is the payload's `from` field (typically
+    /// `"supervisor"`), surfaced through [`BrokerMessage::agent_id`].
+    #[serde(rename = "agent.advanced-main")]
+    AdvancedMain {
+        /// Flattened advanced-main payload (`from`, `merged_branch`,
+        /// `new_main_sha`, `base`, `merged_at`, optional `summary`).
+        #[serde(flatten)]
+        payload: AdvancedMainPayload,
+    },
+    /// Structured learning record -- published by the broker's learnings
+    /// aggregator when `[supervisor] learnings = true` and broker publish is
+    /// active (see [`crate::broker::learnings`]). Carries a deterministic
+    /// dedup `id` so consumers can collapse re-emissions. Routed to the
+    /// scoped `branch_id` inbox when present, otherwise the supervisor inbox;
+    /// always retained in the broker message log. The variant is additive --
+    /// existing consumers ignore unknown types per the broker-messages
+    /// contract.
+    #[serde(rename = "agent.learning")]
+    Learning {
+        /// Learning payload (carries its own `agent_id`).
+        payload: LearningPayload,
+    },
+    /// Supervisor verification nudge -- emitted by the broker (not by an
+    /// agent) when an `agent.artifact { status: "committed" }` arrives and
+    /// `[supervisor].verify_on_commit_nudge` is enabled. Delivered to the
+    /// `"supervisor"` inbox so per-commit verification is triggered by an
+    /// explicit event rather than relying on the supervisor's sweep cadence
+    /// to notice the commit.
+    ///
+    /// Unlike the `agent.*` variants this carries a `branch_id` directly
+    /// (the committing branch) rather than a sender `agent_id` plus a payload
+    /// -- the message originates from the broker itself, so there is no
+    /// publishing agent.
+    #[serde(rename = "supervisor.verify-now")]
+    VerifyNow {
+        /// The committing branch whose commit should be verified now. Copied
+        /// verbatim from the triggering artifact's `agent_id`.
+        branch_id: String,
+    },
 }
 
 impl BrokerMessage {
@@ -243,6 +570,14 @@ impl BrokerMessage {
             | Self::Feedback { agent_id, .. }
             | Self::Question { agent_id, .. }
             | Self::Intent { agent_id, .. } => agent_id,
+            // `AdvancedMain` has no top-level `agent_id`; the sender identity
+            // is the payload's `from` field (typically `"supervisor"`).
+            Self::AdvancedMain { payload } => &payload.from,
+            // `Learning` carries its sender in the payload (no envelope id).
+            Self::Learning { payload } => &payload.agent_id,
+            // `VerifyNow` has no publishing agent; the closest identity is the
+            // committing branch it nudges verification for.
+            Self::VerifyNow { branch_id } => branch_id,
         }
     }
 
@@ -255,6 +590,8 @@ impl BrokerMessage {
     /// - `Feedback` returns `"feedback"`
     /// - `Question` returns `"question"`
     /// - `Intent` returns `"intent"`
+    /// - `AdvancedMain` returns `"advanced-main"`
+    /// - `VerifyNow` returns `"verify-now"`
     pub fn status_label(&self) -> &str {
         match self {
             Self::Status { payload, .. } => &payload.status,
@@ -264,6 +601,9 @@ impl BrokerMessage {
             Self::Feedback { .. } => "feedback",
             Self::Question { .. } => "question",
             Self::Intent { .. } => "intent",
+            Self::AdvancedMain { .. } => "advanced-main",
+            Self::Learning { .. } => "learning",
+            Self::VerifyNow { .. } => "verify-now",
         }
     }
 
@@ -321,7 +661,7 @@ impl BrokerMessage {
                 if payload.files.is_empty() {
                     return Err(MessageError::EmptyIntentFiles);
                 }
-                if payload.files.iter().any(|f| f.trim().is_empty()) {
+                if payload.files.iter().any(|f| f.path().trim().is_empty()) {
                     return Err(MessageError::EmptyIntentFileEntry);
                 }
                 if payload.summary.trim().is_empty() {
@@ -331,6 +671,42 @@ impl BrokerMessage {
                     return Err(MessageError::ZeroValidForSeconds);
                 }
             }
+            Self::AdvancedMain { payload } => {
+                // `from` is this message's `agent_id()`, so the empty-id guard
+                // at the top of this method already rejects a blank `from`.
+                // The remaining required string fields are checked here so a
+                // present-but-blank value trips a clear, field-named error.
+                // `merged_at` is typed as `DateTime<Utc>`, so serde rejects an
+                // absent or malformed timestamp before this validator runs.
+                if payload.merged_branch.trim().is_empty() {
+                    return Err(MessageError::EmptyMergedBranch);
+                }
+                if payload.new_main_sha.trim().is_empty() {
+                    return Err(MessageError::EmptyNewMainSha);
+                }
+                if payload.base.trim().is_empty() {
+                    return Err(MessageError::EmptyBase);
+                }
+            }
+            Self::Learning { payload } => {
+                // The empty-agent-id guard at the top already covers a blank
+                // `payload.agent_id`. `body` presence is guaranteed by serde
+                // (a required field); absence surfaces as a deserialize error
+                // before we get here. We only reject present-but-empty
+                // required string fields.
+                if payload.category.trim().is_empty() {
+                    return Err(MessageError::EmptyCategory);
+                }
+                if payload.title.trim().is_empty() {
+                    return Err(MessageError::EmptyTitle);
+                }
+                if payload.timestamp.trim().is_empty() {
+                    return Err(MessageError::EmptyTimestamp);
+                }
+            }
+            // `branch_id` is the message's `agent_id()`, so the empty-id guard
+            // at the top of this method already rejects a blank branch.
+            Self::VerifyNow { .. } => {}
         }
         Ok(())
     }
@@ -408,6 +784,24 @@ impl fmt::Display for BrokerMessage {
                     payload.valid_for_seconds,
                     payload.summary,
                 )
+            }
+            Self::AdvancedMain { payload } => {
+                write!(
+                    f,
+                    "[{}] advanced-main: {} \u{2192} {} ({})",
+                    payload.from, payload.merged_branch, payload.base, payload.new_main_sha
+                )
+            }
+            Self::Learning { payload } => {
+                let scope = payload.branch_id.as_deref().unwrap_or("*");
+                write!(
+                    f,
+                    "[{}] learning ({}/{}): {}",
+                    payload.agent_id, payload.category, scope, payload.title
+                )
+            }
+            Self::VerifyNow { branch_id } => {
+                write!(f, "[{branch_id}] verify-now")
             }
         }
     }
@@ -706,6 +1100,7 @@ mod tests {
             message: Some("refactoring".to_string()),
             cli: Some("claude".to_string()),
             phase: Some("watching".to_string()),
+            detail: None,
         };
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains("\"cli\":\"claude\""));
@@ -732,6 +1127,7 @@ mod tests {
             message: None,
             cli: None,
             phase: None,
+            detail: None,
         };
         let json = serde_json::to_string(&payload).unwrap();
         assert!(
@@ -758,6 +1154,68 @@ mod tests {
         let payload: StatusPayload = serde_json::from_str(json).unwrap();
         assert_eq!(payload.phase.as_deref(), Some("merging"));
         assert_eq!(payload.cli, None);
+    }
+
+    // --- supervisor-introspection: phase + detail fields (tasks 1.2-1.4) ---
+
+    #[test]
+    fn status_payload_v050_shape_round_trips_byte_equivalent() {
+        // GIVEN a v0.5.0-shape status with no phase/detail (and no cli).
+        // WHEN it is deserialised and re-serialised THEN the JSON must be
+        // byte-equivalent — no `phase`/`detail`/`cli` null keys appear.
+        let json = r#"{"status":"working","modified_files":["src/a.rs"],"message":"booting"}"#;
+        let payload: StatusPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.phase, None);
+        assert_eq!(payload.detail, None);
+        let round_tripped = serde_json::to_string(&payload).unwrap();
+        assert_eq!(
+            round_tripped, json,
+            "v0.5.0 payload must round-trip byte-equivalently; got {round_tripped}"
+        );
+    }
+
+    #[test]
+    fn status_payload_round_trips_with_phase_and_detail() {
+        // Status with phase = "audit" and a structured detail body
+        // round-trips losslessly through serde.
+        let payload = StatusPayload {
+            status: "working".to_string(),
+            modified_files: vec![],
+            message: None,
+            cli: None,
+            phase: Some("audit".to_string()),
+            detail: Some(serde_json::json!({
+                "branch": "feat/x",
+                "audit_step": "tests",
+            })),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"phase\":\"audit\""));
+        assert!(json.contains("\"audit_step\":\"tests\""));
+        let back: StatusPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, payload);
+        assert_eq!(
+            back.detail.as_ref().unwrap()["branch"],
+            serde_json::json!("feat/x")
+        );
+    }
+
+    #[test]
+    fn status_payload_accepts_unknown_phase_value() {
+        // An unknown phase string (not in the v0.6.0 taxonomy) is accepted —
+        // the broker does not validate the set of phase values.
+        let json = r#"{"type":"agent.status","agent_id":"supervisor","payload":{"status":"working","modified_files":[],"phase":"future_value_not_in_v0_6_0_taxonomy","detail":{"k":"v"}}}"#;
+        let msg = BrokerMessage::from_json(json).expect("unknown phase accepted");
+        match &msg {
+            BrokerMessage::Status { payload, .. } => {
+                assert_eq!(
+                    payload.phase.as_deref(),
+                    Some("future_value_not_in_v0_6_0_taxonomy")
+                );
+                assert!(payload.detail.is_some());
+            }
+            other => panic!("expected Status variant, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1039,7 +1497,7 @@ mod tests {
         BrokerMessage::Intent {
             agent_id: agent_id.to_string(),
             payload: IntentPayload {
-                files: files.iter().map(|s| (*s).to_string()).collect(),
+                files: files.iter().map(|s| FileIntent::from(*s)).collect(),
                 summary: summary.to_string(),
                 valid_for_seconds: ttl,
             },
@@ -1070,7 +1528,8 @@ mod tests {
         assert_eq!(back, msg);
         // files preserved in order
         if let BrokerMessage::Intent { payload, .. } = back {
-            assert_eq!(payload.files, vec!["src/auth.rs", "src/auth/client.rs"]);
+            let paths: Vec<&str> = payload.files.iter().map(FileIntent::path).collect();
+            assert_eq!(paths, vec!["src/auth.rs", "src/auth/client.rs"]);
         } else {
             panic!("expected Intent");
         }
@@ -1118,7 +1577,7 @@ mod tests {
         let msg = BrokerMessage::from_json(json).unwrap();
         if let BrokerMessage::Intent { agent_id, payload } = msg {
             assert_eq!(agent_id, "feat-auth");
-            assert_eq!(payload.files, vec!["src/auth.rs"]);
+            assert_eq!(payload.files, vec![FileIntent::from("src/auth.rs")]);
             assert_eq!(payload.summary, "wire AuthClient");
             assert_eq!(payload.valid_for_seconds, 900);
         } else {
@@ -1174,7 +1633,7 @@ mod tests {
         let msg = BrokerMessage::Intent {
             agent_id: "feat-x".to_string(),
             payload: IntentPayload {
-                files: vec!["src/a.rs".to_string()],
+                files: vec![FileIntent::from("src/a.rs")],
                 summary: String::new(),
                 valid_for_seconds: 60,
             },
@@ -1190,6 +1649,175 @@ mod tests {
         );
     }
 
+    // === FileIntent / Region wire shape (conflict-detector-fn-granularity
+    //     tasks 1.4) ===
+
+    #[test]
+    fn file_intent_string_entry_round_trips_to_bare_string() {
+        // The v0.5.0 plain-string shape parses to a file-level intent and
+        // serialises back to a bare JSON string (no object wrapper).
+        let parsed: FileIntent = serde_json::from_str(r#""src/main.rs""#).unwrap();
+        assert_eq!(parsed, FileIntent::Path("src/main.rs".to_string()));
+        assert!(parsed.regions().is_none(), "string entry has no regions");
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), r#""src/main.rs""#);
+    }
+
+    #[test]
+    fn file_intent_object_entry_with_regions_round_trips() {
+        let json =
+            r#"{"path":"src/auth.rs","regions":[{"kind":"function","name":"validate_token"}]}"#;
+        let parsed: FileIntent = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.path(), "src/auth.rs");
+        assert_eq!(
+            parsed.regions(),
+            Some(
+                &vec![Region::Function {
+                    name: "validate_token".to_string()
+                }][..]
+            )
+        );
+        // Re-serialises to the same object shape.
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn file_intent_object_entry_without_regions_omits_field() {
+        // An object entry whose regions vec is empty serialises without the
+        // `regions` key — equivalent on the wire to the plain string form.
+        let entry = FileIntent::Detailed {
+            path: "src/main.rs".to_string(),
+            regions: vec![],
+        };
+        assert_eq!(
+            serde_json::to_string(&entry).unwrap(),
+            r#"{"path":"src/main.rs"}"#
+        );
+        // And `{"path": "..."}` parses back as a Detailed with no regions.
+        let parsed: FileIntent = serde_json::from_str(r#"{"path":"src/main.rs"}"#).unwrap();
+        assert_eq!(parsed.path(), "src/main.rs");
+        assert!(parsed.regions().is_none());
+    }
+
+    #[test]
+    fn intent_mixed_string_and_object_files_round_trip() {
+        let json = r#"{"type":"agent.intent","agent_id":"feat-x","payload":{"files":["src/main.rs",{"path":"src/auth.rs","regions":[{"kind":"function","name":"validate_token"}]}],"summary":"s","valid_for_seconds":60}}"#;
+        let msg = BrokerMessage::from_json(json).unwrap();
+        let BrokerMessage::Intent { payload, .. } = &msg else {
+            panic!("expected Intent");
+        };
+        assert_eq!(payload.files.len(), 2);
+        assert_eq!(
+            payload.files[0],
+            FileIntent::Path("src/main.rs".to_string())
+        );
+        assert_eq!(payload.files[1].path(), "src/auth.rs");
+        assert_eq!(payload.files[1].regions().unwrap().len(), 1);
+        // Round-trips byte-equivalently.
+        assert_eq!(serde_json::to_string(&msg).unwrap(), json);
+    }
+
+    #[test]
+    fn region_each_kind_round_trips() {
+        let cases = [
+            (
+                Region::Function {
+                    name: "f".to_string(),
+                },
+                r#"{"kind":"function","name":"f"}"#,
+            ),
+            (
+                Region::Class {
+                    name: "C".to_string(),
+                },
+                r#"{"kind":"class","name":"C"}"#,
+            ),
+            (
+                Region::Block {
+                    anchor: "Setup".to_string(),
+                },
+                r#"{"kind":"block","anchor":"Setup"}"#,
+            ),
+            (
+                Region::Range {
+                    start_line: 10,
+                    end_line: 50,
+                },
+                r#"{"kind":"range","start_line":10,"end_line":50}"#,
+            ),
+        ];
+        for (region, expected_json) in cases {
+            let json = serde_json::to_string(&region).unwrap();
+            assert_eq!(json, expected_json);
+            let back: Region = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, region);
+        }
+    }
+
+    #[test]
+    fn region_unknown_kind_rejected_with_clear_error() {
+        let json = r#"{"kind":"macro","name":"vec"}"#;
+        let err = serde_json::from_str::<Region>(json).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("macro"),
+            "error should identify the offending kind `macro`; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn intent_with_unknown_region_kind_rejected() {
+        let json = r#"{"type":"agent.intent","agent_id":"feat-x","payload":{"files":[{"path":"src/a.rs","regions":[{"kind":"macro","name":"vec"}]}],"summary":"s","valid_for_seconds":60}}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        assert!(matches!(err, MessageError::Deserialize(_)));
+    }
+
+    #[test]
+    fn v050_string_only_intent_round_trips_byte_equivalent() {
+        // Backwards compatibility: an intent published with the v0.5.0
+        // string-only `files` shape must re-serialise byte-for-byte — no
+        // object wrappers, no `regions` keys leak in.
+        let json = r#"{"type":"agent.intent","agent_id":"feat-x","payload":{"files":["src/foo.rs","src/bar.rs"],"summary":"s","valid_for_seconds":900}}"#;
+        let msg = BrokerMessage::from_json(json).unwrap();
+        assert_eq!(
+            serde_json::to_string(&msg).unwrap(),
+            json,
+            "v0.5.0 string-only intent must round-trip byte-equivalently"
+        );
+    }
+
+    #[test]
+    fn region_display_renders_kind_and_name() {
+        assert_eq!(
+            Region::Function {
+                name: "validate_token".to_string()
+            }
+            .to_string(),
+            "function validate_token"
+        );
+        assert_eq!(
+            Region::Class {
+                name: "Auth".to_string()
+            }
+            .to_string(),
+            "class Auth"
+        );
+        assert_eq!(
+            Region::Block {
+                anchor: "Setup".to_string()
+            }
+            .to_string(),
+            "block Setup"
+        );
+        assert_eq!(
+            Region::Range {
+                start_line: 10,
+                end_line: 30
+            }
+            .to_string(),
+            "range 10-30"
+        );
+    }
+
     // spec-corrections-v0-5-0 envelope + question coverage. The v0.5.0
     // wire format ships seven `BrokerMessage` variants, each tagged via
     // `#[serde(rename = "agent.<lowercase>")]`. The two tests below lock
@@ -1197,6 +1825,7 @@ mod tests {
     // future serde rename can't drift the wire format.
 
     #[test]
+    #[allow(clippy::too_many_lines)] // exhaustive variant data table
     fn envelope_serde_rename_covers_seven_variants() {
         let variants = [
             (
@@ -1208,6 +1837,7 @@ mod tests {
                         message: None,
                         cli: None,
                         phase: None,
+                        detail: None,
                     },
                 },
                 "agent.status",
@@ -1266,21 +1896,58 @@ mod tests {
                 BrokerMessage::Intent {
                     agent_id: "feat-a".to_string(),
                     payload: IntentPayload {
-                        files: vec!["src/a.rs".to_string()],
+                        files: vec![FileIntent::from("src/a.rs")],
                         summary: "wire AuthClient".to_string(),
                         valid_for_seconds: 900,
                     },
                 },
                 "agent.intent",
             ),
+            (
+                BrokerMessage::AdvancedMain {
+                    payload: AdvancedMainPayload {
+                        from: "supervisor".to_string(),
+                        merged_branch: "feat/auth".to_string(),
+                        new_main_sha: "a1b2c3d4e5f6".to_string(),
+                        base: "main".to_string(),
+                        merged_at: DateTime::parse_from_rfc3339("2026-06-04T13:30:00Z")
+                            .unwrap()
+                            .with_timezone(&Utc),
+                        summary: None,
+                    },
+                },
+                "agent.advanced-main",
+            ),
+            (
+                BrokerMessage::Learning {
+                    payload: LearningPayload {
+                        id: "deadbeefdeadbeef".to_string(),
+                        agent_id: "supervisor".to_string(),
+                        branch_id: Some("feat/x".to_string()),
+                        category: "conflict_event".to_string(),
+                        title: "forward conflict: feat-x and feat-y".to_string(),
+                        body: serde_json::json!({"shape": "forward"}),
+                        timestamp: "2026-05-28T12:01:01Z".to_string(),
+                    },
+                },
+                "agent.learning",
+            ),
+            (
+                BrokerMessage::VerifyNow {
+                    branch_id: "feat/foo".to_string(),
+                },
+                "supervisor.verify-now",
+            ),
         ];
 
-        // Sanity: assert we constructed seven distinct variants, matching
-        // the spec'd count.
+        // Sanity: assert we constructed ten distinct variants, matching the
+        // spec'd count (nine `agent.*` — now including both `agent.advanced-main`
+        // and `agent.learning` — plus the broker-emitted `supervisor.verify-now`
+        // nudge).
         assert_eq!(
             variants.len(),
-            7,
-            "expected exactly seven BrokerMessage variants"
+            10,
+            "expected exactly ten BrokerMessage variants"
         );
 
         for (msg, expected_tag) in &variants {
@@ -1297,6 +1964,431 @@ mod tests {
                 "wire discriminator drift: expected {expected_tag}, got {tag}",
             );
         }
+    }
+
+    // === supervisor.verify-now nudge (per-commit-verification-v0-6-x) ===
+
+    #[test]
+    fn verify_now_round_trips_with_branch_id() {
+        let json = r#"{"type":"supervisor.verify-now","branch_id":"feat/foo"}"#;
+        let msg = BrokerMessage::from_json(json).expect("verify-now must parse");
+        let BrokerMessage::VerifyNow { branch_id } = &msg else {
+            panic!("expected VerifyNow, got {msg:?}");
+        };
+        assert_eq!(branch_id, "feat/foo");
+
+        // Re-serialise and confirm the discriminator + field survive.
+        let value = serde_json::to_value(&msg).expect("serialise VerifyNow");
+        assert_eq!(
+            value.get("type").and_then(|v| v.as_str()),
+            Some("supervisor.verify-now")
+        );
+        assert_eq!(
+            value.get("branch_id").and_then(|v| v.as_str()),
+            Some("feat/foo")
+        );
+    }
+
+    #[test]
+    fn verify_now_exposes_branch_as_agent_id_and_label() {
+        let msg = BrokerMessage::VerifyNow {
+            branch_id: "feat-bar".to_string(),
+        };
+        assert_eq!(msg.agent_id(), "feat-bar");
+        assert_eq!(msg.status_label(), "verify-now");
+    }
+
+    #[test]
+    fn verify_now_rejects_blank_branch_id() {
+        let json = r#"{"type":"supervisor.verify-now","branch_id":"   "}"#;
+        assert!(
+            matches!(
+                BrokerMessage::from_json(json),
+                Err(MessageError::EmptyAgentId)
+            ),
+            "blank branch_id must be rejected as an empty agent id"
+        );
+    }
+
+    // === agent.advanced-main variant (advanced-main-event) ===
+
+    fn sample_advanced_main_json() -> &'static str {
+        r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/auth","new_main_sha":"a1b2c3d4e5f6","base":"main","merged_at":"2026-06-04T13:30:00Z","summary":"landed auth client"}"#
+    }
+
+    #[test]
+    fn advanced_main_round_trips_with_all_fields() {
+        let msg = BrokerMessage::from_json(sample_advanced_main_json())
+            .expect("well-formed advanced-main parses");
+        let BrokerMessage::AdvancedMain { payload } = &msg else {
+            panic!("expected AdvancedMain, got {msg:?}");
+        };
+        assert_eq!(payload.from, "supervisor");
+        assert_eq!(payload.merged_branch, "feat/auth");
+        assert_eq!(payload.new_main_sha, "a1b2c3d4e5f6");
+        assert_eq!(payload.base, "main");
+        assert_eq!(payload.summary.as_deref(), Some("landed auth client"));
+
+        // Re-serialise: the payload fields must be flat (top-level), not
+        // nested under a `payload` key, and the discriminator must survive.
+        let value = serde_json::to_value(&msg).expect("serialise AdvancedMain");
+        assert_eq!(
+            value.get("type").and_then(|v| v.as_str()),
+            Some("agent.advanced-main")
+        );
+        assert_eq!(
+            value.get("merged_branch").and_then(|v| v.as_str()),
+            Some("feat/auth"),
+            "merged_branch must be flattened to the envelope top level; got {value:?}"
+        );
+        assert!(
+            value.get("payload").is_none(),
+            "advanced-main fields must not nest under a `payload` key; got {value:?}"
+        );
+
+        // Full round-trip equality.
+        let back: BrokerMessage =
+            serde_json::from_value(value).expect("deserialise re-serialised value");
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn advanced_main_summary_omitted_when_absent() {
+        let json = r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/x","new_main_sha":"deadbeefcafe","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#;
+        let msg = BrokerMessage::from_json(json).expect("parses without summary");
+        let BrokerMessage::AdvancedMain { payload } = &msg else {
+            panic!("expected AdvancedMain");
+        };
+        assert_eq!(payload.summary, None);
+        // `summary` must be skipped on the wire when None.
+        let serialised = serde_json::to_string(&msg).unwrap();
+        assert!(
+            !serialised.contains("summary"),
+            "summary key must be omitted when None; got {serialised}"
+        );
+    }
+
+    #[test]
+    fn advanced_main_preserves_summary_verbatim() {
+        let msg = BrokerMessage::from_json(sample_advanced_main_json()).unwrap();
+        if let BrokerMessage::AdvancedMain { payload } = &msg {
+            assert_eq!(payload.summary.as_deref(), Some("landed auth client"));
+        }
+    }
+
+    // === agent.learning variant (agent-learning-variant) ===
+
+    fn make_learning(
+        id: &str,
+        agent_id: &str,
+        branch_id: Option<&str>,
+        category: &str,
+        title: &str,
+        body: serde_json::Value,
+    ) -> BrokerMessage {
+        BrokerMessage::Learning {
+            payload: LearningPayload {
+                id: id.to_string(),
+                agent_id: agent_id.to_string(),
+                branch_id: branch_id.map(str::to_string),
+                category: category.to_string(),
+                title: title.to_string(),
+                body,
+                timestamp: "2026-05-28T12:01:01Z".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn advanced_main_missing_merged_branch_rejected() {
+        // serde reports the absent required field by name -> 400-class.
+        let json = r#"{"type":"agent.advanced-main","from":"supervisor","new_main_sha":"abc123abc123","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            matches!(err, MessageError::Deserialize(_)) && text.contains("merged_branch"),
+            "missing merged_branch must be rejected and named; got {text}"
+        );
+    }
+
+    #[test]
+    fn advanced_main_missing_new_main_sha_rejected() {
+        let json = r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/x","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        assert!(err.to_string().contains("new_main_sha"));
+    }
+
+    #[test]
+    fn advanced_main_missing_base_rejected() {
+        let json = r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/x","new_main_sha":"abc123abc123","merged_at":"2026-06-04T13:30:00Z"}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        assert!(err.to_string().contains("base"));
+    }
+
+    #[test]
+    fn advanced_main_missing_merged_at_rejected() {
+        let json = r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/x","new_main_sha":"abc123abc123","base":"main"}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        assert!(err.to_string().contains("merged_at"));
+    }
+
+    #[test]
+    fn advanced_main_blank_merged_branch_rejected() {
+        let json = r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"   ","new_main_sha":"abc123abc123","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        assert!(matches!(err, MessageError::EmptyMergedBranch));
+    }
+
+    #[test]
+    fn advanced_main_blank_new_main_sha_rejected() {
+        let json = r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/x","new_main_sha":"","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        assert!(matches!(err, MessageError::EmptyNewMainSha));
+    }
+
+    #[test]
+    fn advanced_main_blank_base_rejected() {
+        let json = r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/x","new_main_sha":"abc123abc123","base":"  ","merged_at":"2026-06-04T13:30:00Z"}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        assert!(matches!(err, MessageError::EmptyBase));
+    }
+
+    #[test]
+    fn advanced_main_blank_from_rejected() {
+        // `from` is the message's agent_id() -> caught by the empty-id guard.
+        let json = r#"{"type":"agent.advanced-main","from":"   ","merged_branch":"feat/x","new_main_sha":"abc123abc123","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        assert!(matches!(err, MessageError::EmptyAgentId));
+    }
+
+    #[test]
+    fn learning_round_trips_through_serde() {
+        let msg = make_learning(
+            "abc123def456abcd",
+            "supervisor",
+            Some("feat/x"),
+            "stuck_duration",
+            "feat-x blocked 11m12s waiting on feat-y",
+            serde_json::json!({
+                "agent_id": "feat-x",
+                "blocked_on": "feat-y",
+                "duration_seconds": 672,
+                "resolved": true
+            }),
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"agent.learning\""));
+        let back: BrokerMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
+        assert_eq!(back.agent_id(), "supervisor");
+        assert_eq!(back.status_label(), "learning");
+    }
+
+    #[test]
+    fn learning_omits_branch_id_when_none() {
+        let msg = make_learning(
+            "abc123def456abcd",
+            "supervisor",
+            None,
+            "permission_pattern",
+            "`cargo check` auto-approved 23 times",
+            serde_json::json!({"command_class": "cargo check", "count": 23}),
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            !json.contains("branch_id"),
+            "branch_id must be omitted when None; got {json}"
+        );
+        let back: BrokerMessage = serde_json::from_str(&json).unwrap();
+        if let BrokerMessage::Learning { payload } = back {
+            assert_eq!(payload.branch_id, None);
+        } else {
+            panic!("expected Learning");
+        }
+    }
+
+    #[test]
+    fn learning_missing_category_rejected_as_deserialize_error() {
+        // `category` is a required serde field — its absence is a 400-class
+        // deserialize error that names the missing field.
+        let json = r#"{"type":"agent.learning","payload":{"id":"x","agent_id":"supervisor","title":"t","body":{},"timestamp":"2026-05-28T12:01:01Z"}}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        assert!(matches!(err, MessageError::Deserialize(_)), "got {err:?}");
+        assert!(err.to_string().contains("category"));
+    }
+
+    #[test]
+    fn learning_missing_body_rejected_as_deserialize_error() {
+        let json = r#"{"type":"agent.learning","payload":{"id":"x","agent_id":"supervisor","category":"stuck_duration","title":"t","timestamp":"2026-05-28T12:01:01Z"}}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        assert!(matches!(err, MessageError::Deserialize(_)), "got {err:?}");
+        assert!(err.to_string().contains("body"));
+    }
+
+    #[test]
+    fn learning_empty_category_rejected() {
+        let msg = make_learning("x", "supervisor", None, "  ", "t", serde_json::json!({}));
+        let json = serde_json::to_string(&msg).unwrap();
+        let err = BrokerMessage::from_json(&json).unwrap_err();
+        assert!(matches!(err, MessageError::EmptyCategory));
+    }
+
+    #[test]
+    fn learning_empty_title_rejected() {
+        let msg = make_learning(
+            "x",
+            "supervisor",
+            None,
+            "stuck_duration",
+            "",
+            serde_json::json!({}),
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        let err = BrokerMessage::from_json(&json).unwrap_err();
+        assert!(matches!(err, MessageError::EmptyTitle));
+    }
+
+    #[test]
+    fn learning_empty_timestamp_rejected() {
+        let msg = BrokerMessage::Learning {
+            payload: LearningPayload {
+                id: "x".to_string(),
+                agent_id: "supervisor".to_string(),
+                branch_id: None,
+                category: "stuck_duration".to_string(),
+                title: "t".to_string(),
+                body: serde_json::json!({}),
+                timestamp: "   ".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let err = BrokerMessage::from_json(&json).unwrap_err();
+        assert!(matches!(err, MessageError::EmptyTimestamp));
+    }
+
+    #[test]
+    fn learning_empty_agent_id_rejected() {
+        let msg = make_learning(
+            "x",
+            "",
+            Some("feat/x"),
+            "stuck_duration",
+            "t",
+            serde_json::json!({}),
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        let err = BrokerMessage::from_json(&json).unwrap_err();
+        assert!(matches!(err, MessageError::EmptyAgentId));
+    }
+
+    #[test]
+    fn advanced_main_agent_id_is_from_field() {
+        let msg = BrokerMessage::from_json(sample_advanced_main_json()).unwrap();
+        assert_eq!(msg.agent_id(), "supervisor");
+        assert_eq!(msg.status_label(), "advanced-main");
+    }
+
+    #[test]
+    fn advanced_main_display_is_single_line() {
+        let msg = BrokerMessage::from_json(sample_advanced_main_json()).unwrap();
+        let s = msg.to_string();
+        assert_eq!(
+            s,
+            "[supervisor] advanced-main: feat/auth \u{2192} main (a1b2c3d4e5f6)"
+        );
+        assert!(!s.contains('\n'));
+        assert!(!s.contains('\u{1b}'));
+    }
+
+    // --- Deterministic id (advanced-main-event §2) ---
+
+    fn ts(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s)
+            .expect("valid rfc3339")
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn advanced_main_id_is_16_hex_chars() {
+        let id = advanced_main_id("feat/x", "abc123abc123", "main", ts("2026-06-04T13:30:00Z"));
+        assert_eq!(id.len(), 16, "id must be a 16-hex-char (64-bit) prefix");
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "id must be lowercase hex; got {id}"
+        );
+    }
+
+    #[test]
+    fn advanced_main_id_same_input_same_hour_is_identical() {
+        let a = advanced_main_id("feat/x", "abc123abc123", "main", ts("2026-06-04T13:00:00Z"));
+        let b = advanced_main_id("feat/x", "abc123abc123", "main", ts("2026-06-04T13:59:59Z"));
+        assert_eq!(
+            a, b,
+            "same merge within the same UTC hour must dedup to one id"
+        );
+    }
+
+    #[test]
+    fn advanced_main_id_differs_across_hour_boundary() {
+        let a = advanced_main_id("feat/x", "abc123abc123", "main", ts("2026-06-04T13:59:59Z"));
+        let b = advanced_main_id("feat/x", "abc123abc123", "main", ts("2026-06-04T14:00:00Z"));
+        assert_ne!(
+            a, b,
+            "the same merge across an hour boundary must produce different ids"
+        );
+    }
+
+    #[test]
+    fn advanced_main_id_differs_for_different_shas() {
+        let a = advanced_main_id("feat/x", "aaaaaaaaaaaa", "main", ts("2026-06-04T13:30:00Z"));
+        let b = advanced_main_id("feat/x", "bbbbbbbbbbbb", "main", ts("2026-06-04T13:30:00Z"));
+        assert_ne!(a, b, "different SHAs must produce different ids");
+    }
+
+    #[test]
+    fn advanced_main_id_differs_for_different_base() {
+        let a = advanced_main_id("feat/x", "abc123abc123", "main", ts("2026-06-04T13:30:00Z"));
+        let b = advanced_main_id(
+            "feat/x",
+            "abc123abc123",
+            "release",
+            ts("2026-06-04T13:30:00Z"),
+        );
+        assert_ne!(a, b, "different base branches must produce different ids");
+    }
+
+    #[test]
+    fn advanced_main_payload_deterministic_id_matches_free_fn() {
+        let payload = AdvancedMainPayload {
+            from: "supervisor".to_string(),
+            merged_branch: "feat/x".to_string(),
+            new_main_sha: "abc123abc123".to_string(),
+            base: "main".to_string(),
+            merged_at: ts("2026-06-04T13:30:00Z"),
+            summary: None,
+        };
+        assert_eq!(
+            payload.deterministic_id(),
+            advanced_main_id("feat/x", "abc123abc123", "main", ts("2026-06-04T13:30:00Z")),
+        );
+    }
+
+    #[test]
+    fn learning_accepts_unknown_category_open_enum() {
+        // A descendant change ([[qualitative-learnings]]) adds new category
+        // values; the broker must accept them without an enum check.
+        let msg = make_learning(
+            "x",
+            "supervisor",
+            Some("feat/x"),
+            "qualitative_insight",
+            "agent kept re-reading the same file",
+            serde_json::json!({"note": "thrash"}),
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        let back = BrokerMessage::from_json(&json).expect("unknown category must be accepted");
+        assert_eq!(back.agent_id(), "supervisor");
     }
 
     #[test]

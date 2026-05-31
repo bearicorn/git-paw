@@ -18,6 +18,37 @@ use super::{BrokerState, WatchTarget, delivery};
 /// Interval between `git status --porcelain` polls.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Decides whether the watcher should publish `working` for an observed
+/// git-status change, given the agent's current broker status, the time since
+/// its last `committed` event (if any), and the configured post-commit
+/// re-entry TTL (bug 8).
+///
+/// - When the agent is **not** in the `committed` state, the watcher publishes
+///   `working` exactly as in v0.5.0.
+/// - When the agent **is** `committed`:
+///   - `ttl == 0` suppresses the publish (committed stays terminal — the
+///     v0.5.0 opt-out model).
+///   - otherwise the publish fires only when the elapsed time since the
+///     committed event is within `ttl`; past the window the agent is
+///     considered settled and the watcher suppresses the publish.
+#[must_use]
+pub fn should_republish_working(
+    status: &str,
+    since_committed: Option<Duration>,
+    ttl: Duration,
+) -> bool {
+    if status != "committed" {
+        return true;
+    }
+    if ttl.is_zero() {
+        return false;
+    }
+    match since_committed {
+        Some(elapsed) => elapsed <= ttl,
+        None => false,
+    }
+}
+
 /// Parses `git status --porcelain` output into a sorted, deduplicated list of paths.
 ///
 /// Each porcelain line looks like `XY PATH` or `XY PATH1 -> PATH2` for renames.
@@ -102,6 +133,24 @@ pub async fn watch_worktree(
             continue;
         }
 
+        // Bug 8: gate the `working` publish against the post-commit re-entry
+        // TTL. Read the agent's status, time-since-committed, and the
+        // configured TTL under a short read lock (never held across an await).
+        let (status, since_committed, ttl) = {
+            let inner = state.read();
+            let ttl = inner.republish_working_ttl;
+            let rec = inner.agents.get(&target.agent_id);
+            let status = rec.map(|r| r.status.clone()).unwrap_or_default();
+            let since = rec.and_then(|r| r.last_committed_at).map(|t| t.elapsed());
+            (status, since, ttl)
+        };
+        if !should_republish_working(&status, since_committed, ttl) {
+            // Agent is settled at `committed`; absorb the change as the new
+            // baseline without re-publishing `working`.
+            previous = Some(current);
+            continue;
+        }
+
         let msg = BrokerMessage::Status {
             agent_id: target.agent_id.clone(),
             payload: StatusPayload {
@@ -119,6 +168,56 @@ pub async fn watch_worktree(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // === Bug 8: post-commit re-entry decision (should_republish_working) ===
+
+    #[test]
+    fn non_committed_status_always_publishes() {
+        // Normal operation: a working agent publishes regardless of TTL.
+        assert!(should_republish_working(
+            "working",
+            None,
+            Duration::from_secs(45)
+        ));
+        assert!(should_republish_working("idle", None, Duration::ZERO));
+    }
+
+    #[test]
+    fn committed_within_ttl_republishes() {
+        assert!(should_republish_working(
+            "committed",
+            Some(Duration::from_secs(10)),
+            Duration::from_secs(45)
+        ));
+    }
+
+    #[test]
+    fn committed_past_ttl_does_not_republish() {
+        assert!(!should_republish_working(
+            "committed",
+            Some(Duration::from_secs(290)),
+            Duration::from_secs(45)
+        ));
+    }
+
+    #[test]
+    fn committed_with_zero_ttl_does_not_republish() {
+        // Opt-out: TTL=0 keeps committed terminal even within "0 seconds".
+        assert!(!should_republish_working(
+            "committed",
+            Some(Duration::from_secs(0)),
+            Duration::ZERO
+        ));
+    }
+
+    #[test]
+    fn committed_without_timestamp_does_not_republish() {
+        assert!(!should_republish_working(
+            "committed",
+            None,
+            Duration::from_secs(45)
+        ));
+    }
 
     #[test]
     fn parse_porcelain_handles_modified_and_untracked() {
@@ -181,6 +280,66 @@ mod tests {
         );
     }
 
+    /// Spec scenario: multiple writes within the TTL republish `working`
+    /// exactly once (the 2s poll coalesces a burst into one tick).
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn watch_worktree_burst_republishes_working_once() {
+        use crate::broker::BrokerState;
+        use crate::broker::messages::{ArtifactPayload, BrokerMessage};
+
+        let tmp = tempfile::tempdir().unwrap();
+        init_test_repo(tmp.path());
+
+        let state = Arc::new(BrokerState::new(None));
+        super::delivery::publish_message(
+            &state,
+            &BrokerMessage::Artifact {
+                agent_id: "feat-b".to_string(),
+                payload: ArtifactPayload {
+                    status: "committed".to_string(),
+                    exports: vec![],
+                    modified_files: vec![],
+                },
+            },
+        );
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let target = WatchTarget {
+            agent_id: "feat-b".to_string(),
+            cli: "claude".to_string(),
+            worktree_path: tmp.path().to_path_buf(),
+        };
+        let handle = tokio::spawn(watch_worktree(Arc::clone(&state), target, rx));
+
+        // Burst: ten files written well within one poll interval.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        for i in 0..10 {
+            std::fs::write(tmp.path().join(format!("f{i}.rs")), "x").unwrap();
+        }
+
+        tokio::time::sleep(POLL_INTERVAL + Duration::from_millis(800)).await;
+
+        let working_count = {
+            let inner = state.read();
+            inner
+                .message_log
+                .iter()
+                .filter(|(_, _, m)| {
+                    matches!(m, BrokerMessage::Status { agent_id, payload }
+                        if agent_id == "feat-b" && payload.status == "working")
+                })
+                .count()
+        };
+        assert_eq!(
+            working_count, 1,
+            "a burst of writes within one poll interval must republish working exactly once"
+        );
+
+        let _ = tx.send(true);
+        let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+    }
+
     #[tokio::test(flavor = "current_thread")]
     #[serial_test::serial]
     async fn run_git_status_respects_gitignore() {
@@ -238,6 +397,105 @@ mod tests {
             }
             other => panic!("expected Status message, got {other:?}"),
         }
+
+        let _ = tx.send(true);
+        let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+    }
+
+    /// Spec scenario (task 5.5): an agent commits, the broker records
+    /// `committed`, then the agent keeps editing — the watcher re-publishes
+    /// `working`, so the record transitions `committed` -> `working`.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn watch_worktree_reenters_working_after_commit() {
+        use crate::broker::BrokerState;
+        use crate::broker::messages::{ArtifactPayload, BrokerMessage};
+
+        let tmp = tempfile::tempdir().unwrap();
+        init_test_repo(tmp.path());
+
+        let state = Arc::new(BrokerState::new(None));
+        // Record a committed artifact so the agent is in the committed state
+        // with a fresh last_committed_at (default TTL is 60s).
+        super::delivery::publish_message(
+            &state,
+            &BrokerMessage::Artifact {
+                agent_id: "feat-x".to_string(),
+                payload: ArtifactPayload {
+                    status: "committed".to_string(),
+                    exports: vec![],
+                    modified_files: vec![],
+                },
+            },
+        );
+        assert_eq!(state.read().agents["feat-x"].status, "committed");
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let target = WatchTarget {
+            agent_id: "feat-x".to_string(),
+            cli: "claude".to_string(),
+            worktree_path: tmp.path().to_path_buf(),
+        };
+        let handle = tokio::spawn(watch_worktree(Arc::clone(&state), target, rx));
+
+        // Agent keeps editing after the commit.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        std::fs::write(tmp.path().join("more_work.rs"), "fn extra() {}").unwrap();
+
+        tokio::time::sleep(POLL_INTERVAL + Duration::from_millis(800)).await;
+
+        assert_eq!(
+            state.read().agents["feat-x"].status,
+            "working",
+            "watcher must re-enter working after a post-commit edit within TTL"
+        );
+
+        let _ = tx.send(true);
+        let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+    }
+
+    /// With TTL=0 the post-commit edit must NOT re-publish `working` — the
+    /// dashboard keeps showing `committed` (v0.5.0 opt-out).
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn watch_worktree_does_not_reenter_when_ttl_zero() {
+        use crate::broker::BrokerState;
+        use crate::broker::messages::{ArtifactPayload, BrokerMessage};
+
+        let tmp = tempfile::tempdir().unwrap();
+        init_test_repo(tmp.path());
+
+        let state = Arc::new(BrokerState::new(None));
+        state.set_republish_working_ttl(Duration::ZERO);
+        super::delivery::publish_message(
+            &state,
+            &BrokerMessage::Artifact {
+                agent_id: "feat-z".to_string(),
+                payload: ArtifactPayload {
+                    status: "committed".to_string(),
+                    exports: vec![],
+                    modified_files: vec![],
+                },
+            },
+        );
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let target = WatchTarget {
+            agent_id: "feat-z".to_string(),
+            cli: "claude".to_string(),
+            worktree_path: tmp.path().to_path_buf(),
+        };
+        let handle = tokio::spawn(watch_worktree(Arc::clone(&state), target, rx));
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        std::fs::write(tmp.path().join("more_work.rs"), "fn extra() {}").unwrap();
+        tokio::time::sleep(POLL_INTERVAL + Duration::from_millis(800)).await;
+
+        assert_eq!(
+            state.read().agents["feat-z"].status,
+            "committed",
+            "with TTL=0 the watcher must not re-enter working after commit"
+        );
 
         let _ = tx.send(true);
         let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;

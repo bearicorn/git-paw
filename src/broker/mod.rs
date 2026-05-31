@@ -56,6 +56,14 @@ pub struct AgentRecord {
     pub last_seen: Instant,
     /// The most recent message from this agent.
     pub last_message: Option<BrokerMessage>,
+    /// When the agent most recently published an `agent.artifact status:
+    /// "committed"` event, if ever.
+    ///
+    /// Bug 8 (`auto-approve-scope-v0-6-x`): the filesystem watcher consults
+    /// this to decide whether a subsequent file modification should
+    /// re-publish `working` (within the configured TTL window). Transient —
+    /// not serialized; reset only when overwritten by a newer committed event.
+    pub last_committed_at: Option<Instant>,
 }
 
 /// JSON-serializable snapshot of an agent's status for the `/status` endpoint
@@ -93,6 +101,13 @@ pub struct BrokerStateInner {
     pub queues: HashMap<String, Vec<(u64, BrokerMessage)>>,
     /// Append-only message log for disk flush.
     pub message_log: Vec<(u64, std::time::SystemTime, BrokerMessage)>,
+    /// Post-commit re-entry TTL for the filesystem watcher (bug 8).
+    ///
+    /// A file modification observed within this window after an agent's
+    /// `committed` event re-publishes `working`. `Duration::ZERO` disables
+    /// the behaviour (v0.5.0 model). Defaults to 60s; overwritten from
+    /// `[broker.watcher].republish_working_ttl_seconds` at broker start.
+    pub republish_working_ttl: std::time::Duration,
 }
 
 /// Shared broker state.
@@ -114,6 +129,18 @@ pub struct BrokerState {
     /// Optional learnings aggregator. Populated when supervisor + learnings
     /// mode is active; the publish path forwards every observed message.
     pub learnings: Option<learnings::SharedLearnings>,
+    /// When `true`, an `agent.artifact { status: "committed" }` triggers a
+    /// broker-emitted [`BrokerMessage::VerifyNow`] nudge to the supervisor
+    /// inbox so per-commit verification fires on an explicit event. Resolved
+    /// from `[supervisor].verify_on_commit_nudge` (default `true`) at session
+    /// boot and threaded in via [`BrokerState::with_verify_on_commit_nudge`].
+    pub verify_on_commit_nudge: bool,
+    /// opsx role-gating context. When `Some` and active (`OpenSpec` engine +
+    /// non-`off` mode), the publish path runs the role-gating guard on every
+    /// `agent.artifact { status: "committed" }`. `None` (the default, and
+    /// non-OpenSpec sessions) leaves the guard inert. Threaded in via
+    /// [`BrokerState::with_role_gating`].
+    pub role_gating: Option<crate::opsx::RoleGatingContext>,
 }
 
 impl BrokerState {
@@ -125,12 +152,61 @@ impl BrokerState {
                 agent_clis: HashMap::new(),
                 queues: HashMap::new(),
                 message_log: Vec::new(),
+                republish_working_ttl: std::time::Duration::from_secs(
+                    crate::config::WatcherConfig::DEFAULT_REPUBLISH_TTL_SECONDS,
+                ),
             }),
             next_seq: AtomicU64::new(0),
             log_path,
             started_at: Instant::now(),
             learnings: None,
+            // Conservative broker-level default: the nudge is opt-in at the
+            // state level and explicitly enabled from config (whose own
+            // default is `true`) via `with_verify_on_commit_nudge`.
+            verify_on_commit_nudge: false,
+            role_gating: None,
         }
+    }
+
+    /// Attaches the opsx role-gating context. Call before [`start_broker`] so
+    /// the publish path observes it from the first committed artifact. Passing
+    /// a context whose mode is `off` or whose engine is not `OpenSpec` leaves
+    /// the guard inert (the guard re-checks [`crate::opsx::RoleGatingContext::is_active`]).
+    #[must_use]
+    pub fn with_role_gating(mut self, ctx: crate::opsx::RoleGatingContext) -> Self {
+        self.role_gating = Some(ctx);
+        self
+    }
+
+    /// Sets whether committed artifacts emit a [`BrokerMessage::VerifyNow`]
+    /// nudge to the supervisor inbox. Call before [`start_broker`] so the
+    /// publish path observes the resolved value from the first message.
+    #[must_use]
+    pub fn with_verify_on_commit_nudge(mut self, enabled: bool) -> Self {
+        self.verify_on_commit_nudge = enabled;
+        self
+    }
+
+    /// Authoritatively seeds an agent's CLI into the roster's CLI map.
+    ///
+    /// git-paw knows every pane's CLI at launch (the supervisor's from
+    /// `[supervisor].cli`/`default_cli`, each agent's from the resolved
+    /// agent CLI), so the launcher seeds those known values rather than
+    /// depending on the agent to self-report via `agent.status`. This is
+    /// the only source for the supervisor's CLI column, since the
+    /// supervisor is not a filesystem watch target (W15-15). A blank `cli`
+    /// is ignored so a missing config value never clobbers the map. Call
+    /// before [`start_broker`] so the first `/status` snapshot is correct.
+    #[must_use]
+    pub fn with_seeded_cli(self, agent_id: &str, cli: &str) -> Self {
+        if !cli.is_empty()
+            && let Ok(mut inner) = self.inner.write()
+        {
+            inner
+                .agent_clis
+                .insert(agent_id.to_string(), cli.to_string());
+        }
+        self
     }
 
     /// Attaches a learnings aggregator. Replaces any previously attached
@@ -138,6 +214,13 @@ impl BrokerState {
     /// observes every message from the first one.
     pub fn attach_learnings(&mut self, aggregator: learnings::SharedLearnings) {
         self.learnings = Some(aggregator);
+    }
+
+    /// Sets the post-commit re-entry TTL consulted by the filesystem watcher
+    /// and the `committed -> working` transition in `update_agent_record`
+    /// (bug 8). `Duration::ZERO` disables the auto-republish behaviour.
+    pub fn set_republish_working_ttl(&self, ttl: std::time::Duration) {
+        self.write().republish_working_ttl = ttl;
     }
 
     /// Acquires a read lock on the inner state.
@@ -388,6 +471,11 @@ pub fn start_broker_with(
 ) -> Result<BrokerHandle, BrokerError> {
     let url = config.url();
     let state = Arc::new(state);
+    // Apply the configured post-commit re-entry TTL (bug 8) before any
+    // watcher task or publish observes the state.
+    state.set_republish_working_ttl(std::time::Duration::from_secs(
+        config.watcher.republish_working_ttl_seconds(),
+    ));
     let stop_flag = Arc::new(AtomicBool::new(false));
 
     match probe_existing_broker(&url) {
@@ -536,6 +624,7 @@ fn learnings_flush_loop(
                 if let Ok(mut agg) = aggregator.lock() {
                     let _ = agg.flush_at_shutdown();
                 }
+                publish_pending_learnings(state, &aggregator);
                 return;
             }
             std::thread::sleep(tick);
@@ -544,6 +633,25 @@ fn learnings_flush_loop(
         if let Ok(mut agg) = aggregator.lock() {
             let _ = agg.flush();
         }
+        publish_pending_learnings(state, &aggregator);
+    }
+}
+
+/// Drains the aggregator's pending broker records and publishes each as an
+/// `agent.learning` message.
+///
+/// Critically, the aggregator lock is acquired *only* to drain the queue and
+/// is released before any publish: `publish_message` re-enters the aggregator
+/// via `observe`, so publishing while holding the lock would deadlock the
+/// non-reentrant `Mutex`. When broker publish is disabled the queue is always
+/// empty, so this is a cheap no-op.
+fn publish_pending_learnings(state: &Arc<BrokerState>, aggregator: &learnings::SharedLearnings) {
+    let records = match aggregator.lock() {
+        Ok(mut agg) => agg.take_pending_publish(),
+        Err(_) => return,
+    };
+    for record in &records {
+        delivery::publish_message(state, &BrokerMessage::from(record));
     }
 }
 
@@ -592,6 +700,7 @@ mod tests {
             #[allow(clippy::cast_possible_truncation)]
             port: 19_000 + (std::process::id() as u16 % 1000),
             bind: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         let state = BrokerState::new(None);
         let handle = start_broker(&config, state, Vec::new());
@@ -609,6 +718,7 @@ mod tests {
             #[allow(clippy::cast_possible_truncation)]
             port: 19_100 + (std::process::id() as u16 % 100),
             bind: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         let state = BrokerState::new(None);
         if let Ok(handle) = start_broker(&config, state, Vec::new()) {
@@ -626,11 +736,165 @@ mod tests {
             #[allow(clippy::cast_possible_truncation)]
             port: 19_200 + (std::process::id() as u16 % 100),
             bind: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         let state = BrokerState::new(Some(log_path));
         if let Ok(handle) = start_broker(&config, state, Vec::new()) {
             assert!(handle.flush_thread.is_some());
             drop(handle);
         }
+    }
+
+    // === agent-learning-variant: dual-output through the real publish path ===
+
+    fn conflict_feedback(target: &str, other: &str) -> BrokerMessage {
+        BrokerMessage::Feedback {
+            agent_id: target.to_string(),
+            payload: messages::FeedbackPayload {
+                from: "supervisor".to_string(),
+                errors: vec![format!(
+                    "[conflict-detector] in-flight conflict with {other} on src/a.rs"
+                )],
+            },
+        }
+    }
+
+    fn learning_payloads(state: &Arc<BrokerState>) -> Vec<messages::LearningPayload> {
+        state
+            .read()
+            .message_log
+            .iter()
+            .filter_map(|(_, _, m)| match m {
+                BrokerMessage::Learning { payload } => Some(payload.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Drives one aggregator tick (flush + publish-pending) the way the flush
+    /// loop does, against an attached aggregator.
+    fn tick(state: &Arc<BrokerState>) {
+        let aggregator = state.learnings.clone().expect("aggregator attached");
+        if let Ok(mut a) = aggregator.lock() {
+            a.flush().unwrap();
+        }
+        publish_pending_learnings(state, &aggregator);
+    }
+
+    fn state_with_aggregator(path: PathBuf, broker_publish: bool) -> Arc<BrokerState> {
+        let mut agg = learnings::LearningsAggregator::new(path);
+        agg.set_broker_publish(broker_publish);
+        agg.register_agent("feat-x");
+        agg.register_agent("feat-y");
+        let mut state = BrokerState::new(None);
+        state.attach_learnings(Arc::new(std::sync::Mutex::new(agg)));
+        Arc::new(state)
+    }
+
+    // Task 7.1: broker on — a conflict scenario yields an `agent.learning`
+    // record on the broker AND a matching entry in the learnings file.
+    #[test]
+    fn dual_output_publishes_learning_and_writes_file_when_broker_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("session-learnings.md");
+        let state = state_with_aggregator(path.clone(), true);
+
+        delivery::publish_message(&state, &conflict_feedback("feat-x", "feat-y"));
+        tick(&state);
+
+        let md = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            md.contains("### Conflict events"),
+            "file missing conflict:\n{md}"
+        );
+
+        let learnings = learning_payloads(&state);
+        assert_eq!(learnings.len(), 1, "expected one agent.learning record");
+        assert_eq!(learnings[0].category, "conflict_event");
+        assert_eq!(learnings[0].id.len(), 16);
+        assert!(
+            md.contains(&learnings[0].title),
+            "file title must match broker record title: {}",
+            learnings[0].title
+        );
+    }
+
+    // Task 7.2: broker off — same scenario writes the file but attempts no
+    // broker publish.
+    #[test]
+    fn no_broker_publish_when_disabled_but_file_still_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("session-learnings.md");
+        let state = state_with_aggregator(path.clone(), false);
+
+        delivery::publish_message(&state, &conflict_feedback("feat-x", "feat-y"));
+        tick(&state);
+
+        let md = std::fs::read_to_string(&path).unwrap();
+        assert!(md.contains("### Conflict events"));
+        assert!(
+            learning_payloads(&state).is_empty(),
+            "no agent.learning record should be published when broker publish is off"
+        );
+    }
+
+    // Task 7.4: re-ticking after the queue is drained does not re-publish —
+    // each record reaches the broker exactly once.
+    #[test]
+    fn re_ticking_does_not_duplicate_learning_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("session-learnings.md");
+        let state = state_with_aggregator(path, true);
+
+        delivery::publish_message(&state, &conflict_feedback("feat-x", "feat-y"));
+        tick(&state);
+        tick(&state); // second tick: queue already drained, nothing new flushed
+
+        assert_eq!(
+            learning_payloads(&state).len(),
+            1,
+            "the conflict record must be published exactly once"
+        );
+    }
+
+    // The branch-scoped record is retrievable via `messages/<branch_id>`.
+    #[test]
+    fn branch_scoped_learning_is_routed_to_branch_inbox() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("session-learnings.md");
+        let state = state_with_aggregator(path, true);
+
+        // A stuck-duration scenario is branch-scoped to "feat-x".
+        delivery::publish_message(
+            &state,
+            &BrokerMessage::Blocked {
+                agent_id: "feat-x".to_string(),
+                payload: messages::BlockedPayload {
+                    needs: "types".to_string(),
+                    from: "feat-y".to_string(),
+                },
+            },
+        );
+        delivery::publish_message(
+            &state,
+            &BrokerMessage::Artifact {
+                agent_id: "feat-x".to_string(),
+                payload: messages::ArtifactPayload {
+                    status: "done".to_string(),
+                    exports: vec![],
+                    modified_files: vec![],
+                },
+            },
+        );
+        tick(&state);
+
+        let (msgs, _) = delivery::poll_messages(&state, "feat-x", 0);
+        assert!(
+            msgs.iter().any(|m| matches!(
+                m,
+                BrokerMessage::Learning { payload } if payload.category == "stuck_duration"
+            )),
+            "stuck_duration learning should land in feat-x's inbox"
+        );
     }
 }

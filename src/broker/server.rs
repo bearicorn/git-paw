@@ -98,7 +98,10 @@ fn check_placeholder_fields(msg: &BrokerMessage) -> Option<Response> {
         BrokerMessage::Status { .. }
         | BrokerMessage::Artifact { .. }
         | BrokerMessage::Verified { .. }
-        | BrokerMessage::Intent { .. } => {}
+        | BrokerMessage::Intent { .. }
+        | BrokerMessage::AdvancedMain { .. }
+        | BrokerMessage::Learning { .. }
+        | BrokerMessage::VerifyNow { .. } => {}
     }
     None
 }
@@ -584,6 +587,67 @@ mod tests {
         );
     }
 
+    // === agent.advanced-main routing + validation (advanced-main-event §3) ===
+
+    #[tokio::test]
+    async fn advanced_main_accepted_through_publish_endpoint() {
+        // No new endpoint: the variant flows through the existing /publish.
+        let (status, _) = post_publish(
+            r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/auth","new_main_sha":"a1b2c3d4e5f6","base":"main","merged_at":"2026-06-04T13:30:00Z","summary":"landed auth"}"#,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::ACCEPTED,
+            "a well-formed advanced-main must be accepted (202)"
+        );
+    }
+
+    #[tokio::test]
+    async fn advanced_main_missing_field_returns_400_naming_field() {
+        let (status, body) = post_publish(
+            r#"{"type":"agent.advanced-main","from":"supervisor","new_main_sha":"a1b2c3d4e5f6","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("merged_branch"),
+            "the 400 must name the missing field; got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn advanced_main_routes_to_every_registered_agent() {
+        // After two agents register, a supervisor-published advance lands in
+        // both their inboxes within one poll.
+        let state = Arc::new(BrokerState::new(None));
+        publish_json(
+            &state,
+            r#"{"type":"agent.status","agent_id":"feat-alpha","payload":{"status":"working","modified_files":[]}}"#,
+        )
+        .await;
+        publish_json(
+            &state,
+            r#"{"type":"agent.status","agent_id":"feat-beta","payload":{"status":"working","modified_files":[]}}"#,
+        )
+        .await;
+        publish_json(
+            &state,
+            r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/alpha","new_main_sha":"a1b2c3d4e5f6","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#,
+        )
+        .await;
+
+        for agent in ["feat-alpha", "feat-beta"] {
+            let (msgs, _) = delivery::poll_messages(&state, agent, 0);
+            assert!(
+                msgs.iter()
+                    .any(|m| matches!(m, BrokerMessage::AdvancedMain { .. })),
+                "{agent} inbox must surface the advanced-main event"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn messages_valid_agent_returns_200_with_last_seq() {
         let app = test_router();
@@ -660,6 +724,107 @@ mod tests {
         assert!(json["version"].is_string());
         assert!(json["uptime_seconds"].is_number());
         assert_eq!(json["agents"], serde_json::json!([]));
+    }
+
+    /// POSTs a JSON body to `/publish` against a router built from `state`.
+    async fn publish_json(state: &Arc<BrokerState>, body: &'static str) {
+        let resp = router(Arc::clone(state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/publish")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    }
+
+    /// GETs `/status` against a router built from `state` and returns the
+    /// parsed JSON body.
+    async fn get_status(state: &Arc<BrokerState>) -> serde_json::Value {
+        let resp = router(Arc::clone(state))
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn e2e_feedback_from_human_creates_no_phantom_roster_row() {
+        // W15-16 end-to-end: two real agents register via `agent.status`,
+        // then a `agent.feedback` with `from:"human"` is published. The
+        // `/status` roster must hold exactly the two real agents — no
+        // phantom `"human"` row.
+        let state = Arc::new(BrokerState::new(None));
+        publish_json(
+            &state,
+            r#"{"type":"agent.status","agent_id":"supervisor","payload":{"status":"working","modified_files":[],"cli":"claude-oss"}}"#,
+        )
+        .await;
+        publish_json(
+            &state,
+            r#"{"type":"agent.status","agent_id":"feat-roster","payload":{"status":"working","modified_files":[],"cli":"claude-oss"}}"#,
+        )
+        .await;
+        publish_json(
+            &state,
+            r#"{"type":"agent.feedback","agent_id":"feat-roster","payload":{"from":"human","errors":["fix the flaky test"]}}"#,
+        )
+        .await;
+
+        let json = get_status(&state).await;
+        let agents = json["agents"].as_array().expect("agents array");
+        let ids: Vec<&str> = agents
+            .iter()
+            .map(|a| a["agent_id"].as_str().unwrap())
+            .collect();
+        assert!(
+            !ids.contains(&"human"),
+            "a feedback `from:human` must not mint a phantom roster row; got {ids:?}",
+        );
+        assert_eq!(ids.len(), 2, "roster holds exactly the two real agents");
+    }
+
+    #[tokio::test]
+    async fn e2e_status_shows_cli_for_every_agent() {
+        // W15-15 end-to-end: every agent that publishes `agent.status` with a
+        // `cli` shows that CLI in the `/status` roster — not just the
+        // supervisor.
+        let state = Arc::new(BrokerState::new(None));
+        publish_json(
+            &state,
+            r#"{"type":"agent.status","agent_id":"supervisor","payload":{"status":"working","modified_files":[],"cli":"claude-oss"}}"#,
+        )
+        .await;
+        publish_json(
+            &state,
+            r#"{"type":"agent.status","agent_id":"feat-build","payload":{"status":"working","modified_files":[],"cli":"claude-oss"}}"#,
+        )
+        .await;
+
+        let json = get_status(&state).await;
+        let agents = json["agents"].as_array().expect("agents array");
+        assert_eq!(agents.len(), 2);
+        for a in agents {
+            assert_eq!(
+                a["cli"].as_str(),
+                Some("claude-oss"),
+                "every agent row must carry its cli: {a}",
+            );
+        }
     }
 
     #[tokio::test]
