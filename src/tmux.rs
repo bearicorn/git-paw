@@ -17,6 +17,10 @@ const MAX_COLLISION_RETRIES: u32 = 10;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TmuxCommand {
     args: Vec<String>,
+    /// When `true`, a non-zero exit is treated as a non-fatal warning rather
+    /// than aborting the build. Used for the border-affordance `set-option`
+    /// invocations, which older tmux versions may not recognise (design D4).
+    soft: bool,
 }
 
 impl TmuxCommand {
@@ -24,6 +28,19 @@ impl TmuxCommand {
     fn new(args: &[&str]) -> Self {
         Self {
             args: args.iter().map(|&s| s.to_owned()).collect(),
+            soft: false,
+        }
+    }
+
+    /// Create a "soft" tmux command whose failure is non-fatal.
+    ///
+    /// On a non-zero exit (e.g. an option unsupported by an older tmux), the
+    /// session executor emits a stderr warning naming the failed invocation
+    /// and continues with the remaining commands. See [`TmuxSession::execute`].
+    fn new_soft(args: &[&str]) -> Self {
+        Self {
+            args: args.iter().map(|&s| s.to_owned()).collect(),
+            soft: true,
         }
     }
 
@@ -63,6 +80,94 @@ pub struct PaneSpec {
     pub cli_command: String,
 }
 
+/// Push the five border-affordance `set-option` invocations onto `commands`,
+/// scoped to `session` (`-t <session>`, never the server or other windows).
+///
+/// The options give git-paw-managed sessions heavier, labelled, and
+/// active-highlighted pane borders so the supervisor↔agent boundary is
+/// visually distinct (see `supervisor-pane-affordances` spec):
+///
+/// - `pane-border-lines double` — `═║` double-line borders (tmux 3.2+) that
+///   read as a stronger row separator than single/heavy lines. tmux has no
+///   inter-pane margin/padding (panes tile flush), so the divider weight plus
+///   the label bar below are the only levers for perceived separation.
+/// - `pane-border-style fg=colour238` — dim inactive borders
+/// - `pane-active-border-style fg=colour45,bold` — focused pane pops
+/// - `pane-border-status top` — label strip above each pane
+/// - `pane-border-format '#[fg=colour39,bold,reverse] #{pane_index}: #{?#{@paw_role},#{@paw_role},#{pane_title}} #[default]'`
+///   — a reverse-video colored label *bar* per pane (reads as a header chip,
+///   not plain text on the line), preferring the git-paw-set `@paw_role` pane
+///   option over `#{pane_title}`. The format prefers `@paw_role` because the
+///   agent CLI emits OSC title escape sequences that overwrite `#{pane_title}`
+///   with its current activity; the pane-scoped `@paw_role` option (set by
+///   [`push_pane_title`]) is not clobbered, so the role label survives. A pane
+///   without `@paw_role` (e.g. a user-created pane) falls back to `#{pane_title}`.
+///
+/// Each is queued as a *soft* command: a non-zero exit on an older tmux that
+/// lacks the option produces a stderr warning and the build continues (D4).
+fn push_border_affordances(commands: &mut Vec<TmuxCommand>, session: &str) {
+    for (option, value) in [
+        ("pane-border-lines", "double"),
+        ("pane-border-style", "fg=colour238"),
+        ("pane-active-border-style", "fg=colour45,bold"),
+        ("pane-border-status", "top"),
+        (
+            "pane-border-format",
+            "#[fg=colour39,bold,reverse] #{pane_index}: #{?#{@paw_role},#{@paw_role},#{pane_title}} #[default]",
+        ),
+    ] {
+        commands.push(TmuxCommand::new_soft(&[
+            "set-option",
+            "-t",
+            session,
+            option,
+            value,
+        ]));
+    }
+}
+
+/// Queue the pane-title invocations that label a pane, but only when
+/// `border_affordances` is enabled. The title is the pane's role or branch id
+/// (`supervisor`, `dashboard`, or e.g. `feat/foo`) and renders in the
+/// `pane-border-format` strip configured by [`push_border_affordances`].
+///
+/// Two commands are queued:
+/// - `select-pane -T <title>` sets `#{pane_title}` (the OSC-style title).
+/// - `set-option -p @paw_role <title>` sets a pane-scoped user option.
+///
+/// Both carry the same label, but the agent CLI overwrites `#{pane_title}` via
+/// its own OSC title escape sequences as it works, so the `select-pane -T`
+/// value does not survive. The pane-scoped `@paw_role` option is git-paw's and
+/// is never clobbered, so the border-format prefers it (see
+/// [`push_border_affordances`]) and the role label stays stable for the life
+/// of the pane.
+fn push_pane_title(
+    commands: &mut Vec<TmuxCommand>,
+    border_affordances: bool,
+    target: &str,
+    title: &str,
+) {
+    if border_affordances {
+        commands.push(TmuxCommand::new(&[
+            "select-pane",
+            "-t",
+            target,
+            "-T",
+            title,
+        ]));
+        // Pane-scoped user option: stable, not clobbered by the CLI's OSC
+        // title sequences. The border-format prefers this over `#{pane_title}`.
+        commands.push(TmuxCommand::new_soft(&[
+            "set-option",
+            "-p",
+            "-t",
+            target,
+            "@paw_role",
+            title,
+        ]));
+    }
+}
+
 /// A fully-resolved tmux session ready to execute or inspect.
 #[derive(Debug)]
 pub struct TmuxSession {
@@ -73,9 +178,34 @@ pub struct TmuxSession {
 
 impl TmuxSession {
     /// Execute all accumulated tmux commands against the live tmux server.
+    ///
+    /// Soft commands (the border affordances) that fail produce a stderr
+    /// warning naming the failed invocation and do not abort the build; any
+    /// other command failure propagates as an error.
     pub fn execute(&self) -> Result<(), PawError> {
+        self.execute_with(|cmd| cmd.execute().map(|_| ()), |w| eprintln!("{w}"))
+    }
+
+    /// Run every queued command via `run`, routing non-fatal warnings to
+    /// `warn`. Pulled out of [`execute`](Self::execute) so the soft-failure
+    /// contract (warn + continue for soft commands, abort for the rest) can be
+    /// exercised without a live tmux server.
+    fn execute_with<R, W>(&self, mut run: R, mut warn: W) -> Result<(), PawError>
+    where
+        R: FnMut(&TmuxCommand) -> Result<(), PawError>,
+        W: FnMut(String),
+    {
         for cmd in &self.commands {
-            cmd.execute()?;
+            if let Err(e) = run(cmd) {
+                if cmd.soft {
+                    warn(format!(
+                        "warning: tmux option not supported: {} ({e})",
+                        cmd.args.join(" ")
+                    ));
+                } else {
+                    return Err(e);
+                }
+            }
         }
         Ok(())
     }
@@ -170,6 +300,7 @@ pub struct TmuxSessionBuilder {
     project_name: String,
     panes: Vec<PaneSpec>,
     mouse_mode: bool,
+    border_affordances: bool,
     session_name_override: Option<String>,
     env_vars: Vec<(String, String)>,
 }
@@ -184,6 +315,7 @@ impl TmuxSessionBuilder {
             project_name: project_name.to_owned(),
             panes: Vec::new(),
             mouse_mode: true,
+            border_affordances: true,
             session_name_override: None,
             env_vars: Vec::new(),
         }
@@ -212,6 +344,20 @@ impl TmuxSessionBuilder {
     #[must_use]
     pub fn mouse_mode(mut self, enabled: bool) -> Self {
         self.mouse_mode = enabled;
+        self
+    }
+
+    /// Enable or disable the border affordances for the session (default:
+    /// `true`).
+    ///
+    /// When enabled, the session receives heavy borders, dim/active border
+    /// styling, and a per-pane label strip, and each pane's title is set to
+    /// its role/branch id. When disabled, none of these `set-option` or
+    /// `select-pane -T` invocations are emitted and the session inherits the
+    /// user's default tmux styling. Driven by `[layout].border_affordances`.
+    #[must_use]
+    pub fn border_affordances(mut self, enabled: bool) -> Self {
+        self.border_affordances = enabled;
         self
     }
 
@@ -255,9 +401,9 @@ impl TmuxSessionBuilder {
             "-s",
             &session_name,
             "-x",
-            "200",
+            "480",
             "-y",
-            "50",
+            "140",
             "-c",
             first_worktree,
         ]));
@@ -272,7 +418,7 @@ impl TmuxSessionBuilder {
             "set-option",
             "-g",
             "default-size",
-            "200x50",
+            "480x140",
         ]));
 
         // 2. Mouse mode
@@ -286,21 +432,12 @@ impl TmuxSessionBuilder {
             ]));
         }
 
-        // 3. Pane border titles — show branch/CLI in each pane's border
-        commands.push(TmuxCommand::new(&[
-            "set-option",
-            "-t",
-            &session_name,
-            "pane-border-status",
-            "top",
-        ]));
-        commands.push(TmuxCommand::new(&[
-            "set-option",
-            "-t",
-            &session_name,
-            "pane-border-format",
-            " #{pane_title} ",
-        ]));
+        // 3. Border affordances — heavy borders, dim/active styling, and the
+        //    per-pane label strip. Gated by `border_affordances`; when off the
+        //    session inherits the user's default tmux styling.
+        if self.border_affordances {
+            push_border_affordances(&mut commands, &session_name);
+        }
 
         // 4. Session-level environment variables (before any send-keys)
         for (key, value) in &self.env_vars {
@@ -313,17 +450,17 @@ impl TmuxSessionBuilder {
             ]));
         }
 
-        // 5. First pane — already exists as pane 0 (directory set by -c above)
+        // 5. First pane — already exists as pane 0 (directory set by -c above).
+        //    The title is the pane's role/branch id (not the CLI command) so it
+        //    reads cleanly in the label strip configured above.
         let first = &self.panes[0];
         let pane_target = format!("{session_name}:0.0");
-        let pane_title = format!("{} \u{2192} {}", first.branch, first.cli_command);
-        commands.push(TmuxCommand::new(&[
-            "select-pane",
-            "-t",
+        push_pane_title(
+            &mut commands,
+            self.border_affordances,
             &pane_target,
-            "-T",
-            &pane_title,
-        ]));
+            &first.branch,
+        );
         commands.push(TmuxCommand::new(&[
             "send-keys",
             "-t",
@@ -357,14 +494,12 @@ impl TmuxSessionBuilder {
 
             // Title and command for the new pane
             let pane_target = format!("{session_name}:0.{i}");
-            let pane_title = format!("{} \u{2192} {}", pane.branch, pane.cli_command);
-            commands.push(TmuxCommand::new(&[
-                "select-pane",
-                "-t",
+            push_pane_title(
+                &mut commands,
+                self.border_affordances,
                 &pane_target,
-                "-T",
-                &pane_title,
-            ]));
+                &pane.branch,
+            );
             commands.push(TmuxCommand::new(&[
                 "send-keys",
                 "-t",
@@ -419,6 +554,55 @@ pub fn is_session_alive(name: &str) -> Result<bool, PawError> {
         .map_err(|e| PawError::TmuxError(format!("failed to run tmux: {e}")))?;
 
     Ok(status.success())
+}
+
+/// Outcome of a session-liveness probe (design D3 of `session-bugfixes`).
+///
+/// Distinguishes a genuinely-absent tmux session (`Stale`) from a probe that
+/// could not be run at all (`Indeterminate`, e.g. the `tmux` binary is
+/// missing). Receipt-staleness detection SHALL NOT report `🔴 stale` on an
+/// `Indeterminate` probe — a missing tmux binary is not evidence the session
+/// died.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionLiveness {
+    /// `tmux has-session` returned exit 0 — the session exists.
+    Alive,
+    /// `tmux has-session` ran and returned non-zero — the session is gone.
+    Stale,
+    /// The probe could not be run (tmux binary absent/unreachable). The
+    /// caller SHALL preserve the receipt's current state.
+    Indeterminate,
+}
+
+/// Pure mapping from a probe's raw outcome to a [`SessionLiveness`].
+///
+/// `spawned` is whether the `tmux has-session` process started at all;
+/// `success` is its exit-status success (only meaningful when `spawned`).
+/// Extracted so each branch is unit-testable without a real tmux server.
+fn classify_liveness(spawned: bool, success: bool) -> SessionLiveness {
+    match (spawned, success) {
+        (false, _) => SessionLiveness::Indeterminate,
+        (true, true) => SessionLiveness::Alive,
+        (true, false) => SessionLiveness::Stale,
+    }
+}
+
+/// Probe a tmux session's liveness via a single `tmux has-session` call.
+///
+/// This is the cheap staleness check used by `status`, `start`, and
+/// `purge --stale` (spec: "Liveness probe is cheap"). It runs exactly one
+/// `tmux has-session -t <name>` invocation and never probes the broker or
+/// agent processes.
+pub fn session_liveness(name: &str) -> SessionLiveness {
+    let spawn = Command::new("tmux")
+        .args(["has-session", "-t", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match spawn {
+        Ok(status) => classify_liveness(true, status.success()),
+        Err(_) => classify_liveness(false, false),
+    }
 }
 
 /// Resolve a unique session name, handling collisions with existing sessions.
@@ -588,6 +772,7 @@ pub fn build_supervisor_session(
     agents: &[PaneSpec],
     layout: crate::supervisor::layout::SupervisorLayout,
     mouse_mode: bool,
+    border_affordances: bool,
     env_vars: &[(String, String)],
 ) -> Result<TmuxSession, PawError> {
     use crate::supervisor::layout::{SUPERVISOR_AGENTS_PER_ROW, SUPERVISOR_PANE_OFFSET};
@@ -611,9 +796,19 @@ pub fn build_supervisor_session(
             "-s",
             &session_name,
             "-x",
-            "200",
+            "480",
             "-y",
-            "50",
+            "140",
+            // Suppress interactive shell startup prompts that would otherwise
+            // fire as pane 0's shell reads its rc and could swallow the first
+            // keystroke of the CLI-launch command (W2-2: oh-my-zsh's
+            // `Would you like to update? [Y/n]` ate the leading `c` of the CLI
+            // name). `-e` sets the variables BEFORE the shell starts, so the
+            // framework never prompts. Inert for shells that don't read them.
+            "-e",
+            "DISABLE_AUTO_UPDATE=true",
+            "-e",
+            "DISABLE_UPDATE_PROMPT=true",
             "-c",
             &supervisor.worktree,
         ],
@@ -626,7 +821,31 @@ pub fn build_supervisor_session(
     // to the layout engine when no client is attached.
     push(
         &mut commands,
-        &["set-option", "-g", "default-size", "200x50"],
+        &["set-option", "-g", "default-size", "480x140"],
+    );
+
+    // Carry the shell-startup-prompt suppression (W2-2) into the session
+    // environment too, so the agent panes created by later `split-window`
+    // calls inherit it (the `-e` flags above only cover pane 0's shell).
+    push(
+        &mut commands,
+        &[
+            "set-environment",
+            "-t",
+            &session_name,
+            "DISABLE_AUTO_UPDATE",
+            "true",
+        ],
+    );
+    push(
+        &mut commands,
+        &[
+            "set-environment",
+            "-t",
+            &session_name,
+            "DISABLE_UPDATE_PROMPT",
+            "true",
+        ],
     );
 
     // 2. Mouse + pane border config.
@@ -636,26 +855,9 @@ pub fn build_supervisor_session(
             &["set-option", "-t", &session_name, "mouse", "on"],
         );
     }
-    push(
-        &mut commands,
-        &[
-            "set-option",
-            "-t",
-            &session_name,
-            "pane-border-status",
-            "top",
-        ],
-    );
-    push(
-        &mut commands,
-        &[
-            "set-option",
-            "-t",
-            &session_name,
-            "pane-border-format",
-            " #{pane_title} ",
-        ],
-    );
+    if border_affordances {
+        push_border_affordances(&mut commands, &session_name);
+    }
 
     // 3. Session-level environment variables (before any send-keys).
     for (key, value) in env_vars {
@@ -666,16 +868,18 @@ pub fn build_supervisor_session(
     }
 
     let supervisor_target = format!("{session_name}:0.0");
-    let supervisor_title = format!("{} \u{2192} {}", supervisor.branch, supervisor.cli_command);
+    push_pane_title(
+        &mut commands,
+        border_affordances,
+        &supervisor_target,
+        &supervisor.branch,
+    );
+    // Clear the input line before launching (W2-2): a stray shell-startup
+    // prompt or buffered keystroke could otherwise corrupt the leading
+    // character of the CLI command. `C-u` on a clean prompt is a no-op.
     push(
         &mut commands,
-        &[
-            "select-pane",
-            "-t",
-            &supervisor_target,
-            "-T",
-            &supervisor_title,
-        ],
+        &["send-keys", "-t", &supervisor_target, "C-u"],
     );
     push(
         &mut commands,
@@ -704,7 +908,15 @@ pub fn build_supervisor_session(
     // set on `new-session -x 200 -y 50`, so the split math succeeds in
     // headless mode. macOS tmux 3.6a tolerates either form.
     let bottom_pct = format!("{}%", 100u16 - u16::from(layout.top_row_pct));
-    if let Some(first_agent) = agents.first() {
+    // W3-1: step 6 swaps panes 1 and 2. `swap-pane` carries each pane's cwd
+    // to the OTHER index, but the CLI commands + titles are sent post-swap by
+    // index — so the `-c` cwds must be assigned to COMPENSATE for the swap.
+    // The agent-area split (which lands at the dashboard's index-1 after the
+    // swap) therefore gets the dashboard's cwd, and the dashboard split (which
+    // lands at the agent's index-2) gets the first agent's worktree. Without
+    // this compensation the first agent's pane inherits the supervisor's
+    // repo-root cwd and its commits land on the wrong branch (contamination).
+    if agents.is_empty() {
         push(
             &mut commands,
             &[
@@ -714,8 +926,6 @@ pub fn build_supervisor_session(
                 &supervisor_target,
                 "-l",
                 &bottom_pct,
-                "-c",
-                &first_agent.worktree,
             ],
         );
     } else {
@@ -728,13 +938,21 @@ pub fn build_supervisor_session(
                 &supervisor_target,
                 "-l",
                 &bottom_pct,
+                "-c",
+                &dashboard.worktree,
             ],
         );
     }
 
     // 5. Split pane 0 horizontally -> creates the top-right pane (currently
     //    index 2, swapped to index 1 below) at 50% width.
-    // Same `-l <N>%` reasoning as step 4.
+    // Same `-l <N>%` reasoning as step 4. Per the W3-1 swap-compensation note
+    // above, this split (which lands at the agent's index-2 after the swap)
+    // is born in the FIRST agent's worktree, so the agent's CLI — sent to
+    // index 2 post-swap — runs in its own worktree, not the repo root.
+    let dashboard_split_cwd = agents
+        .first()
+        .map_or(dashboard.worktree.as_str(), |a| a.worktree.as_str());
     push(
         &mut commands,
         &[
@@ -745,7 +963,7 @@ pub fn build_supervisor_session(
             "-l",
             "50%",
             "-c",
-            &dashboard.worktree,
+            dashboard_split_cwd,
         ],
     );
 
@@ -759,16 +977,15 @@ pub fn build_supervisor_session(
 
     // 7. Set dashboard title + run its command in pane 1 (after swap).
     let dashboard_target = format!("{session_name}:0.1");
-    let dashboard_title = format!("{} \u{2192} {}", dashboard.branch, dashboard.cli_command);
+    push_pane_title(
+        &mut commands,
+        border_affordances,
+        &dashboard_target,
+        &dashboard.branch,
+    );
     push(
         &mut commands,
-        &[
-            "select-pane",
-            "-t",
-            &dashboard_target,
-            "-T",
-            &dashboard_title,
-        ],
+        &["send-keys", "-t", &dashboard_target, "C-u"],
     );
     push(
         &mut commands,
@@ -790,11 +1007,13 @@ pub fn build_supervisor_session(
         // shell startup.
         let first_target = format!("{session_name}:0.{SUPERVISOR_PANE_OFFSET}");
         let first = &agents[0];
-        let first_title = format!("{} \u{2192} {}", first.branch, first.cli_command);
-        push(
+        push_pane_title(
             &mut commands,
-            &["select-pane", "-t", &first_target, "-T", &first_title],
+            border_affordances,
+            &first_target,
+            &first.branch,
         );
+        push(&mut commands, &["send-keys", "-t", &first_target, "C-u"]);
         push(
             &mut commands,
             &[
@@ -848,11 +1067,13 @@ pub fn build_supervisor_session(
                 );
             }
 
-            let title = format!("{} \u{2192} {}", agent.branch, agent.cli_command);
-            push(
+            push_pane_title(
                 &mut commands,
-                &["select-pane", "-t", &pane_target, "-T", &title],
+                border_affordances,
+                &pane_target,
+                &agent.branch,
             );
+            push(&mut commands, &["send-keys", "-t", &pane_target, "C-u"]);
             push(
                 &mut commands,
                 &["send-keys", "-t", &pane_target, &agent.cli_command, "Enter"],
@@ -861,29 +1082,169 @@ pub fn build_supervisor_session(
     }
 
     // 9. Final pass: resize-pane to enforce the layout-table heights. One
-    //    resize-pane per row (top + each agent row). Percentages here are
-    //    `<pct>%` syntax which tmux 3.x accepts on `-y`.
-    let top_pct_str = format!("{}%", layout.top_row_pct);
-    push(
-        &mut commands,
-        &["resize-pane", "-t", &supervisor_target, "-y", &top_pct_str],
-    );
-    let agent_row_pct_str = format_supervisor_pct(layout.agent_row_pct);
-    for row in 0..layout.agent_rows {
-        let pane_idx = SUPERVISOR_PANE_OFFSET + row * SUPERVISOR_AGENTS_PER_ROW;
-        if pane_idx < SUPERVISOR_PANE_OFFSET + agents.len() {
-            let target = format!("{session_name}:0.{pane_idx}");
-            push(
-                &mut commands,
-                &["resize-pane", "-t", &target, "-y", &agent_row_pct_str],
-            );
-        }
-    }
+    //    resize-pane per row (top + each agent row). Shared with the add /
+    //    remove re-tile path via `push_supervisor_resize_pass` so an
+    //    incrementally re-tiled grid matches a start-time grid of the same
+    //    agent count. Percentages use `<pct>%` syntax which tmux 3.x accepts.
+    push_supervisor_resize_pass(&mut commands, &session_name, layout, agents.len());
 
     Ok(TmuxSession {
         name: session_name,
         commands,
     })
+}
+
+/// Build the tmux commands that splice ONE new agent pane into a running
+/// supervisor-mode session and re-tile the grid to `layout` (design D1, the
+/// add path).
+///
+/// `prev_agent_count` is the number of coding agents already in the session
+/// (N); the new agent becomes agent index N (0-based), landing at pane
+/// `SUPERVISOR_PANE_OFFSET + N`. The split mirrors `build_supervisor_session`'s
+/// grid logic:
+///
+/// - When the new agent starts a fresh row (`N % AGENTS_PER_ROW == 0`, N > 0),
+///   `split-window -v` from the previous row's first pane.
+/// - Otherwise `split-window -h` from the immediately preceding pane.
+///
+/// `select-layout` is intentionally avoided (as in `build_supervisor_session`)
+/// so existing panes keep their indices for in-flight `send-keys` targeting;
+/// the new pane gets the next index. A final `resize-pane` pass per row
+/// enforces `layout`'s height proportions for the new total (N+1).
+///
+/// Returns a [`TmuxSession`] so the caller runs it with
+/// [`TmuxSession::execute`] and tests inspect it with
+/// [`TmuxSession::command_strings`]. The boot-prompt submit is the caller's
+/// responsibility (it differs for active vs. paused sessions).
+#[must_use]
+pub fn build_add_agent_commands(
+    session_name: &str,
+    new_agent: &PaneSpec,
+    prev_agent_count: usize,
+    layout: crate::supervisor::layout::SupervisorLayout,
+    border_affordances: bool,
+) -> TmuxSession {
+    use crate::supervisor::layout::{SUPERVISOR_AGENTS_PER_ROW, SUPERVISOR_PANE_OFFSET};
+
+    let mut commands: Vec<TmuxCommand> = Vec::new();
+    let i = prev_agent_count; // 0-based agent index of the new agent
+    let pane_idx = SUPERVISOR_PANE_OFFSET + i;
+    let pane_target = format!("{session_name}:0.{pane_idx}");
+
+    if i > 0 && i.is_multiple_of(SUPERVISOR_AGENTS_PER_ROW) {
+        // New row: vertical split from the previous row's first pane.
+        let prev_row_first = SUPERVISOR_PANE_OFFSET + (i - SUPERVISOR_AGENTS_PER_ROW);
+        let src = format!("{session_name}:0.{prev_row_first}");
+        commands.push(TmuxCommand::new(&[
+            "split-window",
+            "-v",
+            "-t",
+            &src,
+            "-c",
+            &new_agent.worktree,
+        ]));
+    } else {
+        // Same row: horizontal split from the immediately preceding pane.
+        let prev = format!("{session_name}:0.{}", pane_idx - 1);
+        commands.push(TmuxCommand::new(&[
+            "split-window",
+            "-h",
+            "-t",
+            &prev,
+            "-c",
+            &new_agent.worktree,
+        ]));
+    }
+
+    push_pane_title(
+        &mut commands,
+        border_affordances,
+        &pane_target,
+        &new_agent.branch,
+    );
+    commands.push(TmuxCommand::new(&["send-keys", "-t", &pane_target, "C-u"]));
+    commands.push(TmuxCommand::new(&[
+        "send-keys",
+        "-t",
+        &pane_target,
+        &new_agent.cli_command,
+        "Enter",
+    ]));
+
+    push_supervisor_resize_pass(&mut commands, session_name, layout, prev_agent_count + 1);
+
+    TmuxSession {
+        name: session_name.to_string(),
+        commands,
+    }
+}
+
+/// Build the tmux commands that re-tile a supervisor-mode grid AFTER one
+/// agent's pane has been killed (design D6, the remove path).
+///
+/// The caller kills the target pane first (via [`kill_pane`]); tmux then
+/// renumbers the remaining panes to be contiguous, so each surviving row's
+/// first pane is still addressable at `SUPERVISOR_PANE_OFFSET + row * AGENTS_PER_ROW`.
+/// This emits the per-row `resize-pane` pass for `layout` (computed for the new,
+/// smaller `remaining_agent_count`) so the grid re-flows to the proportions a
+/// start of that many agents would produce, without leaving a hole.
+///
+/// Returns an empty command set when no agents remain (the supervisor +
+/// dashboard top row is left as-is). Branch→pane mapping for the survivors is
+/// re-derived by the supervisor via `pane_current_path` each sweep, so the
+/// transient index shift is invisible to targeting.
+#[must_use]
+pub fn build_remove_retile_commands(
+    session_name: &str,
+    remaining_agent_count: usize,
+    layout: crate::supervisor::layout::SupervisorLayout,
+) -> TmuxSession {
+    let mut commands: Vec<TmuxCommand> = Vec::new();
+    if remaining_agent_count > 0 {
+        push_supervisor_resize_pass(&mut commands, session_name, layout, remaining_agent_count);
+    }
+    TmuxSession {
+        name: session_name.to_string(),
+        commands,
+    }
+}
+
+/// Push the per-row `resize-pane -y <pct>%` pass that enforces a supervisor
+/// layout's height proportions: one resize for the top row (supervisor +
+/// dashboard) and one per agent row (targeting each row's first pane). Shared
+/// by the start-time builder's final pass and the add/remove re-tile builders.
+fn push_supervisor_resize_pass(
+    commands: &mut Vec<TmuxCommand>,
+    session_name: &str,
+    layout: crate::supervisor::layout::SupervisorLayout,
+    agent_count: usize,
+) {
+    use crate::supervisor::layout::{SUPERVISOR_AGENTS_PER_ROW, SUPERVISOR_PANE_OFFSET};
+
+    let top_target = format!("{session_name}:0.0");
+    let top_pct_str = format!("{}%", layout.top_row_pct);
+    commands.push(TmuxCommand::new(&[
+        "resize-pane",
+        "-t",
+        &top_target,
+        "-y",
+        &top_pct_str,
+    ]));
+
+    let agent_row_pct_str = format_supervisor_pct(layout.agent_row_pct);
+    for row in 0..layout.agent_rows {
+        let pane_idx = SUPERVISOR_PANE_OFFSET + row * SUPERVISOR_AGENTS_PER_ROW;
+        if pane_idx < SUPERVISOR_PANE_OFFSET + agent_count {
+            let target = format!("{session_name}:0.{pane_idx}");
+            commands.push(TmuxCommand::new(&[
+                "resize-pane",
+                "-t",
+                &target,
+                "-y",
+                &agent_row_pct_str,
+            ]));
+        }
+    }
 }
 
 /// Format a row-height percentage. Whole numbers render as "28%"; the 14.4%
@@ -1010,12 +1371,12 @@ mod tests {
             .find(|c| c.contains("new-session"))
             .expect("new-session command present");
         assert!(
-            new_session_cmd.contains("-x 200"),
-            "new-session must pass -x 200; got: {new_session_cmd}"
+            new_session_cmd.contains("-x 480"),
+            "new-session must pass -x 480; got: {new_session_cmd}"
         );
         assert!(
-            new_session_cmd.contains("-y 50"),
-            "new-session must pass -y 50; got: {new_session_cmd}"
+            new_session_cmd.contains("-y 140"),
+            "new-session must pass -y 140; got: {new_session_cmd}"
         );
     }
 
@@ -1036,7 +1397,7 @@ mod tests {
         let default_size_idx = cmds
             .iter()
             .position(|c| {
-                c.contains("set-option") && c.contains("default-size") && c.contains("200x50")
+                c.contains("set-option") && c.contains("default-size") && c.contains("480x140")
             })
             .expect("set-option default-size 200x50 in command list");
         assert!(
@@ -1078,7 +1439,10 @@ mod tests {
             .unwrap();
 
         let cmds = session.command_strings();
-        let send_keys = commands_containing(&cmds, "send-keys");
+        let send_keys: Vec<String> = commands_containing(&cmds, "send-keys")
+            .into_iter()
+            .filter(|c| !c.trim_end().ends_with("C-u"))
+            .collect();
         assert_eq!(
             send_keys.len(),
             2,
@@ -1099,7 +1463,10 @@ mod tests {
         let session = builder.build().unwrap();
 
         let cmds = session.command_strings();
-        let send_keys = commands_containing(&cmds, "send-keys");
+        let send_keys: Vec<String> = commands_containing(&cmds, "send-keys")
+            .into_iter()
+            .filter(|c| !c.trim_end().ends_with("C-u"))
+            .collect();
         assert_eq!(
             send_keys.len(),
             5,
@@ -1129,7 +1496,10 @@ mod tests {
             .unwrap();
 
         let cmds = session.command_strings();
-        let send_keys = commands_containing(&cmds, "send-keys");
+        let send_keys: Vec<String> = commands_containing(&cmds, "send-keys")
+            .into_iter()
+            .filter(|c| !c.trim_end().ends_with("C-u"))
+            .collect();
 
         // Pane 0 uses `-c` on `new-session` for its directory and runs only
         // the bare CLI command.
@@ -1170,7 +1540,10 @@ mod tests {
             .unwrap();
 
         let cmds = session.command_strings();
-        let send_keys = commands_containing(&cmds, "send-keys");
+        let send_keys: Vec<String> = commands_containing(&cmds, "send-keys")
+            .into_iter()
+            .filter(|c| !c.trim_end().ends_with("C-u"))
+            .collect();
         assert!(
             send_keys[0].contains("Enter"),
             "send-keys should press Enter to submit"
@@ -1187,7 +1560,10 @@ mod tests {
             .unwrap();
 
         let cmds = session.command_strings();
-        let send_keys = commands_containing(&cmds, "send-keys");
+        let send_keys: Vec<String> = commands_containing(&cmds, "send-keys")
+            .into_iter()
+            .filter(|c| !c.trim_end().ends_with("C-u"))
+            .collect();
 
         assert!(
             send_keys[0].contains(":0.0"),
@@ -1211,7 +1587,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn each_pane_is_titled_with_branch_and_cli() {
+    fn each_pane_is_titled_with_its_branch() {
         let session = TmuxSessionBuilder::new("proj")
             .add_pane(make_pane("feat/auth", "/tmp/wt1", "claude"))
             .add_pane(make_pane("fix/api", "/tmp/wt2", "gemini"))
@@ -1222,15 +1598,57 @@ mod tests {
         let select_panes = commands_containing(&cmds, "select-pane");
 
         assert_eq!(select_panes.len(), 2, "each pane should get a title");
+        // The title is the pane's branch id only — the CLI command is no
+        // longer part of the title (it reads cleanly in the label strip).
         assert!(
-            select_panes[0].contains("feat/auth \u{2192} claude"),
-            "first pane title should be 'feat/auth \u{2192} claude', got: {}",
+            select_panes[0].ends_with("-T feat/auth"),
+            "first pane title should be 'feat/auth', got: {}",
             select_panes[0]
         );
         assert!(
-            select_panes[1].contains("fix/api \u{2192} gemini"),
-            "second pane title should be 'fix/api \u{2192} gemini', got: {}",
+            !select_panes[0].contains("claude"),
+            "first pane title should not include the CLI command, got: {}",
+            select_panes[0]
+        );
+        assert!(
+            select_panes[1].ends_with("-T fix/api"),
+            "second pane title should be 'fix/api', got: {}",
             select_panes[1]
+        );
+    }
+
+    /// Scenario: Each pane also gets a pane-scoped `@paw_role` user option
+    /// carrying its role label. This is the clobber-proof source of the border
+    /// label: the agent CLI overwrites `#{pane_title}` via OSC sequences, but
+    /// the `@paw_role` pane option git-paw sets is never overwritten, so the
+    /// `pane-border-format` conditional keeps showing the role.
+    #[test]
+    fn each_pane_gets_a_stable_paw_role_option() {
+        let session = TmuxSessionBuilder::new("proj")
+            .add_pane(make_pane("feat/auth", "/tmp/wt1", "claude"))
+            .add_pane(make_pane("fix/api", "/tmp/wt2", "gemini"))
+            .build()
+            .unwrap();
+
+        let cmds = session.command_strings();
+        // Pane-scoped option assignments only — exclude the pane-border-format
+        // command, which also mentions @paw_role inside its conditional.
+        let role_opts: Vec<&String> = cmds
+            .iter()
+            .filter(|c| c.contains("set-option") && c.contains(" -p ") && c.contains("@paw_role"))
+            .collect();
+        assert_eq!(
+            role_opts.len(),
+            2,
+            "each pane should get a @paw_role option"
+        );
+        assert!(
+            role_opts.iter().any(|c| c.ends_with("@paw_role feat/auth")),
+            "first pane should set `@paw_role feat/auth` pane-scoped; got: {role_opts:#?}"
+        );
+        assert!(
+            role_opts.iter().any(|c| c.ends_with("@paw_role fix/api")),
+            "second pane should set `@paw_role fix/api`; got: {role_opts:#?}"
         );
     }
 
@@ -1251,6 +1669,379 @@ mod tests {
             cmds.iter()
                 .any(|c| c.contains("pane-border-format") && c.contains("#{pane_title}")),
             "should configure pane-border-format to show pane title"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // supervisor-pane-affordances: heavy borders + per-pane labels + active
+    // highlight, scoped to the session, with a config opt-out and graceful
+    // degradation on older tmux.
+    // -----------------------------------------------------------------------
+
+    /// The five affordance `set-option` invocations a session must carry when
+    /// affordances are on, paired with their exact values.
+    const AFFORDANCE_OPTIONS: [(&str, &str); 5] = [
+        ("pane-border-lines", "double"),
+        ("pane-border-style", "fg=colour238"),
+        ("pane-active-border-style", "fg=colour45,bold"),
+        ("pane-border-status", "top"),
+        (
+            "pane-border-format",
+            "#[fg=colour39,bold,reverse] #{pane_index}: #{?#{@paw_role},#{@paw_role},#{pane_title}} #[default]",
+        ),
+    ];
+
+    /// Scenario: Heavy border option is set on the session — and the other
+    /// four affordance options, all scoped with `-t <session>`.
+    #[test]
+    fn builder_emits_all_five_affordances_scoped_to_session_by_default() {
+        let session = TmuxSessionBuilder::new("aff-default")
+            .add_pane(make_pane("feat/a", "/tmp/wt", "claude"))
+            .build()
+            .unwrap();
+        let cmds = session.command_strings();
+        for (option, value) in AFFORDANCE_OPTIONS {
+            assert!(
+                cmds.iter().any(|c| c.contains("set-option")
+                    && c.contains("-t paw-aff-default")
+                    && c.contains(option)
+                    && c.contains(value)),
+                "expected `set-option -t paw-aff-default {option} {value}`; cmds:\n{cmds:#?}"
+            );
+        }
+    }
+
+    /// Scenario: Border format includes index and the role label — the format
+    /// string is exactly ` #{pane_index}: #{?#{@paw_role},#{@paw_role},#{pane_title}} `
+    /// (spaces preserved). The conditional prefers the git-paw-set `@paw_role`
+    /// pane option (not clobbered by the CLI) over `#{pane_title}`.
+    #[test]
+    fn border_format_is_index_then_role_with_padding() {
+        let session = TmuxSessionBuilder::new("fmt")
+            .add_pane(make_pane("feat/a", "/tmp/wt", "claude"))
+            .build()
+            .unwrap();
+        let format_cmd = session
+            .command_strings()
+            .into_iter()
+            .find(|c| c.contains("pane-border-format"))
+            .expect("pane-border-format set-option present");
+        assert!(
+            format_cmd.ends_with(
+                "pane-border-format #[fg=colour39,bold,reverse] #{pane_index}: #{?#{@paw_role},#{@paw_role},#{pane_title}} #[default]"
+            ),
+            "format must be the reverse-video label bar preferring @paw_role; got: {format_cmd}"
+        );
+    }
+
+    /// Scenario: Active border style is applied — a bright bold colour for the
+    /// active border and a dim colour for inactive borders.
+    #[test]
+    fn active_and_inactive_border_styles_applied() {
+        let session = TmuxSessionBuilder::new("styles")
+            .add_pane(make_pane("feat/a", "/tmp/wt", "claude"))
+            .build()
+            .unwrap();
+        let cmds = session.command_strings();
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains("pane-active-border-style") && c.contains("colour45,bold")),
+            "active border must be colour45,bold; cmds:\n{cmds:#?}"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains("pane-border-style") && c.contains("colour238")),
+            "inactive border must be colour238; cmds:\n{cmds:#?}"
+        );
+    }
+
+    /// Scenario: Explicit false skips all affordances — none of the five
+    /// `set-option` invocations and none of the per-pane `select-pane -T`
+    /// title sets are emitted, but the CLI still launches.
+    #[test]
+    fn opt_out_omits_every_affordance_and_title() {
+        let session = TmuxSessionBuilder::new("opt-out")
+            .add_pane(make_pane("feat/a", "/tmp/wt", "claude"))
+            .add_pane(make_pane("feat/b", "/tmp/wt2", "gemini"))
+            .border_affordances(false)
+            .build()
+            .unwrap();
+        let cmds = session.command_strings();
+        for (option, _value) in AFFORDANCE_OPTIONS {
+            assert!(
+                !cmds
+                    .iter()
+                    .any(|c| c.contains("set-option") && c.contains(option)),
+                "opt-out must not emit set-option {option}; cmds:\n{cmds:#?}"
+            );
+        }
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| c.contains("select-pane") && c.contains("-T")),
+            "opt-out must not set any pane title; cmds:\n{cmds:#?}"
+        );
+        assert!(
+            !cmds.iter().any(|c| c.contains("@paw_role")),
+            "opt-out must not set the @paw_role pane option; cmds:\n{cmds:#?}"
+        );
+        // The CLI still runs in each pane — opt-out only drops the styling.
+        assert_eq!(
+            commands_containing(&cmds, "send-keys").len(),
+            2,
+            "both panes still receive their CLI send-keys"
+        );
+    }
+
+    /// Scenario: Unsupported option produces a stderr warning, and other
+    /// affordances still apply (graceful degradation on older tmux, design D4).
+    #[test]
+    fn soft_affordance_failure_warns_and_continues() {
+        let session = TmuxSessionBuilder::new("degrade")
+            .add_pane(make_pane("feat/a", "/tmp/wt", "claude"))
+            .build()
+            .unwrap();
+
+        let mut ran: Vec<String> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
+        // Simulate a tmux that rejects only `pane-border-lines double`.
+        let result = session.execute_with(
+            |cmd| {
+                let s = cmd.as_command_string();
+                ran.push(s.clone());
+                if s.contains("pane-border-lines double") {
+                    Err(PawError::TmuxError(
+                        "unknown option: pane-border-lines".into(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+            |w| warnings.push(w),
+        );
+
+        assert!(result.is_ok(), "soft failure must not abort the build");
+        assert!(
+            warnings.iter().any(|w| w.contains("pane-border-lines")),
+            "a warning naming the unsupported option must be emitted; warnings: {warnings:#?}"
+        );
+        // The other affordances (shipped since tmux 2.3) still ran.
+        assert!(
+            ran.iter().any(|c| c.contains("pane-active-border-style")),
+            "active-border-style must still be applied after the double-line failure"
+        );
+        assert!(
+            ran.iter().any(|c| c.contains("pane-border-status top")),
+            "pane-border-status must still be applied after the double-line failure"
+        );
+    }
+
+    /// A non-soft command failure aborts the build (the double-line tolerance is
+    /// scoped to the soft affordance commands, not every command).
+    #[test]
+    fn hard_command_failure_aborts() {
+        let session = TmuxSessionBuilder::new("hard-fail")
+            .add_pane(make_pane("feat/a", "/tmp/wt", "claude"))
+            .build()
+            .unwrap();
+        let result = session.execute_with(
+            |cmd| {
+                if cmd.as_command_string().contains("new-session") {
+                    Err(PawError::TmuxError("server unreachable".into()))
+                } else {
+                    Ok(())
+                }
+            },
+            |_| {},
+        );
+        assert!(result.is_err(), "a hard command failure must propagate");
+    }
+
+    /// Scenario: Supervisor/dashboard/agent pane titles are their role/branch
+    /// id, and the supervisor builder also emits all five affordances.
+    #[test]
+    fn supervisor_session_titles_are_roles_and_emits_affordances() {
+        let layout = crate::supervisor::layout::supervisor_layout(2).expect("layout");
+        let supervisor = make_pane("supervisor", "/repo", "claude");
+        let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
+        let agent = make_pane("feat/foo", "/tmp/wt", "claude");
+        let session = build_supervisor_session(
+            "sup",
+            None,
+            &supervisor,
+            &dashboard,
+            &[agent],
+            layout,
+            true,
+            true,
+            &[],
+        )
+        .expect("session builds");
+        let cmds = session.command_strings();
+
+        // All five affordances present and scoped.
+        for (option, value) in AFFORDANCE_OPTIONS {
+            assert!(
+                cmds.iter().any(|c| c.contains("set-option")
+                    && c.contains("-t paw-sup")
+                    && c.contains(option)
+                    && c.contains(value)),
+                "supervisor session missing `set-option {option} {value}`; cmds:\n{cmds:#?}"
+            );
+        }
+
+        let title_for = |target: &str| -> String {
+            cmds.iter()
+                .find(|c| c.contains("select-pane") && c.contains(target) && c.contains("-T"))
+                .unwrap_or_else(|| panic!("no title set for {target}; cmds:\n{cmds:#?}"))
+                .clone()
+        };
+        assert!(title_for(":0.0").ends_with("-T supervisor"), "pane 0 title");
+        assert!(title_for(":0.1").ends_with("-T dashboard"), "pane 1 title");
+        assert!(
+            title_for(":0.2").ends_with("-T feat/foo"),
+            "agent pane title"
+        );
+    }
+
+    /// W2-2 (supervisor-cli-launch-robustness): the supervisor build suppresses
+    /// shell startup prompts (so an oh-my-zsh-style update prompt can't eat the
+    /// CLI-launch keystroke) and clears the input line before each launch.
+    #[test]
+    fn supervisor_build_suppresses_startup_prompts_and_clears_input() {
+        let layout = crate::supervisor::layout::supervisor_layout(1).expect("layout");
+        let supervisor = make_pane("supervisor", "/repo", "claude");
+        let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
+        let agent = make_pane("feat/foo", "/tmp/wt", "claude");
+        let session = build_supervisor_session(
+            "sup",
+            None,
+            &supervisor,
+            &dashboard,
+            &[agent],
+            layout,
+            true,
+            true,
+            &[],
+        )
+        .expect("session builds");
+        let cmds = session.command_strings();
+
+        // Pane 0's shell gets the suppression env via `new-session -e`.
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains("new-session") && c.contains("DISABLE_AUTO_UPDATE=true")),
+            "new-session must set DISABLE_AUTO_UPDATE for pane 0; cmds:\n{cmds:#?}"
+        );
+        // Later split panes inherit it via session environment.
+        assert!(
+            cmds.iter().any(|c| c.contains("set-environment")
+                && c.contains("DISABLE_AUTO_UPDATE")
+                && c.contains("true")),
+            "session env must carry DISABLE_AUTO_UPDATE for split panes"
+        );
+        // A `C-u` clear precedes the supervisor pane's CLI-launch command.
+        let clear_idx = cmds.iter().position(|c| {
+            c.contains("send-keys") && c.contains(":0.0") && c.trim_end().ends_with("C-u")
+        });
+        let launch_idx = cmds.iter().position(|c| {
+            c.contains("send-keys")
+                && c.contains(":0.0")
+                && c.contains("claude")
+                && c.contains("Enter")
+        });
+        let (clear_idx, launch_idx) = (
+            clear_idx.expect("a C-u clear is sent to pane 0"),
+            launch_idx.expect("the CLI-launch command is sent to pane 0"),
+        );
+        assert!(
+            clear_idx < launch_idx,
+            "the C-u clear must precede the CLI-launch command on pane 0"
+        );
+    }
+
+    /// W3-1 (supervisor-first-agent-cwd): the split `-c` cwds are assigned to
+    /// compensate for the pane-1/2 swap, so the first agent's CLI (sent to
+    /// index 2 after the swap) runs in its worktree, not the repo root. The
+    /// agent-area `-v` split takes the dashboard's cwd; the dashboard `-h`
+    /// split takes the first agent's worktree.
+    #[test]
+    fn supervisor_build_compensates_first_agent_cwd_for_swap() {
+        let layout = crate::supervisor::layout::supervisor_layout(2).expect("layout");
+        let supervisor = make_pane("supervisor", "/repo", "claude");
+        let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
+        let a0 = make_pane("feat/foo", "/tmp/wt-foo", "claude");
+        let a1 = make_pane("feat/bar", "/tmp/wt-bar", "claude");
+        let session = build_supervisor_session(
+            "sup",
+            None,
+            &supervisor,
+            &dashboard,
+            &[a0, a1],
+            layout,
+            true,
+            true,
+            &[],
+        )
+        .expect("session builds");
+        let cmds = session.command_strings();
+
+        let vsplit = cmds
+            .iter()
+            .find(|c| c.contains("split-window") && c.contains("-v") && c.contains("-c"))
+            .expect("agent-area -v split with -c");
+        let hsplit = cmds
+            .iter()
+            .find(|c| c.contains("split-window") && c.contains("-h") && c.contains("-c"))
+            .expect("dashboard -h split with -c");
+
+        // Agent-area split is born in the dashboard's cwd (it lands at the
+        // dashboard's post-swap index); dashboard split is born in the first
+        // agent's worktree (it lands at the agent's post-swap index).
+        assert!(
+            vsplit.contains("-c /repo"),
+            "agent-area -v split must use the dashboard cwd (swap compensation); got: {vsplit}"
+        );
+        assert!(
+            hsplit.contains("-c /tmp/wt-foo"),
+            "dashboard -h split must use the first agent's worktree (swap compensation); got: {hsplit}"
+        );
+    }
+
+    /// Scenario: opt-out applies to the supervisor builder too — no affordance
+    /// set-options and no `select-pane -T` titles.
+    #[test]
+    fn supervisor_session_opt_out_omits_affordances() {
+        let layout = crate::supervisor::layout::supervisor_layout(1).expect("layout");
+        let supervisor = make_pane("supervisor", "/repo", "claude");
+        let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
+        let agent = make_pane("feat/foo", "/tmp/wt", "claude");
+        let session = build_supervisor_session(
+            "sup-off",
+            None,
+            &supervisor,
+            &dashboard,
+            &[agent],
+            layout,
+            true,
+            false,
+            &[],
+        )
+        .expect("session builds");
+        let cmds = session.command_strings();
+        for (option, _value) in AFFORDANCE_OPTIONS {
+            assert!(
+                !cmds
+                    .iter()
+                    .any(|c| c.contains("set-option") && c.contains(option)),
+                "opt-out supervisor session must not emit set-option {option}"
+            );
+        }
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| c.contains("select-pane") && c.contains("-T")),
+            "opt-out supervisor session must not set pane titles"
         );
     }
 
@@ -1330,6 +2121,49 @@ mod tests {
 
         kill_session(name).unwrap();
         assert!(!is_session_alive(name).unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // session-bugfixes Bug 2 — SessionLiveness probe (tasks 3.1–3.3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn classify_liveness_maps_each_branch() {
+        // tmux ran and the session exists.
+        assert_eq!(classify_liveness(true, true), SessionLiveness::Alive);
+        // tmux ran and the session is gone.
+        assert_eq!(classify_liveness(true, false), SessionLiveness::Stale);
+        // tmux could not be spawned at all (binary missing) — inconclusive.
+        assert_eq!(
+            classify_liveness(false, false),
+            SessionLiveness::Indeterminate
+        );
+        assert_eq!(
+            classify_liveness(false, true),
+            SessionLiveness::Indeterminate
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn session_liveness_reports_stale_for_nonexistent() {
+        assert_eq!(
+            session_liveness("paw-definitely-does-not-exist-98765"),
+            SessionLiveness::Stale
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn session_liveness_reports_alive_then_stale_across_lifecycle() {
+        let name = "paw-unit-test-liveness-probe";
+        cleanup_session(name);
+
+        create_test_session(name);
+        assert_eq!(session_liveness(name), SessionLiveness::Alive);
+
+        kill_session(name).unwrap();
+        assert_eq!(session_liveness(name), SessionLiveness::Stale);
     }
 
     #[test]
@@ -1889,6 +2723,7 @@ mod tests {
             &agents,
             layout,
             true,
+            true,
             &[("GIT_PAW_BROKER_URL".to_string(), "http://x".to_string())],
         )
         .expect("session builds")
@@ -1899,7 +2734,10 @@ mod tests {
     fn supervisor_layout_5_agents_single_row() {
         let session = build_for(5);
         let cmds = session.command_strings();
-        let send_keys = commands_containing(&cmds, "send-keys");
+        let send_keys: Vec<String> = commands_containing(&cmds, "send-keys")
+            .into_iter()
+            .filter(|c| !c.trim_end().ends_with("C-u"))
+            .collect();
         assert_eq!(
             send_keys.len(),
             7,
@@ -1937,7 +2775,10 @@ mod tests {
     fn supervisor_layout_10_agents_two_rows() {
         let session = build_for(10);
         let cmds = session.command_strings();
-        let send_keys = commands_containing(&cmds, "send-keys");
+        let send_keys: Vec<String> = commands_containing(&cmds, "send-keys")
+            .into_iter()
+            .filter(|c| !c.trim_end().ends_with("C-u"))
+            .collect();
         assert_eq!(
             send_keys.len(),
             12,
@@ -1971,7 +2812,10 @@ mod tests {
             "three agent rows at 24% each, got {resizes:#?}"
         );
         // 11 agents start at pane 2 and run through pane 12.
-        let send_keys = commands_containing(&cmds, "send-keys");
+        let send_keys: Vec<String> = commands_containing(&cmds, "send-keys")
+            .into_iter()
+            .filter(|c| !c.trim_end().ends_with("C-u"))
+            .collect();
         assert_eq!(send_keys.len(), 13);
         assert!(send_keys.iter().any(|c| c.contains(":0.12 ")));
     }
@@ -2028,7 +2872,10 @@ mod tests {
     fn supervisor_layout_7_agents_row_major_indices() {
         let session = build_for(7);
         let cmds = session.command_strings();
-        let send_keys = commands_containing(&cmds, "send-keys");
+        let send_keys: Vec<String> = commands_containing(&cmds, "send-keys")
+            .into_iter()
+            .filter(|c| !c.trim_end().ends_with("C-u"))
+            .collect();
         // pane :0.2 is the first agent — its send-keys must contain its CLI
         // command. Likewise :0.6 (fifth agent) and :0.7 (sixth agent).
         assert!(
@@ -2097,12 +2944,12 @@ mod tests {
             .find(|c| c.contains("new-session"))
             .expect("supervisor build emits a new-session command");
         assert!(
-            new_session_cmd.contains("-x 200"),
-            "supervisor new-session must pass -x 200; got: {new_session_cmd}"
+            new_session_cmd.contains("-x 480"),
+            "supervisor new-session must pass -x 480; got: {new_session_cmd}"
         );
         assert!(
-            new_session_cmd.contains("-y 50"),
-            "supervisor new-session must pass -y 50; got: {new_session_cmd}"
+            new_session_cmd.contains("-y 140"),
+            "supervisor new-session must pass -y 140; got: {new_session_cmd}"
         );
     }
 
@@ -2118,7 +2965,7 @@ mod tests {
         let default_size_idx = cmds
             .iter()
             .position(|c| {
-                c.contains("set-option") && c.contains("default-size") && c.contains("200x50")
+                c.contains("set-option") && c.contains("default-size") && c.contains("480x140")
             })
             .expect("set-option default-size 200x50 in command list");
         assert!(
@@ -2248,6 +3095,93 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Convention enforcement (cold-start-ci-parity §3): every `new-session`
+    // command produced by every builder in this module SHALL pass `-x`/`-y`
+    // (headless tmux needs explicit size) and `-c <cwd>` (avoid the
+    // send-keys cd race).
+    //
+    // Every new builder that emits `new-session` MUST be added to
+    // `every_new_session_command()` below so these tests cover it.
+    // -----------------------------------------------------------------------
+
+    /// Collect every `new-session` argv string produced by every public
+    /// builder in this module. Add the next builder's output here when a
+    /// new entry point is introduced.
+    fn every_new_session_command() -> Vec<(&'static str, String)> {
+        let mut found: Vec<(&'static str, String)> = Vec::new();
+
+        // Builder 1: basic TmuxSessionBuilder.
+        let basic = TmuxSessionBuilder::new("conv-basic")
+            .add_pane(make_pane("main", "/tmp/wt-basic", "claude"))
+            .build()
+            .expect("basic builder produces a session");
+        for cmd in basic.command_strings() {
+            if cmd.contains("new-session") {
+                found.push(("TmuxSessionBuilder::build", cmd));
+            }
+        }
+
+        // Builder 2: supervisor-mode layout. Build a small variant so the
+        // sample is fast; the new-session shape doesn't depend on agent
+        // count.
+        let layout = crate::supervisor::layout::supervisor_layout(2).expect("layout");
+        let (supervisor, dashboard, agents) = make_layout_panes(2);
+        let supervisor_session = build_supervisor_session(
+            "conv-supervisor",
+            None,
+            &supervisor,
+            &dashboard,
+            &agents,
+            layout,
+            true,
+            true,
+            &[],
+        )
+        .expect("supervisor builder produces a session");
+        for cmd in supervisor_session.command_strings() {
+            if cmd.contains("new-session") {
+                found.push(("build_supervisor_session", cmd));
+            }
+        }
+
+        assert!(
+            !found.is_empty(),
+            "expected at least one new-session command from the audited builders"
+        );
+        found
+    }
+
+    /// Every `new-session` argv SHALL carry `-x` and `-y` so tmux can size
+    /// the session without an attached client. Regression guard for the
+    /// v0.5.0 `Tmux error: size missing` cold-start bug.
+    #[test]
+    fn every_new_session_passes_x_and_y() {
+        for (builder, cmd) in every_new_session_command() {
+            assert!(
+                cmd.contains(" -x ") || cmd.ends_with(" -x"),
+                "{builder}: new-session must pass -x; got: {cmd}"
+            );
+            assert!(
+                cmd.contains(" -y ") || cmd.ends_with(" -y"),
+                "{builder}: new-session must pass -y; got: {cmd}"
+            );
+        }
+    }
+
+    /// Every `new-session` argv SHALL carry `-c <cwd>` so pane 0 starts in
+    /// the agent's worktree without a follow-up `cd` send-keys race. Bug B
+    /// regression guard from the v0.5.0 dogfood report.
+    #[test]
+    fn every_new_session_passes_c() {
+        for (builder, cmd) in every_new_session_command() {
+            assert!(
+                cmd.contains(" -c "),
+                "{builder}: new-session must pass -c <cwd>; got: {cmd}"
+            );
+        }
+    }
+
     /// Bug B regression coverage: every agent pane SHALL be created with
     /// `-c <agent.worktree>` on its split, and the follow-up `send-keys`
     /// SHALL NOT use the `cd <worktree> && <cli>` race chain.
@@ -2266,6 +3200,7 @@ mod tests {
             &[agent_a, agent_b],
             layout,
             true,
+            true,
             &[],
         )
         .expect("session builds");
@@ -2281,7 +3216,10 @@ mod tests {
             "split for agent b should pass -c /tmp/wt-b; splits: {splits:#?}"
         );
 
-        let send_keys = commands_containing(&cmds, "send-keys");
+        let send_keys: Vec<String> = commands_containing(&cmds, "send-keys")
+            .into_iter()
+            .filter(|c| !c.trim_end().ends_with("C-u"))
+            .collect();
         for entry in &send_keys {
             assert!(
                 !entry.contains("cd /tmp/wt-a &&"),
@@ -2292,5 +3230,100 @@ mod tests {
                 "no send-keys should chain `cd /tmp/wt-b &&`; got: {entry}"
             );
         }
+    }
+
+    // -- add/remove re-tile builders (git-paw-add D1/D6) --
+
+    #[test]
+    fn add_agent_same_row_splits_horizontally_from_previous_pane() {
+        // 4 agents already present (single row, indices 2..=5); adding a 5th
+        // (agent index 4) stays in the same row -> horizontal split from the
+        // immediately-preceding pane (index 5), new pane at index 6.
+        let layout = crate::supervisor::layout::layout_for(5).expect("layout");
+        let new_agent = make_pane("feat/fifth", "/tmp/wt5", "claude");
+        let session = build_add_agent_commands("paw-x", &new_agent, 4, layout, true);
+        let cmds = session.command_strings();
+
+        assert!(
+            cmds.iter().any(|c| c.contains("split-window")
+                && c.contains("-h")
+                && c.contains(":0.5")
+                && c.contains("-c /tmp/wt5")),
+            "5th agent should -h split from pane 5 with -c worktree; cmds:\n{cmds:#?}"
+        );
+        // New pane is targeted at index 6 for title + launch.
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains("send-keys") && c.contains(":0.6") && c.contains("claude")),
+            "new agent CLI should launch in pane 6; cmds:\n{cmds:#?}"
+        );
+    }
+
+    #[test]
+    fn add_agent_new_row_splits_vertically_from_previous_row_first_pane() {
+        // 5 agents present (one full row, indices 2..=6); adding a 6th (agent
+        // index 5) starts a new row -> vertical split from the previous row's
+        // first pane (index 2).
+        let layout = crate::supervisor::layout::layout_for(6).expect("layout");
+        let new_agent = make_pane("feat/sixth", "/tmp/wt6", "claude");
+        let session = build_add_agent_commands("paw-x", &new_agent, 5, layout, false);
+        let cmds = session.command_strings();
+
+        assert!(
+            cmds.iter().any(|c| c.contains("split-window")
+                && c.contains("-v")
+                && c.contains(":0.2")
+                && c.contains("-c /tmp/wt6")),
+            "6th agent should -v split from pane 2 (prev row first); cmds:\n{cmds:#?}"
+        );
+    }
+
+    #[test]
+    fn add_agent_reapplies_row_height_resize_pass() {
+        // The re-tile must end with the same per-row resize pass start uses:
+        // one resize for the top row (:0.0) at top_row_pct, one per agent row.
+        let layout = crate::supervisor::layout::layout_for(5).expect("layout");
+        let new_agent = make_pane("feat/fifth", "/tmp/wt5", "claude");
+        let session = build_add_agent_commands("paw-x", &new_agent, 4, layout, false);
+        let cmds = session.command_strings();
+
+        let top_pct = format!("{}%", layout.top_row_pct);
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains("resize-pane") && c.contains(":0.0") && c.contains(&top_pct)),
+            "re-tile should resize the top row to {top_pct}; cmds:\n{cmds:#?}"
+        );
+    }
+
+    #[test]
+    fn remove_retile_emits_resize_pass_for_remaining_count() {
+        // After removing one of 5 agents, the grid re-tiles to the 4-agent
+        // layout: a top-row resize plus one agent-row resize (single row).
+        let layout = crate::supervisor::layout::layout_for(4).expect("layout");
+        let session = build_remove_retile_commands("paw-x", 4, layout);
+        let cmds = session.command_strings();
+
+        let top_pct = format!("{}%", layout.top_row_pct);
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains("resize-pane") && c.contains(":0.0") && c.contains(&top_pct)),
+            "remove re-tile should resize the top row; cmds:\n{cmds:#?}"
+        );
+        // 4 agents -> 1 agent row -> exactly one agent-row resize (pane :0.2).
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains("resize-pane") && c.contains(":0.2")),
+            "remove re-tile should resize the first agent row (pane 2); cmds:\n{cmds:#?}"
+        );
+    }
+
+    #[test]
+    fn remove_retile_with_zero_remaining_is_empty() {
+        let layout = crate::supervisor::layout::layout_for(1).expect("layout");
+        let session = build_remove_retile_commands("paw-x", 0, layout);
+        assert!(
+            session.command_strings().is_empty(),
+            "removing the last agent leaves the top row untouched (no re-tile)"
+        );
     }
 }
