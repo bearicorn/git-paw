@@ -187,11 +187,14 @@ pub fn setup_dev_allowlist(extra: &[String], settings_path: &Path) -> Result<(),
 ///
 /// Targets:
 ///
-/// - `<repo>/.claude/settings.json` — always written.
-/// - `~/.claude-oss/settings.json` — written only when the
-///   `~/.claude-oss/` directory already exists at session start
-///   (the alt-config dogfood pattern from `prompt-submit-fix`).
-///   The directory is never created by this function.
+/// - `<repo>/.claude/settings.json` — always written (its parent
+///   `<repo>/.claude/` is created if absent).
+/// - each path in `alt_settings` — a configured alternate settings
+///   file (resolved from `[clis.<name>].settings_path`). These are
+///   written only when their parent directory already exists; a
+///   target whose parent is absent is skipped, never created. The
+///   target set is config-driven — there is no hardcoded CLI name or
+///   path.
 ///
 /// Each target is processed independently and failures are reported
 /// individually via the returned [`Vec`]; callers (e.g.
@@ -201,6 +204,7 @@ pub fn setup_dev_allowlist(extra: &[String], settings_path: &Path) -> Result<(),
 pub fn seed_supervisor_session(
     extra: &[String],
     repo_root: &Path,
+    alt_settings: &[std::path::PathBuf],
 ) -> Vec<(std::path::PathBuf, PawError)> {
     let mut failures = Vec::new();
 
@@ -209,13 +213,15 @@ pub fn seed_supervisor_session(
         failures.push((repo_settings, e));
     }
 
-    if let Some(home) = crate::dirs::home_dir() {
-        let claude_oss_dir = home.join(".claude-oss");
-        if claude_oss_dir.is_dir() {
-            let oss_settings = claude_oss_dir.join("settings.json");
-            if let Err(e) = setup_dev_allowlist(extra, &oss_settings) {
-                failures.push((oss_settings, e));
-            }
+    for target in alt_settings {
+        // Defence-in-depth: skip a target whose parent directory does not
+        // exist so the seeder never creates an alternate config dir (the
+        // caller's resolver already filters on this, but `setup_dev_allowlist`
+        // would otherwise `create_dir_all` the parent).
+        if target.parent().is_some_and(std::path::Path::is_dir)
+            && let Err(e) = setup_dev_allowlist(extra, target)
+        {
+            failures.push((target.clone(), e));
         }
     }
 

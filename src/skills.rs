@@ -426,6 +426,12 @@ pub struct GateCommands<'a> {
     pub fmt_check_command: Option<&'a str>,
     /// Renders into `{{SECURITY_AUDIT_COMMAND}}`. Gate 5 security tooling.
     pub security_audit_command: Option<&'a str>,
+    /// Renders into `{{DOC_TOOL_COMMAND}}`. Gate 4 API-doc generator,
+    /// distinct from [`Self::doc_build_command`] which builds the human
+    /// doc site. `None` renders as an empty string so the surrounding
+    /// prose can read naturally without a stray `(not configured)` token
+    /// — the supervisor template is authored to handle the empty case.
+    pub doc_tool_command: Option<&'a str>,
 }
 
 /// Renders a skill template for a specific worktree.
@@ -458,6 +464,33 @@ pub struct GateCommands<'a> {
 /// skill to a single change, which is wrong — the supervisor verifies
 /// many changes over a session lifetime.
 ///
+/// ## Language-agnostic supervisor placeholders
+///
+/// Three additional placeholders make the bundled supervisor skill render
+/// correctly across language stacks without forking the template per
+/// language family:
+///
+/// - `{{DOC_TOOL_COMMAND}}` — substitutes
+///   `[supervisor].doc_tool_command` from config. Renders as the empty
+///   string when unset (the template prose is authored to read
+///   naturally without it; this avoids a stray `(not configured)` in
+///   places where empty reads fine).
+/// - `{{DEV_ALLOWLIST_PRESET}}` — substitutes a prose enumeration of
+///   every entry in `DEV_ALLOWLIST_PRESET`, generated from the
+///   constant so adding new entries does not require a skill-template
+///   edit. See [`render_dev_allowlist_preset`].
+/// - `{{SPEC_PATH_DOCTRINE}}` — substitutes a per-backend path doctrine
+///   paragraph derived from the `backends` slice. Sessions resolving no
+///   backend render a sentinel sentence; multi-backend sessions render
+///   a paragraph listing each present backend's path conventions. See
+///   [`render_spec_path_doctrine`].
+///
+/// The `backends` parameter is the session's resolved spec backends
+/// (typically derived from `SpecEntry.backend` across the session's
+/// `scan_specs(...)` result). For non-supervisor renders or sessions
+/// without resolved specs, pass `&[]` and the doctrine placeholder
+/// renders its sentinel.
+///
 /// Any remaining `{{...}}` placeholder after substitution is logged as a
 /// warning to stderr but does not cause `render` to fail. The
 /// `{{CHANGE_ID}}` form is whitelisted from this warning since the spec
@@ -472,6 +505,7 @@ pub fn render(
     broker_url: &str,
     project: &str,
     gates: &GateCommands<'_>,
+    backends: &[crate::specs::SpecBackendKind],
 ) -> String {
     const NOT_CONFIGURED: &str = "(not configured)";
     let branch_id = slugify_branch(branch);
@@ -480,6 +514,12 @@ pub fn render(
     // literal `(not configured)` when the source value is `None` so the
     // rendered prose remains readable AND the supervisor agent can branch
     // on it to skip the tooling invocation.
+    //
+    // `{{DOC_TOOL_COMMAND}}` is the exception: it renders as an empty
+    // string when unset because the supervisor template is authored so
+    // the surrounding prose reads naturally without the value (per D5).
+    let allowlist_prose = render_dev_allowlist_preset();
+    let spec_doctrine = render_spec_path_doctrine(backends);
     let mut output = template
         .content
         .replace("{{BRANCH_ID}}", &branch_id)
@@ -512,7 +552,10 @@ pub fn render(
         .replace(
             "{{SECURITY_AUDIT_COMMAND}}",
             gates.security_audit_command.unwrap_or(NOT_CONFIGURED),
-        );
+        )
+        .replace("{{DOC_TOOL_COMMAND}}", gates.doc_tool_command.unwrap_or(""))
+        .replace("{{DEV_ALLOWLIST_PRESET}}", &allowlist_prose)
+        .replace("{{SPEC_PATH_DOCTRINE}}", &spec_doctrine);
 
     // `{{CHANGE_ID}}` is intentionally NOT substituted: it is a
     // per-invocation placeholder owned by the supervisor agent at
@@ -525,6 +568,16 @@ pub fn render(
             .replace("{{SKILL_NAME}}", &metadata.name)
             .replace("{{SKILL_DESCRIPTION}}", &metadata.description);
     }
+
+    // Resolve the opsx role-gating regions. The forbidden-command sections are
+    // scoped to the OpenSpec engine: kept when an OpenSpec backend is resolved
+    // for the session, stripped entirely otherwise (speckit/markdown/none). The
+    // region markers themselves are always removed. See the `opsx-role-gating`
+    // spec, "Role-gating is scoped to the OpenSpec spec engine".
+    let opsx_active = backends
+        .iter()
+        .any(|b| matches!(b, crate::specs::SpecBackendKind::OpenSpec));
+    output = render_opsx_regions(&output, opsx_active);
 
     // Warn about any remaining {{...}} placeholders that were not consumed,
     // except `{{CHANGE_ID}}` which is whitelisted (see comment above).
@@ -546,6 +599,157 @@ pub fn render(
     }
 
     output
+}
+
+/// Marker opening an opsx role-gating region in a bundled skill template.
+pub(crate) const OPSX_REGION_BEGIN: &str = "<!-- opsx-role-gating:begin -->";
+/// Marker closing an opsx role-gating region in a bundled skill template.
+pub(crate) const OPSX_REGION_END: &str = "<!-- opsx-role-gating:end -->";
+
+/// Resolves the opsx role-gating regions delimited by [`OPSX_REGION_BEGIN`] /
+/// [`OPSX_REGION_END`] in a rendered skill.
+///
+/// The marker lines are always dropped. When `keep` is `true` (the session's
+/// resolved spec engine is `OpenSpec`) the region body is retained; when `false`
+/// (speckit / markdown / no engine) the body is stripped along with the
+/// markers, so the `/opsx:` forbidden-command sections never render under a
+/// non-OpenSpec engine. Operates line-wise so a region that is left unclosed
+/// degrades gracefully (the trailing lines are simply kept or dropped per the
+/// current region state at end-of-input).
+#[must_use]
+pub(crate) fn render_opsx_regions(input: &str, keep: bool) -> String {
+    let has_trailing_newline = input.ends_with('\n');
+    let mut kept: Vec<&str> = Vec::new();
+    let mut in_region = false;
+    for line in input.split('\n') {
+        let trimmed = line.trim();
+        if trimmed == OPSX_REGION_BEGIN {
+            in_region = true;
+            continue;
+        }
+        if trimmed == OPSX_REGION_END {
+            in_region = false;
+            continue;
+        }
+        if in_region && !keep {
+            continue;
+        }
+        kept.push(line);
+    }
+    let mut out = kept.join("\n");
+    if has_trailing_newline {
+        out.push('\n');
+    }
+    out
+}
+
+/// Sentinel rendered for `{{SPEC_PATH_DOCTRINE}}` when no spec backend
+/// has been resolved for the session. Authored as a complete sentence so
+/// the rendered output is grammatical even when no backend is present.
+pub(crate) const SPEC_DOCTRINE_NO_BACKEND_SENTINEL: &str = "(no spec backend resolved for this session — see your project's documentation for where specs live.)";
+
+/// Renders the bundled `DEV_ALLOWLIST_PRESET` constant into a
+/// prose-friendly listing, grouped by first-word command family.
+///
+/// The output enumerates every entry from
+/// [`crate::supervisor::dev_allowlist::DEV_ALLOWLIST_PRESET`] so adding
+/// a new entry to the constant immediately changes the rendered prose
+/// without requiring a skill-template edit. Entries that share a
+/// prefix word (e.g. `cargo build`, `cargo test`) collapse into a
+/// single `cargo (build, test, …)` group; single-word entries (`just`,
+/// `find`, `grep`) appear bare. Multi-word entries with a unique first
+/// word (`sed -n`) appear verbatim.
+///
+/// The result is a single semicolon-separated paragraph fragment that
+/// callers can embed inline in skill prose.
+#[must_use]
+pub fn render_dev_allowlist_preset() -> String {
+    use crate::supervisor::dev_allowlist::DEV_ALLOWLIST_PRESET;
+
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for entry in DEV_ALLOWLIST_PRESET {
+        let (head, tail) = match entry.split_once(' ') {
+            Some((h, t)) => (h.to_string(), Some(t.to_string())),
+            None => (entry.to_string(), None),
+        };
+        if let Some(existing) = groups.iter_mut().find(|(h, _)| h == &head) {
+            if let Some(t) = tail {
+                existing.1.push(t);
+            }
+        } else {
+            groups.push((head, tail.into_iter().collect()));
+        }
+    }
+
+    let parts: Vec<String> = groups
+        .into_iter()
+        .map(|(head, members)| {
+            if members.is_empty() {
+                head
+            } else if members.len() == 1 {
+                format!("{head} {}", members[0])
+            } else {
+                format!("{head} ({})", members.join(", "))
+            }
+        })
+        .collect();
+    parts.join("; ")
+}
+
+/// Renders the `{{SPEC_PATH_DOCTRINE}}` paragraph for the supervisor
+/// skill based on the resolved session backends.
+///
+/// Each backend contributes a one-sentence path doctrine describing
+/// where its specs live and the per-backend workflow. When `backends`
+/// is empty the sentinel
+/// [`SPEC_DOCTRINE_NO_BACKEND_SENTINEL`] is returned. When more than
+/// one backend is present, every distinct backend's sentence is joined
+/// into a single paragraph prefixed by an introductory clause so the
+/// supervisor agent knows the session spans multiple formats.
+#[must_use]
+pub fn render_spec_path_doctrine(backends: &[crate::specs::SpecBackendKind]) -> String {
+    use crate::specs::SpecBackendKind;
+
+    let mut seen: Vec<SpecBackendKind> = Vec::new();
+    for b in backends {
+        if !seen.contains(b) {
+            seen.push(*b);
+        }
+    }
+
+    if seen.is_empty() {
+        return SPEC_DOCTRINE_NO_BACKEND_SENTINEL.to_string();
+    }
+
+    let per_backend = |kind: SpecBackendKind| -> &'static str {
+        match kind {
+            SpecBackendKind::OpenSpec => {
+                "OpenSpec specs live under `openspec/changes/<change-name>/{proposal,specs,tasks}.md` \
+                 with archived deltas merged into `openspec/specs/`; run `openspec validate <change-name> --strict` \
+                 to verify a change."
+            }
+            SpecBackendKind::SpecKit => {
+                "Spec Kit specs live under `.specify/specs/<feature>/{spec,plan,tasks}.md` \
+                 and use the Spec Kit checklist convention; mark `- [ ]` tasks complete as each one lands."
+            }
+            SpecBackendKind::Markdown => {
+                "Markdown specs are flat `.md` files with `paw_status: pending` frontmatter; \
+                 the format has no per-artifact workflow — the file itself is the contract."
+            }
+        }
+    };
+
+    if seen.len() == 1 {
+        per_backend(seen[0]).to_string()
+    } else {
+        let intro =
+            "This session spans multiple spec backends — apply the matching doctrine per spec:";
+        let sentences: Vec<String> = seen
+            .into_iter()
+            .map(|b| format!("- {}", per_backend(b)))
+            .collect();
+        format!("{intro}\n{}", sentences.join("\n"))
+    }
 }
 
 /// Canonical doc names for the `[governance]` paths, in the order they
@@ -671,6 +875,54 @@ mod tests {
         assert!(
             tmpl.content.contains("Cherry-pick peer commits"),
             "coordination skill should contain a 'Cherry-pick peer commits' heading"
+        );
+    }
+
+    /// `advanced-main-event` §5: the coordination skill SHALL include a "When
+    /// main advances" subsection teaching the four-step polling discipline —
+    /// polling source, the no-auto-rebase rule, the fetch+inspect+decide flow,
+    /// and the commit-or-stash-first safety rule — plus a concrete
+    /// uncommitted-edits example.
+    #[test]
+    fn coordination_skill_teaches_main_advances_discipline() {
+        let tmpl = resolve("coordination").unwrap();
+        let content = &tmpl.content;
+
+        let idx = content
+            .find("When main advances")
+            .expect("coordination skill has a 'When main advances' subsection");
+        let section = &content[idx..];
+        let lowered = section.to_lowercase();
+
+        // (1) Polling source: arrives on the normal /messages poll.
+        assert!(
+            section.contains("agent.advanced-main") && section.contains("/messages/{{BRANCH_ID}}"),
+            "subsection must name the event and its delivery on the normal /messages poll"
+        );
+        // (2) No-auto-rebase rule with a safety rationale.
+        assert!(
+            lowered.contains("not auto-rebase")
+                || lowered.contains("not trigger an automatic rebase"),
+            "subsection must contain an explicit do-not-auto-rebase rule"
+        );
+        // (3) Fetch + inspect + decide flow.
+        assert!(
+            section.contains("git fetch origin")
+                && section.contains("git log HEAD..origin/")
+                && lowered.contains("decide"),
+            "subsection must document the fetch + inspect + decide flow"
+        );
+        // (4) Commit-or-stash-first safety before any rebase.
+        assert!(
+            (lowered.contains("commit") || lowered.contains("stash"))
+                && lowered.contains("before")
+                && lowered.contains("rebase"),
+            "subsection must require a commit or stash before any rebase"
+        );
+        // Concrete uncommitted-edits example.
+        assert!(
+            lowered.contains("uncommitted"),
+            "subsection must include the concrete uncommitted-edits example"
         );
     }
 
@@ -820,6 +1072,399 @@ mod tests {
         );
     }
 
+    // --- supervisor-verify-scratch-dir: skill content ---
+
+    /// `supervisor-verify-scratch-dir` §"Isolated verification worktrees use a
+    /// repo-local gitignored scratch dir": the skill SHALL instruct creating the
+    /// verify worktree under `.git-paw/tmp/` and SHALL NOT teach `/tmp` for
+    /// verification scratch.
+    #[test]
+    fn supervisor_skill_uses_repo_local_verify_scratch_dir() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            tmpl.content.contains(".git-paw/tmp/verify-"),
+            "supervisor skill should name the repo-local verify scratch path .git-paw/tmp/verify-"
+        );
+        assert!(
+            tmpl.content.contains("git worktree add --detach"),
+            "supervisor skill should teach the `git worktree add --detach` verify recipe"
+        );
+        assert!(
+            !tmpl.content.contains("/tmp/paw-verify"),
+            "supervisor skill must not teach an OS-temp (/tmp/paw-verify) path for verify scratch"
+        );
+    }
+
+    // --- supervisor-introspection: skill content (task 2.6) ---
+
+    /// `supervisor-introspection` §"Supervisor phase taxonomy": the skill SHALL
+    /// document an introspection section with a taxonomy table listing at least
+    /// the seven v0.6.0 phase values.
+    #[test]
+    fn supervisor_skill_has_introspection_section_with_phase_taxonomy() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            tmpl.content
+                .contains("### Introspection: what to publish and when"),
+            "supervisor skill must include the introspection section"
+        );
+        for phase in [
+            "sweep",
+            "audit",
+            "merge",
+            "feedback",
+            "intent_watch",
+            "learnings",
+            "idle",
+        ] {
+            assert!(
+                tmpl.content.contains(phase),
+                "the phase taxonomy must document the {phase:?} phase value"
+            );
+        }
+        // The table documents detail field names, not just phase labels.
+        for field in ["agents_checked", "audit_step", "intended_targets"] {
+            assert!(
+                tmpl.content.contains(field),
+                "the taxonomy must document the {field:?} detail field"
+            );
+        }
+    }
+
+    /// `supervisor-introspection` scenario "Audit phase detail names the five
+    /// gates": the audit detail's `audit_step` SHALL enumerate the v0.5.0 five
+    /// gates (tests, spec, docs, security, regression).
+    #[test]
+    fn supervisor_skill_audit_step_enumerates_five_gates() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            tmpl.content.contains("audit_step"),
+            "the audit phase must document the audit_step field"
+        );
+        for gate in ["tests", "regression", "spec", "docs", "security"] {
+            assert!(
+                tmpl.content.contains(gate),
+                "audit_step must enumerate the {gate:?} gate"
+            );
+        }
+    }
+
+    /// `supervisor-introspection` scenario "Cadence rules documented in skill
+    /// prose": emit on phase transition, rate-limit to ~30s within a phase,
+    /// single-emit on idle.
+    #[test]
+    fn supervisor_skill_documents_emission_cadence() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("phase transition"),
+            "cadence rules must require a status on every phase transition"
+        );
+        assert!(
+            lowered.contains("30 second") || tmpl.content.contains("~30 seconds"),
+            "cadence rules must document the ~30s rate-limit within a phase"
+        );
+        assert!(
+            lowered.contains("idle"),
+            "cadence rules must document the single-emit-on-idle rule"
+        );
+    }
+
+    /// `supervisor-introspection` scenario "Checkpoint emission uses phase =
+    /// checkpoint": the skill SHALL acknowledge `checkpoint` as a valid phase
+    /// value and the checkpoint emission SHALL set `phase: "checkpoint"`.
+    #[test]
+    fn supervisor_skill_documents_checkpoint_phase() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            tmpl.content.contains("checkpoint"),
+            "the skill must document the checkpoint phase value"
+        );
+        assert!(
+            tmpl.content.contains("\"phase\":\"checkpoint\""),
+            "the checkpoint emission example must set phase = checkpoint"
+        );
+    }
+
+    /// `advanced-main-event` §4: the Merge orchestration section SHALL teach
+    /// the supervisor to publish an `agent.advanced-main` event after a
+    /// successful merge to main, with a concrete curl-to-`/publish` example,
+    /// and SHALL document `base` as the resolved default-branch value rather
+    /// than a hardcoded literal.
+    #[test]
+    fn supervisor_skill_publishes_advanced_main_after_merge() {
+        let tmpl = resolve("supervisor").unwrap();
+        let content = &tmpl.content;
+
+        // The publish step lives inside the merge-orchestration procedure.
+        let merge_idx = content
+            .find("Merge orchestration")
+            .expect("supervisor skill has a Merge orchestration section");
+        let merge_section = &content[merge_idx..];
+
+        assert!(
+            merge_section.contains("agent.advanced-main"),
+            "the merge section must teach publishing an agent.advanced-main event"
+        );
+        // A concrete curl-to-/publish example for the variant.
+        assert!(
+            merge_section.contains("/publish") && merge_section.contains("new_main_sha"),
+            "the merge section must include a concrete curl /publish example carrying new_main_sha"
+        );
+        // The publish fires after a successful merge + passing tests.
+        let lowered = merge_section.to_lowercase();
+        assert!(
+            lowered.contains("test command passes") || lowered.contains("after the merge succeeds"),
+            "the publish step must fire after a successful merge"
+        );
+        // `base` is the resolved default-branch value, not hardcoded "main".
+        assert!(
+            merge_section.contains("$MAIN_BRANCH")
+                && merge_section.contains("resolved default-branch"),
+            "the example must source `base` from the resolved default branch, not a hardcoded literal"
+        );
+        assert!(
+            !merge_section.contains("\"base\":\"main\"")
+                && !merge_section.contains("\"base\": \"main\""),
+            "the example must not hardcode base as the literal \"main\""
+        );
+    }
+
+    // === supervisor-skill-discipline-v0-6-x: pane/git/commit disciplines ===
+
+    /// Spec "Mandate sweep.sh; forbid inline pane loops": a section directs
+    /// all pane work through sweep.sh and explicitly forbids `for p in ...;
+    /// do tmux ...; done` loops with the `simple_expansion` rationale.
+    #[test]
+    fn supervisor_skill_mandates_helper_and_forbids_inline_pane_loops() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            tmpl.content.contains("Driving agent panes"),
+            "supervisor skill should contain a 'Driving agent panes' section"
+        );
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("for p in") && lowered.contains("do tmux"),
+            "the section should name the forbidden `for p in ...; do tmux ...` loop shape"
+        );
+        assert!(
+            lowered.contains("simple_expansion"),
+            "the section should cite the simple_expansion permission gate as the reason"
+        );
+    }
+
+    /// Spec "Never send-keys to the supervisor's own pane": the section states
+    /// the supervisor must not send-keys to pane 0, with the self-interrupt
+    /// rationale.
+    #[test]
+    fn supervisor_skill_states_never_own_pane_rule() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("never") && lowered.contains("pane 0"),
+            "supervisor skill should state it must never send-keys to its own pane (pane 0)"
+        );
+        assert!(
+            lowered.contains("interrupt"),
+            "the never-own-pane rule should give the self-interrupt rationale"
+        );
+    }
+
+    /// Spec "Cross-worktree git uses git -C, never cd": the rule mandates
+    /// `git -C <path>`, forbids `cd <path> && git`, and states both the
+    /// untrusted-hooks and wrong-branch (cwd-leak) rationales.
+    #[test]
+    fn supervisor_skill_mandates_git_dash_c_and_forbids_cd() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            tmpl.content.contains("git -C"),
+            "supervisor skill should mandate `git -C <path>` for cross-worktree git"
+        );
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("cd ") && lowered.contains("&& git"),
+            "the rule should name and forbid the `cd <path> && git` shape"
+        );
+        assert!(
+            lowered.contains("untrusted-hooks") || lowered.contains("untrusted hooks"),
+            "the rule should cite the untrusted-hooks warning"
+        );
+        assert!(
+            lowered.contains("wrong branch") || lowered.contains("wrong-branch"),
+            "the rule should cite the wrong-branch (cwd-leak) risk"
+        );
+    }
+
+    /// Spec "Reliable commit-cadence nudge": the coordination section states
+    /// the ~10-uncommitted-file threshold and includes a sample
+    /// `agent.feedback` nudge.
+    #[test]
+    fn supervisor_skill_states_commit_cadence_nudge() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("uncommitted") && lowered.contains("10"),
+            "supervisor skill should state the ~10-uncommitted-file commit-nudge threshold"
+        );
+        assert!(
+            lowered.contains("commit-cadence") || lowered.contains("commit cadence"),
+            "supervisor skill should label the commit-cadence nudge"
+        );
+        assert!(
+            tmpl.content.contains("feedback-gate"),
+            "the nudge should be a published agent.feedback (via the feedback-gate helper)"
+        );
+    }
+
+    /// Spec "Testing gate runs the full suite without fail-fast"
+    /// (verification-no-fail-fast-v0-6-x, W2-7): the testing gate mandates
+    /// `--no-fail-fast` + guard neutralization and states the truncated-run
+    /// caveat.
+    #[test]
+    fn supervisor_skill_mandates_no_fail_fast_verification() {
+        // Stack-agnostic: the skill states the discipline generically via
+        // {{TEST_COMMAND}} — no repo-specific runner/flag literals (those
+        // would trip the no-language-leak audit).
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("never fail-fast") || lowered.contains("no-fail-fast"),
+            "testing gate must mandate running the whole suite (no fail-fast)"
+        );
+        assert!(
+            lowered.contains("guard test"),
+            "testing gate must name the environment guard-test failure mode"
+        );
+        assert!(
+            lowered.contains("incomplete, not a pass")
+                || lowered.contains("not a pass unless every later suite"),
+            "testing gate must state that an early-aborted (guard-only) run is not a PASS"
+        );
+    }
+
+    // === per-commit-verification-v0-6-x: "Verify on each event" subsection ===
+
+    /// `per-commit-verification` spec, scenario "Skill contains the per-event
+    /// rule": the subsection exists with MUST/MUST-NOT language and a worked
+    /// example of the batching anti-pattern.
+    #[test]
+    fn supervisor_skill_mandates_per_event_verification() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            tmpl.content
+                .contains("### Verify on each event, never batch"),
+            "supervisor skill must contain the 'Verify on each event, never batch' subsection"
+        );
+        assert!(
+            tmpl.content
+                .contains("MUST NOT** defer a ready verification"),
+            "subsection must state the no-batch rule in MUST-NOT terms"
+        );
+        assert!(
+            tmpl.content
+                .contains("MUST** start a branch's five-gate sweep"),
+            "subsection must state the per-event trigger in MUST terms"
+        );
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("batching anti-pattern"),
+            "subsection must include a worked example of the batching anti-pattern"
+        );
+        assert!(
+            lowered.contains("still mid-task"),
+            "the worked example must name the wave-1 failure: waiting for a second agent to finish"
+        );
+    }
+
+    /// `per-commit-verification` spec, scenario "Dependency-driven deferral
+    /// remains permitted".
+    #[test]
+    fn supervisor_skill_permits_dependency_driven_deferral() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("only acceptable reason to defer is a genuine dependency"),
+            "subsection must state the genuine-dependency deferral exception"
+        );
+        assert!(
+            lowered.contains("state that dependency explicitly"),
+            "subsection must require stating the dependency explicitly when deferring"
+        );
+    }
+
+    /// `per-commit-verification` spec, scenario "Concurrency permission
+    /// documented".
+    #[test]
+    fn supervisor_skill_permits_concurrent_verification() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("per-branch verifications may run concurrently"),
+            "subsection must state per-branch verifications may run concurrently"
+        );
+        assert!(
+            lowered.contains("does **not** block starting agent b's verification"),
+            "subsection must state verifying agent A does not block verifying agent B"
+        );
+    }
+
+    /// The subsection references the broker `supervisor.verify-now` nudge as
+    /// the explicit trigger event.
+    #[test]
+    fn supervisor_skill_references_verify_now_nudge() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            tmpl.content.contains("supervisor.verify-now"),
+            "subsection must reference the broker's supervisor.verify-now nudge"
+        );
+        assert!(
+            tmpl.content.contains("verify_on_commit_nudge"),
+            "subsection must reference the [supervisor] verify_on_commit_nudge config gate"
+        );
+    }
+
+    /// Bug 4 (auto-approve-scope-v0-6-x): the supervisor skill names the
+    /// bundled helper as the canonical stuck-agent detector, documents the
+    /// detection + dedup behaviour, and forbids inline-bash signature-dedup
+    /// monitors.
+    #[test]
+    fn supervisor_skill_has_detecting_stuck_agents_section() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            tmpl.content.contains("### Detecting stuck agents"),
+            "supervisor skill must include a 'Detecting stuck agents' section"
+        );
+        assert!(
+            tmpl.content
+                .contains(".git-paw/scripts/sweep.sh detect-stuck"),
+            "the section must name the bundled detect-stuck helper command"
+        );
+        assert!(
+            tmpl.content.contains("stuck-on-prompt"),
+            "the section must document the stuck-on-prompt phase value"
+        );
+        assert!(
+            tmpl.content.contains("Pasted text #N"),
+            "the section must document the paste-buffer marker"
+        );
+        // Dedup behaviour is documented.
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("dedup") && lowered.contains("prompt-shape"),
+            "the section must document the (agent_id, prompt-shape) dedup"
+        );
+        // Inline-bash reinvention is explicitly forbidden, with rationale.
+        assert!(
+            tmpl.content
+                .contains("Do NOT hand-roll an inline-bash monitor"),
+            "the section must forbid inline-bash signature-dedup monitors"
+        );
+        assert!(
+            lowered.contains("eats repeat-pattern prompts"),
+            "the section must give the bug-9 rationale (signature dedup eats repeat-pattern prompts)"
+        );
+    }
+
     // 9.4: Standard location skill loading
     #[test]
     #[serial(directory_changes)]
@@ -877,6 +1522,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &GateCommands::default(),
+            &[],
         );
         assert!(output.contains("feat-http-broker"));
         assert!(!output.contains("{{BRANCH_ID}}"));
@@ -899,6 +1545,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &GateCommands::default(),
+            &[],
         );
         assert!(output.contains("http://127.0.0.1:9119/status"));
         assert!(!output.contains("{{GIT_PAW_BROKER_URL}}"));
@@ -921,6 +1568,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &GateCommands::default(),
+            &[],
         );
         let expected = slugify_branch("Feature/HTTP_Broker");
         assert_eq!(output, format!("id={expected}"));
@@ -936,6 +1584,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &GateCommands::default(),
+            &[],
         );
         let b = render(
             &tmpl,
@@ -943,6 +1592,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &GateCommands::default(),
+            &[],
         );
         assert_eq!(a, b);
     }
@@ -979,6 +1629,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &GateCommands::default(),
+            &[],
         );
         assert!(output.contains("feat-x"));
 
@@ -1003,6 +1654,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &GateCommands::default(),
+            &[],
         );
         assert!(
             output.contains("{{UNKNOWN_THING}}"),
@@ -1020,6 +1672,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &GateCommands::default(),
+            &[],
         );
         assert!(
             !output.contains("{{"),
@@ -1208,12 +1861,26 @@ mod tests {
             "supervisor skill should contain Spec Audit section"
         );
         assert!(
-            tmpl.content.contains("openspec/changes/"),
-            "should reference openspec/changes/ for spec file discovery"
+            tmpl.content.contains("{{SPEC_PATH_DOCTRINE}}"),
+            "v0.6.0+ supervisor template should embed the SPEC_PATH_DOCTRINE placeholder so spec layout is rendered per backend, not hardcoded"
         );
         assert!(
             tmpl.content.contains("grep"),
             "should instruct to grep for matching tests"
+        );
+        // When rendered against the OpenSpec backend, the rendered output
+        // SHALL still reference the openspec/changes/ path doctrine.
+        let rendered = render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+            &[crate::specs::SpecBackendKind::OpenSpec],
+        );
+        assert!(
+            rendered.contains("openspec/changes/"),
+            "OpenSpec-rendered supervisor skill should reference openspec/changes/ via the SPEC_PATH_DOCTRINE substitution"
         );
     }
 
@@ -1472,10 +2139,20 @@ mod tests {
     #[test]
     fn supervisor_skill_no_gating_language() {
         let tmpl = resolve("supervisor").unwrap();
-        let lowered = tmpl.content.to_lowercase();
+        // The opsx-role-gating capability legitimately uses the tokens
+        // `role-gating` / `role_gating` (a feature name, not the dropped
+        // governance-"gating" terminology this test guards against). Strip
+        // those tokens before checking so the original intent — no governance
+        // "gating"/"blocking" language — still holds.
+        let lowered = tmpl
+            .content
+            .to_lowercase()
+            .replace("opsx-role-gating", "")
+            .replace("role-gating", "")
+            .replace("role_gating", "");
         assert!(
             !lowered.contains("gating"),
-            "supervisor skill must not use the language of 'gating'"
+            "supervisor skill must not use the language of 'gating' (outside the opsx role-gating feature name)"
         );
         assert!(
             !lowered.contains("blocking on governance failures"),
@@ -1580,6 +2257,475 @@ mod tests {
             lowered.contains("convention") || lowered.contains("project"),
             "governance section must reference the project's conventions / process when describing judgment; got:\n{section}"
         );
+    }
+
+    // === supervisor-stream-timeout-recovery: "Stream-timeout recovery" ===
+
+    /// Returns the body of the "Stream-timeout recovery" section — from
+    /// its `### ` heading to the next `### ` top-level subsection or EOF.
+    fn stream_timeout_section(content: &str) -> &str {
+        let start = content
+            .find("### Stream-timeout recovery")
+            .expect("supervisor skill must contain the Stream-timeout recovery section");
+        let after = &content[start..];
+        // skip past this section's own heading before searching for the
+        // next top-level `### ` boundary
+        let body_offset = "### Stream-timeout recovery".len();
+        let end = after[body_offset..]
+            .find("\n### ")
+            .map_or(after.len(), |i| body_offset + i);
+        &after[..end]
+    }
+
+    /// `supervisor-stream-timeout-recovery` spec, scenario "Section exists
+    /// with the four pieces in recovery order": the heading is present and
+    /// the four subsections appear in the documented order.
+    #[test]
+    fn supervisor_skill_stream_timeout_section_has_four_ordered_pieces() {
+        let tmpl = resolve("supervisor").unwrap();
+        let section = stream_timeout_section(&tmpl.content);
+
+        let error_shape = section
+            .find("error-shape recognition")
+            .expect("subsection 1 must name error-shape recognition");
+        let checkpoint = section
+            .find("pre-action checkpoint")
+            .expect("subsection 2 must name the pre-action checkpoint");
+        let replay = section
+            .find("replay-missing-publishes")
+            .expect("subsection 3 must name replay-missing-publishes");
+        let confirmation = section
+            .find("Confirmation rule")
+            .expect("subsection 4 must name the Confirmation rule");
+
+        assert!(
+            error_shape < checkpoint && checkpoint < replay && replay < confirmation,
+            "the four pieces must appear in recovery order: error-shape recognition, \
+             pre-action checkpoint, replay-missing-publishes, confirmation rule"
+        );
+    }
+
+    /// `Requirement: Error-shape recognition`, scenario "Symptoms are named
+    /// generically across CLIs": at least two visible symptom patterns and
+    /// no specific CLI's exact error string.
+    #[test]
+    fn supervisor_skill_stream_timeout_names_two_generic_symptoms() {
+        let tmpl = resolve("supervisor").unwrap();
+        let section = stream_timeout_section(&tmpl.content);
+        let lowered = section.to_lowercase();
+        assert!(
+            lowered.contains("mid-stream cutoff"),
+            "error-shape subsection must name the mid-stream cutoff symptom"
+        );
+        assert!(
+            lowered.contains("transport error") || lowered.contains("stream error"),
+            "error-shape subsection must name a transport-error / stream-error symptom"
+        );
+    }
+
+    /// `Requirement: Pre-action checkpoint via agent.status`, scenario
+    /// "Checkpoint shape is documented": a concrete `agent.status` shape
+    /// with `status: "checkpoint"` and a `summary` enumerating targets.
+    #[test]
+    fn supervisor_skill_stream_timeout_documents_checkpoint_shape() {
+        let tmpl = resolve("supervisor").unwrap();
+        let section = stream_timeout_section(&tmpl.content);
+        assert!(
+            section.contains("agent.status"),
+            "checkpoint subsection must show an agent.status publish"
+        );
+        assert!(
+            section.contains("\"status\":\"checkpoint\"")
+                || section.contains("status: \"checkpoint\""),
+            "checkpoint subsection must show status: \"checkpoint\""
+        );
+        assert!(
+            section.contains("summary"),
+            "checkpoint subsection must show a summary enumerating intended targets"
+        );
+    }
+
+    /// `Requirement: Pre-action checkpoint`, scenario "Checkpoint required
+    /// only for multi-publish iterations".
+    #[test]
+    fn supervisor_skill_stream_timeout_checkpoint_only_for_multi_publish() {
+        let tmpl = resolve("supervisor").unwrap();
+        let section = stream_timeout_section(&tmpl.content);
+        let lowered = section.to_lowercase();
+        assert!(
+            lowered.contains("more than one"),
+            "checkpoint subsection must state it applies only to iterations with \
+             more than one intended downstream publish"
+        );
+        assert!(
+            lowered.contains("not to every sweep") || lowered.contains("not every sweep"),
+            "checkpoint subsection must clarify it does not apply to every sweep"
+        );
+    }
+
+    /// `Requirement: Replay-missing-publishes recovery`, scenario
+    /// "Per-target poll-then-replay pattern documented".
+    #[test]
+    fn supervisor_skill_stream_timeout_documents_replay_loop() {
+        let tmpl = resolve("supervisor").unwrap();
+        let section = stream_timeout_section(&tmpl.content);
+        assert!(
+            section.contains("/messages/"),
+            "replay subsection must show polling the target's /messages/ stream"
+        );
+        let lowered = section.to_lowercase();
+        assert!(
+            lowered.contains("since=") || lowered.contains("checkpoint timestamp"),
+            "replay subsection must poll since the checkpoint timestamp"
+        );
+        assert!(
+            lowered.contains("re-publish"),
+            "replay subsection must re-publish the missing record"
+        );
+        assert!(
+            lowered.contains("idempotent"),
+            "replay subsection must state the replay is idempotent so duplicates are safe"
+        );
+        assert!(
+            lowered.contains("for each"),
+            "replay subsection must show a per-target loop"
+        );
+    }
+
+    /// `Requirement: Confirmation rule`, scenario "Confirmation rule
+    /// appears prominently": bold `**` markers around the key sentence
+    /// plus a stream-timeout rationale.
+    #[test]
+    fn supervisor_skill_stream_timeout_confirmation_rule_is_prominent() {
+        let tmpl = resolve("supervisor").unwrap();
+        let section = stream_timeout_section(&tmpl.content);
+        assert!(
+            section.contains("**Never advance to the next sub-action"),
+            "confirmation rule must be marked prominently with bold (`**`) formatting"
+        );
+        let lowered = section.to_lowercase();
+        assert!(
+            lowered.contains("timed out mid-write") || lowered.contains("may have timed out"),
+            "confirmation rule must pair with a one-sentence rationale referencing stream-timeout risk"
+        );
+    }
+
+    /// `Requirement: Recovery learning record`, scenario "Skill prose names
+    /// the recovery learning trigger": each recovery emits a
+    /// `recovery_cycles` `agent.learning` record with a structured body.
+    #[test]
+    fn supervisor_skill_stream_timeout_names_recovery_learning_record() {
+        let tmpl = resolve("supervisor").unwrap();
+        let section = stream_timeout_section(&tmpl.content);
+        assert!(
+            section.contains("recovery_cycles"),
+            "replay subsection must name the recovery_cycles learning category"
+        );
+        assert!(
+            section.contains("agent.learning"),
+            "replay subsection must state the recovery emits an agent.learning record"
+        );
+        for field in [
+            "checkpoint_id",
+            "intended_targets",
+            "replayed_targets",
+            "skipped_targets",
+        ] {
+            assert!(
+                section.contains(field),
+                "recovery learning body must document the `{field}` field"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // render_dev_allowlist_preset (lang-agnostic-skills)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn dev_allowlist_preset_renders_every_constant_entry() {
+        // Spec contract: every entry from the constant contributes to the
+        // rendered output such that adding a new entry to the constant
+        // would change the output without a skill-template edit. The prose
+        // groups entries by first word — `cargo build` shows as `cargo
+        // (build, …)`. We verify each entry's head word AND tail (if any)
+        // both appear, which would break the moment a new entry is added
+        // without re-rendering.
+        use crate::supervisor::dev_allowlist::DEV_ALLOWLIST_PRESET;
+        let prose = render_dev_allowlist_preset();
+        for entry in DEV_ALLOWLIST_PRESET {
+            let (head, tail) = match entry.split_once(' ') {
+                Some((h, t)) => (h, Some(t)),
+                None => (*entry, None),
+            };
+            assert!(
+                prose.contains(head),
+                "rendered preset must contain head word `{head}` from entry `{entry}`; got:\n{prose}"
+            );
+            if let Some(t) = tail {
+                assert!(
+                    prose.contains(t),
+                    "rendered preset must contain tail `{t}` from entry `{entry}`; got:\n{prose}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dev_allowlist_preset_groups_by_first_word() {
+        // `cargo build` and `cargo test` share `cargo`; the rendered prose
+        // must collapse them into a single `cargo (...)` group so the
+        // listing reads as families, not as a flat array.
+        let prose = render_dev_allowlist_preset();
+        let cargo_groups = prose.matches("cargo (").count();
+        assert_eq!(
+            cargo_groups, 1,
+            "multi-entry prefixes must collapse into a single grouped clause; got {cargo_groups} occurrences of `cargo (` in:\n{prose}"
+        );
+        let git_groups = prose.matches("git (").count();
+        assert_eq!(
+            git_groups, 1,
+            "multi-entry git prefix must collapse into a single grouped clause; got {git_groups} occurrences of `git (` in:\n{prose}"
+        );
+    }
+
+    #[test]
+    fn dev_allowlist_preset_preserves_single_word_entries() {
+        let prose = render_dev_allowlist_preset();
+        for bare in ["just", "find", "grep"] {
+            assert!(
+                prose.contains(bare),
+                "bare single-word entry `{bare}` should appear verbatim in:\n{prose}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // render_spec_path_doctrine (lang-agnostic-skills)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn spec_doctrine_empty_backends_renders_sentinel() {
+        let out = render_spec_path_doctrine(&[]);
+        assert!(
+            out.contains("no spec backend"),
+            "empty backend slice should render the sentinel; got: {out}"
+        );
+    }
+
+    #[test]
+    fn spec_doctrine_openspec_references_openspec_paths_and_workflow() {
+        use crate::specs::SpecBackendKind;
+        let out = render_spec_path_doctrine(&[SpecBackendKind::OpenSpec]);
+        assert!(
+            out.contains("openspec/changes/"),
+            "OpenSpec doctrine should name the openspec/changes/ path; got: {out}"
+        );
+        assert!(
+            out.contains("openspec validate"),
+            "OpenSpec doctrine should reference the openspec validate workflow; got: {out}"
+        );
+    }
+
+    #[test]
+    fn spec_doctrine_speckit_references_specify_paths_and_checklist() {
+        use crate::specs::SpecBackendKind;
+        let out = render_spec_path_doctrine(&[SpecBackendKind::SpecKit]);
+        assert!(
+            out.contains(".specify/specs/"),
+            "Spec Kit doctrine should name the .specify/specs/ path; got: {out}"
+        );
+        assert!(
+            out.to_lowercase().contains("checklist"),
+            "Spec Kit doctrine should reference the checklist convention; got: {out}"
+        );
+    }
+
+    #[test]
+    fn spec_doctrine_markdown_references_paw_status_frontmatter() {
+        use crate::specs::SpecBackendKind;
+        let out = render_spec_path_doctrine(&[SpecBackendKind::Markdown]);
+        assert!(
+            out.contains("paw_status: pending"),
+            "Markdown doctrine should reference paw_status: pending; got: {out}"
+        );
+    }
+
+    #[test]
+    fn spec_doctrine_multi_backend_lists_each_present_backend() {
+        use crate::specs::SpecBackendKind;
+        let out = render_spec_path_doctrine(&[
+            SpecBackendKind::OpenSpec,
+            SpecBackendKind::SpecKit,
+            SpecBackendKind::Markdown,
+        ]);
+        assert!(
+            out.contains("openspec/changes/"),
+            "multi-backend doctrine should mention OpenSpec; got:\n{out}"
+        );
+        assert!(
+            out.contains(".specify/specs/"),
+            "multi-backend doctrine should mention Spec Kit; got:\n{out}"
+        );
+        assert!(
+            out.contains("paw_status: pending"),
+            "multi-backend doctrine should mention Markdown; got:\n{out}"
+        );
+        assert!(
+            out.contains("spans multiple"),
+            "multi-backend doctrine should introduce the multi-backend session shape; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn spec_doctrine_dedupes_repeated_backends() {
+        use crate::specs::SpecBackendKind;
+        let out = render_spec_path_doctrine(&[
+            SpecBackendKind::OpenSpec,
+            SpecBackendKind::OpenSpec,
+            SpecBackendKind::OpenSpec,
+        ]);
+        // A single backend (even repeated) renders the single-backend
+        // sentence shape, not the multi-backend intro.
+        assert!(
+            !out.contains("spans multiple"),
+            "duplicate backends must collapse to the single-backend shape; got:\n{out}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // render() new placeholder substitutions (lang-agnostic-skills)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn render_doc_tool_command_substitutes_from_gates() {
+        let tmpl = SkillTemplate {
+            name: "supervisor".into(),
+            content: "Run {{DOC_TOOL_COMMAND}} for API docs.".into(),
+            source: Source::Embedded,
+            format: SkillFormat::Standardized,
+            metadata: None,
+            resource_paths: None,
+        };
+        let gates = GateCommands {
+            doc_tool_command: Some("sphinx-build -W docs docs/_build"),
+            ..Default::default()
+        };
+        let output = render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &gates,
+            &[],
+        );
+        assert_eq!(output, "Run sphinx-build -W docs docs/_build for API docs.");
+        assert!(!output.contains("{{DOC_TOOL_COMMAND}}"));
+    }
+
+    #[test]
+    fn render_doc_tool_command_empty_when_unset() {
+        // Unlike the other gate placeholders, DOC_TOOL_COMMAND renders as
+        // an empty string when None — the supervisor template is authored
+        // to surround the placeholder with prose that reads naturally
+        // even when empty (per D5 of the design).
+        let tmpl = SkillTemplate {
+            name: "supervisor".into(),
+            content: "API doc tool: `{{DOC_TOOL_COMMAND}}`".into(),
+            source: Source::Embedded,
+            format: SkillFormat::Standardized,
+            metadata: None,
+            resource_paths: None,
+        };
+        let output = render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+            &[],
+        );
+        assert_eq!(output, "API doc tool: ``");
+        assert!(!output.contains("(not configured)"));
+    }
+
+    #[test]
+    fn render_dev_allowlist_preset_placeholder_substitutes() {
+        let tmpl = SkillTemplate {
+            name: "supervisor".into(),
+            content: "Allowed: {{DEV_ALLOWLIST_PRESET}}".into(),
+            source: Source::Embedded,
+            format: SkillFormat::Standardized,
+            metadata: None,
+            resource_paths: None,
+        };
+        let output = render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+            &[],
+        );
+        assert!(
+            output.contains("cargo (build"),
+            "rendered placeholder should embed the grouped preset prose; got:\n{output}"
+        );
+        assert!(!output.contains("{{DEV_ALLOWLIST_PRESET}}"));
+    }
+
+    #[test]
+    fn render_spec_path_doctrine_placeholder_substitutes_per_backend() {
+        use crate::specs::SpecBackendKind;
+        let tmpl = SkillTemplate {
+            name: "supervisor".into(),
+            content: "Spec layout: {{SPEC_PATH_DOCTRINE}}".into(),
+            source: Source::Embedded,
+            format: SkillFormat::Standardized,
+            metadata: None,
+            resource_paths: None,
+        };
+        let openspec_output = render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+            &[SpecBackendKind::OpenSpec],
+        );
+        assert!(openspec_output.contains("openspec/changes/"));
+        assert!(!openspec_output.contains("{{SPEC_PATH_DOCTRINE}}"));
+
+        let speckit_output = render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+            &[SpecBackendKind::SpecKit],
+        );
+        assert!(speckit_output.contains(".specify/specs/"));
+    }
+
+    #[test]
+    fn render_spec_path_doctrine_empty_renders_sentinel() {
+        let tmpl = SkillTemplate {
+            name: "supervisor".into(),
+            content: "{{SPEC_PATH_DOCTRINE}}".into(),
+            source: Source::Embedded,
+            format: SkillFormat::Standardized,
+            metadata: None,
+            resource_paths: None,
+        };
+        let output = render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+            &[],
+        );
+        assert!(output.contains("no spec backend"));
     }
 
     // governance_section_paths renderer (governance-context §1, §3).
@@ -1716,6 +2862,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "my-app",
             &GateCommands::default(),
+            &[],
         );
         assert!(output.contains("paw-my-app"));
         assert!(!output.contains("{{PROJECT_NAME}}"));
@@ -1738,6 +2885,7 @@ mod tests {
             "url",
             "git-paw",
             &GateCommands::default(),
+            &[],
         );
         assert!(output.contains("feat-http-broker"));
         assert!(output.contains("paw-git-paw"));
@@ -1863,6 +3011,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &GateCommands::default(),
+            &[],
         );
         assert!(output.contains("Name: test-skill, Desc: Test description"));
         assert!(!output.contains("{{SKILL_NAME}}"));
@@ -1888,6 +3037,7 @@ mod tests {
                 test_command: Some("just check"),
                 ..Default::default()
             },
+            &[],
         );
         assert_eq!(output, "Run `just check` after each merge.");
         assert!(!output.contains("{{TEST_COMMAND}}"));
@@ -1909,6 +3059,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &GateCommands::default(),
+            &[],
         );
         assert_eq!(output, "Baseline: (not configured)");
         assert!(!output.contains("{{TEST_COMMAND}}"));
@@ -1934,6 +3085,7 @@ mod tests {
                 test_command: Some("just check"),
                 ..Default::default()
             },
+            &[],
         );
         assert!(
             !output.contains("{{TEST_COMMAND}}"),
@@ -1967,6 +3119,7 @@ mod tests {
             spec_validate_command: value,
             fmt_check_command: value,
             security_audit_command: value,
+            doc_tool_command: value,
         };
         render(
             &tmpl,
@@ -1974,6 +3127,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &gates,
+            &[],
         )
     }
 
@@ -1997,6 +3151,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &gates,
+            &[],
         );
         assert!(
             output.contains("Run just check."),
@@ -2033,6 +3188,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &gates,
+            &[],
         );
         assert!(
             output.contains("Run cargo clippy -- -D warnings."),
@@ -2066,6 +3222,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &gates,
+            &[],
         );
         assert!(output.contains("Run cargo build."), "got: {output}");
 
@@ -2096,6 +3253,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &gates,
+            &[],
         );
         assert!(output.contains("Run mdbook build docs/."), "got: {output}");
 
@@ -2126,6 +3284,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &gates,
+            &[],
         );
         assert!(
             output.contains("Run openspec validate {{CHANGE_ID}} --strict."),
@@ -2159,6 +3318,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &gates,
+            &[],
         );
         assert!(output.contains("Run cargo fmt --check."), "got: {output}");
 
@@ -2189,6 +3349,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &gates,
+            &[],
         );
         assert!(output.contains("Run cargo audit."), "got: {output}");
 
@@ -2213,6 +3374,7 @@ mod tests {
             spec_validate_command: Some("CMD-SPEC"),
             fmt_check_command: Some("CMD-FMT"),
             security_audit_command: Some("CMD-SEC"),
+            doc_tool_command: Some("CMD-DOCTOOL"),
         };
         let output = render(
             &tmpl,
@@ -2220,6 +3382,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &gates,
+            &[],
         );
         for needle in [
             "CMD-TEST",
@@ -2249,6 +3412,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &GateCommands::default(),
+            &[],
         );
 
         // Gate 1 (Testing) section.
@@ -2372,6 +3536,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &gates,
+            &[],
         );
         assert!(
             output.contains("Run openspec validate {{CHANGE_ID}} --strict."),
@@ -3115,6 +4280,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &GateCommands::default(),
+            &[],
         )
     }
 
@@ -3126,6 +4292,7 @@ mod tests {
             "http://127.0.0.1:9119",
             "git-paw",
             &GateCommands::default(),
+            &[],
         )
     }
 
@@ -3300,14 +4467,16 @@ mod tests {
                 test_command: Some("just check"),
                 ..Default::default()
             },
+            &[],
         )
     }
 
     /// 8.3 — resolved supervisor skill contains a curl publishing an
-    /// `agent.status` for `agent_id = "supervisor"` AND including a `cli`
-    /// field in the payload JSON.
+    /// `agent.status` for `agent_id = "supervisor"`, and that payload does
+    /// NOT self-report a `cli` (git-paw pre-fills the CLI authoritatively at
+    /// launch — a self-reported guess once clobbered the seed).
     #[test]
-    fn supervisor_skill_self_register_curl_includes_cli_field() {
+    fn supervisor_skill_self_register_curl_omits_cli_field() {
         let rendered = render_supervisor();
         let start = rendered
             .find("Bootstrap")
@@ -3325,8 +4494,8 @@ mod tests {
             "bootstrap curl must use agent_id=\"supervisor\"; got:\n{section}"
         );
         assert!(
-            section.contains("\"cli\""),
-            "bootstrap payload must include a cli field; got:\n{section}"
+            !section.contains("\"cli\""),
+            "bootstrap payload must NOT self-report a cli field (git-paw pre-fills it); got:\n{section}"
         );
     }
 
@@ -3371,7 +4540,8 @@ mod tests {
     }
 
     /// 8a.5 — Rules section bullet mentions absorbing routine approvals
-    /// AND at least three routine command families.
+    /// AND at least three routine command families (now sourced from the
+    /// rendered `{{DEV_ALLOWLIST_PRESET}}` prose).
     #[test]
     fn supervisor_skill_rules_bullet_mentions_routine_absorption() {
         let rendered = render_supervisor();
@@ -3385,8 +4555,12 @@ mod tests {
             lower.contains("absorb routine approval") || lower.contains("rubber-stamp"),
             "Rules must include the routine-approval absorption framing; got:\n{section}"
         );
+        // v0.6.0+ the rules bullet embeds {{DEV_ALLOWLIST_PRESET}} which
+        // groups by first word: `cargo (build, test, ...)`, `git (..., commit, ...)`,
+        // `mdbook build`, `openspec (...)`, `just`. Match against the
+        // grouped families.
         let mut family_hits = 0;
-        for family in ["cargo", "git commit", "mdbook", "git stash", "git restore"] {
+        for family in ["cargo (", "git (", "mdbook", "openspec (", "just"] {
             if section.contains(family) {
                 family_hits += 1;
             }
@@ -3529,7 +4703,11 @@ mod tests {
         );
     }
 
-    /// 8b.10 — Doc audit gate enumerates at least 4 of 5 doc surfaces.
+    /// 8b.10 — Doc audit gate enumerates the doc-surface categories any
+    /// project might carry. v0.6.0+ uses language-neutral wording instead
+    /// of Rust-specific surfaces (was `docs/src/`, `rustdoc`); the
+    /// equivalents now are "user-guide pages" + the configured
+    /// `{{DOC_TOOL_COMMAND}}` placeholder for the API-doc generator.
     #[test]
     fn supervisor_skill_doc_audit_enumerates_surfaces() {
         let rendered = render_supervisor();
@@ -3542,14 +4720,20 @@ mod tests {
             .expect("Security audit follows Doc audit");
         let section = &rendered[start..end];
         let mut hits = 0;
-        for surface in ["docs/src/", "README.md", "AGENTS.md", "--help", "rustdoc"] {
+        for surface in [
+            "user-guide",
+            "README.md",
+            "AGENTS.md",
+            "--help",
+            "doc_tool_command",
+        ] {
             if section.contains(surface) {
                 hits += 1;
             }
         }
         assert!(
             hits >= 4,
-            "Doc audit must enumerate at least 4 of 5 doc surfaces; only {hits} found in:\n{section}",
+            "Doc audit must enumerate at least 4 of 5 doc-surface categories; only {hits} found in:\n{section}",
         );
     }
 
@@ -3848,5 +5032,322 @@ mod tests {
                 || window.contains("no relationship"),
             "section must forbid using `git paw status` order as a mapping source",
         );
+    }
+
+    // === coordination-context-budget: context-budget skill content ===
+
+    /// Spec "Context budget section in coordination skill" /
+    /// "Section placement after 'While you're editing'": the coordination
+    /// skill SHALL contain a "Context budget" heading and it SHALL appear
+    /// after the v0.5.0 "While you're editing" heading.
+    #[test]
+    fn coordination_skill_contains_context_budget_after_while_editing() {
+        let tmpl = resolve("coordination").unwrap();
+        let editing = tmpl
+            .content
+            .find("While you're editing")
+            .expect("coordination skill should contain 'While you're editing' heading");
+        let budget = tmpl
+            .content
+            .find("### Context budget")
+            .expect("coordination skill should contain a 'Context budget' heading");
+        assert!(
+            budget > editing,
+            "the 'Context budget' section must appear after the 'While you're editing' section"
+        );
+    }
+
+    /// Spec "Context budget section in coordination skill" /
+    /// "Section exists with the three topics": the section covers the
+    /// residual-budget heuristic, the named moments, and the
+    /// commit-before-compact discipline.
+    #[test]
+    fn coordination_skill_context_budget_covers_three_topics() {
+        let tmpl = resolve("coordination").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("residual-budget heuristic"),
+            "context-budget section should cover the residual-budget heuristic"
+        );
+        assert!(
+            lowered.contains("when to compact, clear, or summarise"),
+            "context-budget section should cover the named compact/clear/summarise moments"
+        );
+        assert!(
+            lowered.contains("commit before you compact"),
+            "context-budget section should cover the commit-before-compact discipline"
+        );
+    }
+
+    /// Spec "Residual-budget heuristic" / "Heuristic stated in prose": the
+    /// "at least 60% free post-boot" target is phrased as prose, and no new
+    /// config field is introduced in the section.
+    #[test]
+    fn coordination_skill_residual_budget_heuristic_in_prose() {
+        let tmpl = resolve("coordination").unwrap();
+        let start = tmpl
+            .content
+            .find("### Context budget")
+            .expect("context-budget section present");
+        let end = tmpl.content[start..]
+            .find("### Check for messages")
+            .map_or(tmpl.content.len(), |o| start + o);
+        let section = &tmpl.content[start..end];
+        let lowered = section.to_lowercase();
+        assert!(
+            lowered.contains("60%") && lowered.contains("free"),
+            "residual-budget heuristic should reference keeping ~60% of the window free"
+        );
+        assert!(
+            lowered.contains("heuristic"),
+            "residual-budget guidance should be framed as a heuristic"
+        );
+        assert!(
+            lowered.contains("no config field")
+                || lowered.contains("there is no\nconfig field")
+                || lowered.contains("there is no config field"),
+            "the section should state there is no config field for the ratio"
+        );
+    }
+
+    /// Spec "Three named moments to compact / clear / summarise" /
+    /// "Three moments documented in priority order": the three moments
+    /// appear in the documented order, each with its action labelled.
+    #[test]
+    fn coordination_skill_three_moments_in_priority_order() {
+        let tmpl = resolve("coordination").unwrap();
+        let content = &tmpl.content;
+        let scenario = content
+            .find("After each spec scenario completes")
+            .expect("first moment present");
+        let working_set = content
+            .find("working set grows past")
+            .expect("second moment present");
+        let switching = content
+            .find("switching between sub-tasks")
+            .expect("third moment present");
+        assert!(
+            scenario < working_set && working_set < switching,
+            "the three named moments must appear in the documented priority order"
+        );
+
+        // Each moment labels its associated action (compact for 1 & 2,
+        // clear for 3). Check the action label sits near its moment.
+        let first = &content[scenario..working_set];
+        let second = &content[working_set..switching];
+        let third = &content[switching..(switching + 300).min(content.len())];
+        assert!(
+            first.to_lowercase().contains("compact"),
+            "moment 1 should be labelled with the compact action"
+        );
+        assert!(
+            second.to_lowercase().contains("compact"),
+            "moment 2 should be labelled with the compact action"
+        );
+        assert!(
+            third.to_lowercase().contains("clear"),
+            "moment 3 should be labelled with the clear action"
+        );
+    }
+
+    /// Spec "Commit-before-compact discipline" /
+    /// "Discipline stated explicitly with safety rationale": the rule is a
+    /// clearly-marked statement paired with a rationale about why ordering
+    /// matters.
+    #[test]
+    fn coordination_skill_states_commit_before_compact_discipline() {
+        let tmpl = resolve("coordination").unwrap();
+        assert!(
+            tmpl.content
+                .contains("**Never compact, clear, or summarise without first committing"),
+            "commit-before-compact discipline should be a bold, explicit statement"
+        );
+        let lowered = tmpl.content.to_lowercase();
+        assert!(
+            lowered.contains("agent.artifact"),
+            "the discipline should mention publishing an agent.artifact as the alternative to committing"
+        );
+        assert!(
+            lowered.contains("can't recover") || lowered.contains("cannot recover"),
+            "the discipline should pair the rule with a safety rationale about recoverability"
+        );
+    }
+
+    /// Spec "Per-CLI compact mechanism table" /
+    /// "Table includes claude and claude-oss explicitly" + "Generic 'other'
+    /// row points users at their CLI's equivalent".
+    #[test]
+    fn coordination_skill_per_cli_mechanism_table() {
+        let tmpl = resolve("coordination").unwrap();
+        let start = tmpl
+            .content
+            .find("#### Per-CLI mechanism")
+            .expect("per-CLI mechanism subsection present");
+        let section = &tmpl.content[start..];
+        // claude and claude-oss rows, each naming /compact and /clear.
+        assert!(
+            section.contains("| `claude` | `/compact` | `/clear` |"),
+            "table should contain a claude row naming /compact and /clear"
+        );
+        assert!(
+            section.contains("| `claude-oss` | `/compact` | `/clear` |"),
+            "table should contain a claude-oss row naming /compact and /clear"
+        );
+        // Generic "other" fallback row directing to the CLI's equivalent.
+        let other = section
+            .find("| other |")
+            .map(|o| &section[o..(o + 200).min(section.len())])
+            .expect("table should contain an 'other' fallback row");
+        assert!(
+            other.contains("/compact") && other.contains("/save") && other.contains("/reset"),
+            "the 'other' row should point users at the CLI's /compact, /save, or /reset equivalent"
+        );
+    }
+
+    // --- opsx role-gating skill sections (opsx-role-gating 2.3, 7.3, 1a.4) ---
+
+    use crate::specs::SpecBackendKind;
+
+    fn render_skill(name: &str, backends: &[SpecBackendKind]) -> String {
+        let tmpl = resolve(name).unwrap_or_else(|_| panic!("resolve {name}"));
+        render(
+            &tmpl,
+            if name == "supervisor" {
+                "supervisor"
+            } else {
+                "feat/x"
+            },
+            "http://127.0.0.1:9119",
+            "git-paw",
+            &GateCommands::default(),
+            backends,
+        )
+    }
+
+    #[test]
+    fn coordination_lists_forbidden_commands_under_openspec() {
+        let out = render_skill("coordination", &[SpecBackendKind::OpenSpec]);
+        assert!(
+            out.contains("Commands you must not run"),
+            "coordination must carry the forbidden-command section"
+        );
+        assert!(out.contains("/opsx:verify"), "lists /opsx:verify");
+        assert!(out.contains("/opsx:archive"), "lists /opsx:archive");
+        assert!(
+            out.contains("supervisor-only"),
+            "names the commands supervisor-only"
+        );
+        assert!(
+            out.contains("role-gating guard"),
+            "references the role-gating guard"
+        );
+    }
+
+    #[test]
+    fn supervisor_has_must_must_not_section_under_openspec() {
+        let out = render_skill("supervisor", &[SpecBackendKind::OpenSpec]);
+        assert!(
+            out.contains("Commands you must run (not coding agents)"),
+            "supervisor must carry the supervisor-only section"
+        );
+        assert!(out.contains("/opsx:verify") && out.contains("/opsx:archive"));
+        // MUST / MUST NOT framing.
+        assert!(out.contains("MUST") && out.contains("MUST NOT"));
+        // Instruction to call out violations via agent.feedback.
+        let idx = out
+            .find("Commands you must run (not coding agents)")
+            .expect("section present");
+        let section = &out[idx..];
+        assert!(
+            section.contains("agent.feedback"),
+            "section instructs calling out violations via agent.feedback"
+        );
+    }
+
+    #[test]
+    fn supervisor_has_revert_flow_under_openspec() {
+        let out = render_skill("supervisor", &[SpecBackendKind::OpenSpec]);
+        assert!(
+            out.contains("Handling an opsx-role-gating revert request"),
+            "merge-orchestration carries the revert-request flow"
+        );
+        assert!(out.contains("git revert"), "teaches git revert");
+        assert!(
+            out.contains("auto_revert"),
+            "references the [supervisor] auto_revert opt-out"
+        );
+    }
+
+    #[test]
+    fn opsx_sections_omitted_under_non_openspec_engines() {
+        for backends in [
+            vec![SpecBackendKind::Markdown],
+            vec![SpecBackendKind::SpecKit],
+            vec![],
+        ] {
+            let coord = render_skill("coordination", &backends);
+            assert!(
+                !coord.contains("Commands you must not run"),
+                "coordination forbidden section must be omitted for {backends:?}"
+            );
+            let sup = render_skill("supervisor", &backends);
+            assert!(
+                !sup.contains("Commands you must run (not coding agents)"),
+                "supervisor-only section must be omitted for {backends:?}"
+            );
+            assert!(
+                !sup.contains("Handling an opsx-role-gating revert request"),
+                "revert flow must be omitted for {backends:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn opsx_region_markers_never_survive_rendering() {
+        for name in ["coordination", "supervisor"] {
+            for backends in [
+                vec![SpecBackendKind::OpenSpec],
+                vec![SpecBackendKind::Markdown],
+                vec![],
+            ] {
+                let out = render_skill(name, &backends);
+                assert!(
+                    !out.contains(OPSX_REGION_BEGIN) && !out.contains(OPSX_REGION_END),
+                    "{name} under {backends:?} must not leak region markers"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn opsx_multi_backend_session_keeps_sections_when_openspec_present() {
+        // A session spanning OpenSpec + another engine still renders the
+        // sections (OpenSpec is present).
+        let out = render_skill(
+            "supervisor",
+            &[SpecBackendKind::Markdown, SpecBackendKind::OpenSpec],
+        );
+        assert!(out.contains("Commands you must run (not coding agents)"));
+    }
+
+    #[test]
+    fn render_opsx_regions_strips_body_when_not_kept() {
+        let input = "before\n<!-- opsx-role-gating:begin -->\nSECRET\n<!-- opsx-role-gating:end -->\nafter\n";
+        let kept = render_opsx_regions(input, true);
+        assert!(kept.contains("SECRET"));
+        assert!(!kept.contains("opsx-role-gating:begin"));
+        let stripped = render_opsx_regions(input, false);
+        assert!(!stripped.contains("SECRET"));
+        assert!(stripped.contains("before") && stripped.contains("after"));
+    }
+
+    #[test]
+    fn raw_coordination_template_carries_the_forbidden_section() {
+        // The bundled template (pre-render) contains the section; rendering is
+        // what gates it per engine. Satisfies the spec's "bundled coordination.md
+        // is inspected" scenario.
+        let tmpl = resolve("coordination").unwrap();
+        assert!(tmpl.content.contains("Commands you must not run"));
+        assert!(tmpl.content.contains(OPSX_REGION_BEGIN));
     }
 }

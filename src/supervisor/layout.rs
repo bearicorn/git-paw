@@ -73,6 +73,19 @@ pub fn supervisor_layout(agent_count: usize) -> Result<SupervisorLayout, PawErro
     })
 }
 
+/// Pure grid-geometry function of agent count, named per the add/remove
+/// design (D1). The v0.5.0 layout builder ([`supervisor_layout`]) is already a
+/// pure function of `agent_count`; `layout_for` is the canonical name the
+/// `add-branch` / `remove-branch` specs use to make explicit that the same
+/// geometry is recomputed for `N → N+1` (add) and `N → N−1` (remove)
+/// re-tiling, not just the initial start-time layout.
+///
+/// Returns [`PawError::ConfigError`] when `agent_count > SUPERVISOR_MAX_AGENTS`
+/// — the same "split into multiple sessions" error `git paw start` surfaces.
+pub fn layout_for(agent_count: usize) -> Result<SupervisorLayout, PawError> {
+    supervisor_layout(agent_count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +186,23 @@ mod tests {
     fn layout_rejects_far_above_cap() {
         let err = supervisor_layout(100).expect_err("100 agents should be rejected");
         assert!(err.to_string().contains("100 agents requested"));
+    }
+
+    #[test]
+    fn layout_for_matches_supervisor_layout_across_the_range() {
+        // layout_for is the D1-named alias; it must be identical to
+        // supervisor_layout for every valid count and reject the same way.
+        for n in 1..=SUPERVISOR_MAX_AGENTS {
+            assert_eq!(
+                layout_for(n).expect("layout_for should compute"),
+                supervisor_layout(n).expect("supervisor_layout should compute"),
+                "layout_for({n}) should match supervisor_layout({n})"
+            );
+        }
+        assert!(
+            layout_for(SUPERVISOR_MAX_AGENTS + 1).is_err(),
+            "layout_for should reject above the cap like supervisor_layout"
+        );
     }
 
     #[test]

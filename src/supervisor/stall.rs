@@ -57,6 +57,7 @@ mod tests {
                         ..Default::default()
                     },
                 }),
+                last_committed_at: None,
             },
         );
     }
