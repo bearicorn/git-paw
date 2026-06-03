@@ -82,6 +82,29 @@ also matches the post-commit hook's `agent.artifact{status:"committed"}` event
 cadence the supervisor uses for verification — each commit triggers exactly
 one verification-relevant event.
 
+### Stay inside your worktree
+
+You have your own git worktree. **Every command you run — edits, `git add`,
+`git commit`, tests — must execute from your worktree root, using relative paths
+only.** Never `cd` to an absolute path outside your worktree, and never
+run `git` against another worktree's checkout (no `git -C /other/path ...`, no
+`cd /other/worktree`).
+
+Why this matters: linked git worktrees share one `.git/refs` store. If your
+shell wanders into the supervisor's main checkout (or a peer's worktree) and
+you commit there, the commit advances *that* checkout's branch — not yours.
+Your own feature branch stays empty, the integration branch silently absorbs
+your unverified work, and reviewers see a contaminated history. This is a
+data-integrity bug, not a style nit.
+
+A **pre-commit branch guard** enforces this: if the branch your `git commit`
+would advance does not match the branch your worktree was created for, the
+commit is refused with an error naming both branches. If you hit that error,
+you are committing from the wrong directory — `cd` back to your worktree root
+and retry. (The guard can be disabled repo-wide via
+`[supervisor] strict_branch_guard = false`, but the post-commit detection
+still reports any mismatch to the supervisor.)
+
 ### Before you start editing
 
 Coordination is forward-looking. Before you touch any file:
@@ -93,7 +116,7 @@ Coordination is forward-looking. Before you touch any file:
    ```bash
    curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
      -H "Content-Type: application/json" \
-     -d '{"type":"agent.intent","agent_id":"{{BRANCH_ID}}","payload":{"files":["src/auth.rs","src/auth/client.rs"],"summary":"wire AuthClient","valid_for_seconds":900}}'
+     -d '{"type":"agent.intent","agent_id":"{{BRANCH_ID}}","payload":{"files":["src/auth/<file>","src/auth/client/<file>"],"summary":"wire AuthClient","valid_for_seconds":900}}'
    ```
 
 3. Poll your inbox **once** for warnings or overlapping peer intents:
@@ -111,6 +134,51 @@ Coordination is forward-looking. Before you touch any file:
 
    If no overlap is reported, proceed to edit immediately — do **not** wait for any
    explicit go-ahead.
+
+### Declaring regions
+
+By default an `agent.intent` claims whole files, and the conflict detector
+warns any two agents who name the same path. That is too coarse when several
+agents work different parts of one shared file — the warnings become noise and
+real overlaps get dismissed with them. To sharpen the signal, each `files`
+entry MAY be an object that names the **regions** within the file you intend to
+touch, instead of a bare path string:
+
+```bash
+curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
+  -H "Content-Type: application/json" \
+  -d '{"type":"agent.intent","agent_id":"{{BRANCH_ID}}","payload":{"files":[{"path":"src/auth/<file>","regions":[{"kind":"function","name":"validate_token"},{"kind":"function","name":"refresh_session"}]}],"summary":"harden token checks","valid_for_seconds":900}}'
+```
+
+A `files` array may freely mix bare-path strings (file-level intent) and
+region objects. The region `kind` is one of `function` (`{ "name": ... }`),
+`class` (`{ "name": ... }`), `block` (`{ "anchor": "<heading or landmark>" }`,
+for prose or config files), or `range` (`{ "start_line": N, "end_line": M }`,
+when no symbolic name fits). When **both** agents on a shared file declare
+regions, the detector warns only if the regions actually intersect; if **either**
+side omits regions, it falls back to the safe whole-file warning.
+
+**Declare regions when:**
+
+- You and a peer both intend the same file but different parts of it — e.g. you
+  add `validate_token` while a peer reworks `refresh_session` in the same auth
+  file. Naming your regions lets the detector see you don't actually collide.
+- You can name the region precisely and stably — a specific function name, a
+  type or class name, or a named heading/anchor in a doc or config file.
+
+**Skip regions (just name the file) when:**
+
+- You are about to refactor across the whole file — moving everything, renaming
+  the module, reformatting top to bottom. Regions would understate your real
+  footprint and mislead peers.
+- Your plan is still in flux and you cannot yet name the parts you'll touch.
+  Claim the file; re-publish with regions later if it helps.
+
+**Do not manufacture narrow regions to dodge a warning.** Declaring a region
+you don't really own — or splitting an honest whole-file change into fake
+narrow regions just to suppress the overlap warning — defeats the detector and
+hides a collision that will surface later as a merge conflict; the detector is
+on your side, so when in doubt, claim the file.
 
 ### While you're editing
 
@@ -130,6 +198,59 @@ You MUST NOT:
 - Wait for an explicit go-ahead from peers when no conflict signal exists — silence
   from the broker means "no overlap detected", not "permission pending".
 - Block on broker silence — if `agent.intent` polling returns no overlap, proceed.
+
+### Context budget
+
+Coordinating forward is only half the job — you also have to manage your own
+context window. The boot block, this skill, and the governance docs all load
+before you read a single source file, so context is spent before task work
+begins. Manage it deliberately or you will hit an opaque "context length
+exceeded" failure mid-task and lose any work you had not yet committed.
+
+#### Residual-budget heuristic
+
+After the boot blocks, skill prose, and governance docs have loaded, aim to
+keep **at least ~60% of the model's context window free** for task work. This
+is a heuristic target, not a hard rule — context windows vary by model, and
+some tasks legitimately need a fuller window. If you find yourself starting a
+task with less than roughly 60% of the window free, that is a signal to
+compact or clear before you begin rather than partway through. There is no
+config field for this ratio; it lives here as guidance for you to judge.
+
+#### When to compact, clear, or summarise
+
+Reach for these three moments in priority order — read them top-to-bottom and
+take the first one that applies:
+
+1. **After each spec scenario completes — compact.** A finished scenario is a
+   natural commit point and the smallest safe reduction. Commit the work, then
+   `/compact` so recent context is preserved while the older detail is folded
+   away.
+2. **When the working set grows past ~40% of the window — compact.** Crossing
+   this threshold means you are accumulating context that will not all be
+   needed later. `/compact` to fold it down before it crowds out task work.
+3. **When switching between sub-tasks that don't share state — clear.** A
+   clean break is the cheapest fresh start; nothing from the previous sub-task
+   carries forward, so `/clear` rather than `/compact`.
+
+#### Commit before you compact
+
+**Never compact, clear, or summarise without first committing — or publishing
+an `agent.artifact` — to record your work.** The compact operation reduces
+what you can see; if your in-flight work isn't captured in git or in the
+broker first, you can't recover it after the context shrinks. The order is
+always: record, then reduce.
+
+#### Per-CLI mechanism
+
+The compact/clear commands differ by CLI. Use the form for the CLI you are
+running under:
+
+| CLI | Compact | Clear | Notes |
+|---|---|---|---|
+| `claude` | `/compact` | `/clear` | preferred path; `/compact` preserves recent context |
+| `claude-oss` | `/compact` | `/clear` | same semantics as `claude` |
+| other | varies | varies | look for the CLI's `/compact`, `/save`, or `/reset` equivalent |
 
 ### Check for messages from peers (before starting new work)
 
@@ -200,6 +321,27 @@ Why this rule is explicit:
 Commit, let the post-commit hook publish, then wait for `agent.verified`,
 `agent.feedback`, or further `agent.intent` from the supervisor.
 
+<!-- opsx-role-gating:begin -->
+### Commands you must not run
+
+You are a coding agent. You MUST NOT run either of these slash commands:
+
+- `/opsx:verify`
+- `/opsx:archive`
+
+These are supervisor-only. The supervisor verifies and archives changes after
+your branch merges; if you run them yourself you corrupt the spec lifecycle —
+the change is archived without supervisor verification, its delta merges into
+the main specs incorrectly, or both.
+
+This is not just convention. git-paw's role-gating guard backs the rule: a
+post-commit watcher detects archive activity committed from a coding-agent
+worktree and publishes an `agent.feedback` naming the commit and the reason it
+fired. In `block` mode (configurable via `[opsx] role_gating`), the supervisor
+is additionally asked to revert your archive commit. Commit your work, let the
+post-commit hook publish, and wait for the supervisor to verify and archive.
+
+<!-- opsx-role-gating:end -->
 ### Cherry-pick peer commits
 
 When a peer publishes an `agent.artifact` message that lists files or work you depend on,
@@ -213,6 +355,50 @@ git cherry-pick <commit-sha>
 
 After cherry-picking, run your tests. The watcher will pick up the new file state
 automatically.
+
+### When main advances
+
+The supervisor publishes an `agent.advanced-main` event every time it merges a
+branch into the default branch. If your work depends on the base — you branched
+off it, you want to rebase onto newly-landed code, or you need to re-validate
+against the merged result — this event is your signal. Follow this discipline:
+
+1. **Polling source.** The event arrives on your normal
+   `/messages/{{BRANCH_ID}}` poll alongside every other message — there is no
+   separate subscription. Watch for `"type":"agent.advanced-main"`; its payload
+   carries `merged_branch`, `new_main_sha`, `base`, and `merged_at`.
+
+2. **Do NOT auto-rebase.** Receiving the event MUST NOT trigger an automatic
+   rebase. Rebasing rewrites your history and can silently drop or conflict with
+   in-flight work, so the decision always requires your judgment — never react
+   reflexively to the event.
+
+3. **Fetch, inspect, then decide.** When the `base` named in the event is one
+   your branch depends on:
+
+   ```bash
+   git fetch origin <base>                       # bring the new SHA local
+   git log HEAD..origin/<base> --oneline         # see exactly what landed
+   ```
+
+   Then choose deliberately between **rebase** (you want the new commits under
+   your work), **merge** (you want them alongside without rewriting history), or
+   **wait** (the change does not touch your files — keep going). Base the choice
+   on what `git log` showed and the state of your working set.
+
+4. **Commit or stash before any rebase.** If you decide to rebase, your working
+   tree MUST be clean first. Commit your in-progress work (or stash it
+   deliberately — see *Stash hygiene* below) before running the rebase, so a
+   conflict during the rebase can never wipe uncommitted edits.
+
+**Concrete example.** You are mid-edit with uncommitted changes in
+`src/<your-file>` when an `agent.advanced-main` event reports `feat/auth` merged
+into the base your branch sits on. The wrong move is to rebase immediately —
+your uncommitted edits are at risk if the rebase conflicts. The right sequence
+is: commit your in-progress work first (`git commit -am "wip: ..."`), then
+`git fetch origin <base>`, inspect `git log HEAD..origin/<base> --oneline`, and
+only then `git rebase origin/<base>` if the landed commits warrant it. Clean
+tree first, rebase second.
 
 ### Messages you may receive
 

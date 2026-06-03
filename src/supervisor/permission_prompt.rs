@@ -25,6 +25,13 @@ pub enum PermissionType {
     Cargo,
     /// A `git ...` command (`commit`, `push`).
     Git,
+    /// A filesystem write / edit / create whose target path resolves
+    /// inside the agent's own worktree root. Classified by the
+    /// worktree-boundary heuristic in
+    /// [`crate::supervisor::auto_approve::is_worktree_file_op`] rather than
+    /// by [`classify_capture`] (which has no worktree context). Auto-approval
+    /// MAY fire for this variant when `approve_worktree_writes` is enabled.
+    WorktreeFileOp,
     /// An approval prompt was detected but the command class is not
     /// recognised. Auto-approval MUST NOT fire for this variant.
     Unknown,

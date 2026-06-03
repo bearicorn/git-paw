@@ -17,6 +17,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -26,7 +27,7 @@ use crate::config::AutoApproveConfig;
 use crate::error::PawError;
 
 use super::approve::{ApprovalRequest, KeyDispatcher, auto_approve_pane};
-use super::auto_approve::is_safe_command;
+use super::auto_approve::{is_safe_command, is_worktree_file_op};
 use super::permission_prompt::{PermissionType, detect_permission_prompt};
 use super::stall::detect_stalled_agents;
 
@@ -69,6 +70,28 @@ where
     }
 }
 
+/// Trait providing the worktree root path for a given agent ID.
+///
+/// Used by the worktree-file-op classifier (bug 3) to resolve a captured
+/// file-operation prompt's target against the agent's worktree boundary.
+/// `cmd_supervisor` builds the mapping from session state; tests substitute a
+/// closure-backed implementation. Returns `None` for agents without a known
+/// worktree (e.g. the supervisor itself), which suppresses file-op
+/// auto-approval for that agent.
+pub trait WorktreeResolver {
+    /// Returns the worktree root for `agent_id`, or `None` when unknown.
+    fn worktree_root_for(&self, agent_id: &str) -> Option<PathBuf>;
+}
+
+impl<F> WorktreeResolver for F
+where
+    F: Fn(&str) -> Option<PathBuf>,
+{
+    fn worktree_root_for(&self, agent_id: &str) -> Option<PathBuf> {
+        self(agent_id)
+    }
+}
+
 /// Trait providing the captured pane content for an agent.
 ///
 /// In production this is a thin shim over [`super::permission_prompt::capture_pane`].
@@ -107,12 +130,13 @@ pub trait QuestionForwarder {
 ///
 /// Bundled so the per-tick API is one parameter wide and clippy's
 /// `too_many_arguments` lint stays happy.
-pub struct PollContext<'a, R, I, D, Q>
+pub struct PollContext<'a, R, I, D, Q, W>
 where
     R: PaneResolver,
     I: PaneInspector,
     D: KeyDispatcher,
     Q: QuestionForwarder,
+    W: WorktreeResolver,
 {
     /// Broker state used for stall detection by [`poll_tick`].
     ///
@@ -132,18 +156,23 @@ where
     pub dispatcher: &'a mut D,
     /// Forwards unsafe prompts to the dashboard.
     pub forwarder: &'a mut Q,
+    /// Resolves agent ID to worktree root for the file-op classifier (bug 3).
+    pub worktree_resolver: &'a W,
     /// Optional broker URL for audit-log publishing.
     pub broker_url: Option<&'a str>,
 }
 
 /// Runs one tick of the auto-approve poll loop and returns the outcome
 /// for each stalled agent (in iteration order).
-pub fn poll_tick<R, I, D, Q>(ctx: &mut PollContext<'_, R, I, D, Q>) -> Vec<(String, TickOutcome)>
+pub fn poll_tick<R, I, D, Q, W>(
+    ctx: &mut PollContext<'_, R, I, D, Q, W>,
+) -> Vec<(String, TickOutcome)>
 where
     R: PaneResolver,
     I: PaneInspector,
     D: KeyDispatcher,
     Q: QuestionForwarder,
+    W: WorktreeResolver,
 {
     let cfg = ctx.config.resolved();
     if !cfg.enabled {
@@ -240,15 +269,16 @@ pub fn stalled_from_status(rows: &[AgentStatusRow], threshold_seconds: u64) -> V
 /// Mirrors [`poll_tick`] but takes pre-fetched [`AgentStatusRow`] entries
 /// so the supervisor's background thread does not need access to the
 /// broker's lock.
-pub fn tick_from_status<R, I, D, Q>(
+pub fn tick_from_status<R, I, D, Q, W>(
     rows: &[AgentStatusRow],
-    ctx: &mut PollContext<'_, R, I, D, Q>,
+    ctx: &mut PollContext<'_, R, I, D, Q, W>,
 ) -> Vec<(String, TickOutcome)>
 where
     R: PaneResolver,
     I: PaneInspector,
     D: KeyDispatcher,
     Q: QuestionForwarder,
+    W: WorktreeResolver,
 {
     let cfg = ctx.config.resolved();
     if !cfg.enabled {
@@ -259,9 +289,9 @@ where
     drive_outcomes(stalled, ctx, &cfg, &whitelist)
 }
 
-fn drive_outcomes<R, I, D, Q>(
+fn drive_outcomes<R, I, D, Q, W>(
     stalled: Vec<String>,
-    ctx: &mut PollContext<'_, R, I, D, Q>,
+    ctx: &mut PollContext<'_, R, I, D, Q, W>,
     cfg: &AutoApproveConfig,
     whitelist: &[String],
 ) -> Vec<(String, TickOutcome)>
@@ -270,6 +300,7 @@ where
     I: PaneInspector,
     D: KeyDispatcher,
     Q: QuestionForwarder,
+    W: WorktreeResolver,
 {
     let mut out = Vec::with_capacity(stalled.len());
     for agent_id in stalled {
@@ -281,8 +312,9 @@ where
             continue;
         };
         let captured = ctx.inspector.captured_text(ctx.session, pane_index);
-        let matched = first_whitelist_match(&captured, whitelist);
-        if let Some(entry) = matched {
+        // Shell whitelist takes precedence: a `cargo`/`git`/`curl` prompt is
+        // approved exactly as in v0.5.0 before the file-op classifier runs.
+        if let Some(entry) = first_whitelist_match(&captured, whitelist) {
             let req = ApprovalRequest {
                 enabled: cfg.enabled,
                 session: ctx.session,
@@ -302,10 +334,44 @@ where
                 )),
                 _ => out.push((agent_id, TickOutcome::Forwarded { kind })),
             }
-        } else {
-            ctx.forwarder.forward_question(&agent_id, kind, &captured);
-            out.push((agent_id, TickOutcome::Forwarded { kind }));
+            continue;
         }
+
+        // Bug 3: a Claude write / edit / create prompt whose target resolves
+        // inside the agent's own worktree is auto-approved when
+        // `approve_worktree_writes` is enabled.
+        if let Some(root) = ctx.worktree_resolver.worktree_root_for(&agent_id)
+            && is_worktree_file_op(&captured, &root, cfg.approve_worktree_writes())
+        {
+            let req = ApprovalRequest {
+                enabled: cfg.enabled,
+                session: ctx.session,
+                pane_index,
+                agent_id: &agent_id,
+                kind: PermissionType::WorktreeFileOp,
+                matched_entry: Some("worktree-file-op"),
+                broker_url: ctx.broker_url,
+            };
+            match auto_approve_pane(ctx.dispatcher, req) {
+                Ok(true) => out.push((
+                    agent_id,
+                    TickOutcome::Approved {
+                        matched_entry: "worktree-file-op".to_string(),
+                        kind: PermissionType::WorktreeFileOp,
+                    },
+                )),
+                _ => out.push((
+                    agent_id,
+                    TickOutcome::Forwarded {
+                        kind: PermissionType::WorktreeFileOp,
+                    },
+                )),
+            }
+            continue;
+        }
+
+        ctx.forwarder.forward_question(&agent_id, kind, &captured);
+        out.push((agent_id, TickOutcome::Forwarded { kind }));
     }
     out
 }
@@ -388,6 +454,7 @@ mod tests {
                         ..Default::default()
                     },
                 }),
+                last_committed_at: None,
             },
         );
     }
@@ -402,6 +469,8 @@ mod tests {
         RecordingDispatcher,
         RecordingForwarder,
     ) {
+        // Default: no worktree mapping (file-op classifier inert).
+        let no_worktree = |_id: &str| None::<PathBuf>;
         let mut dispatcher = RecordingDispatcher { events: vec![] };
         let mut forwarder = RecordingForwarder::default();
         let out = {
@@ -413,6 +482,7 @@ mod tests {
                 inspector,
                 dispatcher: &mut dispatcher,
                 forwarder: &mut forwarder,
+                worktree_resolver: &no_worktree,
                 broker_url: None,
             };
             poll_tick(&mut ctx)
@@ -573,6 +643,7 @@ mod tests {
             kind: Some(PermissionType::Cargo),
             captured: "cargo test --workspace".into(),
         };
+        let no_worktree = |_id: &str| None::<PathBuf>;
         let mut dispatcher = RecordingDispatcher { events: vec![] };
         let mut forwarder = RecordingForwarder::default();
         let out = {
@@ -584,6 +655,7 @@ mod tests {
                 inspector: &inspector,
                 dispatcher: &mut dispatcher,
                 forwarder: &mut forwarder,
+                worktree_resolver: &no_worktree,
                 broker_url: None,
             };
             tick_from_status(&rows, &mut ctx)
@@ -595,5 +667,136 @@ mod tests {
             .map(|(_, _, k)| k.as_str())
             .collect();
         assert_eq!(keys, vec!["BTab", "Down", "Enter"]);
+    }
+
+    // --- Bug 3: worktree file-op approval through the poll loop ---
+
+    fn run_tick_with_worktree<R, I, Wt>(
+        state: &BrokerState,
+        cfg: &AutoApproveConfig,
+        resolver: &R,
+        inspector: &I,
+        worktree_resolver: &Wt,
+    ) -> (
+        Vec<(String, TickOutcome)>,
+        RecordingDispatcher,
+        RecordingForwarder,
+    )
+    where
+        R: PaneResolver,
+        I: PaneInspector,
+        Wt: WorktreeResolver,
+    {
+        let mut dispatcher = RecordingDispatcher { events: vec![] };
+        let mut forwarder = RecordingForwarder::default();
+        let out = {
+            let mut ctx = PollContext {
+                state: Some(state),
+                session: "paw-x",
+                config: cfg,
+                resolver,
+                inspector,
+                dispatcher: &mut dispatcher,
+                forwarder: &mut forwarder,
+                worktree_resolver,
+                broker_url: None,
+            };
+            poll_tick(&mut ctx)
+        };
+        (out, dispatcher, forwarder)
+    }
+
+    #[test]
+    fn in_worktree_file_prompt_is_auto_approved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let state = BrokerState::new(None);
+        insert_stalled(&state, "agent-a", 600);
+        let cfg = AutoApproveConfig::default();
+        let resolver = |id: &str| if id == "agent-a" { Some(2) } else { None };
+        // A file-write prompt classifies as Unknown by command class, then the
+        // worktree classifier promotes it to WorktreeFileOp.
+        let inspector = StubInspector {
+            kind: Some(PermissionType::Unknown),
+            captured: "Do you want to allow this write to Containerfile?".into(),
+        };
+        let worktree = move |id: &str| {
+            if id == "agent-a" {
+                Some(root.clone())
+            } else {
+                None
+            }
+        };
+        let (out, dispatcher, forwarder) =
+            run_tick_with_worktree(&state, &cfg, &resolver, &inspector, &worktree);
+        assert_eq!(out.len(), 1);
+        match &out[0].1 {
+            TickOutcome::Approved {
+                matched_entry,
+                kind,
+            } => {
+                assert_eq!(matched_entry, "worktree-file-op");
+                assert_eq!(*kind, PermissionType::WorktreeFileOp);
+            }
+            other => panic!("expected Approved worktree-file-op, got {other:?}"),
+        }
+        let keys: Vec<&str> = dispatcher
+            .events
+            .iter()
+            .map(|(_, _, k)| k.as_str())
+            .collect();
+        assert_eq!(keys, vec!["BTab", "Down", "Enter"]);
+        assert!(forwarder.forwards.borrow().is_empty());
+    }
+
+    #[test]
+    fn out_of_worktree_file_prompt_is_forwarded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let state = BrokerState::new(None);
+        insert_stalled(&state, "agent-b", 600);
+        let cfg = AutoApproveConfig::default();
+        let resolver = |_id: &str| Some(3);
+        let inspector = StubInspector {
+            kind: Some(PermissionType::Unknown),
+            captured: "Do you want to allow this write to /etc/hosts?".into(),
+        };
+        let worktree = move |_id: &str| Some(root.clone());
+        let (out, dispatcher, forwarder) =
+            run_tick_with_worktree(&state, &cfg, &resolver, &inspector, &worktree);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0].1, TickOutcome::Forwarded { .. }));
+        assert!(
+            dispatcher.events.is_empty(),
+            "out-of-worktree prompt must not dispatch keystrokes"
+        );
+        assert_eq!(forwarder.forwards.borrow().len(), 1);
+    }
+
+    #[test]
+    fn disabled_worktree_writes_forwards_file_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let state = BrokerState::new(None);
+        insert_stalled(&state, "agent-c", 600);
+        let cfg = AutoApproveConfig {
+            approve_worktree_writes: Some(false),
+            ..AutoApproveConfig::default()
+        };
+        let resolver = |_id: &str| Some(1);
+        let inspector = StubInspector {
+            kind: Some(PermissionType::Unknown),
+            captured: "Do you want to allow this write to Containerfile?".into(),
+        };
+        let worktree = move |_id: &str| Some(root.clone());
+        let (out, dispatcher, _forwarder) =
+            run_tick_with_worktree(&state, &cfg, &resolver, &inspector, &worktree);
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(out[0].1, TickOutcome::Forwarded { .. }),
+            "approve_worktree_writes=false must forward, got {:?}",
+            out[0].1
+        );
+        assert!(dispatcher.events.is_empty());
     }
 }

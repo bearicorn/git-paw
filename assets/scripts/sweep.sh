@@ -54,16 +54,22 @@ else
   exit 4
 fi
 
-# Most-recently-modified session JSON in .git-paw/sessions/.
+# Discover the active session name.
+#
+# Prefers the per-repo discovery JSON in .git-paw/sessions/ (the richer
+# surface — `git paw start` writes session_name + the agent roster there).
+# When no JSON is present (e.g. the supervisor attached to a pre-existing
+# paw-* session created outside the normal start flow), falls back to the
+# live tmux session via $TMUX / `tmux display-message -p '#S'`, so the
+# session file never needs to be hand-authored.
 discover_session_name() {
-  if [[ ! -d "${SESSIONS_DIR}" ]]; then
-    return 1
-  fi
-  local newest
-  # Pick the most recently modified *.json. Use Python so we don't depend
-  # on GNU vs BSD `stat`/`find` flag differences.
-  newest=$(
-    "${PY}" - "${SESSIONS_DIR}" <<'PY'
+  local name=""
+  if [[ -d "${SESSIONS_DIR}" ]]; then
+    local newest
+    # Pick the most recently modified *.json. Use Python so we don't depend
+    # on GNU vs BSD `stat`/`find` flag differences.
+    newest=$(
+      "${PY}" - "${SESSIONS_DIR}" <<'PY'
 import os, sys
 d = sys.argv[1]
 try:
@@ -75,11 +81,10 @@ if not files:
 files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
 print(files[0])
 PY
-  )
-  if [[ -z "${newest}" ]]; then
-    return 1
-  fi
-  "${PY}" - "${newest}" <<'PY'
+    )
+    if [[ -n "${newest}" ]]; then
+      name=$(
+        "${PY}" - "${newest}" <<'PY'
 import json, sys
 with open(sys.argv[1]) as f:
     data = json.load(f)
@@ -87,6 +92,17 @@ name = data.get("session_name")
 if name:
     print(name)
 PY
+      )
+    fi
+  fi
+  # Fall back to the live tmux session when no per-repo JSON yielded a name.
+  if [[ -z "${name}" && -n "${TMUX:-}" ]]; then
+    name=$(tmux display-message -p '#S' 2>/dev/null)
+  fi
+  if [[ -z "${name}" ]]; then
+    return 1
+  fi
+  printf '%s\n' "${name}"
 }
 
 # Parse [broker] port + bind from config.toml. Defaults to 127.0.0.1:9119.
@@ -186,9 +202,40 @@ else:
 PY
 }
 
+# Most-recently-modified session JSON path (for pane->agent resolution).
+discover_session_file() {
+  if [[ ! -d "${SESSIONS_DIR}" ]]; then
+    return 1
+  fi
+  "${PY}" - "${SESSIONS_DIR}" <<'PY'
+import os, sys
+d = sys.argv[1]
+try:
+    files = [os.path.join(d, f) for f in os.listdir(d) if f.endswith(".json")]
+except FileNotFoundError:
+    sys.exit(0)
+if not files:
+    sys.exit(0)
+files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+print(files[0])
+PY
+}
+
 SESSION=$(discover_session_name || true)
+SESSION_FILE=$(discover_session_file || true)
 BROKER=$(discover_broker_url)
 TEST_COMMAND=$(discover_test_command)
+
+# --- Bug 4: stuck-on-prompt detection tuning ---------------------------------
+# A pane is "stuck on prompt" when its capture matches a permission/paste-buffer
+# marker AND the agent's broker last_seen has not advanced for more than
+# STUCK_THRESHOLD_SECONDS. The helper dedups repeat detections of the same
+# (agent_id, prompt-shape) within STUCK_DEDUP_WINDOW_SECONDS so a persistently
+# stuck agent produces exactly one synthetic publish per detection window.
+STUCK_THRESHOLD_SECONDS=30
+STUCK_DEDUP_WINDOW_SECONDS=300
+STUCK_MARKERS_REGEX='Do you want to proceed|Do you want to allow|requires approval|Allow this command|\(y/n\)|\[y/N\]'
+STUCK_DEDUP_FILE="${PAW_DIR}/.sweep-stuck-dedup"
 
 if [[ -z "${SESSION}" ]]; then
   # `status`, `verified`, `feedback-gate`, `status-publish`, and `inbox`
@@ -227,6 +274,8 @@ usage: $0 <subcommand> [args]
   snapshot                            capture-pane tail of every coding-agent pane
   capture <pane>                      single-pane full tail-50 capture
   approve <pane>                      Down + Enter to <pane> (sticky-yes)
+  detect-stuck                        flag panes stuck on a prompt with a stale heartbeat
+  stuck-eval <agent> <last_seen>      (stdin: capture) run the stuck decision for one agent
   status [--all]                      broker /status, one line per agent (phantoms filtered)
   worktrees-status                    uncommitted-file count per agent worktree
   inbox                               supervisor inbox payloads (question/feedback/blocked)
@@ -456,6 +505,193 @@ PY
   echo "supervisor status published"
 }
 
+# Resolve the agent_id owning a tmux pane via its current path. Pane indices
+# are NOT alphabetical or CLI-arg order, so we match pane_current_path against
+# the session JSON's worktree paths and slugify the matching branch.
+resolve_agent_for_path() {
+  local path=$1
+  [[ -z "${SESSION_FILE}" || -z "${path}" ]] && return
+  SESSION_FILE="${SESSION_FILE}" PANE_PATH="${path}" "${PY}" -c "$(cat <<'PY'
+import json, os, re
+def slug(b):
+    s = b.lower()
+    s = re.sub(r'[^a-z0-9_]', '-', s)
+    s = re.sub(r'-+', '-', s).strip('-')
+    return s or 'agent'
+sf = os.environ["SESSION_FILE"]
+path = os.path.realpath(os.environ["PANE_PATH"])
+try:
+    d = json.load(open(sf))
+except Exception:  # noqa: BLE001
+    raise SystemExit(0)
+best, best_len = None, -1
+for wt in d.get("worktrees", []):
+    wp = wt.get("worktree_path", "")
+    if not wp:
+        continue
+    rp = os.path.realpath(wp)
+    if path == rp or path.startswith(rp + os.sep):
+        if len(rp) > best_len:
+            best, best_len = wt.get("branch"), len(rp)
+if best:
+    print(slug(best))
+PY
+)"
+}
+
+# Print last_seen_seconds for an agent from a broker /status JSON blob.
+agent_last_seen() {
+  local json=$1 agent=$2
+  printf '%s' "${json}" | AGENT="${agent}" "${PY}" -c "$(cat <<'PY'
+import json, os, sys
+agent = os.environ["AGENT"]
+try:
+    d = json.load(sys.stdin)
+except Exception:  # noqa: BLE001
+    raise SystemExit(0)
+for a in d.get("agents", []):
+    if a.get("agent_id") == agent:
+        print(a.get("last_seen_seconds", 0))
+        break
+PY
+)"
+}
+
+# Core stuck-prompt decision + synthetic publish for a single agent. Reads the
+# pane capture from stdin; takes <agent> <last_seen_seconds>. Factored out so
+# fixture tests can drive it without tmux via the `stuck-eval` subcommand.
+stuck_eval() {
+  local agent=${1:-} last_seen=${2:-0}
+  if [[ -z "${agent}" ]]; then
+    echo "usage: $0 stuck-eval <agent-id> <last_seen_seconds>" >&2
+    exit 2
+  fi
+  AGENT="${agent}" LAST_SEEN="${last_seen}" THRESHOLD="${STUCK_THRESHOLD_SECONDS}" \
+    MARKERS="${STUCK_MARKERS_REGEX}" BROKER="${BROKER}" DEDUP="${STUCK_DEDUP_FILE}" \
+    WINDOW="${STUCK_DEDUP_WINDOW_SECONDS}" "${PY}" -c "$(cat <<'PY'
+import hashlib, json, os, re, sys, time, urllib.request
+
+cap = sys.stdin.read()
+agent = os.environ["AGENT"]
+last_seen = int(os.environ.get("LAST_SEEN") or 0)
+threshold = int(os.environ["THRESHOLD"])
+markers = os.environ["MARKERS"]
+broker = os.environ["BROKER"]
+dedup_path = os.environ["DEDUP"]
+window = int(os.environ["WINDOW"])
+now = int(time.time())
+
+
+def load_entries():
+    entries = {}
+    try:
+        with open(dedup_path) as f:
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) == 3:
+                    entries[(parts[0], parts[1])] = int(parts[2])
+    except FileNotFoundError:
+        pass
+    return entries
+
+
+def save_entries(entries):
+    os.makedirs(os.path.dirname(dedup_path), exist_ok=True)
+    with open(dedup_path, "w") as f:
+        for (a, s), t in entries.items():
+            f.write(f"{a}\t{s}\t{t}\n")
+
+
+# Determine the prompt variant. Paste-buffer is checked first so its more
+# specific marker wins over the generic permission patterns.
+variant = None
+if re.search(r"Pasted text #[0-9]", cap):
+    variant = "paste-buffer"
+elif re.search(markers, cap):
+    variant = "permission"
+
+if variant is None:
+    # Not stuck: clear any prior dedup entry so a future stall re-publishes.
+    entries = load_entries()
+    pruned = {k: v for k, v in entries.items() if k[0] != agent}
+    if len(pruned) != len(entries):
+        save_entries(pruned)
+    print(f"not-stuck: {agent} (no prompt marker)")
+    raise SystemExit(0)
+
+if last_seen < threshold:
+    # Fresh heartbeat — the agent may have caught it pre-stall. Do not flag.
+    print(f"not-stuck: {agent} (fresh heartbeat {last_seen}s < {threshold}s)")
+    raise SystemExit(0)
+
+prompt = cap.strip()[:200]
+shape = hashlib.sha1(prompt.encode("utf-8", "replace")).hexdigest()[:16]
+entries = load_entries()
+key = (agent, shape)
+last = entries.get(key)
+if last is not None and now - last < window:
+    print(f"stuck: {agent} ({variant}, deduped)")
+    raise SystemExit(0)
+
+payload = json.dumps({
+    "type": "agent.status",
+    "agent_id": agent,
+    "payload": {
+        "status": "working",
+        "modified_files": [],
+        "phase": "stuck-on-prompt",
+        "message": f"stuck on prompt ({variant})",
+        "detail": {"captured_prompt": prompt, "variant": variant},
+    },
+}).encode("utf-8")
+try:
+    req = urllib.request.Request(
+        broker + "/publish",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    urllib.request.urlopen(req, timeout=2).read()
+except Exception as exc:  # noqa: BLE001
+    print(f"stuck: {agent} publish failed: {exc}", file=sys.stderr)
+    raise SystemExit(0)
+
+entries[key] = now
+save_entries(entries)
+print(f"stuck: {agent} published (phase=stuck-on-prompt, {variant})")
+PY
+)"
+}
+
+cmd_detect_stuck() {
+  require_session
+  if [[ ${PANE_COUNT} -eq 0 ]]; then
+    echo "no coding panes discovered in session '${SESSION}'" >&2
+    return 0
+  fi
+  local status_json
+  status_json=$(curl -s "${BROKER}/status")
+  for p in "${PANES[@]}"; do
+    local cap path agent ls
+    cap=$(tmux capture-pane -t "${SESSION}:0.${p}" -p -S -50 2>/dev/null | tail -50)
+    path=$(tmux display-message -p -t "${SESSION}:0.${p}" '#{pane_current_path}' 2>/dev/null)
+    agent=$(resolve_agent_for_path "${path}")
+    if [[ -z "${agent}" ]]; then
+      continue
+    fi
+    ls=$(agent_last_seen "${status_json}" "${agent}")
+    [[ -z "${ls}" ]] && ls=0
+    printf '%s' "${cap}" | stuck_eval "${agent}" "${ls}"
+  done
+}
+
+# Read a pane capture from stdin and run the stuck decision for one agent.
+cmd_stuck_eval() {
+  local agent=${1:-} last_seen=${2:-0}
+  local cap
+  cap=$(cat)
+  printf '%s' "${cap}" | stuck_eval "${agent}" "${last_seen}"
+}
+
 main() {
   local sub=${1:-}
   shift || true
@@ -464,6 +700,8 @@ main() {
     capture) cmd_capture "$@" ;;
     approve) cmd_approve "$@" ;;
     status) cmd_status "$@" ;;
+    detect-stuck) cmd_detect_stuck "$@" ;;
+    stuck-eval) cmd_stuck_eval "$@" ;;
     worktrees-status) cmd_worktrees_status "$@" ;;
     inbox) cmd_inbox "$@" ;;
     feedback-gate) cmd_feedback_gate "$@" ;;
