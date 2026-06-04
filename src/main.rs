@@ -74,24 +74,18 @@ fn run(command: Command) -> Result<(), PawError> {
             let spec_mode = SpecMode::from_flags(from_all_specs, specs.as_deref());
             let specs_format_str = specs_format.map(SpecsFormat::as_str);
             match resolve_dispatch_target(&spec_mode, supervisor_enabled) {
-                DispatchTarget::Supervisor { use_specs } => {
+                DispatchTarget::Supervisor { spec_mode } => {
                     let cwd = std::env::current_dir().map_err(|e| {
                         PawError::SessionError(format!("cannot read current directory: {e}"))
                     })?;
                     let repo_root = git::validate_repo(&cwd)?;
                     let config = config::load_config(&repo_root, None)?;
-                    // When --from-all-specs is set, pass branches_flag = None so
-                    // cmd_supervisor's existing scan_specs() fallback runs.
-                    let supervisor_branches = if use_specs {
-                        None
-                    } else {
-                        branches_flag.as_deref()
-                    };
                     cmd_supervisor(
                         &repo_root,
                         &config,
                         cli_flag.as_deref(),
-                        supervisor_branches,
+                        branches_flag.as_deref(),
+                        &spec_mode,
                         specs_format_str,
                         dry_run,
                         no_rebase,
@@ -115,10 +109,20 @@ fn run(command: Command) -> Result<(), PawError> {
                 ),
             }
         }
+        Command::Add {
+            branch,
+            cli,
+            from_spec,
+        } => cmd_add(branch.as_deref(), cli.as_deref(), from_spec.as_deref()),
+        Command::Remove {
+            branch,
+            keep_worktree,
+            force,
+        } => cmd_remove(&branch, keep_worktree, force),
         Command::Pause => cmd_pause(),
         Command::Stop { force } => cmd_stop(force),
-        Command::Purge { force } => cmd_purge(force),
-        Command::Status => cmd_status(),
+        Command::Purge { force, stale } => cmd_purge(force, stale),
+        Command::Status { json } => cmd_status(json),
         Command::ListClis => cmd_list_clis(),
         Command::AddCli {
             name,
@@ -134,6 +138,11 @@ fn run(command: Command) -> Result<(), PawError> {
             color,
             session,
         } => cmd_replay(branch, list, color, session.as_deref()),
+        Command::Approvals {
+            session,
+            limit,
+            json,
+        } => cmd_approvals(session.as_deref(), limit, json),
     }
 }
 
@@ -178,9 +187,16 @@ impl SpecMode {
 /// independently of any IO.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DispatchTarget {
-    /// Route to `cmd_supervisor`. `use_specs` indicates whether to pass
-    /// `branches_flag = None` so `cmd_supervisor`'s `scan_specs(...)` fallback runs.
-    Supervisor { use_specs: bool },
+    /// Route to `cmd_supervisor`, carrying the resolved spec selection mode.
+    ///
+    /// The mode is passed through verbatim (not collapsed to a boolean) so the
+    /// supervisor launch path applies the same subset filtering as the
+    /// non-supervisor `--specs` path: `Narrow(names)` launches only the named
+    /// subset, `Picker` opens the multi-select picker, `All` launches every
+    /// discovered spec, and `None` falls through to the `--branches` /
+    /// branch-picker flow. Fixes the v0.6.0 dogfood bug where
+    /// `--supervisor --specs a,b` launched every discovered spec.
+    Supervisor { spec_mode: SpecMode },
     /// Route to `cmd_start_with_specs` with the resolved spec mode (one of
     /// `All`, `Picker`, `Narrow`).
     StartWithSpecs(SpecMode),
@@ -190,18 +206,17 @@ enum DispatchTarget {
 
 /// Pure routing function for `start` subcommand dispatch.
 ///
-/// The supervisor-mode check takes precedence for `SpecMode::None` and
-/// `SpecMode::All` so `--from-all-specs --supervisor` (or `--from-all-specs`
-/// with `[supervisor] enabled = true`) actually engages supervisor mode
-/// end-to-end. Combinations of `--supervisor` with `--specs` (picker or
-/// narrow) route through the start-with-specs path; supervisor mode is not
-/// engaged for those combinations in v0.5.0.
+/// When supervisor mode is enabled, every spec mode routes to the supervisor
+/// path carrying the resolved `SpecMode` so subset filtering (`Narrow`),
+/// the interactive `Picker`, `All`, and the bare branch-picker (`None`) cases
+/// behave identically to the non-supervisor path — just with supervisor mode
+/// engaged. Without supervisor mode, a populated spec mode routes through
+/// `cmd_start_with_specs` and `SpecMode::None` falls through to bare `cmd_start`.
 fn resolve_dispatch_target(spec_mode: &SpecMode, supervisor_enabled: bool) -> DispatchTarget {
     match (supervisor_enabled, spec_mode) {
-        (true, SpecMode::None) => DispatchTarget::Supervisor { use_specs: false },
-        (true, SpecMode::All | SpecMode::Picker | SpecMode::Narrow(_)) => {
-            DispatchTarget::Supervisor { use_specs: true }
-        }
+        (true, mode) => DispatchTarget::Supervisor {
+            spec_mode: mode.clone(),
+        },
         (false, SpecMode::All | SpecMode::Picker | SpecMode::Narrow(_)) => {
             DispatchTarget::StartWithSpecs(spec_mode.clone())
         }
@@ -450,9 +465,15 @@ fn cmd_start(
         .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
     let repo_root = git::validate_repo(&cwd)?;
 
-    // Check for existing session (skip reattach/recovery during dry-run)
+    // Check for existing session (skip reattach/recovery during dry-run).
+    // Before deciding reattach-vs-recover, probe the receipt for staleness:
+    // a receipt claiming `active` whose tmux session has vanished is
+    // invalidated (purged) here and the launch proceeds fresh (design D5).
     let existing_session = session::find_session_for_repo(&repo_root)?;
-    if !dry_run && let Some(existing) = &existing_session {
+    if !dry_run
+        && let Some(existing) = &existing_session
+        && !invalidate_if_stale(&repo_root, existing)?
+    {
         let effective =
             existing.effective_status(|name| tmux::is_session_alive(name).unwrap_or(false));
         match effective {
@@ -489,6 +510,7 @@ fn cmd_start(
             &config,
             cli_flag.as_deref(),
             branches_flag.as_deref(),
+            &SpecMode::None,
             None,
             dry_run,
             no_rebase,
@@ -561,7 +583,8 @@ fn cmd_start(
 
     let mut builder = tmux::TmuxSessionBuilder::new(&project)
         .session_name(session_name)
-        .mouse_mode(mouse);
+        .mouse_mode(mouse)
+        .border_affordances(config.border_affordances_enabled());
 
     // Broker: inject dashboard pane and environment variable
     if broker_config.enabled {
@@ -593,7 +616,11 @@ fn cmd_start(
         let wt = git::create_worktree(&repo_root, branch, !no_rebase)?;
         let wt_str = wt.path.to_string_lossy().to_string();
 
-        // Inject AGENTS.md with skill content when broker is enabled
+        // Inject AGENTS.md with skill content when broker is enabled.
+        // Non-supervisor `start` flow has no resolved spec backends —
+        // pass `&[]` so SPEC_PATH_DOCTRINE renders its sentinel. The
+        // coordination skill does not reference the placeholder today,
+        // but keeping the call shape uniform avoids future drift.
         let rendered_skill = skill_content.as_ref().map(|tmpl| {
             git_paw::skills::render(
                 tmpl,
@@ -601,6 +628,7 @@ fn cmd_start(
                 &broker_config.url(),
                 &project,
                 &git_paw::skills::GateCommands::default(),
+                &[],
             )
         });
         let assignment = git_paw::agents::WorktreeAssignment {
@@ -615,7 +643,17 @@ fn cmd_start(
 
         if broker_config.enabled {
             let agent_id = git_paw::broker::messages::slugify_branch(branch);
-            git_paw::agents::install_git_hooks(&wt.path, &broker_config.url(), &agent_id)?;
+            let strict_guard = config
+                .supervisor
+                .as_ref()
+                .is_none_or(SupervisorConfig::strict_branch_guard);
+            git_paw::agents::install_git_hooks(
+                &wt.path,
+                &broker_config.url(),
+                &agent_id,
+                branch,
+                strict_guard,
+            )?;
         }
 
         builder = builder.add_pane(tmux::PaneSpec {
@@ -629,6 +667,7 @@ fn cmd_start(
             worktree_path: wt.path,
             cli: cli.clone(),
             branch_created: wt.branch_created,
+            pending_boot_prompt: None,
         });
     }
 
@@ -675,6 +714,17 @@ fn cmd_start(
     }
 
     session::save_session(&state)?;
+
+    // Write the per-repo discovery file sweep.sh reads. In the bare layout
+    // the dashboard occupies pane 0 when the broker is enabled, so coding
+    // agents start at pane 1; without the broker they start at pane 0.
+    let pane_offset = usize::from(broker_config.enabled);
+    write_repo_discovery_file(
+        &state.repo_path,
+        &tmux_session.name,
+        &state.worktrees,
+        pane_offset,
+    );
 
     // Attach (or print hint when stdin is non-TTY).
     attach_or_print_hint(&tmux_session.name)
@@ -729,6 +779,8 @@ fn spawn_auto_approve_thread(
     broker_url: String,
     config: Option<config::AutoApproveConfig>,
     pane_map: std::collections::HashMap<String, usize>,
+    worktree_map: std::collections::HashMap<String, std::path::PathBuf>,
+    recorder: git_paw::supervisor::manual_approvals::ManualDecisionRecorder,
 ) -> Option<(
     std::sync::Arc<std::sync::atomic::AtomicBool>,
     std::thread::JoinHandle<()>,
@@ -750,15 +802,21 @@ fn spawn_auto_approve_thread(
             PollContext, TmuxPaneInspector, fetch_status_over_http, tick_from_status,
         };
 
+        // The forwarder is invoked by `drive_outcomes` only on the
+        // forward-to-human branch (`TickOutcome::Forwarded`) — auto-approved
+        // prompts take the `Approved` branch and never reach it. That makes it
+        // the single, accurate call site for recording manual-decision-required
+        // commands (approval-pattern-surfacing §3, design D2 option A).
         struct BrokerForwarder {
             broker_url: String,
+            recorder: git_paw::supervisor::manual_approvals::ManualDecisionRecorder,
         }
         impl git_paw::supervisor::poll::QuestionForwarder for BrokerForwarder {
             fn forward_question(
                 &mut self,
                 agent_id: &str,
                 kind: git_paw::supervisor::permission_prompt::PermissionType,
-                _captured: &str,
+                captured: &str,
             ) {
                 let question = format!(
                     "{agent_id} is stalled on a permission prompt classified as {kind:?}; \
@@ -773,14 +831,28 @@ fn spawn_auto_approve_thread(
                 {
                     eprintln!("auto-approve: failed to forward question to dashboard: {e}");
                 }
+
+                // Record the manual-decision-required command. On the first
+                // sighting this returns a `permission_pattern` learning to
+                // publish (when learnings are enabled).
+                if let Some(learning) = self.recorder.record_forwarded(agent_id, captured)
+                    && let Err(e) = git_paw::broker::publish::publish_to_broker_http(
+                        &self.broker_url,
+                        &learning,
+                    )
+                {
+                    eprintln!("auto-approve: failed to publish permission_pattern learning: {e}");
+                }
             }
         }
 
         let inspector = TmuxPaneInspector;
         let resolver = move |id: &str| pane_map.get(id).copied();
+        let worktree_resolver = move |id: &str| worktree_map.get(id).cloned();
         let mut dispatcher = TmuxKeyDispatcher;
         let mut forwarder = BrokerForwarder {
             broker_url: broker_url.clone(),
+            recorder,
         };
 
         while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
@@ -803,6 +875,7 @@ fn spawn_auto_approve_thread(
                 inspector: &inspector,
                 dispatcher: &mut dispatcher,
                 forwarder: &mut forwarder,
+                worktree_resolver: &worktree_resolver,
                 broker_url: Some(&broker_url),
             };
             let _ = tick_from_status(&rows, &mut ctx);
@@ -811,12 +884,132 @@ fn spawn_auto_approve_thread(
     Some((stop, handle))
 }
 
-#[allow(clippy::too_many_lines)]
+/// Per-session context for [`attach_agent`] — the values shared across every
+/// agent attached to a single session. `cmd_supervisor` builds it once before
+/// its per-branch loop; `cmd_add` builds it once for the single new agent.
+struct AttachContext<'a> {
+    /// Repository root the worktrees hang off.
+    repo_root: &'a Path,
+    /// Human-readable project name (worktree-path convention).
+    project: &'a str,
+    /// Broker config (drives skill rendering, hook install, boot block).
+    broker_config: &'a git_paw::config::BrokerConfig,
+    /// Coding-agent CLI id (no flags).
+    agent_cli: &'a str,
+    /// Resolved approval flags appended to `agent_cli` for the pane command.
+    agent_flags: &'a str,
+    /// Pre-resolved coordination skill template (`None` when broker disabled).
+    coordination_template: Option<&'a git_paw::skills::SkillTemplate>,
+    /// Gate-command substitutions for skill rendering.
+    gate_commands: &'a git_paw::skills::GateCommands<'a>,
+    /// Distinct spec backends in the session (for `{{SPEC_PATH_DOCTRINE}}`).
+    session_backends: &'a [git_paw::specs::SpecBackendKind],
+    /// Inter-agent ownership rules block (`None` for the bare/no-rules case).
+    inter_agent_rules: Option<&'a str>,
+    /// Whether the broker git hooks enforce the strict branch guard.
+    strict_guard: bool,
+    /// Skip rebasing the branch onto the default branch on worktree create.
+    no_rebase: bool,
+}
+
+/// Artifacts produced by attaching one agent's worktree: the tmux pane spec to
+/// splice into the session, the initial boot+task prompt to submit, and the
+/// session-JSON worktree entry to register.
+struct AttachedAgent {
+    /// Pane spec (branch, worktree path, CLI command) for the tmux layout.
+    pane: tmux::PaneSpec,
+    /// Combined boot block + initial task prompt to inject into the pane.
+    prompt: String,
+    /// Session-JSON worktree record for `status` / `stop` / `purge`.
+    entry: WorktreeEntry,
+}
+
+/// Performs the per-worktree setup `git paw start` (supervisor mode) does for a
+/// single agent: create or reuse the worktree, render the coordination skill +
+/// spec body into the worktree `AGENTS.md`, install the broker git hooks, and
+/// build the pane spec, boot+task prompt, and session entry.
+///
+/// Factored out of `cmd_supervisor`'s per-branch loop (design D2, task 1.2) so
+/// `cmd_supervisor` (looping over every branch) and `cmd_add` (once, for the
+/// new branch) share one implementation — guaranteeing an added agent is
+/// byte-identical to a start-time agent and that future boot-prompt fixes only
+/// have to land here.
+fn attach_agent(
+    ctx: &AttachContext,
+    branch: &str,
+    spec_entry: Option<&git_paw::specs::SpecEntry>,
+) -> Result<AttachedAgent, PawError> {
+    let wt = git::create_worktree(ctx.repo_root, branch, !ctx.no_rebase)?;
+    let wt_str = wt.path.to_string_lossy().to_string();
+
+    let rendered_skill = ctx.coordination_template.map(|tmpl| {
+        git_paw::skills::render(
+            tmpl,
+            branch,
+            &ctx.broker_config.url(),
+            ctx.project,
+            ctx.gate_commands,
+            ctx.session_backends,
+        )
+    });
+
+    let spec_content = spec_entry.map(|s| s.prompt.clone());
+    let owned_files = spec_entry.and_then(|s| s.owned_files.clone());
+
+    let assignment = git_paw::agents::WorktreeAssignment {
+        branch: branch.to_string(),
+        cli: ctx.agent_cli.to_string(),
+        spec_content,
+        owned_files,
+        skill_content: rendered_skill,
+        inter_agent_rules: ctx.inter_agent_rules.map(str::to_string),
+    };
+    git_paw::agents::setup_worktree_agents_md(ctx.repo_root, &wt.path, &assignment)?;
+
+    if ctx.broker_config.enabled {
+        let agent_id = git_paw::broker::messages::slugify_branch(branch);
+        git_paw::agents::install_git_hooks(
+            &wt.path,
+            &ctx.broker_config.url(),
+            &agent_id,
+            branch,
+            ctx.strict_guard,
+        )?;
+    }
+
+    let cli_command = if ctx.agent_flags.is_empty() {
+        ctx.agent_cli.to_string()
+    } else {
+        format!("{} {}", ctx.agent_cli, ctx.agent_flags)
+    };
+
+    let boot_block = git_paw::skills::build_boot_block(branch, &ctx.broker_config.url());
+    let task_prompt = build_task_prompt(spec_entry);
+
+    Ok(AttachedAgent {
+        pane: tmux::PaneSpec {
+            branch: branch.to_string(),
+            worktree: wt_str,
+            cli_command,
+        },
+        prompt: format!("{boot_block}\n\n{task_prompt}"),
+        entry: WorktreeEntry {
+            branch: branch.to_string(),
+            worktree_path: wt.path,
+            cli: ctx.agent_cli.to_string(),
+            branch_created: wt.branch_created,
+            pending_boot_prompt: None,
+        },
+    })
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn cmd_supervisor(
     repo_root: &Path,
     config: &PawConfig,
     cli_flag: Option<&str>,
     branches_flag: Option<&[String]>,
+    spec_mode: &SpecMode,
     specs_format_override: Option<&str>,
     dry_run: bool,
     no_rebase: bool,
@@ -849,14 +1042,44 @@ fn cmd_supervisor(
         .or_else(|| config.default_cli.clone())
         .unwrap_or_else(|| supervisor_cli.clone());
 
-    // Resolve branches. Prefer --branches, then scan specs, otherwise error.
+    // Resolve branches. Precedence:
+    //   1. `--branches` — explicit branch list wins.
+    //   2. `SpecMode::None` (bare `--supervisor`, no spec flag) — behave like
+    //      `git paw start`: interactive branch picker, no spec discovery.
+    //   3. `SpecMode::{All,Picker,Narrow}` — scan specs, then apply the same
+    //      subset filter the non-supervisor `--specs` path uses so the named
+    //      subset / picker selection is honoured (the v0.6.0 dogfood fix).
     let mut spec_by_branch: std::collections::HashMap<String, git_paw::specs::SpecEntry> =
         std::collections::HashMap::new();
     let branches: Vec<String> = if let Some(bs) = branches_flag {
         bs.to_vec()
+    } else if matches!(spec_mode, SpecMode::None) {
+        let custom_defs = config_to_custom_defs(config);
+        let detected = detect::detect_clis(&custom_defs);
+        if detected.is_empty() {
+            return Err(PawError::NoCLIsFound);
+        }
+        let all_branches = git::list_branches(repo_root)?;
+        let interactive_clis: Vec<interactive::CliInfo> =
+            detected.iter().map(to_interactive_cli).collect();
+        let prompter = interactive::TerminalPrompter;
+        let selection = interactive::run_selection(
+            &prompter,
+            &all_branches,
+            &interactive_clis,
+            cli_flag,
+            None,
+        )?;
+        selection.mappings.into_iter().map(|(b, _)| b).collect()
     } else {
-        let specs =
+        let discovered =
             git_paw::specs::scan_specs_with_override(config, repo_root, specs_format_override)?;
+        if discovered.is_empty() {
+            return Err(PawError::ConfigError(
+                "supervisor mode found no branches: pass --branches or define specs".to_string(),
+            ));
+        }
+        let specs = apply_spec_mode(spec_mode, discovered, &interactive::TerminalPrompter)?;
         if specs.is_empty() {
             return Err(PawError::ConfigError(
                 "supervisor mode found no branches: pass --branches or define specs".to_string(),
@@ -920,6 +1143,26 @@ fn cmd_supervisor(
         ) {
             eprintln!("warning: failed to setup curl allowlist: {e}");
         }
+        // W15-6 (2026-05-31 dogfood): a custom CLI that reads a non-default
+        // claude-format settings file (e.g. one reading
+        // `~/.config/<variant>/settings.json`) needs the broker-curl allowlist
+        // seeded there too, or its boot-time `curl .../publish` hits a
+        // permission prompt the auto-approve thread cannot clear before the
+        // agent registers (W15-7). The path is CONFIG-DRIVEN
+        // (`[clis.<name>].settings_path`), never a hardcoded CLI name — so
+        // this stays CLI-agnostic. Seed each distinct session CLI's
+        // configured settings file once.
+        for cli in session_cli_settings_paths(config, &supervisor_cli, &agent_cli) {
+            if let Err(e) = git_paw::supervisor::curl_allowlist::setup_curl_allowlist(
+                &broker_config.url(),
+                &cli,
+            ) {
+                eprintln!(
+                    "warning: failed to setup curl allowlist at {}: {e}",
+                    cli.display()
+                );
+            }
+        }
     }
 
     // Seed the common dev-command allowlist preset. Independent of broker
@@ -929,6 +1172,7 @@ fn cmd_supervisor(
         for (path, err) in git_paw::supervisor::dev_allowlist::seed_supervisor_session(
             &supervisor_cfg.common_dev_allowlist.extra,
             repo_root,
+            &configured_settings_paths(config),
         ) {
             eprintln!(
                 "warning: failed to seed dev allowlist into {}: {err}",
@@ -936,6 +1180,20 @@ fn cmd_supervisor(
             );
         }
     }
+
+    // Collect the distinct spec backends for this session so the
+    // supervisor skill can render `{{SPEC_PATH_DOCTRINE}}` per backend.
+    // Empty when branches came from `--branches` (no spec scan) — the
+    // doctrine placeholder then renders the no-backend sentinel.
+    let session_backends: Vec<git_paw::specs::SpecBackendKind> = {
+        let mut seen: Vec<git_paw::specs::SpecBackendKind> = Vec::new();
+        for entry in spec_by_branch.values() {
+            if !seen.contains(&entry.backend) {
+                seen.push(entry.backend);
+            }
+        }
+        seen
+    };
 
     // Resolve and materialise the supervisor skill into the repo-root
     // AGENTS.md BEFORE pane 0 starts the supervisor CLI. The supervisor pane
@@ -947,6 +1205,7 @@ fn cmd_supervisor(
         &broker_config.url(),
         &project,
         &supervisor_cfg.gate_commands(),
+        &session_backends,
     );
     let supervisor_assignment = git_paw::agents::WorktreeAssignment {
         branch: "supervisor".to_string(),
@@ -999,66 +1258,37 @@ fn cmd_supervisor(
     let mut agent_prompts: Vec<String> = Vec::with_capacity(branches.len());
     let mut worktree_entries: Vec<WorktreeEntry> = Vec::with_capacity(branches.len());
 
+    // Per-agent setup is delegated to the shared `attach_agent` pipeline
+    // (design D2, task 1.2) so a `git paw add`-attached agent is byte-identical
+    // to a start-time one. The context is built once and reused for every
+    // branch; the combined boot+task prompt `attach_agent` returns becomes the
+    // agent's first message after attach (it points the agent at AGENTS.md,
+    // which `setup_worktree_agents_md` has already populated with the spec
+    // body — see `build_task_prompt`).
+    let strict_guard = config
+        .supervisor
+        .as_ref()
+        .is_none_or(SupervisorConfig::strict_branch_guard);
+    let gate_commands = supervisor_cfg.gate_commands();
+    let attach_ctx = AttachContext {
+        repo_root,
+        project: &project,
+        broker_config: &broker_config,
+        agent_cli: &agent_cli,
+        agent_flags,
+        coordination_template: coordination_template.as_ref(),
+        gate_commands: &gate_commands,
+        session_backends: &session_backends,
+        inter_agent_rules: Some(inter_agent_rules.as_str()),
+        strict_guard,
+        no_rebase,
+    };
+
     for branch in &branches {
-        let wt = git::create_worktree(repo_root, branch, !no_rebase)?;
-        let wt_str = wt.path.to_string_lossy().to_string();
-
-        let rendered_skill = coordination_template.as_ref().map(|tmpl| {
-            git_paw::skills::render(
-                tmpl,
-                branch,
-                &broker_config.url(),
-                &project,
-                &supervisor_cfg.gate_commands(),
-            )
-        });
-
-        let spec_entry = spec_by_branch.get(branch);
-        let spec_content = spec_entry.map(|s| s.prompt.clone());
-        let owned_files = spec_entry.and_then(|s| s.owned_files.clone());
-
-        let assignment = git_paw::agents::WorktreeAssignment {
-            branch: branch.clone(),
-            cli: agent_cli.clone(),
-            spec_content,
-            owned_files,
-            skill_content: rendered_skill,
-            inter_agent_rules: Some(inter_agent_rules.clone()),
-        };
-        git_paw::agents::setup_worktree_agents_md(repo_root, &wt.path, &assignment)?;
-
-        if broker_config.enabled {
-            let agent_id = git_paw::broker::messages::slugify_branch(branch);
-            git_paw::agents::install_git_hooks(&wt.path, &broker_config.url(), &agent_id)?;
-        }
-
-        let cli_command = if agent_flags.is_empty() {
-            agent_cli.clone()
-        } else {
-            format!("{agent_cli} {agent_flags}")
-        };
-
-        agent_panes.push(tmux::PaneSpec {
-            branch: branch.clone(),
-            worktree: wt_str,
-            cli_command,
-        });
-
-        let boot_block = git_paw::skills::build_boot_block(branch, &broker_config.url());
-
-        // Initial prompt always points the agent at AGENTS.md (which
-        // `setup_worktree_agents_md` has already populated with the full
-        // spec body). See `build_task_prompt`. Combined with the boot
-        // block, this becomes the agent's first message after attach.
-        let task_prompt = build_task_prompt(spec_entry);
-        agent_prompts.push(format!("{boot_block}\n\n{task_prompt}"));
-
-        worktree_entries.push(WorktreeEntry {
-            branch: branch.clone(),
-            worktree_path: wt.path,
-            cli: agent_cli.clone(),
-            branch_created: wt.branch_created,
-        });
+        let attached = attach_agent(&attach_ctx, branch, spec_by_branch.get(branch))?;
+        agent_panes.push(attached.pane);
+        agent_prompts.push(attached.prompt);
+        worktree_entries.push(attached.entry);
     }
 
     let env_vars: Vec<(String, String)> = if broker_config.enabled {
@@ -1075,6 +1305,7 @@ fn cmd_supervisor(
         &agent_panes,
         layout,
         mouse,
+        config.border_affordances_enabled(),
         &env_vars,
     )?;
     tmux_session.execute()?;
@@ -1101,6 +1332,15 @@ fn cmd_supervisor(
     }
     session::save_session(&state)?;
 
+    // Write the per-repo discovery file sweep.sh reads. Coding agents start
+    // at SUPERVISOR_PANE_OFFSET (supervisor pane 0, dashboard pane 1).
+    write_repo_discovery_file(
+        repo_root,
+        &tmux_session.name,
+        &state.worktrees,
+        git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET,
+    );
+
     // Wait ~2s for panes to boot to an interactive state, then inject the
     // initial prompt into the supervisor pane (index 0) and each coding
     // agent pane (indices 2..N+1). The dashboard pane (index 1) is a TUI
@@ -1123,11 +1363,13 @@ fn cmd_supervisor(
          pane' section of your skill."
             .to_string();
     let supervisor_prompt = format!("{supervisor_boot_block}\n\n{supervisor_framing}");
-    submit_prompt_to_pane(&tmux_session.name, 0, &supervisor_prompt);
+    let supervisor_delay = resolve_submit_delay_ms(&supervisor_cli, config);
+    submit_prompt_to_pane(&tmux_session.name, 0, &supervisor_prompt, supervisor_delay);
 
+    let agent_delay = resolve_submit_delay_ms(&agent_cli, config);
     for (idx, prompt) in agent_prompts.iter().enumerate() {
         let pane_idx = git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET + idx;
-        submit_prompt_to_pane(&tmux_session.name, pane_idx, prompt);
+        submit_prompt_to_pane(&tmux_session.name, pane_idx, prompt, agent_delay);
     }
 
     // Supervisor self-registration is published from inside the supervisor
@@ -1145,16 +1387,148 @@ fn cmd_supervisor(
     Ok(())
 }
 
-/// Inject an initial prompt into a tmux pane via a single send-keys
-/// invocation. On paste-aware CLIs the prompt may land in a paste-buffer
-/// state; the supervisor agent's launch-time pane sweep recovers it via
-/// the paste-buffer-recovery sub-case in the embedded supervisor skill.
-/// Failures are swallowed — best-effort by design.
-fn submit_prompt_to_pane(session_name: &str, pane_idx: usize, prompt: &str) {
+/// Resolve the boot-prompt settle delay (ms) for `cli` from config,
+/// falling back to [`git_paw::DEFAULT_SUBMIT_DELAY_MS`].
+///
+/// `cli` may carry flags (e.g. `"mycli --foo"`); the lookup keys on the
+/// leading binary token. The delay is config-driven, never a hardcoded
+/// CLI-name table, so the launcher stays CLI-agnostic — a CLI whose
+/// large-paste handling needs more time sets `[clis.<name>].submit_delay_ms`
+/// rather than requiring a code change (W15-1, 2026-05-31 dogfood).
+#[must_use]
+fn resolve_submit_delay_ms(cli: &str, config: &git_paw::config::PawConfig) -> u64 {
+    let base = cli.split_whitespace().next().unwrap_or(cli);
+    config
+        .clis
+        .get(base)
+        .and_then(|c| c.submit_delay_ms)
+        .unwrap_or(git_paw::DEFAULT_SUBMIT_DELAY_MS)
+}
+
+/// Distinct config-declared `settings_path` files for the session's CLIs
+/// (supervisor + agents), expanded and filtered to those whose parent
+/// directory already exists.
+///
+/// CLI-agnostic: only a CLI with `[clis.<name>].settings_path` set
+/// contributes a path; built-in CLIs (no custom entry) contribute nothing
+/// here — the repo-local `.claude/settings.json` is seeded separately. The
+/// parent-exists gate means git-paw never creates a CLI's config dir
+/// (matching the dev-allowlist seeder's caution).
+fn session_cli_settings_paths(
+    config: &git_paw::config::PawConfig,
+    supervisor_cli: &str,
+    agent_cli: &str,
+) -> Vec<std::path::PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for cli in [supervisor_cli, agent_cli] {
+        let base = cli.split_whitespace().next().unwrap_or(cli);
+        if let Some(raw) = config
+            .clis
+            .get(base)
+            .and_then(|c| c.settings_path.as_deref())
+        {
+            let expanded = expand_tilde(raw);
+            let parent_exists = expanded.parent().is_some_and(std::path::Path::is_dir);
+            if parent_exists && seen.insert(expanded.clone()) {
+                out.push(expanded);
+            }
+        }
+    }
+    out
+}
+
+/// Every configured `[clis.<name>].settings_path` (tilde-expanded) whose
+/// parent directory already exists, deduplicated.
+///
+/// Used to seed the dev-command allowlist into each registered CLI's
+/// alternate settings file in a CLI-agnostic way — there is no hardcoded
+/// path. The parent-exists filter preserves the "never create the directory"
+/// guarantee: a configured target whose parent is absent is skipped rather
+/// than created.
+fn configured_settings_paths(config: &git_paw::config::PawConfig) -> Vec<std::path::PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for custom in config.clis.values() {
+        if let Some(raw) = custom.settings_path.as_deref() {
+            let expanded = expand_tilde(raw);
+            let parent_exists = expanded.parent().is_some_and(std::path::Path::is_dir);
+            if parent_exists && seen.insert(expanded.clone()) {
+                out.push(expanded);
+            }
+        }
+    }
+    out
+}
+
+/// Expand a leading `~` / `~/` in `path` to the home directory.
+fn expand_tilde(path: &str) -> std::path::PathBuf {
+    match git_paw::dirs::home_dir() {
+        Some(home) if path == "~" => home,
+        Some(home) => match path.strip_prefix("~/") {
+            Some(rest) => home.join(rest),
+            None => std::path::PathBuf::from(path),
+        },
+        None => std::path::PathBuf::from(path),
+    }
+}
+
+/// Inject and submit an initial prompt into a tmux pane.
+///
+/// The boot block is injected literally, then — after `delay_ms` for a
+/// paste-aware CLI to settle the (often large) paste — a separate `Enter`
+/// submits it. Splitting the inject from the submit (rather than a
+/// same-call trailing `Enter`) is what reliably submits a large paste
+/// across CLIs (W15-1). `delay_ms` is resolved per-CLI from config so this
+/// path carries no CLI-specific assumptions. Failures are swallowed —
+/// best-effort by design.
+fn submit_prompt_to_pane(session_name: &str, pane_idx: usize, prompt: &str, delay_ms: u64) {
     let target = format!("{session_name}:0.{pane_idx}");
+    // 1. Inject the boot block literally (no Enter yet).
     let _ = std::process::Command::new("tmux")
-        .args(["send-keys", "-t", &target, prompt, "Enter"])
+        .args(["send-keys", "-t", &target, "-l", prompt])
         .status();
+    // 2. Let a paste-aware CLI settle the paste before we submit.
+    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+    // 3. Submit with a separate Enter.
+    let _ = std::process::Command::new("tmux")
+        .args(["send-keys", "-t", &target, "Enter"])
+        .status();
+}
+
+/// Writes the per-repo discovery file (`<repo>/.git-paw/sessions/<name>.json`)
+/// the bundled `sweep.sh` helper reads (capability `session-json-location`).
+///
+/// Builds the sweep.sh-compatible agent roster from the launched worktrees:
+/// each entry carries the broker agent id (`branch_id`), worktree path, CLI,
+/// and the tmux `pane_index`. `pane_offset` is the index of the first coding
+/// agent pane — `SUPERVISOR_PANE_OFFSET` for the supervisor layout, or
+/// `1`/`0` for the bare layout depending on whether the dashboard pane is
+/// present. Best-effort: a write failure is surfaced as a warning and does
+/// not abort the launch, since the global receipt remains the source of truth.
+fn write_repo_discovery_file(
+    repo_root: &Path,
+    session_name: &str,
+    worktrees: &[WorktreeEntry],
+    pane_offset: usize,
+) {
+    let agents = worktrees
+        .iter()
+        .enumerate()
+        .map(|(idx, wt)| session::RepoAgentEntry {
+            branch_id: git_paw::broker::messages::slugify_branch(&wt.branch),
+            worktree_path: wt.worktree_path.clone(),
+            cli: wt.cli.clone(),
+            pane_index: pane_offset + idx,
+        })
+        .collect();
+    let file = session::RepoSessionFile {
+        session_name: session_name.to_string(),
+        agents,
+    };
+    if let Err(e) = session::write_repo_session_file(repo_root, &file) {
+        eprintln!("warning: failed to write per-repo session discovery file: {e}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1174,9 +1548,15 @@ fn cmd_start_with_specs(
         .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
     let repo_root = git::validate_repo(&cwd)?;
 
-    // Check for existing session (skip reattach/recovery during dry-run)
+    // Check for existing session (skip reattach/recovery during dry-run).
+    // Before deciding reattach-vs-recover, probe the receipt for staleness:
+    // a receipt claiming `active` whose tmux session has vanished is
+    // invalidated (purged) here and the launch proceeds fresh (design D5).
     let existing_session = session::find_session_for_repo(&repo_root)?;
-    if !dry_run && let Some(existing) = &existing_session {
+    if !dry_run
+        && let Some(existing) = &existing_session
+        && !invalidate_if_stale(&repo_root, existing)?
+    {
         let effective =
             existing.effective_status(|name| tmux::is_session_alive(name).unwrap_or(false));
         match effective {
@@ -1305,7 +1685,8 @@ fn launch_spec_session(
 
     let mut builder = tmux::TmuxSessionBuilder::new(project)
         .session_name(session_name)
-        .mouse_mode(mouse);
+        .mouse_mode(mouse)
+        .border_affordances(config.border_affordances_enabled());
 
     // Broker: inject dashboard pane and environment variable
     if broker_config.enabled {
@@ -1332,6 +1713,20 @@ fn launch_spec_session(
 
     let mut worktree_entries = Vec::new();
 
+    // Collect the distinct spec backends present in this session so
+    // coordination renders embed the right `{{SPEC_PATH_DOCTRINE}}` if
+    // they ever start referencing it. Today coordination.md does not,
+    // but plumbing the value avoids a future drift.
+    let session_backends: Vec<git_paw::specs::SpecBackendKind> = {
+        let mut seen: Vec<git_paw::specs::SpecBackendKind> = Vec::new();
+        for entry in spec_by_branch.values() {
+            if !seen.contains(&entry.backend) {
+                seen.push(entry.backend);
+            }
+        }
+        seen
+    };
+
     for (branch, cli) in mappings {
         let wt = git::create_worktree(repo_root, branch, !no_rebase)?;
         let wt_str = wt.path.to_string_lossy().to_string();
@@ -1348,6 +1743,7 @@ fn launch_spec_session(
                     .as_ref()
                     .map(|s| s.gate_commands())
                     .unwrap_or_default(),
+                &session_backends,
             )
         });
 
@@ -1370,7 +1766,17 @@ fn launch_spec_session(
 
         if broker_config.enabled {
             let agent_id = git_paw::broker::messages::slugify_branch(branch);
-            git_paw::agents::install_git_hooks(&wt.path, &broker_config.url(), &agent_id)?;
+            let strict_guard = config
+                .supervisor
+                .as_ref()
+                .is_none_or(SupervisorConfig::strict_branch_guard);
+            git_paw::agents::install_git_hooks(
+                &wt.path,
+                &broker_config.url(),
+                &agent_id,
+                branch,
+                strict_guard,
+            )?;
         }
 
         builder = builder.add_pane(tmux::PaneSpec {
@@ -1384,6 +1790,7 @@ fn launch_spec_session(
             worktree_path: wt.path,
             cli: cli.clone(),
             branch_created: wt.branch_created,
+            pending_boot_prompt: None,
         });
     }
 
@@ -1491,9 +1898,10 @@ fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result<(), PawErr
         }
         // The new pane is the focused pane; target it via :0.{dashboard_index}.
         let target = format!("{}:0.{dashboard_index}", existing.session_name);
-        let title = "dashboard \u{2192} git-paw __dashboard".to_string();
+        // Title matches the per-pane labelling scheme: the pane's role only,
+        // rendered in the `pane-border-format` strip the session already has.
         let _ = StdCommand::new("tmux")
-            .args(["select-pane", "-t", &target, "-T", &title])
+            .args(["select-pane", "-t", &target, "-T", "dashboard"])
             .status();
         let send_status = StdCommand::new("tmux")
             .args(["send-keys", "-t", &target, &dashboard_command, "Enter"])
@@ -1509,6 +1917,28 @@ fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result<(), PawErr
     // Update session state: status flips back to Active.
     let mut updated = existing.clone();
     updated.status = SessionStatus::Active;
+
+    // Submit boot prompts held for agents added while the session was paused
+    // (design D4 of git-paw-add): they were registered with the pane created
+    // but their prompt left unsubmitted; resume starts them alongside the
+    // rest. Existing (pre-pause) agents carry no pending prompt and are left
+    // untouched — they continue their in-flight conversations on reattach.
+    let has_pending = updated
+        .worktrees
+        .iter()
+        .any(|w| w.pending_boot_prompt.is_some());
+    if has_pending {
+        let session_name = updated.session_name.clone();
+        let offset = agent_pane_offset(&updated);
+        let config = config::load_config(repo_root, None)?;
+        for (idx, wt) in updated.worktrees.iter_mut().enumerate() {
+            if let Some(pending) = wt.pending_boot_prompt.take() {
+                let delay = resolve_submit_delay_ms(&wt.cli, &config);
+                submit_prompt_to_pane(&session_name, offset + idx, &pending, delay);
+            }
+        }
+    }
+
     session::save_session(&updated)?;
 
     attach_or_print_hint(&existing.session_name)
@@ -1564,6 +1994,7 @@ fn recover_session(repo_root: &Path, existing: &Session) -> Result<(), PawError>
         for (path, err) in git_paw::supervisor::dev_allowlist::seed_supervisor_session(
             &supervisor_cfg.common_dev_allowlist.extra,
             repo_root,
+            &configured_settings_paths(&config),
         ) {
             eprintln!(
                 "warning: failed to seed dev allowlist into {}: {err}",
@@ -1572,13 +2003,32 @@ fn recover_session(repo_root: &Path, existing: &Session) -> Result<(), PawError>
         }
     }
 
+    // Tear down any stale tmux session of this name before rebuilding so the
+    // recovery starts from a clean `new-session`. A half-built session left
+    // by a prior crashed/aborted launch would otherwise let the rebuild's
+    // `split-window` commands accumulate panes on top of it, overflowing the
+    // window (W2-3: a 4-worktree recovery produced 10-11 panes and
+    // `no space for new pane`). Killing a non-existent session is a no-op here.
+    if tmux::is_session_alive(&existing.session_name).unwrap_or(false)
+        && let Err(e) = tmux::kill_session(&existing.session_name)
+    {
+        eprintln!(
+            "warning: could not tear down stale tmux session '{}' before recovery: {e}",
+            existing.session_name
+        );
+    }
+
     let tmux_session = match mode {
         SessionMode::Supervisor => {
             recover_supervisor_session(repo_root, existing, &config, broker_url.as_deref(), mouse)?
         }
-        SessionMode::Bare => {
-            recover_bare_session(repo_root, existing, broker_url.as_deref(), mouse)?
-        }
+        SessionMode::Bare => recover_bare_session(
+            repo_root,
+            existing,
+            broker_url.as_deref(),
+            mouse,
+            config.border_affordances_enabled(),
+        )?,
     };
     tmux_session.execute()?;
 
@@ -1598,10 +2048,12 @@ fn recover_bare_session(
     existing: &Session,
     broker_url: Option<&str>,
     mouse: bool,
+    border_affordances: bool,
 ) -> Result<tmux::TmuxSession, PawError> {
     let mut builder = tmux::TmuxSessionBuilder::new(&existing.project_name)
         .session_name(existing.session_name.clone())
-        .mouse_mode(mouse);
+        .mouse_mode(mouse)
+        .border_affordances(border_affordances);
 
     if let Some(url) = broker_url {
         let repo_str = repo_root.to_string_lossy().to_string();
@@ -1703,8 +2155,364 @@ fn recover_supervisor_session(
         &agent_panes,
         layout,
         mouse,
+        config.border_affordances_enabled(),
         &env_vars,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Command: add / remove (live branch-set editing)
+// ---------------------------------------------------------------------------
+
+/// Index of the first coding-agent pane in a session's tmux window.
+///
+/// Supervisor mode reserves pane 0 (supervisor) and pane 1 (dashboard), so
+/// agents start at [`SUPERVISOR_PANE_OFFSET`](git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET).
+/// Bare mode places the dashboard at pane 0 when the broker is enabled (agents
+/// at pane 1), or has no dashboard pane at all (agents at pane 0).
+fn agent_pane_offset(session: &Session) -> usize {
+    match session.mode {
+        SessionMode::Supervisor => git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET,
+        SessionMode::Bare => usize::from(session.broker_port.is_some()),
+    }
+}
+
+/// Error returned when add/remove is invoked on a bare-mode session.
+fn bare_mode_unsupported(session_name: &str, verb: &str) -> PawError {
+    PawError::SessionError(format!(
+        "`git paw {verb}` supports supervisor-mode sessions (the default). Session \
+         '{session_name}' was started in bare (no-supervisor) mode, whose tiled grid is \
+         not re-tiled incrementally in v0.6.0. Stop and re-start with the full branch set, \
+         or run the session in supervisor mode to use add/remove."
+    ))
+}
+
+/// `git paw add <branch>` — hot-attach a worktree + agent pane to a running
+/// session (capability `add-branch`).
+#[allow(clippy::too_many_lines)]
+fn cmd_add(
+    branch_arg: Option<&str>,
+    cli_flag: Option<&str>,
+    from_spec: Option<&str>,
+) -> Result<(), PawError> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
+    let repo_root = git::validate_repo(&cwd)?;
+
+    // 4.1 Resolve the active session; error cleanly when none.
+    let Some(existing) = session::find_session_for_repo(&repo_root)? else {
+        return Err(PawError::SessionError(
+            "no active session for this repository. Start one with `git paw start`.".to_string(),
+        ));
+    };
+
+    let effective = existing.effective_status(|n| tmux::is_session_alive(n).unwrap_or(false));
+    let paused = match effective {
+        SessionStatus::Active => false,
+        SessionStatus::Paused => true,
+        SessionStatus::Stopped => {
+            return Err(PawError::SessionError(format!(
+                "session '{}' is stopped — recover it with `git paw start` before adding agents.",
+                existing.session_name
+            )));
+        }
+    };
+
+    if existing.mode == SessionMode::Bare {
+        return Err(bare_mode_unsupported(&existing.session_name, "add"));
+    }
+
+    tmux::ensure_tmux_installed()?;
+    let config = config::load_config(&repo_root, None)?;
+    let broker_config = config.broker.clone();
+    let project = git::project_name(&repo_root);
+
+    // 4.2 Resolve branch + CLI from the positional arg or --from-spec.
+    let (branch, resolved_cli, spec_entry): (
+        String,
+        Option<String>,
+        Option<git_paw::specs::SpecEntry>,
+    ) = if let Some(spec_name) = from_spec {
+        let discovered = git_paw::specs::scan_specs(&config, &repo_root)?;
+        // resolve_specs errors with the discovered candidate list on an
+        // unknown name — exactly the UX `--specs NAME` gives.
+        let mut resolved =
+            git_paw::specs::resolve::resolve_specs(&discovered, &[spec_name.to_string()])?;
+        let spec = resolved.drain(..).next().ok_or_else(|| {
+            PawError::SpecError(format!("spec '{spec_name}' resolved to no entries"))
+        })?;
+        let cli = cli_flag.map(str::to_string).or_else(|| spec.cli.clone());
+        (spec.branch.clone(), cli, Some(spec))
+    } else {
+        let branch = branch_arg
+            .expect("clap requires a branch when --from-spec is absent")
+            .to_string();
+        (branch, cli_flag.map(str::to_string), None)
+    };
+
+    if existing.worktrees.iter().any(|w| w.branch == branch) {
+        return Err(PawError::SessionError(format!(
+            "branch '{branch}' is already an agent in session '{}'.",
+            existing.session_name
+        )));
+    }
+
+    // Effective CLI: --cli > spec paw_cli > session's CLI > config default_cli.
+    let session_default_cli = existing.worktrees.first().map(|w| w.cli.clone());
+    let agent_cli = resolved_cli
+        .or(session_default_cli)
+        .or_else(|| config.default_cli.clone())
+        .ok_or_else(|| {
+            PawError::ConfigError(
+                "no CLI specified and the session has no default to fall back to; pass --cli <id>."
+                    .to_string(),
+            )
+        })?;
+
+    // 4.3 Validate the CLI against detected CLIs — before mutating anything.
+    // A CLI already in use by a session agent is trusted (it was accepted at
+    // start, and may be a custom CLI absent from this machine's detect set),
+    // so only a CLI that is neither detected nor already running is rejected.
+    // This is what catches an unknown `--cli nonesuch` without breaking the
+    // common "fall back to the session's CLI" path.
+    let custom_defs = config_to_custom_defs(&config);
+    let detected = detect::detect_clis(&custom_defs);
+    let agent_cli_base = agent_cli.split_whitespace().next().unwrap_or(&agent_cli);
+    let cli_in_session = existing
+        .worktrees
+        .iter()
+        .any(|w| w.cli.split_whitespace().next() == Some(agent_cli_base));
+    if !cli_in_session && !detected.iter().any(|c| c.binary_name == agent_cli_base) {
+        let ids: Vec<&str> = detected.iter().map(|c| c.binary_name.as_str()).collect();
+        return Err(PawError::ConfigError(format!(
+            "unknown CLI '{agent_cli_base}'. Detected CLIs: {}.",
+            if ids.is_empty() {
+                "(none)".to_string()
+            } else {
+                ids.join(", ")
+            }
+        )));
+    }
+
+    // 4.4 Enforce the 25-agent cap BEFORE mutating. layout_for(N+1) errors with
+    // the same "split into multiple sessions" message `start` uses.
+    let prev_agent_count = existing.worktrees.len();
+    let layout = git_paw::supervisor::layout::layout_for(prev_agent_count + 1)?;
+
+    // 4.5 Take the advisory lock for the rest of the critical section.
+    let _lock = git_paw::lock::SessionLock::acquire(&repo_root)?;
+
+    // Build the shared attach context (mirrors cmd_supervisor's loop setup).
+    let default_sup = SupervisorConfig::default();
+    let supervisor_cfg = config.supervisor.as_ref().unwrap_or(&default_sup);
+    let approval = &supervisor_cfg.agent_approval;
+    let agent_flags = config::approval_flags(&agent_cli, approval);
+    let strict_guard = config
+        .supervisor
+        .as_ref()
+        .is_none_or(SupervisorConfig::strict_branch_guard);
+    let gate_commands = supervisor_cfg.gate_commands();
+    let coordination_template = if broker_config.enabled {
+        Some(git_paw::skills::resolve("coordination")?)
+    } else {
+        None
+    };
+    let session_backends: Vec<git_paw::specs::SpecBackendKind> = spec_entry
+        .as_ref()
+        .map(|s| vec![s.backend])
+        .unwrap_or_default();
+
+    // The new agent's AGENTS.md should list every peer (existing + new) so its
+    // inter-agent ownership rules reflect the full session.
+    let mut all_branches: Vec<&str> = existing
+        .worktrees
+        .iter()
+        .map(|w| w.branch.as_str())
+        .collect();
+    all_branches.push(branch.as_str());
+    let inter_agent_rules = git_paw::agents::build_inter_agent_rules(&all_branches);
+
+    let attach_ctx = AttachContext {
+        repo_root: &repo_root,
+        project: &project,
+        broker_config: &broker_config,
+        agent_cli: &agent_cli,
+        agent_flags,
+        coordination_template: coordination_template.as_ref(),
+        gate_commands: &gate_commands,
+        session_backends: &session_backends,
+        inter_agent_rules: Some(inter_agent_rules.as_str()),
+        strict_guard,
+        no_rebase: false,
+    };
+
+    // 4.6 Reuse create_worktree + attach_agent to build the new pane's setup.
+    let AttachedAgent {
+        pane,
+        prompt,
+        mut entry,
+    } = attach_agent(&attach_ctx, &branch, spec_entry.as_ref())?;
+
+    // 4.7 Recompute layout_for(N+1) and re-apply (splice the pane + re-tile).
+    let offset = agent_pane_offset(&existing);
+    let new_pane_idx = offset + prev_agent_count;
+    tmux::build_add_agent_commands(
+        &existing.session_name,
+        &pane,
+        prev_agent_count,
+        layout,
+        config.border_affordances_enabled(),
+    )
+    .execute()?;
+
+    // 4.8 Append the branch/pane entry to the session JSON.
+    // 4.9 When paused, hold the boot prompt for `resume` instead of submitting.
+    if paused {
+        entry.pending_boot_prompt = Some(prompt.clone());
+    }
+    let mut updated = existing.clone();
+    updated.worktrees.push(entry);
+    session::save_session(&updated)?;
+    write_repo_discovery_file(
+        &repo_root,
+        &updated.session_name,
+        &updated.worktrees,
+        offset,
+    );
+
+    if paused {
+        println!(
+            "Added '{branch}' to paused session '{}' (pane {new_pane_idx}); it will start on \
+             `git paw resume`.",
+            updated.session_name
+        );
+    } else {
+        // Let the pane's CLI boot to an interactive state before submitting,
+        // matching the start-time settle (cmd_supervisor sleeps 2s here too).
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let delay = resolve_submit_delay_ms(&agent_cli, &config);
+        submit_prompt_to_pane(&updated.session_name, new_pane_idx, &prompt, delay);
+        println!(
+            "Added '{branch}' to session '{}' (pane {new_pane_idx}).",
+            updated.session_name
+        );
+    }
+
+    Ok(())
+}
+
+/// `git paw remove <branch>` — detach a single agent from a running session
+/// (capability `remove-branch`).
+#[allow(clippy::too_many_lines)]
+fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Result<(), PawError> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
+    let repo_root = git::validate_repo(&cwd)?;
+
+    // 5.2 Refuse `git paw remove supervisor` with a pointer to `git paw stop`.
+    if branch == "supervisor" {
+        return Err(PawError::SessionError(
+            "refusing to remove the supervisor. To end the whole session, run `git paw stop` \
+             (or `git paw purge` to also remove worktrees)."
+                .to_string(),
+        ));
+    }
+
+    // 5.1 Resolve the active session and locate the target branch.
+    let Some(existing) = session::find_session_for_repo(&repo_root)? else {
+        return Err(PawError::SessionError(
+            "no active session for this repository.".to_string(),
+        ));
+    };
+
+    if existing.mode == SessionMode::Bare {
+        return Err(bare_mode_unsupported(&existing.session_name, "remove"));
+    }
+
+    let Some(pos) = existing.worktrees.iter().position(|w| w.branch == branch) else {
+        let live: Vec<&str> = existing
+            .worktrees
+            .iter()
+            .map(|w| w.branch.as_str())
+            .collect();
+        return Err(PawError::SessionError(format!(
+            "branch '{branch}' is not an agent in session '{}'. Live agents: {}.",
+            existing.session_name,
+            if live.is_empty() {
+                "(none)".to_string()
+            } else {
+                live.join(", ")
+            }
+        )));
+    };
+    let target = existing.worktrees[pos].clone();
+
+    // 5.3 Uncommitted-work safety check (D7) — unless --force or --keep-worktree.
+    if !force && !keep_worktree {
+        let dirty = git::uncommitted_files(&target.worktree_path).unwrap_or_default();
+        if !dirty.is_empty() {
+            let list = dirty
+                .iter()
+                .map(|f| format!("  {f}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(PawError::SessionError(format!(
+                "worktree for '{branch}' has uncommitted changes:\n{list}\n\n\
+                 Commit them first, or pass --force to remove anyway (the changes will be lost), \
+                 or --keep-worktree to detach the pane and leave the worktree on disk."
+            )));
+        }
+    }
+
+    tmux::ensure_tmux_installed()?;
+
+    // 5.4 Take the advisory lock for the mutate-the-session section.
+    let _lock = git_paw::lock::SessionLock::acquire(&repo_root)?;
+
+    let offset = agent_pane_offset(&existing);
+    let pane_idx = offset + pos;
+    let session_alive = tmux::is_session_alive(&existing.session_name).unwrap_or(false);
+
+    // 5.5 Kill the target tmux pane.
+    if session_alive {
+        let idx = u32::try_from(pane_idx)
+            .map_err(|_| PawError::TmuxError(format!("pane index {pane_idx} out of range")))?;
+        tmux::kill_pane(&existing.session_name, idx)?;
+    }
+
+    // 5.6 Recompute layout_for(N-1) and re-apply so the grid re-flows.
+    let remaining = existing.worktrees.len() - 1;
+    if session_alive && remaining > 0 {
+        let layout = git_paw::supervisor::layout::layout_for(remaining)?;
+        tmux::build_remove_retile_commands(&existing.session_name, remaining, layout).execute()?;
+    }
+
+    // 5.7 Delegate to detach_worktree for removal, unless --keep-worktree.
+    if keep_worktree {
+        println!(
+            "Keeping worktree on disk: {}",
+            target.worktree_path.display()
+        );
+    } else {
+        detach_worktree(&repo_root, &target, &mut std::io::stderr());
+    }
+
+    // 5.8 Drop the branch/pane entry from the session JSON.
+    let mut updated = existing.clone();
+    updated.worktrees.remove(pos);
+    session::save_session(&updated)?;
+    write_repo_discovery_file(
+        &repo_root,
+        &updated.session_name,
+        &updated.worktrees,
+        offset,
+    );
+
+    println!(
+        "Removed '{branch}' from session '{}'.",
+        updated.session_name
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1727,10 +2535,14 @@ fn cmd_dashboard() -> Result<(), PawError> {
     let repo_root = git::validate_repo(&cwd)?;
     let config = config::load_config(&repo_root, None)?;
     let broker_config = config.broker.clone();
-    let show_message_log = config
+    // Broker log panel: ring-buffer cap + initial visibility from
+    // `[dashboard.broker_log]`. An absent `[dashboard]` section uses the
+    // documented defaults (cap 500, visible).
+    let broker_log_cfg = config
         .dashboard
         .as_ref()
-        .is_some_and(|d| d.show_message_log);
+        .map(|d| d.broker_log.clone())
+        .unwrap_or_default();
 
     // The conflict detector subsystem runs only when supervisor mode is
     // enabled — its outputs flow through the supervisor inbox and are
@@ -1750,8 +2562,31 @@ fn cmd_dashboard() -> Result<(), PawError> {
         .as_ref()
         .map_or(60, |s| s.learnings_config.flush_interval_seconds);
 
+    // Per-commit verification nudge: when an agent commits, the broker pings
+    // the supervisor to verify that commit immediately (default on; opt out
+    // with `[supervisor] verify_on_commit_nudge = false`). Resolves to `true`
+    // when no `[supervisor]` section is present.
+    let verify_on_commit_nudge = config
+        .supervisor
+        .as_ref()
+        .is_none_or(SupervisorConfig::verify_on_commit_nudge_enabled);
+
+    // Resolve the supervisor's CLI the same way the launcher did
+    // (`[supervisor].cli` > `default_cli`) and seed it authoritatively. The
+    // supervisor is not a filesystem watch target, so this is the only
+    // deterministic source for its dashboard CLI column — relying on the
+    // supervisor to self-report via `agent.status` is unreliable (W15-15).
+    let supervisor_cli = config
+        .supervisor
+        .as_ref()
+        .and_then(|s| s.cli.clone())
+        .or_else(|| config.default_cli.clone())
+        .unwrap_or_default();
+
     let log_path = session::session_state_dir()?.join("broker.log");
-    let broker_state = broker::BrokerState::new(Some(log_path));
+    let mut broker_state = broker::BrokerState::new(Some(log_path))
+        .with_verify_on_commit_nudge(verify_on_commit_nudge)
+        .with_seeded_cli("supervisor", &supervisor_cli);
 
     // Look up the saved session once: needed for the broker watcher target
     // list AND to discover the supervisor pane_map for the auto-approve thread.
@@ -1769,6 +2604,54 @@ fn cmd_dashboard() -> Result<(), PawError> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+
+    // Attach the opsx role-gating context. The guard is scoped to the OpenSpec
+    // spec engine: under speckit/markdown (or no spec source) `engine_is_openspec`
+    // is false and the guard stays inert regardless of the configured mode. The
+    // roster maps each coding agent's worktree plus the supervisor's repo root,
+    // so the guard can attribute a committing worktree and clear the supervisor's
+    // own archives.
+    {
+        let engine_is_openspec =
+            git_paw::specs::resolved_spec_type(&config, &repo_root).as_deref() == Some("openspec");
+        let mut roster: Vec<(String, std::path::PathBuf)> = watch_targets
+            .iter()
+            .map(|t| (t.agent_id.clone(), t.worktree_path.clone()))
+            .collect();
+        roster.push((
+            git_paw::opsx::SUPERVISOR_AGENT_ID.to_string(),
+            repo_root.clone(),
+        ));
+        broker_state = broker_state.with_role_gating(git_paw::opsx::RoleGatingContext {
+            mode: config.role_gating_mode(),
+            engine_is_openspec,
+            roster,
+        });
+    }
+
+    // Attach the learnings aggregator when supervisor mode + learnings are
+    // both enabled (mirrors the `should_attach` predicate pinned by the
+    // learnings unit test). The aggregator appends to
+    // `.git-paw/session-learnings.md` and — when broker publish resolves to
+    // active — additionally emits `agent.learning` records through the
+    // broker (the `agent-learning-variant` dual-output path).
+    if let Some(sup) = config
+        .supervisor
+        .as_ref()
+        .filter(|s| s.enabled && s.learnings)
+    {
+        let learnings_path = repo_root.join(".git-paw").join("session-learnings.md");
+        let mut aggregator = broker::learnings::LearningsAggregator::new(learnings_path);
+        aggregator.set_broker_publish(
+            sup.learnings_config
+                .broker_publish
+                .resolve(broker_config.enabled),
+        );
+        for target in &watch_targets {
+            aggregator.register_agent(&target.agent_id);
+        }
+        broker_state.attach_learnings(std::sync::Arc::new(std::sync::Mutex::new(aggregator)));
+    }
 
     let handle = broker::start_broker_with(
         &broker_config,
@@ -1844,11 +2727,43 @@ fn cmd_dashboard() -> Result<(), PawError> {
                     )
                 })
                 .collect();
+            // Map each agent to its worktree root so the file-op classifier
+            // (bug 3) can resolve write/edit prompts against the boundary.
+            let worktree_map: std::collections::HashMap<String, std::path::PathBuf> = sess
+                .worktrees
+                .iter()
+                .map(|wt| {
+                    (
+                        broker::messages::slugify_branch(&wt.branch),
+                        wt.worktree_path.clone(),
+                    )
+                })
+                .collect();
+            // Build the manual-decision recorder from supervisor config. It is
+            // inert when `[supervisor] manual_approvals_log = false`; learnings
+            // emission additionally requires `[supervisor] learnings = true`.
+            let supervisor = config.supervisor.as_ref();
+            let manual_enabled =
+                supervisor.is_none_or(SupervisorConfig::manual_approvals_log_enabled);
+            let learnings_enabled = supervisor.is_some_and(|s| s.learnings);
+            let cli = supervisor.and_then(|s| s.cli.clone());
+            let recorder = git_paw::supervisor::manual_approvals::ManualDecisionRecorder::new(
+                git_paw::supervisor::manual_approvals::log_path(
+                    &sess.repo_path,
+                    &sess.session_name,
+                ),
+                manual_enabled,
+                learnings_enabled,
+                sess.project_name.clone(),
+                cli,
+            );
             spawn_auto_approve_thread(
                 sess.session_name.clone(),
                 broker_config.url(),
                 Some(auto_approve_cfg),
                 pane_map,
+                worktree_map,
+                recorder,
             )
         });
 
@@ -1858,7 +2773,8 @@ fn cmd_dashboard() -> Result<(), PawError> {
         &shutdown,
         &std::collections::HashMap::new(),
         None,
-        show_message_log,
+        broker_log_cfg.max_messages,
+        broker_log_cfg.default_visible,
     );
 
     if let Some((stop, join)) = auto_approve_handle {
@@ -1978,7 +2894,16 @@ enum PurgeOutcome {
 }
 
 /// Removes everything: tmux session, worktrees, and state.
-fn cmd_purge(force: bool) -> Result<(), PawError> {
+///
+/// With `stale = true`, purges only sessions whose tmux session is gone (a
+/// stale receipt) across the whole machine, leaving live sessions untouched.
+/// `--force` is redundant in that combination (a stale entry is never
+/// prompted for) — passing both behaves identically to `--stale` alone.
+fn cmd_purge(force: bool, stale: bool) -> Result<(), PawError> {
+    if stale {
+        return cmd_purge_stale();
+    }
+
     let cwd = std::env::current_dir()
         .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
     let repo_root = git::validate_repo(&cwd)?;
@@ -2018,6 +2943,151 @@ fn cmd_purge(force: bool) -> Result<(), PawError> {
         PurgeOutcome::Cancelled => println!("Purge cancelled."),
     }
     Ok(())
+}
+
+/// Probes the existing receipt for staleness and, when stale (the receipt
+/// claims active but the tmux session is gone), invalidates it — purging the
+/// recorded worktrees, branches, and receipt equivalent to `purge --force` —
+/// and emits a stderr notice naming the entry (design D5).
+///
+/// Returns `true` when invalidation fired; the caller SHALL then proceed with
+/// a fresh launch as if no prior session existed. Returns `false` for a live
+/// (`active` + alive), paused, stopped, or indeterminate receipt, leaving the
+/// caller's normal reattach/recover decision intact.
+fn invalidate_if_stale(repo_root: &Path, existing: &Session) -> Result<bool, PawError> {
+    let liveness = tmux::session_liveness(&existing.session_name);
+    if session::DisplayStatus::from_receipt(&existing.status, liveness)
+        != session::DisplayStatus::Stale
+    {
+        return Ok(false);
+    }
+
+    let when = existing
+        .created_at_iso8601()
+        .map(|t| format!(", last seen {t}"))
+        .unwrap_or_default();
+    eprintln!(
+        "notice: removed stale session receipt\n  ({}{}, tmux session no longer exists)",
+        existing.session_name, when
+    );
+
+    let sessions_dir = session::session_state_dir()?;
+    let mut confirm = |_: &str| -> Result<bool, PawError> { Ok(true) };
+    let mut kill_tmux = |name: &str| -> Result<(), PawError> {
+        if tmux::is_session_alive(name)? {
+            tmux::kill_session(name)?;
+        }
+        Ok(())
+    };
+    purge_with_prompt(
+        repo_root,
+        &sessions_dir,
+        existing,
+        true,
+        &mut confirm,
+        &mut kill_tmux,
+        &mut std::io::stderr(),
+    )?;
+    Ok(true)
+}
+
+/// Purges only stale sessions (receipt claims active but the tmux session is
+/// gone) across the whole machine. Live sessions are left untouched.
+///
+/// Stale is defined exactly as [`session::DisplayStatus::Stale`]: an `active`
+/// receipt whose `tmux has-session` probe returns
+/// [`tmux::SessionLiveness::Stale`]. Stopped receipts (intentionally stopped)
+/// and sessions on a host with no tmux binary (Indeterminate probe) are NOT
+/// touched. Exits 0 with a "nothing to purge" message when no stale receipt
+/// exists.
+fn cmd_purge_stale() -> Result<(), PawError> {
+    let sessions_dir = session::session_state_dir()?;
+    let all = session::load_all_sessions_in(&sessions_dir)?;
+
+    let stale: Vec<session::Session> = all
+        .into_iter()
+        .filter(|s| {
+            let liveness = tmux::session_liveness(&s.session_name);
+            session::DisplayStatus::from_receipt(&s.status, liveness)
+                == session::DisplayStatus::Stale
+        })
+        .collect();
+
+    if stale.is_empty() {
+        println!("No stale sessions to purge.");
+        return Ok(());
+    }
+
+    let mut confirm = |_: &str| -> Result<bool, PawError> { Ok(true) };
+    let mut kill_tmux = |name: &str| -> Result<(), PawError> {
+        if tmux::is_session_alive(name)? {
+            tmux::kill_session(name)?;
+        }
+        Ok(())
+    };
+
+    for session_entry in &stale {
+        // force = true: stale entries are orphaned, nothing to confirm.
+        let outcome = purge_with_prompt(
+            &session_entry.repo_path,
+            &sessions_dir,
+            session_entry,
+            true,
+            &mut confirm,
+            &mut kill_tmux,
+            &mut std::io::stderr(),
+        )?;
+        if outcome == PurgeOutcome::Purged {
+            println!("Purged stale session '{}'.", session_entry.session_name);
+        }
+    }
+    Ok(())
+}
+
+/// Tears down a single agent's worktree: removes the worktree directory (with
+/// the per-worktree `Removing worktree ...` / `...done (Xs)` progress markers)
+/// and, when git-paw created the branch, deletes it afterwards.
+///
+/// Extracted from `cmd_purge`'s per-worktree loop (design D6, task 1.3) so
+/// `cmd_remove` performs byte-identical removal for a single agent that
+/// `git paw purge` performs for every agent. Best-effort: a failed
+/// worktree-remove or branch-delete is surfaced as a `warning:` on `stderr`
+/// and does not abort — matching purge's resilience on large or busy
+/// worktrees.
+fn detach_worktree(repo_root: &Path, entry: &WorktreeEntry, stderr: &mut dyn std::io::Write) {
+    let _ = writeln!(
+        stderr,
+        "Removing worktree {}...",
+        entry.worktree_path.display()
+    );
+    let _ = stderr.flush();
+    let started = std::time::Instant::now();
+    let result = git::remove_worktree(repo_root, &entry.worktree_path);
+    let elapsed_secs = started.elapsed().as_secs_f64();
+    match result {
+        Ok(()) => {
+            let _ = writeln!(stderr, "  ...done ({elapsed_secs:.1}s)");
+        }
+        Err(e) => {
+            let _ = writeln!(
+                stderr,
+                "warning: failed to remove worktree '{}' after {:.1}s: {e}",
+                entry.worktree_path.display(),
+                elapsed_secs
+            );
+        }
+    }
+    let _ = stderr.flush();
+
+    if entry.branch_created
+        && let Err(e) = git::delete_branch(repo_root, &entry.branch)
+    {
+        let _ = writeln!(
+            stderr,
+            "warning: failed to delete branch '{}': {e}",
+            entry.branch
+        );
+    }
 }
 
 /// Testable core of the purge UX. Emits the unmerged-commits warning to
@@ -2073,48 +3143,13 @@ fn purge_with_prompt(
 
     kill_tmux(&session.session_name)?;
 
-    // Per-worktree progress output. v0.5.0 reports of "git paw purge
-    // --force freezes" turned out to be misread `git worktree remove
-    // --force` runtime on large worktrees: the command was working but
-    // emitting nothing until done. Emitting a per-worktree begin / end
-    // marker with elapsed seconds lets the user tell the command is
-    // making progress. Bug D in v0-5-0-audit-cleanup.
+    // Per-worktree teardown (worktree-remove + branch cleanup), delegated to
+    // the shared `detach_worktree` helper so `cmd_remove` performs the exact
+    // same per-worktree removal `purge` does (design D6, task 1.3). The helper
+    // emits the per-worktree begin / `...done (Xs)` progress markers Bug D in
+    // v0-5-0-audit-cleanup added.
     for entry in &session.worktrees {
-        let _ = writeln!(
-            stderr,
-            "Removing worktree {}...",
-            entry.worktree_path.display()
-        );
-        let _ = stderr.flush();
-        let started = std::time::Instant::now();
-        let result = git::remove_worktree(repo_root, &entry.worktree_path);
-        let elapsed_secs = started.elapsed().as_secs_f64();
-        match result {
-            Ok(()) => {
-                let _ = writeln!(stderr, "  ...done ({elapsed_secs:.1}s)");
-            }
-            Err(e) => {
-                let _ = writeln!(
-                    stderr,
-                    "warning: failed to remove worktree '{}' after {:.1}s: {e}",
-                    entry.worktree_path.display(),
-                    elapsed_secs
-                );
-            }
-        }
-        let _ = stderr.flush();
-    }
-
-    for entry in &session.worktrees {
-        if entry.branch_created
-            && let Err(e) = git::delete_branch(repo_root, &entry.branch)
-        {
-            let _ = writeln!(
-                stderr,
-                "warning: failed to delete branch '{}': {e}",
-                entry.branch
-            );
-        }
+        detach_worktree(repo_root, entry, stderr);
     }
 
     if let Some(ref log_path) = session.broker_log_path {
@@ -2132,6 +3167,15 @@ fn purge_with_prompt(
     }
 
     session::delete_session_in(&session.session_name, sessions_dir)?;
+
+    // Remove the per-repo discovery file sweep.sh reads (capability
+    // `session-json-location`). Idempotent — a missing file is not an error.
+    if let Err(e) = session::remove_repo_session_file(repo_root, &session.session_name) {
+        let _ = writeln!(
+            stderr,
+            "warning: failed to remove per-repo session discovery file: {e}"
+        );
+    }
 
     Ok(PurgeOutcome::Purged)
 }
@@ -2190,29 +3234,62 @@ fn collect_unmerged_branches(
 // ---------------------------------------------------------------------------
 
 /// Shows session state for the current repo.
-fn cmd_status() -> Result<(), PawError> {
+fn cmd_status(json: bool) -> Result<(), PawError> {
     let cwd = std::env::current_dir()
         .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
     let repo_root = git::validate_repo(&cwd)?;
 
     let Some(existing) = session::find_session_for_repo(&repo_root)? else {
-        println!("No session for this repo.");
+        if json {
+            println!("{}", serde_json::json!({ "session": null }));
+        } else {
+            println!("No session for this repo.");
+        }
         return Ok(());
     };
 
-    let alive = tmux::is_session_alive(&existing.session_name)?;
-    let effective = existing.effective_status(|name| tmux::is_session_alive(name).unwrap_or(false));
+    // Single cheap liveness probe (spec: "Liveness probe is cheap"). The
+    // probe distinguishes a genuinely-absent tmux session (Stale) from a
+    // probe that could not run at all (Indeterminate → never reports stale).
+    let liveness = tmux::session_liveness(&existing.session_name);
+    let display = session::DisplayStatus::from_receipt(&existing.status, liveness);
+    let alive = matches!(liveness, tmux::SessionLiveness::Alive);
 
-    let status_icon = match effective {
-        SessionStatus::Active => "\u{1f7e2}",  // 🟢
-        SessionStatus::Paused => "\u{1f535}",  // 🔵
-        SessionStatus::Stopped => "\u{1f7e1}", // 🟡
-    };
+    if json {
+        let worktrees: Vec<_> = existing
+            .worktrees
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "branch": e.branch,
+                    "cli": e.cli,
+                    "worktree_path": e.worktree_path,
+                })
+            })
+            .collect();
+        let obj = serde_json::json!({
+            "session": existing.session_name,
+            "status": display.as_str(),
+            "tmux_running": alive,
+            "worktrees": worktrees,
+        });
+        println!("{obj}");
+        return Ok(());
+    }
 
     println!("Session: {}", existing.session_name);
-    println!("Status:  {status_icon} {effective}");
-    if effective == SessionStatus::Paused {
-        println!("  \u{21b3} run 'git paw start' to resume");
+    println!("Status:  {} {display}", display.icon());
+    match display {
+        session::DisplayStatus::Paused => {
+            println!("  \u{21b3} run 'git paw start' to resume");
+        }
+        session::DisplayStatus::Stale => {
+            println!(
+                "  \u{21b3} tmux session no longer exists — run 'git paw start' to \
+                 self-heal, or 'git paw purge --stale' to clear it"
+            );
+        }
+        _ => {}
     }
     println!("Tmux:    {}", if alive { "running" } else { "not running" });
     println!();
@@ -2222,7 +3299,7 @@ fn cmd_status() -> Result<(), PawError> {
         let url = format!("http://{bind}:{port}");
         match broker::probe_broker(&url) {
             broker::ProbeResult::LiveBroker => println!("Broker:  {url} (running)"),
-            _ if effective == SessionStatus::Paused => {
+            _ if display == session::DisplayStatus::Paused => {
                 println!("Broker:  {url} (paused \u{2014} run 'git paw start' to resume)");
             }
             _ => println!("Broker:  {url} (not responding)"),
@@ -2325,6 +3402,124 @@ fn cmd_replay(
 }
 
 // ---------------------------------------------------------------------------
+// Command: approvals
+// ---------------------------------------------------------------------------
+
+/// Resolves which session's manual-approval log to read.
+///
+/// `--session` wins when present. Otherwise the active session for the current
+/// repo is used. Unlike `replay`, a missing log file is not an error (the
+/// session simply recorded no manual approvals), so this only needs to name a
+/// session — it does not validate that a log exists.
+fn resolve_approvals_session(
+    repo_root: &Path,
+    session_flag: Option<&str>,
+) -> Result<String, PawError> {
+    if let Some(name) = session_flag {
+        return Ok(name.to_string());
+    }
+    match session::find_session_for_repo(repo_root)? {
+        Some(s) => Ok(s.session_name),
+        None => Err(PawError::SessionError(
+            "no active session for this repo; pass --session <NAME> to target one".to_string(),
+        )),
+    }
+}
+
+/// Reports the manually-approved command patterns for a session.
+///
+/// Reads the per-session manual-approval JSONL log, aggregates by pattern,
+/// applies the promotion-target heuristic, sorts by descending count, and
+/// renders either a text table (default) or JSON (`--json`). An empty/missing
+/// log produces an empty result without error.
+fn cmd_approvals(
+    session_flag: Option<&str>,
+    limit: Option<usize>,
+    json: bool,
+) -> Result<(), PawError> {
+    use git_paw::supervisor::manual_approvals::{self, AggregatedApproval, Suggestion};
+
+    let cwd = std::env::current_dir()
+        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
+    let repo_root = git::validate_repo(&cwd)?;
+    let session_name = resolve_approvals_session(&repo_root, session_flag)?;
+    let project_name = git::project_name(&repo_root);
+
+    let log_path = manual_approvals::log_path(&repo_root, &session_name);
+    let mut rows = manual_approvals::aggregate(&log_path)
+        .map_err(|e| PawError::SessionError(format!("failed to read manual-approvals log: {e}")))?;
+    if let Some(n) = limit {
+        rows.truncate(n);
+    }
+
+    // Pair each pattern with its promotion-target suggestion. Branch/worktree
+    // context is per-agent and not retained by aggregation, so the report
+    // leans on the project name plus the `./`-token rule.
+    let classified: Vec<(AggregatedApproval, Suggestion)> = rows
+        .into_iter()
+        .map(|r| {
+            let s = manual_approvals::suggest_target(&r.pattern, &project_name, "", None);
+            (r, s)
+        })
+        .collect();
+
+    if json {
+        let approvals: Vec<serde_json::Value> = classified
+            .iter()
+            .map(|(r, s)| {
+                serde_json::json!({
+                    "pattern": r.pattern,
+                    "count": r.count,
+                    "suggested_target": s.json_value(),
+                    "first_seen": r.first_seen,
+                    "last_seen": r.last_seen,
+                })
+            })
+            .collect();
+        let out = serde_json::json!({
+            "session": session_name,
+            "approvals": approvals,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out)
+                .map_err(|e| PawError::SessionError(format!("failed to serialize JSON: {e}")))?
+        );
+        return Ok(());
+    }
+
+    if classified.is_empty() {
+        println!("no manual approvals recorded for session '{session_name}'");
+        return Ok(());
+    }
+
+    // Text table: PATTERN / COUNT / SUGGEST, columns sized to content.
+    let pattern_w = classified
+        .iter()
+        .map(|(r, _)| r.pattern.len())
+        .max()
+        .unwrap_or(0)
+        .max("PATTERN".len());
+    let count_w = classified
+        .iter()
+        .map(|(r, _)| r.count.to_string().len())
+        .max()
+        .unwrap_or(0)
+        .max("COUNT".len());
+
+    println!("{:<pattern_w$}  {:>count_w$}  SUGGEST", "PATTERN", "COUNT");
+    for (r, s) in &classified {
+        println!(
+            "{:<pattern_w$}  {:>count_w$}  {}",
+            r.pattern,
+            r.count,
+            s.label()
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Command: remove-cli
 // ---------------------------------------------------------------------------
 
@@ -2372,9 +3567,14 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn dispatch_from_all_specs_with_supervisor_routes_to_supervisor_with_use_specs() {
+    fn dispatch_from_all_specs_with_supervisor_routes_to_supervisor_with_all() {
         let target = resolve_dispatch_target(&SpecMode::All, true);
-        assert_eq!(target, DispatchTarget::Supervisor { use_specs: true });
+        assert_eq!(
+            target,
+            DispatchTarget::Supervisor {
+                spec_mode: SpecMode::All
+            }
+        );
     }
 
     #[test]
@@ -2384,9 +3584,17 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_supervisor_without_specs_routes_to_supervisor_with_branches() {
+    fn dispatch_supervisor_without_specs_routes_to_supervisor_with_none() {
+        // Bare `--supervisor` (no spec flag) carries `SpecMode::None`, which
+        // cmd_supervisor resolves to the `--branches` / branch-picker flow —
+        // NOT spec auto-discovery.
         let target = resolve_dispatch_target(&SpecMode::None, true);
-        assert_eq!(target, DispatchTarget::Supervisor { use_specs: false });
+        assert_eq!(
+            target,
+            DispatchTarget::Supervisor {
+                spec_mode: SpecMode::None
+            }
+        );
     }
 
     #[test]
@@ -2411,17 +3619,31 @@ mod tests {
         );
     }
 
+    // Task 1.4 — `--supervisor --specs a,b` routes to the supervisor path
+    // carrying the named subset, NOT `use_specs`-collapses-to-all.
     #[test]
-    fn dispatch_narrow_with_supervisor_routes_to_supervisor_with_use_specs() {
-        let names = vec!["add-auth".to_string()];
-        let target = resolve_dispatch_target(&SpecMode::Narrow(names), true);
-        assert_eq!(target, DispatchTarget::Supervisor { use_specs: true });
+    fn dispatch_narrow_with_supervisor_routes_to_supervisor_with_named_subset() {
+        let names = vec!["a".to_string(), "b".to_string()];
+        let target = resolve_dispatch_target(&SpecMode::Narrow(names.clone()), true);
+        assert_eq!(
+            target,
+            DispatchTarget::Supervisor {
+                spec_mode: SpecMode::Narrow(names)
+            }
+        );
     }
 
+    // Task 1.5 — `--supervisor --from-all-specs` routes to the supervisor path
+    // carrying `All` (every discovered spec).
     #[test]
-    fn dispatch_picker_with_supervisor_routes_to_supervisor_with_use_specs() {
+    fn dispatch_picker_with_supervisor_routes_to_supervisor_with_picker() {
         let target = resolve_dispatch_target(&SpecMode::Picker, true);
-        assert_eq!(target, DispatchTarget::Supervisor { use_specs: true });
+        assert_eq!(
+            target,
+            DispatchTarget::Supervisor {
+                spec_mode: SpecMode::Picker
+            }
+        );
     }
 
     #[test]
@@ -2957,6 +4179,7 @@ mod tests {
                 worktree_path: wt.path.clone(),
                 cli: "claude".to_string(),
                 branch_created: wt.branch_created,
+                pending_boot_prompt: None,
             }],
             broker_port: None,
             broker_bind: None,
@@ -3347,6 +4570,7 @@ mod supervisor_question_tests {
                 enabled: true,
                 port,
                 bind: "127.0.0.1".to_string(),
+                ..Default::default()
             };
             match broker::start_broker(&cfg, BrokerState::new(None), Vec::new()) {
                 Ok(handle) => {
@@ -3470,5 +4694,130 @@ mod supervisor_question_tests {
             result.is_err(),
             "publishing to an unreachable broker must error"
         );
+    }
+}
+
+#[cfg(test)]
+mod submit_delay_tests {
+    //! `claude-oss-launch-v0-6-x` / `cli-submit-profile`: the boot-prompt
+    //! settle delay is CONFIG-DRIVEN with a CLI-agnostic default — no
+    //! hardcoded CLI-name table (W15-1, agnostic rework).
+
+    use std::collections::HashMap;
+
+    use git_paw::config::{CustomCli, PawConfig};
+
+    use super::resolve_submit_delay_ms;
+
+    fn config_with(cli: &str, submit_delay_ms: Option<u64>) -> PawConfig {
+        let mut clis = HashMap::new();
+        clis.insert(
+            cli.to_string(),
+            CustomCli {
+                command: cli.to_string(),
+                display_name: None,
+                submit_delay_ms,
+                settings_path: None,
+            },
+        );
+        PawConfig {
+            clis,
+            ..PawConfig::default()
+        }
+    }
+
+    #[test]
+    fn unknown_or_unconfigured_cli_uses_agnostic_default() {
+        let cfg = PawConfig::default();
+        assert_eq!(
+            resolve_submit_delay_ms("any-cli", &cfg),
+            git_paw::DEFAULT_SUBMIT_DELAY_MS,
+        );
+    }
+
+    #[test]
+    fn custom_cli_submit_delay_override_is_honoured() {
+        let cfg = config_with("mycli", Some(2500));
+        assert_eq!(resolve_submit_delay_ms("mycli", &cfg), 2500);
+    }
+
+    #[test]
+    fn custom_cli_without_override_falls_back_to_default() {
+        let cfg = config_with("mycli", None);
+        assert_eq!(
+            resolve_submit_delay_ms("mycli", &cfg),
+            git_paw::DEFAULT_SUBMIT_DELAY_MS,
+        );
+    }
+
+    #[test]
+    fn lookup_keys_on_the_binary_not_the_flags() {
+        // A `cli` value may carry flags (e.g. "mycli --foo"); the lookup
+        // keys on the leading binary token.
+        let cfg = config_with("mycli", Some(2500));
+        assert_eq!(
+            resolve_submit_delay_ms("mycli --dangerously-skip-permissions", &cfg),
+            2500,
+        );
+    }
+
+    #[test]
+    fn no_cli_name_is_hardcoded_in_the_resolver() {
+        // The agnostic contract: with an empty config, EVERY cli id —
+        // including former-hardcoded names — resolves to the same default.
+        let cfg = PawConfig::default();
+        for cli in ["claude", "claude-oss", "gemini", "codex", "whatever"] {
+            assert_eq!(
+                resolve_submit_delay_ms(cli, &cfg),
+                git_paw::DEFAULT_SUBMIT_DELAY_MS,
+                "{cli} must use the agnostic default, not a hardcoded value"
+            );
+        }
+    }
+
+    fn config_with_settings_path(cli: &str, settings_path: Option<String>) -> PawConfig {
+        let mut clis = HashMap::new();
+        clis.insert(
+            cli.to_string(),
+            CustomCli {
+                command: cli.to_string(),
+                display_name: None,
+                submit_delay_ms: None,
+                settings_path,
+            },
+        );
+        PawConfig {
+            clis,
+            ..PawConfig::default()
+        }
+    }
+
+    #[test]
+    fn configured_settings_paths_returns_targets_with_existing_parents() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("settings.json");
+        let cfg = config_with_settings_path("mycli", Some(target.to_string_lossy().into_owned()));
+        let paths = super::configured_settings_paths(&cfg);
+        assert_eq!(
+            paths,
+            vec![target],
+            "configured path with existing parent is returned"
+        );
+    }
+
+    #[test]
+    fn configured_settings_paths_skips_targets_with_absent_parent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("missing-subdir").join("settings.json");
+        let cfg = config_with_settings_path("mycli", Some(target.to_string_lossy().into_owned()));
+        assert!(
+            super::configured_settings_paths(&cfg).is_empty(),
+            "a configured path whose parent is absent must be skipped",
+        );
+    }
+
+    #[test]
+    fn configured_settings_paths_empty_when_no_clis() {
+        assert!(super::configured_settings_paths(&PawConfig::default()).is_empty());
     }
 }

@@ -390,15 +390,35 @@ fn build_post_commit_dispatcher_hook() -> String {
     format!(
         "#!/bin/sh\n\
          {HOOK_START_MARKER}\n\
-         # Dispatcher: reads per-worktree $GIT_DIR/paw-agent-id and publishes\n\
-         # agent.artifact to the git-paw broker.\n\
-         if [ -n \"$GIT_DIR\" ] && [ -f \"$GIT_DIR/paw-agent-id\" ]; then\n\
-             . \"$GIT_DIR/paw-agent-id\"\n\
+         # Dispatcher: reads the per-worktree paw-agent-id marker and publishes\n\
+         # agent.artifact to the git-paw broker. Resolve the gitdir via\n\
+         # rev-parse with a GIT_DIR fallback (git does not always export it).\n\
+         PAW_GD=\"${{GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}}\"\n\
+         if [ -n \"$PAW_GD\" ] && [ -f \"$PAW_GD/paw-agent-id\" ]; then\n\
+             . \"$PAW_GD/paw-agent-id\"\n\
              FILES=$(git diff HEAD~1 --name-only 2>/dev/null | awk '{{printf \"%s\\\"%s\\\"\", (NR>1?\",\":\"\"), $0}}')\n\
              curl -s -X POST \"$PAW_BROKER_URL/publish\" \\\n\
                  -H 'Content-Type: application/json' \\\n\
                  -d \"{{\\\"type\\\":\\\"agent.artifact\\\",\\\"agent_id\\\":\\\"$PAW_AGENT_ID\\\",\\\"payload\\\":{{\\\"status\\\":\\\"committed\\\",\\\"exports\\\":[],\\\"modified_files\\\":[$FILES]}}}}\" \\\n\
                  >/dev/null 2>&1 || true\n\
+             # Branch-mismatch detection (detection without enforcement — fires\n\
+             # regardless of PAW_STRICT_BRANCH_GUARD; the pre-commit hook owns\n\
+             # blocking). Publishes agent.feedback + an agent.learning record\n\
+             # (category permission_pattern) identifying the contamination.\n\
+             if [ -n \"$PAW_EXPECTED_BRANCH\" ]; then\n\
+                 PAW_CUR=$(git symbolic-ref --short HEAD 2>/dev/null)\n\
+                 if [ -n \"$PAW_CUR\" ] && [ \"$PAW_CUR\" != \"$PAW_EXPECTED_BRANCH\" ]; then\n\
+                     PAW_SHA=$(git rev-parse HEAD 2>/dev/null)\n\
+                     curl -s -X POST \"$PAW_BROKER_URL/publish\" \\\n\
+                         -H 'Content-Type: application/json' \\\n\
+                         -d \"{{\\\"type\\\":\\\"agent.feedback\\\",\\\"agent_id\\\":\\\"$PAW_AGENT_ID\\\",\\\"payload\\\":{{\\\"from\\\":\\\"branch-guard\\\",\\\"errors\\\":[\\\"commit $PAW_SHA advanced '$PAW_CUR' but this worktree is for '$PAW_EXPECTED_BRANCH'; cherry-pick onto '$PAW_EXPECTED_BRANCH' and reset '$PAW_CUR'\\\"]}}}}\" \\\n\
+                         >/dev/null 2>&1 || true\n\
+                     curl -s -X POST \"$PAW_BROKER_URL/publish\" \\\n\
+                         -H 'Content-Type: application/json' \\\n\
+                         -d \"{{\\\"type\\\":\\\"agent.learning\\\",\\\"agent_id\\\":\\\"$PAW_AGENT_ID\\\",\\\"payload\\\":{{\\\"category\\\":\\\"permission_pattern\\\",\\\"body\\\":\\\"cross-worktree contamination: commit $PAW_SHA landed on '$PAW_CUR' instead of expected '$PAW_EXPECTED_BRANCH'\\\"}}}}\" \\\n\
+                         >/dev/null 2>&1 || true\n\
+                 fi\n\
+             fi\n\
          fi\n\
          {HOOK_END_MARKER}\n"
     )
@@ -417,6 +437,43 @@ fn build_pre_push_hook() -> String {
          if [ -n \"$GIT_DIR\" ] && [ -f \"$GIT_DIR/paw-agent-id\" ]; then\n\
          echo 'error: git-paw agents must not push. The supervisor handles merges.' >&2\n\
          exit 1\n\
+         fi\n\
+         {HOOK_END_MARKER}\n"
+    )
+}
+
+/// Builds the `pre-commit` branch-guard hook.
+///
+/// Sources the per-worktree `$GIT_DIR/paw-agent-id` marker and, when
+/// `PAW_STRICT_BRANCH_GUARD` is not `false`, refuses a commit whose
+/// `git symbolic-ref --short HEAD` differs from `PAW_EXPECTED_BRANCH` — the
+/// branch the worktree was created for. This blocks cross-worktree
+/// contamination, where a commit advances the wrong branch because linked
+/// worktrees share `.git/refs`. The opt-out (`strict_branch_guard = false`)
+/// turns enforcement off while leaving the post-commit detection in place.
+/// Gated on the marker's presence so non-agent checkouts (the main repo)
+/// committing through the shared hooks dir are never blocked.
+fn build_pre_commit_branch_guard_hook() -> String {
+    format!(
+        "#!/bin/sh\n\
+         {HOOK_START_MARKER}\n\
+         # Branch guard: refuse a commit that would advance a branch other than\n\
+         # the one this worktree was created for (cross-worktree contamination).\n\
+         # git does not reliably export GIT_DIR to pre-commit, so resolve the\n\
+         # per-worktree gitdir via rev-parse with a GIT_DIR fallback.\n\
+         PAW_GD=\"${{GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}}\"\n\
+         if [ -n \"$PAW_GD\" ] && [ -f \"$PAW_GD/paw-agent-id\" ]; then\n\
+             . \"$PAW_GD/paw-agent-id\"\n\
+             if [ -n \"$PAW_EXPECTED_BRANCH\" ] && [ \"$PAW_STRICT_BRANCH_GUARD\" != \"false\" ]; then\n\
+                 PAW_CUR=$(git symbolic-ref --short HEAD 2>/dev/null)\n\
+                 if [ -n \"$PAW_CUR\" ] && [ \"$PAW_CUR\" != \"$PAW_EXPECTED_BRANCH\" ]; then\n\
+                     echo \"error: git-paw branch guard refused this commit\" >&2\n\
+                     echo \"  HEAD is on '$PAW_CUR' but this worktree is for '$PAW_EXPECTED_BRANCH'.\" >&2\n\
+                     echo \"  The commit would advance the wrong branch. Switch back to '$PAW_EXPECTED_BRANCH'\" >&2\n\
+                     echo \"  (or set [supervisor] strict_branch_guard = false to override).\" >&2\n\
+                     exit 1\n\
+                 fi\n\
+             fi\n\
          fi\n\
          {HOOK_END_MARKER}\n"
     )
@@ -555,6 +612,8 @@ pub fn install_git_hooks(
     worktree: &Path,
     broker_url: &str,
     agent_id: &str,
+    expected_branch: &str,
+    strict_branch_guard: bool,
 ) -> Result<(), PawError> {
     let common_git_dir = git_rev_parse_path(worktree, "--git-common-dir")?;
     let linked_git_dir = git_rev_parse_path(worktree, "--git-dir")?;
@@ -565,6 +624,10 @@ pub fn install_git_hooks(
         &build_post_commit_dispatcher_hook(),
     )?;
     write_hook_file(&hooks_dir.join("pre-push"), &build_pre_push_hook())?;
+    write_hook_file(
+        &hooks_dir.join("pre-commit"),
+        &build_pre_commit_branch_guard_hook(),
+    )?;
 
     let marker_path = linked_git_dir.join("paw-agent-id");
     if let Some(parent) = marker_path.parent() {
@@ -572,11 +635,18 @@ pub fn install_git_hooks(
             PawError::AgentsMdError(format!("failed to create '{}': {e}", parent.display()))
         })?;
     }
-    fs::write(
-        &marker_path,
-        build_agent_marker(broker_url, agent_id, None, None, None),
-    )
-    .map_err(|e| {
+    // The branch-guard fields are appended to the marker the hooks source.
+    // `PAW_EXPECTED_BRANCH` is the branch this worktree was created for;
+    // `PAW_STRICT_BRANCH_GUARD` controls whether the pre-commit hook *blocks*
+    // (vs. detection-only via post-commit).
+    let mut marker = build_agent_marker(broker_url, agent_id, None, None, None);
+    let _ = writeln!(marker, "PAW_EXPECTED_BRANCH={expected_branch}");
+    let _ = writeln!(
+        marker,
+        "PAW_STRICT_BRANCH_GUARD={}",
+        if strict_branch_guard { "true" } else { "false" }
+    );
+    fs::write(&marker_path, marker).map_err(|e| {
         PawError::AgentsMdError(format!("failed to write '{}': {e}", marker_path.display()))
     })?;
 
@@ -1412,10 +1482,34 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    fn pre_commit_guard_hook_blocks_on_branch_mismatch() {
+        let script = build_pre_commit_branch_guard_hook();
+        // Resolves the gitdir robustly (git does not export GIT_DIR to
+        // pre-commit), gates on the marker, compares HEAD vs expected branch,
+        // honours the strict opt-out, and exits non-zero on mismatch.
+        assert!(script.contains("git rev-parse --git-dir"));
+        assert!(script.contains("PAW_EXPECTED_BRANCH"));
+        assert!(script.contains("PAW_STRICT_BRANCH_GUARD"));
+        assert!(script.contains("git symbolic-ref --short HEAD"));
+        assert!(script.contains("exit 1"));
+    }
+
+    #[test]
+    fn post_commit_dispatcher_detects_branch_mismatch() {
+        let script = build_post_commit_dispatcher_hook();
+        // Detection (without enforcement) publishes both feedback and a
+        // permission_pattern learning when HEAD differs from the expected branch.
+        assert!(script.contains("agent.feedback"));
+        assert!(script.contains("agent.learning"));
+        assert!(script.contains("permission_pattern"));
+        assert!(script.contains("PAW_EXPECTED_BRANCH"));
+    }
+
+    #[test]
     fn post_commit_dispatcher_hook_reads_marker_and_publishes() {
         let script = build_post_commit_dispatcher_hook();
-        assert!(script.contains("$GIT_DIR/paw-agent-id"));
-        assert!(script.contains(". \"$GIT_DIR/paw-agent-id\""));
+        assert!(script.contains("$PAW_GD/paw-agent-id"));
+        assert!(script.contains(". \"$PAW_GD/paw-agent-id\""));
         assert!(script.contains("$PAW_BROKER_URL/publish"));
         assert!(script.contains("$PAW_AGENT_ID"));
         assert!(script.contains("agent.artifact"));
@@ -1522,7 +1616,7 @@ mod tests {
         let worktree = tmp.path();
         init_git_repo(worktree);
 
-        install_git_hooks(worktree, "http://127.0.0.1:9119", "feat-x").unwrap();
+        install_git_hooks(worktree, "http://127.0.0.1:9119", "feat-x", "feat/x", true).unwrap();
 
         let post_commit = worktree.join(".git").join("hooks").join("post-commit");
         let pre_push = worktree.join(".git").join("hooks").join("pre-push");
@@ -1533,12 +1627,21 @@ mod tests {
         assert!(marker.exists(), "paw-agent-id marker should exist");
 
         let pc = fs::read_to_string(&post_commit).unwrap();
-        assert!(pc.contains("$GIT_DIR/paw-agent-id"));
+        assert!(pc.contains("$PAW_GD/paw-agent-id"));
         assert!(pc.contains("agent.artifact"));
+
+        // pre-commit branch guard installed alongside the dispatcher.
+        let pre_commit = worktree.join(".git").join("hooks").join("pre-commit");
+        assert!(pre_commit.exists(), "pre-commit guard should exist");
+        let prc = fs::read_to_string(&pre_commit).unwrap();
+        assert!(prc.contains("branch guard"));
+        assert!(prc.contains("PAW_EXPECTED_BRANCH"));
 
         let marker_body = fs::read_to_string(&marker).unwrap();
         assert!(marker_body.contains("PAW_AGENT_ID=feat-x"));
         assert!(marker_body.contains("PAW_BROKER_URL=http://127.0.0.1:9119"));
+        assert!(marker_body.contains("PAW_EXPECTED_BRANCH=feat/x"));
+        assert!(marker_body.contains("PAW_STRICT_BRANCH_GUARD=true"));
 
         #[cfg(unix)]
         {
@@ -1557,7 +1660,7 @@ mod tests {
         let hook_path = worktree.join(".git").join("hooks").join("post-commit");
         fs::write(&hook_path, "#!/bin/sh\necho user hook\n").unwrap();
 
-        install_git_hooks(worktree, "http://127.0.0.1:9119", "feat-x").unwrap();
+        install_git_hooks(worktree, "http://127.0.0.1:9119", "feat-x", "feat/x", true).unwrap();
 
         let body = fs::read_to_string(&hook_path).unwrap();
         assert!(body.contains("echo user hook"));
@@ -1593,7 +1696,14 @@ mod tests {
             .output()
             .unwrap();
 
-        install_git_hooks(&linked_path, "http://127.0.0.1:9119", "feat-x").unwrap();
+        install_git_hooks(
+            &linked_path,
+            "http://127.0.0.1:9119",
+            "feat-x",
+            "feat/x",
+            true,
+        )
+        .unwrap();
 
         // Dispatcher lives in main .git/hooks/
         let post_commit = main_repo.join(".git").join("hooks").join("post-commit");

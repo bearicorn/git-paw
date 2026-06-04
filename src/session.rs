@@ -57,6 +57,79 @@ impl fmt::Display for SessionStatus {
     }
 }
 
+/// The status git-paw displays for a session, derived from the persisted
+/// receipt status combined with a live tmux probe (design D4 of
+/// `session-bugfixes`).
+///
+/// Distinct from [`SessionStatus`] (the on-disk receipt value): a receipt
+/// that claims `Active` but whose tmux session has vanished surfaces as
+/// [`DisplayStatus::Stale`] rather than silently downgrading to `Stopped`,
+/// so the user can tell a clean stop apart from a crashed / carried-over
+/// session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayStatus {
+    /// Receipt says active and the tmux session is alive.
+    Active,
+    /// Receipt says paused and the tmux session is alive.
+    Paused,
+    /// Receipt says stopped, or a paused session whose tmux server died.
+    Stopped,
+    /// Receipt claims active but the tmux session is gone (crash or
+    /// release-boundary carry-over).
+    Stale,
+}
+
+impl DisplayStatus {
+    /// Resolves the display status from the persisted receipt status and a
+    /// tmux-liveness probe.
+    ///
+    /// `🔴 Stale` surfaces only for `Active` receipts whose probe returns
+    /// [`crate::tmux::SessionLiveness::Stale`]. An `Indeterminate` probe (the
+    /// tmux binary is missing) never yields `Stale`: it preserves the
+    /// pre-existing "tmux not alive" display by downgrading active/paused to
+    /// `Stopped`.
+    #[must_use]
+    pub fn from_receipt(status: &SessionStatus, liveness: crate::tmux::SessionLiveness) -> Self {
+        use crate::tmux::SessionLiveness as L;
+        match (status, liveness) {
+            (SessionStatus::Active, L::Alive) => Self::Active,
+            (SessionStatus::Active, L::Stale) => Self::Stale,
+            (SessionStatus::Paused, L::Alive) => Self::Paused,
+            // Stopped receipt (any probe), paused-with-dead-tmux, and every
+            // Indeterminate case fall through to the unchanged Stopped display.
+            _ => Self::Stopped,
+        }
+    }
+
+    /// Returns the coloured status icon for terminal display.
+    #[must_use]
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Active => "\u{1f7e2}",  // 🟢
+            Self::Paused => "\u{1f535}",  // 🔵
+            Self::Stopped => "\u{1f7e1}", // 🟡
+            Self::Stale => "\u{1f534}",   // 🔴
+        }
+    }
+
+    /// Returns the lowercase status string used in JSON output and logs.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Stopped => "stopped",
+            Self::Stale => "stale",
+        }
+    }
+}
+
+impl fmt::Display for DisplayStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A worktree entry within a session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeEntry {
@@ -70,6 +143,18 @@ pub struct WorktreeEntry {
     /// When `true`, `purge` will delete the branch after removing the worktree.
     #[serde(default)]
     pub branch_created: bool,
+
+    /// Boot+task prompt awaiting submission.
+    ///
+    /// Set only when an agent is attached via `git paw add` to a *paused*
+    /// session (design D4): the pane is created and the boot block injected,
+    /// but the prompt is held unsubmitted so the new agent stays paused with
+    /// the rest of the session. `git paw resume` (restart-from-pause) submits
+    /// any entry carrying a pending prompt and clears the field. `None` for
+    /// every start-time agent and for adds to an active session (submitted
+    /// immediately). Omitted from JSON when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_boot_prompt: Option<String>,
 }
 
 /// Persisted session state for a git-paw session.
@@ -132,6 +217,14 @@ impl Session {
             }
             _ => self.status.clone(),
         }
+    }
+
+    /// Returns the session's creation timestamp formatted as an ISO 8601 UTC
+    /// string, or `None` if the timestamp is before the Unix epoch. Used by
+    /// the stale-receipt invalidation notice (design D5).
+    #[must_use]
+    pub fn created_at_iso8601(&self) -> Option<String> {
+        format_iso8601(self.created_at).ok()
     }
 }
 
@@ -245,6 +338,43 @@ pub fn find_session_for_repo_in(repo_path: &Path, dir: &Path) -> Result<Option<S
     Ok(None)
 }
 
+/// Loads every session receipt in the given directory.
+///
+/// Used by `purge --stale` to enumerate all sessions on the machine and probe
+/// each for staleness. Malformed files are skipped (matching
+/// [`find_session_for_repo_in`]). A missing directory yields an empty list.
+pub fn load_all_sessions_in(dir: &Path) -> Result<Vec<Session>, PawError> {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(PawError::SessionError(format!(
+                "failed to read sessions dir: {e}"
+            )));
+        }
+    };
+
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.map_err(|e| PawError::SessionError(format!("failed to read dir entry: {e}")))?;
+        let path = entry.path();
+
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+
+        let Ok(contents) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Ok(session) = serde_json::from_str::<Session>(&contents) {
+            out.push(session);
+        }
+    }
+
+    Ok(out)
+}
+
 /// Deletes a session file by name from the given directory.
 pub fn delete_session_in(session_name: &str, dir: &Path) -> Result<(), PawError> {
     let path = dir.join(format!("{session_name}.json"));
@@ -254,6 +384,95 @@ pub fn delete_session_in(session_name: &str, dir: &Path) -> Result<(), PawError>
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
         Err(e) => Err(PawError::SessionError(format!(
             "failed to delete session file: {e}"
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-repo session discovery file (`<repo>/.git-paw/sessions/<name>.json`)
+// ---------------------------------------------------------------------------
+//
+// Distinct from the global receipt above: this is the lightweight discovery
+// surface the bundled `assets/scripts/sweep.sh` helper reads to find the
+// active session name and its agent roster from inside the repo, without
+// reaching into the XDG state dir. `git paw start` writes it; `purge` removes
+// it (design `session-json-location`).
+
+/// One agent entry in the per-repo discovery file.
+///
+/// The field set and names match exactly what `sweep.sh` expects:
+/// `branch_id` (the broker agent id / slugified branch), `worktree_path`,
+/// `cli`, and `pane_index`. Adding fields is backwards-compatible — consumers
+/// ignore unknown keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoAgentEntry {
+    /// Broker agent id (slugified branch), e.g. `feat-add-auth`.
+    pub branch_id: String,
+    /// Absolute path to the agent's worktree.
+    pub worktree_path: PathBuf,
+    /// The AI CLI assigned to the agent's pane.
+    pub cli: String,
+    /// The agent's tmux pane index within the session window.
+    pub pane_index: usize,
+}
+
+/// The per-repo discovery document written to
+/// `<repo>/.git-paw/sessions/<session_name>.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoSessionFile {
+    /// The tmux session name (also the file stem).
+    pub session_name: String,
+    /// The coding-agent roster for the session.
+    pub agents: Vec<RepoAgentEntry>,
+}
+
+/// Returns the per-repo sessions directory: `<repo>/.git-paw/sessions/`.
+#[must_use]
+pub fn repo_sessions_dir(repo_root: &Path) -> PathBuf {
+    repo_root.join(".git-paw").join("sessions")
+}
+
+/// Returns the per-repo session file path for a session name.
+#[must_use]
+pub fn repo_session_path(repo_root: &Path, session_name: &str) -> PathBuf {
+    repo_sessions_dir(repo_root).join(format!("{session_name}.json"))
+}
+
+/// Atomically writes the per-repo discovery file for a session.
+///
+/// Creates `<repo>/.git-paw/sessions/` if absent, then writes
+/// `<session_name>.json` via a temp-file-and-rename so a concurrent
+/// `sweep.sh` read never sees a partial document.
+pub fn write_repo_session_file(repo_root: &Path, file: &RepoSessionFile) -> Result<(), PawError> {
+    let dir = repo_sessions_dir(repo_root);
+    fs::create_dir_all(&dir).map_err(|e| {
+        PawError::SessionError(format!("failed to create per-repo sessions dir: {e}"))
+    })?;
+
+    let json = serde_json::to_string_pretty(file).map_err(|e| {
+        PawError::SessionError(format!("failed to serialize per-repo session file: {e}"))
+    })?;
+
+    let final_path = dir.join(format!("{}.json", file.session_name));
+    let tmp_path = dir.join(format!("{}.tmp", file.session_name));
+    fs::write(&tmp_path, json.as_bytes()).map_err(|e| {
+        PawError::SessionError(format!("failed to write per-repo session temp file: {e}"))
+    })?;
+    fs::rename(&tmp_path, &final_path).map_err(|e| {
+        PawError::SessionError(format!("failed to rename per-repo session temp file: {e}"))
+    })?;
+    Ok(())
+}
+
+/// Removes the per-repo discovery file for a session. Idempotent — a missing
+/// file is not an error.
+pub fn remove_repo_session_file(repo_root: &Path, session_name: &str) -> Result<(), PawError> {
+    let path = repo_session_path(repo_root, session_name);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(PawError::SessionError(format!(
+            "failed to remove per-repo session file: {e}"
         ))),
     }
 }
@@ -424,18 +643,21 @@ mod tests {
                     worktree_path: PathBuf::from("/Users/test/code/my-project-feature-auth"),
                     cli: "claude".to_string(),
                     branch_created: false,
+                    pending_boot_prompt: None,
                 },
                 WorktreeEntry {
                     branch: "fix/api".to_string(),
                     worktree_path: PathBuf::from("/Users/test/code/my-project-fix-api"),
                     cli: "gemini".to_string(),
                     branch_created: false,
+                    pending_boot_prompt: None,
                 },
                 WorktreeEntry {
                     branch: "feature/logging".to_string(),
                     worktree_path: PathBuf::from("/Users/test/code/my-project-feature-logging"),
                     cli: "claude".to_string(),
                     branch_created: false,
+                    pending_boot_prompt: None,
                 },
             ],
             broker_port: None,
@@ -597,6 +819,64 @@ mod tests {
         assert_eq!(SessionStatus::Active.to_string(), "active");
         assert_eq!(SessionStatus::Paused.to_string(), "paused");
         assert_eq!(SessionStatus::Stopped.to_string(), "stopped");
+    }
+
+    // -- DisplayStatus: receipt × liveness → display (session-bugfixes Bug 2,
+    //    tasks 4.1–4.3) --
+
+    #[test]
+    fn display_status_active_receipt_alive_tmux_is_active() {
+        use crate::tmux::SessionLiveness;
+        let d = DisplayStatus::from_receipt(&SessionStatus::Active, SessionLiveness::Alive);
+        assert_eq!(d, DisplayStatus::Active);
+        assert_eq!(d.as_str(), "active");
+        assert_eq!(d.icon(), "\u{1f7e2}");
+    }
+
+    #[test]
+    fn display_status_active_receipt_stale_tmux_is_stale() {
+        use crate::tmux::SessionLiveness;
+        let d = DisplayStatus::from_receipt(&SessionStatus::Active, SessionLiveness::Stale);
+        assert_eq!(d, DisplayStatus::Stale);
+        assert_eq!(d.as_str(), "stale");
+        assert_eq!(d.icon(), "\u{1f534}");
+    }
+
+    #[test]
+    fn display_status_stopped_receipt_is_stopped_regardless_of_tmux() {
+        use crate::tmux::SessionLiveness;
+        for liveness in [
+            SessionLiveness::Alive,
+            SessionLiveness::Stale,
+            SessionLiveness::Indeterminate,
+        ] {
+            let d = DisplayStatus::from_receipt(&SessionStatus::Stopped, liveness);
+            assert_eq!(d, DisplayStatus::Stopped, "liveness {liveness:?}");
+            assert_eq!(d.as_str(), "stopped");
+        }
+    }
+
+    #[test]
+    fn display_status_indeterminate_never_reports_stale() {
+        use crate::tmux::SessionLiveness;
+        // tmux binary missing: an active receipt must NOT surface as stale —
+        // it preserves the pre-existing "not alive" display (stopped).
+        let d = DisplayStatus::from_receipt(&SessionStatus::Active, SessionLiveness::Indeterminate);
+        assert_ne!(d, DisplayStatus::Stale);
+        assert_eq!(d, DisplayStatus::Stopped);
+    }
+
+    #[test]
+    fn display_status_paused_alive_is_paused_dead_is_stopped() {
+        use crate::tmux::SessionLiveness;
+        assert_eq!(
+            DisplayStatus::from_receipt(&SessionStatus::Paused, SessionLiveness::Alive),
+            DisplayStatus::Paused
+        );
+        assert_eq!(
+            DisplayStatus::from_receipt(&SessionStatus::Paused, SessionLiveness::Stale),
+            DisplayStatus::Stopped
+        );
     }
 
     // -- Paused variant: round-trip + effective_status --
@@ -853,5 +1133,75 @@ mod tests {
         // No broker fields to recover
         assert!(recovered.broker_port.is_none());
         assert!(recovered.broker_bind.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-repo discovery file (session-json-location, Bug 3)
+    // -----------------------------------------------------------------------
+
+    fn sample_repo_file() -> RepoSessionFile {
+        RepoSessionFile {
+            session_name: "paw-my-project".to_string(),
+            agents: vec![
+                RepoAgentEntry {
+                    branch_id: "feat-add-auth".to_string(),
+                    worktree_path: PathBuf::from("/repo-feat-add-auth"),
+                    cli: "claude".to_string(),
+                    pane_index: 2,
+                },
+                RepoAgentEntry {
+                    branch_id: "feat-fix-db".to_string(),
+                    worktree_path: PathBuf::from("/repo-feat-fix-db"),
+                    cli: "gemini".to_string(),
+                    pane_index: 3,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn write_repo_session_file_writes_sweep_compatible_shape() {
+        let repo = TempDir::new().expect("repo");
+        let file = sample_repo_file();
+        write_repo_session_file(repo.path(), &file).expect("write");
+
+        // Written at the path sweep.sh reads.
+        let path = repo_session_path(repo.path(), "paw-my-project");
+        assert_eq!(
+            path,
+            repo.path()
+                .join(".git-paw")
+                .join("sessions")
+                .join("paw-my-project.json")
+        );
+        assert!(path.exists(), "discovery file should exist");
+
+        // Shape round-trips with the exact field names sweep.sh expects.
+        let raw = fs::read_to_string(&path).expect("read");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(parsed["session_name"], "paw-my-project");
+        let agents = parsed["agents"].as_array().expect("agents array");
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0]["branch_id"], "feat-add-auth");
+        assert_eq!(agents[0]["worktree_path"], "/repo-feat-add-auth");
+        assert_eq!(agents[0]["cli"], "claude");
+        assert_eq!(agents[0]["pane_index"], 2);
+    }
+
+    #[test]
+    fn remove_repo_session_file_is_idempotent() {
+        let repo = TempDir::new().expect("repo");
+        // Removing when nothing exists is a no-op (not an error).
+        remove_repo_session_file(repo.path(), "paw-my-project").expect("remove-missing");
+
+        write_repo_session_file(repo.path(), &sample_repo_file()).expect("write");
+        let path = repo_session_path(repo.path(), "paw-my-project");
+        assert!(path.exists());
+
+        remove_repo_session_file(repo.path(), "paw-my-project").expect("remove");
+        assert!(
+            !path.exists(),
+            "discovery file should be removed by purge path"
+        );
     }
 }

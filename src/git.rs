@@ -505,6 +505,49 @@ pub fn check_uncommitted_specs(
     Ok(uncommitted_specs)
 }
 
+/// Returns the list of files with uncommitted changes in `worktree_root`.
+///
+/// Runs `git status --porcelain` inside the worktree and parses each line's
+/// path (the portion after the 3-character XY-status prefix). Untracked,
+/// modified, staged, and renamed entries are all included. An empty vec means
+/// the worktree is clean. Used by `git paw remove`'s uncommitted-work safety
+/// check (design D7) to tell the user exactly what would be lost.
+pub fn uncommitted_files(worktree_root: &Path) -> Result<Vec<String>, PawError> {
+    let output = Command::new("git")
+        .current_dir(worktree_root)
+        .args(["status", "--porcelain"])
+        .output()
+        .map_err(|e| {
+            PawError::WorktreeError(format!(
+                "failed to run git status in {}: {e}",
+                worktree_root.display()
+            ))
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(PawError::WorktreeError(format!(
+            "git status failed in {}: {stderr}",
+            worktree_root.display()
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut files = Vec::new();
+    for line in stdout.lines() {
+        if line.len() <= 3 {
+            continue;
+        }
+        // Porcelain v1 format: `XY <path>` (or `XY <old> -> <new>` for
+        // renames). The path starts at byte 3. For renames, report the new
+        // path (the portion after `-> `).
+        let path = &line[3..];
+        let reported = path.rsplit(" -> ").next().unwrap_or(path);
+        files.push(reported.trim().to_string());
+    }
+    Ok(files)
+}
+
 /// Merges the specified branch into the current branch.
 ///
 /// Returns `true` if the merge was successful, `false` if there were conflicts.

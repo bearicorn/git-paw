@@ -192,6 +192,90 @@ pub enum Command {
         no_rebase: bool,
     },
 
+    /// Attach a new worktree + agent pane to a running session
+    #[command(
+        about = "Attach a new worktree + agent pane to a running session",
+        long_about = "Hot-attaches a worktree and agent pane to an already-running session — \
+                      no stop/purge/restart, the other agents keep working undisturbed. The \
+                      agent grid re-tiles to the layout a start of that many agents would \
+                      produce, the new branch is registered in the session, and the agent boots \
+                      with the same broker boot block + initial prompt a start-time agent gets.\n\n\
+                      Provide a branch name, or use --from-spec to derive the branch (and CLI) \
+                      from a discovered spec. Adding past the 25-agent cap is rejected. When the \
+                      session is paused, the new pane starts paused too and begins on the next \
+                      `git paw resume`. The supervisor (if any) discovers the new agent on its \
+                      next broker poll — no restart.\n\n\
+                      Examples:\n  \
+                      git paw add feat/new-thing\n  \
+                      git paw add feat/api --cli codex\n  \
+                      git paw add --from-spec add-export"
+    )]
+    Add {
+        /// Branch to attach. Omit when using --from-spec (the branch is
+        /// derived from the spec).
+        #[arg(
+            required_unless_present = "from_spec",
+            help = "Branch to attach (omit when using --from-spec)"
+        )]
+        branch: Option<String>,
+
+        /// AI CLI to launch in the new pane (defaults to the session's CLI).
+        #[arg(
+            long,
+            help = "AI CLI for the new pane (defaults to the session's default CLI)"
+        )]
+        cli: Option<String>,
+
+        /// Resolve the branch name and CLI from a discovered spec instead of a
+        /// positional branch argument.
+        #[arg(
+            long,
+            conflicts_with = "branch",
+            help = "Derive branch + CLI from a spec (OpenSpec change, Markdown spec, or Spec Kit feature)"
+        )]
+        from_spec: Option<String>,
+    },
+
+    /// Detach a single agent from a running session
+    #[command(
+        about = "Detach a single agent from a running session",
+        long_about = "Removes one agent from an active session: closes its tmux pane, re-tiles \
+                      the grid for the smaller agent count, removes its worktree (reusing \
+                      `git paw purge`'s per-worktree teardown), and drops it from the session. \
+                      The other agents are left untouched.\n\n\
+                      Safe by default: `remove` refuses to delete a worktree with uncommitted \
+                      changes (it lists what would be lost) unless you pass --force. Pass \
+                      --keep-worktree to detach the pane + session entry but leave the worktree \
+                      and branch on disk (this skips the uncommitted-work check, since nothing \
+                      is deleted). `remove supervisor` is refused — use `git paw stop` to end \
+                      the whole session. The supervisor notices the departure on its next broker \
+                      poll (the agent stops heartbeating) — no restart.\n\n\
+                      Examples:\n  \
+                      git paw remove feat/done-thing\n  \
+                      git paw remove feat/wip --force\n  \
+                      git paw remove feat/keep --keep-worktree"
+    )]
+    Remove {
+        /// Branch of the agent to remove.
+        #[arg(help = "Branch of the agent to remove")]
+        branch: String,
+
+        /// Detach the pane + session entry but leave the worktree and branch
+        /// on disk (skips the uncommitted-work safety check).
+        #[arg(
+            long,
+            help = "Leave the worktree + branch on disk; only detach the pane and session entry"
+        )]
+        keep_worktree: bool,
+
+        /// Remove the worktree even when it has uncommitted changes.
+        #[arg(
+            long,
+            help = "Remove even with uncommitted changes (bypass the safety check)"
+        )]
+        force: bool,
+    },
+
     /// Pause the session (detaches client, stops broker, leaves CLIs running)
     #[command(
         about = "Pause the session (detaches client, stops broker, leaves CLIs running)",
@@ -234,12 +318,23 @@ pub enum Command {
         about = "Remove everything (tmux session, worktrees, and state)",
         long_about = "Nuclear option: kills the tmux session, removes all worktrees, and deletes \
                       session state. Requires confirmation unless --force is used.\n\n\
-                      Examples:\n  git paw purge\n  git paw purge --force"
+                      Use --stale to purge only sessions whose tmux session is gone (a stale \
+                      receipt). Live sessions are left untouched, so --stale is safe in cleanup \
+                      scripts. Pairing --stale with --force is a no-op (--force is redundant on \
+                      a stale entry).\n\n\
+                      Examples:\n  git paw purge\n  git paw purge --force\n  git paw purge --stale"
     )]
     Purge {
         /// Skip confirmation prompt.
         #[arg(long, help = "Skip confirmation prompt")]
         force: bool,
+        /// Purge only stale sessions (receipt claims active but tmux is gone).
+        #[arg(
+            long,
+            help = "Purge only stale sessions (receipt claims active but tmux is gone); \
+                    live sessions untouched"
+        )]
+        stale: bool,
     },
 
     /// Show session state for the current repo
@@ -247,9 +342,19 @@ pub enum Command {
         about = "Show session state for the current repo",
         long_about = "Displays the current session status, branches, CLIs, and worktree paths \
                       for the repository in the current directory.\n\n\
-                      Example:\n  git paw status"
+                      Status is one of 🟢 active (tmux running), 🔵 paused, 🟡 stopped, or \
+                      🔴 stale (the receipt claims active but the tmux session no longer \
+                      exists — a crash or release-boundary carry-over). Run `git paw start` to \
+                      self-heal a stale receipt, or `git paw purge --stale` to clear it.\n\n\
+                      Pass --json for machine-readable output (the `status` field is one of \
+                      active/paused/stopped/stale).\n\n\
+                      Examples:\n  git paw status\n  git paw status --json"
     )]
-    Status,
+    Status {
+        /// Emit machine-readable JSON instead of the human-readable display.
+        #[arg(long, help = "Emit machine-readable JSON")]
+        json: bool,
+    },
 
     /// List detected and custom AI CLIs
     #[command(
@@ -342,6 +447,38 @@ pub enum Command {
         /// Session name to replay from (defaults to most recent).
         #[arg(long, help = "Session to replay from (defaults to most recent)")]
         session: Option<String>,
+    },
+
+    /// Report manually-approved command patterns for a session
+    #[command(
+        about = "Report manually-approved command patterns for a session",
+        long_about = "Lists the command patterns you manually approved during a session — the \
+                      prompts the auto-approve preset did NOT match — sorted by how often each \
+                      was approved. Each row carries a SUGGEST hint for where the pattern might \
+                      be promoted: the project-local allowlist (project-specific scripts/paths) \
+                      or the bundled dev-allowlist preset (general commands like `make <target>`). \
+                      The suggestion is a hint, not a rule.\n\n\
+                      Reads `.git-paw/sessions/<session>.manual-approvals.jsonl`. Defaults to the \
+                      active session; pass --session to target another. Recording is controlled by \
+                      `[supervisor] manual_approvals_log` (default on).\n\n\
+                      Examples:\n  \
+                      git paw approvals\n  \
+                      git paw approvals --json\n  \
+                      git paw approvals --session paw-myproject\n  \
+                      git paw approvals --limit 5"
+    )]
+    Approvals {
+        /// Session to read approvals from (defaults to the active session).
+        #[arg(long, help = "Session to read from (defaults to the active session)")]
+        session: Option<String>,
+
+        /// Cap the output to the top N patterns by count.
+        #[arg(long, help = "Show at most N patterns (top N by count)")]
+        limit: Option<usize>,
+
+        /// Emit machine-readable JSON instead of the text table.
+        #[arg(long, help = "Emit machine-readable JSON")]
+        json: bool,
     },
 }
 
@@ -874,6 +1011,152 @@ mod tests {
         }
     }
 
+    // -- Add subcommand --
+
+    #[test]
+    fn add_with_branch_only() {
+        let cli = parse(&["add", "feat/new"]);
+        match cli.command.unwrap() {
+            Command::Add {
+                branch,
+                cli,
+                from_spec,
+            } => {
+                assert_eq!(branch.as_deref(), Some("feat/new"));
+                assert!(cli.is_none());
+                assert!(from_spec.is_none());
+            }
+            other => panic!("expected Add, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_with_branch_and_cli() {
+        let cli = parse(&["add", "feat/x", "--cli", "codex"]);
+        match cli.command.unwrap() {
+            Command::Add { branch, cli, .. } => {
+                assert_eq!(branch.as_deref(), Some("feat/x"));
+                assert_eq!(cli.as_deref(), Some("codex"));
+            }
+            other => panic!("expected Add, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_with_from_spec_only_needs_no_branch() {
+        let cli = parse(&["add", "--from-spec", "add-export"]);
+        match cli.command.unwrap() {
+            Command::Add {
+                branch, from_spec, ..
+            } => {
+                assert!(branch.is_none());
+                assert_eq!(from_spec.as_deref(), Some("add-export"));
+            }
+            other => panic!("expected Add, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_with_no_branch_and_no_from_spec_is_rejected() {
+        let result = Cli::try_parse_from(["git-paw", "add"]);
+        assert!(
+            result.is_err(),
+            "add requires either a branch or --from-spec"
+        );
+    }
+
+    #[test]
+    fn add_with_branch_and_from_spec_is_rejected() {
+        let result = Cli::try_parse_from(["git-paw", "add", "feat/x", "--from-spec", "change"]);
+        assert!(
+            result.is_err(),
+            "branch and --from-spec are mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn add_help_lists_flags_and_examples() {
+        let result = Cli::try_parse_from(["git-paw", "add", "--help"]);
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(help.contains("--cli"), "got: {help}");
+        assert!(help.contains("--from-spec"), "got: {help}");
+        assert!(
+            help.contains("git paw add feat/api --cli codex"),
+            "add --help should include copy-pasteable examples; got: {help}"
+        );
+    }
+
+    // -- Remove subcommand --
+
+    #[test]
+    fn remove_with_branch_only() {
+        let cli = parse(&["remove", "feat/done"]);
+        match cli.command.unwrap() {
+            Command::Remove {
+                branch,
+                keep_worktree,
+                force,
+            } => {
+                assert_eq!(branch, "feat/done");
+                assert!(!keep_worktree);
+                assert!(!force);
+            }
+            other => panic!("expected Remove, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_with_keep_worktree_and_force() {
+        let cli = parse(&["remove", "feat/x", "--keep-worktree", "--force"]);
+        match cli.command.unwrap() {
+            Command::Remove {
+                keep_worktree,
+                force,
+                ..
+            } => {
+                assert!(keep_worktree);
+                assert!(force);
+            }
+            other => panic!("expected Remove, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_without_branch_is_rejected() {
+        let result = Cli::try_parse_from(["git-paw", "remove"]);
+        assert!(result.is_err(), "remove requires a branch");
+    }
+
+    #[test]
+    fn remove_help_lists_flags_and_examples() {
+        let result = Cli::try_parse_from(["git-paw", "remove", "--help"]);
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(help.contains("--keep-worktree"), "got: {help}");
+        assert!(help.contains("--force"), "got: {help}");
+        assert!(
+            help.contains("git paw remove feat/wip --force"),
+            "remove --help should include copy-pasteable examples; got: {help}"
+        );
+    }
+
+    #[test]
+    fn root_help_lists_add_and_remove() {
+        let result = Cli::try_parse_from(["git-paw", "--help"]);
+        let help = result.unwrap_err().to_string();
+        assert!(
+            help.contains("add"),
+            "root help should list add; got: {help}"
+        );
+        assert!(
+            help.contains("remove"),
+            "root help should list remove; got: {help}"
+        );
+    }
+
     // -- Pause subcommand --
 
     #[test]
@@ -979,7 +1262,10 @@ mod tests {
     fn purge_without_force() {
         let cli = parse(&["purge"]);
         match cli.command.unwrap() {
-            Command::Purge { force } => assert!(!force),
+            Command::Purge { force, stale } => {
+                assert!(!force);
+                assert!(!stale);
+            }
             other => panic!("expected Purge, got {other:?}"),
         }
     }
@@ -988,7 +1274,34 @@ mod tests {
     fn purge_with_force() {
         let cli = parse(&["purge", "--force"]);
         match cli.command.unwrap() {
-            Command::Purge { force } => assert!(force),
+            Command::Purge { force, stale } => {
+                assert!(force);
+                assert!(!stale);
+            }
+            other => panic!("expected Purge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn purge_with_stale() {
+        let cli = parse(&["purge", "--stale"]);
+        match cli.command.unwrap() {
+            Command::Purge { force, stale } => {
+                assert!(!force);
+                assert!(stale);
+            }
+            other => panic!("expected Purge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn purge_with_stale_and_force() {
+        let cli = parse(&["purge", "--stale", "--force"]);
+        match cli.command.unwrap() {
+            Command::Purge { force, stale } => {
+                assert!(force);
+                assert!(stale);
+            }
             other => panic!("expected Purge, got {other:?}"),
         }
     }
@@ -998,7 +1311,19 @@ mod tests {
     #[test]
     fn status_parses() {
         let cli = parse(&["status"]);
-        assert!(matches!(cli.command.unwrap(), Command::Status));
+        match cli.command.unwrap() {
+            Command::Status { json } => assert!(!json),
+            other => panic!("expected Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_with_json() {
+        let cli = parse(&["status", "--json"]);
+        match cli.command.unwrap() {
+            Command::Status { json } => assert!(json),
+            other => panic!("expected Status, got {other:?}"),
+        }
     }
 
     // -- List-CLIs subcommand --
@@ -1247,6 +1572,82 @@ mod tests {
         assert!(
             help.contains("--no-rebase"),
             "start --help should contain --no-rebase, got: {help}"
+        );
+    }
+
+    // -- Approvals subcommand --
+
+    #[test]
+    fn approvals_parses_with_no_flags() {
+        let cli = parse(&["approvals"]);
+        match cli.command.unwrap() {
+            Command::Approvals {
+                session,
+                limit,
+                json,
+            } => {
+                assert!(session.is_none());
+                assert!(limit.is_none());
+                assert!(!json);
+            }
+            other => panic!("expected Approvals, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn approvals_with_session_limit_and_json() {
+        let cli = parse(&[
+            "approvals",
+            "--session",
+            "paw-other",
+            "--limit",
+            "5",
+            "--json",
+        ]);
+        match cli.command.unwrap() {
+            Command::Approvals {
+                session,
+                limit,
+                json,
+            } => {
+                assert_eq!(session.as_deref(), Some("paw-other"));
+                assert_eq!(limit, Some(5));
+                assert!(json);
+            }
+            other => panic!("expected Approvals, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn approvals_rejects_non_numeric_limit() {
+        let result = Cli::try_parse_from(["git-paw", "approvals", "--limit", "lots"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn approvals_help_lists_flags_and_examples() {
+        let result = Cli::try_parse_from(["git-paw", "approvals", "--help"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(help.contains("--session"), "got: {help}");
+        assert!(help.contains("--limit"), "got: {help}");
+        assert!(help.contains("--json"), "got: {help}");
+        assert!(
+            help.contains("git paw approvals --json"),
+            "help should include examples, got: {help}"
+        );
+    }
+
+    #[test]
+    fn help_shows_approvals_subcommand() {
+        let result = Cli::try_parse_from(["git-paw", "--help"]);
+        let err = result.unwrap_err();
+        let help = err.to_string();
+        assert!(
+            help.contains("approvals"),
+            "root help should list approvals subcommand, got: {help}"
         );
     }
 
