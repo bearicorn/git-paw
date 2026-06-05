@@ -20,6 +20,28 @@ pub struct CustomCli {
     /// Optional human-readable display name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Optional override for the boot-prompt settle delay (milliseconds)
+    /// before the submit `Enter`.
+    ///
+    /// git-paw injects the boot block, waits this long for a paste-aware CLI
+    /// to settle the paste, then sends `Enter` separately. The default
+    /// ([`crate::DEFAULT_SUBMIT_DELAY_MS`]) suits most CLIs; raise it for a
+    /// CLI whose large-paste handling needs longer before the submit lands.
+    /// Set per-CLI rather than hardcoded so the launcher stays CLI-agnostic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submit_delay_ms: Option<u64>,
+    /// Optional path to this CLI's claude-format settings file
+    /// (the file carrying `allowed_bash_prefixes`).
+    ///
+    /// When set and the broker is enabled, git-paw seeds the broker-curl
+    /// allowlist into this path too, so the CLI's boot-time broker `curl`
+    /// does not raise a permission prompt. Use for claude-family variants
+    /// that read a non-default config dir (e.g. a CLI reading
+    /// `~/.claude-oss/settings.json`). A leading `~` is expanded to the
+    /// home directory. Left unset, only the repo-local `.claude/settings.json`
+    /// is seeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_path: Option<String>,
 }
 
 /// A named preset defining branches and a CLI to use.
@@ -82,6 +104,50 @@ pub struct SpecsConfig {
     pub spec_type: Option<String>,
 }
 
+/// Enforcement mode for the opsx role-gating guard.
+///
+/// Governs how the broker reacts when a non-supervisor agent commits an
+/// `OpenSpec` archive operation (see the `opsx-role-gating` capability). The
+/// serde wire values are the lowercase strings `"warn"`, `"block"`, and
+/// `"off"`; an absent `[opsx].role_gating` resolves to [`Self::Warn`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RoleGatingMode {
+    /// Publish an `agent.feedback` to the offending agent and record an
+    /// `agent.learning` with category `permission_pattern`. The default.
+    #[default]
+    Warn,
+    /// Warn behaviour PLUS publish an `agent.feedback` targeted at the
+    /// supervisor requesting it revert the offending commit via its
+    /// merge-orchestration skill.
+    Block,
+    /// Disable the guard entirely — no classification, feedback, or learning.
+    Off,
+}
+
+/// opsx (`OpenSpec`) integration configuration.
+///
+/// Currently carries the single `role_gating` knob. Embedded as
+/// `Option<OpsxConfig>` on [`PawConfig`] so configs without an `[opsx]`
+/// section round-trip identically.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpsxConfig {
+    /// Enforcement mode for the role-gating guard. `None` (the absent
+    /// default) resolves to [`RoleGatingMode::Warn`] via
+    /// [`OpsxConfig::role_gating_mode`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_gating: Option<RoleGatingMode>,
+}
+
+impl OpsxConfig {
+    /// Resolves the effective role-gating mode, defaulting to
+    /// [`RoleGatingMode::Warn`] when the field is absent.
+    #[must_use]
+    pub fn role_gating_mode(&self) -> RoleGatingMode {
+        self.role_gating.unwrap_or_default()
+    }
+}
+
 /// Session logging configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LoggingConfig {
@@ -116,9 +182,56 @@ pub enum ApprovalLevel {
 /// Dashboard configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DashboardConfig {
-    /// Whether to show the broker messages panel in the dashboard.
+    /// Whether to show the legacy broker messages panel in the dashboard.
+    ///
+    /// Superseded by the type-filterable "Broker log" panel
+    /// ([`DashboardConfig::broker_log`]); retained for source compatibility
+    /// with v0.5.0 configs.
     #[serde(default)]
     pub show_message_log: bool,
+    /// Configuration for the v0.6.0 "Broker log" panel — its ring-buffer cap
+    /// and default visibility. An absent `[dashboard.broker_log]` section
+    /// loads [`BrokerLogConfig::default`] so v0.5.0 configs parse unchanged.
+    #[serde(default)]
+    pub broker_log: BrokerLogConfig,
+}
+
+/// Configuration for the dashboard's "Broker log" panel.
+///
+/// Both fields carry `#[serde(default)]` so a v0.5.0 `[dashboard]` section
+/// with no `broker_log` table — or a `[dashboard.broker_log]` table that
+/// sets only one field — loads with the documented defaults for the rest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrokerLogConfig {
+    /// Maximum number of messages retained in the panel's in-memory ring
+    /// buffer. Older messages drop off the top as new ones arrive. Default:
+    /// `500`.
+    #[serde(default = "BrokerLogConfig::default_max_messages")]
+    pub max_messages: usize,
+    /// Whether the panel is visible when the dashboard first launches. The
+    /// `l` hotkey toggles visibility at runtime regardless of this value.
+    /// Default: `true`.
+    #[serde(default = "BrokerLogConfig::default_visible")]
+    pub default_visible: bool,
+}
+
+impl Default for BrokerLogConfig {
+    fn default() -> Self {
+        Self {
+            max_messages: Self::default_max_messages(),
+            default_visible: Self::default_visible(),
+        }
+    }
+}
+
+impl BrokerLogConfig {
+    fn default_max_messages() -> usize {
+        500
+    }
+
+    fn default_visible() -> bool {
+        true
+    }
 }
 
 /// Supervisor mode configuration.
@@ -166,6 +279,18 @@ pub struct SupervisorConfig {
     /// invocation; the manual doc-surface review still applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc_build_command: Option<String>,
+    /// API-doc generator command used during spec audit.
+    ///
+    /// Distinct from [`Self::doc_build_command`] (which builds the
+    /// human-readable doc site): this one runs the per-language API-doc
+    /// extractor against changed public items. Example values:
+    /// `"cargo doc --no-deps"` (Rust), `"sphinx-build -W docs docs/_build"`
+    /// (Python/Sphinx), `"npx typedoc"` (TypeScript), `"javadoc"` (Java),
+    /// `"go doc"` (Go). When `None`, the supervisor skill renders the
+    /// `{{DOC_TOOL_COMMAND}}` placeholder as an empty string and the
+    /// surrounding prose is authored to read naturally without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_tool_command: Option<String>,
     /// Spec-validator command for gate 3 (spec audit).
     ///
     /// Typically takes a change name as argument; the supervisor agent
@@ -238,9 +363,152 @@ pub struct SupervisorConfig {
     /// See [`CommonDevAllowlistConfig`] for field semantics.
     #[serde(default)]
     pub common_dev_allowlist: CommonDevAllowlistConfig,
+    /// Whether the broker emits a `supervisor.verify-now` nudge to the
+    /// supervisor inbox when an agent publishes an
+    /// `agent.artifact { status: "committed" }`.
+    ///
+    /// The nudge makes per-commit verification fire on an explicit event
+    /// rather than relying on the supervisor's sweep cadence to notice the
+    /// commit, so each agent's commit is verified promptly instead of being
+    /// batched with a slower agent's. `None` (the field omitted from config)
+    /// resolves to `true`; set `verify_on_commit_nudge = false` to suppress
+    /// the nudge and fall back to sweep-cadence verification. Resolve the
+    /// effective value with [`Self::verify_on_commit_nudge_enabled`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_on_commit_nudge: Option<bool>,
+    /// Whether the per-worktree pre-commit branch guard refuses commits that
+    /// would advance a branch other than the worktree's assigned branch.
+    ///
+    /// `None` (the default) resolves to `true` via [`Self::strict_branch_guard`]
+    /// — the guard is on unless explicitly disabled. Set
+    /// `[supervisor] strict_branch_guard = false` to opt out of *enforcement*
+    /// (the post-commit `agent.feedback` detection still fires; detection
+    /// without enforcement). Guards against cross-worktree contamination where
+    /// a commit advances the wrong branch because linked worktrees share
+    /// `.git/refs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_branch_guard: Option<bool>,
+    /// Whether the supervisor reverts an opsx role-gating violation commit
+    /// without first confirming with the user.
+    ///
+    /// Consumed by the supervisor skill's merge-orchestration revert flow: in
+    /// `block` mode the guard publishes a revert-request `agent.feedback` to
+    /// the supervisor, and the supervisor confirms with the user before
+    /// running `git revert` UNLESS this is `true`. `None` (the default)
+    /// resolves to `false` via [`Self::auto_revert`] — confirmation is
+    /// required by default so a destructive revert never fires unattended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_revert: Option<bool>,
+    /// Whether manual (user-decided) approval patterns are recorded to the
+    /// per-session log at `.git-paw/sessions/<session>.manual-approvals.jsonl`
+    /// and surfaced via `git paw approvals`.
+    ///
+    /// `None` (the field omitted from config) resolves to `true` via
+    /// [`Self::manual_approvals_log_enabled`] — recording is on unless
+    /// explicitly disabled. Set `[supervisor] manual_approvals_log = false` to
+    /// suppress both the log writes AND the derived `permission_pattern`
+    /// learnings emission. The opt-out affects writes only; `git paw approvals`
+    /// still reads any pre-existing log. See the `approval-pattern-surfacing`
+    /// change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_approvals_log: Option<bool>,
+    /// Configuration for the `/tell` user→agent routing command.
+    ///
+    /// Carries the default delivery mode and the inventory-cache max age. The
+    /// TOML table key is `[supervisor.tell]`. An absent table — every v0.5.0
+    /// config — loads [`TellConfig::default`] (mode `feedback`, max age 60s)
+    /// and round-trips identically because [`TellConfig::is_default`] skips
+    /// serialising the all-default table.
+    #[serde(default, skip_serializing_if = "TellConfig::is_default")]
+    pub tell: TellConfig,
+}
+
+/// Delivery mode for the supervisor `/tell` routing command.
+///
+/// Selects the default channel by which a user-typed prompt reaches the named
+/// agent. The serde wire values are the kebab-case strings `"feedback"` and
+/// `"send-keys"`; an absent `[supervisor.tell] mode` resolves to
+/// [`Self::Feedback`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum TellMode {
+    /// Queue an `agent.feedback` broker message — the agent consumes it on its
+    /// next inbox poll. Safe by default: the prompt is recorded, not race-y.
+    #[default]
+    Feedback,
+    /// Inject the prompt directly into the target pane via `tmux send-keys`.
+    /// Faster, but only safe for agents in accept-edits mode; `/tell` falls
+    /// back to [`Self::Feedback`] when the target's detected mode is not
+    /// `accept-edits`.
+    SendKeys,
+}
+
+/// Configuration for the supervisor `/tell` user→agent routing command.
+///
+/// Embedded as a plain (non-`Option`) field on [`SupervisorConfig`] with
+/// `#[serde(default)]`, so a `[supervisor]` section with no `[supervisor.tell]`
+/// table loads the documented defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TellConfig {
+    /// Default delivery mode for `/tell`. Default: [`TellMode::Feedback`].
+    #[serde(default)]
+    pub mode: TellMode,
+    /// Maximum age (seconds) of the cached inventory snapshot before
+    /// `/tell` / `/agents` rebuild it on demand. Default: `60`.
+    #[serde(default = "TellConfig::default_inventory_max_age_seconds")]
+    pub inventory_max_age_seconds: u64,
+}
+
+impl Default for TellConfig {
+    fn default() -> Self {
+        Self {
+            mode: TellMode::default(),
+            inventory_max_age_seconds: Self::default_inventory_max_age_seconds(),
+        }
+    }
+}
+
+impl TellConfig {
+    fn default_inventory_max_age_seconds() -> u64 {
+        60
+    }
+
+    /// Returns `true` when this config equals [`TellConfig::default`].
+    ///
+    /// Used as the `skip_serializing_if` predicate so an all-default
+    /// `[supervisor.tell]` table is omitted on save, keeping v0.5.0 configs
+    /// byte-stable round-trips.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl SupervisorConfig {
+    /// Resolves whether the pre-commit branch guard enforces (blocks) on a
+    /// branch mismatch. Defaults to `true` when the config field is absent.
+    #[must_use]
+    pub fn strict_branch_guard(&self) -> bool {
+        self.strict_branch_guard.unwrap_or(true)
+    }
+
+    /// Resolves whether the supervisor reverts an opsx role-gating violation
+    /// commit without user confirmation. Defaults to `false` when the config
+    /// field is absent — a revert always asks first unless explicitly opted in.
+    #[must_use]
+    pub fn auto_revert(&self) -> bool {
+        self.auto_revert.unwrap_or(false)
+    }
+
+    /// Resolves whether manual-approval pattern recording is enabled.
+    ///
+    /// Returns the configured [`Self::manual_approvals_log`] value, or `true`
+    /// when the field is unset — recording is on by default.
+    #[must_use]
+    pub fn manual_approvals_log_enabled(&self) -> bool {
+        self.manual_approvals_log.unwrap_or(true)
+    }
+
     /// Borrowed view of the seven gate-command templates suitable for
     /// passing to [`crate::skills::render`]. Each field maps directly to
     /// the matching `Option<String>` on this struct.
@@ -254,7 +522,19 @@ impl SupervisorConfig {
             spec_validate_command: self.spec_validate_command.as_deref(),
             fmt_check_command: self.fmt_check_command.as_deref(),
             security_audit_command: self.security_audit_command.as_deref(),
+            doc_tool_command: self.doc_tool_command.as_deref(),
         }
+    }
+
+    /// Resolves whether the broker should emit a `supervisor.verify-now`
+    /// nudge on each committed artifact.
+    ///
+    /// Returns the configured [`Self::verify_on_commit_nudge`] value, or
+    /// `true` when the field is unset — per-commit verification nudging is on
+    /// by default.
+    #[must_use]
+    pub fn verify_on_commit_nudge_enabled(&self) -> bool {
+        self.verify_on_commit_nudge.unwrap_or(true)
     }
 }
 
@@ -311,12 +591,22 @@ pub struct LearningsConfig {
     /// Interval between periodic flushes to disk. Default: `60`.
     #[serde(default = "LearningsConfig::default_flush_interval_seconds")]
     pub flush_interval_seconds: u64,
+    /// Whether flushed learnings are also published to the broker as
+    /// `agent.learning` messages (in addition to the markdown file).
+    ///
+    /// Default [`BrokerPublish::Auto`] follows `[broker] enabled`: publish
+    /// when the broker is running, file-only when it is not. Set to
+    /// [`BrokerPublish::ForceOff`] to keep file-only output even with an
+    /// active broker. See the `agent-learning-variant` change.
+    #[serde(default)]
+    pub broker_publish: BrokerPublish,
 }
 
 impl Default for LearningsConfig {
     fn default() -> Self {
         Self {
             flush_interval_seconds: Self::default_flush_interval_seconds(),
+            broker_publish: BrokerPublish::default(),
         }
     }
 }
@@ -324,6 +614,33 @@ impl Default for LearningsConfig {
 impl LearningsConfig {
     fn default_flush_interval_seconds() -> u64 {
         60
+    }
+}
+
+/// Whether the learnings aggregator publishes flushed records to the broker.
+///
+/// The markdown file output (`.git-paw/session-learnings.md`) is unconditional
+/// — this knob only governs the additional `agent.learning` broker publish.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BrokerPublish {
+    /// Follow `[broker] enabled`: publish to the broker when it is running,
+    /// file-only when it is not. This is the default.
+    #[default]
+    Auto,
+    /// Never publish to the broker, even when it is running (file-only).
+    ForceOff,
+}
+
+impl BrokerPublish {
+    /// Resolves the effective publish decision against whether the broker is
+    /// enabled for this session.
+    #[must_use]
+    pub fn resolve(self, broker_enabled: bool) -> bool {
+        match self {
+            Self::Auto => broker_enabled,
+            Self::ForceOff => false,
+        }
     }
 }
 
@@ -430,6 +747,17 @@ pub struct AutoApproveConfig {
     /// entries.
     #[serde(default)]
     pub approval_level: ApprovalLevelPreset,
+    /// Whether filesystem write / edit / create prompts whose target path
+    /// resolves *inside* the agent's own worktree are auto-approved.
+    ///
+    /// `None` (the absent default) resolves to `true` via
+    /// [`Self::approve_worktree_writes`] — worktrees are isolated, so
+    /// confining auto-approval to the worktree boundary is safe by
+    /// construction. Set to `false` to revert to the manual-prompt flow for
+    /// all file operations. Out-of-worktree paths always require manual
+    /// approval regardless of this flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approve_worktree_writes: Option<bool>,
 }
 
 impl Default for AutoApproveConfig {
@@ -439,6 +767,7 @@ impl Default for AutoApproveConfig {
             safe_commands: Vec::new(),
             stall_threshold_seconds: Self::default_stall_threshold_seconds(),
             approval_level: ApprovalLevelPreset::Safe,
+            approve_worktree_writes: None,
         }
     }
 }
@@ -477,6 +806,17 @@ impl AutoApproveConfig {
             out.stall_threshold_seconds = Self::MIN_STALL_THRESHOLD_SECONDS;
         }
         out
+    }
+
+    /// Returns whether worktree-confined file operations are auto-approved.
+    ///
+    /// Resolves the optional [`Self::approve_worktree_writes`] field to its
+    /// effective boolean: an absent value (the common case — no
+    /// `[supervisor.auto_approve]` section, or the field omitted) defaults to
+    /// `true`.
+    #[must_use]
+    pub fn approve_worktree_writes(&self) -> bool {
+        self.approve_worktree_writes.unwrap_or(true)
     }
 
     /// Returns the effective whitelist for this config, applying the preset
@@ -532,6 +872,58 @@ pub fn approval_flags(cli: &str, level: &ApprovalLevel) -> &'static str {
     }
 }
 
+/// Configuration for the broker filesystem watcher.
+///
+/// The watcher publishes `agent.status: working` from git-status changes.
+/// Bug 8 (`auto-approve-scope-v0-6-x`) adds a post-commit re-entry: after an
+/// `agent.artifact status: "committed"` event, a subsequent file modification
+/// observed within [`Self::republish_working_ttl_seconds`] re-publishes
+/// `working` so the dashboard reflects the agent's continued activity.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WatcherConfig {
+    /// TTL (seconds) after a `committed` event during which a file write
+    /// re-publishes `working`.
+    ///
+    /// `None` resolves to [`Self::DEFAULT_REPUBLISH_TTL_SECONDS`] (60) via
+    /// [`Self::republish_working_ttl_seconds`]. A value of `0` disables the
+    /// auto-republish entirely (restoring the v0.5.0 "committed is terminal
+    /// until explicit republish" model). Non-zero values below
+    /// [`Self::MIN_REPUBLISH_TTL_SECONDS`] (5) are clamped to that floor with
+    /// a stderr warning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub republish_working_ttl_seconds: Option<u64>,
+}
+
+impl WatcherConfig {
+    /// Default post-commit re-entry TTL in seconds.
+    pub const DEFAULT_REPUBLISH_TTL_SECONDS: u64 = 60;
+    /// Minimum non-zero TTL; smaller positive values clamp up to this floor.
+    pub const MIN_REPUBLISH_TTL_SECONDS: u64 = 5;
+
+    /// Returns the effective post-commit re-entry TTL in seconds.
+    ///
+    /// - `None` → [`Self::DEFAULT_REPUBLISH_TTL_SECONDS`].
+    /// - `Some(0)` → `0` (auto-republish disabled).
+    /// - `Some(n)` with `0 < n < 5` → clamped to
+    ///   [`Self::MIN_REPUBLISH_TTL_SECONDS`] with a stderr warning.
+    /// - `Some(n)` with `n >= 5` → `n`.
+    #[must_use]
+    pub fn republish_working_ttl_seconds(&self) -> u64 {
+        match self.republish_working_ttl_seconds {
+            None => Self::DEFAULT_REPUBLISH_TTL_SECONDS,
+            Some(0) => 0,
+            Some(n) if n < Self::MIN_REPUBLISH_TTL_SECONDS => {
+                eprintln!(
+                    "warning: [broker.watcher] republish_working_ttl_seconds = {n} clamped to {}s minimum",
+                    Self::MIN_REPUBLISH_TTL_SECONDS
+                );
+                Self::MIN_REPUBLISH_TTL_SECONDS
+            }
+            Some(n) => n,
+        }
+    }
+}
+
 /// HTTP broker configuration for agent coordination.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BrokerConfig {
@@ -544,6 +936,9 @@ pub struct BrokerConfig {
     /// Bind address for the broker.
     #[serde(default = "BrokerConfig::default_bind")]
     pub bind: String,
+    /// Filesystem watcher tuning.
+    #[serde(default)]
+    pub watcher: WatcherConfig,
 }
 
 impl Default for BrokerConfig {
@@ -552,6 +947,7 @@ impl Default for BrokerConfig {
             enabled: false,
             port: 9119,
             bind: "127.0.0.1".to_string(),
+            watcher: WatcherConfig::default(),
         }
     }
 }
@@ -568,6 +964,31 @@ impl BrokerConfig {
 
     fn default_bind() -> String {
         "127.0.0.1".to_string()
+    }
+}
+
+/// Layout configuration for git-paw-managed tmux sessions.
+///
+/// Controls the optional pane "affordances" — heavy borders, per-pane title
+/// labels, and active-pane highlighting — applied to `paw-*` sessions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LayoutConfig {
+    /// Whether to apply the border affordances (heavy borders, dim/active
+    /// border styling, per-pane label strip, and per-pane titles) to
+    /// git-paw-managed sessions.
+    ///
+    /// `None` (the default, including when the `[layout]` section is absent)
+    /// resolves to `true` via [`LayoutConfig::border_affordances_enabled`].
+    /// Set to `false` to opt out and inherit the user's default tmux styling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border_affordances: Option<bool>,
+}
+
+impl LayoutConfig {
+    /// Resolve the border-affordances setting, defaulting to `true` when unset.
+    #[must_use]
+    pub fn border_affordances_enabled(&self) -> bool {
+        self.border_affordances.unwrap_or(true)
     }
 }
 
@@ -627,6 +1048,22 @@ pub struct PawConfig {
     /// with `GovernanceConfig::default()` here.
     #[serde(default)]
     pub governance: GovernanceConfig,
+
+    /// Layout configuration for git-paw-managed tmux sessions.
+    ///
+    /// Absent `[layout]` (v0.5.0 and earlier configs) loads as `None`, which
+    /// [`PawConfig::border_affordances_enabled`] resolves to the default
+    /// (affordances on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<LayoutConfig>,
+
+    /// opsx (`OpenSpec`) integration configuration.
+    ///
+    /// Absent `[opsx]` (v0.5.0 and earlier configs) loads as `None`, which
+    /// [`PawConfig::role_gating_mode`] resolves to the default
+    /// ([`RoleGatingMode::Warn`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opsx: Option<OpsxConfig>,
 }
 
 impl PawConfig {
@@ -701,7 +1138,30 @@ impl PawConfig {
                     .clone()
                     .or_else(|| self.governance.constitution.clone()),
             },
+            layout: overlay.layout.clone().or_else(|| self.layout.clone()),
+            opsx: overlay.opsx.clone().or_else(|| self.opsx.clone()),
         }
+    }
+
+    /// Resolves the effective opsx role-gating mode for this config,
+    /// defaulting to [`RoleGatingMode::Warn`] when `[opsx]` or its
+    /// `role_gating` field is absent.
+    #[must_use]
+    pub fn role_gating_mode(&self) -> RoleGatingMode {
+        self.opsx
+            .as_ref()
+            .map(OpsxConfig::role_gating_mode)
+            .unwrap_or_default()
+    }
+
+    /// Resolve whether the border affordances should be applied, defaulting to
+    /// `true` when the `[layout]` section or its `border_affordances` field is
+    /// absent.
+    #[must_use]
+    pub fn border_affordances_enabled(&self) -> bool {
+        self.layout
+            .as_ref()
+            .is_none_or(LayoutConfig::border_affordances_enabled)
     }
 
     /// Returns a preset by name, if it exists.
@@ -899,6 +1359,8 @@ pub fn add_custom_cli_to(
         CustomCli {
             command: resolved_command,
             display_name: display_name.map(String::from),
+            submit_delay_ms: None,
+            settings_path: None,
         },
     );
 
@@ -907,6 +1369,7 @@ pub fn add_custom_cli_to(
 
 /// Returns a default `config.toml` string with sensible defaults and
 /// commented-out v0.2.0 fields for discoverability.
+#[allow(clippy::too_many_lines)] // single big string literal of example config
 pub fn generate_default_config() -> String {
     r#"# git-paw configuration
 # See https://github.com/bearicorn/git-paw for documentation.
@@ -973,9 +1436,25 @@ pub fn generate_default_config() -> String {
 # build_command = "cargo build"                                # or: "npm run build", "mvn package", "go build ./..."
 # fmt_check_command = "cargo fmt --check"                      # or: "prettier --check .", "gofmt -l ."
 # doc_build_command = "mdbook build docs/"                     # or: "sphinx-build", "mkdocs build"
+# doc_tool_command = "cargo doc --no-deps"                     # or: "sphinx-build -W docs docs/_build", "javadoc", "npx typedoc"
 # spec_validate_command = "openspec validate {{CHANGE_ID}} --strict"  # OpenSpec only
 # security_audit_command = "cargo audit"                       # or: "npm audit", "bandit -r ."
 # agent_approval = "auto"  # one of: "manual", "auto", "full-auto"
+# verify_on_commit_nudge = true  # broker nudges the supervisor to verify each commit promptly (default true)
+#
+# Routing through the supervisor (the /tell and /agents commands). The user
+# types in the supervisor pane and the supervisor routes the prompt to the
+# named agent. `mode` selects the default delivery channel:
+#   "feedback"  (default) — queue an agent.feedback; the agent picks it up on
+#                           its next inbox poll. Safe for mixed-mode sessions.
+#   "send-keys"           — inject the prompt directly into the target pane;
+#                           used only when the target is in accept-edits mode,
+#                           otherwise /tell falls back to feedback.
+# `inventory_max_age_seconds` is how stale the cached /agents inventory may be
+# before /tell or /agents re-polls the broker (default 60).
+# [supervisor.tell]
+# mode = "feedback"
+# inventory_max_age_seconds = 60
 #
 # Conflict detector tuning. Active only when supervisor mode is enabled.
 # [supervisor.conflict]
@@ -991,6 +1470,18 @@ pub fn generate_default_config() -> String {
 # [supervisor.common_dev_allowlist]
 # enabled = true
 # extra = ["pnpm test", "deno fmt"]
+
+# opsx (OpenSpec) role gating. When the session's spec engine is OpenSpec,
+# git-paw's post-commit guard detects archive activity (`/opsx:archive` /
+# `openspec archive`) by a non-supervisor agent and reacts per this mode:
+#   "warn"  (default) — feedback to the offending agent + a permission_pattern
+#                       learning the user sees in learnings.
+#   "block"           — warn behaviour PLUS a feedback to the supervisor
+#                       requesting it revert the offending commit.
+#   "off"             — guard disabled entirely.
+# The guard is inert under non-OpenSpec engines (speckit, markdown).
+# [opsx]
+# role_gating = "warn"
 
 # Custom CLI definitions.
 # [clis.my-agent]
@@ -1418,6 +1909,8 @@ enabled = true
                 CustomCli {
                     command: "/bin/test".into(),
                     display_name: Some("Test CLI".into()),
+                    submit_delay_ms: None,
+                    settings_path: None,
                 },
             )]),
             presets: HashMap::from([(
@@ -1433,6 +1926,8 @@ enabled = true
             broker: BrokerConfig::default(),
             supervisor: None,
             governance: GovernanceConfig::default(),
+            layout: None,
+            opsx: None,
         };
 
         save_config_to(&config_path, &original).unwrap();
@@ -1560,6 +2055,7 @@ enabled = true
             enabled: true,
             port: 8080,
             bind: "0.0.0.0".to_string(),
+            ..Default::default()
         };
         assert_eq!(custom.url(), "http://0.0.0.0:8080");
     }
@@ -1650,6 +2146,59 @@ enabled = true
         assert_eq!(supervisor.agent_approval, ApprovalLevel::Auto);
     }
 
+    // --- verify_on_commit_nudge (per-commit-verification-v0-6-x) ---
+
+    #[test]
+    fn verify_on_commit_nudge_defaults_true_when_absent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[supervisor]\nenabled = true\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert_eq!(
+            supervisor.verify_on_commit_nudge, None,
+            "an omitted field must deserialise as None"
+        );
+        assert!(
+            supervisor.verify_on_commit_nudge_enabled(),
+            "an unset verify_on_commit_nudge must resolve to true (default on)"
+        );
+    }
+
+    #[test]
+    fn verify_on_commit_nudge_explicit_false_disables() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\nenabled = true\nverify_on_commit_nudge = false\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert_eq!(supervisor.verify_on_commit_nudge, Some(false));
+        assert!(
+            !supervisor.verify_on_commit_nudge_enabled(),
+            "an explicit `false` must disable the nudge"
+        );
+    }
+
+    #[test]
+    fn verify_on_commit_nudge_explicit_true_enables() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\nenabled = true\nverify_on_commit_nudge = true\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert_eq!(supervisor.verify_on_commit_nudge, Some(true));
+        assert!(supervisor.verify_on_commit_nudge_enabled());
+    }
+
     #[test]
     fn rejects_invalid_approval_level() {
         let tmp = TempDir::new().unwrap();
@@ -1676,6 +2225,7 @@ enabled = true
                 lint_command: None,
                 build_command: None,
                 doc_build_command: None,
+                doc_tool_command: None,
                 spec_validate_command: None,
                 fmt_check_command: None,
                 security_audit_command: None,
@@ -1685,6 +2235,11 @@ enabled = true
                 learnings: false,
                 learnings_config: LearningsConfig::default(),
                 common_dev_allowlist: CommonDevAllowlistConfig::default(),
+                verify_on_commit_nudge: None,
+                strict_branch_guard: None,
+                auto_revert: None,
+                manual_approvals_log: None,
+                tell: TellConfig::default(),
             }),
             ..Default::default()
         };
@@ -1694,7 +2249,78 @@ enabled = true
         assert_eq!(loaded.supervisor, original.supervisor);
     }
 
+    // --- manual_approvals_log (approval-pattern-surfacing) ---
+
+    #[test]
+    fn manual_approvals_log_defaults_to_true_when_absent() {
+        // [supervisor] present without the field → recording on by default.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[supervisor]\nenabled = true\n");
+        let cfg = load_config_file(&path).unwrap().unwrap();
+        let sup = cfg.supervisor.unwrap();
+        assert_eq!(sup.manual_approvals_log, None);
+        assert!(
+            sup.manual_approvals_log_enabled(),
+            "absent field must resolve to true"
+        );
+    }
+
+    #[test]
+    fn manual_approvals_log_explicit_false_opts_out() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\nenabled = true\nmanual_approvals_log = false\n",
+        );
+        let cfg = load_config_file(&path).unwrap().unwrap();
+        let sup = cfg.supervisor.unwrap();
+        assert_eq!(sup.manual_approvals_log, Some(false));
+        assert!(!sup.manual_approvals_log_enabled());
+    }
+
+    #[test]
+    fn pre_v050_config_parses_with_manual_approvals_log_absent() {
+        // A config produced before this change (no `manual_approvals_log`
+        // field) parses cleanly and the resolver still yields true.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\nenabled = true\ncli = \"claude\"\nlearnings = true\n",
+        );
+        let cfg = load_config_file(&path).unwrap().unwrap();
+        let sup = cfg.supervisor.unwrap();
+        assert_eq!(sup.manual_approvals_log, None);
+        assert!(sup.manual_approvals_log_enabled());
+    }
+
     // --- Gate-command fields (supervisor-gate-templating-v0-5-x) ---
+
+    #[test]
+    fn strict_branch_guard_defaults_to_true_and_honours_opt_out() {
+        // Absent field → enforcement on by default.
+        let on = TempDir::new().unwrap();
+        let on_path = on.path().join("config.toml");
+        write_file(&on_path, "[supervisor]\nenabled = true\n");
+        let cfg = load_config_file(&on_path).unwrap().unwrap();
+        let sup = cfg.supervisor.unwrap();
+        assert_eq!(sup.strict_branch_guard, None);
+        assert!(sup.strict_branch_guard(), "default must resolve to true");
+
+        // Explicit opt-out → enforcement off (detection still applies).
+        let off = TempDir::new().unwrap();
+        let off_path = off.path().join("config.toml");
+        write_file(
+            &off_path,
+            "[supervisor]\nenabled = true\nstrict_branch_guard = false\n",
+        );
+        let cfg = load_config_file(&off_path).unwrap().unwrap();
+        let sup = cfg.supervisor.unwrap();
+        assert_eq!(sup.strict_branch_guard, Some(false));
+        assert!(!sup.strict_branch_guard());
+    }
 
     #[test]
     fn gate_command_fields_default_to_none() {
@@ -1708,6 +2334,7 @@ enabled = true
         assert_eq!(supervisor.lint_command, None);
         assert_eq!(supervisor.build_command, None);
         assert_eq!(supervisor.doc_build_command, None);
+        assert_eq!(supervisor.doc_tool_command, None);
         assert_eq!(supervisor.spec_validate_command, None);
         assert_eq!(supervisor.fmt_check_command, None);
         assert_eq!(supervisor.security_audit_command, None);
@@ -1726,6 +2353,7 @@ enabled = true
                 lint_command: Some("cargo clippy -- -D warnings".into()),
                 build_command: Some("cargo build".into()),
                 doc_build_command: Some("mdbook build docs/".into()),
+                doc_tool_command: Some("cargo doc --no-deps".into()),
                 spec_validate_command: Some("openspec validate {{CHANGE_ID}} --strict".into()),
                 fmt_check_command: Some("cargo fmt --check".into()),
                 security_audit_command: Some("cargo audit".into()),
@@ -1747,6 +2375,7 @@ enabled = true
             lint_command: None,
             build_command: None,
             doc_build_command: None,
+            doc_tool_command: None,
             spec_validate_command: None,
             fmt_check_command: None,
             security_audit_command: None,
@@ -1758,6 +2387,7 @@ enabled = true
             "lint_command",
             "build_command",
             "doc_build_command",
+            "doc_tool_command",
             "spec_validate_command",
             "fmt_check_command",
             "security_audit_command",
@@ -1767,6 +2397,74 @@ enabled = true
                 "TOML serialised with None gate fields should omit `{key}`; got:\n{serialized}",
             );
         }
+    }
+
+    // --- doc_tool_command (lang-agnostic-skills) ---
+
+    #[test]
+    fn doc_tool_command_default_none() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[supervisor]\nenabled = true\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert_eq!(supervisor.doc_tool_command, None);
+    }
+
+    #[test]
+    fn doc_tool_command_explicit_value_preserved() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\n\
+             enabled = true\n\
+             doc_tool_command = \"sphinx-build -W docs docs/_build\"\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert_eq!(
+            supervisor.doc_tool_command.as_deref(),
+            Some("sphinx-build -W docs docs/_build"),
+            "explicit doc_tool_command value (including all whitespace) must be preserved verbatim",
+        );
+    }
+
+    #[test]
+    fn doc_tool_command_v0_5_config_parses_without_field() {
+        // A v0.5.0 config that predates the doc_tool_command field SHALL
+        // load cleanly with the field defaulting to None.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\n\
+             enabled = true\n\
+             test_command = \"just check\"\n\
+             lint_command = \"cargo clippy -- -D warnings\"\n\
+             build_command = \"cargo build\"\n\
+             doc_build_command = \"mdbook build docs/\"\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert_eq!(supervisor.doc_tool_command, None);
+        assert_eq!(supervisor.test_command.as_deref(), Some("just check"));
+    }
+
+    #[test]
+    fn doc_tool_command_flows_into_gate_commands() {
+        let supervisor = SupervisorConfig {
+            doc_tool_command: Some("javadoc -d docs/api src/**/*.java".into()),
+            ..Default::default()
+        };
+        let gates = supervisor.gate_commands();
+        assert_eq!(
+            gates.doc_tool_command,
+            Some("javadoc -d docs/api src/**/*.java"),
+        );
     }
 
     // --- CommonDevAllowlistConfig ---
@@ -1968,6 +2666,7 @@ enabled = true
                 learnings: true,
                 learnings_config: LearningsConfig {
                     flush_interval_seconds: 90,
+                    broker_publish: BrokerPublish::ForceOff,
                 },
                 ..Default::default()
             }),
@@ -2066,6 +2765,7 @@ enabled = true
         let original = PawConfig {
             dashboard: Some(DashboardConfig {
                 show_message_log: true,
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -2074,6 +2774,95 @@ enabled = true
         let loaded = load_config_file(&config_path).unwrap().unwrap();
         assert_eq!(loaded.dashboard, original.dashboard);
         assert!(loaded.dashboard.unwrap().show_message_log);
+    }
+
+    // --- BrokerLogConfig (dashboard-broker-log task 1.3) ---
+
+    #[test]
+    fn broker_log_config_defaults() {
+        // Task 1.3: default load — cap 500, visible on.
+        let cfg = BrokerLogConfig::default();
+        assert_eq!(cfg.max_messages, 500);
+        assert!(cfg.default_visible);
+    }
+
+    #[test]
+    fn dashboard_config_default_includes_broker_log_defaults() {
+        // An entirely default DashboardConfig carries the documented
+        // broker-log defaults so a bare `[dashboard]` section behaves
+        // predictably.
+        let cfg = DashboardConfig::default();
+        assert_eq!(cfg.broker_log.max_messages, 500);
+        assert!(cfg.broker_log.default_visible);
+    }
+
+    #[test]
+    fn parses_broker_log_section_with_explicit_overrides() {
+        // Task 1.3: explicit override load.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[dashboard.broker_log]\nmax_messages = 100\ndefault_visible = false\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let dashboard = config.dashboard.unwrap();
+        assert_eq!(dashboard.broker_log.max_messages, 100);
+        assert!(!dashboard.broker_log.default_visible);
+    }
+
+    #[test]
+    fn broker_log_partial_section_fills_remaining_defaults() {
+        // A `[dashboard.broker_log]` table that sets only one field still
+        // loads the documented default for the other (per-field
+        // `#[serde(default)]`).
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[dashboard.broker_log]\nmax_messages = 42\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let broker_log = config.dashboard.unwrap().broker_log;
+        assert_eq!(broker_log.max_messages, 42);
+        assert!(
+            broker_log.default_visible,
+            "default_visible must fall back to true when omitted"
+        );
+    }
+
+    #[test]
+    fn v050_dashboard_section_without_broker_log_still_parses() {
+        // Task 1.3: a v0.5.0 config that predates the broker_log table must
+        // load unchanged, with the new section materialising at its default.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[dashboard]\nshow_message_log = true\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let dashboard = config.dashboard.unwrap();
+        assert!(dashboard.show_message_log);
+        assert_eq!(dashboard.broker_log, BrokerLogConfig::default());
+    }
+
+    #[test]
+    fn broker_log_round_trips_through_save_and_load() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        let original = PawConfig {
+            dashboard: Some(DashboardConfig {
+                show_message_log: false,
+                broker_log: BrokerLogConfig {
+                    max_messages: 250,
+                    default_visible: false,
+                },
+            }),
+            ..Default::default()
+        };
+
+        save_config_to(&config_path, &original).unwrap();
+        let loaded = load_config_file(&config_path).unwrap().unwrap();
+        assert_eq!(loaded.dashboard, original.dashboard);
     }
 
     #[test]
@@ -2087,6 +2876,7 @@ enabled = true
         let config = PawConfig {
             dashboard: Some(DashboardConfig {
                 show_message_log: true,
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -2170,6 +2960,7 @@ enabled = true
                 enabled: true,
                 port: 9200,
                 bind: "127.0.0.1".to_string(),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -2249,6 +3040,88 @@ enabled = true
         };
         let resolved = cfg.resolved();
         assert!(!resolved.enabled, "Off preset must force enabled = false");
+    }
+
+    // --- Bug 8: [broker.watcher] republish_working_ttl_seconds ---
+
+    #[test]
+    fn watcher_ttl_defaults_to_sixty_when_absent() {
+        let cfg = WatcherConfig::default();
+        assert_eq!(cfg.republish_working_ttl_seconds(), 60);
+    }
+
+    #[test]
+    fn watcher_ttl_zero_disables() {
+        let cfg = WatcherConfig {
+            republish_working_ttl_seconds: Some(0),
+        };
+        assert_eq!(cfg.republish_working_ttl_seconds(), 0);
+    }
+
+    #[test]
+    fn watcher_ttl_below_floor_clamps_to_five() {
+        let cfg = WatcherConfig {
+            republish_working_ttl_seconds: Some(2),
+        };
+        assert_eq!(
+            cfg.republish_working_ttl_seconds(),
+            WatcherConfig::MIN_REPUBLISH_TTL_SECONDS
+        );
+    }
+
+    #[test]
+    fn watcher_ttl_explicit_non_zero_is_preserved() {
+        let cfg = WatcherConfig {
+            republish_working_ttl_seconds: Some(120),
+        };
+        assert_eq!(cfg.republish_working_ttl_seconds(), 120);
+    }
+
+    #[test]
+    fn watcher_ttl_parses_from_broker_table() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[broker]\nenabled = true\n[broker.watcher]\nrepublish_working_ttl_seconds = 0\n",
+        );
+        let config = load_config_file(&path).unwrap().unwrap();
+        assert_eq!(config.broker.watcher.republish_working_ttl_seconds, Some(0));
+        assert_eq!(config.broker.watcher.republish_working_ttl_seconds(), 0);
+    }
+
+    #[test]
+    fn approve_worktree_writes_defaults_to_true_when_absent() {
+        // Spec scenario: default true auto-approves (field unset).
+        let cfg = AutoApproveConfig::default();
+        assert!(
+            cfg.approve_worktree_writes(),
+            "absent approve_worktree_writes must resolve to true"
+        );
+    }
+
+    #[test]
+    fn approve_worktree_writes_explicit_false_resolves_false() {
+        // Spec scenario: explicit false reverts to manual.
+        let cfg = AutoApproveConfig {
+            approve_worktree_writes: Some(false),
+            ..AutoApproveConfig::default()
+        };
+        assert!(!cfg.approve_worktree_writes());
+    }
+
+    #[test]
+    fn approve_worktree_writes_parses_from_toml() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\nenabled = true\n[supervisor.auto_approve]\napprove_worktree_writes = false\n",
+        );
+        let config = load_config_file(&path).unwrap().unwrap();
+        let aa = config.supervisor.unwrap().auto_approve.unwrap();
+        assert_eq!(aa.approve_worktree_writes, Some(false));
+        assert!(!aa.approve_worktree_writes());
     }
 
     #[test]
@@ -2966,5 +3839,259 @@ enabled = true
             !round_trip.contains("[governance.gates]"),
             "GovernanceConfig must not round-trip a `[governance.gates]` section; got: {round_trip}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // supervisor-pane-affordances: `[layout].border_affordances` config field
+    // (spec requirement "border_affordances config field").
+    // -----------------------------------------------------------------------
+
+    /// Scenario: Default true applies all affordances — absent `[layout]`
+    /// section resolves to `true`.
+    #[test]
+    fn border_affordances_defaults_to_true_when_layout_absent() {
+        let cfg: PawConfig = toml::from_str("default_cli = \"claude\"\n").expect("toml parse");
+        assert!(
+            cfg.layout.is_none(),
+            "no [layout] section should parse as None"
+        );
+        assert!(
+            cfg.border_affordances_enabled(),
+            "border affordances default to on when [layout] is absent"
+        );
+    }
+
+    /// Scenario: Default true — `[layout]` present but `border_affordances`
+    /// unset still resolves to `true`.
+    #[test]
+    fn border_affordances_defaults_to_true_when_field_unset() {
+        let cfg: PawConfig = toml::from_str("[layout]\n").expect("toml parse");
+        assert!(
+            cfg.border_affordances_enabled(),
+            "border affordances default to on when the field is unset"
+        );
+    }
+
+    /// Scenario: Explicit false skips all affordances.
+    #[test]
+    fn border_affordances_explicit_false_resolves_off() {
+        let cfg: PawConfig =
+            toml::from_str("[layout]\nborder_affordances = false\n").expect("toml parse");
+        assert_eq!(cfg.layout.as_ref().unwrap().border_affordances, Some(false));
+        assert!(
+            !cfg.border_affordances_enabled(),
+            "explicit false must resolve to off"
+        );
+    }
+
+    /// Scenario: Explicit true round-trips and resolves on.
+    #[test]
+    fn border_affordances_explicit_true_resolves_on() {
+        let cfg: PawConfig =
+            toml::from_str("[layout]\nborder_affordances = true\n").expect("toml parse");
+        assert!(cfg.border_affordances_enabled());
+    }
+
+    /// Backward compatibility: a representative v0.5.0 config (no `[layout]`
+    /// section at all) still parses and defaults affordances on.
+    #[test]
+    fn v0_5_0_config_without_layout_parses() {
+        let v0_5_0 = "default_cli = \"claude\"\nmouse = true\n\n[broker]\nenabled = true\nport = 9119\n\n[supervisor]\nenabled = true\n";
+        let cfg: PawConfig = toml::from_str(v0_5_0).expect("v0.5.0 config must still parse");
+        assert!(cfg.layout.is_none());
+        assert!(cfg.border_affordances_enabled());
+    }
+
+    /// `merged_with`: an overlay `[layout]` wins over the base layout.
+    #[test]
+    fn layout_overlay_wins_in_merge() {
+        let base: PawConfig =
+            toml::from_str("[layout]\nborder_affordances = true\n").expect("base");
+        let overlay: PawConfig =
+            toml::from_str("[layout]\nborder_affordances = false\n").expect("overlay");
+        let merged = base.merged_with(&overlay);
+        assert!(
+            !merged.border_affordances_enabled(),
+            "overlay [layout] must win in the merge"
+        );
+    }
+
+    /// `merged_with`: an absent overlay `[layout]` preserves the base layout.
+    #[test]
+    fn layout_base_preserved_when_overlay_absent() {
+        let base: PawConfig =
+            toml::from_str("[layout]\nborder_affordances = false\n").expect("base");
+        let overlay: PawConfig = toml::from_str("default_cli = \"claude\"\n").expect("overlay");
+        let merged = base.merged_with(&overlay);
+        assert!(
+            !merged.border_affordances_enabled(),
+            "base [layout] must survive when the overlay has none"
+        );
+    }
+
+    // --- opsx role-gating config (opsx-role-gating 1.4) ---
+
+    #[test]
+    fn role_gating_defaults_to_warn_when_section_absent() {
+        // A v0.5.0-shaped config with no `[opsx]` section still parses and
+        // resolves to the default Warn mode.
+        let config: PawConfig = toml::from_str("default_cli = \"claude\"\n").expect("parses");
+        assert!(config.opsx.is_none());
+        assert_eq!(config.role_gating_mode(), RoleGatingMode::Warn);
+    }
+
+    #[test]
+    fn role_gating_section_present_but_field_absent_resolves_warn() {
+        let config: PawConfig = toml::from_str("[opsx]\n").expect("parses");
+        assert_eq!(config.role_gating_mode(), RoleGatingMode::Warn);
+    }
+
+    #[test]
+    fn role_gating_explicit_warn() {
+        let config: PawConfig = toml::from_str("[opsx]\nrole_gating = \"warn\"\n").expect("parses");
+        assert_eq!(config.role_gating_mode(), RoleGatingMode::Warn);
+    }
+
+    #[test]
+    fn role_gating_explicit_block() {
+        let config: PawConfig =
+            toml::from_str("[opsx]\nrole_gating = \"block\"\n").expect("parses");
+        assert_eq!(config.role_gating_mode(), RoleGatingMode::Block);
+    }
+
+    #[test]
+    fn role_gating_explicit_off() {
+        let config: PawConfig = toml::from_str("[opsx]\nrole_gating = \"off\"\n").expect("parses");
+        assert_eq!(config.role_gating_mode(), RoleGatingMode::Off);
+    }
+
+    #[test]
+    fn role_gating_invalid_value_is_a_parse_error() {
+        let err = toml::from_str::<PawConfig>("[opsx]\nrole_gating = \"loud\"\n").unwrap_err();
+        assert!(
+            err.to_string().contains("role_gating") || err.to_string().contains("variant"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn role_gating_mode_round_trips_through_toml() {
+        let config = PawConfig {
+            opsx: Some(OpsxConfig {
+                role_gating: Some(RoleGatingMode::Block),
+            }),
+            ..Default::default()
+        };
+        let serialized = toml::to_string(&config).expect("serializes");
+        assert!(
+            serialized.contains("role_gating = \"block\""),
+            "got: {serialized}"
+        );
+        let reparsed: PawConfig = toml::from_str(&serialized).expect("re-parses");
+        assert_eq!(reparsed.role_gating_mode(), RoleGatingMode::Block);
+    }
+
+    #[test]
+    fn opsx_section_merges_with_overlay_winning() {
+        let base: PawConfig =
+            toml::from_str("[opsx]\nrole_gating = \"warn\"\n").expect("base parses");
+        let overlay: PawConfig =
+            toml::from_str("[opsx]\nrole_gating = \"block\"\n").expect("overlay parses");
+        let merged = base.merged_with(&overlay);
+        assert_eq!(merged.role_gating_mode(), RoleGatingMode::Block);
+    }
+
+    #[test]
+    fn opsx_section_base_preserved_when_overlay_absent() {
+        let base: PawConfig =
+            toml::from_str("[opsx]\nrole_gating = \"off\"\n").expect("base parses");
+        let overlay: PawConfig = toml::from_str("default_cli = \"claude\"\n").expect("overlay");
+        let merged = base.merged_with(&overlay);
+        assert_eq!(merged.role_gating_mode(), RoleGatingMode::Off);
+    }
+
+    #[test]
+    fn supervisor_auto_revert_defaults_false() {
+        let config: PawConfig = toml::from_str("[supervisor]\nenabled = true\n").expect("parses");
+        let sup = config.supervisor.expect("supervisor present");
+        assert!(!sup.auto_revert(), "auto_revert defaults to false");
+    }
+
+    #[test]
+    fn supervisor_auto_revert_explicit_true() {
+        let config: PawConfig =
+            toml::from_str("[supervisor]\nenabled = true\nauto_revert = true\n").expect("parses");
+        let sup = config.supervisor.expect("supervisor present");
+        assert!(sup.auto_revert());
+    }
+
+    // --- [supervisor.tell] (supervisor-tell change) ---
+
+    #[test]
+    fn tell_config_defaults_when_table_absent() {
+        // A v0.5.0 `[supervisor]` with no `[supervisor.tell]` table loads the
+        // documented defaults: feedback mode, 60s inventory max age.
+        let config: PawConfig = toml::from_str("[supervisor]\nenabled = true\n").expect("parses");
+        let sup = config.supervisor.expect("supervisor present");
+        assert_eq!(sup.tell.mode, TellMode::Feedback);
+        assert_eq!(sup.tell.inventory_max_age_seconds, 60);
+        assert!(sup.tell.is_default());
+    }
+
+    #[test]
+    fn tell_config_explicit_feedback_loads() {
+        let config: PawConfig = toml::from_str(
+            "[supervisor]\nenabled = true\n[supervisor.tell]\nmode = \"feedback\"\n",
+        )
+        .expect("parses");
+        let sup = config.supervisor.expect("supervisor present");
+        assert_eq!(sup.tell.mode, TellMode::Feedback);
+        // mode set explicitly to the default still resolves to default values.
+        assert_eq!(sup.tell.inventory_max_age_seconds, 60);
+    }
+
+    #[test]
+    fn tell_config_explicit_send_keys_loads() {
+        let config: PawConfig = toml::from_str(
+            "[supervisor]\nenabled = true\n[supervisor.tell]\nmode = \"send-keys\"\ninventory_max_age_seconds = 15\n",
+        )
+        .expect("parses");
+        let sup = config.supervisor.expect("supervisor present");
+        assert_eq!(sup.tell.mode, TellMode::SendKeys);
+        assert_eq!(sup.tell.inventory_max_age_seconds, 15);
+        assert!(!sup.tell.is_default());
+    }
+
+    #[test]
+    fn tell_config_rejects_unknown_mode() {
+        let err = toml::from_str::<PawConfig>(
+            "[supervisor]\nenabled = true\n[supervisor.tell]\nmode = \"shout\"\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("shout") || err.to_string().contains("mode"),
+            "unknown mode should be a parse error; got {err}"
+        );
+    }
+
+    #[test]
+    fn tell_config_all_default_table_round_trips_without_emitting_tell() {
+        // An all-default tell table is skipped on serialize so v0.5.0 configs
+        // stay byte-stable.
+        let sup = SupervisorConfig {
+            enabled: true,
+            ..SupervisorConfig::default()
+        };
+        let config = PawConfig {
+            supervisor: Some(sup),
+            ..PawConfig::default()
+        };
+        let serialized = toml::to_string_pretty(&config).expect("serializes");
+        assert!(
+            !serialized.contains("[supervisor.tell]"),
+            "all-default tell table must be omitted; got:\n{serialized}"
+        );
+        let reparsed: PawConfig = toml::from_str(&serialized).expect("re-parses");
+        assert_eq!(config, reparsed);
     }
 }

@@ -194,6 +194,20 @@ fn resolve_specs_config(
     None
 }
 
+/// Resolves the effective spec engine type for a repo, or `None` when no
+/// spec source is configured or auto-detected.
+///
+/// Applies the same precedence as [`scan_specs`] (explicit `[specs]` config,
+/// then `.specify/` auto-detection) and resolves a present-but-untyped
+/// `[specs]` section to the `"openspec"` default that `scan_specs` would use.
+/// Consumers that need to gate a capability on the `OpenSpec` engine — notably
+/// the `opsx-role-gating` guard — call this and compare against `"openspec"`.
+#[must_use]
+pub fn resolved_spec_type(config: &PawConfig, repo_root: &Path) -> Option<String> {
+    resolve_specs_config(config, repo_root, None)
+        .map(|c| c.spec_type.unwrap_or_else(|| "openspec".to_string()))
+}
+
 /// Scans for pending specs using the configuration from `[specs]`.
 ///
 /// Reads the spec directory and format type from `config`, selects the
