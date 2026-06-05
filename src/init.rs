@@ -14,8 +14,14 @@ use crate::config;
 use crate::error::PawError;
 use crate::git;
 
-/// Gitignore entries managed by init.
-const GITIGNORE_ENTRIES: &[&str] = &[".git-paw/logs/", ".git-paw/session-summary.md"];
+/// Gitignore entries managed by init. `.git-paw/tmp/` is the repo-local
+/// scratch dir (isolated verify worktrees, self-test sessions) — preferred
+/// over OS temp because it is OS-independent, so it must never be committed.
+const GITIGNORE_ENTRIES: &[&str] = &[
+    ".git-paw/logs/",
+    ".git-paw/tmp/",
+    ".git-paw/session-summary.md",
+];
 
 /// Bundled supervisor-sweep helper script, embedded at compile time and
 /// written to `<repo>/.git-paw/scripts/sweep.sh` by [`run_init`].
@@ -38,6 +44,7 @@ pub fn run_init() -> Result<(), PawError> {
 
     let paw_dir = repo_root.join(".git-paw");
     let logs_dir = paw_dir.join("logs");
+    let tmp_dir = paw_dir.join("tmp");
     let scripts_dir = paw_dir.join("scripts");
     let config_path = paw_dir.join("config.toml");
 
@@ -51,6 +58,13 @@ pub fn run_init() -> Result<(), PawError> {
     let created_logs = create_dir_if_missing(&logs_dir)?;
     if created_logs {
         println!("  Created .git-paw/logs/");
+    }
+
+    // 2b. Create .git-paw/tmp/ — repo-local scratch for isolated verify
+    //     worktrees and self-test sessions (preferred over OS temp).
+    let created_tmp = create_dir_if_missing(&tmp_dir)?;
+    if created_tmp {
+        println!("  Created .git-paw/tmp/");
     }
 
     // 3. Create .git-paw/scripts/ directory and install sweep.sh.
@@ -97,7 +111,13 @@ pub fn run_init() -> Result<(), PawError> {
         println!("  Updated .gitignore");
     }
 
-    if !created_dir && !created_logs && !created_config && !migrated_config && !updated_gitignore {
+    if !created_dir
+        && !created_logs
+        && !created_tmp
+        && !created_config
+        && !migrated_config
+        && !updated_gitignore
+    {
         println!("Already initialized. Nothing to do.");
     } else {
         println!("Initialized git-paw.");
@@ -474,6 +494,29 @@ mod tests {
         let content = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         assert!(content.contains(".git-paw/session-summary.md"));
         assert_eq!(content.matches(".git-paw/logs/").count(), 1);
+    }
+
+    #[test]
+    fn repo_local_tmp_added_to_gitignore_and_not_duplicated() {
+        // The repo-local scratch dir must be ignored so verify worktrees /
+        // self-test sessions are never committed in the consuming repo.
+        let dir = setup_repo();
+        // Pre-seed only logs/ — tmp/ must be appended.
+        fs::write(dir.path().join(".gitignore"), ".git-paw/logs/\n").unwrap();
+        assert!(ensure_gitignore_entry(dir.path()).unwrap());
+        let content = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(
+            content.contains(".git-paw/tmp/"),
+            "init must gitignore the repo-local .git-paw/tmp/ scratch dir"
+        );
+        // Idempotent: a second pass adds nothing and keeps a single entry.
+        assert!(!ensure_gitignore_entry(dir.path()).unwrap());
+        let content2 = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert_eq!(
+            content2.matches(".git-paw/tmp/").count(),
+            1,
+            ".git-paw/tmp/ must appear exactly once after repeated init"
+        );
     }
 
     // --- migrate_existing_config ---
