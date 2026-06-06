@@ -66,6 +66,28 @@ jobs:
           print(f'Coverage {pct:.1f}% meets 80% threshold')
           "
 
+  # Cold-start parity smoke: matches the local `just smoke` environment.
+  # Forces a non-TTY, non-tmux baseline so missing `-x`/`-y` on a new
+  # `tmux new-session` call site fails here BEFORE shipping to users.
+  # See openspec/changes/cold-start-ci-parity for context.
+  smoke-headless:
+    name: Cold-start smoke (headless Linux)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      TERM: dumb
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Run integration tests cold (no inherited TMUX, no live-session opt-out)
+        run: |
+          unset TMUX
+          unset GIT_PAW_ALLOW_LIVE_SESSION
+          cargo test --tests
+
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
