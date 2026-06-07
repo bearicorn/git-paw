@@ -29,6 +29,7 @@ fn spawn_test_broker(conflict: Option<&ConflictConfig>) -> (broker::BrokerHandle
             enabled: true,
             port,
             bind: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         match broker::start_broker_with(
             &config,
@@ -119,6 +120,41 @@ fn decode_chunked(body: &str) -> String {
 fn publish(url: &str, payload: &str) {
     let (status, _) = http_request(url, "POST", "/publish", payload);
     assert_eq!(status, 202, "publish should return 202");
+}
+
+/// Publishes without asserting success; returns the HTTP status so a test can
+/// assert a rejection (used by the unknown-region-kind scenario).
+fn try_publish(url: &str, payload: &str) -> u16 {
+    let (status, _) = http_request(url, "POST", "/publish", payload);
+    status
+}
+
+/// Forward-conflict feedback predicate: finds the first `[conflict-detector]`
+/// forward-conflict feedback in an inbox poll response.
+fn forward_feedback(resp: &serde_json::Value) -> Option<serde_json::Value> {
+    let msgs = resp["messages"].as_array()?;
+    msgs.iter()
+        .find(|m| {
+            m["type"] == "agent.feedback"
+                && m["payload"]["errors"]
+                    .as_array()
+                    .and_then(|errs| errs.first()?.as_str())
+                    .is_some_and(|s| {
+                        s.starts_with("[conflict-detector]") && s.contains("forward conflict")
+                    })
+        })
+        .cloned()
+}
+
+/// Asserts that no forward-conflict feedback reaches `agent` within a short
+/// settle window (used by the no-conflict scenarios).
+fn assert_no_forward_feedback(url: &str, agent: &str) {
+    std::thread::sleep(Duration::from_millis(1200));
+    let resp = poll(url, agent);
+    assert!(
+        forward_feedback(&resp).is_none(),
+        "{agent} should not receive forward-conflict feedback; got: {resp}"
+    );
 }
 
 fn poll(url: &str, agent: &str) -> serde_json::Value {
@@ -405,4 +441,168 @@ fn detector_not_started_when_supervisor_disabled() {
             "{who} should not receive detector-emitted feedback when supervisor is off"
         );
     }
+}
+
+// =========================================================================
+// conflict-detector-fn-granularity E2E (tasks 8.1-8.6)
+// =========================================================================
+
+/// 8.1: Two intents declaring different functions in the same file produce
+/// no forward-conflict warning.
+#[test]
+#[serial]
+fn region_distinct_functions_same_file_no_warning() {
+    let cfg = ConflictConfig::default();
+    let (_handle, url) = spawn_test_broker(Some(&cfg));
+    register_agent(&url, "feat-xx");
+    register_agent(&url, "feat-yy");
+    drain_inbox(&url, "feat-xx");
+    drain_inbox(&url, "feat-yy");
+
+    publish(
+        &url,
+        r#"{"type":"agent.intent","agent_id":"feat-xx","payload":{"files":[{"path":"src/auth.rs","regions":[{"kind":"function","name":"validate_token"}]}],"summary":"x","valid_for_seconds":600}}"#,
+    );
+    publish(
+        &url,
+        r#"{"type":"agent.intent","agent_id":"feat-yy","payload":{"files":[{"path":"src/auth.rs","regions":[{"kind":"function","name":"refresh_session"}]}],"summary":"y","valid_for_seconds":600}}"#,
+    );
+
+    assert_no_forward_feedback(&url, "feat-xx");
+    assert_no_forward_feedback(&url, "feat-yy");
+}
+
+/// 8.2: Two intents declaring the same function produce a warning that names
+/// the function.
+#[test]
+#[serial]
+fn region_same_function_warns_with_function_name() {
+    let cfg = ConflictConfig::default();
+    let (_handle, url) = spawn_test_broker(Some(&cfg));
+    register_agent(&url, "feat-xx");
+    register_agent(&url, "feat-yy");
+    drain_inbox(&url, "feat-xx");
+    drain_inbox(&url, "feat-yy");
+
+    publish(
+        &url,
+        r#"{"type":"agent.intent","agent_id":"feat-xx","payload":{"files":[{"path":"src/auth.rs","regions":[{"kind":"function","name":"validate_token"}]}],"summary":"x","valid_for_seconds":600}}"#,
+    );
+    publish(
+        &url,
+        r#"{"type":"agent.intent","agent_id":"feat-yy","payload":{"files":[{"path":"src/auth.rs","regions":[{"kind":"function","name":"validate_token"}]}],"summary":"y","valid_for_seconds":600}}"#,
+    );
+
+    let fb = poll_until(&url, "feat-xx", forward_feedback)
+        .expect("feat-xx should get a region-level forward conflict");
+    let err = fb["payload"]["errors"][0].as_str().unwrap();
+    assert!(err.contains("feat-yy"));
+    assert!(err.contains("function validate_token"), "got: {err}");
+    assert!(err.contains("src/auth.rs"));
+}
+
+/// 8.3: One intent with regions + one v0.5.0-shape (no regions) on the same
+/// file falls back to a file-level warning (back-compat).
+#[test]
+#[serial]
+fn region_plus_v050_shape_falls_back_to_file_level() {
+    let cfg = ConflictConfig::default();
+    let (_handle, url) = spawn_test_broker(Some(&cfg));
+    register_agent(&url, "feat-xx");
+    register_agent(&url, "feat-yy");
+    drain_inbox(&url, "feat-xx");
+    drain_inbox(&url, "feat-yy");
+
+    publish(
+        &url,
+        r#"{"type":"agent.intent","agent_id":"feat-xx","payload":{"files":[{"path":"src/auth.rs","regions":[{"kind":"function","name":"validate_token"}]}],"summary":"x","valid_for_seconds":600}}"#,
+    );
+    publish(
+        &url,
+        r#"{"type":"agent.intent","agent_id":"feat-yy","payload":{"files":["src/auth.rs"],"summary":"y","valid_for_seconds":600}}"#,
+    );
+
+    let fb = poll_until(&url, "feat-yy", forward_feedback)
+        .expect("file-level fallback should warn feat-yy");
+    let err = fb["payload"]["errors"][0].as_str().unwrap();
+    assert!(err.contains("src/auth.rs"));
+    // A file-level conflict names no region detail.
+    assert!(
+        !err.contains("(regions:"),
+        "expected file-level warning, got: {err}"
+    );
+}
+
+/// 8.4: Cross-kind intersection (function vs range) produces a conservative
+/// warning carrying the cross-kind hint.
+#[test]
+#[serial]
+fn region_cross_kind_warns_with_hint() {
+    let cfg = ConflictConfig::default();
+    let (_handle, url) = spawn_test_broker(Some(&cfg));
+    register_agent(&url, "feat-xx");
+    register_agent(&url, "feat-yy");
+    drain_inbox(&url, "feat-xx");
+    drain_inbox(&url, "feat-yy");
+
+    publish(
+        &url,
+        r#"{"type":"agent.intent","agent_id":"feat-xx","payload":{"files":[{"path":"src/auth.rs","regions":[{"kind":"function","name":"validate_token"}]}],"summary":"x","valid_for_seconds":600}}"#,
+    );
+    publish(
+        &url,
+        r#"{"type":"agent.intent","agent_id":"feat-yy","payload":{"files":[{"path":"src/auth.rs","regions":[{"kind":"range","start_line":10,"end_line":50}]}],"summary":"y","valid_for_seconds":600}}"#,
+    );
+
+    let fb = poll_until(&url, "feat-xx", forward_feedback)
+        .expect("cross-kind conflict should warn feat-xx");
+    let err = fb["payload"]["errors"][0].as_str().unwrap();
+    assert!(
+        err.contains("conservatively"),
+        "cross-kind warning must carry the hint; got: {err}"
+    );
+}
+
+/// 8.5: v0.5.0-shape-only intents (plain strings) overlapping on a file
+/// produce v0.5.0-equivalent file-level detector behaviour.
+#[test]
+#[serial]
+fn v050_shape_only_intents_warn_file_level() {
+    let cfg = ConflictConfig::default();
+    let (_handle, url) = spawn_test_broker(Some(&cfg));
+    register_agent(&url, "feat-xx");
+    register_agent(&url, "feat-yy");
+    drain_inbox(&url, "feat-xx");
+    drain_inbox(&url, "feat-yy");
+
+    publish(
+        &url,
+        r#"{"type":"agent.intent","agent_id":"feat-xx","payload":{"files":["src/auth.rs"],"summary":"x","valid_for_seconds":600}}"#,
+    );
+    publish(
+        &url,
+        r#"{"type":"agent.intent","agent_id":"feat-yy","payload":{"files":["src/auth.rs"],"summary":"y","valid_for_seconds":600}}"#,
+    );
+
+    let fb = poll_until(&url, "feat-xx", forward_feedback)
+        .expect("v0.5.0-shape overlap should warn at file level");
+    let err = fb["payload"]["errors"][0].as_str().unwrap();
+    assert!(err.contains("src/auth.rs"));
+    assert!(!err.contains("(regions:"), "got: {err}");
+}
+
+/// 8.6: An unknown region kind value causes the publish to be rejected with a
+/// 400-class error.
+#[test]
+#[serial]
+fn unknown_region_kind_rejected_at_publish() {
+    let cfg = ConflictConfig::default();
+    let (_handle, url) = spawn_test_broker(Some(&cfg));
+    register_agent(&url, "feat-xx");
+
+    let status = try_publish(
+        &url,
+        r#"{"type":"agent.intent","agent_id":"feat-xx","payload":{"files":[{"path":"src/auth.rs","regions":[{"kind":"macro","name":"vec"}]}],"summary":"x","valid_for_seconds":600}}"#,
+    );
+    assert_eq!(status, 400, "unknown region kind must be rejected with 400");
 }

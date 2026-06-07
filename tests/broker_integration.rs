@@ -30,6 +30,7 @@ fn make_session_with_broker(suffix: &str) -> Session {
             worktree_path: PathBuf::from(format!("/tmp/wt-{suffix}-auth")),
             cli: "claude".to_string(),
             branch_created: false,
+            pending_boot_prompt: None,
         }],
         broker_port: Some(9119),
         broker_bind: Some("127.0.0.1".to_string()),
@@ -51,6 +52,7 @@ fn make_session_without_broker(suffix: &str) -> Session {
             worktree_path: PathBuf::from(format!("/tmp/wt-{suffix}-auth")),
             cli: "claude".to_string(),
             branch_created: false,
+            pending_boot_prompt: None,
         }],
         broker_port: None,
         broker_bind: None,
@@ -322,6 +324,7 @@ where
             enabled: true,
             port,
             bind: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         match git_paw::broker::start_broker(&config, make_state(), Vec::new()) {
             Ok(handle) => {
@@ -664,6 +667,7 @@ fn broker_log_flush_on_shutdown() {
             enabled: true,
             port,
             bind: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         match git_paw::broker::start_broker(
             &config,

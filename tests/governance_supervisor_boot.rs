@@ -40,6 +40,7 @@ fn assemble_supervisor_boot_prompt(
             test_command: Some("just check"),
             ..Default::default()
         },
+        &[],
     );
     let governance = governance_section_paths(adr, test_strategy, security, dod, constitution);
     if governance.is_empty() {
@@ -71,6 +72,7 @@ fn supervisor_boot_prompt_with_no_governance_paths_omits_section() {
                 test_command: Some("just check"),
                 ..Default::default()
             },
+            &[],
         )
     };
 

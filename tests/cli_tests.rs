@@ -275,6 +275,7 @@ fn make_session_with_worktree(
             worktree_path: wt.path.clone(),
             cli: "echo".to_string(),
             branch_created: wt.branch_created,
+            pending_boot_prompt: None,
         }],
         broker_port: None,
         broker_bind: None,

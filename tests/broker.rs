@@ -22,6 +22,7 @@ fn spawn_test_broker() -> (broker::BrokerHandle, String) {
             enabled: true,
             port,
             bind: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         match broker::start_broker(&config, BrokerState::new(None), Vec::new()) {
             Ok(handle) => {
@@ -342,6 +343,7 @@ fn second_broker_on_same_port_reattaches() {
         enabled: true,
         port,
         bind: "127.0.0.1".to_string(),
+        ..Default::default()
     };
 
     // Starting a second broker on the same port should reattach.
@@ -444,4 +446,77 @@ fn poll_with_since_returns_only_newer() {
     let resp = http_request(&url, "GET", &path, &[], "");
     let json = resp.json();
     assert_eq!(json["messages"].as_array().unwrap().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// advanced-main-event §10.1: a scripted supervisor merge publishes an
+// agent.advanced-main event that a dependent agent's /messages poll surfaces
+// within one cycle, over the real HTTP broker.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn advanced_main_event_surfaces_on_dependent_poll() {
+    let (_handle, url) = spawn_test_broker();
+
+    // A dependent coding agent registers.
+    let resp = http_request(
+        &url,
+        "POST",
+        "/publish",
+        &[("Content-Type", "application/json")],
+        r#"{"type":"agent.status","agent_id":"feat-dependent","payload":{"status":"working","modified_files":[]}}"#,
+    );
+    assert_eq!(resp.status, 202);
+
+    // The supervisor publishes an advanced-main after merging feat/auth.
+    let resp = http_request(
+        &url,
+        "POST",
+        "/publish",
+        &[("Content-Type", "application/json")],
+        r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/auth","new_main_sha":"a1b2c3d4e5f6","base":"main","merged_at":"2026-06-04T13:30:00Z","summary":"landed auth"}"#,
+    );
+    assert_eq!(
+        resp.status, 202,
+        "well-formed advanced-main must be accepted"
+    );
+
+    // Within one poll cycle the dependent sees it with all fields intact.
+    let resp = http_request(&url, "GET", "/messages/feat-dependent", &[], "");
+    assert_eq!(resp.status, 200);
+    let json = resp.json();
+    let msgs = json["messages"].as_array().unwrap();
+    let advance = msgs
+        .iter()
+        .find(|m| m["type"] == "agent.advanced-main")
+        .expect("dependent's inbox surfaces the advanced-main event");
+    assert_eq!(advance["merged_branch"], "feat/auth");
+    assert_eq!(advance["new_main_sha"], "a1b2c3d4e5f6");
+    assert_eq!(advance["base"], "main");
+    assert_eq!(advance["summary"], "landed auth");
+}
+
+// §10.1 (negative): the broker rejects an advanced-main missing a required
+// field over real HTTP with a 400 naming the field.
+#[test]
+#[serial]
+fn advanced_main_missing_field_rejected_over_http() {
+    let (_handle, url) = spawn_test_broker();
+
+    let resp = http_request(
+        &url,
+        "POST",
+        "/publish",
+        &[("Content-Type", "application/json")],
+        r#"{"type":"agent.advanced-main","from":"supervisor","new_main_sha":"a1b2c3d4e5f6","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#,
+    );
+    assert_eq!(resp.status, 400, "missing merged_branch must be a 400");
+    assert!(
+        resp.json()["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("merged_branch"),
+        "the 400 body must name the missing field"
+    );
 }
