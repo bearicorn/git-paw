@@ -1,9 +1,14 @@
 //! Integration tests for the terminal-status sticky behaviour.
 //!
 //! Spec scenario `terminal-status-sticky`: once an agent's status is one of
-//! the terminal labels (`done`, `verified`, `blocked`, `committed`), the
-//! broker MUST NOT downgrade it back to a non-terminal label like
-//! `working`. The git-status watcher (`src/broker/watcher.rs`) routinely
+//! the terminal labels (`done`, `verified`, `blocked`), the broker MUST NOT
+//! downgrade it back to a non-terminal label like `working`. `committed` is
+//! a special case as of `status-republish-on-write` (auto-approve-scope):
+//! it is sticky against `working` ONLY when the post-commit re-entry TTL is
+//! disabled (`republish_working_ttl = 0`, the v0.5.0 opt-out) or the working
+//! tick arrives after the TTL window; within the TTL a `working` tick
+//! deliberately re-enters the working state. The git-status watcher
+//! (`src/broker/watcher.rs`) routinely
 //! publishes `working` heartbeats whenever it sees dirty paths in the
 //! worktree -- those heartbeats reach the agent record through
 //! `delivery::publish_message`, which is the same public seam the watcher
@@ -18,6 +23,7 @@
 //!   3. Assert the agent's status is still the terminal label.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use git_paw::broker::BrokerState;
 use git_paw::broker::delivery::publish_message;
@@ -110,7 +116,11 @@ fn watcher_working_tick_cannot_downgrade_blocked_status() {
 }
 
 #[test]
-fn watcher_working_tick_cannot_downgrade_committed_status() {
+fn watcher_working_tick_within_ttl_reenters_working_from_committed() {
+    // status-republish-on-write: with the default 60s TTL, a post-commit
+    // `working` tick deliberately re-enters the working state so the
+    // dashboard reflects the agent's continued activity. This replaces the
+    // pre-v0.6.0 "committed is terminal against working" assertion.
     let state = Arc::new(BrokerState::new(None));
     publish_message(&state, &terminal_artifact("feat-qux", "committed"));
     assert_eq!(state.read().agents["feat-qux"].status, "committed");
@@ -119,7 +129,25 @@ fn watcher_working_tick_cannot_downgrade_committed_status() {
 
     assert_eq!(
         state.read().agents["feat-qux"].status,
+        "working",
+        "a working tick within the post-commit TTL must re-enter working"
+    );
+}
+
+#[test]
+fn watcher_working_tick_cannot_downgrade_committed_when_ttl_disabled() {
+    // The v0.5.0 opt-out (`republish_working_ttl = 0`) restores the original
+    // semantics: `committed` is terminal against `working`.
+    let state = Arc::new(BrokerState::new(None));
+    state.set_republish_working_ttl(Duration::ZERO);
+    publish_message(&state, &terminal_artifact("feat-qux", "committed"));
+    assert_eq!(state.read().agents["feat-qux"].status, "committed");
+
+    publish_message(&state, &watcher_working_status("feat-qux", &["README.md"]));
+
+    assert_eq!(
+        state.read().agents["feat-qux"].status,
         "committed",
-        "watcher heartbeat must not downgrade a terminal `committed` status"
+        "with the re-entry TTL disabled, committed must stay terminal (v0.5.0 model)"
     );
 }

@@ -280,11 +280,14 @@ fn recover_session_reconstructs_dashboard_and_watchers() {
     }
 
     // ---------------------------------------------------------------------
-    // Assertion 3: broker is listening on the saved port and reports the
-    // saved agent. The watcher pre-population at broker start (see
-    // `start_broker`) populates `agent_clis` for every WatchTarget — so the
-    // dashboard's `/status` reflects the saved worktree set.
+    // Assertion 3: broker is listening on the saved port and a WatchTarget
+    // exists for the saved worktree — proven by dirtying the worktree and
+    // observing the watcher publish an `agent.status` that surfaces the agent
+    // in `/status`. (A roster row appears once a pane publishes — the
+    // publisher-only rule — so we trigger a real watcher publish rather than
+    // relying on the seed alone.)
     // ---------------------------------------------------------------------
+    let _ = fs::write(wt_path.join(".paw-recover-probe"), "trigger watcher\n");
     let broker_url = format!("http://127.0.0.1:{broker_port}");
     let agent_slug = "feat-alpha"; // slugify_branch("feat/alpha")
     let deadline = Instant::now() + Duration::from_secs(15);

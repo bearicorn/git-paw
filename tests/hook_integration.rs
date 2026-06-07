@@ -28,6 +28,7 @@ fn spawn_test_broker() -> (git_paw::broker::BrokerHandle, String) {
             enabled: true,
             port,
             bind: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         match git_paw::broker::start_broker(
             &config,
@@ -66,7 +67,9 @@ fn git_commit_publishes_agent_artifact_to_broker() {
     let (handle, url) = spawn_test_broker();
 
     // Install the post-commit dispatcher hook + per-worktree marker.
-    git_paw::agents::install_git_hooks(tr.path(), &url, agent_id).expect("install hooks");
+    // Empty expected_branch disables the branch guard so this test exercises
+    // only the artifact dispatcher (the guard has its own dedicated tests).
+    git_paw::agents::install_git_hooks(tr.path(), &url, agent_id, "", true).expect("install hooks");
 
     // Sanity: the hook file and marker file must exist after install.
     let hook = tr.path().join(".git").join("hooks").join("post-commit");

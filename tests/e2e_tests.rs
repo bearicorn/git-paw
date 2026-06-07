@@ -477,7 +477,8 @@ fn tmux_session_with_five_panes_and_different_clis() {
     let pane_count = String::from_utf8_lossy(&output.stdout).lines().count();
     assert_eq!(pane_count, 5, "session should have 5 panes");
 
-    // Verify each pane's title has the correct branch→CLI pairing
+    // Verify each pane's title is its branch id (the per-pane labelling from
+    // supervisor-pane-affordances — title is the branch only, not the CLI).
     let output = std::process::Command::new("tmux")
         .args(["list-panes", "-t", session_name, "-F", "#{pane_title}"])
         .output()
@@ -489,10 +490,10 @@ fn tmux_session_with_five_panes_and_different_clis() {
         .collect();
 
     assert_eq!(titles.len(), 5, "should have 5 pane titles");
-    for (i, (branch, cli)) in panes.iter().enumerate() {
-        assert!(
-            titles[i].contains(branch) && titles[i].contains(cli),
-            "pane {i} should map {branch} to {cli}, got: {}",
+    for (i, (branch, _cli)) in panes.iter().enumerate() {
+        assert_eq!(
+            &titles[i], branch,
+            "pane {i} title should be the branch id {branch}, got: {}",
             titles[i]
         );
     }
@@ -533,6 +534,171 @@ fn tmux_mouse_mode_enabled_by_default() {
     assert!(
         mouse_setting.contains("on"),
         "mouse should be enabled by default, got: {mouse_setting}"
+    );
+
+    cleanup_session(session_name);
+}
+
+/// supervisor-pane-affordances E2E (tasks 6.1, 6.2):
+/// a default session has the border affordances live on the tmux server, and
+/// they do not leak to an unrelated session; an opted-out session inherits the
+/// user's tmux defaults instead.
+#[test]
+#[serial]
+fn tmux_session_applies_border_affordances_by_default() {
+    ensure_tmux_installed().expect("tmux must be installed to run this test");
+
+    let tmux_env = helpers::tmux_test_env();
+    let _proc_env = tmux_env.apply_to_process();
+
+    let session_name = "paw-e2e-affordances-test";
+    let other_session = "paw-e2e-affordances-other";
+    cleanup_session(session_name);
+    cleanup_session(other_session);
+
+    let tmp = TempDir::new().expect("create temp dir");
+    let worktree = tmp.path().to_string_lossy().to_string();
+
+    // An unrelated session created with plain tmux — its borders must stay the
+    // user's default (the "does not leak" scenario).
+    std::process::Command::new("tmux")
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            other_session,
+            "-x",
+            "80",
+            "-y",
+            "24",
+        ])
+        .status()
+        .expect("create unrelated session");
+
+    let session = TmuxSessionBuilder::new("e2e-affordances-test")
+        .add_pane(PaneSpec {
+            branch: "feat/labelled".into(),
+            worktree,
+            cli_command: "echo hi".into(),
+        })
+        .build()
+        .expect("build session");
+    session.execute().expect("execute session");
+
+    let show = |session: &str, option: &str| -> String {
+        let output = std::process::Command::new("tmux")
+            .args(["show-options", "-t", session, "-v", option])
+            .output()
+            .expect("show-options");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+
+    assert_eq!(show(session_name, "pane-border-status"), "top");
+    // The format is a reverse-video label bar that prefers the un-clobberable
+    // `@paw_role` pane option over `#{pane_title}` (which the CLI overwrites via
+    // OSC title sequences). The exact string is asserted by the unit-level
+    // command-string test; here we confirm the live session carries it.
+    assert_eq!(
+        show(session_name, "pane-border-format"),
+        "#[fg=colour39,bold,reverse] #{pane_index}: #{?#{@paw_role},#{@paw_role},#{pane_title}} #[default]"
+    );
+    assert!(
+        show(session_name, "pane-active-border-style").contains("colour45"),
+        "active border should be the bright bold colour"
+    );
+    assert!(
+        show(session_name, "pane-border-style").contains("colour238"),
+        "inactive border should be the dim colour"
+    );
+
+    // The pane title is the branch id (no CLI command).
+    let title_out = std::process::Command::new("tmux")
+        .args([
+            "display-message",
+            "-t",
+            &format!("{session_name}:0.0"),
+            "-p",
+            "#{pane_title}",
+        ])
+        .output()
+        .expect("display-message");
+    assert_eq!(
+        String::from_utf8_lossy(&title_out.stdout).trim(),
+        "feat/labelled"
+    );
+
+    // The stable, clobber-proof role label lives in the pane-scoped @paw_role
+    // option (the border-format prefers it over the CLI-overwritable title).
+    let role_out = std::process::Command::new("tmux")
+        .args([
+            "show-options",
+            "-p",
+            "-t",
+            &format!("{session_name}:0.0"),
+            "-v",
+            "@paw_role",
+        ])
+        .output()
+        .expect("show-options @paw_role");
+    assert_eq!(
+        String::from_utf8_lossy(&role_out.stdout).trim(),
+        "feat/labelled",
+        "pane-scoped @paw_role must carry the role label"
+    );
+
+    // The unrelated session was never touched: its pane-border-status stays at
+    // the tmux default (empty / "off"), not "top".
+    assert_ne!(
+        show(other_session, "pane-border-status"),
+        "top",
+        "git-paw affordances must not leak to other sessions"
+    );
+
+    cleanup_session(session_name);
+    cleanup_session(other_session);
+}
+
+#[test]
+#[serial]
+fn tmux_session_opt_out_inherits_tmux_defaults() {
+    ensure_tmux_installed().expect("tmux must be installed to run this test");
+
+    let tmux_env = helpers::tmux_test_env();
+    let _proc_env = tmux_env.apply_to_process();
+
+    let session_name = "paw-e2e-affordances-optout";
+    cleanup_session(session_name);
+
+    let tmp = TempDir::new().expect("create temp dir");
+    let worktree = tmp.path().to_string_lossy().to_string();
+
+    let session = TmuxSessionBuilder::new("e2e-affordances-optout")
+        .add_pane(PaneSpec {
+            branch: "feat/plain".into(),
+            worktree,
+            cli_command: "echo hi".into(),
+        })
+        .border_affordances(false)
+        .build()
+        .expect("build session");
+    session.execute().expect("execute session");
+
+    // With the opt-out, git-paw sets neither pane-border-status nor the
+    // styled borders — the session inherits the user's tmux defaults.
+    let status = std::process::Command::new("tmux")
+        .args([
+            "show-options",
+            "-t",
+            session_name,
+            "-v",
+            "pane-border-status",
+        ])
+        .output()
+        .expect("show-options");
+    assert_ne!(
+        String::from_utf8_lossy(&status.stdout).trim(),
+        "top",
+        "opt-out session must not force pane-border-status top"
     );
 
     cleanup_session(session_name);

@@ -36,6 +36,7 @@ fn broker_config(port_base: u16) -> BrokerConfig {
         enabled: true,
         port: port_base + (std::process::id() as u16 % 100),
         bind: "127.0.0.1".to_string(),
+        ..Default::default()
     }
 }
 

@@ -27,6 +27,7 @@ fn spawn_test_broker() -> (broker::BrokerHandle, String) {
             enabled: true,
             port,
             bind: "127.0.0.1".to_string(),
+            ..Default::default()
         };
         match broker::start_broker(&config, BrokerState::new(None), Vec::new()) {
             Ok(handle) => {

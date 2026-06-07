@@ -32,6 +32,7 @@ fn make_session_with_broker(suffix: &str) -> Session {
             worktree_path: PathBuf::from(format!("/tmp/wt-{suffix}-auth")),
             cli: "claude".to_string(),
             branch_created: false,
+            pending_boot_prompt: None,
         }],
         broker_port: Some(9120),
         broker_bind: Some("127.0.0.1".to_string()),
@@ -45,6 +46,7 @@ fn make_config_with_message_log(show_log: bool) -> PawConfig {
     PawConfig {
         dashboard: Some(DashboardConfig {
             show_message_log: show_log,
+            ..Default::default()
         }),
         ..Default::default()
     }
@@ -240,6 +242,7 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 
 use git_paw::broker::AgentStatusEntry;
+use git_paw::dashboard::broker_log::BrokerLog;
 use git_paw::dashboard::{format_agent_rows, format_status_line, render_dashboard};
 
 /// Flattens a `Buffer` into a single `String` so substring assertions work
@@ -258,16 +261,18 @@ fn buffer_to_string(buffer: &Buffer) -> String {
 }
 
 /// Renders one frame to a 120x30 `TestBackend` and returns the rendered
-/// buffer as a string for substring assertions.
+/// buffer as a string for substring assertions. `panel_visible` controls
+/// whether the Broker log panel occupies the fourth layout segment.
 fn render_to_string(
     rows: &[git_paw::dashboard::AgentRow],
     status_line: &str,
-    show_message_log: bool,
+    panel_visible: bool,
 ) -> String {
+    let broker_log = BrokerLog::new(500, panel_visible);
     let backend = TestBackend::new(120, 30);
     let mut terminal = Terminal::new(backend).expect("create test terminal");
     terminal
-        .draw(|f| render_dashboard(f, rows, status_line, &[], show_message_log))
+        .draw(|f| render_dashboard(f, rows, status_line, &broker_log))
         .expect("draw frame");
     let buffer = terminal.backend().buffer().clone();
     buffer_to_string(&buffer)

@@ -47,7 +47,7 @@ fn seeds_preset_into_repo_claude_settings_with_default_config() {
         std::env::set_var("HOME", fake_home.path());
     }
 
-    let failures = seed_supervisor_session(&[], repo_root);
+    let failures = seed_supervisor_session(&[], repo_root, &[]);
     assert!(failures.is_empty(), "unexpected failures: {failures:?}");
 
     let settings = repo_root.join(".claude").join("settings.json");
@@ -106,7 +106,7 @@ fn extra_patterns_appear_in_seeded_settings() {
     }
 
     let extra = vec!["pnpm test".to_string()];
-    let failures = seed_supervisor_session(&extra, repo_root);
+    let failures = seed_supervisor_session(&extra, repo_root, &[]);
     assert!(failures.is_empty(), "unexpected failures: {failures:?}");
 
     let entries = read_array(&repo_root.join(".claude").join("settings.json"));
@@ -117,43 +117,42 @@ fn extra_patterns_appear_in_seeded_settings() {
     }
 }
 
-/// 6.4 — When `~/.claude-oss/` pre-exists, the helper also writes
-/// `~/.claude-oss/settings.json`. When absent, the directory is not
-/// created.
+/// 6.4 — A configured alternate settings target (resolved from
+/// `[clis.<name>].settings_path`) is written when its parent directory
+/// already exists, and skipped (never created) when the parent is absent.
+/// The target set is config-driven — there is no hardcoded CLI path.
 #[test]
 #[serial]
-fn writes_claude_oss_when_directory_exists_and_skips_when_absent() {
-    // Part A: directory absent → no claude-oss settings file.
+fn writes_configured_alt_target_when_parent_exists_and_skips_when_absent() {
+    // Part A: alt-target whose parent does not exist → skipped, not created.
     let tr = helpers::setup_test_repo();
     let repo_root = tr.path();
-    let fake_home_a = TempDir::new().unwrap();
-    unsafe {
-        std::env::set_var("HOME", fake_home_a.path());
-    }
-    let failures = seed_supervisor_session(&[], repo_root);
+    let missing_home = TempDir::new().unwrap();
+    let absent_alt = missing_home
+        .path()
+        .join("does-not-exist")
+        .join("settings.json");
+    let failures = seed_supervisor_session(&[], repo_root, std::slice::from_ref(&absent_alt));
     assert!(failures.is_empty(), "unexpected failures: {failures:?}");
-    let oss_dir_a = fake_home_a.path().join(".claude-oss");
-    assert!(!oss_dir_a.exists(), "must not create ~/.claude-oss");
+    assert!(
+        !absent_alt.exists() && !absent_alt.parent().unwrap().exists(),
+        "an alt-target with an absent parent must be skipped, not created",
+    );
 
-    // Part B: directory pre-exists → claude-oss settings written.
+    // Part B: alt-target whose parent exists → written with the preset.
     let tr_b = helpers::setup_test_repo();
     let repo_root_b = tr_b.path();
-    let fake_home_b = TempDir::new().unwrap();
-    let oss_dir_b = fake_home_b.path().join(".claude-oss");
-    fs::create_dir_all(&oss_dir_b).unwrap();
-    unsafe {
-        std::env::set_var("HOME", fake_home_b.path());
-    }
-    let failures = seed_supervisor_session(&[], repo_root_b);
+    let alt_dir = TempDir::new().unwrap();
+    let alt_settings = alt_dir.path().join("settings.json");
+    let failures = seed_supervisor_session(&[], repo_root_b, std::slice::from_ref(&alt_settings));
     assert!(failures.is_empty(), "unexpected failures: {failures:?}");
-    let oss_settings = oss_dir_b.join("settings.json");
     assert!(
-        oss_settings.exists(),
-        "claude-oss settings.json should be created when directory exists",
+        alt_settings.exists(),
+        "alt-target settings.json should be created when its parent exists",
     );
-    let oss_entries = read_array(&oss_settings);
+    let alt_entries = read_array(&alt_settings);
     for pat in DEV_ALLOWLIST_PRESET {
-        assert!(oss_entries.iter().any(|e| e == pat));
+        assert!(alt_entries.iter().any(|e| e == pat));
     }
     let repo_entries = read_array(&repo_root_b.join(".claude").join("settings.json"));
     for pat in DEV_ALLOWLIST_PRESET {
@@ -175,12 +174,12 @@ fn re_seed_on_recovery_is_idempotent() {
     }
 
     // First seed.
-    let failures = seed_supervisor_session(&[], repo_root);
+    let failures = seed_supervisor_session(&[], repo_root, &[]);
     assert!(failures.is_empty(), "first seed: {failures:?}");
     let first = read_array(&repo_root.join(".claude").join("settings.json"));
 
     // Re-seed (recovery path).
-    let failures = seed_supervisor_session(&[], repo_root);
+    let failures = seed_supervisor_session(&[], repo_root, &[]);
     assert!(failures.is_empty(), "re-seed: {failures:?}");
     let second = read_array(&repo_root.join(".claude").join("settings.json"));
 
@@ -210,7 +209,7 @@ fn seeds_without_broker_configuration() {
         std::env::set_var("HOME", fake_home.path());
     }
 
-    let failures = seed_supervisor_session(&[], repo_root);
+    let failures = seed_supervisor_session(&[], repo_root, &[]);
     assert!(failures.is_empty(), "unexpected failures: {failures:?}");
 
     let entries = read_array(&repo_root.join(".claude").join("settings.json"));
@@ -238,7 +237,7 @@ fn malformed_settings_returns_failure_and_leaves_file_unchanged() {
     let malformed = "not json {{{";
     fs::write(&settings, malformed).unwrap();
 
-    let failures = seed_supervisor_session(&[], repo_root);
+    let failures = seed_supervisor_session(&[], repo_root, &[]);
     assert_eq!(failures.len(), 1, "expected one failure: {failures:?}");
     let (failed_path, err) = &failures[0];
     assert_eq!(failed_path, &settings);

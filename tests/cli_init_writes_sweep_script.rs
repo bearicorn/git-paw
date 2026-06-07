@@ -79,6 +79,34 @@ fn init_writes_executable_sweep_script() {
 
 #[test]
 #[serial]
+fn init_creates_and_gitignores_repo_local_tmp() {
+    let tmp = TempDir::new().expect("tempdir");
+    init_git_repo(tmp.path());
+
+    let output = cmd()
+        .current_dir(tmp.path())
+        .arg("init")
+        .timeout(Duration::from_secs(10))
+        .output()
+        .expect("run git paw init");
+    assert!(output.status.success(), "git paw init should succeed");
+
+    // The repo-local scratch dir exists...
+    assert!(
+        tmp.path().join(".git-paw/tmp").is_dir(),
+        "init should create the repo-local .git-paw/tmp/ scratch dir"
+    );
+    // ...and is gitignored so verify worktrees / self-test sessions are
+    // never committed in the consuming repo.
+    let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).expect("read .gitignore");
+    assert!(
+        gitignore.contains(".git-paw/tmp/"),
+        "init should add .git-paw/tmp/ to .gitignore; got:\n{gitignore}"
+    );
+}
+
+#[test]
+#[serial]
 fn init_overwrites_existing_sweep_script() {
     let tmp = TempDir::new().expect("tempdir");
     init_git_repo(tmp.path());
