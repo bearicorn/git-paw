@@ -158,6 +158,10 @@ curl -s -X POST "$GIT_PAW_BROKER_URL/publish" \
   -d '{"type":"agent.intent","agent_id":"feat-auth","payload":{"files":["src/auth.rs","src/auth/client.rs"],"summary":"wire AuthClient","valid_for_seconds":900}}'
 ```
 
+Each `files` entry may also be an object declaring the regions within a file
+the agent intends to touch — see [Declaring regions](#declaring-regions-v060)
+for the region-level granularity added in v0.6.0.
+
 ### Question
 
 An agent escalates an uncertainty to the supervisor inbox. The asking agent
@@ -192,6 +196,44 @@ curl -s -X POST "$GIT_PAW_BROKER_URL/publish" \
   -H "Content-Type: application/json" \
   -d '{"type":"agent.verified","agent_id":"feat-auth","payload":{"verified_by":"supervisor","message":"all five gates pass"}}'
 ```
+
+### Advanced Main
+
+The supervisor publishes this after every successful merge to the default
+branch so dependent agents learn the base moved. The payload fields are flat
+(alongside `type`, not nested under `payload`): `from`, `merged_branch`,
+`new_main_sha`, `base` (the resolved default-branch name), `merged_at`, and an
+optional `summary`.
+
+```bash
+curl -s -X POST "$GIT_PAW_BROKER_URL/publish" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/auth","new_main_sha":"a1b2c3d4e5f6","base":"main","merged_at":"2026-06-04T13:30:00Z","summary":"landed AuthClient"}'
+```
+
+The broker rejects a publish missing any required field (`merged_branch`,
+`new_main_sha`, `base`, `merged_at`) with a 400-class error naming the field.
+Each event carries a deterministic id derived from
+`merged_branch + new_main_sha + base + UTC-hour-bucket`, so re-publishing the
+same merge within the hour dedups to one logical event.
+
+## When Main Advances
+
+An `agent.advanced-main` event arrives on your normal
+`/messages/<agent_id>` poll — no special subscription is needed. When the
+`base` it names is one your branch depends on, react **deliberately**, never
+automatically:
+
+1. `git fetch origin <base>` to bring the new SHA local.
+2. `git log HEAD..origin/<base> --oneline` to see exactly what landed.
+3. Decide between **rebase**, **merge**, or **wait** based on what changed and
+   the state of your working set.
+
+Agents do **not** auto-rebase on receipt: rebasing rewrites history and can
+conflict with in-flight work, so it always requires judgment. If you do rebase,
+commit or deliberately stash your work first so a rebase conflict can never wipe
+uncommitted edits. (The bundled `coordination` skill teaches this discipline to
+coding agents directly.)
 
 ## Polling for Messages
 
@@ -462,3 +504,83 @@ The agent **MUST NOT**:
   pending".
 - Block on broker silence — if `agent.intent` polling returns no overlap,
   the agent proceeds.
+
+### Declaring regions (v0.6.0)
+
+By default an intent claims whole files, so the detector warns any two agents
+who name the same path. When several agents collaborate on different parts of
+one shared file, that whole-file warning is noise — and noisy warnings get
+dismissed, taking real overlaps with them. From v0.6.0, each `files` entry MAY
+be an object that declares the **regions** the agent intends to touch, and the
+detector then warns only when the declared regions actually intersect.
+
+A `files` array may mix bare-path strings (file-level intent, the v0.5.0
+shape) and region objects freely. Four region kinds are recognised:
+
+- `function` — `{ "kind": "function", "name": "<symbol>" }`
+- `class` — `{ "kind": "class", "name": "<symbol>" }`
+- `block` — `{ "kind": "block", "anchor": "<heading or landmark>" }` for prose
+  or config files
+- `range` — `{ "kind": "range", "start_line": N, "end_line": M }` when no
+  symbolic name fits
+
+**Worked example.** Two agents both intend `src/auth.rs`, but `feat-auth` is
+hardening `validate_token` while `feat-session` reworks `refresh_session`:
+
+```bash
+# feat-auth
+curl -s -X POST "$GIT_PAW_BROKER_URL/publish" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"agent.intent","agent_id":"feat-auth","payload":{"files":[{"path":"src/auth.rs","regions":[{"kind":"function","name":"validate_token"}]}],"summary":"harden token checks","valid_for_seconds":900}}'
+
+# feat-session
+curl -s -X POST "$GIT_PAW_BROKER_URL/publish" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"agent.intent","agent_id":"feat-session","payload":{"files":[{"path":"src/auth.rs","regions":[{"kind":"function","name":"refresh_session"}]}],"summary":"rework session refresh","valid_for_seconds":900}}'
+```
+
+Because the declared functions differ, **no** forward-conflict warning fires —
+the two agents proceed in parallel on the same file. Had both named
+`validate_token`, the warning would fire and name the intersecting function.
+
+Three rules govern detection:
+
+- **Both sides must declare regions** for region-level matching. If **either**
+  side omits regions (a bare path string), the detector conservatively falls
+  back to a file-level warning — the v0.5.0 safety net.
+- **Cross-kind comparisons are conservative.** A `function`/`class`/`block`
+  region compared against a `range` always intersects (the detector can't
+  resolve a symbol to line numbers without parsing source), and the warning
+  carries a hint suggesting both sides use the same region kind for narrower
+  matching.
+- **Don't manufacture narrow regions to dodge a warning.** A region you don't
+  really own hides a collision that resurfaces later as a merge conflict.
+
+This guidance is taught to agents by the bundled coordination skill
+(`assets/agent-skills/coordination.md`, the "Declaring regions" section),
+which is the authoritative source.
+
+### Context budget
+
+After the "While you're editing" discipline, the coordination skill teaches
+agents to manage their own context window so they don't hit an opaque
+"context length exceeded" failure mid-task and lose uncommitted work. The
+guidance has three parts:
+
+- **Residual-budget heuristic.** After the boot block, skill prose, and
+  governance docs load, an agent aims to keep at least ~60% of the model's
+  context window free for task work. This is a heuristic target judged by the
+  agent, not a config field.
+- **Three named moments** to compact / clear / summarise, in priority order:
+  after each spec scenario completes (compact), when the working set grows
+  past ~40% of the window (compact), and when switching between sub-tasks that
+  don't share state (clear).
+- **Commit before you compact.** Every compact / clear / summarise operation
+  is preceded by a commit or an `agent.artifact` publish, so reducing context
+  is never lossy.
+
+The bundled coordination skill (`assets/agent-skills/coordination.md`, the
+"Context budget" section) is the **authoritative** source for the exact
+heuristics, the named moments, and the per-CLI compact/clear mechanism table
+(`claude`, `claude-oss`, and a generic fallback). This chapter only
+summarises it.

@@ -179,6 +179,38 @@ git paw start
 └──────────────────────────────────────────────────────┘
 ```
 
+### Per-repo session discovery file
+
+Alongside the global receipt under `~/.local/share/git-paw/sessions/`, `git paw
+start` writes a **per-repo** discovery file at
+`<repo>/.git-paw/sessions/<session>.json`. This is the surface the bundled
+`sweep.sh` supervisor helper reads to find the active session and its agent
+roster from inside the repo (without reaching into the XDG state dir). `purge`
+removes it.
+
+Its shape — stable for sweep.sh and forward-compatible (consumers ignore
+unknown keys):
+
+```json
+{
+  "session_name": "paw-myproject",
+  "agents": [
+    {
+      "branch_id": "feat-add-auth",
+      "worktree_path": "/abs/path/to/myproject-feat-add-auth",
+      "cli": "claude",
+      "pane_index": 2
+    }
+  ]
+}
+```
+
+`branch_id` is the broker agent id (slugified branch); `pane_index` is the
+agent's tmux pane within the session window. When the file is absent (e.g. a
+supervisor attached to a pre-existing `paw-*` session), `sweep.sh` falls back to
+resolving the session name from `$TMUX` / `tmux display-message -p '#S'`, so the
+file never needs to be hand-authored.
+
 ## Broker Architecture
 
 When `[broker] enabled = true`, the dashboard pane runs `git paw __dashboard`. This single process hosts both the HTTP broker and the dashboard TUI. The dashboard pane sits at pane 1 in supervisor mode and at pane 0 in non-supervisor broker mode.
@@ -375,6 +407,19 @@ TmuxSessionBuilder::new()
 ```
 
 The built `TmuxSession` can be inspected, printed (dry run), or executed.
+
+### CLI-launch robustness
+
+Panes are created with shell auto-update prompts suppressed
+(`new-session`/session env set `DISABLE_AUTO_UPDATE=true` and
+`DISABLE_UPDATE_PROMPT=true`) so an interactive framework prompt (e.g.
+oh-my-zsh's `Would you like to update? [Y/n]`) cannot fire as the pane's
+shell reads its rc and swallow the first keystroke of the CLI-launch command.
+As a second layer, the builder sends a `C-u` line-clear immediately before
+each CLI-launch command, so any stray pending input cannot corrupt it. The
+headless `new-session` canvas is sized (480×140) to tile a supervisor session
+with several agents when no client is attached; a real terminal resizes the
+session on attach.
 
 ## Error Strategy
 

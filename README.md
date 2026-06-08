@@ -80,6 +80,7 @@ git-paw lets you run multiple AI coding assistants in parallel, each in its own 
 - **Auto-approval policy** — `[supervisor.auto_approve]` controls safe-command prefixes and approval level for stalled-pane sweeps; `[supervisor.common_dev_allowlist]` seeds a curated dev-loop preset into `.claude/settings.json` so common build/test/git commands bypass per-prompt approval
 - **Conflict-detector tuning** — `[supervisor.conflict]` exposes the in-flight escalation window (`window_seconds`), the intent-overlap warning toggle (`warn_on_intent_overlap`), and the ownership-violation escalation toggle (`escalate_on_violation`)
 - **Learnings flush cadence** — `[supervisor.learnings_config] flush_interval_seconds` (default 60) controls how often learnings entries are flushed from memory to `.git-paw/session-learnings.md`
+- **Routing through the supervisor** — type `/agents` in the supervisor pane to see the live agent inventory (status, mode, pane) and `/tell <agent> <prompt>` to route a prompt to one agent without tab-switching into its pane; `[supervisor.tell] mode` picks the delivery channel (`feedback` queue by default, `send-keys` for accept-edits agents) and every route is recorded in the session learnings
 
 > **Tip:** git-paw uses `AGENTS.md` as the standard agent instruction file. If your AI CLI reads a different file (e.g., `CLAUDE.md`, `GEMINI.md`), you can symlink it:
 > ```bash
@@ -247,6 +248,26 @@ Smart behavior:
 - **Active session exists** → reattaches
 - **Stopped/crashed session** → auto-recovers (reuses worktrees, relaunches CLIs)
 - **No session** → full interactive launch
+
+### `add` — Attach a branch mid-session (v0.6.0+)
+
+```bash
+git paw add feat/new-thing            # attach a worktree + agent pane (session's default CLI)
+git paw add feat/api --cli codex      # choose the CLI for the new pane
+git paw add --from-spec add-export    # derive branch + CLI from a discovered spec
+```
+
+Hot-attaches a worktree and agent pane to a running supervisor session — no stop/purge/restart, the other agents keep working. The grid re-tiles to the layout a `start` of that many agents would produce, the new agent boots with the same broker boot block + prompt a start-time agent gets, and the supervisor discovers it on its next sweep. Adding past the 25-agent cap is rejected; adding to a paused session leaves the new pane paused until `git paw resume`. See [Session Lifecycle](docs/src/user-guide/session-lifecycle.md#adding-and-removing-branches-mid-session).
+
+### `remove` — Detach a single agent (v0.6.0+)
+
+```bash
+git paw remove feat/done-thing            # close pane, remove worktree, drop from session
+git paw remove feat/wip --force           # remove even with uncommitted changes
+git paw remove feat/keep --keep-worktree  # detach pane only; leave worktree + branch on disk
+```
+
+Detaches one agent: closes its pane, re-tiles the grid for the smaller agent count, removes its worktree (reusing `purge`'s teardown), and drops it from the session. Safe by default — refuses a worktree with uncommitted changes (listing what would be lost) unless `--force`; `--keep-worktree` detaches the pane but leaves the worktree on disk. `git paw remove supervisor` is refused — use `git paw stop` to end the whole session.
 
 ### `pause` — Soft-stop the session (v0.5.0+)
 

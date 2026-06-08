@@ -34,6 +34,7 @@ git-paw will:
 
 - **One command** to go from zero to parallel AI sessions
 - **Smart start** — reattaches to active sessions, recovers crashed ones, or launches fresh
+- **Live branch-set editing** (v0.6.0) — `git paw add` and `git paw remove` attach or detach a single agent mid-session, no stop/purge/restart, the other agents untouched
 - **Per-branch CLI selection** — use Claude on one branch and Gemini on another
 - **Session persistence** — stop and resume without losing your place
 - **Custom CLI support** — register any AI CLI binary, not just the built-in ones

@@ -22,6 +22,7 @@ Commands:
   remove-cli  Unregister a custom AI CLI
   init        Initialize the repository for git-paw (creates .git-paw/)
   replay      Replay a captured pane log (requires session logging)
+  approvals   Report manually-approved command patterns for a session
   help        Print this message or the help of the given subcommand(s)
 
 Options:
@@ -45,6 +46,10 @@ Running `init` is idempotent — it's safe to run multiple times.
 **What it creates:**
 - `.git-paw/config.toml` — default configuration
 - `.git-paw/logs/` — log directory (added to `.gitignore`)
+- `.git-paw/tmp/` — repo-local scratch for isolated verify worktrees and
+  self-test sessions (added to `.gitignore`; preferred over OS temp because
+  it is OS-independent)
+- `.git-paw/scripts/sweep.sh` — bundled supervisor helper
 
 **Example:**
 ```bash
@@ -92,6 +97,12 @@ Options:
 `--from-all-specs` and `--specs` are mutually exclusive — one launches every
 discovered spec, the other narrows to a subset or opens the picker.
 
+The selection flags compose with `--supervisor`: `git paw start --supervisor
+--specs a,b` launches a supervisor session for **only** the named subset (`a`
+and `b`), exactly matching the non-supervisor `--specs` behaviour. `--supervisor
+--from-all-specs` launches every discovered spec, and `--supervisor --specs`
+(bare) opens the multi-select picker.
+
 **Examples:**
 ```bash
 git paw start
@@ -108,6 +119,10 @@ git paw start --from-all-specs --dry-run
 # Narrow to specific specs or open the multi-select picker
 git paw start --specs add-auth,fix-session
 git paw start --specs   # interactive picker (requires a TTY)
+
+# Supervisor mode honours the same selection flags
+git paw start --supervisor --specs add-auth        # one agent, for add-auth only
+git paw start --supervisor --from-all-specs        # one agent per discovered spec
 
 # Skip supervisor for this session even when `[supervisor] enabled = true` is set
 git paw start --no-supervisor
@@ -129,6 +144,60 @@ git-paw decides whether to enter supervisor mode using this order (first match w
 `--supervisor` and `--no-supervisor` are mutually exclusive at parse time; passing both is rejected by clap before any command runs.
 
 See [Spec-Driven Launch](user-guide/spec-driven-launch.md) for details on spec formats and configuration.
+
+## `git paw add`
+
+Hot-attaches a worktree and agent pane to a running **supervisor-mode** session without a stop/purge/restart. The agent grid re-tiles to the layout a `start` of that many agents would produce, the new branch is registered in the session, and the agent boots with the same broker boot block + initial prompt a start-time agent receives. The supervisor discovers it on its next broker poll — no restart.
+
+Provide a branch name, or use `--from-spec` to derive the branch (and CLI) from a discovered spec across the OpenSpec / Markdown / Spec Kit backends (same resolution as `start --specs NAME`). Adding past the 25-agent cap is rejected with the same "split into multiple sessions" message `start` uses. Adding to a paused session leaves the new pane paused until `git paw resume`.
+
+```
+Usage: git-paw add [OPTIONS] [BRANCH]
+
+Arguments:
+  [BRANCH]  Branch to attach (omit when using --from-spec)
+
+Options:
+      --cli <CLI>              AI CLI for the new pane (defaults to the session's default CLI)
+      --from-spec <FROM_SPEC>  Derive branch + CLI from a spec (OpenSpec change, Markdown spec, or Spec Kit feature)
+  -h, --help                   Print help
+```
+
+**Examples:**
+```bash
+git paw add feat/new-thing
+git paw add feat/api --cli codex
+git paw add --from-spec add-export
+```
+
+Validation happens before any side effect: an unknown `--cli` errors with the detected CLI ids, and an unknown `--from-spec` errors with the discovered spec candidates — no worktree or pane is created in either case.
+
+## `git paw remove`
+
+Detaches a single agent from an active **supervisor-mode** session: closes its tmux pane, re-tiles the grid for the smaller agent count, removes its worktree (reusing `git paw purge`'s per-worktree teardown), and drops it from the session. The other agents are untouched; the supervisor notices the departure on its next poll (the agent stops heartbeating).
+
+Safe by default: `remove` refuses to delete a worktree with uncommitted changes — listing the changed files — unless `--force` is passed. `--keep-worktree` detaches the pane and session entry but leaves the worktree and branch on disk (and skips the uncommitted-work check, since nothing is deleted). `git paw remove supervisor` is refused — use `git paw stop` to end the whole session.
+
+```
+Usage: git-paw remove [OPTIONS] <BRANCH>
+
+Arguments:
+  <BRANCH>  Branch of the agent to remove
+
+Options:
+      --keep-worktree  Leave the worktree + branch on disk; only detach the pane and session entry
+      --force          Remove even with uncommitted changes (bypass the safety check)
+  -h, --help           Print help
+```
+
+**Examples:**
+```bash
+git paw remove feat/done-thing
+git paw remove feat/wip --force
+git paw remove feat/keep --keep-worktree
+```
+
+> Both `add` and `remove` operate on supervisor-mode sessions (the default). A bare (`--no-supervisor`) session reports an actionable error; stop and re-start it with the full branch set. One branch per invocation in v0.6.0.
 
 ## `git paw pause`
 
@@ -181,13 +250,21 @@ Usage: git-paw purge [OPTIONS]
 
 Options:
       --force  Skip confirmation prompt
+      --stale  Purge only stale sessions (receipt claims active but tmux is gone)
   -h, --help   Print help
 ```
+
+`--stale` purges only sessions whose tmux session no longer exists (a stale
+receipt) across the whole machine, leaving genuinely live sessions untouched —
+safe to run from cleanup scripts. When nothing is stale it exits `0` with a
+"No stale sessions to purge." message. Pairing `--stale` with `--force` is a
+no-op (`--force` is redundant since a stale entry is never prompted for).
 
 **Examples:**
 ```bash
 git paw purge
 git paw purge --force
+git paw purge --stale
 ```
 
 ## `git paw status`
@@ -195,15 +272,31 @@ git paw purge --force
 Displays the current session status, branches, CLIs, and worktree paths for the repository in the current directory. When the broker is enabled, also shows the broker URL and connected agent count.
 
 ```
-Usage: git-paw status
+Usage: git-paw status [OPTIONS]
 
 Options:
+      --json  Emit machine-readable JSON
   -h, --help  Print help
 ```
+
+The status line shows one of:
+
+| Display | Meaning |
+|---------|---------|
+| 🟢 active | Receipt says active and the tmux session is alive |
+| 🔵 paused | Receipt says paused and the tmux session is alive |
+| 🟡 stopped | Receipt says stopped (or a paused session whose tmux server died) |
+| 🔴 stale | Receipt claims active but the tmux session is gone (a crash or a release-boundary carry-over) |
+
+When the status is `🔴 stale`, run `git paw start` to self-heal (the stale
+receipt is invalidated automatically before launching) or `git paw purge --stale`
+to clear it. The `--json` output's `status` field carries the matching lowercase
+value (`active`, `paused`, `stopped`, or `stale`).
 
 **Example:**
 ```bash
 git paw status
+git paw status --json
 ```
 
 ## `git paw list-clis`
@@ -294,6 +387,48 @@ git paw replay feat/add-auth --color
 # Replay from a specific session
 git paw replay feat/add-auth --session paw-my-project
 ```
+
+## `git paw approvals`
+
+Report the command patterns the supervisor forwarded for a manual decision
+during a session — the prompts the auto-approve preset did not match — sorted
+by how often each was forwarded. See
+[Manual approvals](user-guide/supervisor.md#manual-approvals) for the full
+workflow.
+
+```
+Usage: git-paw approvals [OPTIONS]
+
+Options:
+      --session <SESSION> Session to read from (defaults to the active session)
+      --limit <LIMIT>     Show at most N patterns (top N by count)
+      --json              Emit machine-readable JSON
+  -h, --help              Print help
+```
+
+Each row carries a `SUGGEST` hint — `project allowlist` for project-specific
+patterns (a `./`-rooted script, or the project/branch name), `bundled preset
+candidate` otherwise. The hint is a starting point; the command never edits
+the preset or allowlist for you.
+
+**Examples:**
+```bash
+# Active session, text table
+git paw approvals
+
+# Machine-readable JSON
+git paw approvals --json
+
+# A specific session
+git paw approvals --session paw-my-project
+
+# Top 5 patterns by count
+git paw approvals --limit 5
+```
+
+The `--json` output is a `{ "session", "approvals": [...] }` object where each
+entry carries `pattern`, `count`, `suggested_target`, `first_seen`, and
+`last_seen`. An empty or missing log yields `{ "session": "...", "approvals": [] }`.
 
 ## Exit Codes
 
