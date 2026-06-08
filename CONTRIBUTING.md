@@ -109,6 +109,38 @@ in `tests/e2e_tests.rs` bundles both overrides into one call site.
 see `openspec/changes/test-tmux-isolation` for the rationale and
 historical context.
 
+## Cold-start smoke before pushing
+
+When your branch touches **tmux, broker, or worktree** code, run
+`just smoke-all` before pushing. Local `cargo test` and `just check`
+inherit your live `paw-git-paw` dogfood session, which masks
+cold-start regressions (e.g. the v0.5.0 `Tmux error: size missing`
+bug that took three CI iterations to surface).
+
+```bash
+# 1. Pause or kill the dogfood session so tests run cold.
+git paw pause                              # if you want to resume later
+# or
+tmux kill-session -t paw-git-paw           # hard reset
+
+# 2. Run the full smoke matrix.
+just smoke-all
+```
+
+What each recipe does:
+
+| Recipe | Runs |
+|---|---|
+| `just smoke` | Host integration tests with `TMUX=""` and `GIT_PAW_ALLOW_LIVE_SESSION` unset. Refuses to start if any `paw-*` tmux session is live. |
+| `just smoke-container` | Same tests inside an `ubuntu:24.04` container that matches GitHub Actions' Linux runner. macOS dev boxes only. Requires `podman` or `docker`. |
+| `just smoke-all` | `smoke` on Linux; `smoke` + `smoke-container` on macOS. |
+
+The first `just smoke-container` run builds the `git-paw-ci` image
+(~3–5 min). Subsequent runs are ~10 s startup + ~30 s tests because
+the cargo cache and target volume persist between runs. Prune the
+caches with `podman volume rm paw-cargo-cache paw-target-cache` when
+they grow stale.
+
 ## Pull Request Process
 
 1. Fork the repo and create your branch from `main`

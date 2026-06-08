@@ -33,6 +33,14 @@ publishes a fresh intent, or the agent commits).
 the overlapping paths. Neither side blocks; the receiving agents decide
 how to retract or reshape their plans.
 
+**Region granularity (v0.6.0).** When both intents declare *regions* for a
+shared file (function / class / block / range — see [Declaring
+regions](./coordination.md#declaring-regions-v060)), the detector triggers
+only when the declared regions intersect, and the warning names the
+intersecting regions. When either side omits regions it falls back to the
+file-level trigger above, preserving v0.5.0 behaviour. Cross-kind comparisons
+(a named region vs a line range) intersect conservatively and append a hint.
+
 **Toggle.** `[supervisor.conflict] warn_on_intent_overlap` (default
 `true`). When `false`, the detector still records intents (so in-flight
 detection keeps working) but no `agent.feedback` fires for forward shape.

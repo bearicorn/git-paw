@@ -114,3 +114,86 @@ The rebase step runs in both flows:
 If you're debugging a launch and want to know whether the rebase
 modified anything, `git rev-parse <branch>` from the main repo before
 and after `git paw start` will show the SHA change (or lack thereof).
+
+## Adding and removing branches mid-session
+
+Before v0.6.0 the branch set was frozen at `git paw start` time: changing
+it meant `stop`/`purge` + re-`start`, which destroyed every agent's
+in-flight conversation. `git paw add` and `git paw remove` edit a running
+supervisor session's branch set in place — the other agents keep working
+undisturbed.
+
+### `git paw add` — hot-attach an agent
+
+```bash
+git paw add feat/new-thing              # attach a worktree + pane, session's default CLI
+git paw add feat/api --cli codex        # choose the CLI for the new pane
+git paw add --from-spec add-export      # derive branch + CLI from a discovered spec
+```
+
+What it does:
+
+1. Resolves the branch and CLI — from the positional argument, or (with
+   `--from-spec`) from a discovered spec across the OpenSpec / Markdown /
+   Spec Kit backends (same resolution as `git paw start --specs NAME`). An
+   unknown spec name errors with the discovered candidate list; an unknown
+   `--cli` errors with the detected CLI ids — and in both cases nothing is
+   created.
+2. Enforces the 25-agent cap **before** touching anything. Adding the 26th
+   agent fails with the same "split into multiple sessions" message
+   `start` uses.
+3. Creates the worktree (same naming and idempotent-create behaviour as
+   `start`; re-adding an existing worktree reuses it) and attaches the
+   agent through the **same** boot pipeline a start-time agent uses — the
+   broker boot block, the AGENTS.md spec body, and the initial prompt are
+   byte-identical.
+4. Re-tiles the agent grid to the layout a `start` of that many agents
+   would have produced. Existing panes keep their indices, so any
+   in-flight `send-keys` targeting (supervisor sweeps) still lands on the
+   right pane; the new pane gets the next index.
+5. Registers the branch in the session so subsequent `status`, `stop`,
+   `purge`, and `pause` include it.
+
+The supervisor is **not** signalled directly. The new agent
+auto-registers with the broker (filesystem watcher + its own boot-block
+heartbeat) and the supervisor discovers it on its next sweep — no
+restart, at most one sweep-interval of latency.
+
+**Paused sessions:** if the session is paused when you `add`, the new
+pane is created but its prompt is held unsubmitted — the agent stays
+paused with the rest of the session and begins on the next
+`git paw resume`.
+
+### `git paw remove` — detach a single agent
+
+```bash
+git paw remove feat/done-thing          # close pane, remove worktree, drop from session
+git paw remove feat/wip --force         # remove even with uncommitted changes
+git paw remove feat/keep --keep-worktree  # detach pane only; leave worktree + branch on disk
+```
+
+What it does:
+
+1. Locates the agent by branch (errors with the live-agent list if it
+   isn't in the session).
+2. **Uncommitted-work safety:** refuses to delete a worktree with
+   uncommitted changes, listing the changed files, unless you pass
+   `--force`. This mirrors `git worktree remove`'s own safety.
+   `--keep-worktree` skips the check entirely (nothing is deleted).
+3. Kills the agent's pane and re-tiles the grid for the smaller agent
+   count so it re-flows without leaving a hole. The branch→pane mapping
+   for the survivors is re-derived from `pane_current_path` on the
+   supervisor's next sweep, so a mid-grid removal is safe.
+4. Removes the worktree (reusing `git paw purge`'s per-worktree teardown)
+   unless `--keep-worktree`, then drops the branch from the session.
+
+`git paw remove supervisor` is refused — to end the whole session use
+`git paw stop` (or `git paw purge`). The supervisor notices a removed
+agent passively: its heartbeat stops, and the supervisor drops it from
+its coordination scope on the next `/status` poll.
+
+> **Scope (v0.6.0):** `add` / `remove` operate on **supervisor-mode**
+> sessions (the default). Bare (`--no-supervisor`) sessions report an
+> actionable error — stop and re-start them with the full branch set.
+> One branch per invocation; bulk add/remove and configurable layouts
+> are tracked for a later release.

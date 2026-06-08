@@ -60,7 +60,7 @@ Skills support these placeholders that get replaced at runtime:
 
 ### Supervisor gate-command placeholders
 
-The embedded supervisor skill uses seven additional placeholders fed from
+The embedded supervisor skill uses eight additional placeholders fed from
 `[supervisor].*_command` keys in `.git-paw/config.toml`. Each gate-command
 template renders verbatim into the skill prose where the supervisor agent
 reads it:
@@ -70,6 +70,7 @@ reads it:
 - `{{BUILD_COMMAND}}` ← `[supervisor].build_command` — gate 1 build sub-step
 - `{{FMT_CHECK_COMMAND}}` ← `[supervisor].fmt_check_command` — gate 1 formatter check
 - `{{DOC_BUILD_COMMAND}}` ← `[supervisor].doc_build_command` — gate 4 (Doc audit)
+- `{{DOC_TOOL_COMMAND}}` ← `[supervisor].doc_tool_command` — gate 4 API-doc generator (renders empty when unset, not `(not configured)`)
 - `{{SPEC_VALIDATE_COMMAND}}` ← `[supervisor].spec_validate_command` — gate 3 (Spec audit)
 - `{{SECURITY_AUDIT_COMMAND}}` ← `[supervisor].security_audit_command` — gate 5 (Security audit)
 
@@ -82,6 +83,35 @@ for the security gate, the spec scenario coverage check still runs for the
 spec gate). Pre-v0.5.x configs that only set `test_command` continue to
 render the remaining gates as `(not configured)` and the supervisor agent
 runs them as manual-only — no behavior change for those configs.
+
+The one exception is `{{DOC_TOOL_COMMAND}}`: when the underlying key is
+unset, the placeholder renders as the empty string rather than the
+`(not configured)` sentinel. The supervisor skill template is authored
+so the surrounding prose reads naturally without it for projects that
+don't ship an API-doc generator.
+
+### Backend-aware and constant-driven placeholders
+
+Three more placeholders make the bundled supervisor skill polyglot:
+
+- `{{DEV_ALLOWLIST_PRESET}}` — substitutes a prose enumeration of every
+  entry in the bundled `DEV_ALLOWLIST_PRESET` constant. Adding a new
+  entry to the constant changes the rendered output without a
+  skill-template edit. The supervisor skill wraps the placeholder in
+  `<!-- allowlist-prose -->` sentinel comments so the CI no-leak audit
+  can scope the legitimate stack-named enumerations out of its scan.
+- `{{SPEC_PATH_DOCTRINE}}` — substitutes a per-backend paragraph that
+  names where specs live and the matching workflow. The variants:
+  - OpenSpec: `openspec/changes/<change>/{proposal,specs,tasks}.md` plus
+    `openspec validate`.
+  - Spec Kit: `.specify/specs/<feature>/{spec,plan,tasks}.md` plus the
+    Spec Kit checklist convention.
+  - Markdown: flat `.md` files with `paw_status: pending` frontmatter.
+  - Multi-backend: one sentence per present backend, introduced by a
+    "This session spans multiple spec backends" clause.
+  - No backend resolved: a sentinel sentence pointing the supervisor at
+    the project's documentation.
+- `{{CHANGE_ID}}` — see the per-invocation discussion below.
 
 **`{{CHANGE_ID}}` is per-invocation, not per-render.** Spec validators
 typically take a change name as argument (e.g. `openspec validate

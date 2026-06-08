@@ -26,6 +26,11 @@ default_cli = "my-cli"
 # Enable mouse mode in tmux sessions (default: true)
 mouse = true
 
+# Pane affordances: heavy borders, per-pane labels, active-pane highlight
+# (default: true; set false to inherit your own tmux styling)
+# [layout]
+# border_affordances = true
+
 # Custom CLI definitions
 [clis.my-agent]
 command = "/usr/local/bin/my-agent"
@@ -48,6 +53,10 @@ cli = "codex"
 # [specs]
 # dir = "specs"
 # type = "openspec"    # "openspec", "markdown", or "speckit"
+
+# opsx (OpenSpec) role gating — active only under the OpenSpec engine
+# [opsx]
+# role_gating = "warn"  # "warn" (default), "block", or "off"
 
 # Session logging
 # [logging]
@@ -120,7 +129,30 @@ display_name = "My Agent"              # optional, shown in prompts
 [clis.local-llm]
 command = "ollama-code"               # binary name (resolved via PATH)
 display_name = "Local LLM"
+
+# A claude-family variant that reads a non-default config directory.
+[clis.claude-variant]
+command = "claude"
+# Boot-prompt settle delay (ms) before the submit Enter. git-paw injects
+# the boot block, waits this long for a paste-aware CLI to settle the
+# paste, then sends Enter separately. Default suits most CLIs; raise it
+# for a CLI whose large-paste handling needs longer before submit lands.
+submit_delay_ms = 1500
+# Path to this CLI's claude-format settings file (the one carrying
+# `allowed_bash_prefixes`). When set and the broker is enabled, git-paw
+# seeds the broker-curl allowlist into this path too, so the CLI's
+# boot-time broker `curl` does not raise a permission prompt. A leading
+# `~` is expanded to the home directory. Use for claude-family variants
+# that read a non-default config dir.
+settings_path = "~/.config/claude-variant/settings.json"
 ```
+
+| Field | Required | Purpose |
+|-------|----------|---------|
+| `command` | yes | Command or path to the CLI binary. |
+| `display_name` | no | Human-readable name shown in prompts. |
+| `submit_delay_ms` | no | Boot-prompt settle delay (ms) before the submit `Enter`; per-CLI so the launcher stays CLI-agnostic. |
+| `settings_path` | no | Path to the CLI's claude-format settings file; broker-curl allowlist is seeded here so the boot-time broker `curl` doesn't prompt. |
 
 ### Via command line
 
@@ -235,6 +267,21 @@ bind = "127.0.0.1"
 
 When the broker is enabled, git-paw injects the `GIT_PAW_BROKER_URL` environment variable into each agent pane, pointing to `http://<bind>:<port>`. Agents use this URL to communicate with the broker.
 
+### Filesystem watcher
+
+The broker's filesystem watcher publishes `agent.status: working` whenever an agent's `git status` changes. By default, an agent that publishes `agent.artifact status: "committed"` and then keeps editing is re-entered into the `working` state — a file modification observed within a TTL window after the commit re-publishes `working`, so the dashboard reflects the agent's continued activity instead of sticking on `committed`.
+
+```toml
+[broker.watcher]
+republish_working_ttl_seconds = 60
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `republish_working_ttl_seconds` | `60` | Seconds after a `committed` event during which a file write re-publishes `working`. `0` disables the auto-republish (restoring the prior "committed is terminal until the agent itself republishes" behaviour). Non-zero values below `5` are clamped to `5` with a warning. |
+
+Past the TTL window the agent is considered settled at `committed`; only an explicit `agent.status` from the agent itself transitions it out.
+
 ### Multi-repo port assignment
 
 If you run git-paw sessions for multiple repositories at the same time, each session needs a different port. Set a unique `port` in each repo's `.git-paw/config.toml`:
@@ -266,9 +313,13 @@ lint_command = "cargo clippy -- -D warnings"
 build_command = "cargo build"
 fmt_check_command = "cargo fmt --check"
 doc_build_command = "mdbook build docs/"
+doc_tool_command = "cargo doc --no-deps"
 spec_validate_command = "openspec validate {{CHANGE_ID}} --strict"
 security_audit_command = "cargo audit"
 agent_approval = "auto"
+verify_on_commit_nudge = true
+strict_branch_guard = true
+manual_approvals_log = true
 ```
 
 | Field | Default | Description |
@@ -280,11 +331,15 @@ agent_approval = "auto"
 | `build_command` | (none) | Compile step — gate 1 when build is distinct from test (e.g. `"cargo build"`, `"npm run build"`, `"mvn package"`, `"go build ./..."`) |
 | `fmt_check_command` | (none) | Formatter check — gate 1 (e.g. `"cargo fmt --check"`, `"prettier --check ."`, `"gofmt -l ."`, `"black --check ."`) |
 | `doc_build_command` | (none) | Documentation build — gate 4 (e.g. `"mdbook build docs/"`, `"sphinx-build"`, `"mkdocs build"`) |
+| `doc_tool_command` | (none) | API-doc generator — distinct from `doc_build_command`; gates the per-language extractor for changed public items (e.g. `"cargo doc --no-deps"`, `"sphinx-build -W docs docs/_build"`, `"javadoc"`, `"npx typedoc"`, `"go doc"`). Renders empty (not `(not configured)`) when unset so the surrounding prose reads naturally |
 | `spec_validate_command` | (none) | Spec validator — gate 3 (e.g. `"openspec validate {{CHANGE_ID}} --strict"` for OpenSpec). `{{CHANGE_ID}}` is substituted by the supervisor agent at verification time with the change name being audited; it is **not** expanded at config load |
 | `security_audit_command` | (none) | Security audit tooling — gate 5 (e.g. `"cargo audit"`, `"npm audit"`, `"bandit -r ."`, `"gosec ./..."`) |
 | `agent_approval` | `"auto"` | Permission level for coding agents: `"manual"`, `"auto"`, or `"full-auto"` |
+| `verify_on_commit_nudge` | `true` | When on, the broker posts a `supervisor.verify-now` message to the supervisor inbox on every `agent.artifact { status: "committed" }`, so the supervisor verifies each commit promptly on an explicit event instead of batching. Set `false` to fall back to sweep-cadence verification |
+| `strict_branch_guard` | `true` | When `true`, a per-worktree **pre-commit** hook refuses any commit whose checked-out branch differs from the branch the worktree was created for, blocking cross-worktree contamination (linked worktrees share `.git/refs`, so a stray `cd` can otherwise advance the wrong branch). Set `false` to disable *enforcement* — the **post-commit** hook still publishes an `agent.feedback` + `agent.learning` record when it detects a mismatch (detection without enforcement) |
+| `manual_approvals_log` | `true` | When `true`, commands the supervisor forwards for a manual decision (prompts the auto-approve preset did not match) are appended to `.git-paw/sessions/<session>.manual-approvals.jsonl` and surfaced via [`git paw approvals`](../cli-reference.md). On a pattern's first sighting a `permission_pattern` learning is also emitted (when `learnings = true`). Set `false` to suppress both the log writes and the learnings emission; the opt-out affects writes only, so `git paw approvals` still reads any pre-existing log |
 
-**Gate-command templating.** The seven `*_command` keys feed the supervisor
+**Gate-command templating.** The eight `*_command` keys feed the supervisor
 skill's five verification gates (testing, regression analysis, spec audit, doc
 audit, security audit). For each key set on this section, the supervisor skill
 substitutes the matching `{{...}}` placeholder at session boot and the
@@ -332,6 +387,7 @@ enabled = true
 safe_commands = ["just lint", "just test"]
 stall_threshold_seconds = 30
 approval_level = "safe"
+approve_worktree_writes = true
 ```
 
 | Field | Default | Description |
@@ -340,6 +396,17 @@ approval_level = "safe"
 | `safe_commands` | `[]` | Project-specific command prefixes appended to the built-in defaults. |
 | `stall_threshold_seconds` | `30` | Seconds an agent's `last_seen` must lag before its pane is polled (minimum `5`). |
 | `approval_level` | `"safe"` | Coarse preset: `"off"`, `"conservative"`, or `"safe"`. |
+| `approve_worktree_writes` | `true` | Auto-approve file write/edit/create prompts whose target resolves **inside the agent's own worktree**. Set `false` to require manual approval for all file operations. |
+
+**Worktree-confined file edits.** Beyond the shell-command whitelist, auto-approval
+also covers an agent's filesystem write/edit/create prompts when the target path
+resolves inside that agent's own worktree root. The path from the prompt
+(e.g. `"Do you want to allow this write to Containerfile?"`) is canonicalized and
+checked with `starts_with(worktree_root)`, so a `..`/symlink path that escapes the
+worktree fails the check and still requires manual approval. Worktrees are isolated,
+so confining auto-approval to the worktree boundary is safe by construction; set
+`approve_worktree_writes = false` to opt out. Paths outside the worktree (the parent
+repo, your home directory, system paths) always require manual approval.
 
 **Built-in safe commands:** `cargo fmt`, `cargo clippy`, `cargo test`, `cargo build`,
 `git commit`, `git push`, `curl http://127.0.0.1:`.
@@ -406,9 +473,10 @@ surface for your project.
 - Independent of broker status — non-broker supervisor sessions still benefit.
 - Idempotent: re-seeding on session re-attach never duplicates entries.
 - Non-fatal: write failures log a warning to stderr and session start continues.
-- Targets `<repo>/.claude/settings.json` always; also writes
-  `~/.claude-oss/settings.json` when that directory pre-exists (the alt-config
-  dogfood pattern) but never creates the directory.
+- Targets `<repo>/.claude/settings.json` always; also writes each configured
+  `[clis.<name>].settings_path` whose parent directory already exists (the
+  CLI-agnostic alt-config path — register a claude-family variant's settings
+  file there to have it seeded too) but never creates a missing directory.
 - Entries persist after `git paw stop` — prune `.claude/settings.json` manually
   if you want a clean slate.
 
@@ -439,6 +507,27 @@ at the defaults above. Setting `[supervisor] enabled = false` (or omitting
 the section) disables the detector subsystem entirely — no auto-emitted
 warnings fire regardless of the values here.
 
+### Routing through the supervisor (`/tell`)
+
+The `[supervisor.tell]` table tunes the `/agents` and `/tell` commands you
+type in the supervisor pane to route prompts to individual agents (see
+[Routing through the supervisor](../user-guide/supervisor.md#routing-through-the-supervisor)).
+
+```toml
+[supervisor.tell]
+mode = "feedback"
+inventory_max_age_seconds = 60
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `mode` | `"feedback"` | Default delivery channel for `/tell`. `"feedback"` queues an `agent.feedback` the target picks up on its next inbox poll (safe for mixed-mode sessions). `"send-keys"` injects the prompt straight into the target pane with `tmux send-keys` — used only when the target is in accept-edits mode, otherwise `/tell` falls back to `feedback` and prints a note. |
+| `inventory_max_age_seconds` | `60` | How stale the cached `/agents` inventory may be before `/tell`/`/agents` re-poll the broker. Lower it for tighter freshness at the cost of more frequent polling. |
+
+The `[supervisor.tell]` table is fully optional. A v0.5.0 config with
+`[supervisor]` and no `[supervisor.tell]` loads with both defaults above and
+round-trips unchanged.
+
 ### Learnings mode tuning
 
 When supervisor mode is active, the parent `[supervisor] learnings = true`
@@ -455,15 +544,60 @@ learnings = true
 
 [supervisor.learnings_config]
 flush_interval_seconds = 60
+broker_publish = "auto"
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `flush_interval_seconds` | `60` | How often the learnings aggregator flushes accumulated entries from memory to `.git-paw/session-learnings.md`. The file is append-only across sessions; a longer interval batches more entries per write. |
+| `broker_publish` | `"auto"` | Whether flushed entries are *also* published to the broker as `agent.learning` messages. `"auto"` follows `[broker] enabled` (publish when the broker is running, file-only when it is not); `"force_off"` keeps file-only output even with an active broker. The Markdown file is written either way. |
+
+There are **no configuration fields for the qualitative signals**
+(`recurring_failure_shape`, `doc_gap`, `adr_drift`, `scope_mistake`) added
+in v0.6.0. Their detection thresholds live in the supervisor skill prose,
+not in `[supervisor.learnings_config]` — to tune how readily the
+supervisor publishes a category, edit your local copy of the supervisor
+skill rather than a config value.
 
 See the [Learnings Mode chapter](../user-guide/learnings.md) for the
-category-by-category walkthrough, the output-file format, and the v0.6.0
-roadmap for programmatic access via the `agent.learning` broker variant.
+category-by-category walkthrough, the output-file format, and how to consume
+learnings programmatically via the `agent.learning` broker variant and the
+MCP `get_learnings()` tool.
+
+## opsx role gating
+
+```toml
+[opsx]
+role_gating = "warn"  # "warn" (default) | "block" | "off"
+```
+
+git-paw cannot add a permission check to the `/opsx:verify` and `/opsx:archive`
+slash commands themselves (they live in the OpenSpec project). Instead, when the
+session's spec engine is OpenSpec, a post-commit guard watches for **archive
+activity committed from a coding-agent worktree** and reacts per `role_gating`:
+
+| Mode | Behaviour on a coding-agent archive |
+|---|---|
+| `warn` (default) | publish an `agent.feedback` to the offending agent **and** record an `agent.learning` with category `permission_pattern` |
+| `block` | warn behaviour **plus** publish an `agent.feedback` to the supervisor requesting it revert the offending commit (the supervisor performs the revert via its merge-orchestration skill — git-paw never runs `git revert` itself) |
+| `off` | guard disabled entirely |
+
+The guard is **inert under non-OpenSpec engines** (`speckit`, `markdown`, or no
+spec source) regardless of the mode, and the `/opsx:` forbidden-command sections
+are omitted from the bundled coordination/supervisor skills there too.
+
+A commit is treated as archive activity when **either** its message matches the
+canonical archive shape `chore(specs): archive <name>; sync deltas to main
+specs` **or** its diff moves files into `openspec/changes/archive/<name>/`
+and/or adds a main spec under `openspec/specs/<capability>/spec.md`. The
+supervisor's own archives (`agent_id == "supervisor"`) never count as a
+violation. See the [Supervisor guide](../user-guide/supervisor.md#opsx-role-gating)
+for how to read the warning text and tune `block` mode with
+`[supervisor] auto_revert`.
+
+> **v0.6.0 behaviour change.** `role_gating` defaults to `warn`. Sessions where a
+> coding agent archives a change will now see guard feedback and a learnings
+> record. Set `role_gating = "off"` to restore the v0.5.0 (no-guard) behaviour.
 
 ## Governance
 
@@ -514,17 +648,55 @@ Configure the dashboard TUI rendered in pane 0 when the broker is enabled.
 ```toml
 [dashboard]
 show_message_log = true
+
+[dashboard.broker_log]
+max_messages = 500
+default_visible = true
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `show_message_log` | `false` | When `true`, the dashboard renders a scrolling broker-message panel above the prompts section. Useful for watching live agent traffic; leave `false` for a more compact layout. |
+| `show_message_log` | `false` | When `true`, the dashboard renders the legacy scrolling broker-message panel. Superseded by the type-filterable **Broker log** panel below; leave `false` for a more compact layout. |
 
-See [Dashboard](../user-guide/dashboard.md) for details.
+### Broker log panel
+
+The `[dashboard.broker_log]` table configures the v0.6.0 **Broker log**
+panel — a scrolling, type-filterable view of recent broker messages that
+fills the screen region freed when v0.5.0 removed the prompt inbox.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `max_messages` | `500` | Maximum number of messages retained in the panel's in-memory ring buffer. When the buffer is full, the oldest message drops off as new ones arrive. The log is in-memory only and is not persisted across dashboard restarts. |
+| `default_visible` | `true` | Whether the panel is shown when the dashboard first launches. The `l` hotkey toggles visibility at runtime regardless of this value. |
+
+An absent `[dashboard.broker_log]` table — as in any v0.5.0 config —
+loads these defaults, so existing config files parse unchanged.
+
+See [Dashboard](../user-guide/dashboard.md) for the panel's hotkeys,
+filter chips, and details overlay.
 
 ### Multi-repo configuration
 
 Each repository can have its own dashboard settings in `.git-paw/config.toml`. The repo-level config overrides the global config.
+
+## Layout
+
+Configure the visual styling git-paw applies to the tmux sessions it creates.
+
+```toml
+[layout]
+border_affordances = true  # default
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `border_affordances` | `true` | When `true`, git-paw applies *pane affordances* to the sessions it creates: heavy pane borders (`━┃` instead of the default `─│`), a per-pane label strip showing each pane's index and role/branch (e.g. `0: supervisor`, `1: dashboard`, `2: feat/foo`), a dim border on inactive panes, and a cyan-bold border on the focused pane. Set to `false` to opt out and inherit your own tmux styling instead. |
+
+These options are scoped to git-paw-managed sessions (`paw-*`) only — your other tmux sessions are never touched. They apply to both `git paw start` and supervisor-mode sessions.
+
+**When to disable.** Turn `border_affordances` off if you run a tmux theme you prefer, are on tmux older than 3.2 (where the heavy border lines aren't recognised — git-paw warns and continues, but you may prefer the consistent default look), or find the label strip noisy on small terminals.
+
+See [Supervisor](../user-guide/supervisor.md) for how the labelled layout looks in a supervisor session.
 
 ## Merging Rules
 
@@ -544,6 +716,7 @@ When both global and repo configs exist, they merge with these rules:
 | `supervisor` | Repo wins |
 | `dashboard` | Repo wins |
 | `governance` | Per-field merge (repo wins on each set field, unset fields fall back to global) |
+| `layout` | Repo wins |
 
 **Example:** If global config defines `[clis.my-agent]` and repo config defines `[clis.my-agent]` with a different command, the repo version wins. But a `[clis.other-tool]` in global config still appears — maps are merged, not replaced.
 
