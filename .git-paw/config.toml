@@ -1,52 +1,129 @@
-# git-paw configuration
-# See https://github.com/bearicorn/git-paw for documentation.
+# git-paw configuration — dogfood profile
+# Every v0.5.0 capability turned on so the dogfood session
+# exercises the full surface. See AGENTS.md for project conventions.
 
-# Pre-select a CLI in the interactive picker (user can still change).
-# Omit to show the full picker with no default.
-# default_cli = ""
+# Pre-select claude-oss in the interactive picker (changeable at runtime).
+default_cli = "claude-oss"
 
-# Enable tmux mouse mode for sessions (default: true).
-# mouse = true
+# Enable tmux mouse mode (default true; explicit for clarity).
+mouse = true
 
-# Bypass the CLI picker entirely for --from-specs mode.
-# Omit to prompt or use per-spec paw_cli fields.
-# default_spec_cli = ""
+# Bypass the CLI picker entirely in --from-specs mode.
+default_spec_cli = "claude-oss"
 
-# Prefix for spec-derived branch names (default: "spec/").
+# Prefix for spec-derived branch names.
 branch_prefix = "feat/"
 
 # Spec scanning configuration.
 [specs]
 type = "openspec"
 dir = "openspec/changes"
-#
-# Markdown format (frontmatter-based):
-# type = "markdown"
-# Each .md file uses YAML frontmatter fields:
-#   paw_status  — "pending" | "done" | "in-progress" (required)
-#   paw_branch  — branch name suffix (optional, falls back to filename)
-#   paw_cli     — CLI override for this spec (optional)
 
-# Session logging configuration.
-# [logging]
-# enabled = false
+# Session logging — write per-pane transcripts to .git-paw/logs/.
+[logging]
+enabled = true
 
-# HTTP broker for agent coordination
+# HTTP broker for agent coordination.
 [broker]
 enabled = true
 port = 9119
+bind = "127.0.0.1"
 
-# Dashboard configuration
+# Dashboard configuration.
 [dashboard]
-# Show broker messages panel for observability (default: false)
-# show_message_log = true
+# Show the broker messages panel inline with the agent table.
+show_message_log = true
 
+# ---------------------------------------------------------------
+# Supervisor mode — auto-baseline, regression checks, spec audit,
+# auto-merge, learnings, conflict detection, auto-approval.
+# ---------------------------------------------------------------
+[supervisor]
+enabled = true
+cli = "claude-oss"
+
+# Five-gate verification commands. Substituted into the supervisor
+# skill at render time; supervisor agent runs each gate per spec
+# audit pass. Match the project's just-recipes and conventions.
+test_command            = "just verify"
+lint_command            = "just lint"
+build_command           = "cargo build"
+doc_build_command       = "just docs"
+spec_validate_command   = "openspec validate {{CHANGE_ID}} --strict"
+fmt_check_command       = "cargo fmt --check"
+security_audit_command  = "just audit"
+
+# Approval policy. `auto` exercises the auto-approve subsystem;
+# `full-auto` would bypass approvals entirely (skips dogfood signal).
+agent_approval = "auto"
+
+# Learnings aggregator: write session learnings to
+# .git-paw/session-learnings.md on each flush + on shutdown.
+learnings = true
+
+[supervisor.learnings_config]
+flush_interval_seconds = 60
+
+# Common dev-command allowlist: seed Claude's allowed_bash_prefixes
+# with the curated multi-language preset (cargo / npm / pytest /
+# pip / mvn / make / gradle / docker / etc.) so agents don't hit
+# permission prompts for routine dev-loop commands.
+[supervisor.common_dev_allowlist]
+enabled = true
+extra = []
+
+# Auto-approve subsystem: detect Yes/No permission prompts in
+# stalled agent panes and approve safe commands via send-keys.
+[supervisor.auto_approve]
+enabled = true
+approval_level = "safe"
+stall_threshold_seconds = 30
+safe_commands = []
+
+# Conflict detector: warn on forward / in-flight / ownership
+# conflicts between agents' intents and diffs.
+[supervisor.conflict]
+window_seconds = 120
+warn_on_intent_overlap = true
+escalate_on_violation = true
+
+# ---------------------------------------------------------------
+# Governance docs (path-pointer mechanism). Supervisor reads the
+# configured docs during spec audit. Only paths that exist in
+# this repo are pointed at; the others stay commented as templates.
+# ---------------------------------------------------------------
+[governance]
+# This repo's authoritative conventions doc — supervisor reads it
+# during spec audit to verify changes follow project standards
+# (commits, dependencies, CLI conventions, change checklist).
+dod = "AGENTS.md"
+# adr            = "docs/adr"                          # no ADR directory in this repo
+# test_strategy  = "docs/test-strategy.md"             # not present
+# security       = "docs/security-checklist.md"        # not present
+# constitution   = ".specify/memory/constitution.md"   # auto-detected if Spec Kit ever added
+
+# ---------------------------------------------------------------
 # Custom CLI definitions.
+# ---------------------------------------------------------------
+# claude-oss is a custom (non-bundled) CLI. Registering it here lets
+# the CLI-agnostic boot fix (claude-oss-launch-v0-6-x) seed the
+# broker-curl allowlist into the file claude-oss reads, so its
+# boot-time `curl .../publish` never raises a permission prompt.
+# submit_delay_ms is omitted: the agnostic DEFAULT_SUBMIT_DELAY_MS
+# (1500ms split-send) already submits the boot block hands-off; set
+# it only if a live boot shows the paste still unsubmitted.
+[clis.claude-oss]
+command = "claude-oss"
+display_name = "Claude (OSS)"
+settings_path = "~/.claude-oss/settings.json"
+
 # [clis.my-agent]
 # command = "/usr/local/bin/my-agent"
 # display_name = "My Agent"
 
+# ---------------------------------------------------------------
 # Named presets for quick launches.
+# ---------------------------------------------------------------
 # [presets.my-preset]
 # branches = ["feat/api", "fix/db"]
 # cli = ""
