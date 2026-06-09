@@ -26,7 +26,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 schemars = "0.8"
 serde_yaml = "0.9"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 
 [[bin]]
