@@ -314,18 +314,31 @@ own merge into the release branch.
    skipped earlier — back up and archive it as its own commit before
    continuing.
 
-6. **Tag and push**:
+6. **Open a PR, merge to `main`, then tag and push**:
+
+   Push the release branch and open a PR into `main`. The four CI gates
+   (fmt, clippy, deny, audit) must pass and the PR should be reviewed
+   before merging. Prefer a fast-forward or rebase merge so the
+   `chore: prepare vX.Y.Z release` commit becomes `main`'s tip; a merge
+   commit also works as long as `main` ends up containing the prep
+   commit. (Releases through v0.5.0 pushed `main` directly without a
+   PR — the PR adds a CI + review gate before `main` moves. The PR is
+   the default from v0.6.0 onward; a direct push is still acceptable
+   for a hotfix.)
 
    ```bash
+   # after the PR is merged and main is updated locally:
+   git checkout main && git pull
    git tag vX.Y.Z
    git push origin main vX.Y.Z
    ```
 
    Pushing the tag triggers cargo-dist on GitHub Actions, which builds
    cross-platform binaries, publishes the release, and updates the
-   Homebrew tap. Do **not** push the tag separately from `main`; if
-   `main` doesn't include the prep commit yet, cargo-dist sees a
-   mismatched manifest version and the release fails.
+   Homebrew tap. Do **not** push the tag before `main` includes the
+   prep commit — the tag MUST be on a `main` commit that carries the
+   version bump, or cargo-dist sees a mismatched manifest version and
+   the release fails.
 
 7. **Publish to crates.io** (manual — not part of cargo-dist):
 
