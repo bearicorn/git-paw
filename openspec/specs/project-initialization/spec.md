@@ -4,15 +4,23 @@ Bootstrap a repository for git-paw by creating the `.git-paw/` directory structu
 ## Requirements
 ### Requirement: Init creates .git-paw directory structure
 
-The system SHALL create the `.git-paw/` directory and `.git-paw/logs/` subdirectory in the repository root when `git paw init` is run.
+The system SHALL create the `.git-paw/` directory and the
+`.git-paw/logs/` and `.git-paw/tmp/` subdirectories in the repository
+root when `git paw init` is run. `.git-paw/tmp/` is the repo-local
+scratch directory used for isolated verification worktrees and
+self-test sessions (preferred over OS temp because it is
+OS-independent).
 
 #### Scenario: Init in a fresh repo
+
 - **WHEN** `git paw init` is run in a git repo with no `.git-paw/` directory
-- **THEN** `.git-paw/` and `.git-paw/logs/` SHALL exist
+- **THEN** `.git-paw/`, `.git-paw/logs/`, and `.git-paw/tmp/` SHALL exist
 
 #### Scenario: Init when .git-paw already exists
+
 - **WHEN** `git paw init` is run in a repo that already has `.git-paw/`
-- **THEN** the existing directory SHALL be preserved and `.git-paw/logs/` SHALL be created if missing
+- **THEN** the existing directory SHALL be preserved and any missing
+  `.git-paw/logs/` or `.git-paw/tmp/` subdirectory SHALL be created
 
 ### Requirement: Init generates default config.toml
 
@@ -28,7 +36,17 @@ The system SHALL create `.git-paw/config.toml` with sensible defaults and commen
 
 ### Requirement: Init appends logs directory to .gitignore
 
-The system SHALL also ensure `.git-paw/session-summary.md` is listed in the repo's `.gitignore`, in addition to `.git-paw/logs/`.
+The system SHALL ensure the repo's `.gitignore` lists the git-paw
+runtime/scratch entries: `.git-paw/logs/`, `.git-paw/tmp/`, and
+`.git-paw/session-summary.md`. Each entry SHALL appear at most once and
+SHALL be added only if absent.
+
+#### Scenario: Gitignore includes the repo-local tmp scratch after init
+
+- **GIVEN** `git paw init` is run in a repo without `.git-paw/tmp/` in
+  `.gitignore`
+- **WHEN** init completes
+- **THEN** `.gitignore` SHALL contain `.git-paw/tmp/`
 
 #### Scenario: Gitignore includes session-summary.md after init
 
@@ -38,9 +56,10 @@ The system SHALL also ensure `.git-paw/session-summary.md` is listed in the repo
 
 #### Scenario: Gitignore not duplicated on repeated init
 
-- **GIVEN** `.gitignore` already contains `.git-paw/session-summary.md`
+- **GIVEN** `.gitignore` already contains `.git-paw/tmp/` and
+  `.git-paw/session-summary.md`
 - **WHEN** `git paw init` is run again
-- **THEN** `.git-paw/session-summary.md` SHALL appear exactly once in `.gitignore`
+- **THEN** each managed entry SHALL appear exactly once in `.gitignore`
 
 ### Requirement: Init is idempotent
 

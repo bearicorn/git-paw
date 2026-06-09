@@ -155,56 +155,6 @@ be added a second time. This matches the existing
 - **AND** the nonsense entry SHALL be present in
   `allowed_bash_prefixes` (Claude's matcher will simply never hit it)
 
-### Requirement: Per-CLI placement (Claude / `~/.claude-oss` in v0.5.0)
-
-The system SHALL write the merged allowlist to
-`<repo>/.claude/settings.json` on every supervisor start where the
-feature is enabled.
-
-When the directory `~/.claude-oss/` exists at session start (the
-alt-config dogfood pattern from `prompt-submit-fix`), the system
-SHALL ALSO merge the same allowlist into
-`~/.claude-oss/settings.json` using the same merge semantics.
-
-When `~/.claude-oss/` does not exist, the system SHALL NOT create it.
-
-The system SHALL NOT write to any other CLI's configuration file in
-this change (Codex, Gemini, opencode, Cursor, etc. are deferred to the
-v1.0.0 hook-providers capability).
-
-#### Scenario: Writes to `<repo>/.claude/settings.json`
-
-- **GIVEN** the feature is enabled and a supervisor session starts in
-  repository `<repo>`
-- **WHEN** the seeder runs
-- **THEN** the file `<repo>/.claude/settings.json` SHALL contain the
-  merged allowlist
-- **AND** any parent directory `<repo>/.claude/` that did not exist
-  SHALL be created
-
-#### Scenario: Writes to `~/.claude-oss/settings.json` when directory exists
-
-- **GIVEN** the directory `~/.claude-oss/` exists at session start
-- **AND** the feature is enabled
-- **WHEN** the seeder runs
-- **THEN** the file `~/.claude-oss/settings.json` SHALL ALSO contain
-  the merged allowlist with the same entries as
-  `<repo>/.claude/settings.json`
-
-#### Scenario: Does not create `~/.claude-oss/` when absent
-
-- **GIVEN** the directory `~/.claude-oss/` does not exist at session start
-- **WHEN** the seeder runs
-- **THEN** no `~/.claude-oss/` directory SHALL be created
-- **AND** only `<repo>/.claude/settings.json` SHALL be written
-
-#### Scenario: No write to other CLI configs
-
-- **GIVEN** the user has `~/.codex/config.toml` and `~/.gemini/`
-  present at session start
-- **WHEN** the seeder runs
-- **THEN** neither file/directory SHALL be modified by this seeder
-
 ### Requirement: Merge semantics preserve existing entries
 
 The system SHALL merge new entries into the target settings file
@@ -249,4 +199,68 @@ existing curl-allowlist seeder:
 - **AND** a warning SHALL be logged to stderr identifying the file
   and the parse error
 - **AND** the supervisor session SHALL continue to start normally
+
+### Requirement: Per-CLI placement (Claude / config-driven settings paths)
+
+The system SHALL write the merged allowlist to
+`<repo>/.claude/settings.json` on every supervisor start where the
+feature is enabled.
+
+The system SHALL ALSO merge the same allowlist into each configured
+`[clis.<name>].settings_path` whose parent directory already exists at
+session start, using the same merge semantics. The set of alternate
+targets is resolved from configuration only — there is no hardcoded
+CLI name or path. When a configured `settings_path`'s parent directory
+does not exist, the system SHALL NOT create it and SHALL skip that
+target. When no `[clis.<name>].settings_path` is configured, only
+`<repo>/.claude/settings.json` is written.
+
+The system SHALL NOT write to any other CLI's configuration file in
+this change (Codex, Gemini, opencode, Cursor, etc. are deferred to the
+v1.0.0 hook-providers capability).
+
+#### Scenario: Writes to `<repo>/.claude/settings.json`
+
+- **GIVEN** the feature is enabled and a supervisor session starts in
+  repository `<repo>`
+- **WHEN** the seeder runs
+- **THEN** the file `<repo>/.claude/settings.json` SHALL contain the
+  merged allowlist
+- **AND** any parent directory `<repo>/.claude/` that did not exist
+  SHALL be created
+
+#### Scenario: Writes to a configured settings_path when its parent exists
+
+- **GIVEN** config defines `[clis.my-variant].settings_path =
+  "~/.config/my-variant/settings.json"` and the directory
+  `~/.config/my-variant/` exists at session start
+- **AND** the feature is enabled
+- **WHEN** the seeder runs
+- **THEN** the file `~/.config/my-variant/settings.json` SHALL ALSO
+  contain the merged allowlist with the same entries as
+  `<repo>/.claude/settings.json`
+
+#### Scenario: Skips a configured settings_path when its parent is absent
+
+- **GIVEN** config defines `[clis.my-variant].settings_path =
+  "~/.config/my-variant/settings.json"` but `~/.config/my-variant/`
+  does not exist at session start
+- **WHEN** the seeder runs
+- **THEN** no `~/.config/my-variant/` directory SHALL be created
+- **AND** only `<repo>/.claude/settings.json` SHALL be written
+
+#### Scenario: No hardcoded CLI path is seeded without config
+
+- **GIVEN** the directory `~/.claude-oss/` exists at session start
+- **AND** no `[clis.<name>].settings_path` points into it
+- **WHEN** the seeder runs
+- **THEN** `~/.claude-oss/settings.json` SHALL NOT be written by the
+  seeder (the alternate target set is config-driven only)
+
+#### Scenario: No write to other CLI configs
+
+- **GIVEN** the user has `~/.codex/config.toml` and `~/.gemini/`
+  present at session start
+- **WHEN** the seeder runs
+- **THEN** neither file/directory SHALL be modified by this seeder
 
