@@ -1378,6 +1378,15 @@ fn cmd_supervisor(
     // launches do not leave a phantom supervisor row on the dashboard
     // (D1 of supervisor-as-pane-followups).
 
+    // Learnings-mode privacy disclosure: when the user has opted into
+    // learnings (`[supervisor] learnings = true`), surface where the local
+    // file is written, that nothing leaves the machine, and how to optionally
+    // share it. Prints exactly when opted in and is silent otherwise so a
+    // non-learnings session's output is unchanged.
+    if let Some(notice) = learnings_disclosure_notice(config.supervisor.as_ref()) {
+        println!("{notice}");
+    }
+
     println!(
         "Supervisor session '{}' launched with {} coding agent(s).",
         tmux_session.name,
@@ -1385,6 +1394,37 @@ fn cmd_supervisor(
     );
     println!("Attach with:  tmux attach -t {}", tmux_session.name);
     Ok(())
+}
+
+/// Canonical GitHub issues URL for optional learnings sharing. Tracks the
+/// `repository` field in `Cargo.toml` and the README links so the disclosure
+/// notice never drifts to a stale repo location.
+const GIT_PAW_ISSUES_URL: &str = "https://github.com/bearicorn/git-paw/issues";
+
+/// Build the session-start learnings privacy disclosure notice.
+///
+/// Returns `Some(notice)` only when the resolved supervisor config has both
+/// `enabled` and `learnings` set — mirroring the aggregator's attach predicate
+/// so the notice appears exactly when learnings output is actually produced.
+/// Returns `None` when learnings is disabled or the `[supervisor]` section is
+/// absent, so a session that has not opted in prints no extra output.
+///
+/// The notice states (a) the local `.git-paw/session-learnings.md` path,
+/// (b) that no telemetry is performed / nothing is sent anywhere, and (c) the
+/// optional-share-via-GitHub-issue invitation with the review-and-anonymise
+/// caveat. git-paw never scrubs the file itself — only the user knows what is
+/// repo-sensitive — so the guidance is advisory.
+#[must_use]
+fn learnings_disclosure_notice(supervisor: Option<&SupervisorConfig>) -> Option<String> {
+    supervisor.filter(|s| s.enabled && s.learnings)?;
+    Some(format!(
+        "Learnings mode is on. Friction signals are written locally to \
+         .git-paw/session-learnings.md — no telemetry, nothing is sent anywhere.\n\
+         If a recurring rough edge is worth fixing in git-paw, you can optionally \
+         share that file by opening an issue at {GIT_PAW_ISSUES_URL} — review it \
+         first and strip or anonymise any repo-specific details (branch names, \
+         file paths, spec IDs); your own LLM can help with that."
+    ))
 }
 
 /// Resolve the boot-prompt settle delay (ms) for `cli` from config,
@@ -4475,6 +4515,104 @@ mod tests {
         assert!(
             has_write_before_flush,
             "at least one stderr write must precede the pre-confirm flush; events: {recorded:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // learnings_disclosure_notice — session-start privacy disclosure gating
+    // (spec: learnings-mode "Session-start learnings disclosure notice")
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn disclosure_notice_prints_when_learnings_enabled() {
+        // GIVEN [supervisor] enabled = true AND learnings = true.
+        let cfg = SupervisorConfig {
+            enabled: true,
+            learnings: true,
+            ..SupervisorConfig::default()
+        };
+        let notice =
+            learnings_disclosure_notice(Some(&cfg)).expect("notice must print when opted in");
+        // THEN it names the local path, the no-telemetry stance, and the
+        // optional share-via-issue invitation with the review/anonymise caveat.
+        assert!(
+            notice.contains(".git-paw/session-learnings.md"),
+            "notice must name the local path; got: {notice}"
+        );
+        assert!(
+            notice.contains("no telemetry") && notice.contains("nothing is sent anywhere"),
+            "notice must state the no-telemetry stance; got: {notice}"
+        );
+        assert!(
+            notice.contains(GIT_PAW_ISSUES_URL),
+            "notice must invite sharing via the canonical issues URL; got: {notice}"
+        );
+        assert!(
+            notice.contains("anonymise"),
+            "notice must carry the review/anonymise caveat; got: {notice}"
+        );
+    }
+
+    #[test]
+    fn no_disclosure_notice_when_learnings_disabled() {
+        // GIVEN [supervisor] enabled = true but learnings = false.
+        let cfg = SupervisorConfig {
+            enabled: true,
+            learnings: false,
+            ..SupervisorConfig::default()
+        };
+        assert!(
+            learnings_disclosure_notice(Some(&cfg)).is_none(),
+            "no notice when learnings is disabled"
+        );
+    }
+
+    #[test]
+    fn no_disclosure_notice_when_supervisor_section_absent() {
+        // GIVEN no [supervisor] section at all — output identical to pre-change.
+        assert!(
+            learnings_disclosure_notice(None).is_none(),
+            "no notice when the [supervisor] section is absent"
+        );
+    }
+
+    #[test]
+    fn no_disclosure_notice_when_supervisor_disabled() {
+        // Defence in depth: learnings = true but supervisor disabled mirrors
+        // the aggregator attach predicate (enabled && learnings) — no file is
+        // produced, so no notice.
+        let cfg = SupervisorConfig {
+            enabled: false,
+            learnings: true,
+            ..SupervisorConfig::default()
+        };
+        assert!(
+            learnings_disclosure_notice(Some(&cfg)).is_none(),
+            "no notice when supervisor mode itself is disabled"
+        );
+    }
+
+    // Spec scenario: "Learnings doc carries the privacy and sharing section".
+    // Guards the user-guide chapter against silently losing the no-telemetry
+    // stance or the optional-share invitation with its review/anonymise caveat.
+    #[test]
+    fn learnings_doc_carries_privacy_and_sharing_section() {
+        let doc = include_str!("../docs/src/user-guide/learnings.md");
+        assert!(
+            doc.contains("## Privacy & Sharing"),
+            "learnings doc must carry a Privacy & Sharing section"
+        );
+        assert!(
+            doc.contains("no telemetry"),
+            "section must state the no-telemetry / local / opt-in stance"
+        );
+        assert!(
+            doc.contains(GIT_PAW_ISSUES_URL),
+            "section must link to the GitHub issue tracker for optional sharing"
+        );
+        assert!(
+            doc.contains("anonymise"),
+            "section must carry the review-and-anonymise caveat"
         );
     }
 }

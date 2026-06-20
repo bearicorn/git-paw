@@ -10,6 +10,7 @@ deferred to v0.6.0.
 ## Contents
 
 - [Why](#why)
+- [Privacy & Sharing](#privacy--sharing)
 - [Enabling Learnings Mode](#enabling-learnings-mode)
 - [Output File](#output-file)
 - [The Five Categories](#the-five-categories)
@@ -28,6 +29,35 @@ useful signal git-paw can surface for tool, prompt, or process improvement.
 Learnings mode aggregates those events into five deterministic categories
 and writes them to a markdown file you can read between sessions —
 turning silent friction into something you can act on.
+
+## Privacy & Sharing
+
+**Learnings mode performs no telemetry.** The aggregator writes to exactly
+one place — the local `.git-paw/session-learnings.md` file in your repo. The
+broker it observes binds to `127.0.0.1`, and git-paw ships no outbound HTTP
+client: nothing about your session is collected, uploaded, or phoned home
+under any configuration. The feature is also fully **opt-in** — it runs only
+when you set `[supervisor] learnings = true` (default `false`), and a session
+that has not opted in behaves exactly as if the feature did not exist.
+
+That makes the learnings file yours: a purely local artifact you can read,
+keep, or delete. When a session starts with learnings enabled, git-paw prints
+a one-line reminder of where the file lives and that nothing leaves your
+machine, so the privacy stance is visible at the point of use, not just here.
+
+**Optional sharing.** If a session surfaces a recurring rough edge that looks
+worth fixing in git-paw itself, the most useful thing you can do is share that
+context with the maintainers. This is a deliberate, manual action — there is
+no "share now" command and no automatic upload. To contribute, open an issue
+on the [git-paw issue tracker](https://github.com/bearicorn/git-paw/issues)
+and attach (or paste) the relevant part of your `session-learnings.md`.
+
+> **Review before you share.** The file contains repo-specific details —
+> branch names, file paths, spec IDs — that you may not want public. Read it
+> first and strip or anonymise anything sensitive. git-paw deliberately does
+> not scrub the file for you: only you know what is sensitive in your repo.
+> Your own LLM or agent CLI can help here — ask it to redact paths and
+> identifiers before you paste the result into an issue.
 
 ## Enabling Learnings Mode
 
