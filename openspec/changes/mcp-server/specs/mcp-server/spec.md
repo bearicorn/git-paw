@@ -200,7 +200,7 @@ exact configuration file path, a copy-pasteable JSON snippet
 showing the server entry, restart instructions, and a verification
 step the user can run to confirm the connection. The documentation
 SHALL also document the known limitations: ChatGPT Web is
-unsupported in v0.6.0, per-repo configuration is required, and
+unsupported in v0.7.0, per-repo configuration is required, and
 Claude Desktop requires `--repo` because it spawns servers from
 its own app-support directory.
 
@@ -223,14 +223,14 @@ its own app-support directory.
 ### Requirement: Subcommand flag surface
 
 The system SHALL support exactly the following flags on
-`git paw mcp` in v0.6.0:
+`git paw mcp` in v0.7.0:
 
 - `--repo <PATH>`: override the repository resolution
 - `--log-file <PATH>`: write tracing output to a file in addition
   to stderr (optional; off by default)
 
 The system SHALL NOT advertise or implement `--port`, `--host`,
-`--daemon`, `start`, `stop`, or `status` in v0.6.0. These are
+`--daemon`, `start`, `stop`, or `status` in v0.7.0. These are
 reserved for the v2.0.0 HTTP-transport addition.
 
 #### Scenario: --help text describes only the supported flags

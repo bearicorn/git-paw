@@ -6,12 +6,12 @@ HTTP broker (`src/broker/`), files on disk under `.git-paw/` and the
 project's spec directories (`openspec/`, `.specify/`, plain Markdown),
 and git itself. None of that is reachable from a chat client — a user
 who wants to ask "what specs are pending?" or "what are agents about
-to touch?" has to read the repo by hand. v0.6.0's MCP server closes
+to touch?" has to read the repo by hand. v0.7.0's MCP server closes
 that gap by exposing read-only state over the standard Model Context
 Protocol (MCP) so any MCP-aware client (Claude Desktop, Cursor,
 ChatGPT Desktop, Windsurf, VS Code MCP extensions) can query it.
 
-The proposal locks the v0.6.0 surface: stdio one-shot transport,
+The proposal locks the v0.7.0 surface: stdio one-shot transport,
 client-spawned, with five tool categories totalling ~18 read-only
 tools. This design document covers HOW to build that — the module
 layout, the dependency choice, the repo-resolution algorithm, the
@@ -211,7 +211,7 @@ NOT required for MCP tests since the server doesn't touch tmux.
 
 ### D7. Subcommand surface: `git paw mcp` with `--repo` only
 
-**Decision:** v0.6.0 ships exactly one subcommand:
+**Decision:** v0.7.0 ships exactly one subcommand:
 
 ```
 git paw mcp [--repo <path>] [--log-file <path>]
@@ -241,7 +241,7 @@ snippet to lower the activation cost.
 - **Repo-resolution edge cases** (worktrees, submodules, bare
   repos) → D3's algorithm handles worktrees; submodules
   intentionally resolve to the outer repo (the inner-submodule
-  case is too rare to design for in v0.6.0); bare repos are
+  case is too rare to design for in v0.7.0); bare repos are
   rejected with a clear error.
 - **stdout pollution killing the protocol** → linted via a
   unit test that asserts no `println!` exists in `src/mcp/`
@@ -261,13 +261,13 @@ from. Rollout:
 1. Implementation lands behind no feature flag — the subcommand
    simply appears.
 2. mdBook chapter + README MCP section publish with the release.
-3. v0.6.0 release notes call out the new `git paw mcp` subcommand
+3. v0.7.0 release notes call out the new `git paw mcp` subcommand
    with copy-pasteable Claude Desktop + ChatGPT Desktop + Cursor
    configs.
 4. No rollback needed; if the subcommand is broken, users simply
    don't use it. The rest of git-paw is unaffected.
 
-**Forward-compatibility note** for the v0.6.0-to-v2.0.0
+**Forward-compatibility note** for the v0.7.0-to-v2.0.0
 transition: the tool registry (D2) is the stable surface.
 v2.0.0 may add a long-lived HTTP transport, but the tool names,
 input schemas, and output shapes carry over. Document each
@@ -291,6 +291,6 @@ enough that the v2.0.0 HTTP transport is a transport-only swap.
   change's design phase.
 - **Schema versioning.** MCP supports tool capability discovery;
   do we need a `git_paw_version` field in each response for the
-  client to detect older servers? Lean: no for v0.6.0 (MCP
+  client to detect older servers? Lean: no for v0.7.0 (MCP
   protocol-level capabilities cover this); add if v2.0.0 introduces
   schema-incompatible changes.

@@ -103,11 +103,18 @@ is only loaded when a tool is invoked, not at server startup.
 ### Requirement: Project knowledge tools
 
 The system SHALL expose MCP tools for indexing and reading the
-repository's specifications. The category SHALL include
-`get_specs`, `get_spec`, `get_tasks`, `get_task`, and
-`get_dependency_graph`. The tools SHALL handle all three supported
-backends — OpenSpec, plain Markdown, and Spec Kit — using the
-same discovery logic that `git paw start --from-all-specs` uses.
+repository's specifications and the agent skills git-paw would
+inject. The category SHALL include `get_specs`, `get_spec`,
+`get_tasks`, `get_task`, `get_dependency_graph`, and `get_skill`.
+The spec tools SHALL handle all three supported backends —
+OpenSpec, plain Markdown, and Spec Kit — using the same discovery
+logic that `git paw start --from-all-specs` uses. `get_skill`
+SHALL return the rendered content of a named skill using the same
+resolution and `{{...}}` substitution pipeline that boot-time skill
+injection uses (project `.agents/skills/` → user override →
+embedded default); it performs read-only rendering and SHALL NOT
+write any skill to disk, register a watcher, or expose a version /
+hot-reload endpoint.
 
 #### Scenario: get_specs lists discovered specs across all backends
 
@@ -145,6 +152,27 @@ same discovery logic that `git paw start --from-all-specs` uses.
   derived from cross-references in proposals (e.g. `[[other-spec]]`
   links), with `nodes` (specs) and `edges` (dependencies between
   them)
+
+#### Scenario: get_skill returns a named skill's rendered content
+
+- **GIVEN** the repository resolves a skill named `coordination`
+  (from `.agents/skills/`, the user override directory, or the
+  embedded default)
+- **WHEN** the MCP client calls `get_skill({ "name":
+  "coordination" })`
+- **THEN** the response SHALL include the skill's rendered content
+  (post `{{...}}` substitution) plus its `source` (one of
+  `standard | user_override | embedded`)
+- **AND** no skill file SHALL be written to disk and no watcher or
+  version endpoint SHALL be created as a side effect
+
+#### Scenario: get_skill reports an unknown skill without erroring the transport
+
+- **WHEN** the MCP client calls `get_skill({ "name":
+  "does-not-exist" })`
+- **THEN** the response SHALL be a successful JSON-RPC response
+  carrying a `null` (or empty) skill payload and a human-readable
+  `error`/`message` field, not a transport-level failure
 
 #### Scenario: Project knowledge tools return empty arrays when no specs exist
 
