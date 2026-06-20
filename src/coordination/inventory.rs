@@ -428,6 +428,15 @@ pub fn build_inventory(broker_url: &str, tmux_session: &str) -> Result<AgentInve
     })
 }
 
+/// Fetches and parses the broker `GET /status` agent list over HTTP.
+///
+/// Used by callers outside the dashboard process (e.g. the MCP server) that
+/// want a live per-agent snapshot. Returns an error when the broker is
+/// unreachable so the caller can degrade gracefully.
+pub fn fetch_status_agents_over_http(broker_url: &str) -> Result<Vec<StatusAgent>, PawError> {
+    parse_status_agents(&fetch_status_body(broker_url)?)
+}
+
 /// Fetches the raw `GET /status` JSON body over a minimal HTTP/1.1 request.
 fn fetch_status_body(broker_url: &str) -> Result<String, PawError> {
     let addr = broker_url.strip_prefix("http://").unwrap_or(broker_url);

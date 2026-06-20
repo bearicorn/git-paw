@@ -160,15 +160,28 @@ pub fn register_watch_target_http(
     Ok(())
 }
 
-/// Fetches the broker's full message log over HTTP via `GET /log`.
+/// One entry from the broker's `GET /log` response, preserving the
+/// publish-time wall-clock timestamp alongside the message.
 ///
-/// Returns the parsed `BrokerMessage` entries in chronological order
-/// (oldest first). Useful for any code that needs to read broker state
-/// from outside the dashboard process.
+/// [`fetch_log_over_http`] discards the timestamp; callers that need to
+/// reconstruct relative state (e.g. intent TTL expiry, conflict
+/// `detected_at`) use [`fetch_log_entries_over_http`] instead.
+#[derive(Debug, Clone)]
+pub struct BrokerLogEntry {
+    /// Sequence number assigned at publish time.
+    pub seq: u64,
+    /// Wall-clock seconds since the Unix epoch when the message was published.
+    pub timestamp_unix_secs: u64,
+    /// The original broker message.
+    pub message: BrokerMessage,
+}
+
+/// Fetches the broker's full message log over HTTP via `GET /log`,
+/// preserving each entry's sequence number and publish timestamp.
 ///
-/// Errors are returned; the caller decides whether to fail or fall back
-/// to an empty log.
-pub fn fetch_log_over_http(broker_url: &str) -> Result<Vec<BrokerMessage>, PawError> {
+/// Returns entries in chronological order (oldest first). Errors are
+/// returned; the caller decides whether to fail or fall back to empty.
+pub fn fetch_log_entries_over_http(broker_url: &str) -> Result<Vec<BrokerLogEntry>, PawError> {
     let addr = broker_url.strip_prefix("http://").unwrap_or(broker_url);
     let socket_addr = if let Ok(a) = addr.parse() {
         a
@@ -229,10 +242,35 @@ pub fn fetch_log_over_http(broker_url: &str) -> Result<Vec<BrokerMessage>, PawEr
         if let Some(msg_value) = entry.get("message")
             && let Ok(msg) = serde_json::from_value::<BrokerMessage>(msg_value.clone())
         {
-            out.push(msg);
+            out.push(BrokerLogEntry {
+                seq: entry
+                    .get("seq")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                timestamp_unix_secs: entry
+                    .get("timestamp_unix_secs")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                message: msg,
+            });
         }
     }
     Ok(out)
+}
+
+/// Fetches the broker's full message log over HTTP via `GET /log`.
+///
+/// Returns the parsed `BrokerMessage` entries in chronological order
+/// (oldest first). Useful for any code that needs to read broker state
+/// from outside the dashboard process.
+///
+/// Errors are returned; the caller decides whether to fail or fall back
+/// to an empty log.
+pub fn fetch_log_over_http(broker_url: &str) -> Result<Vec<BrokerMessage>, PawError> {
+    Ok(fetch_log_entries_over_http(broker_url)?
+        .into_iter()
+        .map(|e| e.message)
+        .collect())
 }
 
 #[cfg(test)]

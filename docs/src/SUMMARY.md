@@ -19,6 +19,7 @@
   - [Governance](user-guide/governance.md)
   - [Learnings Mode](user-guide/learnings.md)
   - [Conflict Detection](user-guide/conflict-detection.md)
+  - [MCP Server](user-guide/mcp.md)
 - [Configuration](configuration/README.md)
 - [Supported AI CLIs](supported-clis.md)
 - [CLI Reference](cli-reference.md)

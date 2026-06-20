@@ -143,6 +143,9 @@ fn run(command: Command) -> Result<(), PawError> {
             limit,
             json,
         } => cmd_approvals(session.as_deref(), limit, json),
+        Command::Mcp { repo, log_file } => {
+            git_paw::mcp::cmd_mcp(repo.as_deref(), log_file.as_deref())
+        }
     }
 }
 

@@ -4,6 +4,7 @@
 //! All subcommands, flags, and options are declared here.
 
 use clap::{Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 /// Spec format selector for the `--specs-format` flag.
 ///
@@ -479,6 +480,58 @@ pub enum Command {
         /// Emit machine-readable JSON instead of the text table.
         #[arg(long, help = "Emit machine-readable JSON")]
         json: bool,
+    },
+
+    /// Run a read-only Model Context Protocol (MCP) server over stdio
+    #[command(
+        about = "Run a read-only Model Context Protocol (MCP) server over stdio",
+        long_about = "Starts a Model Context Protocol (MCP) server on stdin/stdout so any \
+                      MCP-aware client (Claude Desktop, Cursor, ChatGPT Desktop, Windsurf, \
+                      VS Code MCP) can query this repository's read-only state: agent \
+                      coordination intents/conflicts, governance docs, specs and tasks, \
+                      session status and learnings, agent skills, and git context.\n\n\
+                      The server is client-spawned and one-shot: the MCP client owns the \
+                      process lifecycle and the server exits when stdin is closed. It runs \
+                      standalone — no tmux session, broker, or supervisor is required. When a \
+                      data source is unavailable (no broker, no session, no governance config) \
+                      tools return well-formed empty/null results rather than errors.\n\n\
+                      Repository resolution: --repo wins; otherwise the nearest ancestor of the \
+                      current directory containing .git is used (worktrees resolve to their own \
+                      root). Claude Desktop spawns servers from its app-support directory, so it \
+                      MUST pass --repo with an absolute path.\n\n\
+                      Claude Desktop config (claude_desktop_config.json):\n\n  \
+                      {\n    \
+                        \"mcpServers\": {\n      \
+                          \"git-paw\": {\n        \
+                            \"command\": \"git\",\n        \
+                            \"args\": [\"paw\", \"mcp\", \"--repo\", \"/absolute/path/to/your/repo\"]\n      \
+                          }\n    \
+                        }\n  \
+                      }\n\n\
+                      Examples:\n  \
+                      git paw mcp\n  \
+                      git paw mcp --repo /path/to/repo\n  \
+                      git paw mcp --repo /path/to/repo --log-file /tmp/git-paw-mcp.log"
+    )]
+    Mcp {
+        /// Repository to operate against, overriding current-directory
+        /// discovery. Required for clients that spawn from a fixed directory
+        /// (notably Claude Desktop).
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Repository to serve (overrides current-directory discovery; required for Claude Desktop)"
+        )]
+        repo: Option<PathBuf>,
+
+        /// Write tracing output to this file in addition to stderr (off by
+        /// default). Stdout always stays reserved for the JSON-RPC stream.
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Also write tracing output to this file (stderr is always used)"
+        )]
+        log_file: Option<PathBuf>,
     },
 }
 
@@ -1648,6 +1701,104 @@ mod tests {
         assert!(
             help.contains("approvals"),
             "root help should list approvals subcommand, got: {help}"
+        );
+    }
+
+    // -- Mcp subcommand --
+
+    #[test]
+    fn mcp_parses_with_no_flags() {
+        let cli = parse(&["mcp"]);
+        match cli.command.unwrap() {
+            Command::Mcp { repo, log_file } => {
+                assert!(repo.is_none());
+                assert!(log_file.is_none());
+            }
+            other => panic!("expected Mcp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mcp_parses_with_repo() {
+        let cli = parse(&["mcp", "--repo", "/path/to/repo"]);
+        match cli.command.unwrap() {
+            Command::Mcp { repo, .. } => {
+                assert_eq!(repo.as_deref(), Some(std::path::Path::new("/path/to/repo")));
+            }
+            other => panic!("expected Mcp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mcp_parses_with_repo_and_log_file() {
+        let cli = parse(&["mcp", "--repo", "/r", "--log-file", "/tmp/mcp.log"]);
+        match cli.command.unwrap() {
+            Command::Mcp { repo, log_file } => {
+                assert_eq!(repo.as_deref(), Some(std::path::Path::new("/r")));
+                assert_eq!(
+                    log_file.as_deref(),
+                    Some(std::path::Path::new("/tmp/mcp.log"))
+                );
+            }
+            other => panic!("expected Mcp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mcp_rejects_daemon_and_http_flags() {
+        // v0.7.0 ships stdio only — no --port / --host / --daemon / start / stop / status.
+        for bad in [
+            vec!["mcp", "--port", "9119"],
+            vec!["mcp", "--host", "127.0.0.1"],
+            vec!["mcp", "--daemon"],
+            vec!["mcp", "start"],
+            vec!["mcp", "stop"],
+            vec!["mcp", "status"],
+        ] {
+            let mut full = vec!["git-paw"];
+            full.extend(bad.iter().copied());
+            assert!(
+                Cli::try_parse_from(&full).is_err(),
+                "mcp should reject {bad:?} in v0.7.0"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_help_describes_supported_flags_and_config_snippet() {
+        let result = Cli::try_parse_from(["git-paw", "mcp", "--help"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(
+            help.contains("--repo"),
+            "mcp --help should list --repo; got: {help}"
+        );
+        assert!(
+            help.contains("--log-file"),
+            "mcp --help should list --log-file; got: {help}"
+        );
+        assert!(
+            help.contains("mcpServers"),
+            "mcp --help should include a copy-pasteable Claude Desktop config snippet; got: {help}"
+        );
+        for forbidden in ["--port", "--host", "--daemon"] {
+            assert!(
+                !help.contains(forbidden),
+                "mcp --help must not advertise {forbidden}; got: {help}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_shows_mcp_subcommand() {
+        let result = Cli::try_parse_from(["git-paw", "--help"]);
+        let err = result.unwrap_err();
+        let help = err.to_string();
+        assert!(
+            help.contains("mcp"),
+            "root help should list the mcp subcommand, got: {help}"
         );
     }
 
