@@ -110,6 +110,7 @@ Only add dependencies listed in the approved set:
 | `serde_yaml` | Spec Kit frontmatter parsing |
 | `chrono` | ISO timestamp formatting in broker messages and learnings aggregator |
 | `regex` | Broker `agent_id` validation + supervisor `sweep.sh` phantom filter |
+| `rmcp` v1.7 | Official MCP Rust SDK (Apache-2.0) — stdio MCP server for `git paw mcp`; needs active upstream version tracking (protocol churn) |
 
 Dev: `assert_cmd`, `predicates`, `tempfile`, `serial_test`, `tower`, `hyper`, `hyper-util`, `http-body-util`
 

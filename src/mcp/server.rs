@@ -1,0 +1,164 @@
+//! stdio transport setup, tool-registry wiring, and lifecycle for the MCP
+//! server. This module only *wires* things together (design D2): it owns no
+//! tool logic (that lives in [`crate::mcp::tools`]) and no data reads (those
+//! live in [`crate::mcp::query`]).
+
+use std::path::Path;
+
+use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::model::{ServerCapabilities, ServerInfo};
+use rmcp::transport::stdio;
+use rmcp::{ServerHandler, ServiceExt, tool_handler};
+
+use crate::error::PawError;
+use crate::mcp::{RepoContext, logging};
+
+/// The MCP server handler. Holds the resolved [`RepoContext`] (shared
+/// read-only by every tool) and the merged tool router.
+#[derive(Clone)]
+pub struct GitPawMcpServer {
+    /// Resolved repository context.
+    pub(crate) ctx: RepoContext,
+    /// Combined router across all five tool categories.
+    tool_router: ToolRouter<Self>,
+}
+
+impl GitPawMcpServer {
+    /// Builds the server, merging the per-category tool routers (each defined
+    /// in its own file under `tools/`).
+    #[must_use]
+    pub fn new(ctx: RepoContext) -> Self {
+        let tool_router = Self::coordination_router()
+            + Self::governance_router()
+            + Self::project_router()
+            + Self::session_router()
+            + Self::git_router();
+        Self { ctx, tool_router }
+    }
+}
+
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for GitPawMcpServer {
+    fn get_info(&self) -> ServerInfo {
+        // ServerInfo (InitializeResult) is #[non_exhaustive]; build from Default
+        // and override the fields we care about.
+        let mut info = ServerInfo::default();
+        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info.instructions = Some(
+            "Read-only git-paw repository state over MCP: coordination intents/conflicts, \
+             governance docs, specs and tasks, session status and learnings, agent skills, \
+             and git context. Tools return empty/null results (not errors) when their data \
+             source is unavailable."
+                .to_string(),
+        );
+        info
+    }
+}
+
+/// Validates configuration that must be correct for the server to operate.
+///
+/// A configured `[specs].type` outside the supported set is a hard error per
+/// the spec — the server exits non-zero with a clear stderr message rather
+/// than silently mis-serving.
+fn validate_startup_config(ctx: &RepoContext) -> Result<(), PawError> {
+    let config = crate::config::load_config(&ctx.root, None)?;
+    if let Some(specs) = config.specs.as_ref()
+        && let Some(spec_type) = specs.spec_type.as_deref()
+    {
+        const VALID: [&str; 3] = ["openspec", "markdown", "speckit"];
+        if !VALID.contains(&spec_type) {
+            return Err(PawError::McpError(format!(
+                "invalid [specs].type = \"{spec_type}\" in .git-paw/config.toml. \
+                 Valid values: openspec, markdown, speckit."
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Runs the stdio MCP server until the client closes stdin.
+///
+/// Initialises stderr logging, validates startup config, then drives the
+/// rmcp service loop on a Tokio runtime. Returns `Ok(())` (exit 0) on a clean
+/// stdin EOF.
+pub fn run(ctx: RepoContext, log_file: Option<&Path>) -> Result<(), PawError> {
+    logging::init(log_file)?;
+    validate_startup_config(&ctx)?;
+
+    logging::info(&format!("serving repository {}", ctx.root.display()));
+    if ctx.broker_url.is_none() {
+        logging::info("no active broker; coordination/session tools will return empty results");
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| PawError::McpError(format!("failed to build async runtime: {e}")))?;
+
+    runtime.block_on(async move {
+        let server = GitPawMcpServer::new(ctx);
+        let service = server
+            .serve(stdio())
+            .await
+            .map_err(|e| PawError::McpError(format!("failed to start MCP server: {e}")))?;
+        let reason = service
+            .waiting()
+            .await
+            .map_err(|e| PawError::McpError(format!("MCP server loop error: {e}")))?;
+        logging::info(&format!("MCP server stopped: {reason:?}"));
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx() -> RepoContext {
+        RepoContext {
+            root: std::path::PathBuf::from("/tmp"),
+            git_paw_dir: None,
+            broker_url: None,
+        }
+    }
+
+    #[test]
+    fn server_advertises_tool_capability_and_instructions() {
+        let server = GitPawMcpServer::new(ctx());
+        let info = server.get_info();
+        assert!(
+            info.capabilities.tools.is_some(),
+            "tools capability advertised"
+        );
+        assert!(info.instructions.is_some());
+    }
+
+    #[test]
+    fn new_merges_all_category_routers() {
+        let server = GitPawMcpServer::new(ctx());
+        let names: Vec<String> = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        // Spot-check one tool from each category is registered.
+        for expected in [
+            "get_intents",
+            "get_conflicts",
+            "get_dod",
+            "get_constitution",
+            "get_specs",
+            "get_skill",
+            "get_session_status",
+            "get_learnings",
+            "get_branches",
+            "get_diff",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "tool {expected} should be registered; have: {names:?}"
+            );
+        }
+    }
+}

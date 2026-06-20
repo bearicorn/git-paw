@@ -88,6 +88,10 @@ pub enum PawError {
     #[error("Dashboard error: {0}")]
     DashboardError(String),
 
+    /// MCP server startup / repository-resolution failure.
+    #[error("MCP error: {0}")]
+    McpError(String),
+
     /// I/O operation failed.
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),

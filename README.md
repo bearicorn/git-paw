@@ -81,6 +81,7 @@ git-paw lets you run multiple AI coding assistants in parallel, each in its own 
 - **Conflict-detector tuning** — `[supervisor.conflict]` exposes the in-flight escalation window (`window_seconds`), the intent-overlap warning toggle (`warn_on_intent_overlap`), and the ownership-violation escalation toggle (`escalate_on_violation`)
 - **Learnings flush cadence** — `[supervisor.learnings_config] flush_interval_seconds` (default 60) controls how often learnings entries are flushed from memory to `.git-paw/session-learnings.md`
 - **Routing through the supervisor** — type `/agents` in the supervisor pane to see the live agent inventory (status, mode, pane) and `/tell <agent> <prompt>` to route a prompt to one agent without tab-switching into its pane; `[supervisor.tell] mode` picks the delivery channel (`feedback` queue by default, `send-keys` for accept-edits agents) and every route is recorded in the session learnings
+- **MCP server (v0.7.0+)** — `git paw mcp` exposes this repo's read-only state (coordination intents/conflicts, governance docs, specs/tasks, session status/learnings, agent skills, git context) over the [Model Context Protocol](https://modelcontextprotocol.io) so any MCP-aware client can query it; runs standalone over stdio, degrades gracefully when no session is active, and never invokes an agent CLI as a backend
 
 > **Tip:** git-paw uses `AGENTS.md` as the standard agent instruction file. If your AI CLI reads a different file (e.g., `CLAUDE.md`, `GEMINI.md`), you can symlink it:
 > ```bash
@@ -349,6 +350,44 @@ git paw replay feat/auth --session paw-myproject
 ```
 
 Requires session logging to be enabled in config.
+
+### `mcp` — Read-only MCP server (v0.7.0+)
+
+Runs a [Model Context Protocol](https://modelcontextprotocol.io) server on
+stdio so any MCP-aware client (Claude Desktop, Cursor, ChatGPT Desktop,
+Windsurf, VS Code MCP) can query this repository's read-only state:
+coordination intents/conflicts, governance docs, specs and tasks, session
+status and learnings, agent skills, and git context. It runs standalone — no
+tmux session or broker required.
+
+```bash
+# Serve the repo in the current directory
+git paw mcp
+
+# Serve a specific repo (required for clients that spawn from a fixed dir,
+# notably Claude Desktop)
+git paw mcp --repo /path/to/your/repo
+
+# Tee diagnostics to a file (stderr is always used; stdout is JSON-RPC only)
+git paw mcp --repo /path/to/your/repo --log-file /tmp/git-paw-mcp.log
+```
+
+Claude Desktop config (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "git-paw": {
+      "command": "git",
+      "args": ["paw", "mcp", "--repo", "/absolute/path/to/your/repo"]
+    }
+  }
+}
+```
+
+See the [MCP user-guide chapter](https://bearicorn.github.io/git-paw/user-guide/mcp.html)
+for per-client setup (Cursor, ChatGPT Desktop, Windsurf, VS Code MCP), the full
+tool reference, and known limitations.
 
 ## Configuration
 

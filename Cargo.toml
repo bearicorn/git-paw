@@ -28,6 +28,10 @@ schemars = "0.8"
 serde_yaml = "0.9"
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
+# Official MCP Rust SDK (Apache-2.0). Pinned to 1.7 for the v0.7.0 stdio MCP
+# server. Tracks upstream modelcontextprotocol/rust-sdk; this dep needs active
+# version tracking (protocol churn) — see design.md D1 + Risks.
+rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
 
 [[bin]]
 name = "git-paw"
