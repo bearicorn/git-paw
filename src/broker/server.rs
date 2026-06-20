@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use super::BrokerState;
 use super::delivery;
 use super::messages::BrokerMessage;
+use super::{WatchTarget, watcher};
 
 /// Compiled-once regex matching the only `agent_id` shapes the broker accepts:
 /// `"supervisor"`, or a `feat-{name}` / `feat/{name}` slug whose `{name}`
@@ -106,6 +107,21 @@ fn check_placeholder_fields(msg: &BrokerMessage) -> Option<Response> {
     None
 }
 
+/// Request body for the `POST /watch` endpoint — a live filesystem watch
+/// target to register on the running broker.
+#[derive(Deserialize)]
+struct WatchRequest {
+    /// Agent identifier (slugified branch name) that owns the worktree.
+    agent_id: String,
+    /// Absolute path to the worktree root to begin watching.
+    worktree_path: String,
+    /// CLI label running in the agent's pane (e.g. `"claude"`). Optional —
+    /// an absent or empty value leaves the roster's CLI column unseeded,
+    /// matching the start-time behaviour for a blank CLI.
+    #[serde(default)]
+    cli: String,
+}
+
 /// Query parameters for the `GET /messages/:agent_id` endpoint.
 #[derive(Deserialize)]
 struct PollQuery {
@@ -147,6 +163,7 @@ struct LogEntry {
 pub fn router(state: Arc<BrokerState>) -> Router {
     Router::new()
         .route("/publish", post(publish))
+        .route("/watch", post(watch))
         .route("/messages/{agent_id}", get(messages))
         .route("/status", get(status))
         .route("/log", get(log))
@@ -210,6 +227,87 @@ async fn publish(
         )
             .into_response(),
     }
+}
+
+/// `POST /watch` — registers a live filesystem watch target on the running
+/// broker so the watcher begins surfacing the worktree's activity without a
+/// restart.
+///
+/// Bound to loopback only, on the same listener as `/publish` and `/status`.
+///
+/// - 415 if `Content-Type` is missing or not `application/json`
+/// - 400 if the body is empty, malformed, has an invalid `agent_id`, or an
+///   empty / placeholder `worktree_path`
+/// - 202 on success (including an idempotent re-registration, which records
+///   nothing new and spawns no watcher)
+async fn watch(
+    State(state): State<Arc<BrokerState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !content_type.starts_with("application/json") {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            axum::Json(serde_json::json!({"error": "Content-Type must be application/json"})),
+        )
+            .into_response();
+    }
+    if body.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"error": "request body must not be empty"})),
+        )
+            .into_response();
+    }
+
+    let req: WatchRequest = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+    };
+
+    // Validate agent_id against the same regex `/publish` enforces, so
+    // phantom debris cannot mint a watch target.
+    if !agent_id_regex().is_match(&req.agent_id) {
+        return agent_id_rejection(&req.agent_id);
+    }
+    // The worktree path must be present and not an unfilled placeholder.
+    if req.worktree_path.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"error": "worktree_path must not be empty"})),
+        )
+            .into_response();
+    }
+    if placeholder_regex().is_match(&req.worktree_path) {
+        return placeholder_rejection("worktree_path", &req.worktree_path);
+    }
+
+    let target = WatchTarget {
+        agent_id: req.agent_id,
+        cli: req.cli,
+        worktree_path: std::path::PathBuf::from(req.worktree_path),
+    };
+
+    // Record the target (idempotent). Only spawn a watcher for a freshly
+    // registered path, and only when the broker has a live shutdown signal to
+    // enroll it in (absent in router-only unit tests).
+    if state.register_watch_target(&target)
+        && let Some(rx) = state.watcher_shutdown_rx()
+    {
+        tokio::spawn(watcher::watch_worktree(Arc::clone(&state), target, rx));
+    }
+
+    StatusCode::ACCEPTED.into_response()
 }
 
 /// `GET /messages/:agent_id?since=N` — polls for messages destined to the given agent.
@@ -825,6 +923,152 @@ mod tests {
                 "every agent row must carry its cli: {a}",
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // broker-live-watch-registration — POST /watch
+    // -----------------------------------------------------------------------
+
+    /// Minimal git repo for the watch integration test.
+    fn init_test_repo_server(dir: &std::path::Path) {
+        use std::process::Command;
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .expect("git command failed");
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "test"]);
+        run(&["commit", "--allow-empty", "-m", "root", "-q"]);
+    }
+
+    /// POSTs a body to `/watch` against a router built from `state`.
+    async fn post_watch(state: &Arc<BrokerState>, body: String) -> StatusCode {
+        router(Arc::clone(state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/watch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// Spec scenario: registering a target surfaces the worktree via the
+    /// watcher without a broker restart (tasks 2.3 + 3.3 at the broker layer).
+    #[tokio::test]
+    async fn watch_registers_target_and_surfaces_worktree_in_status() {
+        use super::super::watcher::POLL_INTERVAL;
+        let tmp = tempfile::tempdir().unwrap();
+        init_test_repo_server(tmp.path());
+
+        let state = Arc::new(BrokerState::new(None));
+        // Wire the shared watcher shutdown signal the way start_broker_with
+        // does, so the handler enrolls the spawned watcher in it.
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        state.set_watcher_shutdown_rx(rx);
+
+        let body = format!(
+            r#"{{"agent_id":"feat-hot","worktree_path":"{}","cli":"claude"}}"#,
+            tmp.path().display()
+        );
+        assert_eq!(post_watch(&state, body).await, StatusCode::ACCEPTED);
+
+        // Dirty the worktree so the watcher has activity to surface.
+        std::fs::write(tmp.path().join("hot.rs"), "fn hot() {}").unwrap();
+
+        let mut found = false;
+        for _ in 0..20 {
+            tokio::time::sleep(POLL_INTERVAL / 2).await;
+            let json = get_status(&state).await;
+            if let Some(agents) = json["agents"].as_array()
+                && agents.iter().any(|a| a["agent_id"] == "feat-hot")
+            {
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            found,
+            "a registered worktree must surface its agent in /status from activity"
+        );
+
+        let _ = tx.send(true);
+    }
+
+    /// Spec scenario: registration is idempotent — a duplicate POST still
+    /// succeeds and records no second target.
+    #[tokio::test]
+    async fn watch_duplicate_registration_is_a_noop_success() {
+        let state = Arc::new(BrokerState::new(None));
+        let body = r#"{"agent_id":"feat-hot","worktree_path":"/tmp/feat-hot","cli":"claude"}"#;
+        assert_eq!(
+            post_watch(&state, body.to_string()).await,
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            post_watch(&state, body.to_string()).await,
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            state.read().watched_paths.len(),
+            1,
+            "duplicate registration must not record a second target"
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_rejects_invalid_agent_id() {
+        let state = Arc::new(BrokerState::new(None));
+        let body = r#"{"agent_id":"a","worktree_path":"/tmp/x","cli":"claude"}"#;
+        assert_eq!(
+            post_watch(&state, body.to_string()).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_rejects_placeholder_worktree_path() {
+        let state = Arc::new(BrokerState::new(None));
+        let body = r#"{"agent_id":"feat-hot","worktree_path":"<path>","cli":"claude"}"#;
+        assert_eq!(
+            post_watch(&state, body.to_string()).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_rejects_empty_worktree_path() {
+        let state = Arc::new(BrokerState::new(None));
+        let body = r#"{"agent_id":"feat-hot","worktree_path":"","cli":"claude"}"#;
+        assert_eq!(
+            post_watch(&state, body.to_string()).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_wrong_content_type_returns_415() {
+        let app = test_router();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/watch")
+                    .header("content-type", "text/plain")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
 
     #[tokio::test]
