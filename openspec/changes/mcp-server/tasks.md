@@ -79,6 +79,14 @@
       governance-file-unreadable error path
 - [ ] 6.3 `src/mcp/tools/project.rs` — register `get_specs`,
       `get_spec`, `get_tasks`, `get_task`, `get_dependency_graph`
+- [ ] 6.3a `get_skill(name)` in `src/mcp/tools/project.rs` — call
+      the existing `skills::render` resolution pipeline (project
+      `.agents/skills/` → user override → embedded default) and
+      return rendered content + `source`; read-only, no disk write,
+      no watcher, no version endpoint
+- [ ] 6.3b Unit tests for `get_skill`: rendered-content happy path
+      across all three sources, and unknown-skill → null payload +
+      message (not a transport error)
 - [ ] 6.4 `src/mcp/tools/session.rs` — register
       `get_session_status`, `get_session_summary`, `get_learnings`
 - [ ] 6.5 `src/mcp/tools/git.rs` — register `get_branches`,

@@ -3,7 +3,7 @@
 Today git-paw only delivers value once a multi-pane session is running. A
 developer who wants to inspect specs, intents, learnings, or governance
 docs from a chat client (Claude Desktop, Cursor, any MCP-aware client)
-has no programmatic surface — they have to read the repo by hand. v0.6.0
+has no programmatic surface — they have to read the repo by hand. v0.7.0
 positions git-paw as the universal "developer-MCP-for-this-repo" by
 exposing read-only state via the standard Model Context Protocol.
 Standalone operation matters: the MCP server must run without requiring
@@ -30,8 +30,11 @@ in this repo?" before any agents launch.
     `check_dod(branch)`, `get_constitution()` — serve docs from
     `[governance]` configured paths.
   - **Project knowledge**: `get_specs()`, `get_spec(id)`,
-    `get_tasks()`, `get_task(id)`, `get_dependency_graph()` —
-    index OpenSpec / Markdown / Spec Kit specs and tasks.
+    `get_tasks()`, `get_task(id)`, `get_dependency_graph()`,
+    `get_skill(name)` — index OpenSpec / Markdown / Spec Kit specs
+    and tasks, and return the rendered content of a named agent
+    skill (read-only, via the existing skill resolution + `{{...}}`
+    render pipeline; no disk write, no watcher, no version endpoint).
   - **Session state**: `get_session_status()`, `get_session_summary()`,
     `get_learnings()` — read session JSON + learnings file (empty
     when no session is active).
@@ -45,7 +48,7 @@ in this repo?" before any agents launch.
   Windsurf — including the per-repo config patterns and known
   client-specific quirks.
 - Write tools (create/modify specs, control sessions, deliver
-  agent feedback) are deliberately out of scope for v0.6.0;
+  agent feedback) are deliberately out of scope for v0.7.0;
   deferred to v1.0.0 where a backend-agnostic spec-authoring
   surface across OpenSpec / Spec Kit / Markdown can be designed
   alongside the Per-CLI Hook Providers work.
@@ -59,7 +62,7 @@ in this repo?" before any agents launch.
   The MCP client brings its own LLM; the MCP server provides
   deterministic tools. This guardrail also applies to descendants
   (the v1.0.0 MCP write tools and any future MCP work).
-- **No HTTP/SSE daemon transport in v0.6.0.** `git paw mcp start` /
+- **No HTTP/SSE daemon transport in v0.7.0.** `git paw mcp start` /
   `mcp stop` / `mcp status` were considered and deferred. The stdio
   client-spawned model gives every supported MCP client a working
   path today; a long-lived HTTP daemon adds lifecycle management,
@@ -67,11 +70,11 @@ in this repo?" before any agents launch.
   doesn't materialise until A2A (v2.0.0) reshapes the broker's HTTP
   layer. Revisit consolidation with the broker's HTTP server in v2.0.0
   alongside the A2A migration.
-- **No multi-repo registry in v0.6.0.** A single MCP server that
+- **No multi-repo registry in v0.7.0.** A single MCP server that
   exposes `list_repos()` + a `repo` parameter on every tool, backed
   by a registry written by `git paw init`, was considered. Deferred
   to v1.0.0 alongside the per-CLI specialisation work — that's the
-  natural home for "one config, many repos, many CLIs" UX. v0.6.0
+  natural home for "one config, many repos, many CLIs" UX. v0.7.0
   users with N repos add N entries to their client config.
 
 ## Capabilities

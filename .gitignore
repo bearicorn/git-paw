@@ -35,6 +35,7 @@ GEMINI.md
 .cline/
 .clinerules/
 .opencode/
+.rtk/
 
 # mdBook build output
 docs/book/
