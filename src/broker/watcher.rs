@@ -117,6 +117,15 @@ pub async fn watch_worktree(
         }
 
         let Some(current) = run_git_status(&target.worktree_path).await else {
+            // `git status` failed. Distinguish a transient failure (retry next
+            // tick) from a vanished worktree: when the worktree no longer
+            // exists on disk, deregister it and stop this task. This is the
+            // prune path for `git paw remove` — a later re-registration of the
+            // same path spawns a fresh watcher.
+            if !target.worktree_path.exists() {
+                state.forget_watch_target(&target.worktree_path);
+                break;
+            }
             continue;
         };
 
@@ -499,6 +508,48 @@ mod tests {
 
         let _ = tx.send(true);
         let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+    }
+
+    /// Spec scenario (task 3.2): when a watched worktree disappears (the
+    /// `git paw remove` prune path), the watcher deregisters it from the live
+    /// target set and exits, so a later re-add of the same path spawns a fresh
+    /// watcher.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn watch_worktree_prunes_vanished_worktree() {
+        use crate::broker::BrokerState;
+        let tmp = tempfile::tempdir().unwrap();
+        init_test_repo(tmp.path());
+        let path = tmp.path().to_path_buf();
+
+        let state = Arc::new(BrokerState::new(None));
+        let target = WatchTarget {
+            agent_id: "feat-gone".to_string(),
+            cli: "claude".to_string(),
+            worktree_path: path.clone(),
+        };
+        assert!(state.register_watch_target(&target));
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn(watch_worktree(Arc::clone(&state), target, rx));
+
+        // Let the watcher settle on a baseline, then delete the worktree.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        tmp.close().unwrap();
+
+        // Within a couple poll intervals the watcher detects the vanished
+        // worktree, prunes it, and exits.
+        let joined = tokio::time::timeout(POLL_INTERVAL * 2 + Duration::from_secs(1), handle).await;
+        assert!(
+            joined.is_ok(),
+            "watcher task must exit after its worktree disappears"
+        );
+        assert!(
+            !state.read().watched_paths.contains(&path),
+            "the vanished worktree must be pruned from the live target set"
+        );
+
+        let _ = tx.send(true);
     }
 
     #[tokio::test(flavor = "current_thread")]

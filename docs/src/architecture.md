@@ -60,7 +60,7 @@ This chapter covers git-paw's internal architecture: module structure, data flow
 | File | Purpose |
 |------|---------|
 | `src/broker/mod.rs` | Public surface (start/stop entry points, shared state types). |
-| `src/broker/server.rs` | `axum` HTTP server: `/publish`, `/messages/:agent_id`, `/status`. |
+| `src/broker/server.rs` | `axum` HTTP server: `/publish`, `/watch`, `/messages/:agent_id`, `/status`. |
 | `src/broker/messages.rs` | `BrokerMessage` enum + payload types + slug validation. Source of truth for the wire format used in user-facing examples. |
 | `src/broker/publish.rs` | Validation + sequence assignment for incoming `/publish` calls. |
 | `src/broker/delivery.rs` | Routing layer: which inboxes a message lands in (broadcast, supervisor inbox, targeted delivery). |
@@ -220,10 +220,11 @@ Dashboard pane process (git paw __dashboard):
 ├── tokio runtime (background threads)
 │   ├── axum HTTP server on localhost:9119
 │   │   ├── POST /publish
+│   │   ├── POST /watch   (register a hot-added worktree as a live watch target)
 │   │   ├── GET /messages/:agent_id?since=N
 │   │   └── GET /status
 │   ├── Filesystem watcher (src/broker/watcher.rs)
-│   │   └── Auto-publishes agent.status on file changes
+│   │   └── Auto-publishes agent.status on file changes; prunes a vanished worktree
 │   ├── Conflict detector (src/broker/conflict.rs)
 │   │   └── Forward / in-flight / ownership shapes
 │   └── Learnings aggregator (src/broker/learnings.rs)

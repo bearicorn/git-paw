@@ -2352,6 +2352,9 @@ fn cmd_add(
         prompt,
         mut entry,
     } = attach_agent(&attach_ctx, &branch, spec_entry.as_ref())?;
+    // Capture the new worktree's path before `entry` is moved into the
+    // session, so we can register it as a live broker watch target below.
+    let new_worktree_path = entry.worktree_path.clone();
 
     // 4.7 Recompute layout_for(N+1) and re-apply (splice the pane + re-tile).
     let offset = agent_pane_offset(&existing);
@@ -2379,6 +2382,24 @@ fn cmd_add(
         &updated.worktrees,
         offset,
     );
+
+    // Register the new worktree as a live broker watch target so the watcher
+    // surfaces the agent in `/status` from worktree activity, identical to a
+    // start-time agent — even before its CLI self-publishes (capability
+    // `broker-live-watch-registration`). Best-effort: a broker that is down
+    // or predates `/watch` leaves the agent to self-register via its boot
+    // block, exactly as in v0.6.0, so a failure here is logged, not fatal.
+    if broker_config.enabled {
+        let agent_id = broker::messages::slugify_branch(&branch);
+        if let Err(e) = broker::publish::register_watch_target_http(
+            &broker_config.url(),
+            &agent_id,
+            &new_worktree_path,
+            &agent_cli,
+        ) {
+            eprintln!("warning: could not register '{branch}' with the broker watcher: {e}");
+        }
+    }
 
     if paused {
         println!(

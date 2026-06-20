@@ -20,10 +20,10 @@ pub mod publish;
 pub mod server;
 pub mod watcher;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -108,6 +108,13 @@ pub struct BrokerStateInner {
     /// the behaviour (v0.5.0 model). Defaults to 60s; overwritten from
     /// `[broker.watcher].republish_working_ttl_seconds` at broker start.
     pub republish_working_ttl: std::time::Duration,
+    /// Worktree paths the broker is currently watching, for idempotent live
+    /// registration via `POST /watch`. Seeded with the start-time watch
+    /// targets in [`start_broker_with`] and extended at runtime by
+    /// [`BrokerState::register_watch_target`]. A vanished worktree is pruned
+    /// by its watcher task (see [`watcher::watch_worktree`]), so re-adding the
+    /// same path later spawns a fresh watcher.
+    pub watched_paths: HashSet<PathBuf>,
 }
 
 /// Shared broker state.
@@ -141,6 +148,14 @@ pub struct BrokerState {
     /// non-OpenSpec sessions) leaves the guard inert. Threaded in via
     /// [`BrokerState::with_role_gating`].
     pub role_gating: Option<crate::opsx::RoleGatingContext>,
+    /// Watcher shutdown receiver, populated once in [`start_broker_with`]
+    /// before the start-time watchers spawn. The `POST /watch` handler clones
+    /// it to enroll a live-registered watcher in the same shared shutdown
+    /// signal, so a hot-added watcher stops in lockstep with the rest on
+    /// [`BrokerHandle`] drop. `None` until the broker has spawned its watchers
+    /// (e.g. in router-only unit tests), in which case live registration still
+    /// records the target but spawns no watcher.
+    watcher_shutdown_rx: OnceLock<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl BrokerState {
@@ -155,6 +170,7 @@ impl BrokerState {
                 republish_working_ttl: std::time::Duration::from_secs(
                     crate::config::WatcherConfig::DEFAULT_REPUBLISH_TTL_SECONDS,
                 ),
+                watched_paths: HashSet::new(),
             }),
             next_seq: AtomicU64::new(0),
             log_path,
@@ -165,6 +181,7 @@ impl BrokerState {
             // default is `true`) via `with_verify_on_commit_nudge`.
             verify_on_commit_nudge: false,
             role_gating: None,
+            watcher_shutdown_rx: OnceLock::new(),
         }
     }
 
@@ -221,6 +238,54 @@ impl BrokerState {
     /// (bug 8). `Duration::ZERO` disables the auto-republish behaviour.
     pub fn set_republish_working_ttl(&self, ttl: std::time::Duration) {
         self.write().republish_working_ttl = ttl;
+    }
+
+    /// Records the shared watcher shutdown receiver so the `POST /watch`
+    /// handler can clone it when spawning a live-registered watcher. Called
+    /// once in [`start_broker_with`] before the start-time watchers spawn;
+    /// subsequent calls are ignored (the receiver is set-once).
+    pub fn set_watcher_shutdown_rx(&self, rx: tokio::sync::watch::Receiver<bool>) {
+        let _ = self.watcher_shutdown_rx.set(rx);
+    }
+
+    /// Returns a clone of the shared watcher shutdown receiver if the broker
+    /// has spawned its watchers, or `None` otherwise (e.g. router-only unit
+    /// tests). The `POST /watch` handler uses this to enroll a hot-added
+    /// watcher in the shared shutdown signal.
+    #[must_use]
+    pub fn watcher_shutdown_rx(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        self.watcher_shutdown_rx.get().cloned()
+    }
+
+    /// Registers a worktree as a live watch target for `POST /watch`.
+    ///
+    /// Bookkeeping only — the caller spawns the actual [`watcher::watch_worktree`]
+    /// task when this returns `true`. Idempotent: the worktree path is the key,
+    /// so re-registering an already-watched path returns `false` and the caller
+    /// spawns nothing (no duplicate watcher). On a fresh path it seeds the
+    /// agent's CLI label and inbox queue exactly as the start-time targets are
+    /// seeded in [`start_broker_with`], so the agent surfaces in `/status` and
+    /// receives peer broadcasts on the same terms.
+    pub fn register_watch_target(&self, target: &WatchTarget) -> bool {
+        let mut inner = self.write();
+        if !inner.watched_paths.insert(target.worktree_path.clone()) {
+            return false;
+        }
+        if !target.cli.is_empty() {
+            inner
+                .agent_clis
+                .insert(target.agent_id.clone(), target.cli.clone());
+        }
+        inner.queues.entry(target.agent_id.clone()).or_default();
+        true
+    }
+
+    /// Drops a worktree from the live watch-target set so a later
+    /// re-registration of the same path spawns a fresh watcher. Called by a
+    /// watcher task when it detects its worktree has disappeared (the prune
+    /// path for `git paw remove`).
+    pub fn forget_watch_target(&self, worktree_path: &std::path::Path) {
+        self.write().watched_paths.remove(worktree_path);
     }
 
     /// Acquires a read lock on the inner state.
@@ -462,6 +527,7 @@ pub fn start_broker(
 /// aggregator flushes to `.git-paw/session-learnings.md` when
 /// `state.learnings` is `Some`. Default for [`start_broker`] is 60s;
 /// tests override to drive flush behaviour without waiting on real time.
+#[allow(clippy::too_many_lines)]
 pub fn start_broker_with(
     config: &BrokerConfig,
     state: BrokerState,
@@ -570,6 +636,8 @@ pub fn start_broker_with(
                 .agent_clis
                 .insert(target.agent_id.clone(), target.cli.clone());
             inner.queues.entry(target.agent_id.clone()).or_default();
+            // Seed the live target set so a `POST /watch` for a start-time path is a no-op.
+            inner.watched_paths.insert(target.worktree_path.clone());
         }
     }
 
@@ -578,6 +646,8 @@ pub fn start_broker_with(
     // every watcher to exit on its next tick. The conflict detector
     // shares the same shutdown channel so it stops in lockstep.
     let (watcher_tx, watcher_rx) = tokio::sync::watch::channel(false);
+    // Publish the shutdown receiver so `POST /watch` can enroll live watchers.
+    state.set_watcher_shutdown_rx(watcher_rx.clone());
     for target in watch_targets {
         let s = Arc::clone(&state);
         let rx = watcher_rx.clone();
@@ -666,6 +736,53 @@ mod tests {
         assert!(inner.agents.is_empty());
         assert!(inner.queues.is_empty());
         assert!(inner.message_log.is_empty());
+    }
+
+    #[test]
+    fn register_watch_target_is_idempotent_and_seeds_roster() {
+        let state = BrokerState::new(None);
+        let target = WatchTarget {
+            agent_id: "feat-hot".to_string(),
+            cli: "claude".to_string(),
+            worktree_path: PathBuf::from("/tmp/feat-hot"),
+        };
+        // First registration is fresh — the caller should spawn a watcher.
+        assert!(
+            state.register_watch_target(&target),
+            "first registration must return true"
+        );
+        // Re-registering the same path is a no-op — no duplicate watcher.
+        assert!(
+            !state.register_watch_target(&target),
+            "duplicate registration must return false"
+        );
+        let inner = state.read();
+        assert_eq!(inner.watched_paths.len(), 1, "path recorded exactly once");
+        assert_eq!(
+            inner.agent_clis.get("feat-hot").map(String::as_str),
+            Some("claude"),
+            "registration seeds the CLI label"
+        );
+        assert!(
+            inner.queues.contains_key("feat-hot"),
+            "registration seeds the inbox queue"
+        );
+    }
+
+    #[test]
+    fn forget_watch_target_allows_re_registration() {
+        let state = BrokerState::new(None);
+        let target = WatchTarget {
+            agent_id: "feat-hot".to_string(),
+            cli: "claude".to_string(),
+            worktree_path: PathBuf::from("/tmp/feat-hot"),
+        };
+        assert!(state.register_watch_target(&target));
+        state.forget_watch_target(&target.worktree_path);
+        assert!(
+            state.register_watch_target(&target),
+            "after forgetting, the same path registers fresh again"
+        );
     }
 
     #[test]
