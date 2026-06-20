@@ -1,5 +1,8 @@
-## ADDED Requirements
+# mcp-read-tools Specification
 
+## Purpose
+TBD - created by archiving change mcp-server. Update Purpose after archive.
+## Requirements
 ### Requirement: Coordination tools
 
 The system SHALL expose MCP tools for inspecting active agent
@@ -284,3 +287,4 @@ LLM can validate its own invocations without runtime trial-and-error.
 - **THEN** the schema SHALL distinguish required from optional
   parameters per JSON Schema convention, and SHALL include
   default values where applicable
+
