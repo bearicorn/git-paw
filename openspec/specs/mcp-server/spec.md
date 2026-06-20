@@ -1,5 +1,8 @@
-## ADDED Requirements
+# mcp-server Specification
 
+## Purpose
+TBD - created by archiving change mcp-server. Update Purpose after archive.
+## Requirements
 ### Requirement: MCP server subcommand
 
 The system SHALL provide a `git paw mcp` subcommand that runs a Model
@@ -239,3 +242,4 @@ reserved for the v2.0.0 HTTP-transport addition.
 - **THEN** the output SHALL describe `--repo` and `--log-file`
   with examples, and SHALL NOT advertise any daemon-style or
   HTTP-transport flags
+
