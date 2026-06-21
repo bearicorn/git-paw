@@ -25,7 +25,7 @@ $ git paw
   > Same CLI for all branches
     Different CLI per branch
 
-  ? Select branches (space to toggle, enter to confirm):
+  ? Select branches (type to filter, space to toggle, enter to confirm):
   > [x] feat/auth
     [x] feat/api
     [ ] fix/typo

@@ -24,7 +24,7 @@ You have three ways to control which specs are launched:
 
 - **`--from-all-specs`** — launches every discovered spec across the configured backend.
 - **`--specs NAME[,NAME...]`** — comma-separated list of spec names. Mirrors the existing `--branches feat/a,feat/b` syntax. Unknown names exit with the discovered-set listed as candidates so you can correct quickly.
-- **`--specs`** (bare, no values) — opens a multi-select picker showing every discovered spec. Each row shows the unit identifier; for Spec Kit features that decompose into multiple worktrees, the row also shows a worktree-count hint (e.g. `003-user-list — 3 worktrees: 2 [P] + 1 phase/`).
+- **`--specs`** (bare, no values) — opens a multi-select picker showing every discovered spec. Each row shows the unit identifier; for Spec Kit features that decompose into multiple worktrees, the row also shows a worktree-count hint (e.g. `003-user-list — 3 worktrees: 2 [P] + 1 phase/`). The picker is a type-to-filter multi-select (identical to the branch picker): type to narrow the rows by case-insensitive substring match against the displayed label, Ctrl-U clears the filter, Space toggles, and Enter confirms. Selecting a filtered row still expands to every underlying entry for that unit, and selections persist across filter changes.
 
 `--from-all-specs` and `--specs` are mutually exclusive — they express opposing intents — and clap rejects any invocation that combines them.
 

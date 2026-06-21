@@ -9,7 +9,7 @@ This guide covers the full range of git-paw features beyond the quick starts.
 Running `git paw` (or `git paw start`) with no flags launches the interactive flow:
 
 1. Mode selection — same CLI for all branches, or different CLI per branch
-2. Branch selection — multi-select with fuzzy search
+2. Branch selection — multi-select with type-to-filter search (type to narrow, space to toggle, enter to confirm)
 3. CLI selection — single pick (uniform) or per-branch assignment
 
 ### Smart start behavior

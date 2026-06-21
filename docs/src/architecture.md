@@ -43,7 +43,7 @@ This chapter covers git-paw's internal architecture: module structure, data flow
 | **Tmux** | `src/tmux.rs` | Builder pattern for tmux operations. Creates sessions, splits panes, sends commands, applies the supervisor-as-pane layout, sets pane titles. |
 | **Session** | `src/session.rs` | Persists session state to JSON files under `~/.local/share/git-paw/sessions/`. Atomic writes, crash recovery. |
 | **Config** | `src/config.rs` | Parses TOML from global (`~/.config/git-paw/config.toml`) and per-repo (`.git-paw/config.toml`). Merges with repo-wins semantics. |
-| **Interactive** | `src/interactive.rs` | Terminal prompts via dialoguer. Mode picker, branch multi-select, CLI picker. Skips prompts when flags are provided. |
+| **Interactive** | `src/interactive.rs` | Terminal prompts. The branch and spec multi-selects are ratatui/crossterm fuzzy-filter pickers (type to filter, space to toggle); the mode and CLI single-selects use dialoguer. Skips prompts when flags are provided. |
 | **Error** | `src/error.rs` | `PawError` enum with thiserror. Actionable error messages and distinct exit codes. |
 | **Dirs** | `src/dirs.rs` | In-tree platform XDG path helper. Replaces the upstream `dirs` crate (removed in v0.5.0 for license reasons); see `AGENTS.md § Dependencies`. |
 | **Agents** | `src/agents.rs` | Generates the gitignored `.git-paw/AGENTS.local.md` sidecar (the combined view) per worktree; manages the `<!-- git-paw:start … end -->` marker region; leaves the tracked `AGENTS.md` committable. |

@@ -27,12 +27,15 @@ git paw
 ## Step 3: Select branches
 
 ```
-? Select branches (space to toggle, enter to confirm):
+? Select branches (type to filter, space to toggle, enter to confirm):
   [ ] main
   [x] feat/auth
   [x] feat/api
   [x] refactor/db
 ```
+
+Type to filter the list (case-insensitive substring match); selections persist
+across filter changes, and Ctrl-U clears the filter.
 
 ## Step 4: Assign a CLI to each branch
 
