@@ -489,7 +489,8 @@ pub enum Command {
                       MCP-aware client (Claude Desktop, Cursor, ChatGPT Desktop, Windsurf, \
                       VS Code MCP) can query this repository's read-only state: agent \
                       coordination intents/conflicts, governance docs, specs and tasks, \
-                      session status and learnings, agent skills, and git context.\n\n\
+                      session status and learnings, agent skills, git context, and the \
+                      repository's own README and documentation.\n\n\
                       The server is client-spawned and one-shot: the MCP client owns the \
                       process lifecycle and the server exits when stdin is closed. It runs \
                       standalone — no tmux session, broker, or supervisor is required. When a \

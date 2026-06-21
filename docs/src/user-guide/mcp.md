@@ -244,3 +244,31 @@ error.
 | `get_branches` | — | `{ branches: [{ name, head, current, worktree }] }` |
 | `get_recent_commits` | `{ branch, limit? }` | `{ commits: [{ sha, author, timestamp, subject }] }` (`limit` defaults to 20) |
 | `get_diff` | `{ branch, base? }` | `{ base, branch, diff, files_changed, insertions, deletions }` (`base` defaults to the repo's default branch) |
+
+### Documentation
+
+Read-only access to the repository's own documentation, driven by the
+bring-your-own `[governance].readme` and `[governance].docs` config paths
+(see [below](#documentation-config)). Locations are configured, never
+hardcoded — unset paths degrade to `null`/empty results.
+
+| Tool | Input | Result |
+|------|-------|--------|
+| `get_readme` | — | `{ content: <string> \| null }` (null when `[governance].readme` is unset or the file is absent) |
+| `list_docs` | — | `{ docs: [{ path }] }` (Markdown files under `[governance].docs`, paths relative to that dir; empty when unset) |
+| `get_doc` | `{ path }` | `{ content: <string> \| null, message? }` (`path` relative to `[governance].docs`; confined to that dir — a path escaping it, e.g. `../`, is refused with `null` content and a `message`, not a file read outside the directory) |
+
+<a id="documentation-config"></a>
+The documentation tools read two optional `[governance]` paths in
+`.git-paw/config.toml`:
+
+```toml
+[governance]
+readme = "README.md"   # path to the repository README
+docs   = "docs/src"     # path to the documentation root directory
+```
+
+Both default to unset, in which case `get_readme` returns `null`, `list_docs`
+returns an empty list, and `get_doc` returns `null` — identical to the
+pre-v0.7.0 surface. `list_docs` walks the `docs` directory recursively for
+`*.md` files; the relative paths it returns feed directly back into `get_doc`.

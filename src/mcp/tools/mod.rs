@@ -10,6 +10,7 @@
 //! [`rmcp::ErrorData`].
 
 pub mod coordination;
+pub mod docs;
 pub mod git;
 pub mod governance;
 pub mod project;

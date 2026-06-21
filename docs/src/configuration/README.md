@@ -75,6 +75,8 @@ cli = "codex"
 # security = "docs/security-checklist.md"
 # dod = "docs/definition-of-done.md"
 # constitution = ".specify/memory/constitution.md"
+# readme = "README.md"
+# docs = "docs/src"
 ```
 
 ## Settings Reference
@@ -610,6 +612,8 @@ test_strategy = "docs/test-strategy.md"   # single Markdown file
 security = "docs/security-checklist.md"   # single Markdown file
 dod = "docs/definition-of-done.md"        # single Markdown file
 constitution = ".specify/memory/constitution.md"  # single Markdown file
+readme = "README.md"                      # repository README
+docs = "docs/src"                         # documentation root directory
 ```
 
 | Field | Kind | Description |
@@ -619,6 +623,8 @@ constitution = ".specify/memory/constitution.md"  # single Markdown file
 | `security` | file | Security checklist (OWASP-style, project-specific, whatever the team uses). |
 | `dod` | file | Definition of Done for completed work. |
 | `constitution` | file | Project constitution. Spec Kit users normally let this auto-wire (see below). |
+| `readme` | file | Repository README. Surfaced by the MCP `get_readme` tool ([MCP server](../user-guide/mcp.md)); unset → the tool returns `null`. |
+| `docs` | directory | Documentation root. Surfaced by the MCP `list_docs`/`get_doc` tools, which enumerate and read `*.md` files confined to this directory; unset → those tools return empty/`null`. |
 
 git-paw does not dictate the structure, format, or rubric of any of these documents. The supervisor LLM reads them as context and applies judgment during its existing audit flow. There is no `[governance.gates]` table and no per-doc enforcement switch — gating-per-doc would require git-paw to define "failure" for each doc type, and that is a process choice your team owns.
 

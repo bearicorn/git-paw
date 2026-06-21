@@ -32,7 +32,8 @@ impl GitPawMcpServer {
             + Self::governance_router()
             + Self::project_router()
             + Self::session_router()
-            + Self::git_router();
+            + Self::git_router()
+            + Self::docs_router();
         Self { ctx, tool_router }
     }
 }
@@ -154,6 +155,9 @@ mod tests {
             "get_learnings",
             "get_branches",
             "get_diff",
+            "get_readme",
+            "list_docs",
+            "get_doc",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),
