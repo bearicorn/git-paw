@@ -91,6 +91,17 @@ pub struct GovernanceConfig {
     /// explicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub constitution: Option<PathBuf>,
+    /// Path to the repository README (e.g. `README.md`). Bring-your-own
+    /// pointer surfaced by the MCP documentation tools; `None` by default,
+    /// degrading the `get_readme` tool to a null result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readme: Option<PathBuf>,
+    /// Path to the documentation root directory (e.g. `docs/src`).
+    /// Bring-your-own pointer surfaced by the MCP documentation tools
+    /// (`list_docs`/`get_doc`); `None` by default, degrading those tools to
+    /// empty results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs: Option<PathBuf>,
 }
 
 /// Spec scanning configuration.
@@ -1137,6 +1148,16 @@ impl PawConfig {
                     .constitution
                     .clone()
                     .or_else(|| self.governance.constitution.clone()),
+                readme: overlay
+                    .governance
+                    .readme
+                    .clone()
+                    .or_else(|| self.governance.readme.clone()),
+                docs: overlay
+                    .governance
+                    .docs
+                    .clone()
+                    .or_else(|| self.governance.docs.clone()),
             },
             layout: overlay.layout.clone().or_else(|| self.layout.clone()),
             opsx: overlay.opsx.clone().or_else(|| self.opsx.clone()),
@@ -3504,6 +3525,8 @@ enabled = true
                 security: Some(PathBuf::from("docs/security.md")),
                 dod: Some(PathBuf::from("docs/dod.md")),
                 constitution: Some(PathBuf::from(".specify/memory/constitution.md")),
+                readme: Some(PathBuf::from("README.md")),
+                docs: Some(PathBuf::from("docs/src")),
             },
             ..Default::default()
         };
@@ -3540,12 +3563,14 @@ enabled = true
         assert!(config.governance.security.is_none());
         assert!(config.governance.dod.is_none());
         assert!(config.governance.constitution.is_none());
+        assert!(config.governance.readme.is_none());
+        assert!(config.governance.docs.is_none());
     }
 
-    // 3.8 GovernanceConfig::default() exposes only the five path fields
+    // 3.8 GovernanceConfig::default() exposes only the documented path fields
     // (no `gates` field) — compile-time-style assertion via destructuring.
     #[test]
-    fn governance_default_has_only_five_path_fields() {
+    fn governance_default_has_only_path_fields() {
         // If a future change adds a `gates` (or any other) field, this
         // destructure stops compiling, forcing the change author to
         // revisit the capability boundary explicitly.
@@ -3555,12 +3580,58 @@ enabled = true
             security,
             dod,
             constitution,
+            readme,
+            docs,
         } = GovernanceConfig::default();
         assert!(adr.is_none());
         assert!(test_strategy.is_none());
         assert!(security.is_none());
         assert!(dod.is_none());
         assert!(constitution.is_none());
+        assert!(readme.is_none());
+        assert!(docs.is_none());
+    }
+
+    // governance-config delta: readme + docs parse from [governance].
+    #[test]
+    fn governance_parses_readme_and_docs_fields() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[governance]\n\
+             readme = \"README.md\"\n\
+             docs = \"docs/src\"\n",
+        );
+        let config = load_config_file(&path).unwrap().unwrap();
+        assert_eq!(config.governance.readme, Some(PathBuf::from("README.md")));
+        assert_eq!(config.governance.docs, Some(PathBuf::from("docs/src")));
+    }
+
+    // governance-config delta: readme + docs default to None when omitted.
+    #[test]
+    fn governance_readme_and_docs_default_to_none_when_omitted() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[governance]\ndod = \"docs/dod.md\"\n");
+        let config = load_config_file(&path).unwrap().unwrap();
+        assert!(config.governance.readme.is_none());
+        assert!(config.governance.docs.is_none());
+        assert_eq!(config.governance.dod, Some(PathBuf::from("docs/dod.md")));
+    }
+
+    // governance-config delta: readme + docs survive round-trip serialization.
+    #[test]
+    fn governance_readme_and_docs_round_trip() {
+        let original = GovernanceConfig {
+            readme: Some(PathBuf::from("README.md")),
+            docs: Some(PathBuf::from("docs/src")),
+            ..Default::default()
+        };
+        let toml_str = toml::to_string(&original).unwrap();
+        let reparsed: GovernanceConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(reparsed.readme, original.readme);
+        assert_eq!(reparsed.docs, original.docs);
     }
 
     // 4.1 Auto-wires constitution when SpecKit detected + field unset.

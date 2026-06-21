@@ -13,6 +13,7 @@
 //! surface it to the client as a protocol error.
 
 pub mod conflicts;
+pub mod docs;
 pub mod git;
 pub mod governance;
 pub mod intents;
