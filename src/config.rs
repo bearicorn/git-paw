@@ -104,6 +104,28 @@ pub struct GovernanceConfig {
     pub docs: Option<PathBuf>,
 }
 
+/// MCP server configuration.
+///
+/// Carries settings specific to the `git paw mcp` server. Currently a single
+/// optional `name` field that overrides the identity the server advertises in
+/// the `initialize` handshake's `serverInfo.name`.
+///
+/// Embedded as a plain (non-`Option`) field on [`PawConfig`] with
+/// `#[serde(default)]`, so a config with no `[mcp]` section loads
+/// [`McpConfig::default`] (`name: None`) and pre-existing configs round-trip
+/// identically.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpConfig {
+    /// Per-repo override for the MCP server's advertised identity
+    /// (`serverInfo.name`). When `Some`, the server advertises this name in
+    /// the `initialize` handshake; when `None` (the default), it advertises
+    /// `"git-paw"`. This is independent of the client-side `mcpServers` key the
+    /// user controls in their MCP client config — it lets multi-repo setups
+    /// distinguish instances by the server's own identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
 /// Spec scanning configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SpecsConfig {
@@ -1075,6 +1097,15 @@ pub struct PawConfig {
     /// ([`RoleGatingMode::Warn`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opsx: Option<OpsxConfig>,
+
+    /// MCP server configuration.
+    ///
+    /// Absent `[mcp]` (v0.6.0 and earlier configs) loads as
+    /// [`McpConfig::default`] (`name: None`), so the MCP server advertises the
+    /// default `"git-paw"` identity and pre-existing configs round-trip
+    /// unchanged.
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 impl PawConfig {
@@ -1161,6 +1192,9 @@ impl PawConfig {
             },
             layout: overlay.layout.clone().or_else(|| self.layout.clone()),
             opsx: overlay.opsx.clone().or_else(|| self.opsx.clone()),
+            mcp: McpConfig {
+                name: overlay.mcp.name.clone().or_else(|| self.mcp.name.clone()),
+            },
         }
     }
 
@@ -1183,6 +1217,19 @@ impl PawConfig {
         self.layout
             .as_ref()
             .is_none_or(LayoutConfig::border_affordances_enabled)
+    }
+
+    /// Resolves the effective MCP server identity advertised in the
+    /// `initialize` handshake's `serverInfo.name`.
+    ///
+    /// Returns the configured `[mcp].name` when set, otherwise the default
+    /// `"git-paw"`.
+    #[must_use]
+    pub fn mcp_server_name(&self) -> String {
+        self.mcp
+            .name
+            .clone()
+            .unwrap_or_else(|| "git-paw".to_string())
     }
 
     /// Returns a preset by name, if it exists.
@@ -1949,6 +1996,7 @@ enabled = true
             governance: GovernanceConfig::default(),
             layout: None,
             opsx: None,
+            mcp: McpConfig::default(),
         };
 
         save_config_to(&config_path, &original).unwrap();
@@ -4164,5 +4212,81 @@ enabled = true
         );
         let reparsed: PawConfig = toml::from_str(&serialized).expect("re-parses");
         assert_eq!(config, reparsed);
+    }
+
+    // --- [mcp] configuration section (mcp-server-identity) ---
+
+    // configuration delta — Scenario: Config with [mcp] name parses the field.
+    #[test]
+    fn mcp_name_parses_to_some() {
+        let config: PawConfig = toml::from_str("[mcp]\nname = \"my-project\"\n").expect("parses");
+        assert_eq!(config.mcp.name, Some("my-project".to_string()));
+        assert_eq!(config.mcp_server_name(), "my-project");
+    }
+
+    // configuration delta — Scenario: Config without [mcp] section loads with
+    // defaults (name = None) and does not error.
+    #[test]
+    fn mcp_section_absent_defaults_to_none() {
+        let config: PawConfig = toml::from_str("default_cli = \"claude\"\n").expect("parses");
+        assert_eq!(config.mcp, McpConfig::default());
+        assert!(config.mcp.name.is_none());
+        assert_eq!(config.mcp_server_name(), "git-paw");
+    }
+
+    // Backward compatibility: a representative pre-v0.7.0 config (no [mcp]
+    // section) still parses unchanged.
+    #[test]
+    fn pre_existing_config_without_mcp_loads() {
+        let prior = "default_cli = \"claude\"\nmouse = true\n\n[broker]\nenabled = true\nport = 9119\n\n[supervisor]\nenabled = true\n";
+        let config: PawConfig = toml::from_str(prior).expect("prior config must still parse");
+        assert_eq!(config.mcp, McpConfig::default());
+    }
+
+    // configuration delta — Scenario: MCP config survives round-trip
+    // serialization.
+    #[test]
+    fn mcp_config_round_trips_through_toml() {
+        let config = PawConfig {
+            mcp: McpConfig {
+                name: Some("my-project".to_string()),
+            },
+            ..PawConfig::default()
+        };
+        let serialized = toml::to_string(&config).expect("serializes");
+        let reparsed: PawConfig = toml::from_str(&serialized).expect("re-parses");
+        assert_eq!(reparsed.mcp, config.mcp);
+    }
+
+    // An all-default [mcp] table (name = None) is omitted on serialize so
+    // pre-existing configs stay byte-stable.
+    #[test]
+    fn mcp_default_omits_name_on_serialize() {
+        let config = PawConfig::default();
+        let serialized = toml::to_string_pretty(&config).expect("serializes");
+        assert!(
+            !serialized.contains("name ="),
+            "default [mcp] must not emit a name; got:\n{serialized}"
+        );
+        let reparsed: PawConfig = toml::from_str(&serialized).expect("re-parses");
+        assert_eq!(config, reparsed);
+    }
+
+    // merged_with: a repo-level [mcp].name wins over the global one.
+    #[test]
+    fn mcp_overlay_name_wins_in_merge() {
+        let base: PawConfig = toml::from_str("[mcp]\nname = \"global-name\"\n").expect("base");
+        let overlay: PawConfig = toml::from_str("[mcp]\nname = \"repo-name\"\n").expect("overlay");
+        let merged = base.merged_with(&overlay);
+        assert_eq!(merged.mcp.name, Some("repo-name".to_string()));
+    }
+
+    // merged_with: an absent overlay [mcp].name preserves the base name.
+    #[test]
+    fn mcp_base_name_preserved_when_overlay_absent() {
+        let base: PawConfig = toml::from_str("[mcp]\nname = \"global-name\"\n").expect("base");
+        let overlay: PawConfig = toml::from_str("default_cli = \"claude\"\n").expect("overlay");
+        let merged = base.merged_with(&overlay);
+        assert_eq!(merged.mcp.name, Some("global-name".to_string()));
     }
 }

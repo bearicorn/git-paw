@@ -45,6 +45,12 @@ impl ServerHandler for GitPawMcpServer {
         // and override the fields we care about.
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        // server_info (an Implementation) defaults to the rmcp SDK's own
+        // identity ("rmcp" / the rmcp crate version). Override it so the
+        // handshake advertises git-paw and its real crate version, honouring
+        // any configured [mcp].name resolved onto the RepoContext.
+        info.server_info.name.clone_from(&self.ctx.server_name);
+        info.server_info.version = env!("CARGO_PKG_VERSION").to_string();
         info.instructions = Some(
             "Read-only git-paw repository state over MCP: coordination intents/conflicts, \
              governance docs, specs and tasks, session status and learnings, agent skills, \
@@ -116,10 +122,15 @@ mod tests {
     use super::*;
 
     fn ctx() -> RepoContext {
+        ctx_named("git-paw")
+    }
+
+    fn ctx_named(name: &str) -> RepoContext {
         RepoContext {
             root: std::path::PathBuf::from("/tmp"),
             git_paw_dir: None,
             broker_url: None,
+            server_name: name.to_string(),
         }
     }
 
@@ -132,6 +143,33 @@ mod tests {
             "tools capability advertised"
         );
         assert!(info.instructions.is_some());
+    }
+
+    // mcp-server "Server identity" — Scenario: Default identity is git-paw.
+    #[test]
+    fn server_identity_defaults_to_git_paw_with_crate_version() {
+        let server = GitPawMcpServer::new(ctx());
+        let info = server.get_info();
+        assert_eq!(info.server_info.name, "git-paw");
+        assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    // mcp-server "Server identity" — Scenario: Configured name overrides the
+    // advertised identity (version stays the crate version).
+    #[test]
+    fn server_identity_uses_configured_name_keeping_crate_version() {
+        let server = GitPawMcpServer::new(ctx_named("my-project"));
+        let info = server.get_info();
+        assert_eq!(info.server_info.name, "my-project");
+        assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    // The SDK default identity ("rmcp") must never leak through.
+    #[test]
+    fn server_identity_is_not_the_sdk_default() {
+        let server = GitPawMcpServer::new(ctx());
+        let info = server.get_info();
+        assert_ne!(info.server_info.name, "rmcp");
     }
 
     #[test]

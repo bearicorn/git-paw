@@ -112,6 +112,7 @@ mod tests {
             root: std::path::PathBuf::from("/tmp"),
             git_paw_dir: None,
             broker_url: None,
+            server_name: "git-paw".to_string(),
         };
         assert!(active_intents(&ctx).is_empty());
         assert!(intent_for(&ctx, "feat-x").is_none());

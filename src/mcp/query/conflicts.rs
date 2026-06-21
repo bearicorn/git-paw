@@ -143,6 +143,7 @@ mod tests {
             root: std::path::PathBuf::from("/tmp"),
             git_paw_dir: None,
             broker_url: None,
+            server_name: "git-paw".to_string(),
         };
         assert!(conflicts(&ctx).is_empty());
     }

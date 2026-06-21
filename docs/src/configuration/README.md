@@ -647,6 +647,19 @@ Auto-wiring only runs for the Spec Kit backend. With `[specs] type = "openspec"`
 
 This `[governance]` table is the storage slot. The runtime consumer — boot-prompt injection so the supervisor can read each doc and apply it to its audit — lives in the parallel `governance-context` capability. See the [Governance](../user-guide/governance.md) chapter of the user guide for what that looks like end-to-end.
 
+## MCP
+
+```toml
+[mcp]
+name = "my-project"   # optional; default: "git-paw"
+```
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `name` | `"git-paw"` | The identity the `git paw mcp` server advertises as `serverInfo.name` in the MCP `initialize` handshake. Set a custom value to distinguish multiple repositories that each run an MCP server. Distinct from the client-side `mcpServers` key (the display label in clients like Claude Desktop), which you rename independently. See the [MCP server](../user-guide/mcp.md) chapter. |
+
+The section is optional; omitting it (or `name`) makes the server advertise `git-paw`.
+
 ## Dashboard
 
 Configure the dashboard TUI rendered in pane 0 when the broker is enabled.

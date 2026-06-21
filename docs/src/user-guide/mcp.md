@@ -61,6 +61,22 @@ RUST_LOG=debug git paw mcp --repo /path/to/repo
 If no repository can be found, the server prints a clear error to stderr and
 exits non-zero — it never silently serves nothing.
 
+### Server identity
+
+In the MCP `initialize` handshake the server advertises `serverInfo.name =
+"git-paw"` and its real crate version. To distinguish several repositories that
+each run `git paw mcp`, set a custom name in the repo's `.git-paw/config.toml`:
+
+```toml
+[mcp]
+name = "my-project"   # advertised as serverInfo.name; defaults to "git-paw"
+```
+
+This is the **server's own** advertised identity. It is distinct from the
+display label some clients show, which comes from the `mcpServers` **key** in
+the client config (e.g. `"git-paw"` in the snippet below) — that key is yours
+to rename per client entry regardless of `[mcp].name`.
+
 ## Per-client setup
 
 Each client needs its own entry pointing at this server. The command is `git`
