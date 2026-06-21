@@ -541,6 +541,7 @@ fn active_broker_populates_intents_and_conflicts() {
         root: tmp.path().to_path_buf(),
         git_paw_dir: None,
         broker_url: Some(handle.url.clone()),
+        server_name: "git-paw".to_string(),
     };
 
     let intents = query::intents::active_intents(&ctx);

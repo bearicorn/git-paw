@@ -128,6 +128,7 @@ mod tests {
             root: dir.map_or_else(|| std::path::PathBuf::from("/tmp"), Path::to_path_buf),
             git_paw_dir: dir.map(Path::to_path_buf),
             broker_url: None,
+            server_name: "git-paw".to_string(),
         }
     }
 

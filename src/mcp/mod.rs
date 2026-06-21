@@ -59,6 +59,11 @@ pub struct RepoContext {
     /// probed here — query helpers attempt the HTTP call and degrade to
     /// empty results on failure.
     pub broker_url: Option<String>,
+    /// Effective server identity advertised in the `initialize` handshake's
+    /// `serverInfo.name`. Resolved once at construction from the loaded
+    /// config's `[mcp].name` (defaulting to `"git-paw"`) so the server handler
+    /// never re-loads config per `get_info()` call.
+    pub server_name: String,
 }
 
 impl RepoContext {
@@ -66,7 +71,9 @@ impl RepoContext {
     ///
     /// Reads the active session receipt (if any) to populate
     /// [`RepoContext::broker_url`]; a missing or stopped session simply
-    /// leaves it `None`.
+    /// leaves it `None`. Resolves the advertised server identity from the
+    /// merged config's `[mcp].name`, defaulting to `"git-paw"` when unset (or
+    /// when the config cannot be loaded).
     #[must_use]
     pub fn for_root(root: PathBuf) -> Self {
         let git_paw_dir = {
@@ -78,10 +85,13 @@ impl RepoContext {
             .flatten()
             .as_ref()
             .and_then(broker_url_from_session);
+        let server_name = crate::config::load_config(&root, None)
+            .map_or_else(|_| "git-paw".to_string(), |cfg| cfg.mcp_server_name());
         Self {
             root,
             git_paw_dir,
             broker_url,
+            server_name,
         }
     }
 }

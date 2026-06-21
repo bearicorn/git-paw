@@ -127,6 +127,7 @@ mod tests {
             root,
             git_paw_dir: None,
             broker_url: None,
+            server_name: "git-paw".to_string(),
         })
     }
 
