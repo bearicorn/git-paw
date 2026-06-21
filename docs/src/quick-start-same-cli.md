@@ -35,10 +35,10 @@ Select **Same CLI for all branches** and press Enter.
 
 ## Step 4: Select branches
 
-A multi-select list of all your branches appears with fuzzy search:
+A multi-select list of all your branches appears with type-to-filter search:
 
 ```
-? Select branches (space to toggle, enter to confirm):
+? Select branches (type to filter, space to toggle, enter to confirm):
   [ ] main
   [x] feat/auth
   [x] feat/api
@@ -46,7 +46,9 @@ A multi-select list of all your branches appears with fuzzy search:
   [x] refactor/db
 ```
 
-Use arrow keys to navigate, Space to toggle, and Enter to confirm.
+Type to narrow the list (case-insensitive substring match), use arrow keys to
+navigate, Space to toggle, Ctrl-U to clear the filter, and Enter to confirm.
+Branches you toggle stay selected even if a later filter hides them.
 
 ## Step 5: Select your CLI
 

@@ -1,12 +1,28 @@
 //! Interactive selection prompts.
 //!
-//! User-facing selection flows using `dialoguer`: mode picker, branch picker,
-//! and CLI picker (uniform and per-branch). Logic is separated from UI via
-//! the [`Prompter`] trait for testability.
+//! User-facing selection flows for `git paw start`. The two multi-select
+//! prompts — the branch picker ([`TerminalPrompter::select_branches`]) and the
+//! spec picker ([`TerminalPrompter::select_specs`]) — are built on a shared
+//! `ratatui` + `crossterm` fuzzy multi-select helper ([`fuzzy_multi_select`])
+//! that lets the user type a query to filter a long candidate list. The
+//! single-select prompts (mode picker and CLI pickers) stay on
+//! `dialoguer::Select`. Logic is separated from UI via the [`Prompter`] trait,
+//! and the filter/selection bookkeeping lives in the pure, terminal-free
+//! [`PickerState`] for testability.
 
+use std::collections::HashSet;
 use std::fmt;
+use std::io::{self, Stdout};
 
-use dialoguer::{MultiSelect, Select};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use dialoguer::Select;
+use ratatui::Frame;
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Layout};
+use ratatui::style::{Modifier, Style};
+use ratatui::widgets::{List, ListItem, Paragraph};
 
 use crate::config::PawConfig;
 use crate::error::PawError;
@@ -117,17 +133,11 @@ impl Prompter for TerminalPrompter {
     }
 
     fn select_branches(&self, branches: &[String]) -> Result<Vec<String>, PawError> {
-        let selection = MultiSelect::new()
-            .with_prompt("Select branches (space to toggle, enter to confirm)")
-            .items(branches)
-            .interact_opt()
-            .map_err(|e| map_dialoguer_error(&e))?;
-
-        match selection {
-            Some(indices) if indices.is_empty() => Err(PawError::UserCancelled),
-            Some(indices) => Ok(indices.into_iter().map(|i| branches[i].clone()).collect()),
-            None => Err(PawError::UserCancelled),
-        }
+        let selection = fuzzy_multi_select(
+            "Select branches (type to filter, ctrl-u to clear, space to toggle, enter to confirm)",
+            branches,
+        )?;
+        finalize_branch_selection(branches, selection)
     }
 
     fn select_cli(&self, clis: &[CliInfo], default: Option<&str>) -> Result<String, PawError> {
@@ -170,13 +180,28 @@ impl Prompter for TerminalPrompter {
         let groups = group_specs_by_unit(specs);
         let labels: Vec<String> = groups.iter().map(|(label, _)| label.clone()).collect();
 
-        let selection = MultiSelect::new()
-            .with_prompt("Select specs (space to toggle, enter to confirm)")
-            .items(&labels)
-            .interact_opt()
-            .map_err(|e| map_dialoguer_error(&e))?;
+        let selection = fuzzy_multi_select(
+            "Select specs (type to filter, ctrl-u to clear, space to toggle, enter to confirm)",
+            &labels,
+        )?;
 
         finalize_spec_selection(specs, &groups, selection)
+    }
+}
+
+/// Pure post-processing for `select_branches`: maps the picker's
+/// `Option<Vec<usize>>` selection (indices into the original `branches` slice)
+/// back to branch names, treating both `None` (Ctrl+C / Esc) and `Some(empty)`
+/// (zero rows toggled) as `PawError::UserCancelled` — matching `select_specs`
+/// via [`finalize_spec_selection`].
+fn finalize_branch_selection(
+    branches: &[String],
+    selection: Option<Vec<usize>>,
+) -> Result<Vec<String>, PawError> {
+    match selection {
+        Some(indices) if indices.is_empty() => Err(PawError::UserCancelled),
+        Some(indices) => Ok(indices.into_iter().map(|i| branches[i].clone()).collect()),
+        None => Err(PawError::UserCancelled),
     }
 }
 
@@ -309,6 +334,276 @@ fn map_dialoguer_error(err: &dialoguer::Error) -> PawError {
             PawError::SessionError(format!("Interactive prompt failed: {err}"))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Fuzzy multi-select picker
+// ---------------------------------------------------------------------------
+
+/// Pure filtering and selection state for the fuzzy multi-select picker.
+///
+/// Holds the immutable `labels`, the current filter `query`, and the set of
+/// `selected` rows keyed by **original** label index. Keying selection by the
+/// original index (rather than the visible row) is what lets a selection
+/// survive a query change: toggling a row under one query and then filtering it
+/// out of view never drops it from `selected`. The struct has no terminal
+/// dependency, so the filter/selection contract is unit-tested without a TTY;
+/// the `ratatui` render loop in [`fuzzy_multi_select`] is a thin shell over it.
+struct PickerState {
+    /// All candidate labels, in their original (unfiltered) order.
+    labels: Vec<String>,
+    /// Current filter query. Empty means "show everything".
+    query: String,
+    /// Selected rows, keyed by original index into `labels`.
+    selected: HashSet<usize>,
+}
+
+impl PickerState {
+    /// Creates a picker over `labels` with an empty query and no selection.
+    fn new(labels: Vec<String>) -> Self {
+        Self {
+            labels,
+            query: String::new(),
+            selected: HashSet::new(),
+        }
+    }
+
+    /// Returns the original indices whose label matches the current query.
+    ///
+    /// An empty query yields every index in original order. Otherwise a label
+    /// matches when the query is a case-insensitive substring of it; matching
+    /// indices are returned in original order.
+    fn visible_indices(&self) -> Vec<usize> {
+        if self.query.is_empty() {
+            return (0..self.labels.len()).collect();
+        }
+        let needle = self.query.to_lowercase();
+        self.labels
+            .iter()
+            .enumerate()
+            .filter(|(_, label)| label.to_lowercase().contains(&needle))
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    /// Replaces the filter query wholesale.
+    fn set_query(&mut self, query: String) {
+        self.query = query;
+    }
+
+    /// Appends one character to the filter query.
+    fn push_char(&mut self, c: char) {
+        self.query.push(c);
+    }
+
+    /// Removes the last character from the filter query (no-op when empty).
+    fn pop_char(&mut self) {
+        self.query.pop();
+    }
+
+    /// Toggles the selection of the original index that `visible_row` maps to.
+    ///
+    /// `visible_row` is an index into the current [`Self::visible_indices`]; a
+    /// row outside that range is ignored.
+    fn toggle(&mut self, visible_row: usize) {
+        if let Some(&original_index) = self.visible_indices().get(visible_row) {
+            // `insert` returns false when the value was already present, so a
+            // failed insert means "was selected" → remove it.
+            if !self.selected.insert(original_index) {
+                self.selected.remove(&original_index);
+            }
+        }
+    }
+
+    /// Returns true when the given original index is currently selected.
+    fn is_selected(&self, original_index: usize) -> bool {
+        self.selected.contains(&original_index)
+    }
+
+    /// Returns the selected original indices, sorted ascending.
+    fn confirm(&self) -> Vec<usize> {
+        let mut out: Vec<usize> = self.selected.iter().copied().collect();
+        out.sort_unstable();
+        out
+    }
+}
+
+/// Guard that restores the terminal on drop, ensuring cleanup even on panic or
+/// early return. Mirrors the `TerminalGuard` discipline in `src/dashboard.rs`.
+struct PickerTerminalGuard {
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+}
+
+impl Drop for PickerTerminalGuard {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+        let _ = crossterm::execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = self.terminal.show_cursor();
+    }
+}
+
+/// Enters raw mode and the alternate screen, returning a configured terminal.
+fn picker_setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, PawError> {
+    terminal::enable_raw_mode()
+        .map_err(|e| PawError::SessionError(format!("failed to enable raw mode: {e}")))?;
+    crossterm::execute!(io::stdout(), EnterAlternateScreen)
+        .map_err(|e| PawError::SessionError(format!("failed to enter alternate screen: {e}")))?;
+    Terminal::new(CrosstermBackend::new(io::stdout()))
+        .map_err(|e| PawError::SessionError(format!("failed to create terminal: {e}")))
+}
+
+/// Disables raw mode, leaves the alternate screen, and shows the cursor.
+fn picker_restore_terminal(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+) -> Result<(), PawError> {
+    terminal::disable_raw_mode()
+        .map_err(|e| PawError::SessionError(format!("failed to disable raw mode: {e}")))?;
+    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)
+        .map_err(|e| PawError::SessionError(format!("failed to leave alternate screen: {e}")))?;
+    terminal
+        .show_cursor()
+        .map_err(|e| PawError::SessionError(format!("failed to show cursor: {e}")))
+}
+
+/// Clamps `cursor` so it stays a valid index into the visible rows after the
+/// query changed. An empty visible list parks the cursor at 0.
+fn clamp_cursor(cursor: &mut usize, state: &PickerState) {
+    let visible = state.visible_indices().len();
+    if visible == 0 {
+        *cursor = 0;
+    } else if *cursor >= visible {
+        *cursor = visible - 1;
+    }
+}
+
+/// Renders one frame of the fuzzy multi-select picker.
+///
+/// Layout: a bold prompt line, the live filter query, then the visible rows
+/// (each prefixed with a cursor marker and a `[x]`/`[ ]` checkbox). TUI draw
+/// code is exempt from the coverage gate; the testable logic lives in
+/// [`PickerState`].
+fn draw_picker(frame: &mut Frame, prompt: &str, state: &PickerState, cursor: usize) {
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // prompt
+        Constraint::Length(1), // filter query
+        Constraint::Min(1),    // candidate rows
+    ])
+    .split(frame.area());
+
+    let title = Paragraph::new(prompt).style(Style::default().add_modifier(Modifier::BOLD));
+    frame.render_widget(title, chunks[0]);
+
+    let query_line = Paragraph::new(format!("filter: {}", state.query));
+    frame.render_widget(query_line, chunks[1]);
+
+    let items: Vec<ListItem> = state
+        .visible_indices()
+        .iter()
+        .enumerate()
+        .map(|(row, &original_index)| {
+            let checkbox = if state.is_selected(original_index) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let pointer = if row == cursor { '>' } else { ' ' };
+            ListItem::new(format!(
+                "{pointer} {checkbox} {}",
+                state.labels[original_index]
+            ))
+        })
+        .collect();
+
+    frame.render_widget(List::new(items), chunks[2]);
+}
+
+/// Presents a `ratatui` fuzzy-filter multi-select over `labels` and returns the
+/// selected **original** indices, or `None` when the user cancels (Ctrl+C or
+/// Esc).
+///
+/// Key handling: printable characters edit the filter query, Backspace deletes
+/// the last query character, Ctrl+U clears the whole query, Up/Down move the
+/// cursor over the visible (filtered) rows, Space toggles the cursor row, Enter
+/// confirms, and Ctrl+C / Esc cancel. Selection persists across query changes
+/// because it is keyed by original index (see [`PickerState`]).
+///
+/// The terminal is always restored — raw mode disabled, alternate screen left —
+/// on every exit path (clean exit, early `?` error, or panic) via
+/// [`PickerTerminalGuard`] and an installed panic hook, mirroring
+/// `src/dashboard.rs`.
+///
+/// # Errors
+///
+/// Returns [`PawError::SessionError`] if the terminal cannot be set up, drawn,
+/// or read from.
+fn fuzzy_multi_select(prompt: &str, labels: &[String]) -> Result<Option<Vec<usize>>, PawError> {
+    // Restore the terminal before the default hook prints a panic message, so
+    // a panic inside the loop never leaves the terminal in raw mode.
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = terminal::disable_raw_mode();
+        let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen);
+        original_hook(info);
+    }));
+
+    let terminal = picker_setup_terminal()?;
+    let mut guard = PickerTerminalGuard { terminal };
+
+    let mut state = PickerState::new(labels.to_vec());
+    let mut cursor: usize = 0;
+
+    let selection = loop {
+        guard
+            .terminal
+            .draw(|f| draw_picker(f, prompt, &state, cursor))
+            .map_err(|e| PawError::SessionError(format!("picker draw failed: {e}")))?;
+
+        let event = event::read()
+            .map_err(|e| PawError::SessionError(format!("picker input read failed: {e}")))?;
+        let Event::Key(key) = event else { continue };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break None,
+            KeyCode::Esc => break None,
+            // Ctrl+U clears the whole filter (readline convention), restoring
+            // the full list with selections intact.
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                state.set_query(String::new());
+                cursor = 0;
+            }
+            KeyCode::Enter => break Some(state.confirm()),
+            KeyCode::Up => cursor = cursor.saturating_sub(1),
+            KeyCode::Down => {
+                let visible = state.visible_indices().len();
+                if visible > 0 {
+                    cursor = (cursor + 1).min(visible - 1);
+                }
+            }
+            KeyCode::Char(' ') => state.toggle(cursor),
+            KeyCode::Backspace => {
+                state.pop_char();
+                clamp_cursor(&mut cursor, &state);
+            }
+            // Printable characters edit the query. Control/Alt combos (other
+            // than the Ctrl+C handled above) are ignored rather than typed.
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                state.push_char(c);
+                clamp_cursor(&mut cursor, &state);
+            }
+            _ => {}
+        }
+    };
+
+    // Explicit restore for the clean path; the guard also restores on drop as a
+    // safety net for the early-return and panic paths.
+    picker_restore_terminal(&mut guard.terminal)?;
+    Ok(selection)
 }
 
 // ---------------------------------------------------------------------------
@@ -1246,8 +1541,8 @@ mod tests {
     }
 
     // Maps to scenario `User confirms with zero rows selected` from
-    // cross-format-spec-selection. The TerminalPrompter wires
-    // `MultiSelect::interact_opt() -> Some(empty Vec)` through
+    // cross-format-spec-selection. The TerminalPrompter wires the
+    // `fuzzy_multi_select` picker's `Some(empty Vec)` result through
     // `finalize_spec_selection`, which maps it to UserCancelled. This test
     // exercises that mapping function directly with `Some(empty)` because
     // that is where the production decision lives.
@@ -1257,11 +1552,215 @@ mod tests {
         let specs = vec![bare_spec("003-user-list")];
         let groups = group_specs_by_unit(&specs);
         // `Some(vec![])` represents the user confirming with zero rows
-        // selected — equivalent to dialoguer returning `Ok(vec![])`.
+        // selected — the picker returns an empty index list.
         let result = finalize_spec_selection(&specs, &groups, Some(vec![]));
         assert!(
             matches!(result, Err(PawError::UserCancelled)),
             "zero-row confirmation must map to UserCancelled; got: {result:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // searchable-pickers: PickerState filtering + selection (interactive-
+    // selection capability). The TUI render loop in `fuzzy_multi_select` is
+    // coverage-exempt; the filter/selection contract is tested here through
+    // the pure `PickerState`, and the cancellation/return-shape mapping
+    // through `finalize_branch_selection`.
+    // -----------------------------------------------------------------------
+
+    fn picker_branches() -> Vec<String> {
+        vec![
+            "feature/auth".to_string(),
+            "fix/api".to_string(),
+            "feature/login".to_string(),
+        ]
+    }
+
+    // Scenario `Typing a query filters the branch candidates` + scenario
+    // `Empty filter shows the full branch list` (task 4.1).
+    #[test]
+    fn picker_query_filters_branches_and_empty_shows_full_list() {
+        let mut state = PickerState::new(picker_branches());
+
+        // Empty query → all candidates, original order.
+        assert_eq!(state.visible_indices(), vec![0, 1, 2]);
+
+        // Typing `feature` keeps only the two feature/* branches; `fix/api`
+        // (original index 1) is hidden.
+        state.set_query("feature".to_string());
+        assert_eq!(state.visible_indices(), vec![0, 2]);
+    }
+
+    // Scenario `Typing a query filters the branch candidates` — case-
+    // insensitive substring match.
+    #[test]
+    fn picker_query_match_is_case_insensitive() {
+        let mut state = PickerState::new(vec!["Feature/Auth".to_string(), "fix/api".to_string()]);
+        state.set_query("FEAT".to_string());
+        assert_eq!(state.visible_indices(), vec![0]);
+    }
+
+    // Scenario `Selection under an active filter is preserved when the filter
+    // changes` (task 4.2).
+    #[test]
+    fn picker_selection_persists_across_query_changes() {
+        let mut state = PickerState::new(picker_branches());
+
+        // Type `feature`, toggle the visible `feature/auth` row (visible row 0
+        // → original index 0).
+        state.set_query("feature".to_string());
+        state.toggle(0);
+
+        // Change the query to `fix`, toggle the visible `fix/api` row (visible
+        // row 0 → original index 1).
+        state.set_query("fix".to_string());
+        state.toggle(0);
+
+        // Confirm returns both original indices, sorted — even though each was
+        // toggled under a query that hid the other.
+        assert_eq!(state.confirm(), vec![0, 1]);
+    }
+
+    // Scenario `Clearing the filter restores the full list with selections
+    // intact` (task 4.3).
+    #[test]
+    fn picker_clearing_query_restores_full_list_with_selection() {
+        let mut state = PickerState::new(picker_branches());
+
+        state.set_query("feature".to_string());
+        state.toggle(0); // feature/auth (original index 0)
+
+        // Clear the query back to empty.
+        state.set_query(String::new());
+
+        // Full list visible again, in original order...
+        assert_eq!(state.visible_indices(), vec![0, 1, 2]);
+        // ...and the earlier toggle is still marked.
+        assert!(state.is_selected(0));
+        assert_eq!(state.confirm(), vec![0]);
+    }
+
+    // Scenario `User cancels the filtered branch picker via Ctrl+C` (task
+    // 4.5). The render loop maps Ctrl+C (and Esc) to `None` regardless of the
+    // active filter or any pending selection; `finalize_branch_selection`
+    // turns that into `UserCancelled`. We assert the mapping with a selection
+    // present to capture the *filtered* Ctrl+C path at the helper boundary.
+    #[test]
+    fn filtered_branch_picker_ctrl_c_maps_to_user_cancelled() {
+        // A picker that had an active filter and a toggled row...
+        let mut state = PickerState::new(picker_branches());
+        state.set_query("feature".to_string());
+        state.toggle(0);
+        assert!(
+            !state.confirm().is_empty(),
+            "precondition: a row is selected"
+        );
+
+        // ...still cancels when the loop returns `None` (Ctrl+C / Esc).
+        let result = finalize_branch_selection(&picker_branches(), None);
+        assert!(matches!(result, Err(PawError::UserCancelled)));
+    }
+
+    // Scenario `Confirming with zero branches selected cancels` (task 4.5).
+    #[test]
+    fn branch_picker_zero_selection_maps_to_user_cancelled() {
+        let result = finalize_branch_selection(&picker_branches(), Some(vec![]));
+        assert!(matches!(result, Err(PawError::UserCancelled)));
+    }
+
+    // Scenario `Selecting one of two branches` at the helper boundary: the
+    // returned original indices map back to the right branch names.
+    #[test]
+    fn branch_picker_indices_map_to_names() {
+        let branches = picker_branches();
+        let result = finalize_branch_selection(&branches, Some(vec![1])).unwrap();
+        assert_eq!(result, vec!["fix/api".to_string()]);
+    }
+
+    fn spec_row_labels(specs: &[SpecEntry]) -> Vec<String> {
+        group_specs_by_unit(specs)
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect()
+    }
+
+    // Scenario `Typing a query filters the spec rows` + scenario `Empty filter
+    // shows every grouped spec row`.
+    #[test]
+    fn picker_query_filters_spec_rows_and_empty_shows_all() {
+        let specs = vec![
+            bare_spec("add-auth"),
+            bare_spec("fix-session"),
+            bare_spec("add-logging"),
+        ];
+        let mut state = PickerState::new(spec_row_labels(&specs));
+
+        // Empty query → all three grouped rows, original order.
+        assert_eq!(state.visible_indices(), vec![0, 1, 2]);
+
+        // `add` keeps add-auth (row 0) and add-logging (row 2); fix-session
+        // (row 1) is hidden.
+        state.set_query("add".to_string());
+        assert_eq!(state.visible_indices(), vec![0, 2]);
+    }
+
+    // Scenario `Clearing the spec filter restores all rows with selections
+    // intact`.
+    #[test]
+    fn picker_clearing_spec_filter_restores_rows_with_selection() {
+        let specs = vec![
+            bare_spec("add-auth"),
+            bare_spec("fix-session"),
+            bare_spec("add-logging"),
+        ];
+        let mut state = PickerState::new(spec_row_labels(&specs));
+
+        state.set_query("add".to_string());
+        state.toggle(0); // add-auth row (original index 0)
+
+        state.set_query(String::new());
+
+        assert_eq!(state.visible_indices(), vec![0, 1, 2]);
+        assert!(state.is_selected(0));
+    }
+
+    // Task 4.4 + scenario `Selecting a filtered Spec Kit row still expands to
+    // all its entries`: filtering by `003` keeps the `003-user-list` row, and
+    // selecting that visible row expands (via `finalize_spec_selection`) to all
+    // 3 underlying `SpecEntry` values — crossing the PickerState → finalize
+    // boundary.
+    #[test]
+    fn filtered_spec_kit_row_expands_to_all_underlying_entries() {
+        let specs = vec![
+            bare_spec("003-user-list-T009"),
+            bare_spec("003-user-list-T010"),
+            bare_spec("003-user-list-phase-2"),
+            bare_spec("004-error-handling-phase-1"),
+        ];
+        let groups = group_specs_by_unit(&specs);
+        let labels: Vec<String> = groups.iter().map(|(label, _)| label.clone()).collect();
+
+        let mut state = PickerState::new(labels);
+        state.set_query("003".to_string());
+
+        // Only the 003-user-list grouped row is visible.
+        let visible = state.visible_indices();
+        assert_eq!(visible.len(), 1);
+        assert!(groups[visible[0]].0.starts_with("003-user-list"));
+
+        // Selecting visible row 0 and confirming yields the original group
+        // index, which finalize expands to all 3 underlying entries.
+        state.toggle(0);
+        let selected_rows = state.confirm();
+        let result = finalize_spec_selection(&specs, &groups, Some(selected_rows)).unwrap();
+        let ids: Vec<&str> = result.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "003-user-list-T009",
+                "003-user-list-T010",
+                "003-user-list-phase-2",
+            ]
         );
     }
 }
