@@ -15,3 +15,4 @@ pub mod git;
 pub mod governance;
 pub mod project;
 pub mod session;
+pub mod source;

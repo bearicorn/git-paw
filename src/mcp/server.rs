@@ -33,7 +33,8 @@ impl GitPawMcpServer {
             + Self::project_router()
             + Self::session_router()
             + Self::git_router()
-            + Self::docs_router();
+            + Self::docs_router()
+            + Self::source_router();
         Self { ctx, tool_router }
     }
 }
@@ -54,7 +55,8 @@ impl ServerHandler for GitPawMcpServer {
         info.instructions = Some(
             "Read-only git-paw repository state over MCP: coordination intents/conflicts, \
              governance docs, specs and tasks, session status and learnings, agent skills, \
-             and git context. Tools return empty/null results (not errors) when their data \
+             git context, and source browsing (list_files, read_file, search_code over the \
+             local working tree). Tools return empty/null results (not errors) when their data \
              source is unavailable."
                 .to_string(),
         );
@@ -196,6 +198,9 @@ mod tests {
             "get_readme",
             "list_docs",
             "get_doc",
+            "list_files",
+            "read_file",
+            "search_code",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),

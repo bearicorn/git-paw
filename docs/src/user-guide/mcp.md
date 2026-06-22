@@ -16,6 +16,8 @@ read-only tools:
 - **Session state** — the active session's status/summary and the
   session-learnings file
 - **Git context** — branches, recent commits, and branch diffs
+- **Source/Files** — browse the local working tree, read a file, and search
+  code contents (gitignored paths excluded; reads confined to the repo root)
 
 The server is **standalone**: it does not need a tmux session, broker, or
 supervisor. When a data source is unavailable (no broker, no session, no
@@ -260,6 +262,24 @@ error.
 | `get_branches` | — | `{ branches: [{ name, head, current, worktree }] }` |
 | `get_recent_commits` | `{ branch, limit? }` | `{ commits: [{ sha, author, timestamp, subject }] }` (`limit` defaults to 20) |
 | `get_diff` | `{ branch, base? }` | `{ base, branch, diff, files_changed, insertions, deletions }` (`base` defaults to the repo's default branch) |
+
+### Source/Files
+
+Browse and read the repository's local working tree — tracked files **plus**
+untracked-but-not-ignored files. Gitignored paths (build artifacts, secrets)
+are excluded throughout, and `read_file` is **confined to the repository root**
+(canonicalise + `starts_with` guard, the same as `get_doc`): a path escaping
+the root (`../`, an absolute path, a symlink target outside the root) is
+refused, and a gitignored path is refused, both with `null` content and a
+`message` rather than a read. Reads return the on-disk working-tree content, so
+uncommitted/branch state shows. Implemented over `git ls-files` / `git grep`,
+so a non-git directory or a no-match search degrades to an empty result.
+
+| Tool | Input | Result |
+|------|-------|--------|
+| `list_files` | `{ subpath? }` | `{ files: [<path>] }` (tracked + untracked-not-ignored, relative to the repo root, optionally scoped to `subpath`; empty when not a git repo) |
+| `read_file` | `{ path }` | `{ content: <string> \| null, message? }` (`path` relative to the repo root; confined to the root and gitignore-respecting — a path escaping the root or naming a gitignored file is refused with `null` content and a `message`; `null` with a message when absent) |
+| `search_code` | `{ query, subpath? }` | `{ matches: [{ path, line_number, line }], truncated }` (matches across the working tree, binaries skipped, optionally scoped to `subpath`; capped with a `truncated` flag; empty when no matches or not a git repo) |
 
 ### Documentation
 
