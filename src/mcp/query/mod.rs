@@ -19,6 +19,7 @@ pub mod governance;
 pub mod intents;
 pub mod learnings;
 pub mod session;
+pub mod source;
 pub mod specs;
 
 use std::path::{Path, PathBuf};
