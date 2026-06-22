@@ -23,7 +23,7 @@
 
 ## 4. Quality gates
 
-- [ ] 4.1 `just check` (fmt + clippy + tests) passes
-- [ ] 4.2 `just deny` passes
+- [x] 4.1 `just check` (fmt + clippy + tests) passes
+- [x] 4.2 `just deny` passes
 - [x] 4.3 No `unwrap()`/`expect()` in non-test code; public items documented; no `print!`/`println!` under `src/mcp/`
 - [x] 4.4 Every scenario in `specs/mcp-read-tools/spec.md` maps to a test
