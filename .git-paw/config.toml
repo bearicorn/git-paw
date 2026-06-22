@@ -97,6 +97,8 @@ escalate_on_violation = true
 # during spec audit to verify changes follow project standards
 # (commits, dependencies, CLI conventions, change checklist).
 dod = "AGENTS.md"
+readme = "README.md"
+docs = "docs/src"
 # adr            = "docs/adr"                          # no ADR directory in this repo
 # test_strategy  = "docs/test-strategy.md"             # not present
 # security       = "docs/security-checklist.md"        # not present
