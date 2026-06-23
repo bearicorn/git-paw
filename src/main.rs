@@ -2575,8 +2575,19 @@ fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Result<(), PawE
     // 5.3 Uncommitted-work safety check (D7) — unless --force or --keep-worktree.
     if !force && !keep_worktree {
         let dirty = git::uncommitted_files(&target.worktree_path).unwrap_or_default();
-        if !dirty.is_empty() {
-            let list = dirty
+        // Filter out git-paw's own managed/injected files (the gitignored
+        // sidecar and any residual managed `AGENTS.md` block). Only genuine
+        // user work should block removal — a just-started worktree whose only
+        // dirt is git-paw's injection is treated as clean (see
+        // `agents::is_managed_path`). The refusal message lists only the
+        // residual user files, so the user is never told to commit git-paw's
+        // own bookkeeping.
+        let residual: Vec<String> = dirty
+            .into_iter()
+            .filter(|f| !agents::is_managed_path(&target.worktree_path, f))
+            .collect();
+        if !residual.is_empty() {
+            let list = residual
                 .iter()
                 .map(|f| format!("  {f}"))
                 .collect::<Vec<_>>()
