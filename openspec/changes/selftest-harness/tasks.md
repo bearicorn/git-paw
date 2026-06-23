@@ -20,6 +20,7 @@
 - [ ] 3.1 Audit `tests/` for every broker-port helper using `BASE + (std::process::id() % N)` (e.g. `learnings_mode_integration`, `mcp_e2e`, `hook_integration`, `e2e_qualitative_learnings`, `broker`, `broker_integration`, `broker_agent_id_validation`, `conflict_detection_integration`, `e2e_learnings_aggregator_disabled`, `e2e_learnings_multi_session`)
 - [ ] 3.2 Migrate each to the canonical ephemeral helper (`bind 127.0.0.1:0` → read back port), matching `tests/e2e_supervisor_stop.rs::pick_broker_port`
 - [ ] 3.3 Grep-verify no broker-port helper computes `BASE + (process::id() % N)` after migration
+- [ ] 3.4 De-flake `tests/pause_e2e.rs::pause_detaches_and_stops_broker` — its `wait_until_port_free(broker_port, 5s)` teardown assertion flakes under load (port not released within 5s; surfaced live in the v0.9.0 Wave-1 dogfood verify). This is a port-RELEASE timing race (the port is already OS-ephemeral), distinct from the selection collision above. Fix: make broker shutdown release the listener deterministically (await the bind drop) and/or replace the fixed 5s wait with a bounded retry/backoff (e.g. up to ~30s). Confirm it holds under `cargo llvm-cov` + concurrent shards.
 
 ## 4. Tests
 

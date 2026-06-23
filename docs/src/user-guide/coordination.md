@@ -383,8 +383,8 @@ single group exceeds that mid-implementation, the agent splits into multiple
 commits using a `(part N of M)` suffix:
 
 ```
-feat(coverage): close per-scenario gaps for v0.5.0 (part 1 of 2)
-feat(coverage): close per-scenario gaps for v0.5.0 (part 2 of 2)
+close per-scenario coverage gaps (part 1 of 2)
+close per-scenario coverage gaps (part 2 of 2)
 ```
 
 Each commit must be a **releasable unit** — it builds and passes its own gates
@@ -397,12 +397,14 @@ the most-recent, not-yet-verified commit. This keeps the history as clean,
 verifiable units and avoids the manual release-time squashes earlier cycles
 needed (148→10 in v0.6.0, 4→1 in v0.7.0).
 
-The bundled skill does **not** mandate a commit-message *format*. Message format
-is a per-project convention, so the skill defers to the host project's injected
-`AGENTS.md` (subject style, scope, any "no AI-assistant trailer" rule). A
-Conventional-Commits prefix such as `feat(<scope>):` may appear as an
-illustrative example, but it is not required — projects that use a different
-format own that choice in their own `AGENTS.md`.
+The bundled skill does **not** mandate, default to, or recommend a
+commit-message *format*. Message format is a per-project convention, so the
+skill defers **entirely** to the host project's injected `AGENTS.md` (subject
+style, any prefix or scope convention, any "no AI-assistant trailer" rule), and
+any commit example it shows — like the `(part N of M)` split above — uses a
+format-neutral subject. git-paw's own repo uses Conventional Commits, but only
+via git-paw's own `AGENTS.md`, never via the skill the binary exports to other
+projects.
 
 Per-group cadence protects against agent crashes, conflict mediation, and
 `/clear` resets losing unbounded work, and it maps cleanly to the post-commit
