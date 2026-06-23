@@ -349,3 +349,106 @@ fn audit_excludes_allowlist_prose_via_sentinel() {
     );
     assert_no_forbidden_tokens(&with_sentinel_token, "sentinel-scoped-token");
 }
+
+// ---------------------------------------------------------------------------
+// Convention-leak audit: bundled skills are convention-agnostic, not only
+// stack-agnostic. Implements `lang-agnostic-skills` /
+// `Requirement: Bundled skills are convention-agnostic`.
+// ---------------------------------------------------------------------------
+
+/// Conventional-Commits prefixes that SHALL NOT appear in a bundled skill as a
+/// mandate, default, or recommendation. Commit-message format is the
+/// *consumer's* property, deferred to their injected `AGENTS.md` — git-paw's
+/// OWN Conventional-Commits convention lives only in git-paw's `AGENTS.md`,
+/// never in the asset the binary exports to every consumer.
+const FORBIDDEN_COMMIT_CONVENTION_TOKENS: &[&str] = &[
+    "feat(",
+    "fix(",
+    "docs(",
+    "test(",
+    "chore(",
+    "refactor(",
+    "perf(",
+];
+
+/// Asserts the rendered output (allowlist-prose spans stripped) contains no
+/// hardcoded Conventional-Commits prefix. Surfaces the offending token +
+/// context window so a regression is easy to fix, mirroring
+/// `assert_no_forbidden_tokens`.
+fn assert_no_commit_convention(rendered: &str, label: &str) {
+    let scanned = strip_allowlist_prose(rendered);
+    for token in FORBIDDEN_COMMIT_CONVENTION_TOKENS {
+        if let Some(idx) = scanned.find(token) {
+            let window_start = idx.saturating_sub(80);
+            let window_end = (idx + 80).min(scanned.len());
+            let window = &scanned[window_start..window_end];
+            panic!(
+                "commit-convention leak audit failed for `{label}`: bundled skill hardcodes \
+                 Conventional-Commits prefix `{token}` at byte {idx}\n\
+                 context: ...{window}...\n\
+                 commit-message format must defer to the consumer's AGENTS.md; \
+                 git-paw's own convention belongs in git-paw's AGENTS.md, not the export",
+            );
+        }
+    }
+}
+
+/// Scenario "Leak audit flags a hardcoded commit-convention mandate": the
+/// rendered supervisor and coordination skills (empty substitutions) SHALL NOT
+/// present a Conventional-Commits prefix as the commit-message format, across
+/// every spec backend.
+#[test]
+fn audit_skills_carry_no_hardcoded_commit_convention() {
+    for backends in [
+        vec![SpecBackendKind::OpenSpec],
+        vec![SpecBackendKind::SpecKit],
+        vec![SpecBackendKind::Markdown],
+        vec![
+            SpecBackendKind::OpenSpec,
+            SpecBackendKind::SpecKit,
+            SpecBackendKind::Markdown,
+        ],
+        vec![],
+    ] {
+        let supervisor = render_supervisor_for(&backends);
+        assert_no_commit_convention(&supervisor, "supervisor");
+        let coordination = render_coordination_for(&backends);
+        assert_no_commit_convention(&coordination, "coordination");
+    }
+}
+
+/// Scenario "git-paw's own Conventional-Commits convention is not in the
+/// exported asset": the source `coordination.md` (not just the render) SHALL
+/// NOT carry git-paw's Conventional-Commits convention as a rule, default, or
+/// recommendation.
+#[test]
+fn exported_coordination_asset_carries_no_commit_convention() {
+    use std::fs;
+    let coordination = fs::read_to_string("assets/agent-skills/coordination.md")
+        .expect("coordination.md is at the expected path");
+    assert_no_commit_convention(&coordination, "coordination-source");
+}
+
+/// Companion regression (mirrors `audit_catches_a_rust_leak_regression`): a
+/// skill that DID hardcode a Conventional-Commits prefix as its example must be
+/// flagged by the convention-leak audit.
+#[test]
+fn commit_convention_audit_catches_a_hardcoded_prefix_regression() {
+    let rendered = render_coordination_for(&[SpecBackendKind::OpenSpec]);
+    let with_leak = format!("{rendered}\nUse a `feat(<scope>): ...` prefix for every commit\n");
+
+    let scanned = strip_allowlist_prose(&with_leak);
+    assert!(
+        scanned.contains("feat("),
+        "deliberate regression must survive the sentinel-stripper",
+    );
+
+    let result = std::panic::catch_unwind(|| {
+        assert_no_commit_convention(&with_leak, "regression-test");
+    });
+    assert!(
+        result.is_err(),
+        "commit-convention audit must fail when a bundled skill hardcodes a \
+         Conventional-Commits prefix as the commit-message format",
+    );
+}

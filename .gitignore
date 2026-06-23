@@ -77,3 +77,4 @@ openspec/changes/_release-notes/
 # Root-level operator scratch logs (drive/sweep/verify/docbuild/baseline runs)
 .git-paw/*.log
 .git-paw/session-learnings.md
+.git-paw/worktrees/

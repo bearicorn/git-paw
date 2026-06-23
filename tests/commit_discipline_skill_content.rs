@@ -166,8 +166,22 @@ fn commit_cadence_defers_message_format_to_project_agents_md() {
         "the mandatory Conventional-Commits prescription must be removed"
     );
     assert!(
-        section.contains("does not mandate") && section.contains("illustrative example"),
-        "Commit cadence must state it does not mandate a format and that the prefix is illustrative"
+        section.contains("does not mandate"),
+        "Commit cadence must state it does not mandate a commit-message format"
+    );
+    // Commit-message format now defers ENTIRELY to the project's `AGENTS.md`:
+    // the bundled skill SHALL NOT present a Conventional-Commits prefix as
+    // git-paw's example, default, or recommendation. Any commit example shown
+    // uses a format-neutral subject. (Conventional Commits is git-paw's own repo
+    // convention; it lives in git-paw's injected `AGENTS.md`, not the export.)
+    let has_conventional_prefix = ["feat(", "fix(", "docs(", "test(", "chore("]
+        .iter()
+        .any(|p| section.contains(p));
+    assert!(
+        !has_conventional_prefix,
+        "Commit cadence must NOT present a Conventional-Commits prefix (feat(/fix(/…) — \
+         it defers message format to the project's AGENTS.md and uses only \
+         format-neutral commit examples"
     );
 }
 

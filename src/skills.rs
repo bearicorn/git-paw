@@ -4861,8 +4861,13 @@ mod tests {
     // (tasks 1.3, 2.3, 2.4, 3.3)
     // ---------------------------------------------------------------------------
 
-    /// 1.3 — coordination skill teaches a per-group commit cadence with
-    /// conventional-commit examples.
+    /// Spec `agent-skills` / "Coordination skill SHALL teach per-group commit
+    /// cadence": the coordination skill names the per-group cadence and defers
+    /// commit-message FORMAT entirely to the host project's `AGENTS.md`. It does
+    /// NOT present a Conventional-Commits prefix as git-paw's example, default,
+    /// or recommendation — Conventional Commits is git-paw's OWN repo convention
+    /// (it lives only in git-paw's injected `AGENTS.md`, never in the asset the
+    /// binary exports to every consumer).
     #[test]
     fn coordination_skill_documents_commit_cadence() {
         let tmpl = resolve("coordination").unwrap();
@@ -4877,12 +4882,26 @@ mod tests {
             lowered.contains("group") || lowered.contains("section"),
             "commit-cadence section should mention the GROUP/section grain"
         );
+        // De-opinionated: the section defers commit-message format to the host
+        // project's `AGENTS.md` instead of mandating, defaulting to, or
+        // recommending one.
+        assert!(
+            lowered.contains("agents.md"),
+            "commit-cadence section should reference the project's AGENTS.md as the \
+             source of commit-message conventions"
+        );
+        // The exported asset SHALL NOT present a Conventional-Commits prefix as
+        // git-paw's example, default, or recommendation. Any commit example the
+        // section needs (e.g. the `(part N of M)` split) uses a format-neutral
+        // subject with no convention-specific prefix.
         let has_conventional_prefix = ["feat(", "fix(", "docs(", "test(", "chore("]
             .iter()
             .any(|p| tmpl.content.contains(p));
         assert!(
-            has_conventional_prefix,
-            "commit-cadence section should show at least one conventional-commit prefix example"
+            !has_conventional_prefix,
+            "commit-cadence section must NOT show a Conventional-Commits prefix \
+             (feat(/fix(/…) — defer message format to the project's AGENTS.md and \
+             use only format-neutral commit examples"
         );
     }
 

@@ -65,18 +65,16 @@ If a single group's implementation produces more than ~10 dirty files mid-flight
 split into multiple commits using a `(part N of M)` suffix:
 
 ```
-feat(coverage): close per-scenario gaps for v0.5.0 (part 1 of 2)
-feat(coverage): close per-scenario gaps for v0.5.0 (part 2 of 2)
+close per-scenario coverage gaps (part 1 of 2)
+close per-scenario coverage gaps (part 2 of 2)
 ```
 
 For the commit-message format itself, follow the **project's** commit-message
 conventions — see the project's `AGENTS.md`, which git-paw injects into your
-context and which owns the format rules (subject style, scope, and any
-"no AI-assistant trailer" rule). git-paw's bundled skill does not mandate a
-commit-message format. Many projects use a Conventional-Commits prefix such as
-`feat(<scope>):` or `fix(<scope>):` (the scope being the change name's key word,
-e.g. `coverage`, `dashboard`, `broker`) — but that is an *illustrative example*,
-not a requirement. Defer to whatever your project's `AGENTS.md` specifies.
+context and which owns the format rules (subject style, any prefix or scope
+convention, and any "no AI-assistant trailer" rule). git-paw's bundled skill
+does not mandate, default to, or recommend any commit-message format. Defer
+entirely to whatever your project's `AGENTS.md` specifies.
 
 **Why per-group, not per-task.** A group corresponds to a coherent unit of
 work, so one commit per group maps cleanly to release-notes prose. Per-task
