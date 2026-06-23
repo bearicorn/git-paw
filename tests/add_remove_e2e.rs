@@ -308,6 +308,146 @@ fn remove_dirty_refuses_then_keep_worktree_succeeds() {
     );
 }
 
+// --- remove-dirty-check-ignores-managed-files regression coverage ---
+
+/// Scenario "Clean just-started worktree with only git-paw-injected files is
+/// removed": a freshly provisioned agent whose only uncommitted entry is
+/// git-paw's injected sidecar is removed by a plain `remove` (no `--force`),
+/// and the command output never mentions the sidecar. This is the v0.8.0
+/// regression made deterministic by the exclude-before-write reorder and the
+/// managed-path filter.
+#[test]
+#[serial]
+fn remove_just_started_clean_agent_succeeds_without_force() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    write_supervisor_config(tr.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let session = start_session(tr.path(), home.path(), &tmux_env, "a");
+    let wt_a = tr.path().parent().unwrap().join("repo-a");
+    assert!(wt_a.exists(), "worktree for 'a' should exist after start");
+    // The injected sidecar is present — its mere presence must NOT block remove.
+    assert!(
+        wt_a.join(".git-paw/AGENTS.local.md").exists(),
+        "start should have injected the sidecar"
+    );
+
+    let panes_before = list_pane_count(&tmux_env, &session);
+
+    let mut rm = cmd();
+    tmux_env.apply_assert(&mut rm);
+    let out = rm
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .args(["remove", "a"]) // deliberately no --force
+        .timeout(Duration::from_secs(40))
+        .output()
+        .expect("run remove");
+
+    let panes_after = list_pane_count(&tmux_env, &session);
+    let (agent_count, raw) = read_discovery(tr.path(), &session);
+    let wt_gone = !wt_a.exists();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    kill(&tmux_env, &session);
+
+    assert!(
+        out.status.success(),
+        "plain remove of a clean just-started agent must succeed; output:\n{combined}"
+    );
+    assert_eq!(
+        panes_after,
+        panes_before - 1,
+        "remove should close exactly the agent's pane"
+    );
+    assert!(wt_gone, "worktree for 'a' should be removed from disk");
+    assert_eq!(agent_count, 0, "session JSON should list no agents");
+    assert!(
+        !raw.contains("\"branch_id\": \"a\""),
+        "removed branch 'a' should be gone from the discovery file; raw:\n{raw}"
+    );
+    assert!(
+        !combined.contains(".git-paw/AGENTS.local.md"),
+        "remove output must NOT mention the injected sidecar; output:\n{combined}"
+    );
+}
+
+/// Scenario "Genuine user edit still refuses, and managed files are not
+/// listed": a worktree containing a real user-authored change (`src/foo.rs`)
+/// alongside the injected sidecar is still refused without `--force`; the
+/// refusal names `src/foo.rs` but never the sidecar.
+#[test]
+#[serial]
+fn remove_refuses_genuine_edit_and_hides_managed_files() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    write_supervisor_config(tr.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let session = start_session(tr.path(), home.path(), &tmux_env, "a");
+    let wt_a = tr.path().parent().unwrap().join("repo-a");
+    assert!(wt_a.exists(), "worktree for 'a' should exist after start");
+    assert!(
+        wt_a.join(".git-paw/AGENTS.local.md").exists(),
+        "start should have injected the sidecar"
+    );
+
+    // Genuine user work: a new source file, staged so `git status` reports it
+    // by path (an untracked file in a brand-new directory would collapse to
+    // the `src/` directory entry).
+    fs::create_dir_all(wt_a.join("src")).expect("mkdir src");
+    fs::write(wt_a.join("src/foo.rs"), "fn foo() {}\n").expect("write foo.rs");
+    let add = StdCommand::new("git")
+        .current_dir(&wt_a)
+        .args(["add", "src/foo.rs"])
+        .output()
+        .expect("git add foo.rs");
+    assert!(
+        add.status.success(),
+        "git add of the user file should succeed"
+    );
+
+    let mut rm = cmd();
+    tmux_env.apply_assert(&mut rm);
+    let out = rm
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .args(["remove", "a"]) // deliberately no --force
+        .timeout(Duration::from_secs(20))
+        .output()
+        .expect("run remove");
+
+    let still_there = wt_a.exists();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    kill(&tmux_env, &session);
+
+    assert!(
+        !out.status.success(),
+        "remove must refuse while a genuine user edit is uncommitted; stderr:\n{stderr}"
+    );
+    assert!(still_there, "worktree must survive a refused remove");
+    assert!(
+        stderr.contains("src/foo.rs"),
+        "refusal must name the user file; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains(".git-paw/AGENTS.local.md"),
+        "refusal must NOT list git-paw's injected sidecar; stderr:\n{stderr}"
+    );
+}
+
 // --- 8.9 remove a non-existent branch lists the live agents ---
 
 #[test]

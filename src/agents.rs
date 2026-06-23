@@ -243,6 +243,54 @@ pub fn generate_worktree_section(assignment: &WorktreeAssignment) -> String {
 /// alongside them and is never committed.
 pub const SIDECAR_REL_PATH: &str = ".git-paw/AGENTS.local.md";
 
+/// Returns `true` when the worktree-relative path `rel` names a file that
+/// git-paw injects or manages, rather than user-authored work.
+///
+/// `git paw remove`'s uncommitted-work safety check uses this predicate to
+/// filter git-paw's own bookkeeping out of the "dirty" set, so a
+/// just-provisioned but otherwise-clean worktree is not refused because of the
+/// injected sidecar (the v0.8.0 regression). A path is git-paw-managed when:
+///
+/// - it is the injected sidecar [`SIDECAR_REL_PATH`]
+///   (`.git-paw/AGENTS.local.md`), which is always ephemeral git-paw state; or
+/// - it is the tracked `AGENTS.md` whose ONLY uncommitted change is the
+///   presence of git-paw's managed `<!-- git-paw:start -->` block — i.e. the
+///   file is byte-identical to its `HEAD` revision once that block is removed.
+///   This covers worktrees provisioned by an older git-paw that still injected
+///   the block into the tracked file; such a block is git-paw injection, not
+///   the user's work.
+///
+/// Any other path — including an `AGENTS.md` with a user edit *outside* the
+/// managed block, an `AGENTS.md` that carries no managed block at all, or one
+/// that is untracked at `HEAD` — is treated as user work and returns `false`,
+/// so `remove` still refuses on it.
+pub fn is_managed_path(worktree_root: &Path, rel: &str) -> bool {
+    if rel == SIDECAR_REL_PATH {
+        return true;
+    }
+    if rel != "AGENTS.md" {
+        return false;
+    }
+
+    // AGENTS.md is git-paw-managed only when it still carries the managed block
+    // AND is otherwise unmodified vs HEAD. Read the on-disk content; an
+    // unreadable file is not something we can vouch for, so treat it as user
+    // work.
+    let Ok(on_disk) = fs::read_to_string(worktree_root.join("AGENTS.md")) else {
+        return false;
+    };
+    if !has_git_paw_section(&on_disk) {
+        return false;
+    }
+    let Some(head) = file_content_at_head(worktree_root, "AGENTS.md") else {
+        return false;
+    };
+    // Strip the managed block and compare to HEAD (ignoring trailing
+    // whitespace the injection's blank-line spacing introduces). If they match,
+    // the only uncommitted change is git-paw's block.
+    replace_git_paw_section(&on_disk, "").trim_end() == head.trim_end()
+}
+
 /// Reads the root repo's `AGENTS.md`, injects the worktree assignment section,
 /// and writes the combined view to a gitignored **sidecar** instruction file
 /// ([`SIDECAR_REL_PATH`]) in the worktree — never the tracked `AGENTS.md`.
@@ -266,6 +314,15 @@ pub const SIDECAR_REL_PATH: &str = ".git-paw/AGENTS.local.md";
 ///    committable again.
 /// 2. The sidecar path is added to the worktree ignore set, so the injection
 ///    is never accidentally committed.
+///
+/// The sidecar exclude entry is registered **before** the sidecar file is
+/// written. `info/exclude` is a git-level ignore list, so adding the path while
+/// the file does not yet exist is valid and guarantees `git status` never
+/// reports the sidecar — closing the write-then-exclude race (the v0.8.0
+/// regression where `git paw remove` refused a just-started clean worktree
+/// because the freshly written sidecar briefly showed as an untracked file).
+/// This ordering is defense in depth alongside `remove`'s managed-path filter
+/// ([`is_managed_path`]).
 pub fn setup_worktree_agents_md(
     repo_root: &Path,
     worktree_root: &Path,
@@ -286,14 +343,27 @@ pub fn setup_worktree_agents_md(
     let section = generate_worktree_section(assignment);
     let output = inject_into_content(&root_content, &section);
 
-    // Write the combined view to the gitignored sidecar, NOT the tracked
-    // AGENTS.md. Create the `.git-paw/` parent directory if it is absent.
+    // Resolve the sidecar path and create the `.git-paw/` parent directory if
+    // it is absent (needed before either the exclude or the write).
     let sidecar = worktree_root.join(SIDECAR_REL_PATH);
     if let Some(parent) = sidecar.parent() {
         fs::create_dir_all(parent).map_err(|e| {
             PawError::AgentsMdError(format!("failed to create '{}': {e}", parent.display()))
         })?;
     }
+
+    // Exclude the sidecar BEFORE writing it (race fix, defense in depth).
+    // `info/exclude` is a git-level ignore list, so registering the path while
+    // the file does not yet exist is valid and means `git status` never reports
+    // the sidecar — not even in the window between the write and the exclude
+    // that the earlier ordering left open (the v0.8.0 `git paw remove`
+    // regression). `.git-paw/AGENTS.local.md` is gitignored at the repo level
+    // too, but the explicit worktree-level entry is idempotent and pins the
+    // guarantee even for repos whose `.gitignore` predates this file.
+    exclude_from_git(worktree_root, SIDECAR_REL_PATH)?;
+
+    // Write the combined view to the now-excluded sidecar, NOT the tracked
+    // AGENTS.md.
     fs::write(&sidecar, &output).map_err(|e| {
         PawError::AgentsMdError(format!("failed to write '{}': {e}", sidecar.display()))
     })?;
@@ -303,12 +373,6 @@ pub fn setup_worktree_agents_md(
     // tracked AGENTS.md is otherwise left untouched — git-paw no longer
     // injects into it, hides it from `git status`, or excludes it.
     let _ = no_assume_unchanged(worktree_root, "AGENTS.md");
-
-    // Keep the ephemeral sidecar out of git. `.git-paw/AGENTS.local.md` is
-    // gitignored at the repo level too, but adding the explicit worktree-level
-    // entry is idempotent and pins the guarantee even for repos whose
-    // `.gitignore` predates this file.
-    exclude_from_git(worktree_root, SIDECAR_REL_PATH)?;
 
     Ok(())
 }
@@ -620,6 +684,22 @@ fn git_rev_parse_path(worktree: &Path, flag: &str) -> Result<PathBuf, PawError> 
     } else {
         Ok(worktree.join(path))
     }
+}
+
+/// Returns the content of `rel` at the worktree's `HEAD` revision, or `None`
+/// when the path is untracked at `HEAD`, `HEAD` is unresolvable, or git cannot
+/// be run. Used by [`is_managed_path`] to compare a worktree's on-disk
+/// `AGENTS.md` against its committed revision.
+fn file_content_at_head(worktree_root: &Path, rel: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .current_dir(worktree_root)
+        .args(["show", &format!("HEAD:{rel}")])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Installs git-paw's `post-commit` dispatcher and `pre-push` block hook.
@@ -1309,6 +1389,81 @@ mod tests {
         assert!(
             exclude.lines().any(|l| l.trim() == SIDECAR_REL_PATH),
             "sidecar path must be in the worktree ignore set, got: {exclude}"
+        );
+    }
+
+    #[test]
+    fn setup_worktree_sidecar_not_reported_by_status() {
+        // 4.5 / Scenario "Sidecar is excluded the moment it is written": after
+        // setup completes, `git status --porcelain` in the worktree does NOT
+        // report the injected sidecar (it was excluded before being written).
+        let repo = tempfile::tempdir().unwrap();
+        let wt = tempfile::tempdir().unwrap();
+        init_git_repo(wt.path());
+        fs::write(repo.path().join("AGENTS.md"), "# Project Rules\n").unwrap();
+
+        let assignment = make_assignment(None, None);
+        setup_worktree_agents_md(repo.path(), wt.path(), &assignment).unwrap();
+
+        // Sanity: the sidecar file really was written to disk.
+        assert!(
+            sidecar_path(wt.path()).exists(),
+            "setup must write the sidecar to disk"
+        );
+
+        let status = std::process::Command::new("git")
+            .current_dir(wt.path())
+            .args(["status", "--porcelain"])
+            .output()
+            .expect("git status");
+        let out = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            !out.contains(SIDECAR_REL_PATH),
+            "sidecar must not appear in `git status` after setup; got: {out}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // is_managed_path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn is_managed_path_classifies_sidecar_managed_and_user_files_unmanaged() {
+        let wt = tempfile::tempdir().unwrap();
+        init_git_repo(wt.path());
+        // Commit a clean AGENTS.md at HEAD so the managed-block comparison has a
+        // baseline to diff against.
+        commit_tracked_agents_md(wt.path(), "# Project Rules\n");
+
+        // The injected sidecar is always git-paw-managed.
+        assert!(
+            is_managed_path(wt.path(), SIDECAR_REL_PATH),
+            "sidecar path must be classified managed"
+        );
+
+        // A genuine source file is user work.
+        assert!(
+            !is_managed_path(wt.path(), "src/foo.rs"),
+            "an ordinary source file must NOT be classified managed"
+        );
+
+        // An AGENTS.md carrying ONLY the managed block (otherwise identical to
+        // HEAD) is git-paw injection, not user work.
+        let block = generate_worktree_section(&make_assignment(None, None));
+        let managed_only = inject_into_content("# Project Rules\n", &block);
+        fs::write(wt.path().join("AGENTS.md"), &managed_only).unwrap();
+        assert!(
+            is_managed_path(wt.path(), "AGENTS.md"),
+            "a managed-block-only AGENTS.md must be classified managed"
+        );
+
+        // An AGENTS.md with a user edit OUTSIDE the managed block must NOT be
+        // classified managed — that hunk is real user work.
+        let user_edited = inject_into_content("# Project Rules\n\nuser added a line\n", &block);
+        fs::write(wt.path().join("AGENTS.md"), &user_edited).unwrap();
+        assert!(
+            !is_managed_path(wt.path(), "AGENTS.md"),
+            "an AGENTS.md edited outside the managed block must NOT be managed"
         );
     }
 
