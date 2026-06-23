@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-23
+
+### Features
+
+- *(mcp)* Add source-browsing tools (list_files, read_file, search_code)
+- *(mcp)* Add read-only documentation tools (get_readme, list_docs, get_doc)
+- *(mcp)* Add read-only MCP server (`git paw mcp`) over stdio
+- *(learnings)* Disclose no-telemetry stance and opt-in sharing
+- *(broker)* Live watch-target registration for hot-added agents
+
+### Bug Fixes
+
+- *(mcp)* Advertise git-paw server identity + configurable [mcp] name
 ## [0.6.0] - 2026-06-17
 
 ### Features
@@ -88,7 +101,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 - Add CLI tool for parallel AI coding sessions across git worktrees
-[0.6.0]: https://github.com/bearicorn/git-paw/compare/v0.5.0...0.6.0
+[0.7.0]: https://github.com/bearicorn/git-paw/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/bearicorn/git-paw/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/bearicorn/git-paw/compare/v0.3.0...v0.5.0
 [0.3.0]: https://github.com/bearicorn/git-paw/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/bearicorn/git-paw/compare/v0.1.0...v0.2.0
