@@ -78,8 +78,6 @@ pub struct AgentStatusEntry {
     pub status: String,
     /// Seconds since the agent was last seen.
     pub last_seen_seconds: u64,
-    /// One-line summary from the last message.
-    pub summary: String,
     /// When the agent was last seen (for age calculations in the dashboard).
     #[serde(skip)]
     pub last_seen: Instant,

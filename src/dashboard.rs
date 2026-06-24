@@ -67,8 +67,6 @@ pub struct AgentRow {
     pub status: String,
     /// Relative time since last message (e.g. `"3m ago"`).
     pub age: String,
-    /// One-line summary from the last message.
-    pub summary: String,
 }
 
 /// Maps an agent status label to a Unicode symbol.
@@ -120,7 +118,7 @@ pub fn format_age(elapsed: Duration) -> String {
 /// `"audit"`, `"merge"`, etc.
 ///
 /// `phase` is honoured **only** for the supervisor row. A non-supervisor row
-/// ignores its `phase` and renders exactly as in v0.5.0 (status + summary) —
+/// ignores its `phase` and renders the message-type-derived status label —
 /// coding agents do not emit introspection phases in v0.6.0. The single
 /// exception is the supervisor-published [`STUCK_ON_PROMPT_PHASE`] alert, which
 /// `detect-stuck` targets at the stalled coding agent's row by design.
@@ -152,7 +150,6 @@ pub fn format_agent_rows(agents: &[AgentStatusEntry], now: Instant) -> Vec<Agent
                 cli,
                 status: format!("{symbol} {label}"),
                 age: format_age(elapsed),
-                summary: agent.summary.clone(),
             }
         })
         .collect()
@@ -324,7 +321,7 @@ fn draw_frame(frame: &mut Frame, rows: &[AgentRow], status_line: &str, broker_lo
         let empty = Paragraph::new("No agents connected yet").alignment(Alignment::Center);
         frame.render_widget(empty, chunks[1]);
     } else {
-        let header = Row::new(["Agent", "CLI", "Status", "Last Update", "Summary"])
+        let header = Row::new(["Agent", "CLI", "Status", "Last Update"])
             .style(Style::default().add_modifier(Modifier::BOLD));
         // Pin the supervisor row to row 0 and insert a divider beneath it
         // before rendering. The arrangement is computed from the same
@@ -341,10 +338,8 @@ fn draw_frame(frame: &mut Frame, rows: &[AgentRow], status_line: &str, broker_lo
                     r.cli.clone(),
                     r.status.clone(),
                     r.age.clone(),
-                    r.summary.clone(),
                 ]),
                 AgentTableRow::Divider => Row::new(vec![
-                    divider_segment.clone(),
                     divider_segment.clone(),
                     divider_segment.clone(),
                     divider_segment.clone(),
@@ -357,8 +352,10 @@ fn draw_frame(frame: &mut Frame, rows: &[AgentRow], status_line: &str, broker_lo
             Constraint::Min(15),
             Constraint::Length(10),
             Constraint::Length(15),
-            Constraint::Length(10),
-            Constraint::Min(20),
+            // Wide enough to render the full "Last Update" header label (11
+            // chars) and relative-time values like "1h 15m ago" without
+            // truncation — space reclaimed from the dropped Summary column.
+            Constraint::Length(12),
         ];
         let table = Table::new(table_rows, widths).header(header);
         frame.render_widget(table, chunks[1]);
@@ -606,7 +603,6 @@ mod tests {
                 status: "working".to_string(),
                 last_seen: now.checked_sub(Duration::from_secs(10)).unwrap(),
                 last_seen_seconds: 10,
-                summary: "msg a".to_string(),
                 phase: None,
             },
             AgentStatusEntry {
@@ -615,7 +611,6 @@ mod tests {
                 status: "done".to_string(),
                 last_seen: now.checked_sub(Duration::from_mins(1)).unwrap(),
                 last_seen_seconds: 60,
-                summary: "msg b".to_string(),
                 phase: None,
             },
             AgentStatusEntry {
@@ -624,7 +619,6 @@ mod tests {
                 status: "blocked".to_string(),
                 last_seen: now.checked_sub(Duration::from_mins(5)).unwrap(),
                 last_seen_seconds: 300,
-                summary: String::new(),
                 phase: None,
             },
         ];
@@ -644,7 +638,6 @@ mod tests {
             status: "done".to_string(),
             last_seen: now.checked_sub(Duration::from_mins(3)).unwrap(),
             last_seen_seconds: 180,
-            summary: "finished".to_string(),
             phase: None,
         }];
         let rows = format_agent_rows(&agents, now);
@@ -664,7 +657,6 @@ mod tests {
                 status: "committed".to_string(),
                 last_seen: now.checked_sub(Duration::from_mins(1)).unwrap(),
                 last_seen_seconds: 60,
-                summary: "changes committed".to_string(),
                 phase: None,
             },
             AgentStatusEntry {
@@ -673,7 +665,6 @@ mod tests {
                 status: "working".to_string(),
                 last_seen: now.checked_sub(Duration::from_secs(30)).unwrap(),
                 last_seen_seconds: 30,
-                summary: "in progress".to_string(),
                 phase: None,
             },
         ];
@@ -700,6 +691,36 @@ mod tests {
         assert!(rows.is_empty());
     }
 
+    #[test]
+    fn agent_row_exposes_only_four_fields_no_summary() {
+        // Scenario: AgentRow exposes no summary field. The agent-status table
+        // no longer renders a Summary column, so the row struct carries exactly
+        // `agent_id`, `cli`, `status`, `age` and nothing else. This construction
+        // names every field exhaustively — if a `summary` (or any other) field
+        // were reintroduced, this would fail to compile.
+        let now = Instant::now();
+        let agents = vec![AgentStatusEntry {
+            agent_id: "feat-errors".to_string(),
+            cli: "claude".to_string(),
+            status: "done".to_string(),
+            last_seen: now.checked_sub(Duration::from_mins(3)).unwrap(),
+            last_seen_seconds: 180,
+            phase: None,
+        }];
+        let rows = format_agent_rows(&agents, now);
+        assert_eq!(rows.len(), 1);
+        let AgentRow {
+            agent_id,
+            cli,
+            status,
+            age,
+        } = &rows[0];
+        assert_eq!(agent_id, "feat-errors");
+        assert_eq!(cli, "claude");
+        assert!(status.contains("done"));
+        assert_eq!(age, "3m ago");
+    }
+
     // -----------------------------------------------------------------------
     // CLI column population (W15-15)
     // -----------------------------------------------------------------------
@@ -716,7 +737,6 @@ mod tests {
                 status: "working".to_string(),
                 last_seen: now,
                 last_seen_seconds: 0,
-                summary: String::new(),
                 phase: Some("watching".to_string()),
             },
             AgentStatusEntry {
@@ -725,7 +745,6 @@ mod tests {
                 status: "working".to_string(),
                 last_seen: now,
                 last_seen_seconds: 0,
-                summary: String::new(),
                 phase: None,
             },
             AgentStatusEntry {
@@ -734,7 +753,6 @@ mod tests {
                 status: "working".to_string(),
                 last_seen: now,
                 last_seen_seconds: 0,
-                summary: String::new(),
                 phase: None,
             },
         ];
@@ -759,7 +777,6 @@ mod tests {
             status: "working".to_string(),
             last_seen: now,
             last_seen_seconds: 0,
-            summary: String::new(),
             phase: None,
         }];
         let rows = format_agent_rows(&agents, now);
@@ -879,7 +896,6 @@ mod tests {
             status: "feedback".to_string(),
             last_seen: now,
             last_seen_seconds: 0,
-            summary: String::new(),
             phase: Some("merging".to_string()),
         }];
         let rows = format_agent_rows(&agents, now);
@@ -905,7 +921,6 @@ mod tests {
             status: "working".to_string(),
             last_seen: now,
             last_seen_seconds: 0,
-            summary: String::new(),
             phase: None,
         }];
         let rows = format_agent_rows(&agents, now);
@@ -929,7 +944,6 @@ mod tests {
             status: status.to_string(),
             last_seen: Instant::now(),
             last_seen_seconds: 0,
-            summary: "summary text".to_string(),
             phase: phase.map(str::to_string),
         }
     }
@@ -945,15 +959,11 @@ mod tests {
             "supervisor row must surface the introspection phase; got {:?}",
             rows[0].status,
         );
-        assert_eq!(
-            rows[0].summary, "summary text",
-            "the summary is preserved alongside the phase",
-        );
     }
 
     #[test]
     fn format_agent_rows_supervisor_falls_back_when_phase_absent() {
-        // Scenario: supervisor row falls back to status/summary when phase
+        // Scenario: supervisor row falls back to the status label when phase
         // absent (v0.5.0 layout preserved).
         let now = Instant::now();
         let agents = vec![entry_with_phase("supervisor", "working", None)];
@@ -1031,7 +1041,6 @@ mod tests {
             cli: "claude".to_string(),
             status: "🔵 working".to_string(),
             age: "0s ago".to_string(),
-            summary: String::new(),
         }
     }
 
@@ -1133,6 +1142,43 @@ mod tests {
         assert!(
             pos_divider > pos_supervisor && pos_divider < pos_broker,
             "divider must render between supervisor and first coding row; divider@{pos_divider}, supervisor@{pos_supervisor}, broker@{pos_broker}",
+        );
+    }
+
+    #[test]
+    fn header_row_has_four_columns_and_no_summary() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        // Scenario: Table has a header row. With at least one agent rendered,
+        // the header must label exactly Agent, CLI, Status, Last Update and
+        // must NOT contain a Summary column (the dead column was removed).
+        let rows = vec![agent_row("feat-broker")];
+
+        let backend = TestBackend::new(140, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| draw_frame(f, &rows, "1 agent", &hidden_log()))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let mut rendered = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                rendered.push_str(buffer[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+
+        for label in ["Agent", "CLI", "Status", "Last Update"] {
+            assert!(
+                rendered.contains(label),
+                "header must contain the {label:?} column label; got:\n{rendered}",
+            );
+        }
+        assert!(
+            !rendered.contains("Summary"),
+            "header must NOT contain a 'Summary' column label; got:\n{rendered}",
         );
     }
 

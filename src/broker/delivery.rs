@@ -414,7 +414,6 @@ pub fn agent_status_snapshot(state: &Arc<BrokerState>) -> Vec<AgentStatusEntry> 
                 cli,
                 status: r.status.clone(),
                 last_seen_seconds: r.last_seen.elapsed().as_secs(),
-                summary: String::new(),
                 last_seen: r.last_seen,
                 phase,
             }
