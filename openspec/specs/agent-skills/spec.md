@@ -35,6 +35,7 @@ The embedded `coordination.md` skill content SHALL reflect the v0.5 state in whi
     - **Pop only your own** — only pop stash entries you authored on the current worktree; if authorship is uncertain, leave the stash alone and escalate via `agent.question` rather than risk a destructive pop.
 
     The section SHALL state that `git stash pop` SHOULD NOT be run blindly. The section MAY include a cautionary narrative referencing a real dogfood incident where a blind pop wiped in-flight work.
+13. NOT hardcode a specific commit-MESSAGE format as a mandatory convention. The "Commit cadence" section SHALL defer message format to the host project's injected `AGENTS.md` (e.g. "follow the project's commit-message conventions; see the project's `AGENTS.md`") rather than prescribe Conventional Commits (`feat(<scope>):`, `fix(<scope>):`, …) as the required format. A Conventional-Commits prefix MAY still appear as an illustrative example, but the prose SHALL NOT state that the agent MUST use that format — message format is a per-project convention, not a git-paw-bundled-skill rule.
 
 #### Scenario: Coordination skill documents automatic status publishing
 
@@ -117,6 +118,12 @@ The embedded `coordination.md` skill content SHALL reflect the v0.5 state in whi
 - **AND** it contains the substring `git stash show -p`
 - **AND** it instructs the agent to pop only stash entries the agent authored on the current worktree
 - **AND** it states that `git stash pop` SHOULD NOT be run blindly (or substantively equivalent language)
+
+#### Scenario: Coordination skill defers commit-message format to the project AGENTS.md
+
+- **WHEN** the embedded coordination skill's "Commit cadence" section is inspected
+- **THEN** it instructs the agent to follow the host project's commit-message conventions and references the project's `AGENTS.md`
+- **AND** it does NOT state that the agent MUST use a specific commit-message format (e.g. it does NOT prescribe Conventional Commits as mandatory)
 
 ### Requirement: Skill resolution order
 
@@ -1128,4 +1135,70 @@ The doc comment SHALL be discoverable via grep for the scenario name (`None pres
 - **WHEN** the test file(s) for `load_config` are inspected
 - **THEN** a doc-comment block SHALL exist mentioning the literal substring `None preserves platform-default`
 - **AND** the comment SHALL explain why a dedicated test is intentionally omitted
+
+### Requirement: Coordination skill — stand-by after final commit
+
+The embedded `coordination.md` skill SHALL include a positive "stand by after your
+final commit" protocol that tells the coding agent what to do *instead* of reaching
+for verification or archive once its work is committed. This complements the existing
+`opsx-role-gating` forbidden-commands block (which forbids `/opsx:verify` and
+`/opsx:archive` from a coding-agent worktree) by supplying the actionable next step.
+The protocol SHALL:
+
+1. Instruct the agent that after its final commit it SHALL **stand by**: rely on the
+   automatic `agent.artifact { status: "committed" }` publish (or publish a manual
+   `agent.artifact { status: "done" }` for code-less work) and then **wait**.
+2. State that while standing by the agent SHALL NOT run `/opsx:verify` or
+   `/opsx:archive` — these are supervisor-only — and SHALL cross-reference the
+   role-gating guidance rather than restate the full forbidden-commands list.
+3. State what the agent waits *for*: an `agent.verified`, `agent.feedback`, or
+   further `agent.intent` from the supervisor; on `agent.feedback` the agent fixes the
+   listed errors and re-publishes `agent.artifact`.
+
+#### Scenario: Coordination skill instructs standing by after the final commit
+
+- **WHEN** the embedded coordination skill is inspected
+- **THEN** it contains explicit guidance to stand by (wait) after the final commit rather than proceed to verification or archive
+- **AND** it states that the agent waits for `agent.verified`, `agent.feedback`, or further `agent.intent` from the supervisor
+
+#### Scenario: Stand-by protocol forbids self-verify and self-archive
+
+- **WHEN** the stand-by guidance is inspected
+- **THEN** it states the agent SHALL NOT run `/opsx:verify` or `/opsx:archive` while standing by
+- **AND** it cross-references the supervisor-only / role-gating guidance rather than re-deriving its own enforcement
+
+### Requirement: Coordination skill — releasable-unit commit discipline with amend fixups
+
+The embedded `coordination.md` skill's "Commit cadence" section SHALL teach
+releasable-unit commit discipline so agents stop producing micro-commit noise that the
+supervisor must hand-squash at release. The section SHALL:
+
+1. State that each commit MUST build and pass its own gates on its own — a commit is a
+   releasable unit, not a checkpoint of in-progress work.
+2. State that a small follow-up to the commit the agent *just* made (one that has not
+   yet been verified and that the agent has not moved past) SHOULD be folded into that
+   commit with `git commit --amend` rather than landed as a separate `fix typo` /
+   `address feedback` micro-commit.
+3. State the narrowing caveat: the agent SHALL NOT `--amend` an already-verified commit
+   or an earlier commit from a previous group — amend applies ONLY to the
+   most-recent, not-yet-verified commit.
+4. Tie the rationale to git-paw's orchestration model: per-commit verification treats
+   each committed artifact as a verification boundary, and the supervisor curates the
+   release changelog from these commits, so a clean releasable-unit history avoids the
+   manual squashes seen in prior release cycles.
+
+#### Scenario: Commit cadence requires each commit to be a releasable unit
+
+- **WHEN** the embedded coordination skill's "Commit cadence" section is inspected
+- **THEN** it states that each commit must build and pass its own gates on its own (a releasable unit)
+
+#### Scenario: Commit cadence prefers amend for just-made-commit fixups
+
+- **WHEN** the "Commit cadence" section is inspected
+- **THEN** it instructs the agent to fold a small follow-up to the just-made commit in with `git commit --amend` rather than add a separate micro-commit
+
+#### Scenario: Commit cadence forbids amending verified or earlier commits
+
+- **WHEN** the "Commit cadence" section is inspected
+- **THEN** it states the agent SHALL NOT `git commit --amend` an already-verified commit or an earlier commit from a previous group
 

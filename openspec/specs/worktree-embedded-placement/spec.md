@@ -1,5 +1,8 @@
-## ADDED Requirements
+# worktree-embedded-placement Specification
 
+## Purpose
+TBD - created by archiving change worktree-embedded-placement. Update Purpose after archive.
+## Requirements
 ### Requirement: Worktree placement is configurable as child or sibling
 
 The system SHALL support a `worktree_placement` setting with two values:
@@ -86,3 +89,4 @@ changes.
 - **AND** the config is later changed to `worktree_placement = "child"`
 - **WHEN** the session is purged
 - **THEN** purge SHALL remove the worktree at the recorded sibling path, not at a re-derived child path
+
