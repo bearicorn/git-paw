@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="https://raw.githubusercontent.com/bearicorn/git-paw/main/.github/assets/logo.jpg" alt="git-paw logo" width="240">
+</div>
+
 # git-paw
 
 **Parallel AI Worktrees** — orchestrate multiple AI coding CLI sessions across git worktrees from a single terminal using tmux.
