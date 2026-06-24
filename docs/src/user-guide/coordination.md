@@ -348,9 +348,22 @@ feat(coverage): close per-scenario gaps for v0.5.0 (part 1 of 2)
 feat(coverage): close per-scenario gaps for v0.5.0 (part 2 of 2)
 ```
 
-Each commit uses a conventional-commit prefix (`feat(<scope>):`,
-`fix(<scope>):`, `docs(<scope>):`, `test(<scope>):`, `chore(<scope>):`) — the
-scope is typically the change name's key word.
+Each commit must be a **releasable unit** — it builds and passes its own gates
+on its own, not a checkpoint of half-finished work. When the agent needs to fix
+the commit it *just* made (a typo, a missed file) and that commit has not yet
+been verified, the skill tells it to fold the fix in with `git commit --amend`
+rather than land a separate `fix typo` micro-commit. It must **not** `--amend` an
+already-verified commit or an earlier group's commit — `--amend` applies only to
+the most-recent, not-yet-verified commit. This keeps the history as clean,
+verifiable units and avoids the manual release-time squashes earlier cycles
+needed (148→10 in v0.6.0, 4→1 in v0.7.0).
+
+The bundled skill does **not** mandate a commit-message *format*. Message format
+is a per-project convention, so the skill defers to the host project's injected
+`AGENTS.md` (subject style, scope, any "no AI-assistant trailer" rule). A
+Conventional-Commits prefix such as `feat(<scope>):` may appear as an
+illustrative example, but it is not required — projects that use a different
+format own that choice in their own `AGENTS.md`.
 
 Per-group cadence protects against agent crashes, conflict mediation, and
 `/clear` resets losing unbounded work, and it maps cleanly to the post-commit
@@ -379,6 +392,16 @@ off-limits for the coding agent and are the supervisor's job**:
   + merge flow, not on the agent's feature branch. Archiving from a feature
   branch leaves the change directory deleted on an unmerged branch and
   produces confused history.
+
+The skill frames this positively as a **stand-by-after-commit** protocol: once
+the final commit lands, the agent publishes the terminal signal and then *waits*
+— it does not reach for verify/archive. While standing by it waits for one of
+three supervisor messages: `agent.verified` (work passed — pick up the next
+task), `agent.feedback` (fix the listed errors and re-publish `agent.artifact`),
+or a further `agent.intent` (new scope to pick up). This is the actionable
+counterpart to the role-gating forbidden-commands rule — *what to do instead* of
+self-verifying. On the supervisor side, that post-commit `agent.artifact` is the
+cue for the supervisor (not the agent) to run `/opsx:verify` and `/opsx:archive`.
 
 This is a paw-specific rule for the bundled coordination skill. Single-agent
 workflows that self-verify can override the rule via the standard skill
