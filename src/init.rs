@@ -20,6 +20,7 @@ use crate::git;
 const GITIGNORE_ENTRIES: &[&str] = &[
     ".git-paw/logs/",
     ".git-paw/tmp/",
+    ".git-paw/worktrees/",
     ".git-paw/session-summary.md",
 ];
 
@@ -516,6 +517,29 @@ mod tests {
             content2.matches(".git-paw/tmp/").count(),
             1,
             ".git-paw/tmp/ must appear exactly once after repeated init"
+        );
+    }
+
+    #[test]
+    fn worktrees_dir_added_to_gitignore_and_not_duplicated() {
+        // Child-placement worktrees live under .git-paw/worktrees/; that path
+        // must be ignored so in-repo worktrees are never staged.
+        let dir = setup_repo();
+        // Pre-seed only logs/ — worktrees/ must be appended.
+        fs::write(dir.path().join(".gitignore"), ".git-paw/logs/\n").unwrap();
+        assert!(ensure_gitignore_entry(dir.path()).unwrap());
+        let content = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(
+            content.contains(".git-paw/worktrees/"),
+            "init must gitignore the in-repo .git-paw/worktrees/ dir"
+        );
+        // Idempotent: a second pass adds nothing and keeps a single entry.
+        assert!(!ensure_gitignore_entry(dir.path()).unwrap());
+        let content2 = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert_eq!(
+            content2.matches(".git-paw/worktrees/").count(),
+            1,
+            ".git-paw/worktrees/ must appear exactly once after repeated init"
         );
     }
 

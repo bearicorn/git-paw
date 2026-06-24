@@ -1025,6 +1025,33 @@ impl LayoutConfig {
     }
 }
 
+/// Placement of agent worktrees relative to the repository.
+///
+/// Selects where [`crate::git::create_worktree`] creates a worktree:
+///
+/// - `Sibling` — the v0.7.0 layout: `<repo_parent>/<project>-<branch-slug>`,
+///   beside the repository in its parent directory. This is the
+///   default-on-absent value so pre-existing configs (and sessions created
+///   before this field existed) behave identically to v0.7.0.
+/// - `Child` — the contained layout: `<repo_root>/.git-paw/worktrees/<branch-slug>`,
+///   inside the repository. New repos opt into this via `git paw init`,
+///   enabling a project-scoped permission model (one grant for
+///   `.git-paw/worktrees/` instead of scattered sibling directories).
+///
+/// The serde wire values are the lowercase strings `"child"` and `"sibling"`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WorktreePlacement {
+    /// Create worktrees beside the repository at
+    /// `<repo_parent>/<project>-<branch-slug>` (the v0.7.0 layout). The
+    /// default when `worktree_placement` is absent.
+    #[default]
+    Sibling,
+    /// Create worktrees inside the repository at
+    /// `<repo_root>/.git-paw/worktrees/<branch-slug>`.
+    Child,
+}
+
 /// Top-level git-paw configuration.
 ///
 /// All fields are optional — absent config files produce empty defaults.
@@ -1106,6 +1133,18 @@ pub struct PawConfig {
     /// unchanged.
     #[serde(default)]
     pub mcp: McpConfig,
+
+    /// Placement of agent worktrees relative to the repository
+    /// (`"child"` or `"sibling"`).
+    ///
+    /// Absent (every v0.7.0 and earlier config) resolves to
+    /// [`WorktreePlacement::Sibling`] via [`PawConfig::worktree_placement`],
+    /// preserving the v0.7.0 sibling layout exactly. `git paw init` writes
+    /// `"child"` for new repos. Serialised with `skip_serializing_if` so a
+    /// default value never appears in round-tripped configs, keeping
+    /// pre-existing configs byte-stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_placement: Option<WorktreePlacement>,
 }
 
 impl PawConfig {
@@ -1195,7 +1234,15 @@ impl PawConfig {
             mcp: McpConfig {
                 name: overlay.mcp.name.clone().or_else(|| self.mcp.name.clone()),
             },
+            worktree_placement: overlay.worktree_placement.or(self.worktree_placement),
         }
+    }
+
+    /// Resolves the effective worktree placement for this config, defaulting
+    /// to [`WorktreePlacement::Sibling`] when `worktree_placement` is absent.
+    #[must_use]
+    pub fn worktree_placement(&self) -> WorktreePlacement {
+        self.worktree_placement.unwrap_or_default()
     }
 
     /// Resolves the effective opsx role-gating mode for this config,
@@ -1455,6 +1502,15 @@ pub fn generate_default_config() -> String {
 
 # Prefix for spec-derived branch names (default: "spec/" ).
 # branch_prefix = "spec/"
+
+# Where agent worktrees are created relative to the repository.
+#   "child"   — inside the repo at .git-paw/worktrees/<branch-slug> (contained
+#               layout; enables a project-scoped permission grant). New repos
+#               default to this. Requires .git-paw/worktrees/ in .gitignore
+#               (git paw init seeds it).
+#   "sibling" — beside the repo at ../<project>-<branch-slug> (v0.7.0 layout).
+# Omit the field to default to "sibling".
+worktree_placement = "child"
 
 # Dashboard message log configuration.
 # [dashboard]
@@ -1997,6 +2053,7 @@ enabled = true
             layout: None,
             opsx: None,
             mcp: McpConfig::default(),
+            worktree_placement: Some(WorktreePlacement::Child),
         };
 
         save_config_to(&config_path, &original).unwrap();
@@ -2103,6 +2160,22 @@ enabled = true
         assert!(output.contains("[specs]"), "should contain [specs]");
         assert!(output.contains("[logging]"), "should contain [logging]");
         assert!(output.contains("[broker]"), "should contain [broker]");
+    }
+
+    #[test]
+    fn generated_default_config_contains_child_worktree_placement() {
+        let output = generate_default_config();
+        assert!(
+            output.contains("worktree_placement = \"child\""),
+            "generated config must set child worktree placement for new repos"
+        );
+        // The line must be active (not commented) so it actually takes effect.
+        let parsed: PawConfig = toml::from_str(&output).expect("generated config parses");
+        assert_eq!(
+            parsed.worktree_placement(),
+            WorktreePlacement::Child,
+            "generated config must resolve to child placement"
+        );
     }
 
     // --- BrokerConfig ---
@@ -4288,5 +4361,79 @@ enabled = true
         let overlay: PawConfig = toml::from_str("default_cli = \"claude\"\n").expect("overlay");
         let merged = base.merged_with(&overlay);
         assert_eq!(merged.mcp.name, Some("global-name".to_string()));
+    }
+
+    // --- worktree_placement (worktree-embedded-placement) ---
+
+    #[test]
+    fn worktree_placement_parses_child() {
+        let cfg: PawConfig =
+            toml::from_str("worktree_placement = \"child\"\n").expect("parse child");
+        assert_eq!(cfg.worktree_placement, Some(WorktreePlacement::Child));
+        assert_eq!(cfg.worktree_placement(), WorktreePlacement::Child);
+    }
+
+    #[test]
+    fn worktree_placement_parses_sibling() {
+        let cfg: PawConfig =
+            toml::from_str("worktree_placement = \"sibling\"\n").expect("parse sibling");
+        assert_eq!(cfg.worktree_placement, Some(WorktreePlacement::Sibling));
+        assert_eq!(cfg.worktree_placement(), WorktreePlacement::Sibling);
+    }
+
+    #[test]
+    fn worktree_placement_absent_defaults_to_sibling() {
+        let cfg: PawConfig = toml::from_str("default_cli = \"claude\"\n").expect("parse");
+        assert_eq!(cfg.worktree_placement, None);
+        assert_eq!(cfg.worktree_placement(), WorktreePlacement::Sibling);
+    }
+
+    #[test]
+    fn worktree_placement_repo_overrides_global() {
+        let tmp = TempDir::new().unwrap();
+        let global_path = tmp.path().join("global").join("config.toml");
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+
+        write_file(&global_path, "worktree_placement = \"sibling\"\n");
+        write_file(
+            &repo_config_path(&repo_root),
+            "worktree_placement = \"child\"\n",
+        );
+
+        let config = load_config_from(&global_path, &repo_root).unwrap();
+        assert_eq!(config.worktree_placement(), WorktreePlacement::Child);
+    }
+
+    #[test]
+    fn worktree_placement_survives_round_trip() {
+        let cfg = PawConfig {
+            worktree_placement: Some(WorktreePlacement::Child),
+            ..PawConfig::default()
+        };
+        let serialized = toml::to_string_pretty(&cfg).expect("serialize");
+        let reparsed: PawConfig = toml::from_str(&serialized).expect("reparse");
+        assert_eq!(reparsed.worktree_placement(), WorktreePlacement::Child);
+    }
+
+    #[test]
+    fn worktree_placement_default_skipped_on_serialize() {
+        // A default (absent) placement must not appear in serialized output so
+        // pre-existing configs round-trip byte-stably.
+        let cfg = PawConfig::default();
+        let serialized = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(
+            !serialized.contains("worktree_placement"),
+            "absent placement must not be serialized; got:\n{serialized}"
+        );
+    }
+
+    #[test]
+    fn preexisting_config_without_placement_loads_without_error() {
+        // A v0.7.0 config (no worktree_placement field) must load and resolve
+        // to sibling.
+        let prior = "default_cli = \"claude\"\nmouse = true\n[broker]\nenabled = true\n";
+        let cfg: PawConfig = toml::from_str(prior).expect("v0.7.0 config must load");
+        assert_eq!(cfg.worktree_placement(), WorktreePlacement::Sibling);
     }
 }

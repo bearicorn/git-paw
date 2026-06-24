@@ -249,8 +249,13 @@ fn make_session_with_worktree(
     extra_commit: bool,
 ) -> (Session, std::path::PathBuf) {
     let canonical_repo = git_paw::git::validate_repo(repo).expect("validate repo");
-    let wt =
-        git_paw::git::create_worktree(&canonical_repo, branch, false).expect("create worktree");
+    let wt = git_paw::git::create_worktree(
+        &canonical_repo,
+        branch,
+        false,
+        git_paw::config::WorktreePlacement::Sibling,
+    )
+    .expect("create worktree");
     if extra_commit {
         std::fs::write(wt.path.join("change.txt"), "x").unwrap();
         std::process::Command::new("git")

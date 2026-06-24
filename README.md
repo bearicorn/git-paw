@@ -51,6 +51,7 @@ git-paw lets you run multiple AI coding assistants in parallel, each in its own 
 
 ## Features
 
+- **Contained worktree layout (v0.8.0)** — new repos place agent worktrees *inside* the project at `.git-paw/worktrees/<branch-slug>/` instead of scattering them as siblings of the repo, enabling a single project-scoped permission grant for every agent. Configurable via `worktree_placement` (`"child"` | `"sibling"`); existing repos default to the v0.7.0 sibling layout and stay there until they opt in. See [Worktree Placement](docs/src/user-guide/worktree-placement.md)
 - **Parallel AI sessions** — run Claude, Codex, Gemini, or any AI CLI across multiple branches simultaneously
 - **Git worktree isolation** — each branch gets its own working directory, no stashing or switching needed
 - **Smart session management** — reattach to active sessions, auto-recover after crashes or reboots, and rebase existing agent branches onto the repository's default branch on every `git paw start` so agents never drift behind supervisor commits on `main` (pass `--no-rebase` to opt out)
