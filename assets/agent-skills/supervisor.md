@@ -454,6 +454,17 @@ curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
     .git-paw/scripts/sweep.sh feedback-gate __FILL_IN_AGENT_ID__ cadence "You have 10+ uncommitted files — commit your completed section now (one commit per finished task group) before starting the next, so each section can be verified independently."
     ```
 
+    The verify-then-archive workflow depends on coding agents **standing by**
+    after their final commit: once an agent has committed and published
+    `agent.artifact { status: "committed" }` (or a manual `status: "done"`), it
+    is **you** — the supervisor, not the agent — who runs `/opsx:verify` and
+    `/opsx:archive`. That post-commit `agent.artifact` is your cue to begin the
+    five-gate sweep; an agent should never be expected or instructed to
+    self-verify or self-archive. This is the supervisor side of the agent's
+    stand-by-after-commit protocol in `coordination.md` (its *Terminal action*
+    section), which tells agents to publish the terminal signal and then wait
+    for your `agent.verified` / `agent.feedback`.
+
 ### Verify on each event, never batch
 
 Verify each agent's commit **as its `committed` event arrives** — do not let

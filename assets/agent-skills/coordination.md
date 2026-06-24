@@ -69,10 +69,14 @@ feat(coverage): close per-scenario gaps for v0.5.0 (part 1 of 2)
 feat(coverage): close per-scenario gaps for v0.5.0 (part 2 of 2)
 ```
 
-Use the project's conventional-commit prefix per group — typically one of
-`feat(<scope>):`, `fix(<scope>):`, `docs(<scope>):`, `test(<scope>):`,
-`chore(<scope>):`. The scope is the change name's key word (e.g. `coverage`,
-`dashboard`, `broker`).
+For the commit-message format itself, follow the **project's** commit-message
+conventions — see the project's `AGENTS.md`, which git-paw injects into your
+context and which owns the format rules (subject style, scope, and any
+"no AI-assistant trailer" rule). git-paw's bundled skill does not mandate a
+commit-message format. Many projects use a Conventional-Commits prefix such as
+`feat(<scope>):` or `fix(<scope>):` (the scope being the change name's key word,
+e.g. `coverage`, `dashboard`, `broker`) — but that is an *illustrative example*,
+not a requirement. Defer to whatever your project's `AGENTS.md` specifies.
 
 **Why per-group, not per-task.** A group corresponds to a coherent unit of
 work, so one commit per group maps cleanly to release-notes prose. Per-task
@@ -81,6 +85,26 @@ unbounded work on a crash, conflict mediation, or `/clear` reset. Per-group
 also matches the post-commit hook's `agent.artifact{status:"committed"}` event
 cadence the supervisor uses for verification — each commit triggers exactly
 one verification-relevant event.
+
+**Each commit is a releasable unit.** Every commit MUST build and pass its own
+gates on its own — a commit is a *releasable unit* of work, not a checkpoint of
+half-finished progress. When you need to fix the commit you *just* made — a
+typo, a missed file, a lint nit — and that commit has not yet been verified and
+you have not moved past it, fold the fix into it with `git commit --amend`
+rather than landing a separate `fix typo` / `address feedback` micro-commit. Do
+**NOT** `git commit --amend` a commit that has already been verified, or an
+earlier commit from a previous group: `--amend` applies ONLY to the
+most-recent, not-yet-verified commit. Rewriting a verified or earlier commit
+corrupts the supervisor's verification boundary.
+
+**Why releasable units, not micro-commits.** git-paw's orchestration model
+treats each committed artifact as a verification boundary (the supervisor runs
+its five-gate sweep on each `committed` event) and the supervisor curates the
+release changelog from these commits. A stream of `fix typo` micro-commits
+breaks both: it produces commits that don't build or pass on their own, and it
+bloats the changelog the supervisor must hand-curate — prior release cycles had
+to hand-squash 148 commits down to 10 (v0.6.0) and 4 down to 1 (v0.7.0). A clean
+releasable-unit history avoids that manual squash cost.
 
 ### Stay inside your worktree
 
@@ -318,8 +342,23 @@ Why this rule is explicit:
   Archiving from a feature branch would leave the change directory deleted
   on a branch that is not yet merged and produce a confused git history.
 
-Commit, let the post-commit hook publish, then wait for `agent.verified`,
-`agent.feedback`, or further `agent.intent` from the supervisor.
+**Stand by after your final commit.** Once your final commit lands, your job is
+to *wait* — not to push the change further through its lifecycle. Let the
+post-commit hook publish `agent.artifact { status: "committed" }` (or, for
+code-less work, publish a manual `agent.artifact { status: "done" }`), then
+**stand by**. While standing by you SHALL NOT run `/opsx:verify` or
+`/opsx:archive` — those are supervisor-only, as the rule above states. This
+stand-by protocol is the positive counterpart to that forbidden-commands rule —
+*what to do instead* of reaching for verify/archive. What you wait *for* is one
+of three supervisor messages:
+
+- **`agent.verified`** — your work passed verification; pick up the next task.
+- **`agent.feedback`** — your work has issues; fix the listed `errors` in your
+  worktree and re-publish `agent.artifact`.
+- **a further `agent.intent`** — new scope routed to you; pick it up.
+
+Publish the terminal signal, then wait for one of those. Do not self-verify, do
+not self-archive, do not assume done-means-merged.
 
 <!-- opsx-role-gating:begin -->
 ### Commands you must not run
