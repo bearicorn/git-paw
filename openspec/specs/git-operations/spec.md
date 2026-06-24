@@ -90,7 +90,16 @@ Test: `git::tests::worktree_dir_name_simple_branch`
 
 ### Requirement: Create worktrees as siblings of the repository
 
-The system SHALL create git worktrees in the parent directory of the repository root using the derived directory name convention.
+The system SHALL create git worktrees at a path resolved from the
+configured `worktree_placement` setting. When `worktree_placement` is
+`"child"`, the target path SHALL be
+`<repo_root>/.git-paw/worktrees/<branch-slug>` and the
+`.git-paw/worktrees/` directory SHALL be created if absent. When
+`worktree_placement` is `"sibling"` OR the setting is absent, the target
+path SHALL be `<repo_parent>/<project>-<branch-slug>` using the derived
+directory name convention, matching the v0.7.0 sibling layout. Only the
+resolved target path varies with placement; all other behaviour described
+below is unchanged.
 
 The `create_worktree` function SHALL accept a `rebase_onto_main: bool` parameter. When `rebase_onto_main` is `true` AND the target branch already exists in the local repository, the function SHALL rebase the target branch onto the repository's default branch (as returned by `default_branch()`) BEFORE performing the existence check for the worktree directory. The rebase SHALL be performed by invoking `git rebase <default-branch>` from the repository root. When the branch is already at or ahead of the default branch, `git rebase` exits zero with no rewrite; the function SHALL treat that as success.
 
@@ -109,6 +118,24 @@ If the expected path exists on disk but is NOT a git worktree registered for the
 - **GIVEN** a repository with a branch `feature/test`
 - **WHEN** `create_worktree()` is called with `rebase_onto_main = false`
 - **THEN** a worktree SHALL be created at `../<project>-feature-test` containing the repository files
+
+#### Scenario: Worktree created under child placement
+
+- **GIVEN** a repository whose effective config has `worktree_placement = "child"` and a branch `feature/test`
+- **WHEN** `create_worktree()` is called with `rebase_onto_main = false`
+- **THEN** a worktree SHALL be created at `<repo_root>/.git-paw/worktrees/feature-test` containing the repository files
+
+#### Scenario: Worktree created under sibling placement
+
+- **GIVEN** a repository whose effective config has `worktree_placement = "sibling"` and a branch `feature/test`
+- **WHEN** `create_worktree()` is called with `rebase_onto_main = false`
+- **THEN** a worktree SHALL be created at `../<project>-feature-test`
+
+#### Scenario: Worktree created under absent placement defaults to sibling
+
+- **GIVEN** a repository whose effective config has no `worktree_placement` field and a branch `feature/test`
+- **WHEN** `create_worktree()` is called with `rebase_onto_main = false`
+- **THEN** a worktree SHALL be created at `../<project>-feature-test`
 
 #### Scenario: Creating worktree for currently checked-out branch fails
 

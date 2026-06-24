@@ -120,7 +120,9 @@ The system SHALL render a table displaying all known agents with the following c
 | CLI | The CLI name (e.g. `"claude"`) | Fixed ~10 |
 | Status | A Unicode symbol + status label | Fixed ~15 |
 | Last Update | Relative time since last message | Fixed ~10 |
-| Summary | One-line summary from the last message's `Display` output | Flexible |
+
+The table SHALL NOT render a `Summary` column. The horizontal space formerly
+occupied by the `Summary` column SHALL be reclaimed by the remaining columns.
 
 The table SHALL have a header row with column labels. When no agents are known (e.g. at session start before any agent has posted), the table SHALL display a single row or message indicating "No agents connected yet".
 
@@ -143,7 +145,8 @@ When no `agent_id == "supervisor"` entry is present in the snapshot, no divider 
 #### Scenario: Table has a header row
 
 - **WHEN** the dashboard renders a frame with at least one agent
-- **THEN** the first row of the table contains column labels: Agent, CLI, Status, Last Update, Summary
+- **THEN** the first row of the table contains column labels: Agent, CLI, Status, Last Update
+- **AND** the header row does NOT contain a `Summary` column label
 
 #### Scenario: Supervisor row is pinned to the top of the data rows
 
@@ -167,7 +170,7 @@ The system SHALL provide pure functions for formatting agent data into display-r
 - `pub fn format_agent_rows(agents: &[AgentStatusEntry], now: Instant) -> Vec<AgentRow>` — converts raw agent data into formatted row structs
 - `pub fn format_status_line(total: usize, working: usize, done: usize, blocked: usize, committed: usize) -> String` — produces a summary line like `"5 agents: 2 working, 1 done, 1 blocked, 1 committed"`
 
-`AgentRow` SHALL be a public struct with `String` fields: `agent_id`, `cli`, `status`, `age`, `summary`.
+`AgentRow` SHALL be a public struct with `String` fields: `agent_id`, `cli`, `status`, `age`. `AgentRow` SHALL NOT carry a `summary` field, because the agent-status table no longer renders a Summary column.
 
 **Phase preference.** When `format_agent_rows` builds the row for an entry whose underlying snapshot carries a most-recent `BrokerMessage::Status` with `payload.phase = Some(p)`, the row's `status` field SHALL render `p` (with the same status-symbol prefixing applied as for any other label). When `payload.phase` is `None` (or the most-recent message is not a `Status` variant), the row's `status` field SHALL fall back to the existing message-type-derived label.
 
@@ -182,6 +185,13 @@ The system SHALL provide pure functions for formatting agent data into display-r
 - **GIVEN** an `AgentStatusEntry` with `agent_id = "feat-errors"`, status `"done"`, last seen 180 seconds ago
 - **WHEN** `format_agent_rows` is called
 - **THEN** the resulting `AgentRow` has `agent_id = "feat-errors"`, a non-empty `status` field containing `"done"`, and `age = "3m ago"`
+
+#### Scenario: AgentRow exposes no summary field
+
+- **GIVEN** an `AgentStatusEntry` for any agent
+- **WHEN** `format_agent_rows` is called
+- **THEN** the resulting `AgentRow` exposes only the `agent_id`, `cli`, `status`, and `age` fields
+- **AND** no `summary` field is present on the row
 
 #### Scenario: format_status_line produces a summary
 
