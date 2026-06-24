@@ -137,7 +137,7 @@ fn dashboard_renders_no_supervisor_row_for_empty_snapshot() {
     // synthesises a supervisor row from an empty snapshot.
     let rendered_supervisor = rows
         .iter()
-        .any(|r| r.agent_id.contains("supervisor") || r.summary.contains("supervisor"));
+        .any(|r| r.agent_id.contains("supervisor") || r.status.contains("supervisor"));
     assert!(
         !rendered_supervisor,
         "empty snapshot must not produce any row mentioning 'supervisor'",

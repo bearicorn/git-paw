@@ -14,15 +14,15 @@ The dashboard is **observation-only** — it never sends actions back to agents.
 The dashboard renders a table with one row per agent. When a supervisor pane is running, its row is pinned to the top with a horizontal-line divider beneath it; coding-agent rows follow in alphabetical order:
 
 ```
-┌────────────┬────────┬────────────┬─────────┬──────────────────────────────┐
-│ Agent      │ CLI    │ Status     │ Time    │ Summary                      │
-├────────────┼────────┼────────────┼─────────┼──────────────────────────────┤
-│ supervisor │ claude │ 🔵 watching│ 12s ago │ session online               │
-│ ────────── │ ────── │ ────────── │ ─────── │ ──────────────────────────── │
-│ feat-api   │ claude │ 🟡 blocked │ 1m 05s  │ waiting for auth token format│
-│ feat-auth  │ claude │ 🔵 working │ 3m 22s  │ implementing login endpoint  │
-│ fix-typo   │ gemini │ 🟢 done    │ 8m 41s  │ done — all typos fixed       │
-└────────────┴────────┴────────────┴─────────┴──────────────────────────────┘
+┌────────────┬────────┬────────────┬─────────┐
+│ Agent      │ CLI    │ Status     │ Time    │
+├────────────┼────────┼────────────┼─────────┤
+│ supervisor │ claude │ 🔵 watching│ 12s ago │
+│ ────────── │ ────── │ ────────── │ ─────── │
+│ feat-api   │ claude │ 🟡 blocked │ 1m 05s  │
+│ feat-auth  │ claude │ 🔵 working │ 3m 22s  │
+│ fix-typo   │ gemini │ 🟢 done    │ 8m 41s  │
+└────────────┴────────┴────────────┴─────────┘
 ```
 
 When no supervisor pane is running (e.g. `--no-broker` is not in play but no `--supervisor` was passed, or during the boot window before the supervisor has finished self-registering), the divider is not rendered and coding agents fill rows alphabetically from the top.
@@ -37,7 +37,7 @@ When no supervisor pane is running (e.g. `--no-broker` is not in play but no `--
 | 🟡 | Blocked -- agent is waiting on something |
 | ⚪ | Idle / unknown phase -- agent has not reported a recognised status |
 
-The **Time** column shows elapsed time since the agent's last status update. The **Summary** column shows the most recent status or blocked message body.
+The **Time** column shows elapsed time since the agent's last status update.
 
 ### Supervisor row, `cli` field, and `phase` field
 
