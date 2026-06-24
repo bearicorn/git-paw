@@ -26,6 +26,11 @@ default_cli = "my-cli"
 # Enable mouse mode in tmux sessions (default: true)
 mouse = true
 
+# Where agent worktrees are created: "child" (in-repo .git-paw/worktrees/)
+# or "sibling" (../<project>-<branch>). Absent = "sibling"; git paw init
+# writes "child" for new repos.
+worktree_placement = "child"
+
 # Pane affordances: heavy borders, per-pane labels, active-pane highlight
 # (default: true; set false to inherit your own tmux styling)
 # [layout]
@@ -116,6 +121,42 @@ Enable or disable tmux mouse mode for git-paw sessions. When enabled, you can cl
 ```toml
 mouse = true  # default
 ```
+
+### `worktree_placement`
+
+Controls where git-paw creates an agent's worktree, relative to the
+repository:
+
+- `"child"` — inside the repo at `.git-paw/worktrees/<branch-slug>`. This is
+  the **contained** layout: worktrees live under the project root, so a single
+  permission grant for `.git-paw/worktrees/` covers every agent (no scattered
+  sibling directories outside the repo). `git paw init` writes this for new
+  repos.
+- `"sibling"` — beside the repo at `../<project>-<branch-slug>` (the v0.7.0
+  layout). This is the **default when the field is absent**, so pre-existing
+  repos and sessions created before this field behave exactly as in v0.7.0.
+
+```toml
+worktree_placement = "child"
+```
+
+The `<branch-slug>` for the child layout is derived from the branch name
+alone: `/` becomes `-` and characters outside `[A-Za-z0-9._-]` are stripped
+(the project name is not prepended, since the directory already lives under
+that project's `.git-paw/worktrees/`). For example branch `feat/auth-flow`
+maps to `.git-paw/worktrees/feat-auth-flow/`, and `fix/issue#42` maps to
+`.git-paw/worktrees/fix-issue42/`.
+
+> **Gitignore note.** Child worktrees must be ignored or git would try to
+> stage them as part of the repo. `git paw init` adds `.git-paw/worktrees/`
+> to `.gitignore` automatically. If you opt into `worktree_placement =
+> "child"` by editing the config manually (without re-running `git paw
+> init`), add `.git-paw/worktrees/` to your `.gitignore` yourself.
+
+Placement only governs **new** worktree creation. Existing worktrees stay
+where they are: each session records the concrete worktree path it created,
+and resume/status/purge operate on that recorded path — so flipping the
+config mid-project never orphans an already-created worktree.
 
 ## Custom CLIs
 
@@ -727,6 +768,7 @@ When both global and repo configs exist, they merge with these rules:
 | `default_spec_cli` | Repo wins |
 | `branch_prefix` | Repo wins |
 | `mouse` | Repo wins |
+| `worktree_placement` | Repo wins |
 | `clis` | Maps merge (repo overrides per-key) |
 | `presets` | Maps merge (repo overrides per-key) |
 | `specs` | Repo wins |

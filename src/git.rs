@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::config::WorktreePlacement;
 use crate::error::PawError;
 use crate::specs::SpecEntry;
 
@@ -88,6 +89,26 @@ pub fn worktree_dir_name(project: &str, branch: &str) -> String {
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect();
     format!("{project_safe}-{branch_safe}")
+}
+
+/// Derives the child-layout worktree slug from a branch name alone.
+///
+/// Replaces `/` with `-` and strips every character outside the safe set
+/// of ASCII letters, digits, dot, dash, and underscore (`[A-Za-z0-9._-]`).
+/// Unlike [`worktree_dir_name`] the project name is NOT prepended, because a
+/// child worktree already lives under that project's `.git-paw/worktrees/`,
+/// so the prefix would be redundant. Thus `feat/auth-flow` → `feat-auth-flow`
+/// and `fix/issue#42` → `fix-issue42`.
+#[must_use]
+pub fn branch_slug(branch: &str) -> String {
+    branch
+        .chars()
+        .filter_map(|c| match c {
+            '/' => Some('-'),
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '-' => Some(c),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Returns the name of the default branch (usually "main" or "master").
@@ -253,6 +274,42 @@ fn rebase_branch_onto_default(repo_root: &Path, branch: &str) -> Result<(), PawE
     Ok(())
 }
 
+/// Resolves the absolute worktree directory path for `branch` under the
+/// given `placement`.
+///
+/// [`WorktreePlacement::Child`] resolves to
+/// `<repo_root>/.git-paw/worktrees/<branch-slug>`, creating the
+/// `.git-paw/worktrees/` parent if absent. [`WorktreePlacement::Sibling`]
+/// resolves to `<repo_parent>/<project>-<branch-slug>` (the v0.7.0 layout)
+/// and creates nothing. Factored out of [`create_worktree`] so the path
+/// derivation stays readable and independently testable.
+fn resolve_worktree_path(
+    repo_root: &Path,
+    branch: &str,
+    placement: WorktreePlacement,
+) -> Result<PathBuf, PawError> {
+    match placement {
+        WorktreePlacement::Child => {
+            let worktrees_dir = repo_root.join(".git-paw").join("worktrees");
+            std::fs::create_dir_all(&worktrees_dir).map_err(|e| {
+                PawError::WorktreeError(format!(
+                    "failed to create '{}': {e}",
+                    worktrees_dir.display()
+                ))
+            })?;
+            Ok(worktrees_dir.join(branch_slug(branch)))
+        }
+        WorktreePlacement::Sibling => {
+            let project = project_name(repo_root);
+            let dir_name = worktree_dir_name(&project, branch);
+            let parent = repo_root.parent().ok_or_else(|| {
+                PawError::WorktreeError("cannot determine parent directory of repo".to_string())
+            })?;
+            Ok(parent.join(&dir_name))
+        }
+    }
+}
+
 /// Creates a git worktree for `branch`.
 ///
 /// If the branch already exists, checks it out in a new worktree. If the
@@ -268,18 +325,21 @@ fn rebase_branch_onto_default(repo_root: &Path, branch: &str) -> Result<(), PawE
 /// `git rebase --abort` and returns `PawError::WorktreeError`; the branch is
 /// left at its pre-rebase HEAD. When `rebase_onto_main` is `false` or the
 /// branch does not yet exist locally, the rebase step is skipped.
+///
+/// `placement` selects where the worktree directory is created (see
+/// [`WorktreePlacement`]). [`WorktreePlacement::Child`] resolves to
+/// `<repo_root>/.git-paw/worktrees/<branch-slug>` (creating
+/// `.git-paw/worktrees/` if absent); [`WorktreePlacement::Sibling`] resolves
+/// to `<repo_parent>/<project>-<branch-slug>`, matching the v0.7.0 layout.
+/// Only the resolved target path varies with placement; all other behaviour
+/// is identical.
 pub fn create_worktree(
     repo_root: &Path,
     branch: &str,
     rebase_onto_main: bool,
+    placement: WorktreePlacement,
 ) -> Result<WorktreeCreation, PawError> {
-    let project = project_name(repo_root);
-    let dir_name = worktree_dir_name(&project, branch);
-
-    let parent = repo_root.parent().ok_or_else(|| {
-        PawError::WorktreeError("cannot determine parent directory of repo".to_string())
-    })?;
-    let worktree_path = parent.join(&dir_name);
+    let worktree_path = resolve_worktree_path(repo_root, branch, placement)?;
 
     // Rebase agent branch onto the repo's default branch BEFORE the
     // idempotency check. Resolves MILESTONE.md drift item 48: the supervisor
@@ -685,8 +745,9 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use crate::config::WorktreePlacement;
     use crate::error::PawError;
-    use crate::git::{WorktreeCreation, create_worktree};
+    use crate::git::{WorktreeCreation, branch_slug, create_worktree};
 
     /// Sets up a temp repo with `origin/HEAD` pointing to `refs/heads/main`,
     /// an initial commit on `main`, and the `feat/example` branch at the same
@@ -790,7 +851,8 @@ mod tests {
         let r = setup_rebase_repo();
         advance_main(r.path(), 2);
 
-        let result = create_worktree(r.path(), "feat/example", true).expect("rebase succeeds");
+        let result = create_worktree(r.path(), "feat/example", true, WorktreePlacement::Sibling)
+            .expect("rebase succeeds");
         assert!(
             matches!(
                 result,
@@ -813,8 +875,8 @@ mod tests {
         let r = setup_rebase_repo();
         // Branch is already at main HEAD — rebase is a no-op.
         let before = head_sha(r.path(), "feat/example");
-        let _result =
-            create_worktree(r.path(), "feat/example", true).expect("noop rebase succeeds");
+        let _result = create_worktree(r.path(), "feat/example", true, WorktreePlacement::Sibling)
+            .expect("noop rebase succeeds");
         let after = head_sha(r.path(), "feat/example");
         assert_eq!(before, after, "noop rebase must not change HEAD");
     }
@@ -835,7 +897,7 @@ mod tests {
         run_git(r.path(), &["commit", "-m", "main edit"]);
 
         let pre = head_sha(r.path(), "feat/example");
-        let result = create_worktree(r.path(), "feat/example", true);
+        let result = create_worktree(r.path(), "feat/example", true, WorktreePlacement::Sibling);
         let err = result.expect_err("rebase must error on conflict");
         match err {
             PawError::WorktreeError(msg) => assert!(
@@ -865,8 +927,8 @@ mod tests {
         advance_main(r.path(), 2);
 
         let before = head_sha(r.path(), "feat/example");
-        let result =
-            create_worktree(r.path(), "feat/example", false).expect("no-rebase path succeeds");
+        let result = create_worktree(r.path(), "feat/example", false, WorktreePlacement::Sibling)
+            .expect("no-rebase path succeeds");
         let after = head_sha(r.path(), "feat/example");
         assert_eq!(before, after, "rebase_onto_main=false must not change HEAD");
         assert!(result.path.exists(), "worktree directory must be created");
@@ -876,8 +938,8 @@ mod tests {
     fn create_worktree_new_branch_skips_rebase_regardless_of_flag() {
         let r = setup_rebase_repo();
         // feat/new does NOT exist locally.
-        let result =
-            create_worktree(r.path(), "feat/new", true).expect("new-branch creation succeeds");
+        let result = create_worktree(r.path(), "feat/new", true, WorktreePlacement::Sibling)
+            .expect("new-branch creation succeeds");
         assert!(
             matches!(
                 result,
@@ -917,5 +979,100 @@ mod tests {
         // without unwrapping a non-UTF-8 path.
         let result = remove_worktree(repo.path(), &worktree_path);
         assert!(result.is_err(), "expected Err for non-existent worktree");
+    }
+
+    // --- worktree placement (worktree-embedded-placement) ---
+
+    #[test]
+    fn branch_slug_replaces_slash_with_dash() {
+        assert_eq!(branch_slug("feat/auth-flow"), "feat-auth-flow");
+        assert_eq!(branch_slug("a/b/c"), "a-b-c");
+    }
+
+    #[test]
+    fn branch_slug_strips_unsafe_characters() {
+        // `#` is outside [A-Za-z0-9._-] and is stripped (not replaced).
+        assert_eq!(branch_slug("fix/issue#42"), "fix-issue42");
+    }
+
+    #[test]
+    fn branch_slug_preserves_safe_punctuation() {
+        // dot, underscore, and dash are all in the safe set.
+        assert_eq!(branch_slug("release/v1.2_rc-3"), "release-v1.2_rc-3");
+    }
+
+    #[test]
+    fn create_worktree_child_placement_creates_inside_repo() {
+        let r = setup_rebase_repo();
+
+        let result = create_worktree(r.path(), "feat/auth-flow", false, WorktreePlacement::Child)
+            .expect("child worktree creation succeeds");
+
+        let expected = r
+            .path()
+            .join(".git-paw")
+            .join("worktrees")
+            .join("feat-auth-flow");
+        assert_eq!(result.path, expected, "child worktree path mismatch");
+        assert!(result.path.exists(), "child worktree directory must exist");
+        assert!(
+            r.path().join(".git-paw").join("worktrees").is_dir(),
+            ".git-paw/worktrees/ must be created"
+        );
+    }
+
+    #[test]
+    fn create_worktree_child_slug_strips_unsafe_characters() {
+        let r = setup_rebase_repo();
+
+        let result = create_worktree(r.path(), "fix/issue#42", false, WorktreePlacement::Child)
+            .expect("child worktree creation succeeds");
+
+        assert!(
+            result.path.ends_with(".git-paw/worktrees/fix-issue42"),
+            "expected slug-derived child path, got {}",
+            result.path.display()
+        );
+    }
+
+    #[test]
+    fn create_worktree_sibling_placement_creates_beside_repo() {
+        let r = setup_rebase_repo();
+        let project = super::project_name(r.path());
+
+        let result = create_worktree(r.path(), "feature/test", false, WorktreePlacement::Sibling)
+            .expect("sibling worktree creation succeeds");
+
+        let expected = r
+            .path()
+            .parent()
+            .unwrap()
+            .join(format!("{project}-feature-test"));
+        assert_eq!(result.path, expected, "sibling worktree path mismatch");
+        assert!(
+            result.path.exists(),
+            "sibling worktree directory must exist"
+        );
+    }
+
+    #[test]
+    fn create_worktree_child_and_sibling_differ_for_same_branch() {
+        // Sanity: the two placements resolve to different locations for the
+        // same branch — child under the repo, sibling in the parent.
+        let r = setup_rebase_repo();
+
+        let child =
+            create_worktree(r.path(), "feat/x", false, WorktreePlacement::Child).expect("child");
+        let sibling = create_worktree(r.path(), "feat/y", false, WorktreePlacement::Sibling)
+            .expect("sibling");
+
+        assert!(
+            child.path.starts_with(r.path()),
+            "child must be inside repo"
+        );
+        assert!(
+            !sibling.path.starts_with(r.path()),
+            "sibling must be outside repo"
+        );
     }
 }

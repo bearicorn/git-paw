@@ -616,7 +616,7 @@ fn cmd_start(
     };
 
     for (branch, cli) in &selection.mappings {
-        let wt = git::create_worktree(&repo_root, branch, !no_rebase)?;
+        let wt = git::create_worktree(&repo_root, branch, !no_rebase, config.worktree_placement())?;
         let wt_str = wt.path.to_string_lossy().to_string();
 
         // Inject AGENTS.md with skill content when broker is enabled.
@@ -913,6 +913,8 @@ struct AttachContext<'a> {
     strict_guard: bool,
     /// Skip rebasing the branch onto the default branch on worktree create.
     no_rebase: bool,
+    /// Worktree placement (child vs sibling) for `create_worktree`.
+    placement: git_paw::config::WorktreePlacement,
 }
 
 /// Artifacts produced by attaching one agent's worktree: the tmux pane spec to
@@ -942,7 +944,7 @@ fn attach_agent(
     branch: &str,
     spec_entry: Option<&git_paw::specs::SpecEntry>,
 ) -> Result<AttachedAgent, PawError> {
-    let wt = git::create_worktree(ctx.repo_root, branch, !ctx.no_rebase)?;
+    let wt = git::create_worktree(ctx.repo_root, branch, !ctx.no_rebase, ctx.placement)?;
     let wt_str = wt.path.to_string_lossy().to_string();
 
     let rendered_skill = ctx.coordination_template.map(|tmpl| {
@@ -1285,6 +1287,7 @@ fn cmd_supervisor(
         inter_agent_rules: Some(inter_agent_rules.as_str()),
         strict_guard,
         no_rebase,
+        placement: config.worktree_placement(),
     };
 
     for branch in &branches {
@@ -1771,7 +1774,7 @@ fn launch_spec_session(
     };
 
     for (branch, cli) in mappings {
-        let wt = git::create_worktree(repo_root, branch, !no_rebase)?;
+        let wt = git::create_worktree(repo_root, branch, !no_rebase, config.worktree_placement())?;
         let wt_str = wt.path.to_string_lossy().to_string();
 
         // Set up AGENTS.md with spec + skill content
@@ -2387,6 +2390,7 @@ fn cmd_add(
         inter_agent_rules: Some(inter_agent_rules.as_str()),
         strict_guard,
         no_rebase: false,
+        placement: config.worktree_placement(),
     };
 
     // 4.6 Reuse create_worktree + attach_agent to build the new pane's setup.
@@ -4225,7 +4229,13 @@ mod tests {
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-q", "-m", "initial"]);
 
-        let wt = git::create_worktree(&repo, "feature/test", false).expect("create worktree");
+        let wt = git::create_worktree(
+            &repo,
+            "feature/test",
+            false,
+            git_paw::config::WorktreePlacement::Sibling,
+        )
+        .expect("create worktree");
         if with_unmerged_commit {
             std::fs::write(wt.path.join("new.txt"), "hello").unwrap();
             git(&wt.path, &["add", "."]);
