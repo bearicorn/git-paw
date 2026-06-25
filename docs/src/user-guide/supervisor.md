@@ -163,10 +163,11 @@ config schema and how the supervisor reads each doc.
 
 ## Common dev-command allowlist
 
-A bundled preset whitelists routine dev commands so the supervisor stops
-escalating every `cargo test`, `cargo build`, `git commit`, `git push`,
-`mdbook build`, or broker curl on `127.0.0.1`. The preset is on by default
-and ships with the launcher.
+A bundled **universal** preset whitelists routine, stack-neutral dev commands
+so the supervisor stops escalating every `git commit`, `git push`, `git diff`,
+`grep`, or broker curl on `127.0.0.1`. The preset is on by default and ships
+with the launcher. Toolchain-specific commands (`cargo …`, `npm …`, `pytest`,
+`go …`) are **not** in the universal set — opt into them per stack.
 
 To opt out for a session, set:
 
@@ -175,18 +176,32 @@ To opt out for a session, set:
 enabled = false
 ```
 
-To extend the preset with project-specific patterns (e.g. `just`, `nox`, a
-custom test runner), use the `extra` field:
+To seed a toolchain's curated grants, name its stack preset; to add anything
+not covered by a named stack (e.g. `just`, `nox`, a custom test runner), use
+the `extra` field:
 
 ```toml
 [supervisor.common_dev_allowlist]
 enabled = true
+stacks = ["rust", "python"]
 extra = ["just check", "nox -s tests"]
 ```
 
-`extra` patterns are prefix-matched against the captured command line, the
-same way the built-in patterns are. See
-[Configuration](../configuration/README.md) for the full schema.
+Both `stacks` entries and `extra` patterns are prefix-matched against the
+captured command line, the same way the universal patterns are. See
+[Configuration](../configuration/README.md) for the named-preset contents and
+the full schema.
+
+### Run dev commands bare — no exit-code-probe wrappers
+
+The allowlist works because each grant is a bare command **prefix** that
+generalises across argument variants. Wrapping a command in an exit-code probe
+— `<cmd> && echo "EXIT $?"`, `<cmd>; echo $?`, `RC=$?; echo "$RC"` — defeats
+that: the probe text varies per run, so the CLI's command-string permission
+whitelisting never matches the next invocation and the command re-prompts every
+time. The bundled supervisor and coordination skills instruct agents to run dev
+commands bare and read the exit status directly; keep your own commands to the
+same shape so a seeded prefix actually suppresses the prompt.
 
 ## Manual approvals
 

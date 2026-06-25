@@ -47,7 +47,7 @@ fn seeds_preset_into_repo_claude_settings_with_default_config() {
         std::env::set_var("HOME", fake_home.path());
     }
 
-    let failures = seed_supervisor_session(&[], repo_root, &[]);
+    let failures = seed_supervisor_session(&[], &[], repo_root, &[]);
     assert!(failures.is_empty(), "unexpected failures: {failures:?}");
 
     let settings = repo_root.join(".claude").join("settings.json");
@@ -106,7 +106,7 @@ fn extra_patterns_appear_in_seeded_settings() {
     }
 
     let extra = vec!["pnpm test".to_string()];
-    let failures = seed_supervisor_session(&extra, repo_root, &[]);
+    let failures = seed_supervisor_session(&[], &extra, repo_root, &[]);
     assert!(failures.is_empty(), "unexpected failures: {failures:?}");
 
     let entries = read_array(&repo_root.join(".claude").join("settings.json"));
@@ -115,6 +115,61 @@ fn extra_patterns_appear_in_seeded_settings() {
     for pat in DEV_ALLOWLIST_PRESET {
         assert!(entries.iter().any(|e| e == pat));
     }
+}
+
+/// Stack selection: `stacks = ["rust"]` seeds the universal preset plus
+/// the curated rust prefixes into the settings file.
+#[test]
+#[serial]
+fn rust_stack_seeds_cargo_prefixes_into_settings() {
+    let tr = helpers::setup_test_repo();
+    let repo_root = tr.path();
+
+    let fake_home = TempDir::new().unwrap();
+    unsafe {
+        std::env::set_var("HOME", fake_home.path());
+    }
+
+    let stacks = vec!["rust".to_string()];
+    let failures = seed_supervisor_session(&stacks, &[], repo_root, &[]);
+    assert!(failures.is_empty(), "unexpected failures: {failures:?}");
+
+    let entries = read_array(&repo_root.join(".claude").join("settings.json"));
+    for pat in DEV_ALLOWLIST_PRESET {
+        assert!(entries.iter().any(|e| e == pat), "missing universal {pat}");
+    }
+    for pat in ["cargo build", "cargo test", "cargo clippy"] {
+        assert!(entries.iter().any(|e| e == pat), "missing rust {pat}");
+    }
+}
+
+/// Non-Rust project (no stacks selected, empty extra) does NOT receive
+/// any cargo or other stack-specific grant.
+#[test]
+#[serial]
+fn no_stacks_selected_seeds_no_cargo_grants() {
+    let tr = helpers::setup_test_repo();
+    let repo_root = tr.path();
+
+    let fake_home = TempDir::new().unwrap();
+    unsafe {
+        std::env::set_var("HOME", fake_home.path());
+    }
+
+    let failures = seed_supervisor_session(&[], &[], repo_root, &[]);
+    assert!(failures.is_empty(), "unexpected failures: {failures:?}");
+
+    let entries = read_array(&repo_root.join(".claude").join("settings.json"));
+    assert!(
+        !entries.iter().any(|e| e.starts_with("cargo")),
+        "default (no stacks) must not seed any cargo prefix: {entries:?}",
+    );
+    assert!(
+        !entries
+            .iter()
+            .any(|e| e == "just" || e == "mdbook build" || e.starts_with("openspec")),
+        "default (no stacks) must not seed stack-specific prefixes: {entries:?}",
+    );
 }
 
 /// 6.4 — A configured alternate settings target (resolved from
@@ -132,7 +187,7 @@ fn writes_configured_alt_target_when_parent_exists_and_skips_when_absent() {
         .path()
         .join("does-not-exist")
         .join("settings.json");
-    let failures = seed_supervisor_session(&[], repo_root, std::slice::from_ref(&absent_alt));
+    let failures = seed_supervisor_session(&[], &[], repo_root, std::slice::from_ref(&absent_alt));
     assert!(failures.is_empty(), "unexpected failures: {failures:?}");
     assert!(
         !absent_alt.exists() && !absent_alt.parent().unwrap().exists(),
@@ -144,7 +199,8 @@ fn writes_configured_alt_target_when_parent_exists_and_skips_when_absent() {
     let repo_root_b = tr_b.path();
     let alt_dir = TempDir::new().unwrap();
     let alt_settings = alt_dir.path().join("settings.json");
-    let failures = seed_supervisor_session(&[], repo_root_b, std::slice::from_ref(&alt_settings));
+    let failures =
+        seed_supervisor_session(&[], &[], repo_root_b, std::slice::from_ref(&alt_settings));
     assert!(failures.is_empty(), "unexpected failures: {failures:?}");
     assert!(
         alt_settings.exists(),
@@ -174,12 +230,12 @@ fn re_seed_on_recovery_is_idempotent() {
     }
 
     // First seed.
-    let failures = seed_supervisor_session(&[], repo_root, &[]);
+    let failures = seed_supervisor_session(&[], &[], repo_root, &[]);
     assert!(failures.is_empty(), "first seed: {failures:?}");
     let first = read_array(&repo_root.join(".claude").join("settings.json"));
 
     // Re-seed (recovery path).
-    let failures = seed_supervisor_session(&[], repo_root, &[]);
+    let failures = seed_supervisor_session(&[], &[], repo_root, &[]);
     assert!(failures.is_empty(), "re-seed: {failures:?}");
     let second = read_array(&repo_root.join(".claude").join("settings.json"));
 
@@ -209,7 +265,7 @@ fn seeds_without_broker_configuration() {
         std::env::set_var("HOME", fake_home.path());
     }
 
-    let failures = seed_supervisor_session(&[], repo_root, &[]);
+    let failures = seed_supervisor_session(&[], &[], repo_root, &[]);
     assert!(failures.is_empty(), "unexpected failures: {failures:?}");
 
     let entries = read_array(&repo_root.join(".claude").join("settings.json"));
@@ -237,7 +293,7 @@ fn malformed_settings_returns_failure_and_leaves_file_unchanged() {
     let malformed = "not json {{{";
     fs::write(&settings, malformed).unwrap();
 
-    let failures = seed_supervisor_session(&[], repo_root, &[]);
+    let failures = seed_supervisor_session(&[], &[], repo_root, &[]);
     assert_eq!(failures.len(), 1, "expected one failure: {failures:?}");
     let (failed_path, err) = &failures[0];
     assert_eq!(failed_path, &settings);
@@ -257,6 +313,6 @@ fn malformed_settings_returns_failure_and_leaves_file_unchanged() {
 fn setup_dev_allowlist_is_publicly_reachable() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("settings.json");
-    setup_dev_allowlist(&[], &path).unwrap();
+    setup_dev_allowlist(&[], &[], &path).unwrap();
     assert!(path.exists());
 }

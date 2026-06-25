@@ -573,12 +573,14 @@ impl SupervisorConfig {
 
 /// Configuration for the common dev-command allowlist preset.
 ///
-/// The preset is a curated set of safe, repeatedly-prompted dev-loop
-/// commands (cargo, git, just, mdbook, openspec, find, grep, sed -n)
-/// that the supervisor seeds into Claude's `allowed_bash_prefixes` so
-/// agents do not hit a permission prompt for each variant of these
-/// commands. See `src/supervisor/dev_allowlist.rs` for the preset
-/// constant and the merge implementation.
+/// The universal preset is a curated set of stack-neutral, repeatedly-
+/// prompted dev-loop commands (non-destructive git verbs plus read-only
+/// `find` / `grep` / `sed -n`) that the supervisor seeds into Claude's
+/// `allowed_bash_prefixes` so agents do not hit a permission prompt for
+/// each variant of these commands. Stack-specific grants are opt-in via
+/// `stacks` (named presets `rust` / `node` / `python` / `go`) and/or
+/// the free-form `extra` list. See `src/supervisor/dev_allowlist.rs`
+/// for the preset constants and the merge implementation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommonDevAllowlistConfig {
     /// Whether the dev-allowlist seeder runs on supervisor start.
@@ -588,12 +590,22 @@ pub struct CommonDevAllowlistConfig {
     /// `[supervisor.common_dev_allowlist] enabled = false`.
     #[serde(default = "CommonDevAllowlistConfig::default_enabled")]
     pub enabled: bool,
+    /// Named, curated stack presets the repository opts into.
+    ///
+    /// Each entry names a built-in stack preset (`rust` / `node` /
+    /// `python` / `go`) whose curated prefix bundle is seeded in
+    /// addition to the universal preset. Unknown names contribute
+    /// nothing. Defaults to empty — a fresh repo seeds only the
+    /// universal preset, never a toolchain it does not use. See
+    /// `src/supervisor/dev_allowlist.rs::stack_preset`.
+    #[serde(default)]
+    pub stacks: Vec<String>,
     /// Additional project-specific prefix patterns appended to the
-    /// built-in preset.
+    /// built-in preset (and to any selected stack presets).
     ///
     /// Each entry is a raw string consumed by Claude's prefix matcher;
     /// the seeder does not validate the strings. Duplicates of preset
-    /// entries are silently de-duplicated.
+    /// or stack entries are silently de-duplicated.
     #[serde(default)]
     pub extra: Vec<String>,
 }
@@ -602,6 +614,7 @@ impl Default for CommonDevAllowlistConfig {
     fn default() -> Self {
         Self {
             enabled: Self::default_enabled(),
+            stacks: Vec::new(),
             extra: Vec::new(),
         }
     }
@@ -1587,13 +1600,16 @@ worktree_placement = "child"
 # escalate_on_violation = true  # also publish agent.question to supervisor on ownership violations
 
 # Common dev-command allowlist. When supervisor mode starts a session,
-# git-paw seeds .claude/settings.json::allowed_bash_prefixes with a
-# curated preset (cargo, git, just, mdbook, openspec, find, grep, sed -n)
-# so agents do not hit a permission prompt for each variant. Opt out by
-# setting enabled = false; extend with project-specific prefixes via extra.
+# git-paw seeds .claude/settings.json::allowed_bash_prefixes with the
+# universal preset (non-destructive git verbs + find / grep / sed -n) so
+# agents do not hit a permission prompt for each variant. Opt into a
+# toolchain's curated grants with stacks (named presets: rust / node /
+# python / go); extend with project-specific prefixes via extra. Opt out
+# entirely by setting enabled = false.
 # [supervisor.common_dev_allowlist]
 # enabled = true
-# extra = ["pnpm test", "deno fmt"]
+# stacks = ["rust"]
+# extra = ["just", "mdbook build", "openspec validate"]
 
 # opsx (OpenSpec) role gating. When the session's spec engine is OpenSpec,
 # git-paw's post-commit guard detects archive activity (`/opsx:archive` /
@@ -2620,7 +2636,29 @@ enabled = true
         let config = load_config_file(&path).unwrap().unwrap();
         let supervisor = config.supervisor.unwrap();
         assert!(supervisor.common_dev_allowlist.enabled);
+        assert!(supervisor.common_dev_allowlist.stacks.is_empty());
         assert!(supervisor.common_dev_allowlist.extra.is_empty());
+    }
+
+    #[test]
+    fn supervisor_common_dev_allowlist_stacks_parsed() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\nenabled = true\n\
+             [supervisor.common_dev_allowlist]\nstacks = [\"rust\", \"node\"]\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert_eq!(
+            supervisor.common_dev_allowlist.stacks,
+            vec!["rust".to_string(), "node".to_string()],
+        );
+        // extra still defaults to empty; enabled stays true.
+        assert!(supervisor.common_dev_allowlist.extra.is_empty());
+        assert!(supervisor.common_dev_allowlist.enabled);
     }
 
     #[test]
@@ -2670,6 +2708,7 @@ enabled = true
                 enabled: true,
                 common_dev_allowlist: CommonDevAllowlistConfig {
                     enabled: false,
+                    stacks: vec!["rust".into(), "node".into()],
                     extra: vec!["pnpm test".into(), "uv pip install".into()],
                 },
                 ..Default::default()
@@ -2719,6 +2758,10 @@ enabled = true
         assert!(
             template.contains("extra ="),
             "template should illustrate the extra field",
+        );
+        assert!(
+            template.contains("stacks ="),
+            "template should illustrate the stacks field",
         );
     }
 

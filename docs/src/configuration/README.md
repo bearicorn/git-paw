@@ -476,40 +476,63 @@ never hits a permission prompt. Existing entries in that file are preserved.
 
 On every supervisor session start, git-paw seeds a curated preset of dev-loop
 prefix patterns into `.claude/settings.json::allowed_bash_prefixes` so agents
-do not hit a permission prompt for each variant of `cargo build`, `git commit`,
-`just check`, `mdbook build`, etc. The mechanism is the same one Claude uses
-for its "Yes, don't ask again" flow — but seeded up-front rather than approved
-one-by-one.
+do not hit a permission prompt for each variant of `git commit`, `git diff`,
+`grep`, etc. The mechanism is the same one Claude uses for its "Yes, don't ask
+again" flow — but seeded up-front rather than approved one-by-one.
+
+Each seeded value is a command **prefix** (a verb or verb + subcommand) that
+subsumes every argument variant — `git diff` covers `git diff --stat HEAD~1`,
+so a routine dev-loop command prompts at most once.
+
+The preset is split into two tiers:
+
+- a **universal** set that is always seeded — stack-neutral commands safe in any
+  repository regardless of language or toolchain;
+- **opt-in stack presets** (`rust` / `node` / `python` / `go`) plus a free-form
+  `extra` list for everything tied to a particular toolchain. A bare project
+  inherits only the universal set and never a toolchain it does not use.
 
 ```toml
 [supervisor.common_dev_allowlist]
 enabled = true
-extra = ["pnpm test", "deno fmt"]
+stacks = ["rust"]
+extra = ["just", "mdbook build", "openspec validate"]
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `true` | Master switch for the seeder. Set to `false` to skip seeding entirely. |
-| `extra` | `[]` | Additional project-specific prefix patterns appended to the built-in preset. |
+| `stacks` | `[]` | Named, curated stack presets to opt into: `rust`, `node`, `python`, `go`. The seeder seeds the union of the universal preset, each selected stack, and `extra`. Unknown names contribute nothing. git-paw does **not** auto-detect your stack — selection is always explicit. |
+| `extra` | `[]` | Additional project-specific prefix patterns appended to the universal preset and any selected stacks. |
 
-**Built-in preset (all v0.5.0 entries):**
+**Universal preset (always seeded):**
 
-- **Cargo**: `cargo build`, `cargo test`, `cargo clippy`, `cargo fmt`,
-  `cargo check`, `cargo tree`, `cargo deny`, `cargo update`
 - **Git (read)**: `git status`, `git log`, `git diff`, `git show`, `git fetch`
 - **Git (write, non-destructive)**: `git commit`, `git push`, `git pull`,
   `git merge`, `git stash`, `git add`, `git restore`, `git rm`
-- **Just**: `just` (any recipe)
-- **mdBook**: `mdbook build`
-- **OpenSpec**: `openspec validate`, `openspec new`, `openspec archive`,
-  `openspec list`, `openspec status`, `openspec instructions`
 - **Search (read-only)**: `find`, `grep`, `sed -n`
 
-**Intentional exclusions:** `cargo install`, `cargo run`, `cargo bench`,
-`git rebase`, `git reset`, `git checkout`, `git push --force`, `sed` without
-`-n`, and non-cargo package managers (`npm`, `pnpm`, `yarn`, `deno`, `bun`,
-`uv`, `pip`, `pipx`, `gem`). Add them via `extra` if you accept the wider
-surface for your project.
+**Named stack presets (opt-in via `stacks`):**
+
+- **`rust`**: `cargo build`, `cargo test`, `cargo clippy`, `cargo fmt`,
+  `cargo check`, `cargo tree`, `cargo deny`, `cargo update`
+- **`node`**: `npm install`, `npm ci`, `npm test`, `npm run`, `pnpm install`,
+  `pnpm test`, `pnpm run`, `yarn install`, `yarn test`
+- **`python`**: `pytest`, `pip install`, `ruff`, `black`, `mypy`, `flake8`,
+  `uv pip`, `uv sync`
+- **`go`**: `go build`, `go test`, `go vet`, `go fmt`, `gofmt`, `go mod`,
+  `golangci-lint`
+
+Tools that don't belong to a named stack — `just`, `mdbook build`,
+`openspec …`, etc. — go in `extra` (git-paw's own repo opts into `rust` and
+lists those in `extra`).
+
+**Intentional exclusions:** the universal set and every curated stack preset
+omit destructive verbs — `cargo install`, `cargo run`, `cargo bench`, `go run`,
+package-manager `publish`/`uninstall`, `git rebase`, `git reset`,
+`git checkout`, `git push --force`, and `sed` without `-n`. Add any of these via
+`extra` if you accept the wider surface for your project (`extra` entries are
+never validated).
 
 **Behaviour:**
 

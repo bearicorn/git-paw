@@ -291,6 +291,27 @@ git -C __FILL_IN_AGENT_WORKTREE__ status --porcelain     # inspect
 git -C __FILL_IN_AGENT_WORKTREE__ log --oneline -5        # review commits
 ```
 
+### Run dev commands bare — no exit-code-probe wrappers
+
+Run each dev command **bare** and read its exit status directly. Do
+**NOT** wrap a command in an exit-code probe such as
+`<cmd> && echo "EXIT $?"`, `<cmd>; echo $?`, or `RC=$?; echo "$RC"` just
+to print the result.
+
+The probe text varies from one run to the next (a different captured
+code, different trailing output), so the CLI's command-string permission
+whitelisting never matches the next invocation — every run raises a
+fresh approval prompt and the loop stalls on the same safe command
+forever. A bare, prefix-matchable command is approved once and
+generalises across every later run, which is exactly what the seeded
+allowlist relies on.
+
+This is about the *probe wrapper*, not about the exit status itself:
+keep observing and acting on whether a command succeeded or failed —
+just let the shell surface the status instead of appending an
+`echo "… $?"`. When you relay a command for an agent to run, hold it to
+the same discipline.
+
 ### Detecting stuck agents
 
 An agent stuck on a permission prompt publishes nothing — the broker stream
