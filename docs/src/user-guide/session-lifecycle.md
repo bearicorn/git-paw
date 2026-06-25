@@ -150,9 +150,19 @@ What it does:
 4. Re-tiles the agent grid to the layout a `start` of that many agents
    would have produced. Existing panes keep their indices, so any
    in-flight `send-keys` targeting (supervisor sweeps) still lands on the
-   right pane; the new pane gets the next index.
+   right pane; the new pane gets the next index. The re-tile preserves
+   **every** other agent's pane — no existing agent loses its pane — and
+   each agent row is rebalanced to equal width, so the added grid matches a
+   start-time grid of the same count in both pane count and pane widths.
+   After the re-tile, git-paw reconciles the session JSON against the live
+   panes and warns if any agent has no live pane (a JSON↔tmux desync), so it
+   is visible and recoverable rather than silent.
 5. Registers the branch in the session so subsequent `status`, `stop`,
    `purge`, and `pause` include it.
+
+The new agent's boot block is injected only once its CLI reaches an
+interactive ready state (the launch-readiness gate), not after a blind
+fixed sleep — the same protection `git paw start` applies.
 
 The supervisor is **not** signalled directly. The new agent
 auto-registers with the broker (filesystem watcher + its own boot-block
@@ -181,9 +191,17 @@ What it does:
    `--force`. This mirrors `git worktree remove`'s own safety.
    `--keep-worktree` skips the check entirely (nothing is deleted).
 3. Kills the agent's pane and re-tiles the grid for the smaller agent
-   count so it re-flows without leaving a hole. The branch→pane mapping
-   for the survivors is re-derived from `pane_current_path` on the
-   supervisor's next sweep, so a mid-grid removal is safe.
+   count so it re-flows without leaving a hole. The target pane is
+   resolved by mapping the removed branch's worktree to a live pane via
+   `pane_current_path` and killed by its tmux pane id — **regardless of the
+   process running in it** (a bare shell from a failed/never-started CLI, a
+   CLI, or anything else). Killing by resolved pane id (not by a position
+   computed from the session JSON) guarantees only the removed agent's pane
+   is closed and never a different agent's pane, even if a stale orphan pane
+   has shifted the grid. The re-tile preserves every other agent's pane and
+   rebalances each row to equal width. The branch→pane mapping for the
+   survivors is re-derived from `pane_current_path` on the supervisor's next
+   sweep, so a mid-grid removal is safe.
 4. Removes the worktree (reusing `git paw purge`'s per-worktree teardown)
    unless `--keep-worktree`, then drops the branch from the session.
 

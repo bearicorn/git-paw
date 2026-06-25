@@ -33,6 +33,12 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+/// Low launch-readiness budget for socket-isolated e2e tests. Test launches use
+/// fake CLIs (`echo`) whose panes never match a CLI-readiness marker, so the
+/// gate always falls back after its per-attempt budget; a short timeout keeps
+/// that fall-back fast instead of paying the production default per pane.
+const TEST_READINESS_TIMEOUT_MS: &str = "120";
+
 /// A test sandbox containing a git repository.
 ///
 /// The repo lives at `<sandbox>/repo/` so that worktrees created at
@@ -95,6 +101,7 @@ impl TmuxTestEnv {
     /// inside it dies with it.
     pub fn apply<'a>(&self, cmd: &'a mut Command) -> &'a mut Command {
         cmd.env("TMUX_TMPDIR", self.socket_dir.path())
+            .env("GIT_PAW_READINESS_TIMEOUT_MS", TEST_READINESS_TIMEOUT_MS)
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
     }
@@ -106,6 +113,7 @@ impl TmuxTestEnv {
         cmd: &'a mut assert_cmd::Command,
     ) -> &'a mut assert_cmd::Command {
         cmd.env("TMUX_TMPDIR", self.socket_dir.path())
+            .env("GIT_PAW_READINESS_TIMEOUT_MS", TEST_READINESS_TIMEOUT_MS)
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
     }
@@ -135,6 +143,7 @@ pub struct ProcessTmuxEnvGuard {
     previous_tmpdir: Option<OsString>,
     previous_tmux: Option<OsString>,
     previous_pane: Option<OsString>,
+    previous_readiness: Option<OsString>,
 }
 
 impl ProcessTmuxEnvGuard {
@@ -142,10 +151,12 @@ impl ProcessTmuxEnvGuard {
         let previous_tmpdir = std::env::var_os("TMUX_TMPDIR");
         let previous_tmux = std::env::var_os("TMUX");
         let previous_pane = std::env::var_os("TMUX_PANE");
+        let previous_readiness = std::env::var_os("GIT_PAW_READINESS_TIMEOUT_MS");
         // SAFETY: callers MUST gate the test with `#[serial]` so the env
         // mutation cannot race with other threads inspecting the env.
         unsafe {
             std::env::set_var("TMUX_TMPDIR", socket_dir);
+            std::env::set_var("GIT_PAW_READINESS_TIMEOUT_MS", TEST_READINESS_TIMEOUT_MS);
             std::env::remove_var("TMUX");
             std::env::remove_var("TMUX_PANE");
         }
@@ -153,6 +164,7 @@ impl ProcessTmuxEnvGuard {
             previous_tmpdir,
             previous_tmux,
             previous_pane,
+            previous_readiness,
         }
     }
 }
@@ -165,6 +177,10 @@ impl Drop for ProcessTmuxEnvGuard {
             match &self.previous_tmpdir {
                 Some(v) => std::env::set_var("TMUX_TMPDIR", v),
                 None => std::env::remove_var("TMUX_TMPDIR"),
+            }
+            match &self.previous_readiness {
+                Some(v) => std::env::set_var("GIT_PAW_READINESS_TIMEOUT_MS", v),
+                None => std::env::remove_var("GIT_PAW_READINESS_TIMEOUT_MS"),
             }
             if let Some(v) = &self.previous_tmux {
                 std::env::set_var("TMUX", v);

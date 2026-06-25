@@ -1317,6 +1317,13 @@ fn cmd_supervisor(
     )?;
     tmux_session.execute()?;
 
+    // Rebalance each agent row to equal width on the live window (design D4,
+    // G3): the raw `split-window -h` chain renders a row as 50/25/25, so a
+    // column-precise resize evens it out now that the panes exist.
+    if let Err(e) = tmux::rebalance_agent_rows(&tmux_session.name, agent_panes.len()) {
+        eprintln!("warning: could not rebalance agent-row widths: {e}");
+    }
+
     // Save session state so `git paw status`/`stop`/`purge` see the session.
     let mut state = Session {
         session_name: tmux_session.name.clone(),
@@ -1348,19 +1355,23 @@ fn cmd_supervisor(
         git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET,
     );
 
-    // Wait ~2s for panes to boot to an interactive state, then inject the
-    // initial prompt into the supervisor pane (index 0) and each coding
-    // agent pane (indices 2..N+1). The dashboard pane (index 1) is a TUI
-    // process and does NOT receive a send-keys prompt.
+    // Inject the initial prompt into the supervisor pane (index 0) and each
+    // coding agent pane (indices 2..N+1). The dashboard pane (index 1) is a
+    // TUI process and does NOT receive a send-keys prompt.
     //
-    // A single Enter is sent here — on paste-aware CLIs (Claude Code
+    // Instead of a blind fixed sleep, each pane's boot block is gated on
+    // observed CLI readiness (design D1, G1): `gate_pane_for_injection` polls
+    // the pane for its CLI's interactive marker — relaunching a still-bare
+    // shell, and falling back to injection after the budget for an
+    // unrecognised CLI — so the multi-line boot block is never typed into a
+    // bare shell (the v0.8.0 G1 failure).
+    //
+    // A single Enter is sent per pane — on paste-aware CLIs (Claude Code
     // v2.1.x) this leaves the prompt in a paste-buffer state which is then
     // recovered by the supervisor agent via the paste-buffer-recovery skill
     // (see assets/agent-skills/supervisor.md). Sending more than one Enter
     // at launch risks accidentally accepting a follow-on permission prompt
     // on fast CLIs and is intentionally avoided.
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
     let supervisor_boot_block =
         git_paw::skills::build_boot_block("supervisor", &broker_config.url());
     let supervisor_framing =
@@ -1371,11 +1382,17 @@ fn cmd_supervisor(
             .to_string();
     let supervisor_prompt = format!("{supervisor_boot_block}\n\n{supervisor_framing}");
     let supervisor_delay = resolve_submit_delay_ms(&supervisor_cli, config);
+    let _ = tmux::gate_pane_for_injection(&tmux_session.name, 0, &supervisor_pane.cli_command);
     submit_prompt_to_pane(&tmux_session.name, 0, &supervisor_prompt, supervisor_delay);
 
     let agent_delay = resolve_submit_delay_ms(&agent_cli, config);
     for (idx, prompt) in agent_prompts.iter().enumerate() {
         let pane_idx = git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET + idx;
+        let _ = tmux::gate_pane_for_injection(
+            &tmux_session.name,
+            pane_idx,
+            &agent_panes[idx].cli_command,
+        );
         submit_prompt_to_pane(&tmux_session.name, pane_idx, prompt, agent_delay);
     }
 
@@ -2417,6 +2434,13 @@ fn cmd_add(
     )
     .execute()?;
 
+    // Rebalance the (possibly newly-full) agent row to equal width on the live
+    // window so the added grid matches a start-time grid width-for-width
+    // (design D4, G3).
+    if let Err(e) = tmux::rebalance_agent_rows(&existing.session_name, prev_agent_count + 1) {
+        eprintln!("warning: could not rebalance agent-row widths: {e}");
+    }
+
     // 4.8 Append the branch/pane entry to the session JSON.
     // 4.9 When paused, hold the boot prompt for `resume` instead of submitting.
     if paused {
@@ -2457,14 +2481,37 @@ fn cmd_add(
             updated.session_name
         );
     } else {
-        // Let the pane's CLI boot to an interactive state before submitting,
-        // matching the start-time settle (cmd_supervisor sleeps 2s here too).
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // Gate boot-block injection on observed CLI readiness, matching the
+        // start path (design D1, G1): poll the new pane for its CLI's
+        // interactive marker — relaunching a still-bare shell, falling back to
+        // injection after the budget — instead of a blind fixed sleep.
+        let _ =
+            tmux::gate_pane_for_injection(&updated.session_name, new_pane_idx, &pane.cli_command);
         let delay = resolve_submit_delay_ms(&agent_cli, &config);
         submit_prompt_to_pane(&updated.session_name, new_pane_idx, &prompt, delay);
         println!(
             "Added '{branch}' to session '{}' (pane {new_pane_idx}).",
             updated.session_name
+        );
+    }
+
+    // Reconcile the session JSON against the live panes after the re-tile and
+    // surface any agent with no live pane (design D3, G2b) so a dropped/
+    // orphaned pane is visible and recoverable rather than silent.
+    let reconcile_agents: Vec<(String, std::path::PathBuf)> = updated
+        .worktrees
+        .iter()
+        .map(|w| (w.branch.clone(), w.worktree_path.clone()))
+        .collect();
+    if let Ok(missing) = tmux::reconcile_agents_to_panes(&updated.session_name, &reconcile_agents)
+        && !missing.is_empty()
+    {
+        eprintln!(
+            "warning: {} agent(s) in the session JSON have no live tmux pane \
+             (JSON↔tmux desync): {}. Recover with `git paw remove <branch>` then \
+             `git paw add <branch>`.",
+            missing.len(),
+            missing.join(", ")
         );
     }
 
@@ -2540,14 +2587,20 @@ fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Result<(), PawE
     let _lock = git_paw::lock::SessionLock::acquire(&repo_root)?;
 
     let offset = agent_pane_offset(&existing);
-    let pane_idx = offset + pos;
     let session_alive = tmux::is_session_alive(&existing.session_name).unwrap_or(false);
 
-    // 5.5 Kill the target tmux pane.
-    if session_alive {
-        let idx = u32::try_from(pane_idx)
-            .map_err(|_| PawError::TmuxError(format!("pane index {pane_idx} out of range")))?;
-        tmux::kill_pane(&existing.session_name, idx)?;
+    // 5.5 Kill the target tmux pane by RESOLVED pane id, not a JSON-position
+    // index (design D2, G2a): map the removed branch's worktree to its live
+    // pane via `pane_current_path` and kill that pane id, regardless of the
+    // process running in it (a bare shell from a failed launch, a CLI, or
+    // anything else). This never targets a different agent's pane even when a
+    // stale orphan pane has shifted the grid (the v0.8.0 G2 failure), and is
+    // an idempotent no-op when no pane maps (the pane is already gone).
+    if session_alive
+        && let Some(pane_id) =
+            tmux::resolve_pane_id_for_worktree(&existing.session_name, &target.worktree_path)?
+    {
+        tmux::kill_pane_by_id(&pane_id)?;
     }
 
     // 5.6 Recompute layout_for(N-1) and re-apply so the grid re-flows.
@@ -2555,6 +2608,12 @@ fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Result<(), PawE
     if session_alive && remaining > 0 {
         let layout = git_paw::supervisor::layout::layout_for(remaining)?;
         tmux::build_remove_retile_commands(&existing.session_name, remaining, layout).execute()?;
+        // Rebalance the re-flowed agent rows to equal width on the live window
+        // (design D4, G3): tmux renumbered the survivors after the kill, so the
+        // contiguous rows are resized to even columns for the new count.
+        if let Err(e) = tmux::rebalance_agent_rows(&existing.session_name, remaining) {
+            eprintln!("warning: could not rebalance agent-row widths: {e}");
+        }
     }
 
     // 5.7 Delegate to detach_worktree for removal, unless --keep-worktree.
@@ -3917,12 +3976,14 @@ mod tests {
         );
     }
 
-    // Maps to scenario `boot-delay timing` from prompt-submit-fix. The
-    // pre-`send-keys` sleep in `cmd_supervisor` is governed by a literal
-    // `Duration::from_secs(2)` expression; the spec requires the value
-    // be in [1500ms, 3000ms]. (test-coverage-v0-5-0 task 3.2)
+    // Maps to scenario `Boot block withheld until the pane is CLI-ready` from
+    // session-orchestration-robustness (G1). The blind pre-`send-keys`
+    // fixed sleep was replaced by the launch-readiness gate: `cmd_supervisor`
+    // MUST gate every prompt-bearing pane via `tmux::gate_pane_for_injection`
+    // before injecting its boot block, rather than relying on a wall-clock
+    // sleep that the v0.8.0 dogfood proved racy.
     #[test]
-    fn supervisor_launch_records_boot_delay_constant() {
+    fn supervisor_launch_gates_injection_on_readiness() {
         let src = include_str!("main.rs");
         let cmd_start = src
             .find("fn cmd_supervisor(")
@@ -3948,38 +4009,20 @@ mod tests {
         }
         let body = &src[body_start..end];
 
-        // Find the pre-send-keys sleep call: `std::thread::sleep(<expr>)`.
-        let sleep_idx = body
-            .find("std::thread::sleep")
-            .expect("cmd_supervisor must call std::thread::sleep before injecting prompts");
-
-        // Look for one of the supported expressions in the surrounding 200
-        // bytes and parse out the numeric component + unit.
-        let snippet = &body[sleep_idx..(sleep_idx + 200).min(body.len())];
-        let ms = if let Some(open) = snippet.find("Duration::from_secs(") {
-            let after = &snippet[open + "Duration::from_secs(".len()..];
-            let close = after.find(')').expect("matching ) for from_secs");
-            let n: u64 = after[..close]
-                .trim()
-                .parse()
-                .expect("from_secs argument should parse as u64");
-            n * 1000
-        } else if let Some(open) = snippet.find("Duration::from_millis(") {
-            let after = &snippet[open + "Duration::from_millis(".len()..];
-            let close = after.find(')').expect("matching ) for from_millis");
-            after[..close]
-                .trim()
-                .parse::<u64>()
-                .expect("from_millis argument should parse as u64")
-        } else {
-            panic!(
-                "cmd_supervisor's pre-send-keys sleep should use Duration::from_secs / from_millis; got:\n{snippet}"
-            );
-        };
-
+        let gate_idx = body.find("gate_pane_for_injection").expect(
+            "cmd_supervisor must gate boot-block injection on CLI readiness \
+             (tmux::gate_pane_for_injection) instead of a blind fixed sleep",
+        );
+        let submit_idx = body
+            .find("submit_prompt_to_pane")
+            .expect("cmd_supervisor must still inject the boot block via submit_prompt_to_pane");
         assert!(
-            (1500..=3000).contains(&ms),
-            "pre-send-keys boot delay must be in [1500ms, 3000ms]; got {ms}ms"
+            gate_idx < submit_idx,
+            "the readiness gate must run BEFORE the first boot-block injection"
+        );
+        assert!(
+            !body.contains("from_secs(2)"),
+            "the blind 2s pre-injection sleep must be gone (replaced by the readiness gate)"
         );
     }
 
