@@ -1,5 +1,8 @@
-## ADDED Requirements
+# selftest Specification
 
+## Purpose
+TBD - created by archiving change selftest-harness. Update Purpose after archive.
+## Requirements
 ### Requirement: `git paw selftest` subcommand
 
 The CLI SHALL provide a `selftest` subcommand that runs an isolated, end-to-end session lifecycle against a throwaway repository and a dummy CLI, then reports a single pass/fail verdict. The subcommand SHALL parse with no required arguments and SHALL exit `0` when the lifecycle completes successfully and non-zero when any lifecycle step fails.
@@ -116,3 +119,4 @@ The `selftest` harness SHALL isolate its tmux and broker resources so it never c
 - **WHEN** each harness allocates its broker port
 - **THEN** each SHALL bind `127.0.0.1:0` to obtain a distinct OS-assigned port
 - **AND** neither run SHALL fail with an "address already in use" broker-port error
+

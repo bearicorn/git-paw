@@ -23,6 +23,7 @@ Commands:
   init        Initialize the repository for git-paw (creates .git-paw/)
   replay      Replay a captured pane log (requires session logging)
   approvals   Report manually-approved command patterns for a session
+  selftest    Run an isolated end-to-end session-lifecycle smoke check
   help        Print this message or the help of the given subcommand(s)
 
 Options:
@@ -432,6 +433,50 @@ git paw approvals --limit 5
 The `--json` output is a `{ "session", "approvals": [...] }` object where each
 entry carries `pattern`, `count`, `suggested_target`, `first_seen`, and
 `last_seen`. An empty or missing log yields `{ "session": "...", "approvals": [] }`.
+
+## `git paw selftest`
+
+Runs an isolated, end-to-end session-lifecycle smoke check — the shipped form
+of the dogfood isolation recipe — so the orchestration plumbing can be verified
+anywhere, including CI, without a real LLM backend or an interactive terminal.
+
+```
+Usage: git-paw selftest
+
+Options:
+  -h, --help  Print help
+```
+
+The harness drives `start` → `add` → `remove` → `stop` against a throwaway
+repository and a dummy CLI (`cat`), observing that the agent roster grows on
+`add` and shrinks on `remove`. It takes no arguments.
+
+Every external resource is isolated so the run never disturbs live work:
+
+- a **private tmux socket** (a per-run `TMUX_TMPDIR`, with `TMUX`/`TMUX_PANE`
+  stripped from every child) — your default tmux socket is untouched;
+- an **OS-assigned ephemeral broker port** (`bind 127.0.0.1:0`), so concurrent
+  runs never collide on the broker port;
+- an **isolated `HOME`**, so your real sessions directory is never written;
+- a **throwaway git repository** under `.git-paw/tmp/`, swept clean before the
+  run and removed on both the success and failure paths.
+
+**Exit behaviour:**
+
+- Exits `0` and prints `selftest passed` when the full lifecycle completes.
+- Skips with `selftest skipped: tmux not available` and exits `0` when tmux is
+  not on `PATH` (CI runners have tmux, so a skip never silently passes there).
+- Exits non-zero and names the failing step (e.g. `selftest failed at step
+  'add': …`) only on an actual lifecycle failure.
+
+**Example:**
+```bash
+git paw selftest
+```
+
+See the [Selftest chapter](user-guide/selftest.md) for the full isolation recipe
+and how the harness closes the deferred live-verification of add/remove roster
+transitions.
 
 ## Exit Codes
 

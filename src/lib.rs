@@ -32,6 +32,7 @@ pub mod logging;
 pub mod mcp;
 pub mod opsx;
 pub mod replay;
+pub mod selftest;
 pub mod session;
 pub mod skills;
 pub mod specs;

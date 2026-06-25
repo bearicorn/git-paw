@@ -19,11 +19,23 @@ use git_paw::broker::messages::{
 use git_paw::broker::{BrokerState, WatchTarget, start_broker_with};
 use git_paw::config::BrokerConfig;
 
-fn broker_config(port_base: u16) -> BrokerConfig {
-    #[allow(clippy::cast_possible_truncation)]
+/// Allocates an OS-assigned ephemeral broker port (`bind 127.0.0.1:0`, read
+/// back, release), matching `tests/e2e_supervisor_stop.rs::pick_broker_port`.
+/// Replaces the former `BASE + (process::id() % N)` scheme (F8 root cause),
+/// which keyed the port on the PID modulo a small constant and collided
+/// across concurrent test runs.
+fn pick_broker_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral port")
+        .local_addr()
+        .expect("read local addr")
+        .port()
+}
+
+fn broker_config() -> BrokerConfig {
     BrokerConfig {
         enabled: true,
-        port: port_base + (std::process::id() as u16 % 100),
+        port: pick_broker_port(),
         bind: "127.0.0.1".to_string(),
         ..Default::default()
     }
@@ -108,7 +120,7 @@ fn broker_aggregator_writes_expected_sections_and_no_learning_variant_appears() 
     }
     state.attach_learnings(Arc::clone(&agg));
 
-    let config = broker_config(20_000);
+    let config = broker_config();
     // Long interval — we drive the flush manually in the assertion. Skip
     // the test if the chosen port happens to be in use locally.
     let Ok(handle) = start_broker_with(
@@ -231,7 +243,7 @@ fn shutdown_flush_captures_unresolved_blocks() {
     }
     state.attach_learnings(Arc::clone(&agg));
 
-    let config = broker_config(20_200);
+    let config = broker_config();
     let Ok(handle) = start_broker_with(
         &config,
         state,
@@ -269,7 +281,7 @@ fn restart_preserves_prior_session_and_appends_new_h2() {
             a.register_agent("feat-y");
         }
         state.attach_learnings(Arc::clone(&agg));
-        let config = broker_config(20_400);
+        let config = broker_config();
         let Ok(handle) = start_broker_with(
             &config,
             state,
@@ -302,7 +314,7 @@ fn restart_preserves_prior_session_and_appends_new_h2() {
             a.register_agent("feat-x");
         }
         state.attach_learnings(Arc::clone(&agg));
-        let config = broker_config(20_600);
+        let config = broker_config();
         let Ok(handle) = start_broker_with(
             &config,
             state,
@@ -347,7 +359,7 @@ fn periodic_flush_writes_accumulated_entries_on_timer() {
     }
     state.attach_learnings(Arc::clone(&agg));
 
-    let config = broker_config(20_800);
+    let config = broker_config();
     let Ok(handle) = start_broker_with(
         &config,
         state,

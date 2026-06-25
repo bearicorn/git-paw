@@ -57,7 +57,9 @@ impl SpecsFormat {
                   # Stop session (kills CLIs, preserves worktrees for later)\n  \
                   git paw stop\n\n  \
                   # Remove everything\n  \
-                  git paw purge"
+                  git paw purge\n\n  \
+                  # Verify the orchestration plumbing end-to-end (isolated, no LLM)\n  \
+                  git paw selftest"
 )]
 pub struct Cli {
     /// Subcommand to run. Defaults to `start` if omitted.
@@ -535,6 +537,27 @@ pub enum Command {
         )]
         log_file: Option<PathBuf>,
     },
+
+    /// Run an isolated end-to-end session-lifecycle smoke check
+    #[command(
+        about = "Run an isolated end-to-end session-lifecycle smoke check",
+        long_about = "Exercises the full session lifecycle (start \u{2192} add \u{2192} remove \u{2192} \
+                      stop) against a throwaway repository and a dummy CLI, then reports a single \
+                      pass/fail verdict. No real AI CLI backend (LLM) and no interactive terminal \
+                      are required.\n\n\
+                      The harness isolates every external resource so it never disturbs your live \
+                      work: a private tmux socket (it does not touch your default tmux socket), an \
+                      OS-assigned ephemeral broker port, an isolated HOME (your real sessions \
+                      directory is untouched), and a throwaway git repository under .git-paw/tmp/. \
+                      The session boots in detached mode with a dummy CLI (`cat`) in place of a \
+                      real agent CLI, so no LLM process is spawned. All artifacts are cleaned up \
+                      on both the success and failure paths.\n\n\
+                      Exits 0 when the lifecycle completes (printing `selftest passed`), or skips \
+                      with a message and exits 0 when tmux is unavailable. Exits non-zero and \
+                      names the failing step only on an actual lifecycle failure.\n\n\
+                      Example:\n  git paw selftest"
+    )]
+    Selftest,
 }
 
 #[cfg(test)]
@@ -1812,6 +1835,54 @@ mod tests {
         assert!(
             !help.contains("__dashboard"),
             "hidden __dashboard subcommand should not appear in help output"
+        );
+    }
+
+    // -- Selftest subcommand --
+
+    #[test]
+    fn selftest_parses_with_no_args() {
+        let cli = parse(&["selftest"]);
+        assert!(matches!(cli.command.unwrap(), Command::Selftest));
+    }
+
+    #[test]
+    fn selftest_rejects_unknown_flags() {
+        let result = Cli::try_parse_from(["git-paw", "selftest", "--anything"]);
+        assert!(result.is_err(), "selftest takes no flags");
+    }
+
+    #[test]
+    fn selftest_help_describes_isolated_lifecycle_with_example() {
+        let result = Cli::try_parse_from(["git-paw", "selftest", "--help"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(
+            help.contains("dummy CLI"),
+            "selftest --help should describe the dummy CLI; got: {help}"
+        );
+        assert!(
+            help.to_lowercase().contains("no real ai cli")
+                || help.to_lowercase().contains("no llm")
+                || help.to_lowercase().contains("real ai cli backend"),
+            "selftest --help should say no real LLM backend is required; got: {help}"
+        );
+        assert!(
+            help.contains("git paw selftest"),
+            "selftest --help should include a usage example; got: {help}"
+        );
+    }
+
+    #[test]
+    fn help_shows_selftest_subcommand() {
+        let result = Cli::try_parse_from(["git-paw", "--help"]);
+        let err = result.unwrap_err();
+        let help = err.to_string();
+        assert!(
+            help.contains("selftest"),
+            "root help should list the selftest subcommand, got: {help}"
         );
     }
 }

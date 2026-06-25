@@ -396,6 +396,20 @@ See the [MCP user-guide chapter](https://bearicorn.github.io/git-paw/user-guide/
 for per-client setup (Cursor, ChatGPT Desktop, Windsurf, VS Code MCP), the full
 tool reference, and known limitations.
 
+### `selftest` — Verify the orchestration plumbing (v0.9.0+)
+
+```bash
+git paw selftest
+```
+
+Runs a full session lifecycle (start → add → remove → stop) against a throwaway
+repo and a dummy CLI (`cat`) — no real LLM backend and no interactive terminal.
+Every external resource is isolated (private tmux socket, ephemeral broker port,
+isolated `HOME`, throwaway repo under `.git-paw/tmp/`) and cleaned up afterward.
+Exits `0` on a healthy build (or when tmux is unavailable, printing a skip),
+non-zero and naming the failing step on an actual lifecycle failure. See the
+[Selftest chapter](docs/src/user-guide/selftest.md).
+
 ## Configuration
 
 ### Per-repo config (`.git-paw/config.toml`)

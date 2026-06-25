@@ -16,9 +16,9 @@ This chapter covers git-paw's internal architecture: module structure, data flow
 │  detect.rs    git.rs      tmux.rs    session.rs    logging.rs    │
 │  (PATH scan)  (worktrees) (builder)  (JSON state)  (pane logs)   │
 │                                                                   │
-│  agents.rs    skills.rs   init.rs    replay.rs                   │
-│  (AGENTS.md)  (skill      (project    (log                       │
-│               templates)  bootstrap)  playback)                  │
+│  agents.rs    skills.rs   init.rs    replay.rs    selftest.rs    │
+│  (AGENTS.md)  (skill      (project    (log        (smoke         │
+│               templates)  bootstrap)  playback)    check)        │
 ├───────────────────────────────────────────────────────────────────┤
 │  broker/                  supervisor/             specs/         │
 │  ├── mod.rs               ├── mod.rs              ├── mod.rs     │
@@ -50,6 +50,7 @@ This chapter covers git-paw's internal architecture: module structure, data flow
 | **Skills** | `src/skills.rs` | Loads standardized agent skills from `.agents/skills/` following the [agentskills.io specification](https://agentskills.io). Injects coordination + supervisor instructions into the worktree sidecar. |
 | **Init** | `src/init.rs` | `git paw init` bootstrap. Creates `.git-paw/`, default config, logs directory, gitignore entries. Auto-detects `.specify/` for Spec Kit. |
 | **Replay** | `src/replay.rs` | `git paw replay`. Reads pane logs from `.git-paw/logs/` and either strips ANSI or pipes through `less -R`. |
+| **Selftest** | `src/selftest.rs` | `git paw selftest`. Isolated end-to-end lifecycle smoke check (start → add → remove → stop) against a throwaway repo and a dummy CLI (`cat`) — private tmux socket, ephemeral broker port, isolated `HOME`, no LLM backend. The shipped form of the dogfood isolation recipe. |
 | **Logging** | `src/logging.rs` | Per-pane log capture via `tmux pipe-pane`. Files at `.git-paw/logs/<session>/<branch>.log`. |
 | **Broker** | `src/broker/` | HTTP coordination server (axum) with watcher + conflict detector + learnings subsystems. Detail below. |
 | **Supervisor** | `src/supervisor/` | Supervisor-mode subsystems (auto-approve, dev allowlist, stall sweeps, permission prompts, pane layout). Detail below. |

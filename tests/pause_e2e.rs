@@ -324,15 +324,24 @@ fn pause_detaches_and_stops_broker() {
         .success();
 
     // Always tear down the tmux session before asserting.
-    let port_free = wait_until_port_free(broker_port, Duration::from_secs(5));
+    //
+    // De-flake (selftest-harness §3.4): the broker shuts down when `pause`
+    // kills the dashboard pane, but under full-suite load (especially under
+    // `cargo llvm-cov` + concurrent shards) the OS can take longer than the
+    // former fixed 5s to actually release the listener socket. This is a
+    // port-RELEASE timing race, not a selection collision — the port was
+    // already OS-ephemeral. `wait_until_port_free` polls in a bounded loop and
+    // returns the instant the port frees, so a wider 30s bound costs nothing
+    // in the common case and absorbs the slow-release tail.
+    let port_free = wait_until_port_free(broker_port, Duration::from_secs(30));
     kill_tmux_session(&session_name);
 
     assert!(alive, "tmux session should still be alive after pause");
 
-    // Assertion 4: broker port released within 5s.
+    // Assertion 4: broker port released within the bounded retry window.
     assert!(
         port_free,
-        "broker port {broker_port} should be free after pause"
+        "broker port {broker_port} should be free after pause (waited up to 30s for release)"
     );
 
     // Assertion 5: session JSON status flipped to paused.
