@@ -2,9 +2,9 @@
 //!
 //! Spawns a real (detached) tmux session, lays down a fake "agent pane"
 //! whose buffer contains a permission prompt, and verifies that
-//! `auto_approve_pane` either dispatches `BTab Down Enter` or no-ops
-//! depending on whether the captured command matches the safe-command
-//! whitelist.
+//! `auto_approve_pane` either dispatches the option-index keystrokes (the
+//! option digit followed by `Enter`) or no-ops depending on whether the
+//! captured command is classified safe and live.
 //!
 //! tmux is a hard dependency of git-paw, so these tests run normally and
 //! are not gated behind `#[ignore]`.
@@ -70,7 +70,7 @@ fn create_detached_session(name: &str) {
 
 #[test]
 #[serial]
-fn safe_prompt_dispatches_btab_down_enter_against_real_tmux() {
+fn safe_prompt_dispatches_keystrokes_against_real_tmux() {
     if !tmux_available() {
         eprintln!("skipping: tmux not available");
         return;
@@ -101,8 +101,8 @@ fn safe_prompt_dispatches_btab_down_enter_against_real_tmux() {
     );
     assert!(captured.contains("cargo test"));
 
-    // Drive the auto-approver. The Cargo class is safe, so it must
-    // dispatch BTab Down Enter via three send-keys calls.
+    // Drive the auto-approver. The Cargo class is safe and live, so it must
+    // dispatch the option digit + Enter via send-keys.
     let mut dispatcher = TmuxKeyDispatcher;
     let req = ApprovalRequest {
         enabled: true,
@@ -111,6 +111,8 @@ fn safe_prompt_dispatches_btab_down_enter_against_real_tmux() {
         agent_id: "feat-test",
         kind: PermissionType::Cargo,
         matched_entry: Some("cargo test"),
+        live_prompt: true,
+        option_index: 1,
         broker_url: None,
     };
     let fired = auto_approve_pane(&mut dispatcher, req).expect("auto_approve_pane");
@@ -155,6 +157,8 @@ fn unsafe_prompt_is_noop_against_real_tmux() {
         agent_id: "feat-test",
         kind: PermissionType::Unknown,
         matched_entry: None,
+        live_prompt: true,
+        option_index: 1,
         broker_url: None,
     };
     let fired = auto_approve_pane(&mut dispatcher, req).expect("auto_approve_pane");
@@ -186,6 +190,8 @@ fn disabled_config_is_noop_against_real_tmux() {
         agent_id: "feat-test",
         kind: PermissionType::Cargo,
         matched_entry: Some("cargo test"),
+        live_prompt: true,
+        option_index: 1,
         broker_url: None,
     };
     let fired = auto_approve_pane(&mut dispatcher, req).expect("auto_approve_pane");

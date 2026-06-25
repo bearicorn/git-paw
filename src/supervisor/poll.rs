@@ -6,10 +6,10 @@
 //! 1. Detects stalled agents via [`super::stall::detect_stalled_agents`].
 //! 2. Captures each stalled agent's pane via
 //!    [`super::permission_prompt::detect_permission_prompt`].
-//! 3. For safe-classified prompts, dispatches `BTab Down Enter` via
-//!    [`super::approve::auto_approve_pane`].
-//! 4. For `Unknown` prompts, forwards a question to the dashboard inbox so
-//!    the human can resolve it.
+//! 3. For LIVE, safe-classified prompts, selects the option index and
+//!    dispatches the approval keystrokes via [`super::approve::auto_approve_pane`].
+//! 4. For danger-list matches and `Unknown` prompts, forwards a question to
+//!    the supervisor so the human can resolve it.
 //!
 //! The loop driver lives in `main.rs` (background thread spawned by
 //! `cmd_supervisor`); this module keeps the per-tick logic pure and
@@ -27,7 +27,10 @@ use crate::config::AutoApproveConfig;
 use crate::error::PawError;
 
 use super::approve::{ApprovalRequest, KeyDispatcher, auto_approve_pane};
-use super::auto_approve::{is_safe_command, is_worktree_file_op};
+use super::auto_approve::{
+    detect_prompt_shape, extract_command_slice, is_dangerous, is_live_prompt, is_safe_command,
+    is_scratch_rm, is_worktree_file_op, is_worktree_git_op, select_option_index,
+};
 use super::permission_prompt::{PermissionType, detect_permission_prompt};
 use super::stall::detect_stalled_agents;
 
@@ -312,28 +315,77 @@ where
             continue;
         };
         let captured = ctx.inspector.captured_text(ctx.session, pane_index);
-        // Shell whitelist takes precedence: a `cargo`/`git`/`curl` prompt is
-        // approved exactly as in v0.5.0 before the file-op classifier runs.
-        if let Some(entry) = first_whitelist_match(&captured, whitelist) {
-            let req = ApprovalRequest {
-                enabled: cfg.enabled,
-                session: ctx.session,
+        // Classify against the prompted COMMAND slice (text between the
+        // `Bash command` / `Bash(` header and the confirmation question), not
+        // the surrounding narration. Fall back to the whole capture when no
+        // header is present.
+        let slice = extract_command_slice(&captured).unwrap_or_else(|| captured.clone());
+
+        // Live-prompt gate: act only when the footer marker `Esc to cancel`
+        // is within the last ~4 non-blank lines. A non-live capture (mere
+        // narration, or a prompt scrolled away) is never acted on — no
+        // keystrokes and no forward — so it cannot trip a phantom approval.
+        if !is_live_prompt(&captured) {
+            out.push((agent_id, TickOutcome::NoPrompt));
+            continue;
+        }
+
+        // Option-index selection per the prompt shape and broad-grant rule.
+        let option_index = select_option_index(detect_prompt_shape(&captured), &slice);
+
+        // Danger-first precedence: a curated danger-list match is a terminal
+        // escalate that overrides any whitelist / safe-by-pattern match.
+        if is_dangerous(&slice) {
+            ctx.forwarder.forward_question(&agent_id, kind, &captured);
+            out.push((agent_id, TickOutcome::Forwarded { kind }));
+            continue;
+        }
+
+        // Scratch-path exception: an `rm -rf` whose every target is repo/OS
+        // scratch classifies safe-by-pattern (the danger-list does not escalate
+        // it).
+        if is_scratch_rm(&slice) {
+            out.push(dispatch_safe(
+                ctx,
+                &agent_id,
                 pane_index,
-                agent_id: &agent_id,
-                kind,
-                matched_entry: Some(entry.as_str()),
-                broker_url: ctx.broker_url,
-            };
-            match auto_approve_pane(ctx.dispatcher, req) {
-                Ok(true) => out.push((
-                    agent_id,
-                    TickOutcome::Approved {
-                        matched_entry: entry,
-                        kind,
-                    },
-                )),
-                _ => out.push((agent_id, TickOutcome::Forwarded { kind })),
-            }
+                cfg.enabled,
+                option_index,
+                "scratch-rm",
+            ));
+            continue;
+        }
+
+        // Worktree-confined `git add` / `git commit` pre-approval (F2
+        // keystone): an unattended agent stages and commits its own work
+        // without stalling, since its cwd resolves inside its isolated
+        // worktree. `git push` is NOT covered — the danger-list above already
+        // escalated it.
+        if let Some(root) = ctx.worktree_resolver.worktree_root_for(&agent_id)
+            && is_worktree_git_op(&slice, &root)
+        {
+            out.push(dispatch_safe(
+                ctx,
+                &agent_id,
+                pane_index,
+                cfg.enabled,
+                option_index,
+                "worktree-git",
+            ));
+            continue;
+        }
+
+        // Shell whitelist (read-mostly verbs + configured safe commands),
+        // subordinate to the danger-list above.
+        if let Some(entry) = first_whitelist_match(&slice, whitelist) {
+            out.push(dispatch_safe(
+                ctx,
+                &agent_id,
+                pane_index,
+                cfg.enabled,
+                option_index,
+                &entry,
+            ));
             continue;
         }
 
@@ -350,6 +402,8 @@ where
                 agent_id: &agent_id,
                 kind: PermissionType::WorktreeFileOp,
                 matched_entry: Some("worktree-file-op"),
+                live_prompt: true,
+                option_index,
                 broker_url: ctx.broker_url,
             };
             match auto_approve_pane(ctx.dispatcher, req) {
@@ -374,6 +428,57 @@ where
         out.push((agent_id, TickOutcome::Forwarded { kind }));
     }
     out
+}
+
+/// Dispatches the approval keystrokes for a command the classifier judged
+/// known-safe ([`PermissionType::SafeCommand`]) and returns the per-agent
+/// outcome. Centralises the request build + dispatch shared by the
+/// scratch-rm, worktree-git, and whitelist approval paths.
+///
+/// The caller has already passed the live-prompt gate, so `live_prompt: true`
+/// is set unconditionally here; `auto_approve_pane` re-checks it as a hard
+/// precondition.
+fn dispatch_safe<R, I, D, Q, W>(
+    ctx: &mut PollContext<'_, R, I, D, Q, W>,
+    agent_id: &str,
+    pane_index: usize,
+    enabled: bool,
+    option_index: u8,
+    matched_entry: &str,
+) -> (String, TickOutcome)
+where
+    R: PaneResolver,
+    I: PaneInspector,
+    D: KeyDispatcher,
+    Q: QuestionForwarder,
+    W: WorktreeResolver,
+{
+    let req = ApprovalRequest {
+        enabled,
+        session: ctx.session,
+        pane_index,
+        agent_id,
+        kind: PermissionType::SafeCommand,
+        matched_entry: Some(matched_entry),
+        live_prompt: true,
+        option_index,
+        broker_url: ctx.broker_url,
+    };
+    match auto_approve_pane(ctx.dispatcher, req) {
+        Ok(true) => (
+            agent_id.to_string(),
+            TickOutcome::Approved {
+                matched_entry: matched_entry.to_string(),
+                kind: PermissionType::SafeCommand,
+            },
+        ),
+        _ => (
+            agent_id.to_string(),
+            TickOutcome::Forwarded {
+                kind: PermissionType::SafeCommand,
+            },
+        ),
+    }
 }
 
 fn first_whitelist_match(captured: &str, whitelist: &[String]) -> Option<String> {
@@ -516,7 +621,7 @@ mod tests {
         let resolver = |id: &str| if id == "agent-a" { Some(2) } else { None };
         let inspector = StubInspector {
             kind: Some(PermissionType::Cargo),
-            captured: "cargo test --workspace".into(),
+            captured: "cargo test --workspace\nEsc to cancel".into(),
         };
         let (out, dispatcher, forwarder) = run_tick(&state, &cfg, &resolver, &inspector);
         assert_eq!(out.len(), 1);
@@ -528,7 +633,7 @@ mod tests {
                 kind,
             } => {
                 assert_eq!(matched_entry, "cargo test");
-                assert_eq!(*kind, PermissionType::Cargo);
+                assert_eq!(*kind, PermissionType::SafeCommand);
             }
             _ => panic!("expected Approved, got {outcome:?}"),
         }
@@ -538,7 +643,7 @@ mod tests {
             .iter()
             .map(|(_, _, k)| k.as_str())
             .collect();
-        assert_eq!(keys, vec!["BTab", "Down", "Enter"]);
+        assert_eq!(keys, vec!["1", "Enter"]);
         assert!(forwarder.forwards.borrow().is_empty());
     }
 
@@ -550,7 +655,7 @@ mod tests {
         let resolver = |_id: &str| Some(3);
         let inspector = StubInspector {
             kind: Some(PermissionType::Unknown),
-            captured: "rm -rf /tmp/foo\nrequires approval".into(),
+            captured: "rm -rf /tmp/foo\nrequires approval\nEsc to cancel".into(),
         };
         let (out, dispatcher, forwarder) = run_tick(&state, &cfg, &resolver, &inspector);
         assert_eq!(out.len(), 1);
@@ -565,6 +670,86 @@ mod tests {
         let forwards = forwarder.forwards.borrow();
         assert_eq!(forwards.len(), 1);
         assert_eq!(forwards[0].0, "agent-b");
+    }
+
+    /// Spec scenario "git push still escalates despite worktree confinement" /
+    /// "Danger match overrides a whitelist match": `git push` is on the
+    /// danger-list and forwards even though `git push` is whitelisted.
+    #[test]
+    fn git_push_escalates_despite_whitelist() {
+        let state = BrokerState::new(None);
+        insert_stalled(&state, "agent-p", 600);
+        let cfg = AutoApproveConfig::default();
+        let resolver = |_id: &str| Some(4);
+        let inspector = StubInspector {
+            kind: Some(PermissionType::Git),
+            captured:
+                "Bash command\n  git push origin main\nDo you want to proceed?\nEsc to cancel"
+                    .into(),
+        };
+        let (out, dispatcher, forwarder) = run_tick(&state, &cfg, &resolver, &inspector);
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(out[0].1, TickOutcome::Forwarded { .. }),
+            "git push must escalate, got {:?}",
+            out[0].1
+        );
+        assert!(dispatcher.events.is_empty(), "no keystrokes for danger");
+        assert_eq!(forwarder.forwards.borrow().len(), 1);
+    }
+
+    /// Spec scenario "Scratch temp delete auto-approves": an `rm -rf` of a
+    /// `/tmp/paw-*` scratch dir is approved by the scratch-path exception.
+    #[test]
+    fn scratch_rm_is_auto_approved() {
+        let state = BrokerState::new(None);
+        insert_stalled(&state, "agent-s", 600);
+        let cfg = AutoApproveConfig::default();
+        let resolver = |_id: &str| Some(5);
+        let inspector = StubInspector {
+            kind: Some(PermissionType::Unknown),
+            captured:
+                "Bash command\n  rm -rf /tmp/paw-build-9\nDo you want to proceed?\nEsc to cancel"
+                    .into(),
+        };
+        let (out, dispatcher, forwarder) = run_tick(&state, &cfg, &resolver, &inspector);
+        assert_eq!(out.len(), 1);
+        match &out[0].1 {
+            TickOutcome::Approved {
+                matched_entry,
+                kind,
+            } => {
+                assert_eq!(matched_entry, "scratch-rm");
+                assert_eq!(*kind, PermissionType::SafeCommand);
+            }
+            other => panic!("expected Approved scratch-rm, got {other:?}"),
+        }
+        assert!(!dispatcher.events.is_empty());
+        assert!(forwarder.forwards.borrow().is_empty());
+    }
+
+    /// Spec scenario "Safe class with non-live prompt does not fire": a safe
+    /// command without the `Esc to cancel` footer in the live window is not
+    /// acted on — no keystrokes and no forward.
+    #[test]
+    fn non_live_prompt_yields_no_prompt() {
+        let state = BrokerState::new(None);
+        insert_stalled(&state, "agent-n", 600);
+        let cfg = AutoApproveConfig::default();
+        let resolver = |_id: &str| Some(1);
+        let inspector = StubInspector {
+            kind: Some(PermissionType::Cargo),
+            captured: "I plan to run cargo test soon\njust some narration".into(),
+        };
+        let (out, dispatcher, forwarder) = run_tick(&state, &cfg, &resolver, &inspector);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].1,
+            TickOutcome::NoPrompt,
+            "non-live prompt must not fire"
+        );
+        assert!(dispatcher.events.is_empty(), "no keystrokes for non-live");
+        assert!(forwarder.forwards.borrow().is_empty(), "no forward either");
     }
 
     #[test]
@@ -641,7 +826,7 @@ mod tests {
         let resolver = |id: &str| if id == "agent-a" { Some(2) } else { None };
         let inspector = StubInspector {
             kind: Some(PermissionType::Cargo),
-            captured: "cargo test --workspace".into(),
+            captured: "cargo test --workspace\nEsc to cancel".into(),
         };
         let no_worktree = |_id: &str| None::<PathBuf>;
         let mut dispatcher = RecordingDispatcher { events: vec![] };
@@ -666,7 +851,7 @@ mod tests {
             .iter()
             .map(|(_, _, k)| k.as_str())
             .collect();
-        assert_eq!(keys, vec!["BTab", "Down", "Enter"]);
+        assert_eq!(keys, vec!["1", "Enter"]);
     }
 
     // --- Bug 3: worktree file-op approval through the poll loop ---
@@ -718,7 +903,7 @@ mod tests {
         // worktree classifier promotes it to WorktreeFileOp.
         let inspector = StubInspector {
             kind: Some(PermissionType::Unknown),
-            captured: "Do you want to allow this write to Containerfile?".into(),
+            captured: "Do you want to allow this write to Containerfile?\nEsc to cancel".into(),
         };
         let worktree = move |id: &str| {
             if id == "agent-a" {
@@ -745,7 +930,48 @@ mod tests {
             .iter()
             .map(|(_, _, k)| k.as_str())
             .collect();
-        assert_eq!(keys, vec!["BTab", "Down", "Enter"]);
+        assert_eq!(keys, vec!["1", "Enter"]);
+        assert!(forwarder.forwards.borrow().is_empty());
+    }
+
+    /// Spec scenario "Worktree git commit auto-approves" exercised through the
+    /// poll loop: a worktree-confined `git commit` is approved via the
+    /// dedicated worktree-git path (`matched_entry` `worktree-git`).
+    #[test]
+    fn worktree_git_commit_is_auto_approved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let state = BrokerState::new(None);
+        insert_stalled(&state, "agent-g", 600);
+        let cfg = AutoApproveConfig::default();
+        let resolver = |id: &str| if id == "agent-g" { Some(2) } else { None };
+        let inspector = StubInspector {
+            kind: Some(PermissionType::Git),
+            captured:
+                "Bash command\n  git commit -m \"feat: x\"\nDo you want to proceed?\nEsc to cancel"
+                    .into(),
+        };
+        let worktree = move |id: &str| {
+            if id == "agent-g" {
+                Some(root.clone())
+            } else {
+                None
+            }
+        };
+        let (out, dispatcher, forwarder) =
+            run_tick_with_worktree(&state, &cfg, &resolver, &inspector, &worktree);
+        assert_eq!(out.len(), 1);
+        match &out[0].1 {
+            TickOutcome::Approved {
+                matched_entry,
+                kind,
+            } => {
+                assert_eq!(matched_entry, "worktree-git");
+                assert_eq!(*kind, PermissionType::SafeCommand);
+            }
+            other => panic!("expected Approved worktree-git, got {other:?}"),
+        }
+        assert!(!dispatcher.events.is_empty());
         assert!(forwarder.forwards.borrow().is_empty());
     }
 
@@ -759,7 +985,7 @@ mod tests {
         let resolver = |_id: &str| Some(3);
         let inspector = StubInspector {
             kind: Some(PermissionType::Unknown),
-            captured: "Do you want to allow this write to /etc/hosts?".into(),
+            captured: "Do you want to allow this write to /etc/hosts?\nEsc to cancel".into(),
         };
         let worktree = move |_id: &str| Some(root.clone());
         let (out, dispatcher, forwarder) =
@@ -786,7 +1012,7 @@ mod tests {
         let resolver = |_id: &str| Some(1);
         let inspector = StubInspector {
             kind: Some(PermissionType::Unknown),
-            captured: "Do you want to allow this write to Containerfile?".into(),
+            captured: "Do you want to allow this write to Containerfile?\nEsc to cancel".into(),
         };
         let worktree = move |_id: &str| Some(root.clone());
         let (out, dispatcher, _forwarder) =

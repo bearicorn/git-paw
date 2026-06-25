@@ -32,6 +32,13 @@ pub enum PermissionType {
     /// by [`classify_capture`] (which has no worktree context). Auto-approval
     /// MAY fire for this variant when `approve_worktree_writes` is enabled.
     WorktreeFileOp,
+    /// A shell command the poll-loop classifier judged known-safe: a
+    /// read-mostly / whitelisted verb, a worktree-confined `git add` /
+    /// `git commit`, or an `rm -rf` whose every target is repo/OS scratch.
+    /// The coarse [`classify_capture`] cannot reach this verdict (it has no
+    /// danger-list, whitelist, or worktree context); the poll loop assigns it
+    /// after running the full classifier. Auto-approval MAY fire for it.
+    SafeCommand,
     /// An approval prompt was detected but the command class is not
     /// recognised. Auto-approval MUST NOT fire for this variant.
     Unknown,
