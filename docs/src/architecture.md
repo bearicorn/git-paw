@@ -288,8 +288,42 @@ grid depend on how many bottom rows the layout produces:
 | 4 | 28% / 18% / 18% / 18% / 18% |
 | 5 | 28% / 14.4% / 14.4% / 14.4% / 14.4% / 14.4% |
 
-The agent-grid columns within each row are split evenly via tmux's tiled
-layout. `src/supervisor/layout.rs` is the source of truth.
+### Equal-width agent columns
+
+Agent panes are spliced into a row by successive `tmux split-window -h`, and
+each `-h` split halves the *current* pane — so a row populated by raw splits
+renders unequal widths (a 3-agent row would render 50/25/25, not equal
+thirds). `select-layout tiled` is deliberately **not** used for the whole
+window because it would scramble the predictable pane-index ordering the rest
+of the system relies on. Instead, after the panes for a row exist, git-paw
+rebalances that row to equal width: `tmux::rebalance_agent_rows` queries the
+live window width and issues `tmux resize-pane -x <cols>` so each pane in the
+row gets an equal column share (the last pane absorbs the rounding remainder),
+leaving the row equal-width within a one-column tolerance. The rebalance runs
+on every path that changes the grid — `git paw start`, `git paw add`, and
+`git paw remove` — so an incrementally-built grid matches a start-time grid of
+the same agent count. It never touches the top row's supervisor/dashboard
+50/50 split nor the per-row vertical heights. No agent row exceeds five panes
+(`SUPERVISOR_AGENTS_PER_ROW`), bounding the smallest equal-width target to
+~20% of the window. `src/supervisor/layout.rs` and the rebalance in
+`src/tmux.rs` are the source of truth.
+
+### Launch-readiness gate
+
+Before injecting an agent's boot block (the initial prompt, paste-handling
+notes, and `/opsx:apply …` task) into a pane, git-paw verifies the pane's CLI
+has actually reached an interactive state rather than relying on a fixed
+wall-clock sleep. `tmux::gate_pane_for_injection` polls the pane with
+`tmux capture-pane` for a CLI-readiness marker; only once the marker appears is
+the boot block injected. If the readiness budget elapses while the pane is
+still a bare shell (the CLI never started), git-paw relaunches the CLI command
+into that pane and polls again, up to a small relaunch budget, before falling
+back to injection. The gate is conservative: an unrecognised CLI whose UI
+matches no known marker simply falls back to injecting after the budget, so
+launch behaviour is never worse than the previous fixed-sleep launch. This
+prevents the multi-line boot block from being typed into a bare shell, where
+it would be interpreted line-by-line as failing commands. The same gate guards
+both the `git paw start` and `git paw add` launch paths.
 
 ## Non-Supervisor Layout
 

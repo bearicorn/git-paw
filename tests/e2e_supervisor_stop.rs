@@ -34,10 +34,16 @@ fn tmux_available() -> bool {
 }
 
 fn pick_broker_port() -> u16 {
-    #[allow(clippy::cast_possible_truncation)]
-    {
-        24_000 + (std::process::id() as u16 % 200)
-    }
+    // Bind an OS-assigned ephemeral port, read it back, then release it so the
+    // broker can claim it. Replaces the former `24_000 + (pid % 200)` scheme,
+    // which gave only 200 ports keyed on PID and collided across concurrent
+    // test runs (F8 root cause). An OS-assigned port is collision-proof at any
+    // concurrency. Each call yields a distinct free port.
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral port")
+        .local_addr()
+        .expect("read local addr")
+        .port()
 }
 
 fn write_supervisor_config(repo: &std::path::Path, port: u16, auto_approve: bool) {
@@ -167,7 +173,7 @@ fn stop_in_supervisor_mode_terminates_auto_approve() {
     let tr = setup_test_repo();
     let tmux_env = tmux_test_env();
     let _proc_env = tmux_env.apply_to_process();
-    let port = pick_broker_port() + 1;
+    let port = pick_broker_port();
     write_supervisor_config(tr.path(), port, true);
 
     let mut start = cmd();

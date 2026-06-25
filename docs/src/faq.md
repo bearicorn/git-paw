@@ -109,7 +109,7 @@ git paw add-cli my-tool /path/to/my-tool
 
 ### "no space for new pane" in tmux
 
-This can happen with many branches on a small terminal. Make your terminal window larger before launching, or select fewer branches. git-paw applies tiled layout progressively to minimize this issue.
+This can happen with many branches on a small terminal. Make your terminal window larger before launching, or select fewer branches. git-paw caps each agent row at five panes and rebalances every row to equal width, so panes stay as wide as the layout allows; the hard cap is 25 agents per session.
 
 ### Session state seems stale
 

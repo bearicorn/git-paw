@@ -4,7 +4,9 @@
 //! applies layouts, and manages attach/reattach. Uses a builder pattern for
 //! testability and dry-run support.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use crate::error::PawError;
 
@@ -718,6 +720,343 @@ pub fn kill_session(name: &str) -> Result<(), PawError> {
     }
 }
 
+/// Kill a single pane addressed by its tmux pane id (`%N`), regardless of the
+/// process running in it (a CLI, a bare shell, or anything else).
+///
+/// Used by the `remove` path (design D2, G2a): the target pane is resolved
+/// from the removed branch's worktree via [`resolve_pane_id_for_worktree`] so
+/// the kill never depends on the JSON-position arithmetic that broke under an
+/// orphan pane. A pane that has already gone is treated as an idempotent no-op,
+/// matching [`kill_pane`]'s missing-pane tolerance.
+pub fn kill_pane_by_id(pane_id: &str) -> Result<(), PawError> {
+    let output = Command::new("tmux")
+        .args(["kill-pane", "-t", pane_id])
+        .output()
+        .map_err(|e| PawError::TmuxError(format!("failed to run tmux: {e}")))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    if stderr.contains("can't find pane")
+        || stderr.contains("no such pane")
+        || stderr.contains("pane not found")
+    {
+        return Ok(());
+    }
+    Err(PawError::TmuxError(
+        String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+    ))
+}
+
+/// List every live pane in `session_name`'s window as
+/// `(pane_id, pane_current_path)` pairs via
+/// `tmux list-panes -F '#{pane_id} #{pane_current_path}'`.
+///
+/// Returns an empty vector (not an error) when the session/server is gone, so
+/// callers on a torn-down session degrade to "no live panes" rather than
+/// failing. Only a genuine tmux execution failure surfaces as an error.
+pub fn list_panes_with_paths(session_name: &str) -> Result<Vec<(String, String)>, PawError> {
+    let output = Command::new("tmux")
+        .args([
+            "list-panes",
+            "-t",
+            session_name,
+            "-F",
+            "#{pane_id} #{pane_current_path}",
+        ])
+        .output()
+        .map_err(|e| PawError::TmuxError(format!("failed to run tmux: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+        if stderr.contains("can't find")
+            || stderr.contains("no such")
+            || stderr.contains("no server running")
+        {
+            return Ok(Vec::new());
+        }
+        return Err(PawError::TmuxError(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut panes = Vec::new();
+    for line in text.lines() {
+        if let Some((id, path)) = line.split_once(' ') {
+            panes.push((id.to_string(), path.to_string()));
+        }
+    }
+    Ok(panes)
+}
+
+/// Resolve the tmux pane id (`%N`) whose `pane_current_path` matches
+/// `worktree_path` in `session_name` (design D2, G2a).
+///
+/// Both the queried `pane_current_path` and `worktree_path` are canonicalised
+/// before comparison so a symlinked temp root (e.g. macOS `/var` →
+/// `/private/var`) does not defeat the match. Returns `Ok(None)` when no live
+/// pane maps to the worktree (the agent's pane is already gone), so the caller
+/// can treat removal as an idempotent no-op.
+pub fn resolve_pane_id_for_worktree(
+    session_name: &str,
+    worktree_path: &Path,
+) -> Result<Option<String>, PawError> {
+    let want = canonical_or_self(worktree_path);
+    for (pane_id, path) in list_panes_with_paths(session_name)? {
+        if canonical_or_self(Path::new(&path)) == want {
+            return Ok(Some(pane_id));
+        }
+    }
+    Ok(None)
+}
+
+/// Canonicalise `path`, falling back to the path itself when it cannot be
+/// resolved (e.g. a temp dir already removed). Keeps comparisons total.
+fn canonical_or_self(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Pure JSON↔tmux reconciliation (design D3, G2b): given the session-JSON
+/// agents as `(branch, worktree_path)` pairs and the set of live pane
+/// `pane_current_path` values, return the branches whose worktree maps to no
+/// live pane.
+///
+/// Split from [`reconcile_agents_to_panes`] so the divergence logic is unit
+/// testable without a live tmux server. Paths are canonicalised on both sides
+/// (with a self fallback) so the comparison is symlink-tolerant.
+#[must_use]
+pub fn agents_without_live_pane(
+    agents: &[(String, PathBuf)],
+    live_pane_paths: &[PathBuf],
+) -> Vec<String> {
+    let live: Vec<PathBuf> = live_pane_paths
+        .iter()
+        .map(|p| canonical_or_self(p))
+        .collect();
+    agents
+        .iter()
+        .filter(|(_, wt)| {
+            let want = canonical_or_self(wt);
+            !live.contains(&want)
+        })
+        .map(|(branch, _)| branch.clone())
+        .collect()
+}
+
+/// Reconcile the session-JSON agents against the live tmux panes in
+/// `session_name` and report any agent (by branch) whose worktree maps to no
+/// live pane (the v0.8.0 G2 desync). Returns an empty vector when every agent
+/// maps to a pane.
+///
+/// Surfaced (not auto-repaired) on the `add` path so a dropped/orphaned pane is
+/// visible and recoverable rather than silent.
+pub fn reconcile_agents_to_panes(
+    session_name: &str,
+    agents: &[(String, PathBuf)],
+) -> Result<Vec<String>, PawError> {
+    let live: Vec<PathBuf> = list_panes_with_paths(session_name)?
+        .into_iter()
+        .map(|(_, path)| PathBuf::from(path))
+        .collect();
+    Ok(agents_without_live_pane(agents, &live))
+}
+
+// ---------------------------------------------------------------------------
+// Launch-readiness gate (design D1, G1)
+// ---------------------------------------------------------------------------
+
+/// Substrings that positively identify a launched agent CLI's interactive
+/// ready state, as opposed to a bare shell prompt. Conservative phrase matches
+/// drawn from the agent CLIs git-paw supports — a bare shell that merely echoed
+/// a failed command never contains any of these, so a match means the CLI's UI
+/// is up and the boot block is safe to inject.
+///
+/// Extend this when a new agent CLI surfaces a different ready banner. An
+/// unrecognised CLI whose UI matches nothing here falls back to fixed-budget
+/// injection (never worse than the prior fixed-sleep launch).
+pub const CLI_READY_MARKERS: &[&str] = &[
+    "? for shortcuts",
+    "? for help",
+    "Welcome to Claude Code",
+    "esc to interrupt",
+    "Bypassing Permissions",
+    "│ >",
+];
+
+/// Default per-attempt readiness timeout (ms). Matches the prior fixed
+/// pre-injection sleep so the conservative fall-back path (an unrecognised CLI
+/// that never matches a marker) is never slower than the old behaviour; a
+/// recognised CLI returns as soon as its marker appears, typically sooner.
+/// Overridable via `GIT_PAW_READINESS_TIMEOUT_MS` so tests exercise the
+/// fall-back path quickly.
+const READINESS_TIMEOUT_MS: u64 = 2000;
+/// Interval between readiness polls (ms).
+const READINESS_POLL_INTERVAL_MS: u64 = 150;
+/// Number of CLI relaunch attempts after a bare-shell timeout before falling
+/// back to injection.
+const READINESS_RELAUNCH_ATTEMPTS: usize = 1;
+
+/// Classification of a captured pane's content for the launch-readiness gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneReadiness {
+    /// A CLI-readiness marker was observed; the boot block is safe to inject.
+    Ready,
+    /// The pane is still a bare shell prompt (the CLI never started) — the
+    /// G1 condition; relaunch is warranted.
+    BareShell,
+    /// Neither ready nor an obvious bare shell (e.g. a blank/clearing screen
+    /// or an unrecognised CLI). Wait, then conservatively fall back.
+    Indeterminate,
+}
+
+/// Outcome of gating a pane before boot-block injection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateOutcome {
+    /// A CLI-readiness marker was observed; inject the boot block.
+    Ready,
+    /// The readiness budget elapsed without a positive classification (an
+    /// unrecognised CLI, or a relaunched-but-never-ready pane). The caller
+    /// injects anyway — behaviour matches the prior fixed-sleep launch.
+    FellBack,
+}
+
+/// Per-attempt timeout, poll interval, and relaunch budget for the gate.
+#[derive(Debug, Clone, Copy)]
+pub struct ReadinessBudget {
+    /// Interval between `capture-pane` polls.
+    pub poll_interval: Duration,
+    /// How long to poll for readiness within a single attempt before declaring
+    /// the attempt timed out.
+    pub timeout: Duration,
+    /// Number of CLI relaunch attempts after a bare-shell timeout.
+    pub relaunch_attempts: usize,
+}
+
+impl Default for ReadinessBudget {
+    fn default() -> Self {
+        let timeout_ms = std::env::var("GIT_PAW_READINESS_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(READINESS_TIMEOUT_MS);
+        Self {
+            poll_interval: Duration::from_millis(READINESS_POLL_INTERVAL_MS),
+            timeout: Duration::from_millis(timeout_ms),
+            relaunch_attempts: READINESS_RELAUNCH_ATTEMPTS,
+        }
+    }
+}
+
+/// Returns whether `captured` (the last non-empty line) looks like a returned
+/// shell prompt — ending in a common prompt sigil. Used to distinguish the
+/// G1 bare-shell condition from a CLI whose UI simply has not rendered yet.
+fn looks_like_bare_shell(captured: &str) -> bool {
+    match captured.lines().rev().find(|l| !l.trim().is_empty()) {
+        Some(line) => {
+            let trimmed = line.trim_end();
+            trimmed.ends_with('$')
+                || trimmed.ends_with('%')
+                || trimmed.ends_with('#')
+                || trimmed.ends_with('❯')
+                || trimmed.ends_with('➜')
+        }
+        None => false,
+    }
+}
+
+/// Classify a captured pane's content for the readiness gate.
+#[must_use]
+pub fn classify_pane_readiness(captured: &str) -> PaneReadiness {
+    if CLI_READY_MARKERS.iter().any(|m| captured.contains(m)) {
+        PaneReadiness::Ready
+    } else if looks_like_bare_shell(captured) {
+        PaneReadiness::BareShell
+    } else {
+        PaneReadiness::Indeterminate
+    }
+}
+
+/// Core readiness loop, generic over the capture, relaunch, and sleep
+/// primitives so it is unit-testable without a live tmux server or wall-clock
+/// waits (design D1).
+///
+/// Polls `capture` on `budget.poll_interval` until a [`PaneReadiness::Ready`]
+/// classification is seen or `budget.timeout` elapses. On a bare-shell timeout
+/// it invokes `relaunch` and re-polls, up to `budget.relaunch_attempts`. An
+/// indeterminate or persistently-bare pane returns [`GateOutcome::FellBack`].
+fn gate_pane_generic<C, R, S>(
+    budget: ReadinessBudget,
+    mut capture: C,
+    mut relaunch: R,
+    mut sleep: S,
+) -> GateOutcome
+where
+    C: FnMut() -> Option<String>,
+    R: FnMut(),
+    S: FnMut(Duration),
+{
+    for attempt in 0..=budget.relaunch_attempts {
+        let mut waited = Duration::ZERO;
+        loop {
+            let captured = capture().unwrap_or_default();
+            if classify_pane_readiness(&captured) == PaneReadiness::Ready {
+                return GateOutcome::Ready;
+            }
+            if waited >= budget.timeout {
+                break;
+            }
+            sleep(budget.poll_interval);
+            waited = waited.saturating_add(budget.poll_interval);
+        }
+        // Attempt timed out. Relaunch only when the pane is positively a bare
+        // shell AND a relaunch attempt remains; otherwise fall back.
+        let final_state = classify_pane_readiness(&capture().unwrap_or_default());
+        if final_state == PaneReadiness::BareShell && attempt < budget.relaunch_attempts {
+            relaunch();
+        } else {
+            break;
+        }
+    }
+    GateOutcome::FellBack
+}
+
+/// Gate an agent pane before boot-block injection (design D1, G1).
+///
+/// Polls `tmux capture-pane` for a CLI-readiness marker. If the pane is still a
+/// bare shell when the per-attempt timeout elapses, relaunches `cli_command`
+/// into the pane (clearing the input line with `C-u` first, as the launch path
+/// does) and re-polls, up to the relaunch budget. An unrecognised CLI whose UI
+/// matches no marker falls back to [`GateOutcome::FellBack`] so the caller
+/// injects anyway — never worse than the prior fixed-sleep launch.
+#[must_use]
+pub fn gate_pane_for_injection(
+    session_name: &str,
+    pane_index: usize,
+    cli_command: &str,
+) -> GateOutcome {
+    gate_pane_generic(
+        ReadinessBudget::default(),
+        || crate::supervisor::permission_prompt::capture_pane(session_name, pane_index),
+        || relaunch_cli_into_pane(session_name, pane_index, cli_command),
+        std::thread::sleep,
+    )
+}
+
+/// Relaunch `cli_command` into a pane that never reached readiness: clear the
+/// input line with `C-u` (matching the launch path) then send the command and
+/// `Enter`. Best-effort — tmux errors are swallowed so the fall-back injection
+/// still proceeds.
+fn relaunch_cli_into_pane(session_name: &str, pane_index: usize, cli_command: &str) {
+    let target = format!("{session_name}:0.{pane_index}");
+    let _ = Command::new("tmux")
+        .args(["send-keys", "-t", &target, "C-u"])
+        .status();
+    let _ = Command::new("tmux")
+        .args(["send-keys", "-t", &target, cli_command, "Enter"])
+        .status();
+}
+
 /// Builds the argv for `tmux send-keys` that injects `text` into
 /// `<session_name>:0.<pane_index>` literally (`-l`) and *without* a trailing
 /// `Enter` key.
@@ -1213,6 +1552,11 @@ pub fn build_remove_retile_commands(
 /// layout's height proportions: one resize for the top row (supervisor +
 /// dashboard) and one per agent row (targeting each row's first pane). Shared
 /// by the start-time builder's final pass and the add/remove re-tile builders.
+///
+/// The per-row equal-width rebalance is applied separately at runtime by
+/// [`rebalance_agent_rows`] (design D4, G3): it needs the live window width to
+/// resize each row to exact, equal columns, which a pure command builder
+/// cannot know.
 fn push_supervisor_resize_pass(
     commands: &mut Vec<TmuxCommand>,
     session_name: &str,
@@ -1245,6 +1589,93 @@ fn push_supervisor_resize_pass(
             ]));
         }
     }
+}
+
+/// Compute the per-pane column-width resize targets for the equal-width row
+/// rebalance (design D4, G3), given the live `window_width` and total
+/// `agent_count`.
+///
+/// Agents are spliced into a row by successive `split-window -h`, and each
+/// `-h` split halves the *current* pane — so a raw 3-agent row renders
+/// 50/25/25, not equal thirds (the v0.8.0 G3 failure). For each agent row
+/// (up to [`crate::supervisor::layout::SUPERVISOR_AGENTS_PER_ROW`] panes) this
+/// resizes every pane but the last to `(window_width - separators) /
+/// panes_in_row` columns — an equal share after accounting for the
+/// one-column pane separators — and lets the last pane absorb the rounding
+/// remainder, leaving the row equal-width within a one-column tolerance.
+/// Returns `(pane_index, columns)` pairs for the panes to resize (the last
+/// pane of each row is omitted).
+///
+/// Pure (no IO) so the row arithmetic is unit-testable; the live application
+/// is [`rebalance_agent_rows`].
+#[must_use]
+pub fn agent_row_widths(window_width: usize, agent_count: usize) -> Vec<(usize, usize)> {
+    use crate::supervisor::layout::{SUPERVISOR_AGENTS_PER_ROW, SUPERVISOR_PANE_OFFSET};
+
+    let mut targets = Vec::new();
+    if window_width == 0 {
+        return targets;
+    }
+    let mut row_first_agent = 0;
+    while row_first_agent < agent_count {
+        let panes_in_row = (agent_count - row_first_agent).min(SUPERVISOR_AGENTS_PER_ROW);
+        if panes_in_row > 1 {
+            let separators = panes_in_row - 1;
+            let per = window_width.saturating_sub(separators) / panes_in_row;
+            for j in 0..(panes_in_row - 1) {
+                targets.push((SUPERVISOR_PANE_OFFSET + row_first_agent + j, per));
+            }
+        }
+        row_first_agent += panes_in_row;
+    }
+    targets
+}
+
+/// Query the live window width (columns) of `session_name`'s window 0.
+///
+/// Returns `Ok(None)` when the session/window is gone so callers degrade to a
+/// no-op rather than failing.
+fn query_window_width(session_name: &str) -> Result<Option<usize>, PawError> {
+    let target = format!("{session_name}:0");
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "-t", &target, "#{window_width}"])
+        .output()
+        .map_err(|e| PawError::TmuxError(format!("failed to run tmux: {e}")))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().parse().ok())
+}
+
+/// Rebalance every agent row to equal width on the live window (design D4, G3).
+///
+/// Queries the live window width, then resizes each row's panes (all but the
+/// last, which absorbs the remainder) to an equal column share via
+/// `tmux resize-pane -x <cols>`, so a row of agents renders equal-width within
+/// a one-column tolerance instead of the 50/25/25 raw `-h` splits produce. A
+/// no-op for 0 or 1 agents, or when the window is gone. Setting a pane's `-x`
+/// width only moves its boundary with the horizontal neighbour in the same
+/// row, so this never disturbs the top-row supervisor/dashboard 50/50 split
+/// nor the per-row vertical heights.
+///
+/// Must run AFTER the splits (start/add) or the kill + height re-tile (remove)
+/// settle so pane indices are contiguous (panes 2..N+1). No agent row exceeds
+/// [`crate::supervisor::layout::SUPERVISOR_AGENTS_PER_ROW`] (5) by
+/// construction, bounding the smallest equal-width target to ~20% per pane
+/// (design D5). Best-effort per resize; one pane's tmux failure does not abort
+/// the rest.
+pub fn rebalance_agent_rows(session_name: &str, agent_count: usize) -> Result<(), PawError> {
+    let Some(window_width) = query_window_width(session_name)? else {
+        return Ok(());
+    };
+    for (pane_idx, cols) in agent_row_widths(window_width, agent_count) {
+        let target = format!("{session_name}:0.{pane_idx}");
+        let cols_str = cols.to_string();
+        let _ = Command::new("tmux")
+            .args(["resize-pane", "-t", &target, "-x", &cols_str])
+            .status();
+    }
+    Ok(())
 }
 
 /// Format a row-height percentage. Whole numbers render as "28%"; the 14.4%
@@ -3324,6 +3755,227 @@ mod tests {
         assert!(
             session.command_strings().is_empty(),
             "removing the last agent leaves the top row untouched (no re-tile)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // G3 — per-row equal-width rebalance arithmetic (design D4)
+    // -----------------------------------------------------------------------
+
+    /// A 3-agent single row resizes the first two agent panes to an equal
+    /// third (the last absorbs the remainder), so the row is equal thirds —
+    /// NOT the raw 50/25/25 a chain of `-h` splits produces. At a 480-col
+    /// window: (480-2)/3 = 159 cols each; the remainder pane lands at 162,
+    /// within a one-column-per-pane tolerance of the 160 ideal.
+    #[test]
+    fn agent_row_widths_three_agents_equal_thirds() {
+        let targets = agent_row_widths(480, 3);
+        // Panes :0.2 and :0.3 resized; :0.4 omitted (absorbs remainder).
+        assert_eq!(targets, vec![(2, 159), (3, 159)]);
+    }
+
+    /// A full 5-agent row targets an equal fifth per pane (resizing the first
+    /// four). At 480 cols: (480-4)/5 = 95 each.
+    #[test]
+    fn agent_row_widths_five_agents_equal_fifths() {
+        let targets = agent_row_widths(480, 5);
+        assert_eq!(targets, vec![(2, 95), (3, 95), (4, 95), (5, 95)]);
+    }
+
+    /// A single agent needs no rebalance; two rows (6 agents = 5 + 1) rebalance
+    /// only the full first row — the lone second-row pane (:0.7) is omitted.
+    #[test]
+    fn agent_row_widths_skips_single_pane_rows() {
+        assert!(
+            agent_row_widths(480, 1).is_empty(),
+            "a lone agent needs no width rebalance"
+        );
+        let targets = agent_row_widths(480, 6);
+        // Row 1 panes :0.2..:0.5 resized (4); row 2's lone pane :0.7 omitted.
+        assert_eq!(targets.len(), 4, "only the full first row rebalances");
+        assert!(
+            targets.iter().all(|(idx, _)| *idx >= 2 && *idx <= 5),
+            "no second-row pane resized; got {targets:?}"
+        );
+    }
+
+    /// The rebalance never targets the top row (panes 0/1), so the
+    /// supervisor/dashboard 50/50 split is untouched (spec 4.3 / D4).
+    #[test]
+    fn agent_row_widths_never_touch_top_row() {
+        for n in 1..=crate::supervisor::layout::SUPERVISOR_MAX_AGENTS {
+            for (idx, _) in agent_row_widths(480, n) {
+                assert!(idx >= 2, "rebalance must skip panes 0 and 1 for n={n}");
+            }
+        }
+    }
+
+    /// No agent row exceeds 5 panes, so the smallest equal-width target stays
+    /// at ~20% of the window (design D5). At a 480-col window every per-pane
+    /// target is >= floor(480/5)-ish; assert none drops below 20% of width.
+    #[test]
+    fn agent_row_widths_minimum_is_one_fifth() {
+        let window = 480usize;
+        let floor = window / 5; // 96 cols = 20%
+        for n in 1..=crate::supervisor::layout::SUPERVISOR_MAX_AGENTS {
+            for (idx, cols) in agent_row_widths(window, n) {
+                assert!(
+                    cols + 1 >= floor,
+                    "pane {idx} width {cols} below the ~20% floor ({floor}) for n={n}"
+                );
+            }
+        }
+    }
+
+    /// A zero-width window (no live geometry) yields no resize targets.
+    #[test]
+    fn agent_row_widths_zero_window_is_empty() {
+        assert!(agent_row_widths(0, 5).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // 6.5 — JSON↔tmux reconciliation (design D3, G2b)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reconcile_reports_agent_with_no_live_pane() {
+        let agents = vec![
+            ("feat/a".to_string(), PathBuf::from("/tmp/wt-a")),
+            ("feat/b".to_string(), PathBuf::from("/tmp/wt-b")),
+            ("feat/c".to_string(), PathBuf::from("/tmp/wt-c")),
+        ];
+        // Live panes map only to a and c; b's pane was dropped.
+        let live = vec![PathBuf::from("/tmp/wt-a"), PathBuf::from("/tmp/wt-c")];
+        let missing = agents_without_live_pane(&agents, &live);
+        assert_eq!(
+            missing,
+            vec!["feat/b".to_string()],
+            "only b has no live pane"
+        );
+    }
+
+    #[test]
+    fn reconcile_passes_when_every_agent_maps() {
+        let agents = vec![
+            ("feat/a".to_string(), PathBuf::from("/tmp/wt-a")),
+            ("feat/b".to_string(), PathBuf::from("/tmp/wt-b")),
+        ];
+        let live = vec![
+            PathBuf::from("/tmp/wt-b"),
+            PathBuf::from("/tmp/wt-a"),
+            PathBuf::from("/tmp/wt-supervisor"),
+        ];
+        assert!(
+            agents_without_live_pane(&agents, &live).is_empty(),
+            "all agents map to a live pane → no divergence"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 6.6 — launch-readiness gate (design D1, G1)
+    // -----------------------------------------------------------------------
+
+    fn test_budget() -> ReadinessBudget {
+        // Tiny budget so the IO-free generic core runs instantly: timeout =
+        // 2 poll intervals, one relaunch attempt.
+        ReadinessBudget {
+            poll_interval: Duration::from_millis(1),
+            timeout: Duration::from_millis(2),
+            relaunch_attempts: 1,
+        }
+    }
+
+    #[test]
+    fn classify_distinguishes_ready_bareshell_indeterminate() {
+        assert_eq!(
+            classify_pane_readiness("some banner\n? for shortcuts\n"),
+            PaneReadiness::Ready
+        );
+        assert_eq!(
+            classify_pane_readiness("user@host ~/repo % "),
+            PaneReadiness::BareShell
+        );
+        assert_eq!(
+            classify_pane_readiness("\n\n   \n"),
+            PaneReadiness::Indeterminate,
+            "a blank/clearing screen is not yet a bare shell"
+        );
+    }
+
+    #[test]
+    fn gate_returns_ready_without_relaunch_when_marker_present() {
+        let mut relaunches = 0;
+        let outcome = gate_pane_generic(
+            test_budget(),
+            || Some("welcome\n? for shortcuts".to_string()),
+            || relaunches += 1,
+            |_| {},
+        );
+        assert_eq!(outcome, GateOutcome::Ready);
+        assert_eq!(relaunches, 0, "a ready pane is never relaunched");
+    }
+
+    #[test]
+    fn gate_relaunches_a_persistent_bare_shell_then_falls_back() {
+        let mut relaunches = 0;
+        let outcome = gate_pane_generic(
+            test_budget(),
+            || Some("user@host:~$ ".to_string()),
+            || relaunches += 1,
+            |_| {},
+        );
+        assert_eq!(
+            outcome,
+            GateOutcome::FellBack,
+            "a never-ready bare shell falls back after the relaunch budget"
+        );
+        assert_eq!(
+            relaunches, 1,
+            "exactly one relaunch fires (relaunch_attempts = 1)"
+        );
+    }
+
+    #[test]
+    fn gate_does_not_relaunch_an_unrecognised_cli() {
+        let mut relaunches = 0;
+        // Content that is neither a known marker nor an obvious shell prompt.
+        let outcome = gate_pane_generic(
+            test_budget(),
+            || Some("custom-cli interactive session — type a command".to_string()),
+            || relaunches += 1,
+            |_| {},
+        );
+        assert_eq!(outcome, GateOutcome::FellBack);
+        assert_eq!(
+            relaunches, 0,
+            "an unrecognised (indeterminate) CLI falls back without relaunching"
+        );
+    }
+
+    #[test]
+    fn gate_becomes_ready_after_a_relaunch() {
+        let mut captures = 0;
+        let mut relaunches = 0;
+        let outcome = gate_pane_generic(
+            test_budget(),
+            || {
+                captures += 1;
+                // Bare shell until the relaunch fires (~4 captures for the
+                // first attempt's poll loop + final classification), then the
+                // CLI marker appears.
+                if captures > 4 {
+                    Some("? for shortcuts".to_string())
+                } else {
+                    Some("user@host:~$ ".to_string())
+                }
+            },
+            || relaunches += 1,
+            |_| {},
+        );
+        assert_eq!(outcome, GateOutcome::Ready);
+        assert_eq!(
+            relaunches, 1,
+            "the bare shell was relaunched once before going ready"
         );
     }
 }
