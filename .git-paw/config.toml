@@ -64,13 +64,25 @@ learnings = true
 [supervisor.learnings_config]
 flush_interval_seconds = 60
 
-# Common dev-command allowlist: seed Claude's allowed_bash_prefixes
-# with the curated multi-language preset (cargo / npm / pytest /
-# pip / mvn / make / gradle / docker / etc.) so agents don't hit
-# permission prompts for routine dev-loop commands.
+# Common dev-command allowlist: seed Claude's allowed_bash_prefixes so
+# agents don't hit permission prompts for routine dev-loop commands. The
+# universal preset (non-destructive git verbs + find / grep / sed -n) is
+# always seeded; git-paw is a Rust + just + mdBook + OpenSpec repo, so it
+# opts into the curated `rust` stack and adds its remaining toolchain
+# verbs via `extra`.
 [supervisor.common_dev_allowlist]
 enabled = true
-extra = []
+stacks = ["rust"]
+extra = [
+    "just",
+    "mdbook build",
+    "openspec validate",
+    "openspec new",
+    "openspec archive",
+    "openspec list",
+    "openspec status",
+    "openspec instructions",
+]
 
 # Auto-approve subsystem: detect Yes/No permission prompts in
 # stalled agent panes and approve safe commands via send-keys.

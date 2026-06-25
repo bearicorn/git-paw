@@ -105,6 +105,24 @@ breaks both: it produces commits that don't build or pass on their own, and it
 bloats the changelog the supervisor must hand-curate — prior release cycles had
 to hand-squash 148 commits down to 10 (v0.6.0) and 4 down to 1 (v0.7.0). A clean
 releasable-unit history avoids that manual squash cost.
+### Run dev commands bare — no exit-code-probe wrappers
+
+Run each dev command **bare** and read its exit status directly. Do
+**NOT** wrap a command in an exit-code probe such as
+`<cmd> && echo "EXIT $?"`, `<cmd>; echo $?`, or `RC=$?; echo "$RC"` just
+to print the result.
+
+The probe text varies from one run to the next (a different captured
+code, different trailing output), so the CLI's command-string permission
+whitelisting never matches the next invocation — every run raises a
+fresh approval prompt, and your dev loop stalls on the same safe command
+forever instead of being approved once. A bare, prefix-matchable command
+generalises across every later run.
+
+This is about the *probe wrapper*, not about the exit status itself:
+keep observing and acting on whether a command succeeded or failed —
+just let the shell surface the status instead of appending an
+`echo "… $?"`.
 
 ### Stay inside your worktree
 

@@ -1175,6 +1175,7 @@ fn cmd_supervisor(
     // from suppressed dev-loop prompts.
     if supervisor_cfg.common_dev_allowlist.enabled {
         for (path, err) in git_paw::supervisor::dev_allowlist::seed_supervisor_session(
+            &supervisor_cfg.common_dev_allowlist.stacks,
             &supervisor_cfg.common_dev_allowlist.extra,
             repo_root,
             &configured_settings_paths(config),
@@ -2038,6 +2039,7 @@ fn recover_session(repo_root: &Path, existing: &Session) -> Result<(), PawError>
         && supervisor_cfg.common_dev_allowlist.enabled
     {
         for (path, err) in git_paw::supervisor::dev_allowlist::seed_supervisor_session(
+            &supervisor_cfg.common_dev_allowlist.stacks,
             &supervisor_cfg.common_dev_allowlist.extra,
             repo_root,
             &configured_settings_paths(&config),

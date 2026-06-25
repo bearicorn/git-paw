@@ -254,21 +254,85 @@ fn agent_feedback_examples_cover_three_failure_shapes() {
     );
 }
 
+/// Scenario from `lang-agnostic-skills` /
+/// `Requirement: Bundled skills nudge against exit-code-probe wrappers`:
+/// the bundled supervisor and coordination skills SHALL contain guidance
+/// to run dev commands bare AND the command-string-whitelisting rationale.
+#[test]
+fn bundled_skills_contain_no_exit_probe_guidance_and_rationale() {
+    use std::fs;
+    for (path, label) in [
+        ("assets/agent-skills/supervisor.md", "supervisor"),
+        ("assets/agent-skills/coordination.md", "coordination"),
+    ] {
+        let body = fs::read_to_string(path).expect("skill file is at the expected path");
+
+        // The guidance: run dev commands bare; reject the exit-probe wrapper.
+        assert!(
+            body.contains("Run dev commands bare"),
+            "{label} skill must carry the run-dev-commands-bare guidance heading",
+        );
+        assert!(
+            body.contains("EXIT $?"),
+            "{label} skill must name the exit-code-probe wrapper shape it forbids",
+        );
+
+        // The rationale: per-run variation defeats command-string whitelisting.
+        assert!(
+            body.contains("command-string permission\nwhitelisting")
+                || body.contains("command-string permission whitelisting"),
+            "{label} skill must explain the command-string-whitelisting rationale",
+        );
+        assert!(
+            body.contains("approval prompt"),
+            "{label} skill rationale must mention the re-prompt consequence",
+        );
+
+        // It must NOT discourage reading the exit status itself.
+        assert!(
+            body.contains("read its exit status directly"),
+            "{label} skill must still direct the agent to read the exit status",
+        );
+    }
+}
+
+/// The exit-probe nudge is stack-neutral: it passes the no-leak audit on
+/// both rendered skills across every spec backend.
+#[test]
+fn exit_probe_nudge_passes_no_leak_audit_across_backends() {
+    for backends in [
+        vec![SpecBackendKind::OpenSpec],
+        vec![SpecBackendKind::SpecKit],
+        vec![SpecBackendKind::Markdown],
+        vec![],
+    ] {
+        let supervisor = render_supervisor_for(&backends);
+        assert!(
+            supervisor.contains("Run dev commands bare"),
+            "rendered supervisor skill should include the exit-probe nudge"
+        );
+        assert_no_forbidden_tokens(&supervisor, "supervisor-exit-probe");
+
+        let coordination = render_coordination_for(&backends);
+        assert!(
+            coordination.contains("Run dev commands bare"),
+            "rendered coordination skill should include the exit-probe nudge"
+        );
+        assert_no_forbidden_tokens(&coordination, "coordination-exit-probe");
+    }
+}
+
 #[test]
 fn audit_excludes_allowlist_prose_via_sentinel() {
-    // The legitimate {{DEV_ALLOWLIST_PRESET}} enumeration contains
-    // `cargo (build, test, ...)` — confirm the rendered baseline DOES
-    // contain `cargo` somewhere (inside the sentinel) AND the audit
-    // still passes (because the sentinel scopes that span out).
+    // The universal DEV_ALLOWLIST_PRESET is now stack-neutral, so the
+    // rendered baseline carries no forbidden token (a repo opts into
+    // `cargo` via the `rust` stack preset, not via the hardcoded
+    // universal set). The sentinel pair still wraps the placeholder so
+    // a stack-preset enumeration could legitimately surface a token
+    // there in future. Verify the sentinel pairing exists AND that a
+    // forbidden token placed *inside* a sentinel span is scoped out by
+    // the strip (the mechanism the audit relies on).
     let rendered = render_supervisor_for(&[SpecBackendKind::OpenSpec]);
-    assert!(
-        rendered.contains("cargo"),
-        "rendered DEV_ALLOWLIST_PRESET prose should mention cargo as one of the auto-approved families",
-    );
-    // The audit passes because the cargo mention is inside the
-    // sentinel span (asserted by audit_passes_for_openspec_backend).
-    // Here we double-check the sentinel pairing exists in the rendered
-    // skill so the audit's allowlist-strip has something to remove.
     assert!(
         rendered.contains("<!-- allowlist-prose -->"),
         "rendered supervisor skill must include the allowlist-prose sentinel pair",
@@ -277,4 +341,11 @@ fn audit_excludes_allowlist_prose_via_sentinel() {
         rendered.contains("<!-- /allowlist-prose -->"),
         "rendered supervisor skill must close every allowlist-prose sentinel",
     );
+
+    // Inject a forbidden token inside a sentinel span and confirm the
+    // audit still passes — the strip removes the span before scanning.
+    let with_sentinel_token = format!(
+        "{rendered}\nsafe-by-pattern: <!-- allowlist-prose -->cargo (build, test)<!-- /allowlist-prose -->\n"
+    );
+    assert_no_forbidden_tokens(&with_sentinel_token, "sentinel-scoped-token");
 }

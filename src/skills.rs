@@ -2473,15 +2473,10 @@ mod tests {
 
     #[test]
     fn dev_allowlist_preset_groups_by_first_word() {
-        // `cargo build` and `cargo test` share `cargo`; the rendered prose
-        // must collapse them into a single `cargo (...)` group so the
+        // `git status` and `git log` share `git`; the rendered prose
+        // must collapse them into a single `git (...)` group so the
         // listing reads as families, not as a flat array.
         let prose = render_dev_allowlist_preset();
-        let cargo_groups = prose.matches("cargo (").count();
-        assert_eq!(
-            cargo_groups, 1,
-            "multi-entry prefixes must collapse into a single grouped clause; got {cargo_groups} occurrences of `cargo (` in:\n{prose}"
-        );
         let git_groups = prose.matches("git (").count();
         assert_eq!(
             git_groups, 1,
@@ -2492,7 +2487,7 @@ mod tests {
     #[test]
     fn dev_allowlist_preset_preserves_single_word_entries() {
         let prose = render_dev_allowlist_preset();
-        for bare in ["just", "find", "grep"] {
+        for bare in ["find", "grep"] {
             assert!(
                 prose.contains(bare),
                 "bare single-word entry `{bare}` should appear verbatim in:\n{prose}"
@@ -2668,7 +2663,7 @@ mod tests {
             &[],
         );
         assert!(
-            output.contains("cargo (build"),
+            output.contains("git (status"),
             "rendered placeholder should embed the grouped preset prose; got:\n{output}"
         );
         assert!(!output.contains("{{DEV_ALLOWLIST_PRESET}}"));
@@ -4555,12 +4550,12 @@ mod tests {
             lower.contains("absorb routine approval") || lower.contains("rubber-stamp"),
             "Rules must include the routine-approval absorption framing; got:\n{section}"
         );
-        // v0.6.0+ the rules bullet embeds {{DEV_ALLOWLIST_PRESET}} which
-        // groups by first word: `cargo (build, test, ...)`, `git (..., commit, ...)`,
-        // `mdbook build`, `openspec (...)`, `just`. Match against the
-        // grouped families.
+        // The rules bullet embeds {{DEV_ALLOWLIST_PRESET}}, which now
+        // renders the stack-neutral universal preset grouped by first
+        // word: `git (status, log, diff, ...)`, `find`, `grep`,
+        // `sed -n`. Match against the universal families.
         let mut family_hits = 0;
-        for family in ["cargo (", "git (", "mdbook", "openspec (", "just"] {
+        for family in ["git (", "find", "grep", "sed"] {
             if section.contains(family) {
                 family_hits += 1;
             }
