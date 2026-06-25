@@ -203,6 +203,65 @@ time. The bundled supervisor and coordination skills instruct agents to run dev
 commands bare and read the exit status directly; keep your own commands to the
 same shape so a seeded prefix actually suppresses the prompt.
 
+## Auto-approve classification
+
+When `[supervisor.auto_approve]` is enabled, the poll loop classifies each
+captured permission prompt into **escalate-to-human** or **auto-approve**. The
+decision is deterministic and reviewable — the same logic ships in the bundled
+`sweep.sh` helper (`sweep.sh classify`, fed a pane capture on stdin) so the
+shell path and the Rust path agree.
+
+The classifier reads the prompted **command slice** — the text between the
+`Bash command` / `Bash(…)` header and the confirmation question — not the
+surrounding narration. A supervisor that merely *mentions* `rm -rf /` in prose
+is never mistaken for a prompt to run it.
+
+### Decision order
+
+1. **Live-prompt gate.** The classifier acts only when the footer marker
+   `Esc to cancel` appears within the last ~4 non-blank lines of the capture.
+   A prompt that has scrolled away, or pane text that is just narration, is
+   treated as *not live* — no keystrokes are sent. This kills phantom
+   approvals.
+2. **Danger-list (escalate wins).** A curated danger-list is evaluated
+   **first** and overrides any allowlist match. It covers `rm -rf` / `rm -fr`,
+   `git push`, `--force` / `force-push`, `reset --hard`, `git rebase`,
+   branch-switching `git checkout `, `branch -D`, `git worktree remove`,
+   `clean -fd` / `clean -fdx`, `sudo`, `mkfs`, `dd if=`, `> /dev/`, `chmod -R`,
+   `chown -R`, and `pkill` / `kill`, plus a per-OS addendum (macOS `diskutil`
+   and raw `/dev/disk*`; Linux/WSL `/dev/sd*`, `/dev/nvme*`, `mkfs*`). A
+   danger match always escalates to you — even when the verb is otherwise
+   whitelisted (so `git push` escalates although `git` is a safe verb).
+3. **Scratch-path exception.** An `rm -rf` / `rm -fr` does *not* escalate when
+   **every** target is repo/OS scratch: `/tmp/paw-*`, `/private/tmp/paw-*`, a
+   `$TMPDIR`-rooted `paw-*`, or any path under `.git-paw/tmp/`. This also covers
+   `rm -rf "$VAR"` when `$VAR` resolves (via the captured environment or a
+   preceding `VAR=…` assignment) to such a path. If a variable cannot be
+   resolved, or **any** target lies outside the scratch set, the whole command
+   escalates (fail-safe).
+4. **Worktree-confined `git add` / `git commit`.** These pre-approve when the
+   agent's worktree resolves to a real directory (the same canonicalize-then-
+   `starts_with` boundary check used for file edits), so an unattended agent can
+   stage and commit its own work without stalling. `git push` is **not** covered
+   — the danger-list escalates it.
+5. **Read-mostly verb allowlist.** Routine verbs auto-approve: `curl`, `cat`,
+   `ls`, `grep`, `rg`, `git`, `echo`, `sed`, `awk`, `find`, `wc`, `head`,
+   `tail`, `jq`, `mkdir`, `touch`, `openspec`, `just`, `export`, `tmux`, `env`
+   (plus your configured `safe_commands`). This is subordinate to the
+   danger-list above.
+6. Anything else is **Unknown** and forwarded to you.
+
+### Option selection and the arbitrary-code policy
+
+When the classifier approves, it selects the prompt option by shape: a 2-option
+`Yes` / `No` prompt takes option 1 (`Yes`); a 3-option `Yes` /
+`Yes, and don't ask again` / `No` prompt takes option 2 (the **permanent broad
+grant**) only when the command's verb is read-mostly-allowlisted **and** is not
+an arbitrary-code runner. Arbitrary-code runners — `python`, `bash -c`,
+`sh -c`, `eval`, `node`, or any bare ` -c ` code-string flag — take the
+one-time `Yes` only and **never** receive a permanent grant: a standing grant
+on `python -c` is effectively a standing grant on anything.
+
 ## Manual approvals
 
 The preset only covers the commands it knows about. Everything else — a

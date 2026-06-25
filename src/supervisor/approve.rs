@@ -1,11 +1,14 @@
 //! Auto-approval keystroke dispatch.
 //!
-//! Implements the `automatic-approval` capability of the
-//! `auto-approve-patterns` change: when the supervisor poll loop classifies
-//! a stalled agent's prompt as safe, this module sends the
-//! `BTab Down Enter` sequence to the pane via three separate
-//! `tmux send-keys` invocations and publishes an `agent.status` audit log
-//! entry to the broker before the keystrokes go out.
+//! Implements the `automatic-approval` capability: when the supervisor poll
+//! loop classifies a stalled agent's prompt as safe and LIVE, this module
+//! selects the prompt's option index, types the option digit followed by
+//! `Enter` via two separate `tmux send-keys` invocations, and publishes an
+//! `agent.status` audit log entry to the broker before the keystrokes go out.
+//!
+//! Digit selection is deliberate: a blind `Down`+`Enter` selects the wrong
+//! row on a 2-option `Yes`/`No` prompt (it lands on `No`). Typing the option
+//! number is unambiguous across 2- and 3-option shapes.
 //!
 //! The send-keys invoker is abstracted through [`KeyDispatcher`] so unit
 //! tests can record argument vectors without spawning tmux.
@@ -16,12 +19,12 @@ use crate::broker::publish::{build_status_message, publish_to_broker_http};
 use crate::error::PawError;
 use crate::supervisor::permission_prompt::PermissionType;
 
-/// Keys (in tmux notation) sent to a pane to approve and remember a
-/// permission prompt.
-///
-/// `BTab` focuses the prompt's "Yes, don't ask again" choice,
-/// `Down` selects it, and `Enter` submits.
-pub const APPROVAL_KEYS: &[&str] = &["BTab", "Down", "Enter"];
+/// Keystrokes (in tmux notation) that select the 1-based `option_index` at a
+/// permission prompt: type the option digit, then submit with `Enter`.
+#[must_use]
+pub fn approval_keystrokes(option_index: u8) -> [String; 2] {
+    [option_index.to_string(), "Enter".to_string()]
+}
 
 /// Abstraction over `tmux send-keys` so [`auto_approve_pane`] can be tested
 /// without spawning tmux.
@@ -70,6 +73,12 @@ pub struct ApprovalRequest<'a> {
     /// Whitelist entry that matched the captured command, included in the
     /// audit log when `Some`.
     pub matched_entry: Option<&'a str>,
+    /// Whether the prompt is LIVE (footer `Esc to cancel` in the last ~4
+    /// non-blank lines). A non-live prompt SHALL NOT receive keystrokes.
+    pub live_prompt: bool,
+    /// 1-based option index to select (per the prompt shape and broad-grant
+    /// rule). Typed as the leading keystroke before `Enter`.
+    pub option_index: u8,
     /// Broker URL for the audit log message; `None` skips logging.
     pub broker_url: Option<&'a str>,
 }
@@ -82,10 +91,14 @@ pub struct ApprovalRequest<'a> {
 ///
 /// Order of operations is fixed:
 ///
-/// 1. If `req.enabled == false` or `req.kind == Unknown`, return `Ok(false)`.
+/// 1. If `req.enabled == false`, `req.kind == Unknown`, or
+///    `req.live_prompt == false`, return `Ok(false)` (no keystrokes). The
+///    live-prompt check is a hard precondition — a non-live capture is never
+///    acted on.
 /// 2. Publish an `agent.status` message tagged `auto_approved` to the
 ///    broker. Failures are non-fatal — see the spec rationale.
-/// 3. Send `BTab`, `Down`, `Enter` as three separate `send-keys` calls.
+/// 3. Type the selected option digit, then `Enter`, as two separate
+///    `send-keys` calls (see [`approval_keystrokes`]).
 ///
 /// The `matched_entry` field is included in the audit log so the human
 /// can see which whitelist entry triggered the approval.
@@ -93,7 +106,7 @@ pub fn auto_approve_pane<D: KeyDispatcher>(
     dispatcher: &mut D,
     req: ApprovalRequest<'_>,
 ) -> Result<bool, PawError> {
-    if !req.enabled || req.kind == PermissionType::Unknown {
+    if !req.enabled || req.kind == PermissionType::Unknown || !req.live_prompt {
         return Ok(false);
     }
 
@@ -113,9 +126,9 @@ pub fn auto_approve_pane<D: KeyDispatcher>(
         }
     }
 
-    for key in APPROVAL_KEYS {
+    for key in approval_keystrokes(req.option_index) {
         dispatcher
-            .send_key(req.session, req.pane_index, key)
+            .send_key(req.session, req.pane_index, &key)
             .map_err(|e| PawError::TmuxError(format!("send-keys {key} failed: {e}")))?;
     }
     Ok(true)
@@ -157,21 +170,23 @@ mod tests {
             agent_id: "feat-foo",
             kind,
             matched_entry,
+            live_prompt: true,
+            option_index: 1,
             broker_url: None,
         }
     }
 
     #[test]
-    fn safe_prompt_dispatches_btab_down_enter_in_order() {
+    fn safe_prompt_types_option_digit_then_enter() {
         let mut rec = Recorder::new();
         let fired = auto_approve_pane(
             &mut rec,
             req(true, PermissionType::Cargo, Some("cargo test")),
         )
         .unwrap();
-        assert!(fired, "should fire when enabled and class is safe");
+        assert!(fired, "should fire when enabled, safe, and live");
         let keys: Vec<&str> = rec.events.iter().map(|(_, _, k)| k.as_str()).collect();
-        assert_eq!(keys, vec!["BTab", "Down", "Enter"]);
+        assert_eq!(keys, vec!["1", "Enter"], "option 1 => type `1` then Enter");
         for (s, p, _) in &rec.events {
             assert_eq!(s, "paw-test");
             assert_eq!(*p, 2);
@@ -179,11 +194,23 @@ mod tests {
     }
 
     #[test]
+    fn broad_grant_selects_option_two() {
+        let mut rec = Recorder::new();
+        let request = ApprovalRequest {
+            option_index: 2,
+            ..req(true, PermissionType::SafeCommand, Some("git"))
+        };
+        auto_approve_pane(&mut rec, request).unwrap();
+        let keys: Vec<&str> = rec.events.iter().map(|(_, _, k)| k.as_str()).collect();
+        assert_eq!(keys, vec!["2", "Enter"], "option 2 => type `2` then Enter");
+    }
+
+    #[test]
     fn each_key_dispatched_separately() {
         let mut rec = Recorder::new();
         auto_approve_pane(&mut rec, req(true, PermissionType::Curl, None)).unwrap();
-        // Three distinct invocations (no concatenated string).
-        assert_eq!(rec.events.len(), 3);
+        // Two distinct invocations (digit + Enter), no concatenated string.
+        assert_eq!(rec.events.len(), 2);
     }
 
     #[test]
@@ -206,11 +233,30 @@ mod tests {
         assert!(rec.events.is_empty(), "Unknown => no keystrokes");
     }
 
+    /// Spec scenario "Footer absent does not fire" / live-prompt precondition:
+    /// a non-live prompt receives no keystrokes even when the class is safe.
     #[test]
-    fn approval_keys_constant_matches_spec() {
-        // Spec scenario: "Default Claude approval sequence" requires
-        // BTab Down Enter in order, sent via tmux send-keys.
-        assert_eq!(APPROVAL_KEYS, &["BTab", "Down", "Enter"]);
+    fn non_live_prompt_is_noop() {
+        let mut rec = Recorder::new();
+        let request = ApprovalRequest {
+            live_prompt: false,
+            ..req(true, PermissionType::SafeCommand, Some("cargo test"))
+        };
+        let fired = auto_approve_pane(&mut rec, request).unwrap();
+        assert!(!fired, "non-live prompt must not fire");
+        assert!(rec.events.is_empty(), "non-live => no keystrokes");
+    }
+
+    #[test]
+    fn approval_keystrokes_are_digit_then_enter() {
+        assert_eq!(
+            approval_keystrokes(1),
+            ["1".to_string(), "Enter".to_string()]
+        );
+        assert_eq!(
+            approval_keystrokes(2),
+            ["2".to_string(), "Enter".to_string()]
+        );
     }
 
     /// Spec scenario `auto-approve-patterns/automatic-approval` —
@@ -295,6 +341,8 @@ mod tests {
             agent_id: "feat-foo",
             kind: PermissionType::Cargo,
             matched_entry: Some("cargo test"),
+            live_prompt: true,
+            option_index: 1,
             broker_url: Some(&broker_url),
         };
         let fired = auto_approve_pane(&mut dispatcher, req).expect("auto_approve_pane");
@@ -333,7 +381,7 @@ mod tests {
             "audit message must be published BEFORE keystrokes; timeline: {events:?}"
         );
 
-        // Sanity: all three keys were dispatched in order.
+        // Sanity: the option digit then Enter were dispatched in order.
         let keys: Vec<String> = events
             .iter()
             .filter_map(|(_, e)| match e {
@@ -341,6 +389,6 @@ mod tests {
                 Event::Published(_) => None,
             })
             .collect();
-        assert_eq!(keys, vec!["BTab", "Down", "Enter"]);
+        assert_eq!(keys, vec!["1", "Enter"]);
     }
 }
