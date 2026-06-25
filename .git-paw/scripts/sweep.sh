@@ -276,6 +276,7 @@ usage: $0 <subcommand> [args]
   approve <pane>                      Down + Enter to <pane> (sticky-yes)
   detect-stuck                        flag panes stuck on a prompt with a stale heartbeat
   stuck-eval <agent> <last_seen>      (stdin: capture) run the stuck decision for one agent
+  classify [worktree-root]            (stdin: capture) auto-approve classification (escalate/approve/no-op)
   status [--all]                      broker /status, one line per agent (phantoms filtered)
   worktrees-status                    uncommitted-file count per agent worktree
   inbox                               supervisor inbox payloads (question/feedback/blocked)
@@ -692,6 +693,229 @@ cmd_stuck_eval() {
   printf '%s' "${cap}" | stuck_eval "${agent}" "${last_seen}"
 }
 
+# Auto-approve classification, mirroring the Rust classifier
+# (src/supervisor/auto_approve.rs) so the bundled helper decides identically:
+# command-slice extraction, the curated danger-list (+ per-OS addendum) with
+# the rm -rf scratch exception, the read-mostly verb allowlist, worktree-
+# confined git add/commit, the live-prompt gate, and option-index selection.
+#
+# Reads a pane capture on stdin; takes an optional worktree root (defaults to
+# the project root) used by the worktree-git pre-approval. Prints one of:
+#   no-op (not live)
+#   escalate (danger|unknown)
+#   approve option=<N> (scratch-rm|worktree-git|whitelist)
+cmd_classify() {
+  local root=${1:-${PROJECT_ROOT}}
+  local cap
+  cap=$(cat)
+  printf '%s' "${cap}" | WORKTREE_ROOT="${root}" "${PY}" -c "$(cat <<'PY'
+import os, platform, re, sys
+
+cap = sys.stdin.read()
+worktree_root = os.environ.get("WORKTREE_ROOT", "")
+
+# --- command-slice extraction --------------------------------------------
+DECOR = " \t│─╭╮╰╯├┤┐└┘┌⎿❯●•*·"
+
+def strip_decoration(line):
+    return line.lstrip(DECOR).rstrip()
+
+def is_option_line(line):
+    s = line.lstrip()
+    return len(s) >= 2 and s[0].isdigit() and s[1] in ".)"
+
+def is_boundary(line):
+    low = line.lower()
+    return (low.startswith("do you want to") or "requires approval" in low
+            or "[y/n]" in low or "(y/n)" in low or is_option_line(line))
+
+def extract_slice(cap):
+    lines = cap.splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        line = strip_decoration(lines[i])
+        idx = line.find("Bash(")
+        if idx != -1:
+            after = line[idx + 5:]
+            end = after.rfind(")")
+            if end != -1 and after[:end].strip():
+                return after[:end].strip()
+        if line.lower().startswith("bash command"):
+            for nxt in lines[i + 1:]:
+                c = strip_decoration(nxt)
+                if not c:
+                    continue
+                if is_boundary(c):
+                    break
+                return c
+    return None
+
+# --- curated danger-list --------------------------------------------------
+DANGER_BASE = ["rm -rf", "rm -fr", "git push", "--force", "force-push",
+    "reset --hard", "git rebase", "git checkout ", "branch -D",
+    "git worktree remove", "clean -fd", "clean -fdx", "sudo", "mkfs",
+    "dd if=", "> /dev/", "chmod -R", "chown -R", "pkill", "kill"]
+OS_ADDENDUM = ["diskutil", "/dev/disk"] if platform.system() == "Darwin" \
+    else ["/dev/sd", "/dev/nvme", "mkfs"]
+
+def contains_word(hay, word):
+    return re.search(r"(?<![A-Za-z0-9_])" + re.escape(word) + r"(?![A-Za-z0-9_])", hay) is not None
+
+def danger_match(s, pat):
+    if pat in ("sudo", "kill", "pkill"):
+        return contains_word(s, pat)
+    return pat in s
+
+# --- rm -rf scratch-path exception ---------------------------------------
+def is_scratch_path(p):
+    p = p.strip().strip('"').strip("'")
+    if p.startswith("/tmp/paw-") or p.startswith("/private/tmp/paw-"):
+        return True
+    if p.startswith(".git-paw/tmp/") or "/.git-paw/tmp/" in p:
+        return True
+    tmp = os.environ.get("TMPDIR", "")
+    base = tmp.rstrip("/")
+    if base and p.startswith(base + "/paw-"):
+        return True
+    return False
+
+def parse_var_ref(t):
+    if not t.startswith("$"):
+        return None
+    rest = t[1:]
+    if rest.startswith("{"):
+        rest = rest[1:].rstrip("}")
+    if rest and all(c.isalnum() or c == "_" for c in rest):
+        return rest
+    return None
+
+def resolve_target(tok, assigns):
+    t = tok.strip('"').strip("'")
+    name = parse_var_ref(t)
+    if name is not None:
+        if name in assigns:
+            return assigns[name]
+        return os.environ.get(name)
+    if "$TMPDIR" in t:
+        tmp = os.environ.get("TMPDIR")
+        return None if tmp is None else t.replace("$TMPDIR", tmp.rstrip("/"))
+    return t
+
+def rm_targets(s):
+    assigns, targets, seen_rm = {}, [], False
+    for tok in s.split():
+        if tok in ("&&", "||", ";", "|"):
+            break
+        if not seen_rm:
+            if "=" in tok:
+                k, v = tok.split("=", 1)
+                if k and all(c.isalnum() or c == "_" for c in k):
+                    assigns[k] = v
+                    continue
+            if tok == "rm":
+                seen_rm = True
+            continue
+        if tok.startswith("-"):
+            continue
+        r = resolve_target(tok, assigns)
+        if r is None:
+            return None
+        targets.append(r)
+    return targets
+
+def rm_all_scratch(s):
+    t = rm_targets(s)
+    return bool(t) and all(is_scratch_path(x) for x in t)
+
+def is_dangerous(s):
+    for pat in DANGER_BASE + OS_ADDENDUM:
+        if danger_match(s, pat):
+            if pat in ("rm -rf", "rm -fr") and rm_all_scratch(s):
+                continue
+            return True
+    return False
+
+def is_scratch_rm(s):
+    if "rm -rf" not in s and "rm -fr" not in s:
+        return False
+    return rm_all_scratch(s) and not is_dangerous(s)
+
+# --- read-mostly allowlist + worktree git --------------------------------
+READ_MOSTLY = ["curl", "cat", "ls", "grep", "rg", "git", "echo", "sed", "awk",
+    "find", "wc", "head", "tail", "jq", "mkdir", "touch", "openspec", "just",
+    "export", "tmux", "env"]
+EXPLICIT_SAFE = ["cargo fmt", "cargo clippy", "cargo test", "cargo build",
+    "git commit", "git push", "curl http://127.0.0.1:"]
+
+def leading_verb(s):
+    for tok in s.split():
+        if "=" in tok:
+            k = tok.split("=", 1)[0]
+            if k and all(c.isalnum() or c == "_" for c in k):
+                continue
+        return tok.rsplit("/", 1)[-1]
+    return None
+
+def starts_with_boundary(s, entry):
+    s = s.lstrip()
+    if not s.startswith(entry):
+        return False
+    nxt = s[len(entry):len(entry) + 1]
+    return nxt == "" or nxt.isspace()
+
+def is_safe_command(s):
+    return any(starts_with_boundary(s, e) for e in EXPLICIT_SAFE + READ_MOSTLY)
+
+def is_worktree_git_op(s, root):
+    if not (starts_with_boundary(s, "git add") or starts_with_boundary(s, "git commit")):
+        return False
+    return bool(root) and os.path.isdir(root)
+
+# --- live-prompt gate -----------------------------------------------------
+def is_live(cap):
+    nonblank = [l for l in cap.splitlines() if l.strip()]
+    return any("esc to cancel" in l.lower() for l in nonblank[-4:])
+
+# --- prompt shape + option-index selection -------------------------------
+def detect_shape(cap):
+    low = cap.lower()
+    return "three" if ("don't ask again" in low or "don’t ask again" in low) else "two"
+
+def is_arbitrary(s):
+    if leading_verb(s) in ("python", "python3", "node", "eval"):
+        return True
+    return "bash -c" in s or "sh -c" in s or " -c " in s
+
+def select_option(shape, s):
+    if shape == "two":
+        return 1
+    if leading_verb(s) in READ_MOSTLY and not is_arbitrary(s):
+        return 2
+    return 1
+
+# --- decision -------------------------------------------------------------
+if not is_live(cap):
+    print("no-op (not live)")
+    raise SystemExit(0)
+
+s = extract_slice(cap)
+if s is None:
+    s = cap
+opt = select_option(detect_shape(cap), s)
+
+if is_dangerous(s):
+    print("escalate (danger)")
+elif is_scratch_rm(s):
+    print(f"approve option={opt} (scratch-rm)")
+elif is_worktree_git_op(s, worktree_root):
+    print(f"approve option={opt} (worktree-git)")
+elif is_safe_command(s):
+    print(f"approve option={opt} (whitelist)")
+else:
+    print("escalate (unknown)")
+PY
+)"
+}
+
 main() {
   local sub=${1:-}
   shift || true
@@ -702,6 +926,7 @@ main() {
     status) cmd_status "$@" ;;
     detect-stuck) cmd_detect_stuck "$@" ;;
     stuck-eval) cmd_stuck_eval "$@" ;;
+    classify) cmd_classify "$@" ;;
     worktrees-status) cmd_worktrees_status "$@" ;;
     inbox) cmd_inbox "$@" ;;
     feedback-gate) cmd_feedback_gate "$@" ;;

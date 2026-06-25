@@ -7,22 +7,27 @@
 //! Covers `openspec/changes/conflict-detection/tasks.md` items 5.1-5.3.
 
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 use git_paw::broker::{self, BrokerState};
 use git_paw::config::{BrokerConfig, ConflictConfig};
 use serial_test::serial;
 
-/// Atomic counter to give each test a unique port — avoids cross-test
-/// races on the same port.
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
+/// Allocates an OS-assigned ephemeral broker port (`bind 127.0.0.1:0`, read
+/// back, release), matching `tests/e2e_supervisor_stop.rs::pick_broker_port`.
+/// Replaces the former `BASE + (process::id() % N)` scheme (F8 root cause),
+/// which keyed the port on the PID modulo a small constant and collided
+/// across concurrent test runs.
+fn pick_broker_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral port")
+        .local_addr()
+        .expect("read local addr")
+        .port()
+}
 
 fn spawn_test_broker(conflict: Option<&ConflictConfig>) -> (broker::BrokerHandle, String) {
-    #[allow(clippy::cast_possible_truncation)]
-    let base = 26_000 + (std::process::id() as u16 % 3000);
-    let offset = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let mut port = base + offset;
+    let mut port = pick_broker_port();
     let mut attempts = 0;
     loop {
         let config = BrokerConfig {
@@ -43,7 +48,7 @@ fn spawn_test_broker(conflict: Option<&ConflictConfig>) -> (broker::BrokerHandle
                 return (handle, url);
             }
             Err(_) if attempts < 10 => {
-                port += 100;
+                port = pick_broker_port();
                 attempts += 1;
             }
             Err(e) => panic!("failed to start test broker after retries: {e}"),

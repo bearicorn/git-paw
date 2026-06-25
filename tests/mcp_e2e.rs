@@ -19,6 +19,19 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+/// Allocates an OS-assigned ephemeral broker port (`bind 127.0.0.1:0`, read
+/// back, release), matching `tests/e2e_supervisor_stop.rs::pick_broker_port`.
+/// Replaces the former `BASE + (process::id() % N)` scheme (F8 root cause),
+/// which keyed the port on the PID modulo a small constant and collided
+/// across concurrent test runs.
+fn pick_broker_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral port")
+        .local_addr()
+        .expect("read local addr")
+        .port()
+}
+
 /// Initialises a throwaway git repo at `dir` with one commit on `main`.
 fn git_init_with_commit(dir: &Path) {
     run_git(dir, &["init", "-q", "-b", "main"]);
@@ -507,10 +520,9 @@ fn intent_msg(agent: &str, files: &[&str], summary: &str) -> BrokerMessage {
 #[test]
 fn active_broker_populates_intents_and_conflicts() {
     let tmp = tempfile::tempdir().unwrap();
-    #[allow(clippy::cast_possible_truncation)]
     let config = BrokerConfig {
         enabled: true,
-        port: 21_000 + (std::process::id() as u16 % 500),
+        port: pick_broker_port(),
         bind: "127.0.0.1".to_string(),
         ..Default::default()
     };

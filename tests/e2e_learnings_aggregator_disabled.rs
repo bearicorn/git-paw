@@ -30,11 +30,23 @@ fn should_attach(s: &SupervisorConfig) -> bool {
     s.enabled && s.learnings
 }
 
-fn broker_config(port_base: u16) -> BrokerConfig {
-    #[allow(clippy::cast_possible_truncation)]
+/// Allocates an OS-assigned ephemeral broker port (`bind 127.0.0.1:0`, read
+/// back, release), matching `tests/e2e_supervisor_stop.rs::pick_broker_port`.
+/// Replaces the former `BASE + (process::id() % N)` scheme (F8 root cause),
+/// which keyed the port on the PID modulo a small constant and collided
+/// across concurrent test runs.
+fn pick_broker_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral port")
+        .local_addr()
+        .expect("read local addr")
+        .port()
+}
+
+fn broker_config() -> BrokerConfig {
     BrokerConfig {
         enabled: true,
-        port: port_base + (std::process::id() as u16 % 100),
+        port: pick_broker_port(),
         bind: "127.0.0.1".to_string(),
         ..Default::default()
     }
@@ -66,7 +78,7 @@ fn aggregator_does_not_run_when_supervisor_disabled() {
         unreachable!("test contradicts should_attach predicate");
     }
 
-    let config = broker_config(21_000);
+    let config = broker_config();
     let watch_targets = vec![WatchTarget {
         agent_id: "feat-x".to_string(),
         cli: "claude".to_string(),

@@ -5,7 +5,6 @@
 //! message to the broker on the URL written into the per-worktree marker.
 
 use std::process::Command as StdCommand;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 use serial_test::serial;
@@ -13,15 +12,22 @@ use serial_test::serial;
 mod helpers;
 use helpers::*;
 
-/// Atomic counter to ensure each test gets a unique broker port.
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
+/// Allocates an OS-assigned ephemeral broker port (`bind 127.0.0.1:0`, read
+/// back, release), matching `tests/e2e_supervisor_stop.rs::pick_broker_port`.
+/// Replaces the former `BASE + (process::id() % N)` scheme (F8 root cause),
+/// which keyed the port on the PID modulo a small constant and collided
+/// across concurrent test runs.
+fn pick_broker_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral port")
+        .local_addr()
+        .expect("read local addr")
+        .port()
+}
 
 /// Starts a broker on a unique free port and returns the handle + URL.
 fn spawn_test_broker() -> (git_paw::broker::BrokerHandle, String) {
-    #[allow(clippy::cast_possible_truncation)]
-    let base = 22_000 + (std::process::id() as u16 % 5000);
-    let offset = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let mut port = base + offset;
+    let mut port = pick_broker_port();
     let mut attempts = 0;
     loop {
         let config = git_paw::config::BrokerConfig {
@@ -37,7 +43,7 @@ fn spawn_test_broker() -> (git_paw::broker::BrokerHandle, String) {
         ) {
             Ok(handle) => return (handle, config.url()),
             Err(_) if attempts < 10 => {
-                port = port.wrapping_add(100);
+                port = pick_broker_port();
                 attempts += 1;
             }
             Err(e) => panic!("failed to start test broker after retries: {e}"),

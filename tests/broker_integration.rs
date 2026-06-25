@@ -301,8 +301,18 @@ fn missing_broker_section_defaults_to_disabled() {
 // E2E tests requiring tmux / HTTP broker
 // ===========================================================================
 
-/// Atomic counter to ensure each test gets a unique port.
-static PORT_COUNTER: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+/// Allocates an OS-assigned ephemeral broker port (`bind 127.0.0.1:0`, read
+/// back, release), matching `tests/e2e_supervisor_stop.rs::pick_broker_port`.
+/// Replaces the former `BASE + (process::id() % N)` scheme (F8 root cause),
+/// which keyed the port on the PID modulo a small constant and collided
+/// across concurrent test runs.
+fn pick_broker_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral port")
+        .local_addr()
+        .expect("read local addr")
+        .port()
+}
 
 /// Starts a broker on a unique free port and returns the handle + URL.
 ///
@@ -312,12 +322,7 @@ fn spawn_test_broker_with<F>(make_state: F) -> (git_paw::broker::BrokerHandle, S
 where
     F: Fn() -> git_paw::broker::BrokerState,
 {
-    use std::sync::atomic::Ordering;
-
-    #[allow(clippy::cast_possible_truncation)]
-    let base = 21_000 + (std::process::id() as u16 % 5000);
-    let offset = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let mut port = base + offset;
+    let mut port = pick_broker_port();
     let mut attempts = 0;
     loop {
         let config = git_paw::config::BrokerConfig {
@@ -332,7 +337,7 @@ where
                 return (handle, url);
             }
             Err(_) if attempts < 10 => {
-                port = port.wrapping_add(100);
+                port = pick_broker_port();
                 attempts += 1;
             }
             Err(e) => panic!("failed to start test broker after retries: {e}"),
@@ -650,16 +655,11 @@ fn dashboard_subcommand_with_tmux_env_does_not_return_internal_error() {
 #[test]
 #[serial]
 fn broker_log_flush_on_shutdown() {
-    use std::sync::atomic::Ordering;
-
     let tmp = TempDir::new().unwrap();
     let log_path = tmp.path().join("broker.log");
 
     // Build a broker with log_path configured
-    #[allow(clippy::cast_possible_truncation)]
-    let base = 22_000 + (std::process::id() as u16 % 5000);
-    let offset = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let mut port = base + offset;
+    let mut port = pick_broker_port();
     let mut attempts = 0;
 
     let (handle, url) = loop {
@@ -679,7 +679,7 @@ fn broker_log_flush_on_shutdown() {
                 break (h, u);
             }
             Err(_) if attempts < 10 => {
-                port += 100;
+                port = pick_broker_port();
                 attempts += 1;
             }
             Err(e) => panic!("failed to start test broker: {e}"),

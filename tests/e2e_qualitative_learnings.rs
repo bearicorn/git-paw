@@ -29,11 +29,23 @@ use git_paw::broker::messages::{BrokerMessage, LearningPayload};
 use git_paw::broker::{BrokerState, WatchTarget, start_broker_with};
 use git_paw::config::BrokerConfig;
 
-fn broker_config(port_base: u16) -> BrokerConfig {
-    #[allow(clippy::cast_possible_truncation)]
+/// Allocates an OS-assigned ephemeral broker port (`bind 127.0.0.1:0`, read
+/// back, release), matching `tests/e2e_supervisor_stop.rs::pick_broker_port`.
+/// Replaces the former `BASE + (process::id() % N)` scheme (F8 root cause),
+/// which keyed the port on the PID modulo a small constant and collided
+/// across concurrent test runs.
+fn pick_broker_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral port")
+        .local_addr()
+        .expect("read local addr")
+        .port()
+}
+
+fn broker_config() -> BrokerConfig {
     BrokerConfig {
         enabled: true,
-        port: port_base + (std::process::id() as u16 % 100),
+        port: pick_broker_port(),
         bind: "127.0.0.1".to_string(),
         ..Default::default()
     }
@@ -137,7 +149,7 @@ fn broker_on_routes_four_categories_to_four_sections() {
     }
     state.attach_learnings(Arc::clone(&agg));
 
-    let config = broker_config(23_000);
+    let config = broker_config();
     let Ok(handle) = start_broker_with(
         &config,
         state,
@@ -204,7 +216,7 @@ fn dedup_same_recurring_shape_renders_once() {
     let agg = Arc::new(Mutex::new(LearningsAggregator::new(md_path.clone())));
     state.attach_learnings(Arc::clone(&agg));
 
-    let config = broker_config(23_200);
+    let config = broker_config();
     let Ok(handle) = start_broker_with(
         &config,
         state,
@@ -275,7 +287,7 @@ fn broker_off_file_only_still_renders_four_sections() {
     }
     state.attach_learnings(Arc::clone(&agg));
 
-    let config = broker_config(23_400);
+    let config = broker_config();
     let Ok(handle) = start_broker_with(
         &config,
         state,
