@@ -80,15 +80,24 @@ The log is **in-memory only** — closing the dashboard drops it — and bounded
 top as new ones arrive. The panel is read-only: replying to a question or
 directing an agent still happens in the supervisor pane.
 
+When visible, the panel occupies a fixed **20 rows** by default — materially more
+than its original 12 — so more coordination traffic is visible without constant
+scrolling. Tune it with `[dashboard.broker_log] height_lines`. The agent-status
+table keeps a positive minimum height and absorbs the terminal's slack, so on a
+tall terminal the table grows while the panel stays at its configured height; on
+a terminal too short to grant both, the panel yields space before the table
+shrinks below its minimum.
+
 ### Showing and hiding the panel
 
 The panel is visible by default. Toggle it with `l`, or set the launch default
-in `.git-paw/config.toml`:
+and height in `.git-paw/config.toml`:
 
 ```toml
 [dashboard.broker_log]
 max_messages = 500
 default_visible = true
+height_lines = 20
 ```
 
 When the panel is hidden the dashboard layout is identical to its v0.5.0

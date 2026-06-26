@@ -269,10 +269,11 @@ fn render_to_string(
     panel_visible: bool,
 ) -> String {
     let broker_log = BrokerLog::new(500, panel_visible);
+    let panel_height = git_paw::config::BrokerLogConfig::default().height_lines;
     let backend = TestBackend::new(120, 30);
     let mut terminal = Terminal::new(backend).expect("create test terminal");
     terminal
-        .draw(|f| render_dashboard(f, rows, status_line, &broker_log))
+        .draw(|f| render_dashboard(f, rows, status_line, &broker_log, panel_height))
         .expect("draw frame");
     let buffer = terminal.backend().buffer().clone();
     buffer_to_string(&buffer)

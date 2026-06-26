@@ -735,6 +735,7 @@ show_message_log = true
 [dashboard.broker_log]
 max_messages = 500
 default_visible = true
+height_lines = 20
 ```
 
 | Field | Default | Description |
@@ -751,6 +752,7 @@ fills the screen region freed when v0.5.0 removed the prompt inbox.
 |-------|---------|-------------|
 | `max_messages` | `500` | Maximum number of messages retained in the panel's in-memory ring buffer. When the buffer is full, the oldest message drops off as new ones arrive. The log is in-memory only and is not persisted across dashboard restarts. |
 | `default_visible` | `true` | Whether the panel is shown when the dashboard first launches. The `l` hotkey toggles visibility at runtime regardless of this value. |
+| `height_lines` | `20` | Number of terminal rows the panel occupies when visible — raised from the v0.6.0 fixed `12` so more messages show without scrolling. The agent-status table keeps a positive minimum height and absorbs slack, so the panel stays at this height on tall terminals and yields space before the table shrinks on short ones. |
 
 An absent `[dashboard.broker_log]` table — as in any v0.5.0 config —
 loads these defaults, so existing config files parse unchanged.
