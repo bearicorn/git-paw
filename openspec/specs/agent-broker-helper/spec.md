@@ -1,5 +1,8 @@
-## ADDED Requirements
+# agent-broker-helper Specification
 
+## Purpose
+TBD - created by archiving change agent-broker-helper. Update Purpose after archive.
+## Requirements
 ### Requirement: Bundled agent-broker helper script
 
 The system SHALL provide a bundled agent-side broker helper,
@@ -116,3 +119,4 @@ if such a shape is reintroduced, identifying the offending line.
   block
 - **WHEN** the convention scanner runs against it
 - **THEN** it SHALL flag the offending shape and identify the line
+
