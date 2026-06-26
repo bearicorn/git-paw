@@ -1,6 +1,6 @@
 # Spec-Driven Launch
 
-The `--from-all-specs` and `--specs` flags let you define branches, CLI assignments, and prompts in spec files instead of using interactive selection. git-paw reads spec files from a configured directory, creates worktrees for each pending spec, and launches AI CLIs with the spec content injected into each worktree's `AGENTS.md`.
+The `--from-all-specs` and `--specs` flags let you define branches, CLI assignments, and prompts in spec files instead of using interactive selection. git-paw reads spec files from a configured directory, creates worktrees for each pending spec, and launches AI CLIs with the spec content injected into each worktree's gitignored `.git-paw/AGENTS.local.md` sidecar (the tracked `AGENTS.md` is left untouched).
 
 ## Quick Example
 
@@ -176,7 +176,7 @@ In this example, one feature directory produces three worktrees and three branch
 
 **Phase advancement.** Phases earlier than the current one are assumed complete (all `- [x]`). Phases later than the current one are deferred — they only produce worktrees on a future scan, after every task in the current phase has been ticked off. Fully completed features (every task in every phase is `- [x]`) are skipped silently.
 
-**Boot prompts.** Each Spec Kit worktree's `AGENTS.md` contains:
+**Boot prompts.** Each Spec Kit worktree's `.git-paw/AGENTS.local.md` sidecar contains:
 
 1. **Feature Context** — the full `spec.md` content.
 2. **Implementation Plan** — the full `plan.md` content (omitted when absent).

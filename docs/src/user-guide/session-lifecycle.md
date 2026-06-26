@@ -145,8 +145,8 @@ What it does:
 3. Creates the worktree (same naming and idempotent-create behaviour as
    `start`; re-adding an existing worktree reuses it) and attaches the
    agent through the **same** boot pipeline a start-time agent uses — the
-   broker boot block, the AGENTS.md spec body, and the initial prompt are
-   byte-identical.
+   broker boot block, the sidecar spec body (`.git-paw/AGENTS.local.md`), and
+   the initial prompt are byte-identical.
 4. Re-tiles the agent grid to the layout a `start` of that many agents
    would have produced. Existing panes keep their indices, so any
    in-flight `send-keys` targeting (supervisor sweeps) still lands on the

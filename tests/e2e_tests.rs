@@ -1233,7 +1233,7 @@ fn broker_session_full_lifecycle() {
     );
 
     // -----------------------------------------------------------------------
-    // Step 8: Verify AGENTS.md skill injection in worktree
+    // Step 8: Verify skill injection lands in the worktree sidecar
     // -----------------------------------------------------------------------
     // Find worktree paths by listing git worktrees
     let wt_output = std::process::Command::new("git")
@@ -1263,23 +1263,26 @@ fn broker_session_full_lifecycle() {
         worktree_paths.len()
     );
 
-    // Check at least one worktree's AGENTS.md contains skill injection
+    // Check at least one worktree's sidecar contains skill injection. The
+    // tracked AGENTS.md is left untouched; the combined view lives in the
+    // gitignored `.git-paw/AGENTS.local.md` sidecar.
     let agents_content =
-        fs::read_to_string(worktree_paths[0].join("AGENTS.md")).expect("read worktree AGENTS.md");
+        fs::read_to_string(worktree_paths[0].join(git_paw::agents::SIDECAR_REL_PATH))
+            .expect("read worktree sidecar");
     assert!(
         agents_content.contains("Coordination Skills"),
-        "AGENTS.md should contain 'Coordination Skills', got:\n{agents_content}"
+        "sidecar should contain 'Coordination Skills', got:\n{agents_content}"
     );
     assert!(
         agents_content.contains(&format!("http://127.0.0.1:{broker_port}")),
-        "AGENTS.md should contain the pre-expanded broker URL, got:\n{agents_content}"
+        "sidecar should contain the pre-expanded broker URL, got:\n{agents_content}"
     );
     // Check the slugified branch name appears (feat-smoke-a or feat-smoke-b)
     let has_slug =
         agents_content.contains("feat-smoke-a") || agents_content.contains("feat-smoke-b");
     assert!(
         has_slug,
-        "AGENTS.md should contain slugified branch name, got:\n{agents_content}"
+        "sidecar should contain slugified branch name, got:\n{agents_content}"
     );
 
     // -----------------------------------------------------------------------

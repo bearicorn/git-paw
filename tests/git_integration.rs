@@ -481,11 +481,11 @@ fn list_branches_strips_remote_prefix_and_deduplicates() {
 }
 
 // ---------------------------------------------------------------------------
-// AGENTS.md injection protection in real worktrees
+// AGENTS.md sidecar injection in real worktrees (finding F10)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn agents_md_injection_not_staged_by_git_add_in_worktree() {
+fn agents_md_injection_lands_in_sidecar_and_tracked_file_stays_committable() {
     // Setup: create a repo with a tracked AGENTS.md (like any project using
     // the Linux Foundation AGENTS.md standard).
     let tr = setup_test_repo();
@@ -515,14 +515,33 @@ fn agents_md_injection_not_staged_by_git_add_in_worktree() {
     git_paw::agents::setup_worktree_agents_md(tr.path(), &wt.path, &assignment)
         .expect("inject agents md");
 
-    // Verify AGENTS.md was modified (session content injected)
-    let content = std::fs::read_to_string(wt.path.join("AGENTS.md")).unwrap();
+    // The combined view (root + assignment) lands in the gitignored sidecar.
+    let sidecar = wt.path.join(git_paw::agents::SIDECAR_REL_PATH);
+    let sidecar_content = std::fs::read_to_string(&sidecar).expect("read sidecar");
     assert!(
-        content.contains("feat/test-injection"),
-        "AGENTS.md should contain injected session content"
+        sidecar_content.contains("feat/test-injection"),
+        "sidecar should contain injected session content"
+    );
+    assert!(
+        sidecar_content.contains("# Project Rules"),
+        "sidecar should be the combined view (root content + assignment)"
     );
 
-    // THE CRITICAL ASSERTION: git add -A should NOT stage AGENTS.md
+    // The tracked AGENTS.md is untouched by git-paw — no injected block.
+    let tracked = std::fs::read_to_string(wt.path.join("AGENTS.md")).unwrap();
+    assert!(
+        !tracked.contains("feat/test-injection"),
+        "tracked AGENTS.md must NOT contain the injected block, got: {tracked}"
+    );
+
+    // THE CRITICAL ASSERTION (finding F10): a legitimate hand edit to the
+    // tracked AGENTS.md stages via `git add -A` and shows in `git status` —
+    // the file is a normal committable file, no longer hidden.
+    std::fs::write(
+        wt.path.join("AGENTS.md"),
+        "# Project Rules\n\n- approved dependency: rmcp\n",
+    )
+    .unwrap();
     run_git(&wt.path, &["add", "-A"]);
     let output = Command::new("git")
         .current_dir(&wt.path)
@@ -531,20 +550,14 @@ fn agents_md_injection_not_staged_by_git_add_in_worktree() {
         .expect("git diff --cached");
     let staged = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !staged.contains("AGENTS.md"),
-        "AGENTS.md should NOT be staged after git add -A, but got: {staged}"
+        staged.contains("AGENTS.md"),
+        "a hand edit to AGENTS.md MUST stage after git add -A, but got: {staged}"
     );
 
-    // Also verify git status doesn't show it
-    let output = Command::new("git")
-        .current_dir(&wt.path)
-        .args(["status", "--porcelain"])
-        .output()
-        .expect("git status");
-    let status = String::from_utf8_lossy(&output.stdout);
+    // The ephemeral sidecar is gitignored — never staged.
     assert!(
-        !status.contains("AGENTS.md"),
-        "AGENTS.md should not appear in git status, got: {status}"
+        !staged.contains("AGENTS.local.md"),
+        "the gitignored sidecar must NOT be staged, got: {staged}"
     );
 
     // Cleanup

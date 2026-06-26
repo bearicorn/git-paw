@@ -652,13 +652,40 @@ pub fn delete_branch(repo_root: &Path, branch: &str) -> Result<(), PawError> {
     Ok(())
 }
 
-/// Excludes a file from git tracking by adding it to `.git/info/exclude`.
+/// Excludes a file from git tracking by adding it to `info/exclude`.
 ///
 /// This prevents the file from being tracked by git without modifying the
 /// repository's `.gitignore` file, which is useful for worktree-specific
-/// files that should not be committed.
+/// files that should not be committed. Idempotent: an entry already present is
+/// not duplicated.
+///
+/// **Linked worktrees.** Git reads `info/exclude` from the *common* git
+/// directory, never the per-worktree git directory, so for a linked worktree
+/// (`<worktree>/.git` is a file pointing at `<common>/worktrees/<id>`) the
+/// entry is written to the common dir's `info/exclude`. Writing it to the
+/// per-worktree dir — as an earlier version did — has no effect: git silently
+/// ignores it, so the path would remain stageable.
 pub fn exclude_from_git(worktree_root: &Path, filename: &str) -> Result<(), PawError> {
-    let exclude_file = worktree_root.join(".git/info/exclude");
+    // Resolve the effective `info/exclude` path. For a normal repo this is
+    // `<worktree>/.git/info/exclude`; for a linked worktree it is the common
+    // dir's `info/exclude`.
+    let dot_git = worktree_root.join(".git");
+    let exclude_file = if dot_git.is_file() {
+        let gitdir = std::fs::read_to_string(&dot_git)
+            .ok()
+            .and_then(|s| s.strip_prefix("gitdir: ").map(|s| s.trim().to_owned()))
+            .unwrap_or_default();
+        // A linked worktree's git dir is `<common>/worktrees/<id>`; strip the
+        // last two components to reach the common dir.
+        let worktree_git_dir = PathBuf::from(&gitdir);
+        let common_dir = worktree_git_dir
+            .parent()
+            .and_then(Path::parent)
+            .map_or_else(|| worktree_git_dir.clone(), Path::to_path_buf);
+        common_dir.join("info").join("exclude")
+    } else {
+        dot_git.join("info").join("exclude")
+    };
 
     // Read existing exclude patterns
     let existing = if exclude_file.exists() {
@@ -676,37 +703,8 @@ pub fn exclude_from_git(worktree_root: &Path, filename: &str) -> Result<(), PawE
         updated.push_str(filename);
         updated.push('\n');
 
-        // Create .git/info directory if it doesn't exist
+        // Create the `info/` directory if it doesn't exist.
         if let Some(parent) = exclude_file.parent() {
-            // Check if .git (the grandparent) is a file (worktree case)
-            if let Some(git_dir) = parent.parent()
-                && git_dir.is_file()
-            {
-                // This is a worktree - .git is a file pointing to main repo
-                // The actual git directory is inside the main repo
-                let main_git_dir = std::fs::read_to_string(git_dir)
-                    .ok()
-                    .and_then(|s| s.strip_prefix("gitdir: ").map(|s| s.trim().to_owned()))
-                    .unwrap_or_default();
-                let main_git_info = PathBuf::from(main_git_dir).join("info");
-                if !main_git_info.try_exists().unwrap_or(false) {
-                    std::fs::create_dir_all(&main_git_info).map_err(|e| {
-                        PawError::SessionError(format!("failed to create main .git/info: {e}"))
-                    })?;
-                }
-                let main_exclude = main_git_info.join("exclude");
-                std::fs::write(&main_exclude, updated).map_err(|e| {
-                    PawError::SessionError(format!(
-                        "failed to write to main .git/info/exclude: {e}"
-                    ))
-                })?;
-                return Ok(());
-            }
-            if parent.exists() && parent.is_file() {
-                std::fs::remove_file(parent).map_err(|e| {
-                    PawError::SessionError(format!("failed to remove .git/info file: {e}"))
-                })?;
-            }
             std::fs::create_dir_all(parent).map_err(|e| {
                 PawError::SessionError(format!("failed to create .git/info directory: {e}"))
             })?;
@@ -734,6 +732,24 @@ pub fn assume_unchanged(worktree_root: &Path, filename: &str) -> Result<(), PawE
     let _ = std::process::Command::new("git")
         .current_dir(worktree_root)
         .args(["update-index", "--assume-unchanged", filename])
+        .output();
+    Ok(())
+}
+
+/// Clears the assume-unchanged bit on a file in git's index.
+///
+/// Undoes a prior `git update-index --assume-unchanged`, so the file is
+/// reported by `git status` and staged by `git add -A` again. Returns `Ok`
+/// even if the command fails (e.g. the file is untracked, or no bit was set),
+/// because this is a self-healing measure: worktrees created by an older
+/// git-paw version may carry a stale assume-unchanged bit on `AGENTS.md`, and
+/// clearing it on every start makes the upgrade transparent to the user.
+pub fn no_assume_unchanged(worktree_root: &Path, filename: &str) -> Result<(), PawError> {
+    // `.output()` rather than `.status()` so git's stderr (emitted when the
+    // file isn't tracked) doesn't bleed through to the parent process.
+    let _ = std::process::Command::new("git")
+        .current_dir(worktree_root)
+        .args(["update-index", "--no-assume-unchanged", filename])
         .output();
     Ok(())
 }
