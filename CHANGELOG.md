@@ -5,7 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.0] - 2026-06-23
+## [0.8.0] - 2026-06-26
+
+### Features
+
+- *(agents)* Inject managed block into gitignored sidecar, not tracked AGENTS.md
+- *(agent)* Bundle broker.sh helper; least-privilege boot allowlist
+- *(dashboard)* Enlarge broker-log panel with configurable height
+- *(orchestration)* Launch-readiness gate, remove-by-pane-id, equal-width rows
+- *(supervisor)* Prefix-grant dev-allowlist + genericise DEV_ALLOWLIST_PRESET
+- *(worktree)* Configurable worktree placement (child vs sibling)
+- *(skills)* Add stand-by-after-commit + releasable-unit commit discipline
+- *(dashboard)* Drop the always-blank Summary column from the agent table
+
+### Bug Fixes
+
+- *(init)* Gitignore .git-paw/session-learnings.md
+
+### Documentation
+
+- *(readme)* Add centered logo to the README header
+- Add logo to README header ([#54](https://github.com/bearicorn/git-paw/pull/54))
+## [0.7.0] - 2026-06-24
 
 ### Features
 
@@ -101,6 +122,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 - Add CLI tool for parallel AI coding sessions across git worktrees
+[0.8.0]: https://github.com/bearicorn/git-paw/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/bearicorn/git-paw/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/bearicorn/git-paw/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/bearicorn/git-paw/compare/v0.3.0...v0.5.0
