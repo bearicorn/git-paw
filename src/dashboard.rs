@@ -256,15 +256,25 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
 ///
 /// Public wrapper around the internal `draw_frame` so integration tests can
 /// drive a real frame with `ratatui::backend::TestBackend` and assert against
-/// the resulting buffer.
+/// the resulting buffer. `panel_height` is the visible Broker log panel's row
+/// count (from `[dashboard.broker_log] height_lines`).
 pub fn render_dashboard(
     frame: &mut Frame,
     rows: &[AgentRow],
     status_line: &str,
     broker_log: &BrokerLog,
+    panel_height: u16,
 ) {
-    draw_frame(frame, rows, status_line, broker_log);
+    draw_frame(frame, rows, status_line, broker_log, panel_height);
 }
+
+/// Minimum number of rows the agent-status table keeps when the Broker log
+/// panel is visible (header plus a few agent rows). Expressed as a `Min`
+/// constraint so the table still absorbs the terminal's slack on tall
+/// terminals, but on a terminal too short to grant both their full heights
+/// ratatui shrinks the panel's `Length` before driving the table below this
+/// floor — the enlarged panel cannot starve the table.
+pub(crate) const MIN_AGENT_TABLE_HEIGHT: u16 = 6;
 
 /// Returns the vertical layout constraints for the dashboard frame.
 ///
@@ -272,14 +282,16 @@ pub fn render_dashboard(
 /// produces a three-segment layout: title, agent table, status line. This is
 /// the byte-equivalent baseline the Broker log panel must reproduce when
 /// hidden. `show_panel = true` appends a fourth segment for the Broker log
-/// panel.
-pub(crate) fn build_layout_constraints(show_panel: bool) -> Vec<Constraint> {
+/// panel, sized to `panel_height` rows (from `[dashboard.broker_log]
+/// height_lines`, default `20` — materially larger than the v0.6.0 fixed
+/// `12`).
+pub(crate) fn build_layout_constraints(show_panel: bool, panel_height: u16) -> Vec<Constraint> {
     if show_panel {
         vec![
-            Constraint::Length(1),  // title
-            Constraint::Min(0),     // agent table
-            Constraint::Length(1),  // status line
-            Constraint::Length(12), // broker log panel
+            Constraint::Length(1),                   // title
+            Constraint::Min(MIN_AGENT_TABLE_HEIGHT), // agent table
+            Constraint::Length(1),                   // status line
+            Constraint::Length(panel_height),        // broker log panel
         ]
     } else {
         vec![
@@ -301,15 +313,22 @@ pub(crate) fn should_quit(code: KeyCode) -> bool {
     matches!(code, KeyCode::Char('q'))
 }
 
-/// Renders one frame of the dashboard TUI.
-fn draw_frame(frame: &mut Frame, rows: &[AgentRow], status_line: &str, broker_log: &BrokerLog) {
+/// Renders one frame of the dashboard TUI. `panel_height` sizes the visible
+/// Broker log panel's segment (from `[dashboard.broker_log] height_lines`).
+fn draw_frame(
+    frame: &mut Frame,
+    rows: &[AgentRow],
+    status_line: &str,
+    broker_log: &BrokerLog,
+    panel_height: u16,
+) {
     // The prompt-inbox panel was removed in v0.5.0 (supervisor-as-pane-
     // followups D3). The supervisor pane is the human's input surface for
     // replying to `agent.question` events; the dashboard is observation-
     // only. v0.6.0 fills the freed region with the Broker log panel when
     // `broker_log.visible`; when hidden the layout is byte-equivalent to
     // the v0.5.0 three-segment shape.
-    let layout_constraints = build_layout_constraints(broker_log.visible);
+    let layout_constraints = build_layout_constraints(broker_log.visible, panel_height);
 
     let chunks = Layout::vertical(layout_constraints).split(frame.area());
 
@@ -409,6 +428,7 @@ pub fn run_dashboard(
         None,
         500,
         false,
+        crate::config::BrokerLogConfig::default().height_lines,
     )
 }
 
@@ -417,9 +437,13 @@ pub fn run_dashboard(
 /// `pane_map` and `session_name` are now unused — the prompt-inbox panel
 /// that consumed them was removed in v0.5.0.
 ///
-/// `max_messages` caps the Broker log panel's ring buffer and
-/// `default_visible` sets its initial visibility (both from
-/// `[dashboard.broker_log]`).
+/// `max_messages` caps the Broker log panel's ring buffer, `default_visible`
+/// sets its initial visibility, and `height_lines` sizes the visible panel's
+/// vertical segment (all from `[dashboard.broker_log]`).
+// Launcher seam: the three broker-log scalars are plumbed individually
+// (alongside the retained-for-compat pane_map/session_name params) rather than
+// bundled, matching the existing call style.
+#[allow(clippy::too_many_arguments)]
 pub fn run_dashboard_with_panes<S: std::hash::BuildHasher>(
     state: &Arc<BrokerState>,
     broker_handle: BrokerHandle,
@@ -428,6 +452,7 @@ pub fn run_dashboard_with_panes<S: std::hash::BuildHasher>(
     _session_name: Option<&str>,
     max_messages: usize,
     default_visible: bool,
+    height_lines: u16,
 ) -> Result<(), PawError> {
     let _broker_handle = broker_handle;
     // Install a panic hook that restores the terminal before printing the panic.
@@ -498,7 +523,7 @@ pub fn run_dashboard_with_panes<S: std::hash::BuildHasher>(
         guard
             .terminal
             .draw(|f| {
-                draw_frame(f, &rows, &status_line, &broker_log);
+                draw_frame(f, &rows, &status_line, &broker_log, height_lines);
             })
             .map_err(|e| PawError::DashboardError(format!("draw failed: {e}")))?;
 
@@ -519,6 +544,12 @@ mod tests {
     /// v0.5.0 three-segment shape these assertions expect.
     fn hidden_log() -> BrokerLog {
         BrokerLog::new(500, false)
+    }
+
+    /// The production default panel height (`[dashboard.broker_log]
+    /// height_lines`), for `draw_frame` calls in tests.
+    fn default_panel_height() -> u16 {
+        crate::config::BrokerLogConfig::default().height_lines
     }
 
     // -----------------------------------------------------------------------
@@ -1105,7 +1136,7 @@ mod tests {
         let backend = TestBackend::new(140, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| draw_frame(f, &rows, "3 agents", &hidden_log()))
+            .draw(|f| draw_frame(f, &rows, "3 agents", &hidden_log(), default_panel_height()))
             .unwrap();
 
         // Flatten the buffer to a single string so we can check row order
@@ -1158,7 +1189,7 @@ mod tests {
         let backend = TestBackend::new(140, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| draw_frame(f, &rows, "1 agent", &hidden_log()))
+            .draw(|f| draw_frame(f, &rows, "1 agent", &hidden_log(), default_panel_height()))
             .unwrap();
 
         let buffer = terminal.backend().buffer().clone();
@@ -1230,7 +1261,7 @@ mod tests {
         let backend = TestBackend::new(140, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| draw_frame(f, &[], "0 agents", &hidden_log()))
+            .draw(|f| draw_frame(f, &[], "0 agents", &hidden_log(), default_panel_height()))
             .unwrap();
 
         let buffer = terminal.backend().buffer().clone();
@@ -1298,7 +1329,7 @@ mod tests {
         // (title, agent table, status line). The pre-inbox-removal shape
         // had 5 or 6 segments — a regression to that would imply the
         // prompt-inbox panel is back.
-        let constraints = build_layout_constraints(false);
+        let constraints = build_layout_constraints(false, default_panel_height());
         assert_eq!(
             constraints.len(),
             3,
@@ -1310,13 +1341,67 @@ mod tests {
         // panel as a 4th segment. Asserting both shapes catches the case
         // where the helper accidentally drops the messages panel or
         // grows a spurious 5th segment.
-        let with_log = build_layout_constraints(true);
+        let with_log = build_layout_constraints(true, default_panel_height());
         assert_eq!(
             with_log.len(),
             4,
             "layout with message log must be exactly 4 segments, got {} constraints",
             with_log.len(),
         );
+
+        // The panel segment is the new configurable height, no longer the
+        // v0.6.0 fixed `Length(12)`.
+        assert_eq!(
+            with_log[3],
+            Constraint::Length(default_panel_height()),
+            "the broker-log panel segment must be the configured height, not the old fixed 12",
+        );
+    }
+
+    #[test]
+    fn visible_panel_default_height_exceeds_twelve() {
+        // Task 3.1 / spec "Visible panel gets more than twelve rows by
+        // default": with the default height the panel segment is a fixed
+        // `Length` strictly greater than the v0.6.0 fixed 12. We assert the
+        // computed constraint, not pixels (the TUI draw loop is
+        // coverage-exempt).
+        let constraints = build_layout_constraints(true, default_panel_height());
+        let panel = constraints[3];
+        match panel {
+            Constraint::Length(n) => assert!(
+                n > 12,
+                "default panel height must be strictly greater than 12, got {n}",
+            ),
+            other => panic!("panel segment must be a Length constraint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configured_height_sets_panel_segment_length() {
+        // Task 3.2 / spec "Configured height_lines sets the panel height":
+        // an explicit height is reflected exactly in the panel segment.
+        let constraints = build_layout_constraints(true, 24);
+        assert_eq!(
+            constraints[3],
+            Constraint::Length(24),
+            "configured height_lines must size the panel segment exactly",
+        );
+    }
+
+    #[test]
+    fn agent_table_keeps_positive_minimum() {
+        // Task 3.3 / spec "Agent table keeps a positive minimum height": the
+        // table segment is a `Min` with a positive lower bound, so the
+        // enlarged panel cannot starve it (ratatui honours `Min` before the
+        // panel's `Length`).
+        let constraints = build_layout_constraints(true, default_panel_height());
+        match constraints[1] {
+            Constraint::Min(m) => assert!(
+                m > 0,
+                "agent-table segment must keep a positive minimum height, got Min({m})",
+            ),
+            other => panic!("agent-table segment must be a Min constraint, got {other:?}"),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1330,7 +1415,9 @@ mod tests {
     fn draw_to_buffer(rows: &[AgentRow], status: &str, log: &broker_log::BrokerLog) -> Buffer {
         let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| draw_frame(f, rows, status, log)).unwrap();
+        terminal
+            .draw(|f| draw_frame(f, rows, status, log, default_panel_height()))
+            .unwrap();
         terminal.backend().buffer().clone()
     }
 

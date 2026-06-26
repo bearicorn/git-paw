@@ -231,9 +231,9 @@ pub struct DashboardConfig {
 
 /// Configuration for the dashboard's "Broker log" panel.
 ///
-/// Both fields carry `#[serde(default)]` so a v0.5.0 `[dashboard]` section
+/// All fields carry `#[serde(default)]` so a v0.5.0 `[dashboard]` section
 /// with no `broker_log` table — or a `[dashboard.broker_log]` table that
-/// sets only one field — loads with the documented defaults for the rest.
+/// sets only some fields — loads with the documented defaults for the rest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BrokerLogConfig {
     /// Maximum number of messages retained in the panel's in-memory ring
@@ -246,6 +246,12 @@ pub struct BrokerLogConfig {
     /// Default: `true`.
     #[serde(default = "BrokerLogConfig::default_visible")]
     pub default_visible: bool,
+    /// Number of terminal rows the panel occupies when visible. Raised from
+    /// the v0.6.0 fixed `12` so more broker messages are visible without
+    /// scrolling; the agent table keeps a positive minimum and yields slack
+    /// to the panel only on tall terminals. Default: `20`.
+    #[serde(default = "BrokerLogConfig::default_height_lines")]
+    pub height_lines: u16,
 }
 
 impl Default for BrokerLogConfig {
@@ -253,6 +259,7 @@ impl Default for BrokerLogConfig {
         Self {
             max_messages: Self::default_max_messages(),
             default_visible: Self::default_visible(),
+            height_lines: Self::default_height_lines(),
         }
     }
 }
@@ -264,6 +271,12 @@ impl BrokerLogConfig {
 
     fn default_visible() -> bool {
         true
+    }
+
+    /// Default panel height in terminal rows. Strictly greater than the
+    /// v0.6.0 fixed `12` so the panel shows materially more messages.
+    fn default_height_lines() -> u16 {
+        20
     }
 }
 
@@ -2965,10 +2978,15 @@ enabled = true
 
     #[test]
     fn broker_log_config_defaults() {
-        // Task 1.3: default load — cap 500, visible on.
+        // Task 1.3: default load — cap 500, visible on, height > 12.
         let cfg = BrokerLogConfig::default();
         assert_eq!(cfg.max_messages, 500);
         assert!(cfg.default_visible);
+        assert!(
+            cfg.height_lines > 12,
+            "default height_lines must be strictly greater than the v0.6.0 fixed 12, got {}",
+            cfg.height_lines,
+        );
     }
 
     #[test]
@@ -2979,6 +2997,7 @@ enabled = true
         let cfg = DashboardConfig::default();
         assert_eq!(cfg.broker_log.max_messages, 500);
         assert!(cfg.broker_log.default_visible);
+        assert!(cfg.broker_log.height_lines > 12);
     }
 
     #[test]
@@ -3013,6 +3032,42 @@ enabled = true
             broker_log.default_visible,
             "default_visible must fall back to true when omitted"
         );
+        assert_eq!(
+            broker_log.height_lines,
+            BrokerLogConfig::default_height_lines(),
+            "height_lines must fall back to the documented default when omitted"
+        );
+    }
+
+    #[test]
+    fn height_lines_parses_explicit_value() {
+        // Configuration scenario "height_lines explicitly configured": an
+        // explicit `[dashboard.broker_log] height_lines = 24` loads as 24.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[dashboard.broker_log]\nheight_lines = 24\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let broker_log = config.dashboard.unwrap().broker_log;
+        assert_eq!(broker_log.height_lines, 24);
+    }
+
+    #[test]
+    fn height_lines_absent_uses_default() {
+        // Configuration scenario "height_lines absent uses the default": a
+        // `[dashboard.broker_log]` table that omits the field loads the
+        // documented default, which is strictly greater than 12.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[dashboard.broker_log]\ndefault_visible = true\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let broker_log = config.dashboard.unwrap().broker_log;
+        assert_eq!(
+            broker_log.height_lines,
+            BrokerLogConfig::default_height_lines()
+        );
+        assert!(broker_log.height_lines > 12);
     }
 
     #[test]
@@ -3040,6 +3095,7 @@ enabled = true
                 broker_log: BrokerLogConfig {
                     max_messages: 250,
                     default_visible: false,
+                    height_lines: 30,
                 },
             }),
             ..Default::default()
@@ -3048,6 +3104,9 @@ enabled = true
         save_config_to(&config_path, &original).unwrap();
         let loaded = load_config_file(&config_path).unwrap().unwrap();
         assert_eq!(loaded.dashboard, original.dashboard);
+        // Configuration scenario "height_lines round-trips through save and
+        // load": the re-parsed value matches what was written.
+        assert_eq!(loaded.dashboard.unwrap().broker_log.height_lines, 30);
     }
 
     #[test]

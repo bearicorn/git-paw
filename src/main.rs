@@ -2904,6 +2904,7 @@ fn cmd_dashboard() -> Result<(), PawError> {
         None,
         broker_log_cfg.max_messages,
         broker_log_cfg.default_visible,
+        broker_log_cfg.height_lines,
     );
 
     if let Some((stop, join)) = auto_approve_handle {
