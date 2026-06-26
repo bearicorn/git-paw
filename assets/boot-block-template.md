@@ -2,14 +2,17 @@
 
 These instructions ensure reliable coordination. Follow them exactly before starting your assigned task.
 
+All broker interaction goes through the bundled helper at
+`.git-paw/scripts/broker.sh` — it resolves the broker URL and shapes the JSON
+for you, so you only pass simple arguments. Run `.git-paw/scripts/broker.sh --help`
+to see every subcommand.
+
 ### 1. REGISTER: Immediate status publication
 
-As your very first action, publish your working status with "booting" message:
+As your very first action, publish your working status with a "booting" message:
 
 ```bash
-curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.status","agent_id":"{{BRANCH_ID}}","payload":{"status":"working","message":"booting","modified_files":[]}}'
+.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} status booting
 ```
 
 This makes you visible in the dashboard immediately.
@@ -20,12 +23,10 @@ When you finish your task, commit your work via `git commit`. The git-paw post-c
 
 **WARNING: Do NOT publish manual `done` while your worktree has uncommitted changes — commit instead.** The post-commit hook will publish on your behalf with the authoritative `modified_files` list derived from the commit.
 
-**Fallback for code-less tasks only:** if your task produces no code changes (docs-only updates handled outside this worktree, planning notes, exploration tasks where the artifact is information reported to the broker), publish `agent.artifact { status: "done" }` manually with the curl below. Include specific exports if you want to announce public API items for peers to cherry-pick.
+**Fallback for code-less tasks only:** if your task produces no code changes (docs-only updates handled outside this worktree, planning notes, exploration tasks where the artifact is information reported to the broker), publish `agent.artifact { status: "done" }` manually with the helper below. Add `--exports a,b` to announce public API items for peers to cherry-pick, and `--files a,b` to list the files touched.
 
 ```bash
-curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.artifact","agent_id":"{{BRANCH_ID}}","payload":{"status":"done","exports":[],"modified_files":[]}}'
+.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} artifact --exports "" --files ""
 ```
 
 ### 3. BLOCKED: Dependency waiting notification
@@ -33,9 +34,7 @@ curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
 When you realize you are waiting on another agent or external state, publish blocked status immediately:
 
 ```bash
-curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.blocked","agent_id":"{{BRANCH_ID}}","payload":{"needs":"<describe what you need>","from":"<agent-id or resource>"}}'
+.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} blocked "<describe what you need>" "<agent-id or resource>"
 ```
 
 Replace `<describe what you need>` and `<agent-id or resource>` with specific details.
@@ -45,12 +44,10 @@ Replace `<describe what you need>` and `<agent-id or resource>` with specific de
 **IMPORTANT**: If you are uncertain about what is wanted, DO NOT guess or make assumptions. Publish a question and WAIT for the answer before continuing:
 
 ```bash
-curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.question","agent_id":"{{BRANCH_ID}}","payload":{"question":"<your specific question>"}}'
+.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} question "<your specific question>"
 ```
 
-**DO NOT CONTINUE UNTIL YOU RECEIVE AN ANSWER!** The supervisor or human will respond via the dashboard prompts section. Check for new messages before proceeding.
+**DO NOT CONTINUE UNTIL YOU RECEIVE AN ANSWER!** The supervisor or human will respond via the dashboard prompts section. Check for new messages before proceeding (`.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} poll`).
 
 ### PASTE HANDLING
 

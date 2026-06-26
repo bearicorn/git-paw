@@ -69,8 +69,14 @@ Each worktree's `AGENTS.md` includes:
     silently skipped.
   - **Owned files** list (from OpenSpec file-ownership declarations) when
     declared.
-  - **Boot block** with the broker `curl` commands the agent uses to
-    self-report status, artifacts, blockers, intents, and questions.
+  - **Boot block** that calls the bundled `.git-paw/scripts/broker.sh`
+    helper for the agent to self-report status, artifacts, blockers, and
+    questions. The helper (installed by `git paw init`, alongside the
+    supervisor's `sweep.sh`) discovers the broker URL and shapes the JSON, so
+    the boot block carries no raw `curl` or broker URL. The launch path seeds
+    a single least-privilege allowlist grant for the helper's stable path
+    (`.git-paw/scripts/broker.sh`) instead of a broad `curl` rule — see
+    [Coordination](./coordination.md#broker-helper).
 
 The supervisor-mode boot prompt does not duplicate any of this content — it
 points at the file. If a change is updated on disk during a session (e.g.

@@ -1,41 +1,46 @@
-//! Curl allowlist setup for the supervisor.
+//! Broker-helper allowlist setup for the supervisor.
 //!
-//! Implements the `curl-allowlist` capability of the
-//! `auto-approve-patterns` change: write a curl-prefix allowlist into
-//! `.claude/settings.json` so the supervisor and coding agents do not
-//! hit a permission prompt on every broker round-trip.
+//! Implements the `curl-allowlist` capability: write a least-privilege,
+//! path-based allowlist into `.claude/settings.json` so the coding agents
+//! do not hit a permission prompt when they invoke the bundled
+//! agent-broker helper (`agent-broker-helper`) on every broker round-trip.
+//!
+//! The seeded grant is the single, stable path of `.git-paw/scripts/broker.sh`
+//! (both the bare path and the `bash .git-paw/scripts/broker.sh` form the
+//! boot block may emit) — NOT per-endpoint `curl <broker-url><endpoint>`
+//! prefixes and never a broad `curl *` rule. A single literal path cannot
+//! drift with URL normalisation or curl flag order, which was the root cause
+//! of the boot-publish dead-stall.
 //!
 //! The allowlist is merged with any existing `allowed_bash_prefixes`
-//! field — entries the user added are preserved.
+//! field — entries the user added (including stale per-endpoint curl
+//! prefixes from older versions) are preserved and harmless.
 
 use std::path::Path;
 
 use crate::error::PawError;
 
-/// Broker endpoints the supervisor and coding agents call most often.
-///
-/// The list is intentionally narrow — adding a new endpoint requires a
-/// code change so the allowlist cannot drift silently.
-pub const BROKER_ENDPOINTS: &[&str] = &["/publish", "/status", "/poll", "/feedback"];
+/// Stable relative path of the bundled agent-broker helper, installed by
+/// `git paw init` at `<repo>/.git-paw/scripts/broker.sh`.
+pub const BROKER_HELPER_PATH: &str = ".git-paw/scripts/broker.sh";
 
-/// Returns the prefixes that auto-approval would whitelist for `broker_url`.
+/// Returns the least-privilege allowlist prefixes authorising the bundled
+/// agent-broker helper.
 ///
-/// Each entry is a `curl -s <url><endpoint>` string suitable for matching
-/// the agent CLI's "allowed bash prefixes" rule. Both `curl -s ...` and
-/// `curl ...` are emitted so agents that omit `-s` still bypass the
-/// prompt.
+/// Both the bare path (`.git-paw/scripts/broker.sh`) and the
+/// `bash .git-paw/scripts/broker.sh` form the boot block may emit are
+/// returned so the match is exact regardless of how the agent invokes the
+/// script. The grant is independent of the broker URL — it authorises
+/// exactly one script, not a host or all of `curl`.
 #[must_use]
-pub fn broker_prefixes(broker_url: &str) -> Vec<String> {
-    let url = broker_url.trim_end_matches('/');
-    let mut out = Vec::with_capacity(BROKER_ENDPOINTS.len() * 2);
-    for endpoint in BROKER_ENDPOINTS {
-        out.push(format!("curl -s {url}{endpoint}"));
-        out.push(format!("curl {url}{endpoint}"));
-    }
-    out
+pub fn broker_prefixes() -> Vec<String> {
+    vec![
+        BROKER_HELPER_PATH.to_string(),
+        format!("bash {BROKER_HELPER_PATH}"),
+    ]
 }
 
-/// Merges the broker allowlist into `.claude/settings.json`.
+/// Merges the broker-helper allowlist into `.claude/settings.json`.
 ///
 /// Behaviour:
 ///
@@ -46,8 +51,8 @@ pub fn broker_prefixes(broker_url: &str) -> Vec<String> {
 ///   appended.
 /// - When the file exists but is not valid JSON, an error is returned.
 ///   The function never panics.
-pub fn setup_curl_allowlist(broker_url: &str, settings_path: &Path) -> Result<(), PawError> {
-    let new_entries = broker_prefixes(broker_url);
+pub fn setup_curl_allowlist(settings_path: &Path) -> Result<(), PawError> {
+    let new_entries = broker_prefixes();
 
     // Load existing JSON or start from a fresh object.
     let mut value: serde_json::Value = if settings_path.exists() {
@@ -135,28 +140,39 @@ mod tests {
     fn writes_fresh_settings_when_file_absent() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("settings.json");
-        setup_curl_allowlist("http://127.0.0.1:9119", &path).unwrap();
+        setup_curl_allowlist(&path).unwrap();
         let entries = read_array(&path);
         assert!(
-            entries
-                .iter()
-                .any(|s| s == "curl -s http://127.0.0.1:9119/publish")
+            entries.iter().any(|s| s == ".git-paw/scripts/broker.sh"),
+            "must grant the bare helper path; got: {entries:?}"
         );
         assert!(
             entries
                 .iter()
-                .any(|s| s == "curl -s http://127.0.0.1:9119/status")
+                .any(|s| s == "bash .git-paw/scripts/broker.sh"),
+            "must grant the `bash <helper>` form; got: {entries:?}"
         );
+    }
+
+    /// The seeded grant must never authorise broad `curl`, and must never
+    /// fall back to per-endpoint `curl <broker-url><endpoint>` prefixes.
+    #[test]
+    fn grants_helper_path_not_broad_curl() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.json");
+        setup_curl_allowlist(&path).unwrap();
+        let entries = read_array(&path);
         assert!(
-            entries
-                .iter()
-                .any(|s| s == "curl -s http://127.0.0.1:9119/poll")
+            entries.iter().any(|s| s == ".git-paw/scripts/broker.sh"),
+            "helper-path grant missing: {entries:?}"
         );
-        assert!(
-            entries
-                .iter()
-                .any(|s| s == "curl -s http://127.0.0.1:9119/feedback")
-        );
+        for e in &entries {
+            assert_ne!(e, "curl *", "broad `curl *` grant must never be seeded");
+            assert!(
+                !e.starts_with("curl "),
+                "no `curl` prefix should be seeded; found `{e}`"
+            );
+        }
     }
 
     #[test]
@@ -168,22 +184,20 @@ mod tests {
             r#"{"allowed_bash_prefixes":["just check","cargo build"]}"#,
         )
         .unwrap();
-        setup_curl_allowlist("http://127.0.0.1:9119", &path).unwrap();
+        setup_curl_allowlist(&path).unwrap();
         let entries = read_array(&path);
         assert!(
             entries.iter().any(|s| s == "just check"),
             "must preserve existing entries"
         );
         assert!(entries.iter().any(|s| s == "cargo build"));
-        assert!(
-            entries
-                .iter()
-                .any(|s| s == "curl -s http://127.0.0.1:9119/publish")
-        );
+        assert!(entries.iter().any(|s| s == ".git-paw/scripts/broker.sh"));
     }
 
+    /// A pre-existing per-endpoint `curl` prefix from an older version is
+    /// preserved (harmless) — re-seeding only appends the helper-path grant.
     #[test]
-    fn does_not_duplicate_existing_broker_entries() {
+    fn preserves_stale_curl_prefix_and_adds_helper_path() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("settings.json");
         std::fs::write(
@@ -191,13 +205,45 @@ mod tests {
             r#"{"allowed_bash_prefixes":["curl -s http://127.0.0.1:9119/publish"]}"#,
         )
         .unwrap();
-        setup_curl_allowlist("http://127.0.0.1:9119", &path).unwrap();
+        setup_curl_allowlist(&path).unwrap();
+        let entries = read_array(&path);
+        assert!(
+            entries
+                .iter()
+                .any(|s| s == "curl -s http://127.0.0.1:9119/publish"),
+            "stale prefix must be preserved (harmless)"
+        );
+        assert!(entries.iter().any(|s| s == ".git-paw/scripts/broker.sh"));
+    }
+
+    #[test]
+    fn does_not_duplicate_existing_helper_grant() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"allowed_bash_prefixes":[".git-paw/scripts/broker.sh"]}"#,
+        )
+        .unwrap();
+        setup_curl_allowlist(&path).unwrap();
         let entries = read_array(&path);
         let count = entries
             .iter()
-            .filter(|s| *s == "curl -s http://127.0.0.1:9119/publish")
+            .filter(|s| *s == ".git-paw/scripts/broker.sh")
             .count();
         assert_eq!(count, 1, "no duplicates allowed");
+    }
+
+    /// Re-seeding is idempotent: a second pass produces identical content.
+    #[test]
+    fn re_seeding_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.json");
+        setup_curl_allowlist(&path).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        setup_curl_allowlist(&path).unwrap();
+        let second = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(first, second, "re-seeding must be a no-op");
     }
 
     #[test]
@@ -205,41 +251,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("settings.json");
         std::fs::write(&path, "not json {{{ broken").unwrap();
-        let err = setup_curl_allowlist("http://127.0.0.1:9119", &path).unwrap_err();
+        let err = setup_curl_allowlist(&path).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("invalid JSON"), "got: {msg}");
-    }
-
-    #[test]
-    fn updates_when_broker_url_changes() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("settings.json");
-        setup_curl_allowlist("http://127.0.0.1:9119", &path).unwrap();
-        // Re-invoke with a different URL — both URLs should be present.
-        setup_curl_allowlist("http://127.0.0.1:9120", &path).unwrap();
-        let entries = read_array(&path);
-        assert!(
-            entries
-                .iter()
-                .any(|s| s == "curl -s http://127.0.0.1:9119/publish")
-        );
-        assert!(
-            entries
-                .iter()
-                .any(|s| s == "curl -s http://127.0.0.1:9120/publish")
-        );
-    }
-
-    #[test]
-    fn includes_feedback_endpoint() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("settings.json");
-        setup_curl_allowlist("http://127.0.0.1:9119", &path).unwrap();
-        let entries = read_array(&path);
-        assert!(
-            entries.iter().any(|s| s.contains("/feedback")),
-            "feedback endpoint missing: {entries:?}"
-        );
     }
 
     #[test]
@@ -248,7 +262,7 @@ mod tests {
         let path = tmp.path().join(".claude").join("settings.json");
         // Parent directory does not yet exist.
         assert!(!path.parent().unwrap().exists());
-        setup_curl_allowlist("http://127.0.0.1:9119", &path).unwrap();
+        setup_curl_allowlist(&path).unwrap();
         assert!(path.exists());
     }
 
@@ -257,7 +271,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("settings.json");
         std::fs::write(&path, "[]").unwrap();
-        let err = setup_curl_allowlist("http://127.0.0.1:9119", &path).unwrap_err();
+        let err = setup_curl_allowlist(&path).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("must be a JSON object"), "got: {msg}");
     }

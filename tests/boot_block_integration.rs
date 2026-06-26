@@ -205,9 +205,10 @@ fn manual_mode_boot_block_lands_in_agent_pane() {
             && out.status.success()
         {
             buffer = String::from_utf8_lossy(&out.stdout).to_string();
-            // The boot block's first section is REGISTER and contains the
-            // pre-expanded broker URL with the test's ephemeral port.
-            if buffer.contains("REGISTER") && buffer.contains(&broker_port.to_string()) {
+            // The boot block's first section is REGISTER and instructs the
+            // agent to publish through the bundled broker.sh helper (which
+            // replaced the inline curl + pre-expanded URL).
+            if buffer.contains("REGISTER") && buffer.contains(".git-paw/scripts/broker.sh") {
                 break;
             }
         }
@@ -221,19 +222,18 @@ fn manual_mode_boot_block_lands_in_agent_pane() {
         .status();
 
     // The boot block must contain at minimum: the section header for
-    // REGISTER (one of the four mandated essential events) and the
-    // pre-expanded broker URL with the configured port. These are the
-    // observable signals that `tmux send-keys -l` reached the pane with
-    // the rendered boot block, which is what manual-mode injection
-    // promises.
+    // REGISTER (one of the four mandated essential events) and the bundled
+    // broker.sh helper invocation (which replaced the inline curl +
+    // pre-expanded URL; broker.sh now resolves the URL itself). These are
+    // the observable signals that `tmux send-keys -l` reached the pane with
+    // the rendered boot block, which is what manual-mode injection promises.
     assert!(
         buffer.contains("REGISTER"),
         "boot block REGISTER section must appear in the agent pane buffer; got:\n{buffer}"
     );
     assert!(
-        buffer.contains(&broker_port.to_string()),
-        "pre-expanded broker URL with port {broker_port} must appear in the agent pane buffer; \
-         got:\n{buffer}"
+        buffer.contains(".git-paw/scripts/broker.sh"),
+        "broker.sh helper invocation must appear in the agent pane buffer; got:\n{buffer}"
     );
     assert!(
         buffer.contains("feat-x"),

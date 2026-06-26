@@ -50,6 +50,9 @@ Running `init` is idempotent — it's safe to run multiple times.
   self-test sessions (added to `.gitignore`; preferred over OS temp because
   it is OS-independent)
 - `.git-paw/scripts/sweep.sh` — bundled supervisor helper
+- `.git-paw/scripts/broker.sh` — bundled agent-broker helper (the agent side
+  of `sweep.sh`); the agent boot block calls it to self-report to the broker.
+  See [Coordination → Broker helper](user-guide/coordination.md#broker-helper)
 
 **Example:**
 ```bash
