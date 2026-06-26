@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use crate::error::PawError;
-use crate::git::{assume_unchanged, exclude_from_git};
+use crate::git::{exclude_from_git, no_assume_unchanged};
 
 /// Matches `PAW_SUPERVISOR_PID=<digits>` lines inside the agent marker file.
 ///
@@ -233,16 +233,39 @@ pub fn generate_worktree_section(assignment: &WorktreeAssignment) -> String {
     section
 }
 
-/// Reads the root repo's AGENTS.md, injects the worktree assignment section,
-/// writes the result to the worktree root, and protects it from being committed.
+/// Worktree-relative path of the gitignored **sidecar** instruction file that
+/// carries git-paw's managed block.
 ///
-/// Uses two layers of protection:
-/// 1. `.git/info/exclude` — hides AGENTS.md from `git status`
-/// 2. `git update-index --assume-unchanged` — prevents `git add -A` from staging it
+/// The combined view — the project's `AGENTS.md` content followed by the
+/// per-worktree assignment section — is written here, never to the tracked
+/// `AGENTS.md`. `.git-paw/` is already gitignored and used for session
+/// learnings, logs, and helper scripts, so the ephemeral injection lives
+/// alongside them and is never committed.
+pub const SIDECAR_REL_PATH: &str = ".git-paw/AGENTS.local.md";
+
+/// Reads the root repo's `AGENTS.md`, injects the worktree assignment section,
+/// and writes the combined view to a gitignored **sidecar** instruction file
+/// ([`SIDECAR_REL_PATH`]) in the worktree — never the tracked `AGENTS.md`.
 ///
-/// The second layer is critical for AI agents that run `git add -A` or
-/// `git add .` to commit their work — without it, the injected session
-/// content would be committed to the branch.
+/// The sidecar keeps the ephemeral per-session injection out of version
+/// control entirely, so the tracked `AGENTS.md` stays a normal committable
+/// file: a hand edit to it shows in `git status` and stages via `git add -A`.
+/// This resolves the v0.7.0 footgun (finding F10), where a file-level
+/// `git update-index --assume-unchanged AGENTS.md` bit silently hid *every*
+/// edit to the file — including legitimate ones — and blocked agents from
+/// committing real `AGENTS.md` changes.
+///
+/// The launched CLI is pointed at the sidecar's combined view via its boot
+/// prompt (see `build_task_prompt`), since the supported CLIs only auto-load
+/// the worktree-root `AGENTS.md`.
+///
+/// Two steps make the upgrade self-healing for worktrees set up by an older
+/// git-paw version:
+/// 1. Any stale `assume-unchanged` bit on the tracked `AGENTS.md` is cleared
+///    (`git update-index --no-assume-unchanged AGENTS.md`) so the file becomes
+///    committable again.
+/// 2. The sidecar path is added to the worktree ignore set, so the injection
+///    is never accidentally committed.
 pub fn setup_worktree_agents_md(
     repo_root: &Path,
     worktree_root: &Path,
@@ -263,22 +286,29 @@ pub fn setup_worktree_agents_md(
     let section = generate_worktree_section(assignment);
     let output = inject_into_content(&root_content, &section);
 
-    let worktree_agents = worktree_root.join("AGENTS.md");
-    fs::write(&worktree_agents, &output).map_err(|e| {
-        PawError::AgentsMdError(format!(
-            "failed to write '{}': {e}",
-            worktree_agents.display()
-        ))
+    // Write the combined view to the gitignored sidecar, NOT the tracked
+    // AGENTS.md. Create the `.git-paw/` parent directory if it is absent.
+    let sidecar = worktree_root.join(SIDECAR_REL_PATH);
+    if let Some(parent) = sidecar.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            PawError::AgentsMdError(format!("failed to create '{}': {e}", parent.display()))
+        })?;
+    }
+    fs::write(&sidecar, &output).map_err(|e| {
+        PawError::AgentsMdError(format!("failed to write '{}': {e}", sidecar.display()))
     })?;
 
-    exclude_from_git(worktree_root, "AGENTS.md")?;
+    // Self-healing: clear any stale assume-unchanged bit a prior git-paw
+    // version set on the tracked AGENTS.md so it is committable again. The
+    // tracked AGENTS.md is otherwise left untouched — git-paw no longer
+    // injects into it, hides it from `git status`, or excludes it.
+    let _ = no_assume_unchanged(worktree_root, "AGENTS.md");
 
-    // Belt-and-suspenders: mark the file as assume-unchanged so `git add -A`
-    // doesn't stage it. This only works when AGENTS.md is already tracked in
-    // the index (which it is for worktrees of repos that have a tracked
-    // AGENTS.md). For repos without a tracked AGENTS.md, exclude_from_git
-    // above is the primary protection.
-    let _ = assume_unchanged(worktree_root, "AGENTS.md");
+    // Keep the ephemeral sidecar out of git. `.git-paw/AGENTS.local.md` is
+    // gitignored at the repo level too, but adding the explicit worktree-level
+    // entry is idempotent and pins the guarantee even for repos whose
+    // `.gitignore` predates this file.
+    exclude_from_git(worktree_root, SIDECAR_REL_PATH)?;
 
     Ok(())
 }
@@ -1085,35 +1115,70 @@ mod tests {
             .expect("git commit");
     }
 
+    /// Absolute path of the gitignored sidecar inside a worktree.
+    fn sidecar_path(wt: &Path) -> PathBuf {
+        wt.join(SIDECAR_REL_PATH)
+    }
+
+    /// Reads the `git ls-files -v` flag character for `AGENTS.md`. A lowercase
+    /// flag (e.g. `h`) means the assume-unchanged bit is set; uppercase `H`
+    /// means a normal tracked file.
+    fn agents_md_ls_files_flag(wt: &Path) -> char {
+        let out = std::process::Command::new("git")
+            .current_dir(wt)
+            .args(["ls-files", "-v", "AGENTS.md"])
+            .output()
+            .expect("git ls-files -v");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        stdout
+            .lines()
+            .next()
+            .and_then(|l| l.chars().next())
+            .unwrap_or('?')
+    }
+
+    /// Tracks `AGENTS.md` in the worktree index with `body` and commits it, so
+    /// assume-unchanged / commit semantics apply to a real tracked file.
+    fn commit_tracked_agents_md(wt: &Path, body: &str) {
+        fs::write(wt.join("AGENTS.md"), body).unwrap();
+        std::process::Command::new("git")
+            .current_dir(wt)
+            .args(["add", "AGENTS.md"])
+            .output()
+            .expect("git add AGENTS.md");
+        std::process::Command::new("git")
+            .current_dir(wt)
+            .args(["commit", "-m", "add agents"])
+            .output()
+            .expect("git commit");
+    }
+
     #[test]
     fn setup_worktree_root_exists() {
         let repo = tempfile::tempdir().unwrap();
         let wt = tempfile::tempdir().unwrap();
         init_git_repo(wt.path());
         fs::write(repo.path().join("AGENTS.md"), "# Project Rules\n").unwrap();
-
-        // Track AGENTS.md in the worktree's git index so assume-unchanged works
-        fs::write(wt.path().join("AGENTS.md"), "# placeholder\n").unwrap();
-        std::process::Command::new("git")
-            .current_dir(wt.path())
-            .args(["add", "AGENTS.md"])
-            .output()
-            .expect("git add AGENTS.md");
-        std::process::Command::new("git")
-            .current_dir(wt.path())
-            .args(["commit", "-m", "add agents"])
-            .output()
-            .expect("git commit");
+        commit_tracked_agents_md(wt.path(), "# placeholder\n");
 
         let assignment = make_assignment(None, None);
         setup_worktree_agents_md(repo.path(), wt.path(), &assignment).unwrap();
 
-        let result = fs::read_to_string(wt.path().join("AGENTS.md")).unwrap();
-        assert!(result.contains("# Project Rules"));
-        assert!(result.contains("`feat/foo`"));
-        assert!(result.contains(START_MARKER));
+        // The combined view lands in the gitignored sidecar, not AGENTS.md.
+        let sidecar = fs::read_to_string(sidecar_path(wt.path())).unwrap();
+        assert!(sidecar.contains("# Project Rules"));
+        assert!(sidecar.contains("`feat/foo`"));
+        assert!(sidecar.contains(START_MARKER));
 
-        // Verify AGENTS.md is hidden from git status (assume-unchanged)
+        // 5.1: the tracked AGENTS.md is NOT marked assume-unchanged.
+        assert_eq!(
+            agents_md_ls_files_flag(wt.path()),
+            'H',
+            "tracked AGENTS.md must not carry the assume-unchanged bit"
+        );
+
+        // 5.1: a hand edit to the tracked AGENTS.md appears in git status.
+        fs::write(wt.path().join("AGENTS.md"), "# placeholder\n\nhand edit\n").unwrap();
         let status = std::process::Command::new("git")
             .current_dir(wt.path())
             .args(["status", "--porcelain"])
@@ -1121,13 +1186,118 @@ mod tests {
             .expect("git status");
         let status_output = String::from_utf8_lossy(&status.stdout);
         assert!(
-            !status_output.contains("AGENTS.md"),
-            "AGENTS.md should not appear in git status, got: {status_output}"
+            status_output.contains("AGENTS.md"),
+            "a hand edit to AGENTS.md must appear in git status, got: {status_output}"
         );
     }
 
     #[test]
-    fn setup_worktree_root_missing() {
+    fn setup_worktree_hand_edit_stages_and_commits() {
+        // 5.2: a hand edit to the tracked AGENTS.md stages via `git add -A`
+        // and commits — the v0.7.0 footgun (blocked commit) is gone.
+        let repo = tempfile::tempdir().unwrap();
+        let wt = tempfile::tempdir().unwrap();
+        init_git_repo(wt.path());
+        fs::write(repo.path().join("AGENTS.md"), "# Project Rules\n").unwrap();
+        commit_tracked_agents_md(wt.path(), "# Project Rules\n");
+
+        let assignment = make_assignment(None, None);
+        setup_worktree_agents_md(repo.path(), wt.path(), &assignment).unwrap();
+
+        // Legitimate edit an agent might make (e.g. adding a dependency row).
+        fs::write(
+            wt.path().join("AGENTS.md"),
+            "# Project Rules\n\n- approved dependency: rmcp\n",
+        )
+        .unwrap();
+
+        std::process::Command::new("git")
+            .current_dir(wt.path())
+            .args(["add", "-A"])
+            .output()
+            .expect("git add -A");
+        let commit = std::process::Command::new("git")
+            .current_dir(wt.path())
+            .args(["commit", "-m", "edit agents"])
+            .output()
+            .expect("git commit");
+        assert!(commit.status.success(), "commit should succeed");
+
+        // The committed tip contains the edit and the working tree is clean.
+        let show = std::process::Command::new("git")
+            .current_dir(wt.path())
+            .args(["show", "--stat", "HEAD"])
+            .output()
+            .expect("git show");
+        assert!(String::from_utf8_lossy(&show.stdout).contains("AGENTS.md"));
+        let status = std::process::Command::new("git")
+            .current_dir(wt.path())
+            .args(["status", "--porcelain", "AGENTS.md"])
+            .output()
+            .expect("git status");
+        assert!(
+            String::from_utf8_lossy(&status.stdout).trim().is_empty(),
+            "AGENTS.md should be clean after committing the edit"
+        );
+    }
+
+    #[test]
+    fn setup_worktree_managed_block_in_sidecar_combined_view() {
+        // 5.3: the managed `<!-- git-paw:start -->` block is present in the
+        // sidecar and the sidecar is the combined view (root + block).
+        let repo = tempfile::tempdir().unwrap();
+        let wt = tempfile::tempdir().unwrap();
+        init_git_repo(wt.path());
+        fs::write(repo.path().join("AGENTS.md"), "# Project Rules\n").unwrap();
+
+        let assignment = make_assignment(None, None);
+        setup_worktree_agents_md(repo.path(), wt.path(), &assignment).unwrap();
+
+        let sidecar = fs::read_to_string(sidecar_path(wt.path())).unwrap();
+        assert!(
+            sidecar.contains(START_MARKER),
+            "sidecar must carry the block"
+        );
+        // Combined = root content first, then the managed block.
+        let root_idx = sidecar
+            .find("# Project Rules")
+            .expect("root content present");
+        let block_idx = sidecar.find(START_MARKER).expect("block present");
+        assert!(
+            root_idx < block_idx,
+            "root content must precede the managed block in the combined view"
+        );
+    }
+
+    #[test]
+    fn setup_worktree_tracked_agents_md_untouched_and_not_excluded() {
+        // 5.4: git-paw writes no block into the tracked AGENTS.md, and does
+        // not add AGENTS.md to the worktree's `.git/info/exclude`.
+        let repo = tempfile::tempdir().unwrap();
+        let wt = tempfile::tempdir().unwrap();
+        init_git_repo(wt.path());
+        fs::write(repo.path().join("AGENTS.md"), "# Project Rules\n").unwrap();
+        commit_tracked_agents_md(wt.path(), "# Project Rules\n");
+
+        let assignment = make_assignment(None, None);
+        setup_worktree_agents_md(repo.path(), wt.path(), &assignment).unwrap();
+
+        let tracked = fs::read_to_string(wt.path().join("AGENTS.md")).unwrap();
+        assert!(
+            !tracked.contains(START_MARKER_PREFIX),
+            "git-paw must not write its managed block into the tracked AGENTS.md"
+        );
+
+        let exclude = fs::read_to_string(wt.path().join(".git/info/exclude")).unwrap_or_default();
+        assert!(
+            !exclude.lines().any(|l| l.trim() == "AGENTS.md"),
+            "AGENTS.md must NOT be added to .git/info/exclude, got: {exclude}"
+        );
+    }
+
+    #[test]
+    fn setup_worktree_sidecar_in_ignore_set() {
+        // 5.5: the sidecar path IS in the worktree ignore set.
         let repo = tempfile::tempdir().unwrap();
         let wt = tempfile::tempdir().unwrap();
         init_git_repo(wt.path());
@@ -1135,13 +1305,73 @@ mod tests {
         let assignment = make_assignment(None, None);
         setup_worktree_agents_md(repo.path(), wt.path(), &assignment).unwrap();
 
-        let result = fs::read_to_string(wt.path().join("AGENTS.md")).unwrap();
-        assert!(!result.contains("# Project Rules"));
-        assert!(result.contains("`feat/foo`"));
+        let exclude = fs::read_to_string(wt.path().join(".git/info/exclude")).unwrap();
+        assert!(
+            exclude.lines().any(|l| l.trim() == SIDECAR_REL_PATH),
+            "sidecar path must be in the worktree ignore set, got: {exclude}"
+        );
+    }
+
+    #[test]
+    fn setup_worktree_clears_stale_assume_unchanged() {
+        // 5.6: a stale assume-unchanged bit set before setup is cleared.
+        let repo = tempfile::tempdir().unwrap();
+        let wt = tempfile::tempdir().unwrap();
+        init_git_repo(wt.path());
+        fs::write(repo.path().join("AGENTS.md"), "# Project Rules\n").unwrap();
+        commit_tracked_agents_md(wt.path(), "# placeholder\n");
+
+        // Simulate an older git-paw version having hidden the file.
+        std::process::Command::new("git")
+            .current_dir(wt.path())
+            .args(["update-index", "--assume-unchanged", "AGENTS.md"])
+            .output()
+            .expect("git update-index --assume-unchanged");
+        assert_eq!(
+            agents_md_ls_files_flag(wt.path()),
+            'h',
+            "precondition: the stale assume-unchanged bit is set"
+        );
+
+        let assignment = make_assignment(None, None);
+        setup_worktree_agents_md(repo.path(), wt.path(), &assignment).unwrap();
+
+        assert_eq!(
+            agents_md_ls_files_flag(wt.path()),
+            'H',
+            "setup must clear the stale assume-unchanged bit"
+        );
+        // And a hand edit now surfaces in git status.
+        fs::write(wt.path().join("AGENTS.md"), "# placeholder\n\nedited\n").unwrap();
+        let status = std::process::Command::new("git")
+            .current_dir(wt.path())
+            .args(["status", "--porcelain"])
+            .output()
+            .expect("git status");
+        assert!(
+            String::from_utf8_lossy(&status.stdout).contains("AGENTS.md"),
+            "after clearing the bit, a hand edit must appear in git status"
+        );
+    }
+
+    #[test]
+    fn setup_worktree_root_missing() {
+        // 5.7: read the sidecar, not the worktree AGENTS.md.
+        let repo = tempfile::tempdir().unwrap();
+        let wt = tempfile::tempdir().unwrap();
+        init_git_repo(wt.path());
+
+        let assignment = make_assignment(None, None);
+        setup_worktree_agents_md(repo.path(), wt.path(), &assignment).unwrap();
+
+        let sidecar = fs::read_to_string(sidecar_path(wt.path())).unwrap();
+        assert!(!sidecar.contains("# Project Rules"));
+        assert!(sidecar.contains("`feat/foo`"));
     }
 
     #[test]
     fn setup_worktree_replaces_root_section() {
+        // 5.7: read the sidecar, not the worktree AGENTS.md.
         let repo = tempfile::tempdir().unwrap();
         let wt = tempfile::tempdir().unwrap();
         init_git_repo(wt.path());
@@ -1152,13 +1382,13 @@ mod tests {
         let assignment = make_assignment(None, None);
         setup_worktree_agents_md(repo.path(), wt.path(), &assignment).unwrap();
 
-        let result = fs::read_to_string(wt.path().join("AGENTS.md")).unwrap();
-        assert!(result.contains("# Rules"));
-        assert!(result.contains("## Footer"));
-        assert!(!result.contains("old root section"));
-        assert!(result.contains("`feat/foo`"));
+        let sidecar = fs::read_to_string(sidecar_path(wt.path())).unwrap();
+        assert!(sidecar.contains("# Rules"));
+        assert!(sidecar.contains("## Footer"));
+        assert!(!sidecar.contains("old root section"));
+        assert!(sidecar.contains("`feat/foo`"));
         assert_eq!(
-            result.matches(START_MARKER_PREFIX).count(),
+            sidecar.matches(START_MARKER_PREFIX).count(),
             1,
             "should have exactly one git-paw section"
         );

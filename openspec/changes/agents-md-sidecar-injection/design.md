@@ -100,6 +100,28 @@ The invariant the spec pins down: the agent's effective instruction view SHALL
 equal `tracked AGENTS.md content + managed block`, and the managed block SHALL
 live only in the gitignored sidecar.
 
+**Implementation note (supervisor-approved, option a).** None of the currently
+supported CLIs accept an explicit instruction-file flag in git-paw's launch,
+and they auto-load only the worktree-root `AGENTS.md` — never the sidecar. So
+the realized mechanism is the boot prompt: `build_task_prompt` points **every**
+backend (OpenSpec, Markdown, Spec Kit, and the no-spec default) at the sidecar
+first, then runs its apply/begin step, and the supervisor pane's framing prompt
+is repointed the same way. **This intentionally overrides the earlier frozen
+decision** (from the spec-backend-aware-task-prompt work) that the OpenSpec
+branch emit a bare `/opsx:apply <id>` with *no* `AGENTS.md` pointer: that
+decision relied on the combined view being auto-loaded from the worktree-root
+`AGENTS.md`, which no longer holds once the block moves to the sidecar. Without
+the pointer, OpenSpec agents would silently lose their assignment, file
+ownership, and inter-agent rules.
+
+**Implementation note — `exclude_from_git` worktree fix.** Git reads
+`info/exclude` only from the *common* git directory, not a linked worktree's
+per-worktree git directory. `exclude_from_git`'s worktree branch wrote to the
+per-worktree dir, so the entry was silently ignored — harmless for the old
+tracked-`AGENTS.md` call (which `assume-unchanged` actually protected) but fatal
+for the untracked sidecar, which would otherwise stay stageable. The helper was
+fixed to resolve and write the common dir's `info/exclude`.
+
 ### D3 — Drop assume-unchanged and the exclude entry on the tracked AGENTS.md
 
 `setup_worktree_agents_md` no longer calls `assume_unchanged(_, "AGENTS.md")`

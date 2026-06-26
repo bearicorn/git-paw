@@ -288,54 +288,65 @@ fn attach_or_print_hint(session_name: &str) -> Result<(), PawError> {
 /// boot block before injection via `tmux send-keys`.
 ///
 /// **Per-backend dispatch.** When `spec_entry` is `Some`, the helper switches
-/// on `SpecEntry.backend` to pick the prompt shape:
+/// on `SpecEntry.backend` to pick the prompt shape. Every branch first points
+/// the agent at the gitignored sidecar
+/// ([`SIDECAR_REL_PATH`](git_paw::agents::SIDECAR_REL_PATH)) — the combined
+/// view of the project's `AGENTS.md` plus the agent's assignment and
+/// coordination rules — before its apply/begin step:
 ///
-/// - `SpecBackendKind::OpenSpec` → the bare slash-command invocation
-///   `/opsx:apply <id>`. No surrounding prose, no `AGENTS.md` pointer.
-///   The bare-command form is required so paste-aware CLIs parse it as a
-///   slash command at the start of the agent's first turn instead of as
-///   user prose. Paired with the boot block (which is sent as a separate
-///   logical line), the agent's first action is the `opsx:apply` skill's
-///   task-selection step rather than a free-form "what do I do" message.
-/// - `SpecBackendKind::Markdown` → the v0.5.0 generic AGENTS.md pointer
-///   with the spec id interpolated into the `openspec/changes/<id>/`
-///   path. No equivalent slash-command apply workflow exists for plain
-///   Markdown specs, so the agent is told to read AGENTS.md and locate
-///   sibling artifacts manually.
-/// - `SpecBackendKind::SpecKit` → falls through to the same generic
-///   AGENTS.md pointer as `Markdown`. A `/speckit:apply`-style slash
-///   command may land later; this change does not pre-empt its shape.
+/// - `SpecBackendKind::OpenSpec` → read the sidecar, then run the
+///   `/opsx:apply <id>` slash command. (Pre-`agents-md-sidecar-injection`
+///   this branch was the bare slash command with deliberately *no* pointer,
+///   because the combined view was auto-loaded from the worktree-root
+///   `AGENTS.md`. The sidecar is no longer auto-loaded by the CLIs, so the
+///   pointer is now required for the agent to receive its assignment and
+///   inter-agent rules. This intentionally overrides that earlier
+///   no-pointer decision.)
+/// - `SpecBackendKind::Markdown` → read the sidecar (which carries the full
+///   spec body), then locate sibling artifacts under `openspec/changes/<id>/`.
+/// - `SpecBackendKind::SpecKit` → falls through to the same sidecar pointer
+///   as `Markdown`. A `/speckit:apply`-style slash command may land later;
+///   this change does not pre-empt its shape.
 ///
 /// The match SHALL be exhaustive over `SpecBackendKind` (no `_ =>`
 /// catch-all); the Rust compiler forces a decision for any new variant.
 ///
-/// The returned string always points the agent at `AGENTS.md` rather than
-/// embedding any portion of the spec body. The full spec body is written to
-/// `AGENTS.md` separately by `setup_worktree_agents_md`, and every supported
-/// CLI auto-loads `AGENTS.md` on startup. Telling the agent "read AGENTS.md"
-/// avoids the paste-buffer trap and duplicate content.
+/// The returned string points the agent at the sidecar rather than embedding
+/// any portion of the spec body. The combined view is written to the sidecar
+/// by `setup_worktree_agents_md`; the supported CLIs only auto-load the
+/// worktree-root `AGENTS.md`, so the prompt is what directs the agent to the
+/// sidecar's combined content. Pointing at a file avoids the paste-buffer trap
+/// and duplicate content.
 ///
 /// **Prerequisite:** callers SHALL ensure `setup_worktree_agents_md` has run
 /// for the worktree before the resulting prompt is injected. The prompt's
-/// guidance is non-actionable if AGENTS.md is missing.
+/// guidance is non-actionable if the sidecar is missing.
 ///
 /// When a spec is associated with the branch, the prompt includes the spec
 /// ID so the agent can locate sibling artifacts (proposal, design, specs,
 /// tasks) under `openspec/changes/<id>/`. When no spec is associated, the
-/// prompt is the existing default fallback string.
+/// prompt is the default fallback that points only at the sidecar.
 pub(crate) fn build_task_prompt(spec_entry: Option<&git_paw::specs::SpecEntry>) -> String {
+    use git_paw::agents::SIDECAR_REL_PATH;
     use git_paw::specs::SpecBackendKind;
     match spec_entry {
         Some(s) => match s.backend {
-            SpecBackendKind::OpenSpec => format!("/opsx:apply {id}", id = s.id),
+            SpecBackendKind::OpenSpec => format!(
+                "Read {SIDECAR_REL_PATH} first — it carries your assignment and \
+                 coordination rules — then run /opsx:apply {id}.",
+                id = s.id,
+            ),
             SpecBackendKind::Markdown | SpecBackendKind::SpecKit => format!(
-                "Begin your assigned task. The full spec is in AGENTS.md in this worktree. \
-                 Additional artifacts (proposal, design, specs, tasks) live under \
-                 openspec/changes/{id}/ — read them all before starting.",
+                "Begin your assigned task. Read {SIDECAR_REL_PATH} first — it carries the \
+                 project rules, your full spec, and your assignment. Additional artifacts \
+                 (proposal, design, specs, tasks) live under openspec/changes/{id}/ — read \
+                 them all before starting.",
                 id = s.id,
             ),
         },
-        None => "Begin your assigned task as described in AGENTS.md.".to_string(),
+        None => format!(
+            "Read {SIDECAR_REL_PATH} first for your assignment, then begin your assigned task."
+        ),
     }
 }
 
@@ -1264,9 +1275,10 @@ fn cmd_supervisor(
     // (design D2, task 1.2) so a `git paw add`-attached agent is byte-identical
     // to a start-time one. The context is built once and reused for every
     // branch; the combined boot+task prompt `attach_agent` returns becomes the
-    // agent's first message after attach (it points the agent at AGENTS.md,
-    // which `setup_worktree_agents_md` has already populated with the spec
-    // body — see `build_task_prompt`).
+    // agent's first message after attach (it points the agent at the gitignored
+    // sidecar `.git-paw/AGENTS.local.md`, which `setup_worktree_agents_md` has
+    // already populated with the combined spec + assignment view — see
+    // `build_task_prompt`).
     let strict_guard = config
         .supervisor
         .as_ref()
@@ -1370,12 +1382,13 @@ fn cmd_supervisor(
     // on fast CLIs and is intentionally avoided.
     let supervisor_boot_block =
         git_paw::skills::build_boot_block("supervisor", &broker_config.url());
-    let supervisor_framing =
-        "Begin observing the spec implementation session. Your skill (AGENTS.md) describes \
-         your role — read it, then start the autonomous loop. The user can type questions or \
-         directives directly into your pane; handle them per the 'When the user types in your \
-         pane' section of your skill."
-            .to_string();
+    let supervisor_framing = format!(
+        "Begin observing the spec implementation session. Your skill \
+         ({skill}) describes your role — read it, then start the autonomous loop. The user \
+         can type questions or directives directly into your pane; handle them per the 'When \
+         the user types in your pane' section of your skill.",
+        skill = git_paw::agents::SIDECAR_REL_PATH,
+    );
     let supervisor_prompt = format!("{supervisor_boot_block}\n\n{supervisor_framing}");
     let supervisor_delay = resolve_submit_delay_ms(&supervisor_cli, config);
     let _ = tmux::gate_pane_for_injection(&tmux_session.name, 0, &supervisor_pane.cli_command);
@@ -3791,10 +3804,10 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn make_spec_entry(id: &str, prompt_body: &str) -> git_paw::specs::SpecEntry {
-        // Default to the `Markdown` backend so the legacy regression tests
-        // (`task_prompt_with_spec_points_at_agents_md_and_includes_id`,
+        // Default to the `Markdown` backend so the regression tests
+        // (`task_prompt_with_spec_points_at_sidecar_and_includes_id`,
         // `task_prompt_does_not_include_spec_body_first_line`) keep exercising
-        // the generic-AGENTS.md-pointer branch of `build_task_prompt`.
+        // the sidecar-pointer branch of `build_task_prompt`.
         // Tests that want the OpenSpec branch construct a `SpecEntry`
         // literal directly with `backend = SpecBackendKind::OpenSpec`.
         git_paw::specs::SpecEntry {
@@ -3808,12 +3821,12 @@ mod tests {
     }
 
     #[test]
-    fn task_prompt_with_spec_points_at_agents_md_and_includes_id() {
+    fn task_prompt_with_spec_points_at_sidecar_and_includes_id() {
         let entry = make_spec_entry("my-change", "## 1. First section\n\nbody body body");
         let prompt = build_task_prompt(Some(&entry));
         assert!(
-            prompt.contains("AGENTS.md"),
-            "spec-derived task prompt should point at AGENTS.md, got: {prompt}"
+            prompt.contains(git_paw::agents::SIDECAR_REL_PATH),
+            "spec-derived task prompt should point at the sidecar, got: {prompt}"
         );
         assert!(
             prompt.contains("openspec/changes/my-change"),
@@ -3822,16 +3835,24 @@ mod tests {
     }
 
     #[test]
-    fn task_prompt_without_spec_uses_default_agents_md_fallback() {
+    fn task_prompt_without_spec_points_at_sidecar() {
         let prompt = build_task_prompt(None);
         assert_eq!(
-            prompt, "Begin your assigned task as described in AGENTS.md.",
-            "no-spec task prompt should be the existing default fallback verbatim"
+            prompt,
+            "Read .git-paw/AGENTS.local.md first for your assignment, then begin your assigned task.",
+            "no-spec task prompt should point at the sidecar verbatim"
         );
     }
 
     #[test]
-    fn task_prompt_openspec_backend_invokes_opsx_apply_slash_command() {
+    fn task_prompt_openspec_backend_points_at_sidecar_then_invokes_opsx_apply() {
+        // OVERRIDE (agents-md-sidecar-injection): pre-sidecar this branch was
+        // the bare `/opsx:apply <id>` with deliberately NO pointer, because the
+        // combined view was auto-loaded from the worktree-root AGENTS.md. The
+        // managed block now lives in a gitignored sidecar the CLIs do not
+        // auto-load, so the prompt MUST point the agent at the sidecar first,
+        // then run the slash command. This intentionally reverses the earlier
+        // "no AGENTS.md pointer" decision.
         let entry = git_paw::specs::SpecEntry {
             id: "my-change".to_string(),
             backend: git_paw::specs::SpecBackendKind::OpenSpec,
@@ -3841,13 +3862,13 @@ mod tests {
             owned_files: None,
         };
         let prompt = build_task_prompt(Some(&entry));
-        assert_eq!(
-            prompt, "/opsx:apply my-change",
-            "OpenSpec-backed task prompt should be exactly the bare slash command, got: {prompt}"
+        assert!(
+            prompt.contains(git_paw::agents::SIDECAR_REL_PATH),
+            "OpenSpec branch must point the agent at the sidecar, got: {prompt}"
         );
         assert!(
-            !prompt.contains("AGENTS.md"),
-            "OpenSpec branch must suppress the AGENTS.md pointer prose, got: {prompt}"
+            prompt.contains("/opsx:apply my-change"),
+            "OpenSpec branch must still invoke the opsx:apply slash command, got: {prompt}"
         );
         assert!(
             !prompt.contains("openspec/changes/"),
@@ -3856,7 +3877,7 @@ mod tests {
     }
 
     #[test]
-    fn task_prompt_markdown_backend_uses_generic_agents_md_pointer() {
+    fn task_prompt_markdown_backend_uses_sidecar_pointer() {
         let entry = git_paw::specs::SpecEntry {
             id: "my-feature".to_string(),
             backend: git_paw::specs::SpecBackendKind::Markdown,
@@ -3867,8 +3888,8 @@ mod tests {
         };
         let prompt = build_task_prompt(Some(&entry));
         assert!(
-            prompt.contains("AGENTS.md"),
-            "Markdown-backed task prompt should point at AGENTS.md, got: {prompt}"
+            prompt.contains(git_paw::agents::SIDECAR_REL_PATH),
+            "Markdown-backed task prompt should point at the sidecar, got: {prompt}"
         );
         assert!(
             prompt.contains("openspec/changes/my-feature"),
@@ -3881,13 +3902,14 @@ mod tests {
     }
 
     #[test]
-    fn task_prompt_without_spec_unchanged_after_backend_introduction() {
-        // Regression: the `None` branch must produce the exact v0.5.0 fallback
-        // string byte-for-byte, even after the per-backend dispatch is added.
+    fn task_prompt_without_spec_points_at_sidecar_verbatim() {
+        // Regression: the `None` branch must produce the exact sidecar-pointer
+        // fallback string byte-for-byte, even after the per-backend dispatch.
         let prompt = build_task_prompt(None);
         assert_eq!(
-            prompt, "Begin your assigned task as described in AGENTS.md.",
-            "no-spec task prompt should be the existing default fallback verbatim"
+            prompt,
+            "Read .git-paw/AGENTS.local.md first for your assignment, then begin your assigned task.",
+            "no-spec task prompt should be the sidecar-pointer fallback verbatim"
         );
     }
 
@@ -3913,16 +3935,16 @@ mod tests {
         );
     }
 
-    // Maps to scenario "Spec-derived task prompt points at AGENTS.md and
+    // Maps to scenario "Spec-derived task prompt points at the sidecar and
     // includes spec id" — fixes the named-test coverage gap from
     // boot-prompt-full-body. (test-coverage-v0-5-0 task 2.1)
     #[test]
-    fn build_task_prompt_spec_entry_contains_agents_md_and_spec_id() {
+    fn build_task_prompt_spec_entry_contains_sidecar_and_spec_id() {
         let entry = make_spec_entry("governance-config", "## 1. Struct definitions\n\nBody.");
         let prompt = build_task_prompt(Some(&entry));
         assert!(
-            prompt.contains("AGENTS.md"),
-            "spec-derived prompt should point at AGENTS.md, got: {prompt}"
+            prompt.contains(git_paw::agents::SIDECAR_REL_PATH),
+            "spec-derived prompt should point at the sidecar, got: {prompt}"
         );
         assert!(
             prompt.contains("openspec/changes/governance-config"),
@@ -3943,7 +3965,7 @@ mod tests {
     fn supervisor_pane_prompt_starts_with_boot_block() {
         let broker_url = "http://127.0.0.1:9119";
         let boot_block = git_paw::skills::build_boot_block("supervisor", broker_url);
-        let supervisor_framing = "Begin observing the spec implementation session. Your skill (AGENTS.md) describes \
+        let supervisor_framing = "Begin observing the spec implementation session. Your skill (.git-paw/AGENTS.local.md) describes \
              your role — read it, then start the autonomous loop. The user can type questions or \
              directives directly into your pane; handle them per the 'When the user types in your \
              pane' section of your skill.";

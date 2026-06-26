@@ -46,8 +46,8 @@ This chapter covers git-paw's internal architecture: module structure, data flow
 | **Interactive** | `src/interactive.rs` | Terminal prompts via dialoguer. Mode picker, branch multi-select, CLI picker. Skips prompts when flags are provided. |
 | **Error** | `src/error.rs` | `PawError` enum with thiserror. Actionable error messages and distinct exit codes. |
 | **Dirs** | `src/dirs.rs` | In-tree platform XDG path helper. Replaces the upstream `dirs` crate (removed in v0.5.0 for license reasons); see `AGENTS.md § Dependencies`. |
-| **Agents** | `src/agents.rs` | Generates worktree `AGENTS.md` files; manages the `<!-- git-paw:start … end -->` marker region; supports the boot-prompt-full-body model. |
-| **Skills** | `src/skills.rs` | Loads standardized agent skills from `.agents/skills/` following the [agentskills.io specification](https://agentskills.io). Injects coordination + supervisor instructions into worktree `AGENTS.md`. |
+| **Agents** | `src/agents.rs` | Generates the gitignored `.git-paw/AGENTS.local.md` sidecar (the combined view) per worktree; manages the `<!-- git-paw:start … end -->` marker region; leaves the tracked `AGENTS.md` committable. |
+| **Skills** | `src/skills.rs` | Loads standardized agent skills from `.agents/skills/` following the [agentskills.io specification](https://agentskills.io). Injects coordination + supervisor instructions into the worktree sidecar. |
 | **Init** | `src/init.rs` | `git paw init` bootstrap. Creates `.git-paw/`, default config, logs directory, gitignore entries. Auto-detects `.specify/` for Spec Kit. |
 | **Replay** | `src/replay.rs` | `git paw replay`. Reads pane logs from `.git-paw/logs/` and either strips ANSI or pipes through `less -R`. |
 | **Logging** | `src/logging.rs` | Per-pane log capture via `tmux pipe-pane`. Files at `.git-paw/logs/<session>/<branch>.log`. |

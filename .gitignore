@@ -50,6 +50,11 @@ docs/book/
 .git-paw/baseline-summary.txt
 .git-paw/baseline-test.log
 
+# Per-worktree agent-instruction sidecar: the combined view of the project's
+# AGENTS.md plus git-paw's ephemeral per-session injection. Never committed —
+# the tracked AGENTS.md stays a normal committable file (finding F10).
+.git-paw/AGENTS.local.md
+
 # Project management files (not tracked)
 TODO.md
 MILESTONE.md
