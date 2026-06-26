@@ -81,7 +81,7 @@ mode.
 | `src/supervisor/mod.rs` | Supervisor boot — composes the subsystems below and drives the supervisor pane. |
 | `src/supervisor/approve.rs` | Generic approval/feedback decision plumbing shared by the auto-approver. |
 | `src/supervisor/auto_approve.rs` | Safe-command auto-approver against stalled panes (`approval_level`, `safe_commands`, sweeps). |
-| `src/supervisor/curl_allowlist.rs` | Seeds the broker `curl` endpoints into `.claude/settings.json::allowed_bash_prefixes` so the first broker call never hits a permission prompt. |
+| `src/supervisor/curl_allowlist.rs` | Seeds the least-privilege agent-broker helper path (`.git-paw/scripts/broker.sh`) into `.claude/settings.json::allowed_bash_prefixes` so the agent's first broker call never hits a permission prompt — a single stable path grant, not per-endpoint `curl` prefixes or a broad `curl *` rule. |
 | `src/supervisor/dev_allowlist.rs` | Seeds the curated `[supervisor.common_dev_allowlist]` preset (cargo / git / just / mdBook / OpenSpec) into `.claude/settings.json`. |
 | `src/supervisor/layout.rs` | Supervisor-as-pane tmux layout: pane 0 supervisor, pane 1 dashboard, agent panes 2 onwards in the bottom-row grid (row-height proportions documented below). |
 | `src/supervisor/permission_prompt.rs` | Pane classification for permission-prompt detection (`tmux capture-pane` parsing). |

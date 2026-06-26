@@ -1137,33 +1137,29 @@ fn cmd_supervisor(
     // Real launch.
     git::prune_worktrees(repo_root)?;
 
-    // Pre-populate `.claude/settings.json` with curl allowlist entries so the
-    // supervisor and coding agents do not hit an approval prompt on every
+    // Pre-populate `.claude/settings.json` with the least-privilege
+    // agent-broker helper-path grant so the coding agents do not hit an
+    // approval prompt when they invoke `.git-paw/scripts/broker.sh` on every
     // broker round-trip. Failures are logged but non-fatal.
     if broker_config.enabled {
         let claude_settings = repo_root.join(".claude").join("settings.json");
-        if let Err(e) = git_paw::supervisor::curl_allowlist::setup_curl_allowlist(
-            &broker_config.url(),
-            &claude_settings,
-        ) {
-            eprintln!("warning: failed to setup curl allowlist: {e}");
+        if let Err(e) = git_paw::supervisor::curl_allowlist::setup_curl_allowlist(&claude_settings)
+        {
+            eprintln!("warning: failed to setup broker-helper allowlist: {e}");
         }
         // W15-6 (2026-05-31 dogfood): a custom CLI that reads a non-default
         // claude-format settings file (e.g. one reading
-        // `~/.config/<variant>/settings.json`) needs the broker-curl allowlist
-        // seeded there too, or its boot-time `curl .../publish` hits a
+        // `~/.config/<variant>/settings.json`) needs the helper-path grant
+        // seeded there too, or its boot-time `broker.sh status booting` hits a
         // permission prompt the auto-approve thread cannot clear before the
         // agent registers (W15-7). The path is CONFIG-DRIVEN
         // (`[clis.<name>].settings_path`), never a hardcoded CLI name — so
         // this stays CLI-agnostic. Seed each distinct session CLI's
         // configured settings file once.
         for cli in session_cli_settings_paths(config, &supervisor_cli, &agent_cli) {
-            if let Err(e) = git_paw::supervisor::curl_allowlist::setup_curl_allowlist(
-                &broker_config.url(),
-                &cli,
-            ) {
+            if let Err(e) = git_paw::supervisor::curl_allowlist::setup_curl_allowlist(&cli) {
                 eprintln!(
-                    "warning: failed to setup curl allowlist at {}: {e}",
+                    "warning: failed to setup broker-helper allowlist at {}: {e}",
                     cli.display()
                 );
             }
@@ -2036,15 +2032,14 @@ fn recover_session(repo_root: &Path, existing: &Session) -> Result<(), PawError>
         .zip(existing.broker_bind.as_ref())
         .map(|(port, bind)| format!("http://{bind}:{port}"));
 
-    if let Some(url) = &broker_url {
-        // Re-populate the curl allowlist when recovering — the broker URL can
-        // change across sessions and missing entries would re-trigger
-        // permission prompts.
+    if broker_url.is_some() {
+        // Re-populate the broker-helper allowlist when recovering — a
+        // re-attached session must carry the helper-path grant so the agents'
+        // first `broker.sh` invocation does not re-trigger a permission prompt.
         let claude_settings = repo_root.join(".claude").join("settings.json");
-        if let Err(e) =
-            git_paw::supervisor::curl_allowlist::setup_curl_allowlist(url, &claude_settings)
+        if let Err(e) = git_paw::supervisor::curl_allowlist::setup_curl_allowlist(&claude_settings)
         {
-            eprintln!("warning: failed to setup curl allowlist: {e}");
+            eprintln!("warning: failed to setup broker-helper allowlist: {e}");
         }
     }
 

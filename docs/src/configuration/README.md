@@ -183,10 +183,10 @@ command = "claude"
 submit_delay_ms = 1500
 # Path to this CLI's claude-format settings file (the one carrying
 # `allowed_bash_prefixes`). When set and the broker is enabled, git-paw
-# seeds the broker-curl allowlist into this path too, so the CLI's
-# boot-time broker `curl` does not raise a permission prompt. A leading
-# `~` is expanded to the home directory. Use for claude-family variants
-# that read a non-default config dir.
+# seeds the agent-broker helper-path grant (`.git-paw/scripts/broker.sh`)
+# into this path too, so the CLI's boot-time `broker.sh status booting` does
+# not raise a permission prompt. A leading `~` is expanded to the home
+# directory. Use for claude-family variants that read a non-default config dir.
 settings_path = "~/.config/claude-variant/settings.json"
 ```
 
@@ -195,7 +195,7 @@ settings_path = "~/.config/claude-variant/settings.json"
 | `command` | yes | Command or path to the CLI binary. |
 | `display_name` | no | Human-readable name shown in prompts. |
 | `submit_delay_ms` | no | Boot-prompt settle delay (ms) before the submit `Enter`; per-CLI so the launcher stays CLI-agnostic. |
-| `settings_path` | no | Path to the CLI's claude-format settings file; broker-curl allowlist is seeded here so the boot-time broker `curl` doesn't prompt. |
+| `settings_path` | no | Path to the CLI's claude-format settings file; the agent-broker helper-path grant (`.git-paw/scripts/broker.sh`) is seeded here so the boot-time `broker.sh` call doesn't prompt. |
 
 ### Via command line
 
@@ -468,9 +468,12 @@ repo, your home directory, system paths) always require manual approval.
 `BTab Down Enter` (if safe) or publishes an `agent.question` to the supervisor inbox
 (if not).
 
-git-paw also seeds `.claude/settings.json::allowed_bash_prefixes` with the broker
-endpoints (`/publish`, `/status`, `/poll`, `/feedback`) so the first broker call
-never hits a permission prompt. Existing entries in that file are preserved.
+git-paw also seeds `.claude/settings.json::allowed_bash_prefixes` with the
+least-privilege path of the bundled agent-broker helper
+(`.git-paw/scripts/broker.sh`) so the agent's first broker call never hits a
+permission prompt. This is a single stable path grant — not per-endpoint
+`curl` prefixes and never a broad `curl *` rule — so it cannot drift with URL
+normalisation or flag order. Existing entries in that file are preserved.
 
 ### Common dev-command allowlist
 

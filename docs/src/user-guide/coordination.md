@@ -17,32 +17,60 @@ When you run `git paw start`, pane 0 becomes a dashboard instead of an agent pan
 
 git-paw sets the `GIT_PAW_BROKER_URL` environment variable in every agent pane. Agents use this URL to send and receive messages. A typical value is `http://127.0.0.1:9119`.
 
-When skill templates are enabled (the default), each agent's `AGENTS.md` also contains curl commands for interacting with the broker, so agents know how to use it without any manual setup.
+When skill templates are enabled (the default), each agent's `AGENTS.md` boot block calls the bundled [broker helper](#broker-helper) for interacting with the broker, so agents know how to use it without any manual setup.
+
+## Broker helper
+
+`git paw init` installs a bundled agent-side helper at
+`.git-paw/scripts/broker.sh` — the agent-facing analogue of the supervisor's
+`sweep.sh`. Because `.git-paw/scripts/` is part of the repo tree, the helper
+is present in every agent worktree, and the agent invokes it by its stable
+relative path.
+
+The helper wraps every agent→broker `curl` an agent is allowed to make. It
+discovers the broker URL from `.git-paw/config.toml` `[broker]` (defaulting to
+`http://127.0.0.1:9119`) and shapes the JSON internally, so callers pass only
+simple arguments. The agent id comes from `--agent <id>` (the boot block
+passes the pre-expanded branch id) or, absent one, from slugifying the current
+worktree branch. Run `.git-paw/scripts/broker.sh --help` for the full surface.
+
+| Subcommand | Publishes / reads |
+|------------|-------------------|
+| `status <message>` | `agent.status` (`status:"working"`, the message, `modified_files:[]`) |
+| `artifact [--exports a,b] [--files a,b]` | `agent.artifact` (`status:"done"`) — the code-less DONE fallback |
+| `blocked <needs> <from>` | `agent.blocked` with dependency info |
+| `question <text>` | `agent.question` |
+| `intent <summary> <files> [valid_for_seconds]` | `agent.intent` (forward-coordination file claim) |
+| `poll [since]` | reads `GET <broker>/messages/<agent-id>?since=<n>` — this agent's inbox |
+
+**Why a script and not a `git paw publish` subcommand?** The helper is an
+agent-internal mechanism. A user-facing subcommand would surface in `--help`
+and produce confusing errors when run by a human (no broker, no session). A
+script under `.git-paw/scripts/` is unambiguously agent-internal, mirrors the
+supervisor's `sweep.sh`, and lets the launch path seed a single
+least-privilege allowlist grant for one stable path — see
+[Allowlist seeding](#allowlist-seeding).
 
 ## Boot-Prompt Injection
 
-To ensure reliable agent self-reporting, git-paw automatically injects a standardized boot instruction block into every agent's initial prompt. This boot block contains pre-expanded curl commands for four essential operations:
+To ensure reliable agent self-reporting, git-paw automatically injects a standardized boot instruction block into every agent's initial prompt. The block calls `.git-paw/scripts/broker.sh` (with the pre-expanded `--agent <id>`) for four essential operations — no raw `curl` and no broker URL appear in the boot block:
 
 ### 1. REGISTER - Immediate Status Publication
 
 Agents automatically publish their working status with a "booting" message as their very first action:
 
 ```bash
-curl -s -X POST http://127.0.0.1:9119/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.status","agent_id":"feat-auth","payload":{"status":"working","message":"booting","modified_files":[]}}'
+.git-paw/scripts/broker.sh --agent feat-auth status booting
 ```
 
 ### 2. DONE - Task Completion Reporting
 
 The primary completion path is `git commit`. The git-paw post-commit hook auto-publishes `agent.artifact { status: "committed" }` with `modified_files` derived from `git diff HEAD~1 --name-only`, so agents working on code changes do not publish anything manually — they commit and the hook reports on their behalf.
 
-The boot block retains a manual `agent.artifact { status: "done" }` curl as a fallback for code-less tasks (docs-only updates handled outside the worktree, planning notes, exploration tasks where the artifact is information reported to the broker). The block warns agents NOT to publish manual `done` while their worktree has uncommitted changes — they should commit instead.
+The boot block retains a manual `agent.artifact { status: "done" }` fallback for code-less tasks (docs-only updates handled outside the worktree, planning notes, exploration tasks where the artifact is information reported to the broker). The block warns agents NOT to publish manual `done` while their worktree has uncommitted changes — they should commit instead.
 
 ```bash
-curl -s -X POST http://127.0.0.1:9119/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.artifact","agent_id":"feat-auth","payload":{"status":"done","exports":[],"modified_files":[]}}'
+.git-paw/scripts/broker.sh --agent feat-auth artifact --exports "" --files ""
 ```
 
 ### 3. BLOCKED - Dependency Waiting Notification
@@ -50,9 +78,7 @@ curl -s -X POST http://127.0.0.1:9119/publish \
 Agents can properly declare when they're waiting on dependencies:
 
 ```bash
-curl -s -X POST http://127.0.0.1:9119/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.blocked","agent_id":"feat-api","payload":{"needs":"auth token format","from":"feat-auth"}}'
+.git-paw/scripts/broker.sh --agent feat-api blocked "auth token format" feat-auth
 ```
 
 ### 4. QUESTION - Uncertainty Escalation (Critical)
@@ -60,12 +86,23 @@ curl -s -X POST http://127.0.0.1:9119/publish \
 Agents are instructed to publish questions and wait for answers rather than guessing:
 
 ```bash
-curl -s -X POST http://127.0.0.1:9119/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.question","agent_id":"feat-auth","payload":{"question":"Should the JWT use RS256 or HS256 signing?"}}'
+.git-paw/scripts/broker.sh --agent feat-auth question "Should the JWT use RS256 or HS256 signing?"
 ```
 
 **IMPORTANT**: The boot block explicitly instructs agents: "DO NOT CONTINUE UNTIL YOU RECEIVE AN ANSWER!"
+
+## Allowlist seeding
+
+So an agent's first boot action never stalls on a permission prompt, the
+launch path seeds the agent CLI's allowlist
+(`.claude/settings.json::allowed_bash_prefixes`, plus any configured
+`[clis.<name>].settings_path`) with the **single stable helper path** —
+`.git-paw/scripts/broker.sh` (and the `bash .git-paw/scripts/broker.sh` form).
+This is least-privilege: it authorises exactly one script, not a host or all
+of `curl`, and it cannot drift with URL normalisation or curl flag order. No
+broad `curl *` grant is ever seeded. Seeding is idempotent and preserves any
+existing entries (including stale per-endpoint `curl` prefixes from older
+versions, which remain harmless).
 
 ### Boot Block Injection Modes
 
@@ -80,7 +117,7 @@ The boot block includes instructions for proper paste handling, particularly the
 
 - **Reliable Monitoring**: Agents self-report immediately on boot
 - **Consistent Behavior**: All agents follow the same coordination pattern
-- **No Permission Prompts**: Pre-expanded curl commands avoid shell variable expansion issues
+- **No Permission Prompts**: The boot block calls the bundled `broker.sh` helper by its stable path, which the launch path allowlists once — the first broker call never stalls on a prompt
 - **Supervisor Visibility**: Questions and blockers surface to the dashboard promptly
 - **Audit Trail**: All boot operations are logged in the broker log
 
@@ -252,6 +289,8 @@ curl -s "$GIT_PAW_BROKER_URL/messages/feat-auth?since=42"
 ```
 
 This cursor-based approach is lossless -- no messages are missed between polls, regardless of timing.
+
+Agents can use the bundled helper instead of a raw `curl` for the same read — `.git-paw/scripts/broker.sh poll [since]` issues `GET /messages/<agent-id>?since=<n>` and prints the returned messages (see [Broker helper](#broker-helper)).
 
 ## Checking Overall Status
 

@@ -28,6 +28,13 @@ const GITIGNORE_ENTRIES: &[&str] = &[
 /// written to `<repo>/.git-paw/scripts/sweep.sh` by [`run_init`].
 const SWEEP_SCRIPT: &str = include_str!("../assets/scripts/sweep.sh");
 
+/// Bundled agent-side broker helper script, embedded at compile time and
+/// written to `<repo>/.git-paw/scripts/broker.sh` by [`run_init`]. The
+/// analogue of [`SWEEP_SCRIPT`] for the coding-agent side — it wraps every
+/// agent→broker `curl` so the boot block calls one stable script path
+/// instead of inlining raw `curl` commands.
+const BROKER_SCRIPT: &str = include_str!("../assets/scripts/broker.sh");
+
 /// Runs the `git paw init` command.
 ///
 /// Creates `.git-paw/` directory structure, generates a default config,
@@ -68,18 +75,27 @@ pub fn run_init() -> Result<(), PawError> {
         println!("  Created .git-paw/tmp/");
     }
 
-    // 3. Create .git-paw/scripts/ directory and install sweep.sh.
+    // 3. Create .git-paw/scripts/ directory and install the bundled helpers
+    //    (sweep.sh for the supervisor, broker.sh for the coding agents).
     let created_scripts = create_dir_if_missing(&scripts_dir)?;
     if created_scripts {
         println!("  Created .git-paw/scripts/");
     }
     let sweep_path = scripts_dir.join("sweep.sh");
     let sweep_existed = sweep_path.exists();
-    install_sweep_script(&sweep_path)?;
+    install_script(&sweep_path, SWEEP_SCRIPT)?;
     if sweep_existed {
         println!("  Updated .git-paw/scripts/sweep.sh");
     } else {
         println!("  Created .git-paw/scripts/sweep.sh");
+    }
+    let broker_path = scripts_dir.join("broker.sh");
+    let broker_existed = broker_path.exists();
+    install_script(&broker_path, BROKER_SCRIPT)?;
+    if broker_existed {
+        println!("  Updated .git-paw/scripts/broker.sh");
+    } else {
+        println!("  Created .git-paw/scripts/broker.sh");
     }
 
     // 4. Generate or migrate config. For a fresh config, prompt for supervisor
@@ -127,12 +143,13 @@ pub fn run_init() -> Result<(), PawError> {
     Ok(())
 }
 
-/// Writes the bundled supervisor-sweep helper to `path` and marks it
-/// executable. Overwrites any existing file at `path` (the script is treated
-/// as binary-managed content — users with local edits SHALL back the file up
-/// before re-running `git paw init`).
-fn install_sweep_script(path: &Path) -> Result<(), PawError> {
-    fs::write(path, SWEEP_SCRIPT)
+/// Writes a bundled helper script `content` to `path` and marks it
+/// executable (mode `0o755` on Unix). Overwrites any existing file at `path`
+/// (the scripts are treated as binary-managed content — users with local
+/// edits SHALL back the file up before re-running `git paw init`). Shared by
+/// the `sweep.sh` and `broker.sh` installers.
+fn install_script(path: &Path, content: &str) -> Result<(), PawError> {
+    fs::write(path, content)
         .map_err(|e| PawError::InitError(format!("failed to write '{}': {e}", path.display())))?;
 
     #[cfg(unix)]

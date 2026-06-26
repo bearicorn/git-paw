@@ -378,12 +378,16 @@ fn slugify_branch(branch: &str) -> String {
 /// # Arguments
 ///
 /// * `branch_id` - The branch name (will be slugified)
-/// * `broker_url` - The fully-qualified broker URL for curl commands
+/// * `broker_url` - The fully-qualified broker URL. Retained for signature
+///   stability and any future broker-URL placeholder; the boot block no
+///   longer inlines the URL — each event calls `.git-paw/scripts/broker.sh`
+///   (the `agent-broker-helper` capability), which discovers the URL itself.
 ///
 /// # Returns
 ///
-/// A string containing the complete boot instruction block with all placeholders
-/// substituted and curl commands pre-expanded.
+/// A string containing the complete boot instruction block with the
+/// `{{BRANCH_ID}}` placeholder pre-expanded so each `broker.sh` invocation
+/// carries the agent's literal id.
 pub fn build_boot_block(branch_id: &str, broker_url: &str) -> String {
     let template = include_str!("../assets/boot-block-template.md");
     let slugified_branch = slugify_branch(branch_id);
@@ -3597,6 +3601,48 @@ mod tests {
         );
     }
 
+    /// Task 5.3 — the rendered boot block calls `.git-paw/scripts/broker.sh`
+    /// for all four events, contains no raw broker `curl`, and the DONE
+    /// fallback still publishes `agent.artifact { status: "done" }`.
+    #[test]
+    fn boot_block_all_four_events_call_helper_no_raw_curl() {
+        let block = build_boot_block("feat/test", "http://127.0.0.1:9119");
+
+        // No raw broker curl anywhere.
+        assert!(
+            !block.contains("curl -s -X POST"),
+            "boot block must not inline a raw broker curl for any event"
+        );
+        assert!(
+            !block.contains("{{GIT_PAW_BROKER_URL}}"),
+            "boot block must not leak the broker-URL placeholder"
+        );
+
+        // Each event calls the helper with the pre-expanded agent id.
+        assert!(
+            block.contains(".git-paw/scripts/broker.sh --agent feat-test status booting"),
+            "REGISTER event should call broker.sh status"
+        );
+        assert!(
+            block.contains(".git-paw/scripts/broker.sh --agent feat-test artifact"),
+            "DONE-fallback event should call broker.sh artifact"
+        );
+        assert!(
+            block.contains(".git-paw/scripts/broker.sh --agent feat-test blocked"),
+            "BLOCKED event should call broker.sh blocked"
+        );
+        assert!(
+            block.contains(".git-paw/scripts/broker.sh --agent feat-test question"),
+            "QUESTION event should call broker.sh question"
+        );
+
+        // The DONE fallback still describes publishing agent.artifact status done.
+        assert!(
+            block.contains("agent.artifact") && block.contains("status: \"done\""),
+            "DONE fallback should still publish agent.artifact status: done"
+        );
+    }
+
     #[test]
     fn boot_block_substitutes_branch_id_placeholder() {
         let block = build_boot_block("Feature/HTTP_Broker", "http://localhost:9119");
@@ -3611,15 +3657,21 @@ mod tests {
     }
 
     #[test]
-    fn boot_block_substitutes_broker_url_placeholder() {
+    fn boot_block_uses_helper_not_raw_broker_url() {
         let block = build_boot_block("feat/x", "http://127.0.0.1:9119");
+        // The broker URL and JSON shaping now live inside the helper, so the
+        // boot block must not inline a raw broker `curl` for any event.
         assert!(
-            block.contains("http://127.0.0.1:9119/publish"),
-            "Broker URL not substituted"
+            !block.contains("curl -s -X POST http://127.0.0.1:9119/publish"),
+            "boot block must not inline a raw broker curl"
         );
         assert!(
             !block.contains("{{GIT_PAW_BROKER_URL}}"),
-            "GIT_PAW_BROKER_URL placeholder not substituted"
+            "GIT_PAW_BROKER_URL placeholder must not leak into the rendered block"
+        );
+        assert!(
+            block.contains(".git-paw/scripts/broker.sh"),
+            "boot block must invoke the bundled broker.sh helper"
         );
     }
 
@@ -3670,19 +3722,22 @@ mod tests {
     }
 
     #[test]
-    fn boot_block_contains_pre_expanded_curl_commands() {
+    fn boot_block_contains_pre_expanded_helper_invocations() {
         let block = build_boot_block("feat/test", "http://127.0.0.1:9119");
 
-        // Check that all curl commands have the actual URL substituted
+        // Each event calls the helper with the pre-expanded branch id.
         assert!(
-            block.contains("curl -s -X POST http://127.0.0.1:9119/publish"),
-            "Curl commands not pre-expanded"
+            block.contains(".git-paw/scripts/broker.sh --agent feat-test status booting"),
+            "REGISTER should call broker.sh with the pre-expanded agent id"
         );
-
-        // Check that all curl commands have the actual branch ID substituted
         assert!(
-            block.contains("\"agent_id\":\"feat-test\""),
-            "Agent ID not substituted in curl commands"
+            block.contains(".git-paw/scripts/broker.sh --agent feat-test"),
+            "Agent ID not substituted in broker.sh invocations"
+        );
+        // No raw broker curl should remain anywhere in the block.
+        assert!(
+            !block.contains("curl -s -X POST"),
+            "boot block must not contain a raw broker curl"
         );
     }
 
@@ -3707,12 +3762,12 @@ mod tests {
             .expect("DONE section should lead with a commit-first instruction");
 
         let manual_done_idx = done_body
-            .find("\"status\":\"done\"")
-            .expect("DONE section should still contain the manual done curl as a fallback");
+            .find(".git-paw/scripts/broker.sh --agent feat-test artifact")
+            .expect("DONE section should still contain the manual artifact helper as a fallback");
 
         assert!(
             commit_idx < manual_done_idx,
-            "commit-first instruction (byte {commit_idx}) must appear before the manual done curl (byte {manual_done_idx})"
+            "commit-first instruction (byte {commit_idx}) must appear before the manual artifact helper (byte {manual_done_idx})"
         );
     }
 
@@ -3768,29 +3823,38 @@ mod tests {
     }
 
     #[test]
-    fn boot_block_done_section_retains_manual_done_curl() {
+    fn boot_block_done_section_retains_manual_done_helper() {
         let block = build_boot_block("feat/test", "http://127.0.0.1:9119");
         let done_body = done_section_body(&block);
 
+        // The manual fallback is now a copy-pasteable broker.sh artifact
+        // invocation, not a raw curl.
         assert!(
-            done_body.contains("curl -s -X POST http://127.0.0.1:9119/publish"),
-            "DONE section should retain the pre-expanded broker curl"
+            done_body.contains(".git-paw/scripts/broker.sh --agent feat-test artifact"),
+            "DONE section should retain the manual artifact helper invocation"
         );
         assert!(
-            done_body.contains("\"type\":\"agent.artifact\""),
-            "DONE section curl should publish an agent.artifact event"
+            !done_body.contains("curl -s -X POST"),
+            "DONE section must not retain a raw broker curl"
+        );
+        // The helper publishes the same agent.artifact { status: "done" }
+        // shape; the prose names the event and the exports/files fields the
+        // helper maps onto the payload.
+        assert!(
+            done_body.contains("agent.artifact"),
+            "DONE section should name the agent.artifact event the helper publishes"
         );
         assert!(
-            done_body.contains("\"status\":\"done\""),
-            "DONE section curl should still publish status: done as the manual fallback"
+            done_body.contains("status: \"done\"") || done_body.contains("status:\"done\""),
+            "DONE section should describe the status: done manual fallback"
         );
         assert!(
-            done_body.contains("\"exports\":[]"),
-            "DONE section curl should retain the exports field"
+            done_body.contains("--exports"),
+            "DONE section should show the --exports flag mapping onto the exports field"
         );
         assert!(
-            done_body.contains("\"modified_files\":[]"),
-            "DONE section curl should retain the modified_files field"
+            done_body.contains("--files"),
+            "DONE section should show the --files flag mapping onto modified_files"
         );
     }
 
