@@ -22,6 +22,7 @@ const GITIGNORE_ENTRIES: &[&str] = &[
     ".git-paw/tmp/",
     ".git-paw/worktrees/",
     ".git-paw/session-summary.md",
+    ".git-paw/session-learnings.md",
 ];
 
 /// Bundled supervisor-sweep helper script, embedded at compile time and
@@ -512,6 +513,21 @@ mod tests {
         let content = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         assert!(content.contains(".git-paw/session-summary.md"));
         assert_eq!(content.matches(".git-paw/logs/").count(), 1);
+    }
+
+    #[test]
+    fn session_learnings_added_to_gitignore() {
+        // The learnings aggregator writes .git-paw/session-learnings.md as
+        // per-session runtime output; it must never be committed (an agent's
+        // `git add -A` otherwise sweeps it into a PR).
+        let dir = setup_repo();
+        fs::write(dir.path().join(".gitignore"), ".git-paw/logs/\n").unwrap();
+        assert!(ensure_gitignore_entry(dir.path()).unwrap());
+        let content = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(
+            content.contains(".git-paw/session-learnings.md"),
+            "init must gitignore the per-session .git-paw/session-learnings.md output"
+        );
     }
 
     #[test]
