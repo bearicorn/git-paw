@@ -525,21 +525,41 @@ same time at your discretion (gate sweeps can be resource-heavy), but you
 SHALL NOT serialise them purely to batch feedback.
 
 **Isolated verify worktrees go in a repo-local gitignored scratch dir.**
-When a gate needs an isolated checkout of a branch's committed SHA, create
-the worktree under `.git-paw/tmp/verify-<branch>/` — repo-local and
-gitignored (`.git-paw/tmp/` is ignored). Never use `/tmp` or any path
-outside the repository: an OS-temp path can collide with another user or
-session sharing `/tmp`, and a stray `rm -rf` on a mis-resolved temp variable
-would target the root filesystem. The repo-local path is unique per checkout
-and cleaned up with the repo. Recipe:
+When a gate needs an isolated checkout of a branch, create the worktree
+under `.git-paw/tmp/verify-<branch>/` — repo-local and gitignored
+(`.git-paw/tmp/` is ignored). Never use `/tmp` or any path outside the
+repository: an OS-temp path can collide with another user or session
+sharing `/tmp`, and a stray `rm -rf` on a mis-resolved temp variable would
+target the root filesystem. The repo-local path is unique per checkout and
+cleaned up with the repo.
+
+**Check out the re-resolved branch tip, not a captured SHA.** Resolve the
+branch's current tip with `git rev-parse "$BRANCH"` *immediately before*
+`git worktree add --detach`, and pass that tip as the checkout target — do
+NOT reuse a `$SHA` captured from the triggering `committed` event or
+`supervisor.verify-now` nudge. That event fires on the branch's *first*
+commit; agents keep committing (implementation, then tests, then docs), so a
+pinned `$SHA` goes stale while the tip advances. Keep `--detach` so the
+agent's own worktree stays the authoritative holder of the branch ref.
+Recipe:
 
 ```sh
 VERIFY=".git-paw/tmp/verify-${BRANCH//\//-}"
 git worktree remove --force "$VERIFY" 2>/dev/null; git worktree prune
-git worktree add --detach "$VERIFY" "$SHA"
+TIP="$(git rev-parse "$BRANCH")"          # re-resolve the tip at gate time
+git worktree add --detach "$VERIFY" "$TIP"
 # ... run the gate commands with -C "$VERIFY" ...
 git worktree remove --force "$VERIFY"   # clean up when the gate is done
 ```
+
+**Re-resolve the tip on every (re-)run.** Each time you run — or re-run — the
+gates for a branch, re-resolve `TIP=$(git rev-parse "$BRANCH")` and re-create
+the worktree at that tip. The recipe already tears the worktree down (`git
+worktree remove --force` / `git worktree prune`) at the top, so a fresh sweep
+composes cleanly: a later `committed` event, a `supervisor.verify-now` nudge,
+or a re-verify after `agent.feedback` each re-resolve and re-check-out the
+current tip. The worktree therefore never holds a snapshot older than the
+branch's current tip.
 
 Steps 4-7 below are the **five first-class verification gates**, run in order
 before any `agent.verified` message is published for a coding-agent branch.
@@ -547,6 +567,42 @@ Findings from any gate flow through `agent.feedback`; each error string in the
 `errors` array SHALL begin with a bracketed gate-name prefix (`[testing]`,
 `[regression]`, `[spec audit]`, `[doc audit]`, `[security audit]`) so the
 recipient agent can route the fix correctly.
+
+**Run every gate against the re-resolved branch tip — never the triggering
+SHA.** At verification time, re-resolve the agent branch's current tip with
+`git rev-parse <branch>` and run all five gates against that tip (checked out
+in the isolated verify worktree described above). Do **NOT** run the gates
+against the commit SHA carried by the `committed` event or the
+`supervisor.verify-now` nudge that triggered this sweep: that SHA is typically
+the branch's *first* commit and is already stale, because agents commit
+incrementally (implementation, then tests, then docs) and the tip advances
+after the event fires.
+
+**Re-resolve before every re-run.** Before you *re-run* the gates for a branch
+— a later `committed` event arrives, a `supervisor.verify-now` nudge lands, or
+you are re-verifying after sending `agent.feedback` — re-resolve
+`git rev-parse <branch>` and re-check-out the new tip (drop and recreate the
+verify worktree per the recipe above). No gate may ever report against a
+snapshot older than the branch's current tip.
+
+**Doc/test surfaces present at the tip are not "missing".** Because the doc
+audit and spec audit read their surfaces from the re-resolved tip, a
+documentation file or test that is committed at the tip MUST NOT be reported
+as MISSING — even if it was absent at the triggering event's commit. This is
+the concrete failure this discipline fixes: in a v0.9.0 dogfood run the doc
+audit ran against a stale first-commit snapshot and flagged docs as missing
+while they were already committed at the tip, nearly driving a wasted
+fix-request to a correct agent.
+
+**Diff "what the change added/removed" against the merge-base.** For the gates
+that need the branch's own contribution — the spec audit and the
+security-audit diff review — compute the diff against the **merge-base** of the
+branch tip and the integration target, e.g.
+`git -C "$VERIFY" diff "$(git merge-base <integration-target> "$TIP")...$TIP"`,
+NOT against a stale integration tip. Diffing against an integration tip that
+has since moved makes a behind-tip or rebased branch show the integration
+tip's own commits as spurious mass deletions or additions; the merge-base
+isolates only what this branch changed.
 
 **Gate command templating.** Each gate's tooling step is keyed off a named
 placeholder — `TEST_COMMAND`, `LINT_COMMAND`, `BUILD_COMMAND`,
@@ -561,8 +617,10 @@ that you SHALL substitute with the change name being audited at the moment
 of running the command — `git paw` does not substitute it at render time.
 
 4. **Testing** — when an agent reports `status:"done"` or `status:"committed"`,
-   check out its worktree and run the configured gate-1 pre-test checks in
-   order. Run each that is configured; skip any sub-step whose command
+   run the configured gate-1 pre-test checks inside the isolated verify
+   worktree checked out at the re-resolved branch tip (per the recipe above —
+   `git worktree add --detach "$VERIFY" "$TIP"`, never a captured event SHA).
+   Run each check that is configured, in order; skip any sub-step whose command
    renders as `(not configured)`:
 
    - Format check: `{{FMT_CHECK_COMMAND}}`
@@ -599,14 +657,20 @@ of running the command — `git paw` does not substitute it at render time.
    specs. When `{{SPEC_VALIDATE_COMMAND}}` is configured (i.e. does not render
    as `(not configured)`), also run it as a tooling-aided pre-check;
    substitute `{{CHANGE_ID}}` in the rendered command with the change name
-   being audited. **Skip this step if testing or regression-analysis failed**
-   — there is no point auditing code that does not build or pass tests.
-   Errors are reported as `[spec audit] <requirement-name>: <gap
-   description>`.
+   being audited. Assess *what the change added* from the **merge-base** diff
+   (`git merge-base <integration-target> <tip>` — see the merge-base rule
+   above), NOT from a stale integration tip, so a behind-tip or rebased branch
+   does not show spurious mass deletions. **Skip this step if testing or
+   regression-analysis failed** — there is no point auditing code that does not
+   build or pass tests. Errors are reported as `[spec audit]
+   <requirement-name>: <gap description>`.
 
 6a. **Doc audit** — verify the documentation surfaces named in the change's
-   `Impact` section have been updated. When `{{DOC_BUILD_COMMAND}}` is
-   configured, also run it to confirm the doc surface still builds; skip the
+   `Impact` section have been updated, reading them from the re-resolved branch
+   tip (per the recipe above) so docs committed after the triggering event are
+   seen; a surface present at the tip MUST NOT be reported as MISSING. When
+   `{{DOC_BUILD_COMMAND}}` is configured, also run it to confirm the doc
+   surface still builds; skip the
    tooling invocation if it renders as `(not configured)` (the manual
    surface-coverage review still applies). Doc surfaces typically in scope
    (the change's `Impact` section is the authoritative driver of which
@@ -624,8 +688,10 @@ of running the command — `git paw` does not substitute it at render time.
    tagged `[doc audit]`. Doc-audit gaps are reported as
    `[doc audit] <surface>: <gap description>`.
 
-6b. **Security audit** — review the diff for the OWASP-relevant patterns called
-   out in the project's `CLAUDE.md` / governance docs:
+6b. **Security audit** — review the **merge-base** diff (the branch's own
+   contribution — `git merge-base <integration-target> <tip>`, per the
+   merge-base rule above, NOT a stale integration tip) for the OWASP-relevant
+   patterns called out in the project's `CLAUDE.md` / governance docs:
 
    - command injection
    - XSS
