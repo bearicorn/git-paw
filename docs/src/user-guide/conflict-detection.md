@@ -58,8 +58,28 @@ or status (whichever is freshest).
 
 **Action.** Both agents receive `[conflict-detector]`-tagged
 `agent.feedback`. The detector starts a `window_seconds` timer; if no
-side retracts before it elapses, the detector escalates to the supervisor
-inbox via `agent.question` (see [Supervisor Inbox Routing](#supervisor-inbox-routing)).
+side retracts before it elapses, the detector classifies the overlap from
+the two agents' declared intent regions for the shared file and acts:
+
+- **True collision** — the declared regions intersect (same named region,
+  same insertion anchor, overlapping line ranges, or a conservative
+  cross-kind match), *or* either side declared no regions for the file
+  (a file-level intent, or no active intent at all). The detector escalates
+  to the supervisor inbox via `agent.question`
+  (see [Supervisor Inbox Routing](#supervisor-inbox-routing)).
+- **Additive overlap** — *both* agents declared regions for the file and
+  the region sets are disjoint (well-separated hunks or differently named
+  regions). The detector downgrades to a single informational
+  `[conflict-detector]`-tagged `agent.feedback` delivered to both agents
+  ("shared file, additive — resolve at merge") and does **not** escalate to
+  the human. The overlap is still recorded: the triple is marked decided so
+  it neither re-escalates nor re-emits the downgrade on later ticks, and it
+  clears only when one agent stops touching the file — so an additive
+  overlap is never silently dropped.
+
+The downgrade requires *both* sides to have declared regions; whenever the
+region data is insufficient to prove the hunks are disjoint, the detector
+escalates, preserving the conservative default.
 
 **Window.** `[supervisor.conflict] window_seconds` (default `120`).
 
@@ -109,10 +129,13 @@ identity. The tag, not the source, is the discriminator.
 
 ## Supervisor Inbox Routing
 
-When an in-flight conflict has not resolved within `window_seconds`, the
-detector escalates to the supervisor by publishing an `agent.question`
+When an in-flight conflict has not resolved within `window_seconds` **and
+is classified a true collision** (see [In-flight conflict](#in-flight-conflict)),
+the detector escalates to the supervisor by publishing an `agent.question`
 addressed to the *supervisor* (not to either of the conflicting agents).
-The supervisor pane sees the question in its broker inbox and can:
+Additive overlaps are downgraded to an `agent.feedback` and never land in
+this inbox. The supervisor pane sees the question in its broker inbox and
+can:
 
 1. Type a reply, which the supervisor skill forwards to both involved
    agents via `tmux send-keys` (the same dual-write pattern documented in

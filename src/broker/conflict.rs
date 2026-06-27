@@ -12,8 +12,17 @@
 //!   intent is replaced or expires.
 //! - **In-flight conflict** — two agents' `agent.status.modified_files`
 //!   sets overlap on a file. Both branches are warned. If neither agent
-//!   stops touching the file within `[supervisor.conflict] window_seconds`
-//!   an escalation `agent.question` is published to the supervisor inbox.
+//!   stops touching the file within `[supervisor.conflict] window_seconds`,
+//!   the overlap is classified from the two agents' declared intent regions
+//!   for the file: a **true** collision (both declared regions that
+//!   intersect, or either side declared no regions / no active intent for
+//!   the file) escalates via `agent.question` to the supervisor inbox,
+//!   while an **additive** overlap (both declared disjoint regions) is
+//!   downgraded to an informational `agent.feedback` ("shared file,
+//!   additive — resolve at merge") and never reaches the human. Either
+//!   decision marks the triple handled once; the triple stays tracked until
+//!   an agent stops touching the file, so the overlap is recorded, not
+//!   dropped.
 //! - **Ownership violation** — an agent's `modified_files` include a file
 //!   outside its own active `agent.intent` *and* inside another active
 //!   agent's intent. The violator gets `agent.feedback`. If
@@ -220,8 +229,72 @@ impl IntentRecord {
 struct InFlightPair {
     /// When the triple was first observed.
     first_seen: Instant,
-    /// Whether an escalation `agent.question` has already been emitted.
+    /// Whether this triple's escalation decision has been made and acted
+    /// on — a `True` collision emitted an `agent.question`, or an
+    /// `Additive` overlap emitted a downgrade `agent.feedback`. Once set,
+    /// later ticks neither re-escalate nor re-downgrade the triple while
+    /// its region declarations are unchanged.
     escalated: bool,
+}
+
+/// Classification of a due in-flight overlap on a shared file, derived from
+/// the two agents' declared intent regions for that file.
+///
+/// The window-elapsed escalation path acts on this: a [`InFlightClass::True`]
+/// collision escalates to the supervisor via `agent.question`; an
+/// [`InFlightClass::Additive`] overlap downgrades to an informational
+/// `agent.feedback` and never reaches the human.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum InFlightClass {
+    /// A true collision — the detector cannot prove the two agents' edits
+    /// are disjoint: a side lacks an active intent for the file, a side
+    /// declares the file at file level (`regions == None`), or both
+    /// declared regions that intersect. Escalates as `agent.question`.
+    True,
+    /// An additive overlap — both agents declared regions for the file and
+    /// the region sets are disjoint (well-separated hunks or differently
+    /// named regions). Downgraded to an informational `agent.feedback`.
+    Additive,
+}
+
+/// Classifies an in-flight overlap on `file` between agents `a` and `b`
+/// using their active-intent region declarations.
+///
+/// Returns [`InFlightClass::Additive`] only when BOTH agents have an active
+/// intent that declares `file` with regions AND those region sets are
+/// disjoint under [`regions_intersect`]. In every other case — either side
+/// has no active intent for `file`, either declares `file` at file level
+/// (`regions == None`), or both declared regions that intersect — it
+/// returns the conservative [`InFlightClass::True`], preserving the
+/// pre-region always-escalate behaviour whenever disjointness cannot be
+/// proven.
+///
+/// Takes `intents` by reference (rather than being a `&self` method) so it
+/// can be called while `in_flight_pairs` is mutably borrowed inside
+/// [`ConflictTracker::take_due_escalations`].
+fn classify_in_flight(
+    intents: &HashMap<String, IntentRecord>,
+    a: &str,
+    b: &str,
+    file: &str,
+) -> InFlightClass {
+    let a_regions = intents.get(a).and_then(|r| r.files.get(file));
+    let b_regions = intents.get(b).and_then(|r| r.files.get(file));
+    match (a_regions, b_regions) {
+        // Both agents declared regions for the file: additive only if the
+        // region sets do not intersect.
+        (Some(Some(ra)), Some(Some(rb))) => {
+            let (hits, _cross_kind) = regions_intersect(ra, rb);
+            if hits.is_empty() {
+                InFlightClass::Additive
+            } else {
+                InFlightClass::True
+            }
+        }
+        // A side has no active intent for the file, or declares it at file
+        // level (`None`): cannot prove disjointness → conservative escalate.
+        _ => InFlightClass::True,
+    }
 }
 
 /// Lex-ordered agent-id pair used as the dedup key for forward
@@ -512,14 +585,20 @@ impl ConflictTracker {
         }
     }
 
-    /// Returns and marks-escalated every in-flight triple whose age
-    /// exceeds `window` and that has not yet been escalated. Each triple
-    /// is returned at most once across the tracker's lifetime.
+    /// Returns and marks-decided every in-flight triple whose age exceeds
+    /// `window` and whose escalation decision has not yet been made. Each
+    /// returned triple is paired with its additive-vs-true classification
+    /// (computed from the two agents' declared regions via
+    /// [`classify_in_flight`]) so the caller can act — escalate a `True`
+    /// collision, downgrade an `Additive` overlap — without a second
+    /// lookup. Taking a triple marks it decided (via the `escalated` flag),
+    /// so each triple is returned at most once across the tracker's
+    /// lifetime while its region declarations are unchanged.
     pub fn take_due_escalations(
         &mut self,
         window: Duration,
         now: Instant,
-    ) -> Vec<(String, String, String)> {
+    ) -> Vec<(String, String, String, InFlightClass)> {
         let mut out = Vec::new();
         for (key, pair) in &mut self.in_flight_pairs {
             if pair.escalated {
@@ -527,7 +606,9 @@ impl ConflictTracker {
             }
             if now.saturating_duration_since(pair.first_seen) >= window {
                 pair.escalated = true;
-                out.push(key.clone());
+                let (a, b, file) = key;
+                let class = classify_in_flight(&self.intents, a, b, file);
+                out.push((a.clone(), b.clone(), file.clone(), class));
             }
         }
         out.sort();
@@ -637,6 +718,20 @@ fn ownership_violation_error(file: &str, owner: &str) -> String {
 fn in_flight_escalation_question(a: &str, b: &str, file: &str, window_secs: u64) -> String {
     format!(
         "{CONFLICT_DETECTOR_TAG} in-flight conflict on {file} between {a} and {b} has not resolved within {window_secs}s. Human input requested.",
+    )
+}
+
+/// Builds the informational additive-downgrade feedback error string.
+///
+/// Emitted to both agents (with `from = "supervisor"`) instead of an
+/// escalation `agent.question` when a due in-flight overlap classifies as
+/// [`InFlightClass::Additive`]: both agents declared disjoint regions on the
+/// shared file, so their edits do not collide in flight. The text tells them
+/// the file is shared but the changes are additive and any residual
+/// reconciliation is deferred to merge time.
+fn additive_downgrade_feedback(a: &str, b: &str, file: &str) -> String {
+    format!(
+        "{CONFLICT_DETECTOR_TAG} shared file, additive — resolve at merge: {file} is modified by both {a} and {b}, but their declared regions are disjoint so the edits do not collide in flight",
     )
 }
 
@@ -787,10 +882,20 @@ pub fn process_message(
 }
 
 /// Run a single tick of the periodic timer-driven detector logic:
-/// expire stale intents, sweep resolved in-flight pairs, then emit any
-/// escalations whose window has elapsed.
+/// expire stale intents, sweep resolved in-flight pairs, then act on any
+/// escalation decisions whose window has elapsed.
 ///
-/// Returns the number of escalation messages emitted.
+/// Each due triple is classified additive-vs-true from the two agents'
+/// declared regions (see [`classify_in_flight`]). A `True` collision
+/// escalates to the supervisor inbox via `agent.question`; an `Additive`
+/// overlap downgrades to a single informational `agent.feedback` delivered
+/// to both agents and NO `agent.question`. Both branches mark the triple
+/// decided, so neither re-emits on later ticks; the triple itself stays in
+/// the tracker until `sweep_in_flight_pairs` drops it when an agent stops
+/// touching the file, so the overlap is recorded rather than discarded.
+///
+/// Returns the number of auto-emitted broker messages (a question counts as
+/// one; an additive downgrade counts as two — one feedback per agent).
 pub fn tick(
     state: &Arc<BrokerState>,
     tracker: &mut ConflictTracker,
@@ -801,12 +906,22 @@ pub fn tick(
     tracker.sweep_in_flight_pairs();
     let window = Duration::from_secs(config.window_seconds);
     let mut emitted = 0usize;
-    for (a, b, file) in tracker.take_due_escalations(window, now) {
-        emit_question(
-            state,
-            in_flight_escalation_question(&a, &b, &file, config.window_seconds),
-        );
-        emitted += 1;
+    for (a, b, file, class) in tracker.take_due_escalations(window, now) {
+        match class {
+            InFlightClass::True => {
+                emit_question(
+                    state,
+                    in_flight_escalation_question(&a, &b, &file, config.window_seconds),
+                );
+                emitted += 1;
+            }
+            InFlightClass::Additive => {
+                let text = additive_downgrade_feedback(&a, &b, &file);
+                emit_feedback(state, &a, text.clone());
+                emit_feedback(state, &b, text);
+                emitted += 2;
+            }
+        }
     }
     emitted
 }
@@ -2115,5 +2230,286 @@ mod tests {
                 payload.errors[0]
             );
         }
+    }
+
+    // ====================================================================
+    // Additive-vs-true in-flight escalation (conflict-detection spec)
+    // ====================================================================
+
+    fn block(anchor: &str) -> Region {
+        Region::Block {
+            anchor: anchor.to_string(),
+        }
+    }
+
+    fn range(start_line: u32, end_line: u32) -> Region {
+        Region::Range {
+            start_line,
+            end_line,
+        }
+    }
+
+    /// Config with a short window and forward-overlap warnings disabled, so
+    /// these tests isolate the in-flight escalation decision from
+    /// forward-conflict feedback noise while intents (and their regions) are
+    /// still tracked (`insert_intent` runs regardless of the flag).
+    fn escalation_config() -> ConflictConfig {
+        ConflictConfig {
+            window_seconds: 5,
+            warn_on_intent_overlap: false,
+            ..ConflictConfig::default()
+        }
+    }
+
+    /// Registers both inboxes, feeds each agent's region-bearing intent for
+    /// `file`, then their overlapping status on `file` (recording the
+    /// in-flight triple). The caller advances past the window and ticks.
+    fn setup_in_flight(
+        x_regions: Vec<Region>,
+        y_regions: Vec<Region>,
+        file: &str,
+    ) -> (Arc<BrokerState>, ConflictTracker, ConflictConfig, Instant) {
+        let state = fresh_state();
+        let mut t = ConflictTracker::new();
+        let cfg = escalation_config();
+        // Register both inboxes (delivery skips unregistered queues).
+        delivery::publish_message(&state, &status_msg("feat-x", &[]));
+        delivery::publish_message(&state, &status_msg("feat-y", &[]));
+        let now = Instant::now();
+        process_message(
+            &state,
+            &mut t,
+            &intent_msg_with_regions("feat-x", &[(file, x_regions)], "x", 600),
+            &cfg,
+            now,
+        );
+        process_message(
+            &state,
+            &mut t,
+            &intent_msg_with_regions("feat-y", &[(file, y_regions)], "y", 600),
+            &cfg,
+            now,
+        );
+        // Both agents now touch the file → in-flight triple recorded.
+        process_message(&state, &mut t, &status_msg("feat-x", &[file]), &cfg, now);
+        process_message(&state, &mut t, &status_msg("feat-y", &[file]), &cfg, now);
+        (state, t, cfg, now)
+    }
+
+    /// Feedback messages in `target`'s inbox whose text is the additive
+    /// downgrade (distinguished from the initial in-flight warning by the
+    /// "additive" wording).
+    fn additive_downgrade_feedbacks(state: &Arc<BrokerState>, target: &str) -> Vec<BrokerMessage> {
+        supervisor_feedbacks_in_inbox(state, target)
+            .into_iter()
+            .filter(|m| {
+                matches!(
+                    m,
+                    BrokerMessage::Feedback { payload, .. }
+                        if payload.errors.iter().any(|e| e.contains("additive"))
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn detector_true_collision_same_anchor_escalates_after_window() {
+        // Spec: True collision (same anchor) escalates after the window.
+        // Both agents insert at the same block anchor → regions intersect →
+        // true collision → agent.question to the supervisor.
+        let (state, mut t, cfg, now) =
+            setup_in_flight(vec![block("L82")], vec![block("L82")], "coordination.md");
+        let due = now + Duration::from_secs(10);
+        let emitted = tick(&state, &mut t, &cfg, due);
+        assert_eq!(emitted, 1, "a true collision emits exactly one question");
+        let q = supervisor_questions(&state);
+        assert_eq!(q.len(), 1);
+        if let BrokerMessage::Question { payload, .. } = &q[0] {
+            assert!(payload.question.contains(CONFLICT_DETECTOR_TAG));
+            assert!(payload.question.contains("coordination.md"));
+            assert!(payload.question.contains("feat-x"));
+            assert!(payload.question.contains("feat-y"));
+        } else {
+            panic!("expected Question");
+        }
+        // No additive downgrade for a true collision.
+        assert!(additive_downgrade_feedbacks(&state, "feat-x").is_empty());
+        // Triple marked decided: a later tick emits nothing more.
+        let later = due + Duration::from_secs(10);
+        assert_eq!(tick(&state, &mut t, &cfg, later), 0);
+        assert_eq!(supervisor_questions(&state).len(), 1);
+    }
+
+    #[test]
+    fn detector_true_collision_overlapping_ranges_escalates() {
+        // Spec: overlapping ranges are a true collision (the "/" alternative
+        // in task 3.1).
+        let (state, mut t, cfg, now) =
+            setup_in_flight(vec![range(10, 30)], vec![range(25, 45)], "src/a.rs");
+        let due = now + Duration::from_secs(10);
+        assert_eq!(tick(&state, &mut t, &cfg, due), 1);
+        assert_eq!(supervisor_questions(&state).len(), 1);
+        assert!(additive_downgrade_feedbacks(&state, "feat-x").is_empty());
+    }
+
+    #[test]
+    fn detector_additive_overlap_downgrades_no_question() {
+        // Spec: Additive overlap is downgraded, not escalated to the human.
+        // Disjoint declared ranges on a shared file → one informational
+        // agent.feedback to each agent, and NO agent.question.
+        let (state, mut t, cfg, now) =
+            setup_in_flight(vec![range(10, 30)], vec![range(80, 120)], "src/config.rs");
+        let due = now + Duration::from_secs(10);
+        let emitted = tick(&state, &mut t, &cfg, due);
+        assert_eq!(
+            emitted, 2,
+            "additive downgrade emits one feedback per agent"
+        );
+        assert!(
+            supervisor_questions(&state).is_empty(),
+            "additive overlap must not escalate to the human"
+        );
+        for target in ["feat-x", "feat-y"] {
+            let fb = additive_downgrade_feedbacks(&state, target);
+            assert_eq!(
+                fb.len(),
+                1,
+                "{target} should receive one additive downgrade"
+            );
+            if let BrokerMessage::Feedback { payload, .. } = &fb[0] {
+                let err = &payload.errors[0];
+                assert!(err.starts_with(CONFLICT_DETECTOR_TAG));
+                assert!(err.contains("shared file, additive — resolve at merge"));
+                assert!(err.contains("src/config.rs"));
+            } else {
+                panic!("expected Feedback");
+            }
+        }
+    }
+
+    #[test]
+    fn detector_additive_downgrade_recorded_and_not_reemitted() {
+        // Spec: Additive downgrade records the overlap and does not re-emit.
+        let (state, mut t, cfg, now) =
+            setup_in_flight(vec![range(10, 30)], vec![range(80, 120)], "src/config.rs");
+        let due = now + Duration::from_secs(10);
+        tick(&state, &mut t, &cfg, due);
+        assert_eq!(
+            t.in_flight_pair_count(),
+            1,
+            "triple is recorded, not dropped"
+        );
+        let fb_before = additive_downgrade_feedbacks(&state, "feat-x").len();
+        // Subsequent ticks while regions unchanged: no new feedback, no question.
+        let later = due + Duration::from_secs(30);
+        assert_eq!(tick(&state, &mut t, &cfg, later), 0);
+        assert_eq!(
+            additive_downgrade_feedbacks(&state, "feat-x").len(),
+            fb_before
+        );
+        assert!(supervisor_questions(&state).is_empty());
+        assert_eq!(
+            t.in_flight_pair_count(),
+            1,
+            "triple still recorded after later ticks"
+        );
+    }
+
+    #[test]
+    fn detector_conservative_fallback_file_level_intents_escalate() {
+        // Spec: Conservative escalation when regions are not declared. Both
+        // agents declare the file at file level (no regions) → cannot prove
+        // disjointness → escalate as a question.
+        let state = fresh_state();
+        let mut t = ConflictTracker::new();
+        let cfg = escalation_config();
+        delivery::publish_message(&state, &status_msg("feat-x", &[]));
+        delivery::publish_message(&state, &status_msg("feat-y", &[]));
+        let now = Instant::now();
+        process_message(
+            &state,
+            &mut t,
+            &intent_msg("feat-x", &["src/a.rs"], "x", 600),
+            &cfg,
+            now,
+        );
+        process_message(
+            &state,
+            &mut t,
+            &intent_msg("feat-y", &["src/a.rs"], "y", 600),
+            &cfg,
+            now,
+        );
+        process_message(
+            &state,
+            &mut t,
+            &status_msg("feat-x", &["src/a.rs"]),
+            &cfg,
+            now,
+        );
+        process_message(
+            &state,
+            &mut t,
+            &status_msg("feat-y", &["src/a.rs"]),
+            &cfg,
+            now,
+        );
+        let due = now + Duration::from_secs(10);
+        assert_eq!(tick(&state, &mut t, &cfg, due), 1);
+        let q = supervisor_questions(&state);
+        assert_eq!(q.len(), 1);
+        if let BrokerMessage::Question { payload, .. } = &q[0] {
+            assert!(payload.question.contains(CONFLICT_DETECTOR_TAG));
+            assert!(payload.question.contains("src/a.rs"));
+            assert!(payload.question.contains("feat-x"));
+            assert!(payload.question.contains("feat-y"));
+        }
+        assert!(additive_downgrade_feedbacks(&state, "feat-x").is_empty());
+    }
+
+    #[test]
+    fn detector_conservative_fallback_one_side_file_level_escalates() {
+        // Conservative fallback: one agent declares regions, the other
+        // declares the same file at file level → disjointness cannot be
+        // proven → escalate as a question (not a downgrade).
+        let state = fresh_state();
+        let mut t = ConflictTracker::new();
+        let cfg = escalation_config();
+        delivery::publish_message(&state, &status_msg("feat-x", &[]));
+        delivery::publish_message(&state, &status_msg("feat-y", &[]));
+        let now = Instant::now();
+        process_message(
+            &state,
+            &mut t,
+            &intent_msg_with_regions("feat-x", &[("src/a.rs", vec![range(10, 30)])], "x", 600),
+            &cfg,
+            now,
+        );
+        // feat-y declares the same file at file level (bare string).
+        process_message(
+            &state,
+            &mut t,
+            &intent_msg("feat-y", &["src/a.rs"], "y", 600),
+            &cfg,
+            now,
+        );
+        process_message(
+            &state,
+            &mut t,
+            &status_msg("feat-x", &["src/a.rs"]),
+            &cfg,
+            now,
+        );
+        process_message(
+            &state,
+            &mut t,
+            &status_msg("feat-y", &["src/a.rs"]),
+            &cfg,
+            now,
+        );
+        let due = now + Duration::from_secs(10);
+        assert_eq!(tick(&state, &mut t, &cfg, due), 1);
+        assert_eq!(supervisor_questions(&state).len(), 1);
+        assert!(additive_downgrade_feedbacks(&state, "feat-x").is_empty());
     }
 }

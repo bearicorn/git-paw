@@ -331,6 +331,94 @@ fn in_flight_conflict_round_trips_and_escalates() {
 }
 
 // =========================================================================
+// Additive-vs-true in-flight escalation: when BOTH agents declare disjoint
+// regions on a shared file, the window-elapsed overlap is downgraded to an
+// informational agent.feedback and NOT escalated to the supervisor inbox.
+// The full cross-module flow: region intents + status over HTTP → detector
+// classifies additive → feedback delivered to both agents, no question.
+// =========================================================================
+
+#[test]
+#[serial]
+fn additive_in_flight_overlap_downgrades_without_escalation() {
+    let cfg = ConflictConfig {
+        window_seconds: 1,
+        ..ConflictConfig::default()
+    };
+    let (_handle, url) = spawn_test_broker(Some(&cfg));
+    register_agent(&url, "feat-xx");
+    register_agent(&url, "feat-yy");
+    drain_inbox(&url, "feat-xx");
+    drain_inbox(&url, "feat-yy");
+    drain_inbox(&url, "supervisor");
+
+    // Both agents declare disjoint ranges on the same file → additive.
+    publish(
+        &url,
+        r#"{"type":"agent.intent","agent_id":"feat-xx","payload":{"files":[{"path":"src/config.rs","regions":[{"kind":"range","start_line":10,"end_line":30}]}],"summary":"x","valid_for_seconds":600}}"#,
+    );
+    publish(
+        &url,
+        r#"{"type":"agent.intent","agent_id":"feat-yy","payload":{"files":[{"path":"src/config.rs","regions":[{"kind":"range","start_line":80,"end_line":120}]}],"summary":"y","valid_for_seconds":600}}"#,
+    );
+    // Both now touch the file → in-flight triple recorded.
+    publish(
+        &url,
+        r#"{"type":"agent.status","agent_id":"feat-xx","payload":{"status":"working","modified_files":["src/config.rs"]}}"#,
+    );
+    publish(
+        &url,
+        r#"{"type":"agent.status","agent_id":"feat-yy","payload":{"status":"working","modified_files":["src/config.rs"]}}"#,
+    );
+
+    // Wait for the window to elapse and a detector tick to fire the downgrade.
+    std::thread::sleep(Duration::from_secs(2));
+
+    // Both agents receive the informational additive-downgrade feedback.
+    let downgrade_pred = |resp: &serde_json::Value| {
+        let msgs = resp["messages"].as_array()?;
+        msgs.iter()
+            .find(|m| {
+                m["type"] == "agent.feedback"
+                    && m["payload"]["errors"]
+                        .as_array()
+                        .and_then(|errs| errs.first()?.as_str())
+                        .is_some_and(|s| {
+                            s.starts_with("[conflict-detector]")
+                                && s.contains("shared file, additive — resolve at merge")
+                                && s.contains("src/config.rs")
+                        })
+            })
+            .cloned()
+    };
+    assert!(
+        poll_until(&url, "feat-xx", downgrade_pred).is_some(),
+        "feat-xx should receive the additive-downgrade feedback"
+    );
+    assert!(
+        poll_until(&url, "feat-yy", downgrade_pred).is_some(),
+        "feat-yy should receive the additive-downgrade feedback"
+    );
+
+    // No escalation question reaches the supervisor inbox for this overlap.
+    let supervisor = poll(&url, "supervisor");
+    let question_count = supervisor["messages"].as_array().map_or(0, |msgs| {
+        msgs.iter()
+            .filter(|m| {
+                m["type"] == "agent.question"
+                    && m["payload"]["question"]
+                        .as_str()
+                        .is_some_and(|s| s.contains("[conflict-detector]"))
+            })
+            .count()
+    });
+    assert_eq!(
+        question_count, 0,
+        "additive overlap must not escalate to the supervisor; got: {supervisor}"
+    );
+}
+
+// =========================================================================
 // 5.3: Ownership-violation round trip + escalate_on_violation = false
 //      suppresses the supervisor question.
 // =========================================================================
