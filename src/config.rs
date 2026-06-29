@@ -458,6 +458,39 @@ pub struct SupervisorConfig {
     /// change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_approvals_log: Option<bool>,
+    /// No-progress detection window, in seconds, for the bundled `sweep.sh`
+    /// stuck detector.
+    ///
+    /// An agent is flagged `no-progress` when BOTH its completed-task-checkbox
+    /// count AND its branch commit count stay unchanged for at least this many
+    /// seconds. Consumed only by `.git-paw/scripts/sweep.sh` (which reads it
+    /// from `[supervisor]` config); when the field is absent the helper falls
+    /// back to its documented default (~1500s / 25 min), longer than the
+    /// stuck-on-prompt heartbeat threshold because real edits take minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_progress_window_seconds: Option<u64>,
+    /// Context-bloat token threshold, in thousands of tokens, for the bundled
+    /// `sweep.sh` stuck detector.
+    ///
+    /// When an agent's pane shows a `/clear to save <N>k tokens` hint whose `N`
+    /// meets or exceeds this value, the detector proactively flags the agent
+    /// `context-bloat` so the supervisor can pre-empt the eventual freeze.
+    /// Consumed only by `.git-paw/scripts/sweep.sh`; when absent the helper
+    /// falls back to its documented default (~250, matching the observed
+    /// v0.8.0 freeze point).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_bloat_threshold_k: Option<u64>,
+    /// Blocked-on-supervisor timeout window, in seconds, for the bundled
+    /// `sweep.sh` stuck detector.
+    ///
+    /// An agent whose latest unanswered `agent.blocked` names the supervisor as
+    /// the blocker is flagged `blocked-on-supervisor` once it has waited longer
+    /// than this window, forcing the supervisor (or the unattended drive loop)
+    /// to answer rather than leaving the agent stalled. Consumed only by
+    /// `.git-paw/scripts/sweep.sh`; when absent the helper falls back to its
+    /// documented default (~900s / 15 min).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_on_supervisor_window_seconds: Option<u64>,
     /// Configuration for the `/tell` user→agent routing command.
     ///
     /// Carries the default delivery mode and the inventory-cache max age. The
@@ -1592,6 +1625,12 @@ worktree_placement = "child"
 # agent_approval = "auto"  # one of: "manual", "auto", "full-auto"
 # verify_on_commit_nudge = true  # broker nudges the supervisor to verify each commit promptly (default true)
 #
+# Stuck/bloat detection thresholds, read by .git-paw/scripts/sweep.sh. Each is
+# optional; omit to use the documented default shown.
+# no_progress_window_seconds = 1500           # flag no-progress after ~25 min with no checkbox/commit movement
+# context_bloat_threshold_k = 250             # flag context-bloat when the CLI hints at clearing >= this many k tokens
+# blocked_on_supervisor_window_seconds = 900  # flag a supervisor-targeted block unanswered past ~15 min
+#
 # Routing through the supervisor (the /tell and /agents commands). The user
 # types in the supervisor pane and the supervisor routes the prompt to the
 # named agent. `mode` selects the default delivery channel:
@@ -2410,6 +2449,9 @@ enabled = true
                 strict_branch_guard: None,
                 auto_revert: None,
                 manual_approvals_log: None,
+                no_progress_window_seconds: None,
+                context_bloat_threshold_k: None,
+                blocked_on_supervisor_window_seconds: None,
                 tell: TellConfig::default(),
             }),
             ..Default::default()
@@ -2568,6 +2610,110 @@ enabled = true
                 "TOML serialised with None gate fields should omit `{key}`; got:\n{serialized}",
             );
         }
+    }
+
+    // --- stuck/bloat detection thresholds (supervisor-stuck-bloat-detection) ---
+
+    #[test]
+    fn stuck_detection_fields_default_to_none() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[supervisor]\nenabled = true\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert_eq!(supervisor.no_progress_window_seconds, None);
+        assert_eq!(supervisor.context_bloat_threshold_k, None);
+        assert_eq!(supervisor.blocked_on_supervisor_window_seconds, None);
+    }
+
+    #[test]
+    fn stuck_detection_fields_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        let original = PawConfig {
+            supervisor: Some(SupervisorConfig {
+                enabled: true,
+                no_progress_window_seconds: Some(1800),
+                context_bloat_threshold_k: Some(300),
+                blocked_on_supervisor_window_seconds: Some(600),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        save_config_to(&config_path, &original).unwrap();
+        let loaded = load_config_file(&config_path).unwrap().unwrap();
+        assert_eq!(loaded.supervisor, original.supervisor);
+        let supervisor = loaded.supervisor.unwrap();
+        assert_eq!(supervisor.no_progress_window_seconds, Some(1800));
+        assert_eq!(supervisor.context_bloat_threshold_k, Some(300));
+        assert_eq!(supervisor.blocked_on_supervisor_window_seconds, Some(600));
+    }
+
+    #[test]
+    fn stuck_detection_fields_omit_from_toml_when_none() {
+        let supervisor = SupervisorConfig {
+            enabled: true,
+            no_progress_window_seconds: None,
+            context_bloat_threshold_k: None,
+            blocked_on_supervisor_window_seconds: None,
+            ..Default::default()
+        };
+        let serialized = toml::to_string_pretty(&supervisor).unwrap();
+        for key in [
+            "no_progress_window_seconds",
+            "context_bloat_threshold_k",
+            "blocked_on_supervisor_window_seconds",
+        ] {
+            assert!(
+                !serialized.contains(key),
+                "TOML serialised with None stuck-detection fields should omit `{key}`; got:\n{serialized}",
+            );
+        }
+    }
+
+    #[test]
+    fn stuck_detection_fields_pre_existing_config_loads() {
+        // A config authored before these fields existed SHALL load cleanly with
+        // the new fields defaulting to None (backward compatibility).
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\n\
+             enabled = true\n\
+             test_command = \"just check\"\n\
+             strict_branch_guard = true\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert_eq!(supervisor.no_progress_window_seconds, None);
+        assert_eq!(supervisor.context_bloat_threshold_k, None);
+        assert_eq!(supervisor.blocked_on_supervisor_window_seconds, None);
+        assert_eq!(supervisor.test_command.as_deref(), Some("just check"));
+    }
+
+    #[test]
+    fn stuck_detection_fields_explicit_values_preserved() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\n\
+             enabled = true\n\
+             no_progress_window_seconds = 900\n\
+             context_bloat_threshold_k = 200\n\
+             blocked_on_supervisor_window_seconds = 1200\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert_eq!(supervisor.no_progress_window_seconds, Some(900));
+        assert_eq!(supervisor.context_bloat_threshold_k, Some(200));
+        assert_eq!(supervisor.blocked_on_supervisor_window_seconds, Some(1200));
     }
 
     // --- doc_tool_command (lang-agnostic-skills) ---
@@ -2906,6 +3052,10 @@ enabled = true
         assert!(output.contains("enabled"));
         assert!(output.contains("test_command"));
         assert!(output.contains("agent_approval"));
+        // Stuck/bloat detection thresholds are listed with example values.
+        assert!(output.contains("no_progress_window_seconds = 1500"));
+        assert!(output.contains("context_bloat_threshold_k = 250"));
+        assert!(output.contains("blocked_on_supervisor_window_seconds = 900"));
     }
 
     // --- DashboardConfig ---

@@ -363,6 +363,9 @@ agent_approval = "auto"
 verify_on_commit_nudge = true
 strict_branch_guard = true
 manual_approvals_log = true
+no_progress_window_seconds = 1500
+context_bloat_threshold_k = 250
+blocked_on_supervisor_window_seconds = 900
 ```
 
 | Field | Default | Description |
@@ -381,6 +384,9 @@ manual_approvals_log = true
 | `verify_on_commit_nudge` | `true` | When on, the broker posts a `supervisor.verify-now` message to the supervisor inbox on every `agent.artifact { status: "committed" }`, so the supervisor verifies each commit promptly on an explicit event instead of batching. Set `false` to fall back to sweep-cadence verification |
 | `strict_branch_guard` | `true` | When `true`, a per-worktree **pre-commit** hook refuses any commit whose checked-out branch differs from the branch the worktree was created for, blocking cross-worktree contamination (linked worktrees share `.git/refs`, so a stray `cd` can otherwise advance the wrong branch). Set `false` to disable *enforcement* — the **post-commit** hook still publishes an `agent.feedback` + `agent.learning` record when it detects a mismatch (detection without enforcement) |
 | `manual_approvals_log` | `true` | When `true`, commands the supervisor forwards for a manual decision (prompts the auto-approve preset did not match) are appended to `.git-paw/sessions/<session>.manual-approvals.jsonl` and surfaced via [`git paw approvals`](../cli-reference.md). On a pattern's first sighting a `permission_pattern` learning is also emitted (when `learnings = true`). Set `false` to suppress both the log writes and the learnings emission; the opt-out affects writes only, so `git paw approvals` still reads any pre-existing log |
+| `no_progress_window_seconds` | `1500` (~25 min) | Read by `.git-paw/scripts/sweep.sh`: an agent is flagged `no-progress` when BOTH its completed-task-checkbox count AND its branch commit count stay unchanged for this many seconds. Set longer to tolerate long build/research steps, shorter to nudge sooner. Omitted → the documented default |
+| `context_bloat_threshold_k` | `250` (thousand tokens) | Read by `.git-paw/scripts/sweep.sh`: when an agent's pane shows a `/clear to save <N>k tokens` hint whose `N` meets or exceeds this value, the agent is proactively flagged `context-bloat` so the supervisor can pre-empt the eventual freeze. Omitted → the documented default |
+| `blocked_on_supervisor_window_seconds` | `900` (~15 min) | Read by `.git-paw/scripts/sweep.sh`: an agent whose latest unanswered `agent.blocked` names the supervisor as the blocker is flagged `blocked-on-supervisor` once it has waited longer than this window, forcing the supervisor to answer. Omitted → the documented default |
 
 **Gate-command templating.** The eight `*_command` keys feed the supervisor
 skill's five verification gates (testing, regression analysis, spec audit, doc

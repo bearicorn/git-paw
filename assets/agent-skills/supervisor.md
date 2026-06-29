@@ -323,32 +323,87 @@ bundled helper to find these stalls:
 .git-paw/scripts/sweep.sh detect-stuck
 ```
 
-`detect-stuck` captures every coding-agent pane, matches it against the
-documented prompt markers (`Do you want to proceed`, `Do you want to allow`,
-`requires approval`, `(y/n)`, `[y/N]`, and the `Pasted text #N` paste-buffer
-indicator), and cross-checks the agent's broker `last_seen_seconds`. A pane is
-flagged **stuck-on-prompt** only when a marker is present AND the heartbeat has
-not advanced for more than 30 seconds — a fresh heartbeat means the agent may
-have caught the prompt itself, so the helper holds off. For each flagged pane
-it publishes a synthetic `agent.status` with `phase: "stuck-on-prompt"` and a
-`detail.captured_prompt` carrying the first ~200 characters of the capture, so
-the stall shows up on the dashboard and through the session-status surface
-without you scraping panes by hand. Once flagged, approve the prompt
-(`.git-paw/scripts/sweep.sh approve __FILL_IN_PANE_INDEX__`) or send guidance.
+`detect-stuck` captures every coding-agent pane, resolves it to an `agent_id`,
+and classifies each agent into one of **five stuck shapes**. Each detected
+shape publishes a synthetic `agent.status` carrying a documented `phase` (plus a
+`detail` object describing the evidence), so the stall shows up on the dashboard
+and through the session-status surface without you scraping panes by hand. The
+five shapes are:
 
-The helper dedups by `(agent_id, prompt-shape)` within the detection window: a
-persistently stuck agent produces exactly **one** synthetic publish per window,
-and a new publish only when the prompt text changes or the agent recovers and
-stalls again.
+- **`stuck-on-prompt`** — a permission/paste-buffer marker is present
+  (`Do you want to proceed`, `Do you want to allow`, `requires approval`,
+  `(y/n)`, `[y/N]`, or the `Pasted text #N` paste-buffer indicator) AND the
+  agent's broker `last_seen_seconds` has not advanced for more than 30 seconds.
+  A fresh heartbeat means the agent may have caught the prompt itself, so the
+  helper holds off. `detail.captured_prompt` carries the first ~200 characters
+  of the capture. Once flagged, approve the prompt
+  (`.git-paw/scripts/sweep.sh approve __FILL_IN_PANE_INDEX__`) or send guidance.
+- **`stuck-stream-timeout`** — the pane shows a stream-timeout / transport-error
+  marker (the agent's CLI API call failed mid-stream and it is sitting dead with
+  no prompt marker). Flag it for recovery — nudge or restart — rather than
+  leaving it stalled. See "Stream-timeout recovery" below for the coding-agent
+  case versus your own.
+- **`context-bloat`** — the pane shows a `/clear to save <N>k tokens` (or
+  compact) hint where `N` meets or exceeds the configured
+  `context_bloat_threshold_k` (default 250). This is a **proactive** flag: the
+  agent is still responsive, so the phase exists to let you pre-empt the
+  eventual freeze. Nudge the agent to commit or publish an `agent.artifact`,
+  then clear/compact — see the coordination skill's "Context budget".
+- **`no-progress`** — across the no-progress window (default ~25 min) BOTH the
+  agent's completed-task-checkbox count AND its branch commit count are
+  unchanged. This is **advisory** — surface it for a nudge or investigation, not
+  an auto-termination. A slow-but-moving agent (either counter advancing) is
+  never flagged.
+- **`blocked-on-supervisor`** — the agent's latest `agent.blocked` names the
+  supervisor as the blocker and has gone unanswered past the
+  blocked-on-supervisor window (default ~15 min). The remediation is specific:
+  **you must answer**, not nudge the agent. (In a v0.8.0 dogfood an agent sat
+  blocked on the supervisor for 1054 minutes — this shape exists so that cannot
+  recur.)
+
+**Read the live pane before you classify.** The detector inspects each agent's
+pane capture and evaluates the pane-marker shapes (stuck-on-prompt,
+stuck-stream-timeout, context-bloat) BEFORE the no-progress heuristic — so an
+idle-looking agent that is actually sitting on a permission prompt is classified
+**blocked-on-prompt (stuck-on-prompt)**, never no-progress, even when its
+checkbox and commit counts are unchanged. NEVER judge an agent idle from
+branch-tip or uncommitted-file counts alone: that is exactly the wrong "wind
+down" call the dogfood supervisor made twice. The count-based no-progress signal
+only applies once the pane shows no marker.
+
+The helper dedups by `(agent_id, shape)` within the detection window: a
+persistently stuck agent produces exactly **one** synthetic publish per window
+per shape, and a new publish only when the evidence changes or the agent
+recovers and stalls again. For `stuck-on-prompt` the shape is the
+**prompt-shape** — a hash of the prompt text, so two genuinely different prompts
+each publish; for the other four shapes the shape is the phase name itself.
 
 Do NOT hand-roll an inline-bash monitor that runs `tmux capture-pane` and hashes
 the output for its own dedup. Ad-hoc signature dedup eats repeat-pattern prompts
 — when two genuinely distinct prompts happen to render alike, a naive hash
 treats the second as a duplicate and you never see it. The bundled helper's
-dedup is keyed on `(agent_id, prompt-shape)` with a recovery reset, so it
-distinguishes "same prompt seen twice" from "two distinct prompts that look
-alike." Drive `detect-stuck` on your monitoring cadence instead of reinventing
-it.
+dedup is keyed on `(agent_id, shape)` (the prompt-shape hash for stuck-on-prompt)
+with a recovery reset, so it distinguishes "same prompt seen twice" from "two
+distinct prompts that look alike." Drive `detect-stuck` on your monitoring
+cadence instead of reinventing it.
+
+### N re-verify cycles is not a stall
+
+Multiple feedback→fix→re-verify cycles per agent are **normal progress**, not a
+stuck state. Real agents have taken many rounds to pass all five gates — in the
+v0.8.0 dogfood the mcp-server change took **7** feedback→fix→re-verify cycles
+and the dev-allowlist change took **6** — and each of those rounds was the
+verification loop working as intended, not an agent spinning.
+
+Do NOT flag, nudge, or wind down an agent on the cycle count alone. "Not yet
+verified after N cycles" is not by itself evidence of a stall. Judge a stall
+only by the detected stuck shapes above — `stuck-on-prompt`,
+`stuck-stream-timeout`, `context-bloat`, `no-progress`, and
+`blocked-on-supervisor` — never by how many verify rounds an agent has consumed.
+An agent that keeps committing, fixing, and answering feedback across six or
+seven cycles is progressing; an agent that trips one of the five detected shapes
+is stuck. Only the latter warrants intervention.
+
 ### Publish Question to Human Dashboard
 
 When you encounter ambiguity (user intent, trade-off decisions, unclear
@@ -1339,6 +1394,20 @@ wording:
 
 Either symptom means: assume the action you were in the middle of
 **may not have completed**. Do not resume as if the prior step landed.
+
+**Two distinct cases — your own timeout vs a coding agent's.** The
+checkpoint/replay flow in the rest of this section recovers *your own*
+stream timeout (the supervisor's API stream dropped mid-sweep). A **coding
+agent** can hit the same transport failure in its own pane — its CLI shows a
+mid-stream cutoff or a transport/stream error and the agent sits dead with no
+permission prompt to approve. You do not see that by polling the broker; you
+detect it with `.git-paw/scripts/sweep.sh detect-stuck`, which surfaces it as a
+synthetic `agent.status` with `phase: "stuck-stream-timeout"`. Treat a coding
+agent in `stuck-stream-timeout` as a stalled agent to **recover** — nudge its
+pane or restart it — never as one that is still making progress. The symptoms
+are the same shape as your own timeout; the difference is whose stream dropped
+and who acts: your own timeout you replay from a checkpoint, a coding agent's
+timeout you nudge or restart.
 
 #### 2. Checkpoint before risky actions (pre-action checkpoint)
 

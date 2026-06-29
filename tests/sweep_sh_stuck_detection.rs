@@ -120,6 +120,7 @@ struct Fixture {
     root: std::path::PathBuf,
     bodies: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
+    port: u16,
 }
 
 fn setup() -> Fixture {
@@ -148,7 +149,70 @@ fn setup() -> Fixture {
         root,
         bodies,
         stop,
+        port,
     }
+}
+
+/// Rewrites the fixture's `config.toml` to add a `[supervisor]` block with the
+/// given body (e.g. `"context_bloat_threshold_k = 200\n"`), preserving the
+/// recorder broker port so the detector still publishes to the stub.
+fn set_supervisor_config(fx: &Fixture, supervisor_body: &str) {
+    fs::write(
+        fx.root.join(".git-paw/config.toml"),
+        format!(
+            "[broker]\nenabled = true\nport = {}\n[supervisor]\n{supervisor_body}",
+            fx.port
+        ),
+    )
+    .expect("rewrite config with [supervisor]");
+}
+
+/// Seeds the no-progress snapshot file `.git-paw/.sweep-progress` with a single
+/// `agent<TAB>checkbox<TAB>commit<TAB>timestamp` line so a test can pin the
+/// prior snapshot (and its age) without waiting real wall-clock time.
+fn seed_progress(fx: &Fixture, agent: &str, checkbox: &str, commit: &str, ts: u64) {
+    fs::write(
+        fx.root.join(".git-paw/.sweep-progress"),
+        format!("{agent}\t{checkbox}\t{commit}\t{ts}\n"),
+    )
+    .expect("seed .sweep-progress");
+}
+
+/// Runs `stuck-eval` with the full positional arg set (`checkbox_count`,
+/// `commit_count`, `blocked_age_seconds`); pass "" for any the branch under
+/// test does not use.
+#[allow(clippy::too_many_arguments)]
+fn run_stuck_eval_full(
+    fx: &Fixture,
+    agent: &str,
+    last_seen: u64,
+    checkbox: &str,
+    commit: &str,
+    blocked_age: &str,
+    capture: &str,
+) -> String {
+    let mut child = StdCommand::new("bash")
+        .arg(&fx.sweep)
+        .arg("stuck-eval")
+        .arg(agent)
+        .arg(last_seen.to_string())
+        .arg(checkbox)
+        .arg(commit)
+        .arg(blocked_age)
+        .current_dir(&fx.root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn sweep.sh");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(capture.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("wait");
+    String::from_utf8_lossy(&out.stdout).to_string()
 }
 
 fn run_stuck_eval(fx: &Fixture, agent: &str, last_seen: u64, capture: &str) -> String {
@@ -273,5 +337,284 @@ fn repeated_detection_is_deduped() {
         fx.bodies.lock().unwrap().len(),
         1,
         "a persistently stuck agent publishes exactly once per window"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// supervisor-stuck-bloat-detection: the four new stuck shapes.
+// ---------------------------------------------------------------------------
+
+/// 4.1 — a stream-timeout / transport-error marker in a pane publishes
+/// `phase: "stuck-stream-timeout"` with the captured prompt.
+#[test]
+#[serial]
+fn stream_timeout_marker_publishes_stuck_stream_timeout() {
+    let fx = setup();
+    let out = run_stuck_eval_full(
+        &fx,
+        "feat-st",
+        60,
+        "",
+        "",
+        "",
+        "compiling the workspace\nRequest timed out\n",
+    );
+    wait_for_bodies(&fx, 1, Duration::from_secs(5));
+    fx.stop.store(true, Ordering::SeqCst);
+    assert!(out.contains("stuck"), "expected stuck output, got: {out}");
+    let bodies = fx.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1, "expected one publish, got {bodies:?}");
+    let v: serde_json::Value = serde_json::from_str(&bodies[0]).expect("valid json");
+    assert_eq!(v["type"], "agent.status");
+    assert_eq!(v["agent_id"], "feat-st");
+    assert_eq!(v["payload"]["phase"], "stuck-stream-timeout");
+    assert!(
+        v["payload"]["detail"]["captured_prompt"]
+            .as_str()
+            .unwrap()
+            .contains("Request timed out"),
+        "captured_prompt must carry the marker text: {}",
+        bodies[0]
+    );
+}
+
+/// 4.2a — a `/clear to save Nk tokens` hint at/over the threshold publishes
+/// `phase: "context-bloat"` with the parsed token figure.
+#[test]
+#[serial]
+fn context_bloat_over_threshold_publishes() {
+    let fx = setup();
+    set_supervisor_config(&fx, "context_bloat_threshold_k = 200\n");
+    let out = run_stuck_eval_full(
+        &fx,
+        "feat-cb",
+        60,
+        "",
+        "",
+        "",
+        "still working\n/clear to save 250k tokens\n",
+    );
+    wait_for_bodies(&fx, 1, Duration::from_secs(5));
+    fx.stop.store(true, Ordering::SeqCst);
+    assert!(out.contains("stuck"), "expected stuck output, got: {out}");
+    let bodies = fx.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1, "expected one publish, got {bodies:?}");
+    let v: serde_json::Value = serde_json::from_str(&bodies[0]).expect("valid json");
+    assert_eq!(v["payload"]["phase"], "context-bloat");
+    assert_eq!(
+        v["payload"]["detail"]["tokens_k"], 250,
+        "detail must carry the parsed token figure: {}",
+        bodies[0]
+    );
+}
+
+/// 4.2b — a clear hint below the threshold is NOT flagged.
+#[test]
+#[serial]
+fn context_bloat_below_threshold_does_not_publish() {
+    let fx = setup();
+    set_supervisor_config(&fx, "context_bloat_threshold_k = 200\n");
+    let out = run_stuck_eval_full(
+        &fx,
+        "feat-cb2",
+        60,
+        "",
+        "",
+        "",
+        "still working\n/clear to save 100k tokens\n",
+    );
+    thread::sleep(Duration::from_millis(200));
+    fx.stop.store(true, Ordering::SeqCst);
+    assert!(
+        out.contains("not-stuck"),
+        "below-threshold bloat must be not-stuck, got: {out}"
+    );
+    assert!(
+        fx.bodies.lock().unwrap().is_empty(),
+        "below-threshold bloat must not publish"
+    );
+}
+
+/// 4.3a — both counters unchanged past the window (no pane marker) publishes
+/// `phase: "no-progress"`.
+#[test]
+#[serial]
+fn no_progress_unchanged_past_window_publishes() {
+    let fx = setup();
+    // Prior snapshot at epoch 0 → unchanged_for far exceeds the ~1500s default.
+    seed_progress(&fx, "feat-np", "5", "3", 0);
+    let out = run_stuck_eval_full(&fx, "feat-np", 60, "5", "3", "", "thinking hard\n");
+    wait_for_bodies(&fx, 1, Duration::from_secs(5));
+    fx.stop.store(true, Ordering::SeqCst);
+    assert!(out.contains("stuck"), "expected stuck output, got: {out}");
+    let bodies = fx.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1, "expected one publish, got {bodies:?}");
+    let v: serde_json::Value = serde_json::from_str(&bodies[0]).expect("valid json");
+    assert_eq!(v["payload"]["phase"], "no-progress");
+    assert_eq!(v["payload"]["detail"]["checkbox_count"], "5");
+    assert_eq!(v["payload"]["detail"]["commit_count"], "3");
+}
+
+/// 4.3b — movement in either counter is NOT no-progress.
+#[test]
+#[serial]
+fn no_progress_counter_movement_does_not_publish() {
+    let fx = setup();
+    seed_progress(&fx, "feat-np2", "5", "3", 0);
+    // Commit count advanced 3 → 4: movement clears the timer.
+    let out = run_stuck_eval_full(&fx, "feat-np2", 60, "5", "4", "", "thinking hard\n");
+    thread::sleep(Duration::from_millis(200));
+    fx.stop.store(true, Ordering::SeqCst);
+    assert!(
+        out.contains("not-stuck"),
+        "counter movement must be not-stuck, got: {out}"
+    );
+    assert!(
+        fx.bodies.lock().unwrap().is_empty(),
+        "counter movement must not publish"
+    );
+}
+
+/// 4.3c — the first observation of an agent only records state; it never flags.
+#[test]
+#[serial]
+fn no_progress_first_observation_only_records() {
+    let fx = setup();
+    // No prior snapshot on file.
+    let out = run_stuck_eval_full(&fx, "feat-np3", 60, "5", "3", "", "thinking hard\n");
+    thread::sleep(Duration::from_millis(200));
+    fx.stop.store(true, Ordering::SeqCst);
+    assert!(
+        out.contains("not-stuck"),
+        "first observation must be not-stuck, got: {out}"
+    );
+    assert!(
+        fx.bodies.lock().unwrap().is_empty(),
+        "first observation must not publish"
+    );
+    let progress = fs::read_to_string(fx.root.join(".git-paw/.sweep-progress"))
+        .expect("first observation must record a snapshot");
+    assert!(
+        progress.contains("feat-np3\t5\t3\t"),
+        "snapshot must record the current counts: {progress}"
+    );
+}
+
+/// 4.4 — read-pane rule: a pane showing a permission marker is stuck-on-prompt,
+/// NOT no-progress, even when the checkbox/commit counters are unchanged past
+/// the window.
+#[test]
+#[serial]
+fn permission_marker_is_stuck_on_prompt_not_no_progress() {
+    let fx = setup();
+    // Counters unchanged past the window would otherwise trip no-progress...
+    seed_progress(&fx, "feat-pp", "5", "3", 0);
+    // ...but the live pane shows a permission prompt, so the read-pane rule wins.
+    run_stuck_eval_full(
+        &fx,
+        "feat-pp",
+        60,
+        "5",
+        "3",
+        "",
+        "running the build\nDo you want to proceed?\n  1. Yes\n  2. No\n",
+    );
+    wait_for_bodies(&fx, 1, Duration::from_secs(5));
+    fx.stop.store(true, Ordering::SeqCst);
+    let bodies = fx.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1, "expected one publish, got {bodies:?}");
+    let v: serde_json::Value = serde_json::from_str(&bodies[0]).expect("valid json");
+    assert_eq!(
+        v["payload"]["phase"], "stuck-on-prompt",
+        "a prompt-blocked agent must be stuck-on-prompt, never no-progress: {}",
+        bodies[0]
+    );
+}
+
+/// 4.5a — a supervisor-targeted block unanswered past the window publishes
+/// `phase: "blocked-on-supervisor"`.
+#[test]
+#[serial]
+fn blocked_on_supervisor_past_window_publishes() {
+    let fx = setup();
+    // blocked_age 1200s > default 900s window.
+    let out = run_stuck_eval_full(
+        &fx,
+        "feat-b",
+        60,
+        "",
+        "",
+        "1200",
+        "waiting for the supervisor\n",
+    );
+    wait_for_bodies(&fx, 1, Duration::from_secs(5));
+    fx.stop.store(true, Ordering::SeqCst);
+    assert!(out.contains("stuck"), "expected stuck output, got: {out}");
+    let bodies = fx.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1, "expected one publish, got {bodies:?}");
+    let v: serde_json::Value = serde_json::from_str(&bodies[0]).expect("valid json");
+    assert_eq!(v["payload"]["phase"], "blocked-on-supervisor");
+    assert_eq!(v["payload"]["detail"]["unanswered_for_seconds"], 1200);
+}
+
+/// 4.5b — a freshly-blocked agent (within the window) is NOT flagged.
+#[test]
+#[serial]
+fn blocked_on_supervisor_fresh_does_not_publish() {
+    let fx = setup();
+    // blocked_age 30s < default 900s window.
+    let out = run_stuck_eval_full(
+        &fx,
+        "feat-b2",
+        60,
+        "",
+        "",
+        "30",
+        "waiting for the supervisor\n",
+    );
+    thread::sleep(Duration::from_millis(200));
+    fx.stop.store(true, Ordering::SeqCst);
+    assert!(
+        out.contains("not-stuck"),
+        "a fresh block must be not-stuck, got: {out}"
+    );
+    assert!(
+        fx.bodies.lock().unwrap().is_empty(),
+        "a fresh block must not publish"
+    );
+}
+
+/// 4.6 — dedup: each shape publishes once per window per `(agent_id, shape)`
+/// across repeated sweeps. Exercised for stream-timeout and no-progress.
+#[test]
+#[serial]
+fn each_shape_dedups_per_agent_and_shape() {
+    let fx = setup();
+
+    // Stream-timeout: two identical sweeps → one publish, second deduped.
+    let cap_st = "compiling\nRequest timed out\n";
+    run_stuck_eval_full(&fx, "feat-d", 60, "", "", "", cap_st);
+    let second_st = run_stuck_eval_full(&fx, "feat-d", 60, "", "", "", cap_st);
+    assert!(
+        second_st.contains("deduped"),
+        "second stream-timeout detection must be deduped, got: {second_st}"
+    );
+
+    // No-progress: two identical sweeps (prior snapshot pinned old) → one
+    // publish, second deduped. Different agent so the shape keys are isolated.
+    seed_progress(&fx, "feat-d2", "7", "2", 0);
+    run_stuck_eval_full(&fx, "feat-d2", 60, "7", "2", "", "thinking\n");
+    let second_np = run_stuck_eval_full(&fx, "feat-d2", 60, "7", "2", "", "thinking\n");
+    assert!(
+        second_np.contains("deduped"),
+        "second no-progress detection must be deduped, got: {second_np}"
+    );
+
+    wait_for_bodies(&fx, 2, Duration::from_secs(5));
+    fx.stop.store(true, Ordering::SeqCst);
+    assert_eq!(
+        fx.bodies.lock().unwrap().len(),
+        2,
+        "each shape publishes exactly once per window: one stream-timeout + one no-progress"
     );
 }
