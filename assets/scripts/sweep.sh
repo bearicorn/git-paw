@@ -202,6 +202,62 @@ else:
 PY
 }
 
+# Parse an integer [supervisor].<field> from config.toml. Prints <default>
+# when the file, section, or field is absent (or not an integer). Mirrors
+# discover_test_command's tomllib-with-regex-fallback shape.
+discover_supervisor_int() {
+  local field=$1 default=$2
+  if [[ ! -f "${CONFIG_TOML}" ]]; then
+    printf '%s\n' "${default}"
+    return
+  fi
+  FIELD="${field}" DEFAULT="${default}" "${PY}" - "${CONFIG_TOML}" <<'PY'
+import os, sys
+
+field = os.environ["FIELD"]
+default = os.environ["DEFAULT"]
+
+try:
+    import tomllib
+    mode = "rb"
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib
+        mode = "rb"
+    except ModuleNotFoundError:
+        tomllib = None
+
+val = None
+if tomllib is None:
+    import re
+    text = open(sys.argv[1]).read()
+    in_sup = False
+    pat = re.compile(r"^\s*" + re.escape(field) + r"\s*=\s*(\d+)")
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_sup = stripped == "[supervisor]"
+            continue
+        if not in_sup:
+            continue
+        m = pat.match(line)
+        if m:
+            val = m.group(1)
+            break
+else:
+    with open(sys.argv[1], mode) as f:
+        data = tomllib.load(f)
+    sup = data.get("supervisor", {})
+    v = sup.get(field)
+    if isinstance(v, bool):
+        v = None
+    if isinstance(v, int):
+        val = str(v)
+
+print(val if val is not None else default)
+PY
+}
+
 # Most-recently-modified session JSON path (for pane->agent resolution).
 discover_session_file() {
   if [[ ! -d "${SESSIONS_DIR}" ]]; then
@@ -236,6 +292,28 @@ STUCK_THRESHOLD_SECONDS=30
 STUCK_DEDUP_WINDOW_SECONDS=300
 STUCK_MARKERS_REGEX='Do you want to proceed|Do you want to allow|requires approval|Allow this command|\(y/n\)|\[y/N\]'
 STUCK_DEDUP_FILE="${PAW_DIR}/.sweep-stuck-dedup"
+
+# --- Additional stuck shapes: stream-timeout, context-bloat, no-progress -----
+# A coding agent's CLI API call can fail mid-stream (transport error / timeout)
+# and sit dead with no permission marker present; and its context can bloat past
+# the point where the CLI surfaces a `/clear to save <N>k tokens` hint. Both are
+# pane-text markers kept in named regexes next to STUCK_MARKERS_REGEX so a
+# CLI-string tweak is a one-line edit. The patterns are deliberately generic
+# (multiple symptom phrasings) rather than one CLI's exact string.
+STREAM_TIMEOUT_MARKERS_REGEX='Request timed out|Request timeout|stream error|stream timed out|stream disconnected|transport error|Connection error|error streaming'
+# Group 2 captures N (thousands of tokens) from a `/clear to save <N>k tokens`
+# (or `/compact ...`) hint; the leading slash is optional for CLI variants.
+CONTEXT_BLOAT_MARKER_REGEX='/?(clear|compact) to save ([0-9]+)k tokens'
+# No-progress heartbeat snapshot: one line per agent,
+# `agent<TAB>checkbox_count<TAB>commit_count<TAB>timestamp`.
+SWEEP_PROGRESS_FILE="${PAW_DIR}/.sweep-progress"
+
+# Detection thresholds/windows, read from [supervisor] config with documented
+# defaults (no-progress ~25 min, context-bloat 250k tokens, blocked-on-
+# supervisor ~15 min). See src/config.rs SupervisorConfig for the field docs.
+NO_PROGRESS_WINDOW_SECONDS=$(discover_supervisor_int no_progress_window_seconds 1500)
+CONTEXT_BLOAT_THRESHOLD_K=$(discover_supervisor_int context_bloat_threshold_k 250)
+BLOCKED_ON_SUPERVISOR_WINDOW_SECONDS=$(discover_supervisor_int blocked_on_supervisor_window_seconds 900)
 
 if [[ -z "${SESSION}" ]]; then
   # `status`, `verified`, `feedback-gate`, `status-publish`, and `inbox`
@@ -274,8 +352,9 @@ usage: $0 <subcommand> [args]
   snapshot                            capture-pane tail of every coding-agent pane
   capture <pane>                      single-pane full tail-50 capture
   approve <pane>                      Down + Enter to <pane> (sticky-yes)
-  detect-stuck                        flag panes stuck on a prompt with a stale heartbeat
-  stuck-eval <agent> <last_seen>      (stdin: capture) run the stuck decision for one agent
+  detect-stuck                        flag stuck agents (prompt/stream-timeout/bloat/no-progress/blocked)
+  stuck-eval <agent> <last_seen> [checkbox_count] [commit_count] [blocked_age]
+                                      (stdin: capture) run the stuck decision for one agent
   classify [worktree-root]            (stdin: capture) auto-approve classification (escalate/approve/no-op)
   status [--all]                      broker /status, one line per agent (phantoms filtered)
   worktrees-status                    uncommitted-file count per agent worktree
@@ -558,18 +637,85 @@ PY
 )"
 }
 
+# Count completed task checkboxes (`- [x]`) across tasks.md files in an agent
+# worktree. Used by the no-progress heartbeat. Prints 0 when the worktree has
+# no tasks.md (grep -r degrades gracefully to empty output on no match).
+agent_checkbox_count() {
+  local wt=$1
+  if [[ -z "${wt}" || ! -d "${wt}" ]]; then
+    printf '0'
+    return
+  fi
+  grep -rhE '^[[:space:]]*- \[[xX]\]' --include='tasks.md' "${wt}" 2>/dev/null \
+    | wc -l | tr -d '[:space:]'
+}
+
+# Count commits reachable from HEAD in an agent worktree. Used by the
+# no-progress heartbeat. Prints empty on failure (treated as unknown).
+agent_commit_count() {
+  local wt=$1
+  [[ -z "${wt}" ]] && return
+  git -C "${wt}" rev-list --count HEAD 2>/dev/null
+}
+
+# Compute the unanswered age (seconds) of an agent's latest supervisor-targeted
+# agent.blocked, from a broker /log JSON blob. Prints nothing when there is no
+# such block or when a later agent.feedback/agent.verified to the agent shows
+# the supervisor already answered.
+agent_blocked_age() {
+  local json=$1 agent=$2
+  [[ -z "${agent}" ]] && return
+  printf '%s' "${json}" | AGENT="${agent}" "${PY}" -c "$(cat <<'PY'
+import json, os, sys, time
+agent = os.environ["AGENT"]
+try:
+    data = json.load(sys.stdin)
+except Exception:  # noqa: BLE001
+    raise SystemExit(0)
+entries = data.get("entries", [])
+block_seq = None
+block_ts = None
+for e in entries:
+    m = e.get("message", {})
+    if m.get("type") == "agent.blocked" and m.get("agent_id") == agent:
+        p = m.get("payload", {})
+        if str(p.get("from", "")).lower() == "supervisor":
+            block_seq = e.get("seq", 0)
+            block_ts = e.get("timestamp_unix_secs")
+if block_seq is None:
+    raise SystemExit(0)
+# A later supervisor response addressed to the agent means it was answered.
+for e in entries:
+    if e.get("seq", 0) <= block_seq:
+        continue
+    m = e.get("message", {})
+    if m.get("type") in ("agent.feedback", "agent.verified") and m.get("agent_id") == agent:
+        raise SystemExit(0)
+now = int(time.time())
+age = now - int(block_ts if block_ts is not None else now)
+if age < 0:
+    age = 0
+print(age)
+PY
+)"
+}
+
 # Core stuck-prompt decision + synthetic publish for a single agent. Reads the
 # pane capture from stdin; takes <agent> <last_seen_seconds>. Factored out so
 # fixture tests can drive it without tmux via the `stuck-eval` subcommand.
 stuck_eval() {
-  local agent=${1:-} last_seen=${2:-0}
+  local agent=${1:-} last_seen=${2:-0} checkbox=${3:-} commit=${4:-} blocked_age=${5:-}
   if [[ -z "${agent}" ]]; then
-    echo "usage: $0 stuck-eval <agent-id> <last_seen_seconds>" >&2
+    echo "usage: $0 stuck-eval <agent-id> <last_seen_seconds> [checkbox_count] [commit_count] [blocked_age_seconds]" >&2
     exit 2
   fi
   AGENT="${agent}" LAST_SEEN="${last_seen}" THRESHOLD="${STUCK_THRESHOLD_SECONDS}" \
-    MARKERS="${STUCK_MARKERS_REGEX}" BROKER="${BROKER}" DEDUP="${STUCK_DEDUP_FILE}" \
-    WINDOW="${STUCK_DEDUP_WINDOW_SECONDS}" "${PY}" -c "$(cat <<'PY'
+    MARKERS="${STUCK_MARKERS_REGEX}" STREAM_MARKERS="${STREAM_TIMEOUT_MARKERS_REGEX}" \
+    BLOAT_MARKER="${CONTEXT_BLOAT_MARKER_REGEX}" BLOAT_THRESHOLD_K="${CONTEXT_BLOAT_THRESHOLD_K}" \
+    NO_PROGRESS_WINDOW="${NO_PROGRESS_WINDOW_SECONDS}" BLOCKED_WINDOW="${BLOCKED_ON_SUPERVISOR_WINDOW_SECONDS}" \
+    PROGRESS="${SWEEP_PROGRESS_FILE}" CHECKBOX="${checkbox}" COMMIT="${commit}" BLOCKED_AGE="${blocked_age}" \
+    BROKER="${BROKER}" DEDUP="${STUCK_DEDUP_FILE}" WINDOW="${STUCK_DEDUP_WINDOW_SECONDS}" \
+    "${PY}" -c "$(cat <<'PY'
 import hashlib, json, os, re, sys, time, urllib.request
 
 cap = sys.stdin.read()
@@ -577,10 +723,21 @@ agent = os.environ["AGENT"]
 last_seen = int(os.environ.get("LAST_SEEN") or 0)
 threshold = int(os.environ["THRESHOLD"])
 markers = os.environ["MARKERS"]
+stream_markers = os.environ.get("STREAM_MARKERS", "")
+bloat_marker = os.environ.get("BLOAT_MARKER", "")
+bloat_threshold_k = int(os.environ.get("BLOAT_THRESHOLD_K") or 0)
+no_progress_window = int(os.environ.get("NO_PROGRESS_WINDOW") or 0)
+blocked_window = int(os.environ.get("BLOCKED_WINDOW") or 0)
+progress_path = os.environ.get("PROGRESS", "")
+checkbox_raw = os.environ.get("CHECKBOX", "").strip()
+commit_raw = os.environ.get("COMMIT", "").strip()
+blocked_age_raw = os.environ.get("BLOCKED_AGE", "").strip()
 broker = os.environ["BROKER"]
 dedup_path = os.environ["DEDUP"]
 window = int(os.environ["WINDOW"])
 now = int(time.time())
+
+prompt = cap.strip()[:200]
 
 
 def load_entries():
@@ -598,67 +755,202 @@ def load_entries():
 
 def save_entries(entries):
     os.makedirs(os.path.dirname(dedup_path), exist_ok=True)
-    with open(dedup_path, "w") as f:
+    tmp = dedup_path + ".tmp"
+    with open(tmp, "w") as f:
         for (a, s), t in entries.items():
             f.write(f"{a}\t{s}\t{t}\n")
+    os.replace(tmp, dedup_path)
 
 
-# Determine the prompt variant. Paste-buffer is checked first so its more
-# specific marker wins over the generic permission patterns.
+def clear_dedup_for_agent():
+    # Recovery reset: drop dedup entries for this agent so a future stall of any
+    # shape re-publishes rather than being suppressed forever.
+    entries = load_entries()
+    pruned = {k: v for k, v in entries.items() if k[0] != agent}
+    if len(pruned) != len(entries):
+        save_entries(pruned)
+
+
+def load_progress():
+    prog = {}
+    if not progress_path:
+        return prog
+    try:
+        with open(progress_path) as f:
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) == 4:
+                    try:
+                        prog[parts[0]] = (parts[1], parts[2], int(parts[3]))
+                    except ValueError:
+                        continue
+    except FileNotFoundError:
+        pass
+    return prog
+
+
+def save_progress(prog):
+    if not progress_path:
+        return
+    os.makedirs(os.path.dirname(progress_path), exist_ok=True)
+    tmp = progress_path + ".tmp"
+    with open(tmp, "w") as f:
+        for a, (cb, ci, ts) in prog.items():
+            f.write(f"{a}\t{cb}\t{ci}\t{ts}\n")
+    os.replace(tmp, progress_path)
+
+
+def publish(phase, message, detail, shape_key):
+    # Dedup per (agent, shape) within the detection window: one publish per
+    # window per shape. A persistently-stuck agent emits exactly once.
+    entries = load_entries()
+    key = (agent, shape_key)
+    last = entries.get(key)
+    if last is not None and now - last < window:
+        print(f"stuck: {agent} ({phase}, deduped)")
+        return
+    payload = json.dumps({
+        "type": "agent.status",
+        "agent_id": agent,
+        "payload": {
+            "status": "working",
+            "modified_files": [],
+            "phase": phase,
+            "message": message,
+            "detail": detail,
+        },
+    }).encode("utf-8")
+    try:
+        req = urllib.request.Request(
+            broker + "/publish",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=2).read()
+    except Exception as exc:  # noqa: BLE001
+        print(f"stuck: {agent} publish failed: {exc}", file=sys.stderr)
+        raise SystemExit(0)
+    entries[key] = now
+    save_entries(entries)
+    print(f"stuck: {agent} published (phase={phase})")
+
+
+# Classification order (Decision 2): read LIVE pane state first. Pane-marker
+# shapes are evaluated BEFORE the no-progress heuristic so an agent sitting on
+# a prompt is never mis-classified as idle.
+
+# 1. Stream-timeout / transport-error marker: the CLI API call failed and the
+#    agent is stalled. The marker is definitive evidence (no heartbeat gate).
+if stream_markers and re.search(stream_markers, cap):
+    publish(
+        "stuck-stream-timeout",
+        "stream timeout / transport error in pane",
+        {"captured_prompt": prompt},
+        "stuck-stream-timeout",
+    )
+    raise SystemExit(0)
+
+# 2. Permission / paste-buffer marker → stuck-on-prompt (existing path).
+#    Paste-buffer is checked first so its more specific marker wins.
 variant = None
 if re.search(r"Pasted text #[0-9]", cap):
     variant = "paste-buffer"
 elif re.search(markers, cap):
     variant = "permission"
 
-if variant is None:
-    # Not stuck: clear any prior dedup entry so a future stall re-publishes.
-    entries = load_entries()
-    pruned = {k: v for k, v in entries.items() if k[0] != agent}
-    if len(pruned) != len(entries):
-        save_entries(pruned)
-    print(f"not-stuck: {agent} (no prompt marker)")
-    raise SystemExit(0)
-
-if last_seen < threshold:
-    # Fresh heartbeat — the agent may have caught it pre-stall. Do not flag.
-    print(f"not-stuck: {agent} (fresh heartbeat {last_seen}s < {threshold}s)")
-    raise SystemExit(0)
-
-prompt = cap.strip()[:200]
-shape = hashlib.sha1(prompt.encode("utf-8", "replace")).hexdigest()[:16]
-entries = load_entries()
-key = (agent, shape)
-last = entries.get(key)
-if last is not None and now - last < window:
-    print(f"stuck: {agent} ({variant}, deduped)")
-    raise SystemExit(0)
-
-payload = json.dumps({
-    "type": "agent.status",
-    "agent_id": agent,
-    "payload": {
-        "status": "working",
-        "modified_files": [],
-        "phase": "stuck-on-prompt",
-        "message": f"stuck on prompt ({variant})",
-        "detail": {"captured_prompt": prompt, "variant": variant},
-    },
-}).encode("utf-8")
-try:
-    req = urllib.request.Request(
-        broker + "/publish",
-        data=payload,
-        headers={"Content-Type": "application/json"},
+if variant is not None:
+    if last_seen < threshold:
+        # Fresh heartbeat — the agent may have caught it pre-stall. A pane
+        # marker is present, so the read-pane rule forbids falling through to
+        # the no-progress heuristic: hold off, do not prune.
+        print(f"not-stuck: {agent} (fresh heartbeat {last_seen}s < {threshold}s)")
+        raise SystemExit(0)
+    shape = hashlib.sha1(prompt.encode("utf-8", "replace")).hexdigest()[:16]
+    publish(
+        "stuck-on-prompt",
+        f"stuck on prompt ({variant})",
+        {"captured_prompt": prompt, "variant": variant},
+        shape,
     )
-    urllib.request.urlopen(req, timeout=2).read()
-except Exception as exc:  # noqa: BLE001
-    print(f"stuck: {agent} publish failed: {exc}", file=sys.stderr)
     raise SystemExit(0)
 
-entries[key] = now
-save_entries(entries)
-print(f"stuck: {agent} published (phase=stuck-on-prompt, {variant})")
+# 3. Context-bloat clear hint at/over the configured threshold → proactive
+#    flag. The agent is still responsive; the flag lets the drive loop pre-empt
+#    the eventual freeze. Below threshold is NOT flagged and falls through (the
+#    /clear hint alone is not a stall).
+if bloat_marker:
+    m = re.search(bloat_marker, cap)
+    if m:
+        try:
+            tokens_k = int(m.group(2))
+        except (IndexError, ValueError):
+            tokens_k = None
+        if tokens_k is not None and bloat_threshold_k and tokens_k >= bloat_threshold_k:
+            publish(
+                "context-bloat",
+                f"context bloat (~{tokens_k}k tokens >= {bloat_threshold_k}k)",
+                {"captured_prompt": prompt, "tokens_k": tokens_k,
+                 "threshold_k": bloat_threshold_k},
+                "context-bloat",
+            )
+            raise SystemExit(0)
+
+# 4. Blocked-on-supervisor: an unanswered supervisor-targeted block whose wait
+#    exceeds the window. blocked_age is computed by detect-stuck from the
+#    broker agent.blocked stream (passed here as an arg for fixture testing).
+if blocked_age_raw:
+    try:
+        blocked_age = int(blocked_age_raw)
+    except ValueError:
+        blocked_age = None
+    if blocked_age is not None and blocked_window and blocked_age >= blocked_window:
+        publish(
+            "blocked-on-supervisor",
+            f"blocked on supervisor for {blocked_age}s (unanswered)",
+            {"from": "supervisor", "unanswered_for_seconds": blocked_age},
+            "blocked-on-supervisor",
+        )
+        raise SystemExit(0)
+
+# 5. No-progress heartbeat: BOTH checkbox count AND commit count unchanged over
+#    the window (Decision 3). Only reachable when no pane marker is present.
+if checkbox_raw != "" and commit_raw != "":
+    prog = load_progress()
+    prev = prog.get(agent)
+    if prev is None:
+        # First observation only records state — never no-progress.
+        prog[agent] = (checkbox_raw, commit_raw, now)
+        save_progress(prog)
+        clear_dedup_for_agent()
+        print(f"not-stuck: {agent} (no-progress: first observation recorded)")
+        raise SystemExit(0)
+    prev_cb, prev_ci, prev_ts = prev
+    if checkbox_raw != prev_cb or commit_raw != prev_ci:
+        # Movement in either counter clears the timer (reset the snapshot).
+        prog[agent] = (checkbox_raw, commit_raw, now)
+        save_progress(prog)
+        clear_dedup_for_agent()
+        print(f"not-stuck: {agent} (no-progress: counters moved)")
+        raise SystemExit(0)
+    unchanged_for = now - prev_ts
+    if no_progress_window and unchanged_for >= no_progress_window:
+        # Keep prev_ts so unchanged_for keeps growing across sweeps; dedup keeps
+        # the publish to one per detection window.
+        publish(
+            "no-progress",
+            f"no progress for {unchanged_for}s (checkbox+commit unchanged)",
+            {"unchanged_for_seconds": unchanged_for,
+             "checkbox_count": checkbox_raw, "commit_count": commit_raw},
+            "no-progress",
+        )
+        raise SystemExit(0)
+    # Unchanged but within the window — not yet no-progress; keep the snapshot.
+    print(f"not-stuck: {agent} (no-progress: unchanged {unchanged_for}s < {no_progress_window}s)")
+    raise SystemExit(0)
+
+# Nothing detected — clear any prior dedup so a future stall re-publishes.
+clear_dedup_for_agent()
+print(f"not-stuck: {agent} (no stuck marker)")
 PY
 )"
 }
@@ -669,10 +961,11 @@ cmd_detect_stuck() {
     echo "no coding panes discovered in session '${SESSION}'" >&2
     return 0
   fi
-  local status_json
+  local status_json log_json
   status_json=$(curl -s "${BROKER}/status")
+  log_json=$(curl -s "${BROKER}/log?since=0")
   for p in "${PANES[@]}"; do
-    local cap path agent ls
+    local cap path agent ls wt cb ci bage
     cap=$(tmux capture-pane -t "${SESSION}:0.${p}" -p -S -50 2>/dev/null | tail -50)
     path=$(tmux display-message -p -t "${SESSION}:0.${p}" '#{pane_current_path}' 2>/dev/null)
     agent=$(resolve_agent_for_path "${path}")
@@ -681,16 +974,23 @@ cmd_detect_stuck() {
     fi
     ls=$(agent_last_seen "${status_json}" "${agent}")
     [[ -z "${ls}" ]] && ls=0
-    printf '%s' "${cap}" | stuck_eval "${agent}" "${ls}"
+    wt=$(git -C "${path}" rev-parse --show-toplevel 2>/dev/null)
+    cb=$(agent_checkbox_count "${wt}")
+    ci=$(agent_commit_count "${wt}")
+    bage=$(agent_blocked_age "${log_json}" "${agent}")
+    printf '%s' "${cap}" | stuck_eval "${agent}" "${ls}" "${cb}" "${ci}" "${bage}"
   done
 }
 
 # Read a pane capture from stdin and run the stuck decision for one agent.
+# Extra positional args (checkbox_count, commit_count, blocked_age_seconds) let
+# the no-progress and blocked-on-supervisor branches be driven from fixtures
+# without tmux or a live broker.
 cmd_stuck_eval() {
-  local agent=${1:-} last_seen=${2:-0}
+  local agent=${1:-} last_seen=${2:-0} checkbox=${3:-} commit=${4:-} blocked_age=${5:-}
   local cap
   cap=$(cat)
-  printf '%s' "${cap}" | stuck_eval "${agent}" "${last_seen}"
+  printf '%s' "${cap}" | stuck_eval "${agent}" "${last_seen}" "${checkbox}" "${commit}" "${blocked_age}"
 }
 
 # Auto-approve classification, mirroring the Rust classifier

@@ -281,6 +281,20 @@ what you can see; if your in-flight work isn't captured in git or in the
 broker first, you can't recover it after the context shrinks. The order is
 always: record, then reduce.
 
+#### Proactive context-bloat flagging
+
+You are not the only one watching your context. The supervisor flags context
+bloat **proactively**: when your pane surfaces a `/clear to save <N>k tokens`
+hint whose `N` meets or exceeds the configured threshold
+(`context_bloat_threshold_k`, default ~250k tokens), the supervisor publishes a
+synthetic `agent.status` with `phase: "context-bloat"` — before you freeze,
+while you are still responsive. That early flag exists so the stall can be
+pre-empted rather than waited out. When you hit that hint (or the supervisor
+flags you), **commit or publish an `agent.artifact` first, then clear or
+compact** — the same commit-before-compact discipline above. Recording your
+work before you reduce context is exactly what turns the proactive flag into a
+safe hand-off instead of a lost-work risk.
+
 #### Per-CLI mechanism
 
 The compact/clear commands differ by CLI. Use the form for the CLI you are
