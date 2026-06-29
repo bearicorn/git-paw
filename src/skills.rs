@@ -1176,7 +1176,10 @@ mod tests {
 
     /// `supervisor-introspection` scenario "Checkpoint emission uses phase =
     /// checkpoint": the skill SHALL acknowledge `checkpoint` as a valid phase
-    /// value and the checkpoint emission SHALL set `phase: "checkpoint"`.
+    /// value and the checkpoint emission SHALL set `phase = "checkpoint"`. The
+    /// emission now routes through `sweep.sh status-publish --phase checkpoint`
+    /// (broker-helper-full-surface), which embeds `phase: "checkpoint"` in the
+    /// published payload internally rather than showing a raw JSON literal.
     #[test]
     fn supervisor_skill_documents_checkpoint_phase() {
         let tmpl = resolve("supervisor").unwrap();
@@ -1185,8 +1188,8 @@ mod tests {
             "the skill must document the checkpoint phase value"
         );
         assert!(
-            tmpl.content.contains("\"phase\":\"checkpoint\""),
-            "the checkpoint emission example must set phase = checkpoint"
+            tmpl.content.contains("status-publish --phase checkpoint"),
+            "the checkpoint emission example must set phase = checkpoint via the helper"
         );
     }
 
@@ -2327,25 +2330,31 @@ mod tests {
         );
     }
 
-    /// `Requirement: Pre-action checkpoint via agent.status`, scenario
-    /// "Checkpoint shape is documented": a concrete `agent.status` shape
-    /// with `status: "checkpoint"` and a `summary` enumerating targets.
+    /// `Requirement: Pre-action checkpoint via agent.status` (MODIFIED by
+    /// broker-helper-full-surface), scenario "Checkpoint shape is documented":
+    /// the checkpoint is now emitted via `sweep.sh status-publish --phase
+    /// checkpoint` whose `--detail` enumerates the intended targets, NOT a raw
+    /// `agent.status` curl. The checkpoint is identified by its `phase`, not a
+    /// `status: "checkpoint"` label (the helper shapes `status: "working"`).
     #[test]
     fn supervisor_skill_stream_timeout_documents_checkpoint_shape() {
         let tmpl = resolve("supervisor").unwrap();
         let section = stream_timeout_section(&tmpl.content);
         assert!(
             section.contains("agent.status"),
-            "checkpoint subsection must show an agent.status publish"
+            "checkpoint subsection must describe an agent.status checkpoint"
         );
         assert!(
-            section.contains("\"status\":\"checkpoint\"")
-                || section.contains("status: \"checkpoint\""),
-            "checkpoint subsection must show status: \"checkpoint\""
+            section.contains("sweep.sh status-publish --phase checkpoint"),
+            "checkpoint subsection must emit via `sweep.sh status-publish --phase checkpoint`"
         );
         assert!(
-            section.contains("summary"),
-            "checkpoint subsection must show a summary enumerating intended targets"
+            section.contains("intended_targets"),
+            "checkpoint detail must enumerate intended_targets"
+        );
+        assert!(
+            !section.contains("\"type\":\"agent.status\""),
+            "checkpoint must not emit an agent.status via a raw curl /publish body"
         );
     }
 
@@ -4530,12 +4539,14 @@ mod tests {
         )
     }
 
-    /// 8.3 — resolved supervisor skill contains a curl publishing an
-    /// `agent.status` for `agent_id = "supervisor"`, and that payload does
-    /// NOT self-report a `cli` (git-paw pre-fills the CLI authoritatively at
+    /// 8.3 (as amended by broker-helper-full-surface) — the resolved supervisor
+    /// skill publishes its boot self-register `agent.status` through the
+    /// bundled `sweep.sh status-publish` helper (which sets
+    /// `agent_id = "supervisor"` internally), NOT a raw curl, and does NOT
+    /// self-report a `cli` field (git-paw pre-fills the CLI authoritatively at
     /// launch — a self-reported guess once clobbered the seed).
     #[test]
-    fn supervisor_skill_self_register_curl_omits_cli_field() {
+    fn supervisor_skill_self_register_via_helper_omits_cli_field() {
         let rendered = render_supervisor();
         let start = rendered
             .find("Bootstrap")
@@ -4549,13 +4560,44 @@ mod tests {
             "bootstrap section must publish agent.status; got:\n{section}"
         );
         assert!(
-            section.contains("\"agent_id\":\"supervisor\""),
-            "bootstrap curl must use agent_id=\"supervisor\"; got:\n{section}"
+            section.contains("sweep.sh status-publish --phase baseline"),
+            "bootstrap must self-register via `sweep.sh status-publish --phase baseline`; got:\n{section}"
+        );
+        assert!(
+            !section.contains("\"type\":\"agent.status\""),
+            "bootstrap must not self-register via a raw agent.status curl; got:\n{section}"
         );
         assert!(
             !section.contains("\"cli\""),
             "bootstrap payload must NOT self-report a cli field (git-paw pre-fills it); got:\n{section}"
         );
+    }
+
+    /// broker-helper-full-surface task 4.4 / agent-broker-helper scenario
+    /// "supervisor skill contains no raw agent.status curl" + supervisor-
+    /// introspection scenario "Phase emission examples use the helper, not raw
+    /// curl": the rendered supervisor skill SHALL contain NO `/publish` example
+    /// whose body is an `agent.status`, and the boot / audit / checkpoint /
+    /// final-summary emissions SHALL each use `sweep.sh status-publish`.
+    #[test]
+    fn supervisor_skill_routes_every_agent_status_through_helper() {
+        let rendered = render_supervisor();
+        assert!(
+            !rendered.contains("\"type\":\"agent.status\""),
+            "supervisor.md must contain no raw agent.status /publish body — \
+             every supervisor agent.status routes through sweep.sh status-publish"
+        );
+        for needle in [
+            "sweep.sh status-publish --phase baseline", // boot self-register
+            "sweep.sh status-publish --phase audit --detail", // introspection audit example
+            "sweep.sh status-publish --phase checkpoint --detail", // stream-timeout checkpoint
+            "sweep.sh status-publish \"merge orchestration complete", // final-summary status
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "supervisor.md must route its agent.status emission via `{needle}`"
+            );
+        }
     }
 
     /// 8.4 — bootstrap section names this as the FIRST action after

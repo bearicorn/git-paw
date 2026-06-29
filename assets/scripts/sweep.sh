@@ -21,7 +21,10 @@
 #   inbox                               — agent.question/feedback/blocked from supervisor inbox
 #   feedback-gate <agent> <gate> <msg…> — publish agent.feedback with bracketed gate prefix
 #   verified <agent> <msg…>             — publish agent.verified
-#   status-publish <msg…>               — publish agent.status as supervisor
+#   status-publish [--phase <p>] [--detail '<obj>'] <msg…>
+#                                       — publish agent.status as supervisor
+#                                         (--phase / --detail are optional; the
+#                                         plain <msg…> form is unchanged)
 
 set -u
 
@@ -361,7 +364,9 @@ usage: $0 <subcommand> [args]
   inbox                               supervisor inbox payloads (question/feedback/blocked)
   feedback-gate <agent> <gate> <msg…> publish agent.feedback with bracketed gate prefix
   verified <agent> <msg…>             publish agent.verified
-  status-publish <msg…>               publish an agent.status from agent_id="supervisor"
+  status-publish [--phase <p>] [--detail '<obj>'] <msg…>
+                                      publish an agent.status from agent_id="supervisor";
+                                      --phase adds a phase label, --detail a JSON-object detail
 
 Discovered configuration:
   session:        ${SESSION:-<none>}
@@ -565,22 +570,73 @@ PY
 }
 
 cmd_status_publish() {
+  # Optional --phase / --detail flags precede the positional message. The
+  # plain `status-publish <message…>` form (no flags) is preserved
+  # byte-for-byte: the emitted payload then carries neither key (v0.5.0 shape).
+  local phase="" detail="" have_phase=0 have_detail=0
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --phase)
+        phase="${2:-}"; have_phase=1
+        shift 2 || { echo "sweep.sh: --phase requires a value" >&2; exit 2; }
+        ;;
+      --phase=*)
+        phase="${1#--phase=}"; have_phase=1; shift
+        ;;
+      --detail)
+        detail="${2:-}"; have_detail=1
+        shift 2 || { echo "sweep.sh: --detail requires a value" >&2; exit 2; }
+        ;;
+      --detail=*)
+        detail="${1#--detail=}"; have_detail=1; shift
+        ;;
+      --)
+        shift; break
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
   local msg=$*
   if [[ -z "${msg}" ]]; then
-    echo "usage: $0 status-publish <message>" >&2
+    echo "usage: $0 status-publish [--phase <phase>] [--detail '<json-object>'] <message>" >&2
     exit 2
   fi
-  local payload
-  payload=$("${PY}" - "${msg}" <<'PY'
-import json, sys
-msg = sys.argv[1]
+  # Shape the payload internally via `-c "$(cat <<'EOF' … EOF)"` so stdin stays
+  # free (consistent with cmd_feedback_gate / cmd_verified). `phase` is embedded
+  # only when --phase was supplied and `detail` only when --detail was supplied;
+  # both are omitted otherwise. A --detail that does not parse to a JSON object
+  # is rejected (non-zero exit, stderr diagnostic) and nothing is published.
+  local payload rc
+  payload=$(MSG="${msg}" PHASE="${phase}" DETAIL="${detail}" \
+    HAVE_PHASE="${have_phase}" HAVE_DETAIL="${have_detail}" \
+    "${PY}" -c "$(cat <<'PY'
+import json, os, sys
+payload = {"status": "working", "modified_files": [], "message": os.environ["MSG"]}
+if os.environ.get("HAVE_PHASE") == "1":
+    payload["phase"] = os.environ["PHASE"]
+if os.environ.get("HAVE_DETAIL") == "1":
+    try:
+        parsed = json.loads(os.environ["DETAIL"])
+    except ValueError as exc:
+        print(f"sweep.sh: --detail is not valid JSON: {exc}", file=sys.stderr)
+        sys.exit(6)
+    if not isinstance(parsed, dict):
+        print("sweep.sh: --detail must be a JSON object", file=sys.stderr)
+        sys.exit(6)
+    payload["detail"] = parsed
 print(json.dumps({
     "type": "agent.status",
     "agent_id": "supervisor",
-    "payload": {"status": "working", "modified_files": [], "message": msg},
+    "payload": payload,
 }))
 PY
-)
+)")
+  rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    exit "${rc}"
+  fi
   publish "${payload}" >/dev/null
   echo "supervisor status published"
 }

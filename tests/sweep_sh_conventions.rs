@@ -143,3 +143,59 @@ echo ok
         "pure-comment lines must not trigger the lint"
     );
 }
+
+/// Extract a shell function body from `cmd_status_publish() {` up to and
+/// including the first bare `}` at column 0 (the function's closing brace).
+/// Interior closing braces are always indented or part of a wider token
+/// (e.g. `}))` inside the embedded Python), so a line that is exactly `}`
+/// marks the function end.
+fn extract_function(body: &str, name: &str) -> String {
+    let header = format!("{name}() {{");
+    let start = body
+        .find(&header)
+        .unwrap_or_else(|| panic!("function `{name}` not found in sweep.sh"));
+    let mut out = String::new();
+    for line in body[start..].lines() {
+        out.push_str(line);
+        out.push('\n');
+        if line == "}" {
+            break;
+        }
+    }
+    out
+}
+
+/// broker-helper-full-surface task 4.6: the widened `cmd_status_publish` SHALL
+/// shape its `agent.status` JSON via a `-c "$(cat <<'EOF' … EOF)"` block (stdin
+/// stays free) and SHALL NOT reintroduce a stdin-claiming `interpreter - <<`
+/// heredoc. The positive assertion also fails if the function reverts to the
+/// prior `"${PY}" - <args> <<'PY'` args-heredoc form, since that shape lacks
+/// the `-c "$(cat` marker.
+#[test]
+fn cmd_status_publish_keeps_c_cat_heredoc_shape() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("scripts")
+        .join("sweep.sh");
+    let body = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!("read {}: {e}", path.display());
+    });
+    let func = extract_function(&body, "cmd_status_publish");
+
+    assert!(
+        func.contains("-c \"$(cat <<'"),
+        "cmd_status_publish must shape JSON via `-c \"$(cat <<'EOF' … EOF)\"`; body:\n{func}"
+    );
+
+    for bad in [
+        "\"${PY}\" - <<",
+        "${PY} - <<",
+        "python3 - <<",
+        "python - <<",
+    ] {
+        assert!(
+            !func.contains(bad),
+            "cmd_status_publish must not reintroduce the stdin-claiming shape `{bad}`; body:\n{func}"
+        );
+    }
+}
