@@ -39,19 +39,20 @@ though you are actively working.
 
 To keep `last_seen` fresh, publish a lightweight `agent.status` heartbeat
 **every 5 tool uses** (SHOULD floor — more often is fine, less often defeats the
-purpose). The heartbeat reuses the existing `agent.status` shape, so no new
-wire-format variant is needed and the broker treats it identically to watcher-driven
-status updates:
+purpose) through the bundled helper, which shapes the `agent.status` payload
+internally so you never hand-roll the JSON:
 
 ```bash
-curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.status","agent_id":"{{BRANCH_ID}}","payload":{"status":"working","message":"<one-line what you are doing>","modified_files":[]}}'
+.git-paw/scripts/broker.sh --agent {{BRANCH_ID}} status "<one-line what you are doing>"
 ```
 
-If you have an in-progress dirty file list at the heartbeat moment, pass it as
-`modified_files` instead of `[]`; the broker merges with the watcher's view of the
-same field without conflict.
+The heartbeat reuses the existing `agent.status` shape, so no new wire-format
+variant is needed and the broker treats it identically to watcher-driven status
+updates. The helper publishes with `modified_files: []`; your actual dirty-file
+list still flows to the dashboard continuously from the filesystem watcher, and
+the broker merges the two views of that field without conflict — so the
+heartbeat's only job is to refresh `last_seen` during the read-only and
+deliberation windows the watcher cannot see.
 
 ### Commit cadence
 

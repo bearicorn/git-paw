@@ -1,16 +1,21 @@
 //! Broker-helper allowlist setup for the supervisor.
 //!
 //! Implements the `curl-allowlist` capability: write a least-privilege,
-//! path-based allowlist into `.claude/settings.json` so the coding agents
-//! do not hit a permission prompt when they invoke the bundled
-//! agent-broker helper (`agent-broker-helper`) on every broker round-trip.
+//! path-based allowlist into `.claude/settings.json` so neither the coding
+//! agents nor the supervisor hit a permission prompt when they invoke a
+//! bundled broker helper (`agent-broker-helper`) on every broker round-trip.
 //!
-//! The seeded grant is the single, stable path of `.git-paw/scripts/broker.sh`
-//! (both the bare path and the `bash .git-paw/scripts/broker.sh` form the
-//! boot block may emit) — NOT per-endpoint `curl <broker-url><endpoint>`
-//! prefixes and never a broad `curl *` rule. A single literal path cannot
-//! drift with URL normalisation or curl flag order, which was the root cause
-//! of the boot-publish dead-stall.
+//! Two bundled helpers are granted by their single, stable relative paths:
+//! `.git-paw/scripts/broker.sh` (the agent-side helper) and
+//! `.git-paw/scripts/sweep.sh` (the supervisor-side helper). For each, both
+//! the bare path and the `bash <path>` form the boot block may emit are
+//! seeded — NOT per-endpoint `curl <broker-url><endpoint>` prefixes and never
+//! a broad `curl *` rule. A single literal path cannot drift with URL
+//! normalisation or curl flag order, which was the root cause of the
+//! boot-publish dead-stall; and because a subcommand shares its script's path
+//! prefix, one by-path grant covers every verb — including the widened
+//! supervisor `sweep.sh status-publish --phase … --detail …` — without any
+//! broadening.
 //!
 //! The allowlist is merged with any existing `allowed_bash_prefixes`
 //! field — entries the user added (including stale per-endpoint curl
@@ -24,8 +29,12 @@ use crate::error::PawError;
 /// `git paw init` at `<repo>/.git-paw/scripts/broker.sh`.
 pub const BROKER_HELPER_PATH: &str = ".git-paw/scripts/broker.sh";
 
+/// Stable relative path of the bundled supervisor-sweep helper, installed by
+/// `git paw init` at `<repo>/.git-paw/scripts/sweep.sh`.
+pub const SWEEP_HELPER_PATH: &str = ".git-paw/scripts/sweep.sh";
+
 /// Returns the least-privilege allowlist prefixes authorising the bundled
-/// agent-broker helper.
+/// agent-broker helper (`broker.sh`).
 ///
 /// Both the bare path (`.git-paw/scripts/broker.sh`) and the
 /// `bash .git-paw/scripts/broker.sh` form the boot block may emit are
@@ -40,19 +49,47 @@ pub fn broker_prefixes() -> Vec<String> {
     ]
 }
 
+/// Returns the least-privilege allowlist prefixes authorising the bundled
+/// supervisor-sweep helper (`sweep.sh`).
+///
+/// The supervisor invokes this helper by its stable relative path for its
+/// broker publishes (`status-publish`, `verified`, `feedback-gate`) and its
+/// observe verbs. Both the bare path and the `bash .git-paw/scripts/sweep.sh`
+/// form are returned. A single by-path grant covers *every* subcommand —
+/// including the widened `status-publish --phase … --detail …` — because they
+/// all share the `.git-paw/scripts/sweep.sh` prefix, so no broad `curl *`
+/// grant is ever required to publish a phase-tagged `agent.status`.
+#[must_use]
+pub fn sweep_prefixes() -> Vec<String> {
+    vec![
+        SWEEP_HELPER_PATH.to_string(),
+        format!("bash {SWEEP_HELPER_PATH}"),
+    ]
+}
+
+/// Returns the union of every bundled-helper by-path grant seeded into a
+/// session's Claude settings: [`broker_prefixes`] (agent side) followed by
+/// [`sweep_prefixes`] (supervisor side).
+#[must_use]
+pub fn helper_prefixes() -> Vec<String> {
+    let mut prefixes = broker_prefixes();
+    prefixes.extend(sweep_prefixes());
+    prefixes
+}
+
 /// Merges the broker-helper allowlist into `.claude/settings.json`.
 ///
 /// Behaviour:
 ///
 /// - When `settings_path` does not exist, a new JSON object is created
-///   with `allowed_bash_prefixes` set to [`broker_prefixes`].
+///   with `allowed_bash_prefixes` set to [`helper_prefixes`].
 /// - When the file exists and contains valid JSON, the existing
 ///   `allowed_bash_prefixes` array is preserved and missing entries are
 ///   appended.
 /// - When the file exists but is not valid JSON, an error is returned.
 ///   The function never panics.
 pub fn setup_curl_allowlist(settings_path: &Path) -> Result<(), PawError> {
-    let new_entries = broker_prefixes();
+    let new_entries = helper_prefixes();
 
     // Load existing JSON or start from a fresh object.
     let mut value: serde_json::Value = if settings_path.exists() {
@@ -172,6 +209,56 @@ mod tests {
                 !e.starts_with("curl "),
                 "no `curl` prefix should be seeded; found `{e}`"
             );
+        }
+    }
+
+    /// broker-helper-full-surface task 4.5 / agent-broker-helper scenario
+    /// "rich status-publish needs no broad curl grant": the seeded allowlist
+    /// SHALL authorise the supervisor's `.git-paw/scripts/sweep.sh` helper by
+    /// path — so the widened `status-publish --phase … --detail …` verb is
+    /// covered by a prefix match — and SHALL NOT seed a broad `curl *` grant.
+    #[test]
+    fn seeds_sweep_helper_by_path_without_broad_curl() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.json");
+        setup_curl_allowlist(&path).unwrap();
+        let entries = read_array(&path);
+        assert!(
+            entries.iter().any(|s| s == ".git-paw/scripts/sweep.sh"),
+            "supervisor sweep helper must be granted by path; got: {entries:?}"
+        );
+        // The widened rich verb shares the by-path prefix, so a prefix match
+        // covers it without any new (or broader) grant.
+        let rich = ".git-paw/scripts/sweep.sh status-publish --phase audit \
+                    --detail '{\"branch\":\"feat/auth\",\"audit_step\":\"tests\"}' \"auditing feat/auth\"";
+        assert!(
+            entries.iter().any(|grant| rich.starts_with(grant.as_str())),
+            "an existing by-path grant must prefix-cover the widened status-publish verb; got: {entries:?}"
+        );
+        for e in &entries {
+            assert_ne!(e, "curl *", "broad `curl *` grant must never be seeded");
+            assert!(
+                !e.starts_with("curl "),
+                "no `curl` prefix should be seeded; found `{e}`"
+            );
+        }
+    }
+
+    /// `sweep_prefixes` / `helper_prefixes` return the by-path sweep grants and
+    /// the union never contains a broad curl entry.
+    #[test]
+    fn helper_prefixes_union_covers_both_helpers_by_path() {
+        let all = helper_prefixes();
+        assert!(all.iter().any(|s| s == ".git-paw/scripts/broker.sh"));
+        assert!(all.iter().any(|s| s == "bash .git-paw/scripts/broker.sh"));
+        assert!(all.iter().any(|s| s == ".git-paw/scripts/sweep.sh"));
+        assert!(all.iter().any(|s| s == "bash .git-paw/scripts/sweep.sh"));
+        for e in &all {
+            assert!(
+                !e.starts_with("curl "),
+                "no curl prefix in union; found `{e}`"
+            );
+            assert_ne!(e, "curl *");
         }
     }
 

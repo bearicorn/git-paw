@@ -23,12 +23,12 @@ The git-paw broker is reachable at `{{GIT_PAW_BROKER_URL}}`.
 
 After reading this skill (AGENTS.md), **your very first action** SHALL be to
 publish a self-registration `agent.status` so the dashboard's supervisor row
-shows you as actively working. Run this curl exactly once at boot:
+shows you as actively working. Run this helper command exactly once at boot —
+it shapes the `agent.status` payload internally (`phase` included) and
+publishes as `agent_id = "supervisor"`, so you never hand-roll the JSON:
 
 ```bash
-curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.status","agent_id":"supervisor","payload":{"status":"working","message":"supervisor online","modified_files":[],"phase":"baseline"}}'
+.git-paw/scripts/sweep.sh status-publish --phase baseline "supervisor online"
 ```
 
 Notes:
@@ -49,7 +49,7 @@ Notes:
   so updating it on every transition keeps the supervisor row's status
   column readable.
 
-If this curl fails (broker down or unreachable), retry it after `~5s`. The
+If this command fails (broker down or unreachable), retry it after `~5s`. The
 rest of the workflow below assumes the supervisor row is present in
 `/status`.
 
@@ -110,12 +110,13 @@ The dashboard renders only your most-recent status, so even if you
 over-emit the user sees a single current row; the rate-limit is about not
 flooding the broker log and the session-status feed.
 
-Example — entering the audit phase's first gate for a branch:
+Example — entering the audit phase's first gate for a branch. The helper
+shapes the full `agent.status` payload — the `phase` label and the structured
+`detail` object — internally, so you pass only the phase, the detail JSON, and
+the message:
 
 ```bash
-curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.status","agent_id":"supervisor","payload":{"status":"working","message":"auditing feat/auth","modified_files":[],"phase":"audit","detail":{"branch":"feat/auth","audit_step":"tests"}}}'
+.git-paw/scripts/sweep.sh status-publish --phase audit --detail '{"branch":"feat/auth","audit_step":"tests"}' "auditing feat/auth"
 ```
 
 ### Poll session status and messages
@@ -1419,9 +1420,7 @@ to do via `detail.intended_targets`, so on recovery you have a re-entry
 point describing where you stopped:
 
 ```bash
-curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.status","agent_id":"supervisor","payload":{"status":"checkpoint","message":"about to publish 3 feedback records: feat/a (test regression), feat/b (lint), feat/c (spec drift)","modified_files":[],"phase":"checkpoint","detail":{"intended_targets":["feat/a","feat/b","feat/c"]}}}'
+.git-paw/scripts/sweep.sh status-publish --phase checkpoint --detail '{"intended_targets":["feat/a","feat/b","feat/c"]}' "about to publish 3 feedback records: feat/a (test regression), feat/b (lint), feat/c (spec drift)"
 ```
 
 `phase: "checkpoint"` is the shared phase value from the introspection

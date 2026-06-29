@@ -57,19 +57,31 @@ restart) rather than left stalled.
 
 ### Requirement: Pre-action checkpoint via agent.status
 
-The skill SHALL teach the supervisor to publish an
-`agent.status` "checkpoint" record before any sweep iteration
-that will publish more than one downstream record (e.g.
-multiple `agent.feedback` or `agent.verified`). The checkpoint
-SHALL describe the intended sub-actions so the recovery path
-has a re-entry point.
+The skill SHALL teach the supervisor to publish a `phase: "checkpoint"`
+`agent.status` record — through the bundled `sweep.sh status-publish` helper
+(`--phase checkpoint --detail '{"intended_targets":[…]}'`), NOT a raw
+`curl …/publish` — before any sweep iteration that will publish more than one
+downstream record (e.g. multiple `agent.feedback` or `agent.verified`). The
+checkpoint SHALL describe the intended sub-actions via `detail.intended_targets`
+so the recovery path has a re-entry point.
+
+Because the checkpoint now routes through the helper (which shapes the payload
+as `status: "working"` with `phase: "checkpoint"`), the checkpoint is
+identified by its `phase` value rather than a `status` label — consumers route
+it by reading `phase`, consistent with the introspection phase taxonomy. This
+supersedes the earlier requirement that the documented shape carry
+`status: "checkpoint"`: routing every supervisor `agent.status` through the
+bundled helper ([[agent-broker-helper]], [[supervisor-introspection]]) is the
+governing constraint, and the helper does not emit a `checkpoint` status label.
 
 #### Scenario: Checkpoint shape is documented
 
 - **WHEN** the pre-action checkpoint subsection is read
-- **THEN** the prose SHALL show a concrete `agent.status`
-  shape with `status: "checkpoint"` and a `summary` enumerating
-  intended targets
+- **THEN** the prose SHALL show a concrete checkpoint emitted via
+  `sweep.sh status-publish --phase checkpoint` whose `--detail` object
+  enumerates the intended targets (`intended_targets`)
+- **AND** the checkpoint emission SHALL go through the bundled helper, NOT a
+  raw `curl …/publish`
 
 #### Scenario: Checkpoint required only for multi-publish iterations
 

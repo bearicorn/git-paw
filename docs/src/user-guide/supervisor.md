@@ -58,6 +58,15 @@ column, and the MCP `get_session_status` tool returns the same `phase` and
 degrade gracefully: a supervisor that hasn't published a phase renders with
 its plain status, exactly as in v0.5.0.)
 
+The supervisor emits these phase-tagged statuses through the bundled
+`.git-paw/scripts/sweep.sh status-publish` helper — `--phase <phase>` sets the
+label and `--detail '<json-object>'` carries the structured body, while the
+plain `status-publish <message>` form (no flags) publishes the v0.5.0 shape
+unchanged. The helper shapes the `agent.status` payload internally, so the
+supervisor never hand-rolls the JSON and the least-privilege by-path allowlist
+grant for `.git-paw/scripts/sweep.sh` covers every phase without a broad `curl`
+rule.
+
 The phases, with what each one means:
 
 | Phase | The supervisor is… |
