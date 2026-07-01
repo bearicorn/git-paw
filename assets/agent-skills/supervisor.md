@@ -555,6 +555,28 @@ curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
     section), which tells agents to publish the terminal signal and then wait
     for your `agent.verified` / `agent.feedback`.
 
+3.7 **Opportunistic qualitative capture (terminal, non-blocking)** — as the
+    **last** step of each sweep iteration, *after* you have cleared any
+    permission prompts (step 2) and run stuck detection (step 3), take one
+    beat to ask: did this sweep observe or absorb friction that meets a
+    qualitative-learning category gate (see *Qualitative learnings* below)? A
+    recurring failure shape, a doc gap an audit surfaced, ADR drift, a scope
+    mistake, or **tooling friction** with git-paw itself you have now worked
+    around for the second time this session. If a gate is met, record it in
+    the moment with one short publish:
+
+    ```bash
+    .git-paw/scripts/sweep.sh learn __FILL_IN_CATEGORY__ "__FILL_IN_ONE_SENTENCE_TITLE__" '__FILL_IN_BODY_JSON__'
+    ```
+
+    This step is **terminal and non-blocking**: it never precedes or displaces
+    approval clearing or stuck detection, and it is at most one short publish —
+    if nothing meets a gate, do nothing and move on. Before publishing, dedup
+    against the `agent.learning` records you already emitted this session by
+    each category's primary identifier (see *Dedup discipline*). Capture the
+    perishable specifics now (the exact prompt, which pane) that would be gone
+    by wind-down.
+
 ### Verify on each event, never batch
 
 Verify each agent's commit **as its `committed` event arrives** — do not let
@@ -812,8 +834,25 @@ of running the command — `git paw` does not substitute it at render time.
    agents with **no dependents first** (their files are not touched by any other agent).
    Agents whose files are modified by others merge last, after their dependents verify
    cleanly against the merged result.
-9. **Summarize** — when all agents are verified and merged, post a final `agent.status`
-   message summarizing what shipped.
+9. **Summarize + synthesise learnings** — when all agents are verified and
+   merged, post a final `agent.status` message summarizing what shipped. Then
+   run a **session-end synthesis pass**: reflect back over the whole run and
+   publish the durable qualitative learnings that only emerge across the
+   session — patterns you did not already capture opportunistically mid-sweep
+   (step 3.7). For each qualitative category (see *Qualitative learnings*
+   below), publish via `sweep.sh learn` any observation that now meets its
+   gate:
+
+   ```bash
+   .git-paw/scripts/sweep.sh learn __FILL_IN_CATEGORY__ "__FILL_IN_ONE_SENTENCE_TITLE__" '__FILL_IN_BODY_JSON__'
+   ```
+
+   Dedup against the `agent.learning` records you already published this
+   session by each category's **primary identifier** (`shape`, `convention`,
+   `decision_area`, the `branches` set, `friction`) — do not re-emit a learning
+   you captured mid-sweep. Opportunistic capture (step 3.7) catches perishable
+   specifics; this synthesis pass catches the patterns that only become visible
+   once the whole run is in view.
 
 <!-- opsx-role-gating:begin -->
 ### Commands you must run (not coding agents)
@@ -1469,13 +1508,12 @@ is always safe to re-publish when in doubt.
 
 Each successful recovery SHALL emit a `recovery_cycles`
 `agent.learning` record so recurrent timeouts surface in the learnings
-output. Publish it once the replay is done, with a structured body
-naming the checkpoint id and the target lists:
+output. Publish it once the replay is done via the bundled helper (never a
+raw curl), with a structured body naming the checkpoint id and the target
+lists:
 
 ```bash
-curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.learning","agent_id":"supervisor","payload":{"category":"recovery_cycles","title":"Recovered from API stream timeout during sweep","body":{"checkpoint_id":"<status message id>","intended_targets":["feat/a","feat/b","feat/c"],"replayed_targets":["feat/b","feat/c"],"skipped_targets":["feat/a"]}}}'
+.git-paw/scripts/sweep.sh learn recovery_cycles "Recovered from API stream timeout during sweep" '{"checkpoint_id":"<status message id>","intended_targets":["feat/a","feat/b","feat/c"],"replayed_targets":["feat/b","feat/c"],"skipped_targets":["feat/a"]}'
 ```
 
 `recovery_cycles` is the existing deterministic learning category; this
@@ -1502,10 +1540,10 @@ capture *mechanical* friction. The higher-value observations are the ones
 only you can make by reasoning over the whole session: the same failure
 recurring across unrelated branches, a convention the specs assume but no
 doc explains, code drifting away from the recorded architecture, a spec
-boundary that turned out to be in the wrong place. When you notice one of
-these during your normal sweep and audit work, record it as an
-`agent.learning` so it lands in the session learnings file alongside the
-deterministic signals.
+boundary that turned out to be in the wrong place, or friction with git-paw
+itself that made you repeat work. When you notice one of these during your
+normal sweep and audit work, record it as an `agent.learning` so it lands in
+the session learnings file alongside the deterministic signals.
 
 These are **judgment calls**, so they are gated. Each category below has a
 detection heuristic and an explicit *do-not-publish* gate. The gate exists
@@ -1515,19 +1553,22 @@ the user stops trusting it. **When in doubt, do not publish.** There is
 no confidence field — you signal confidence by publishing or staying
 silent, nothing in between. Never publish "just in case".
 
-Publish with the existing `agent.learning` variant — no new message type.
-Always include a `category`, a one-sentence `title`, a structured `body`,
-the current UTC `timestamp`, and an `id` (any stable 16-character token;
-the broker and its consumers dedupe on the record content, so the id only
-needs to be present and well-formed):
+Publish with the bundled helper — **never hand-roll a raw `curl …/publish`
+for `agent.learning`.** The `sweep.sh learn` verb shapes the `agent.learning`
+envelope for you: it fixes `agent_id = "supervisor"` and fills the `id` and
+`timestamp` internally, so you pass only the category, a one-sentence title,
+and the structured body (one of the categories below):
 
 ```bash
-curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.learning","payload":{"id":"<16-hex token>","agent_id":"supervisor","category":"<one of the four below>","title":"<one sentence>","body":{ ... },"timestamp":"<current UTC ISO-8601, e.g. 2026-06-05T14:32:00Z>"}}'
+.git-paw/scripts/sweep.sh learn <category> "<one-sentence title>" '<body-json>'
 ```
 
-#### The four categories
+Routing through `sweep.sh learn` keeps the publish on the least-privilege
+by-path allowlist grant. A raw `curl …/publish` would force a broad `curl`
+grant (the G4 anti-pattern) and is error-prone — so the skill **MUST NOT**
+hand-roll a raw curl to emit an `agent.learning`; always use `sweep.sh learn`.
+
+#### The categories
 
 Each names a **primary identifier** field (used by the dedup discipline
 below) and a documented `body` shape. The examples are deliberately
@@ -1599,6 +1640,25 @@ identifier: the `branches` set.
 > one commit AND you can point to at least two coordination exchanges about
 > the overlap.
 
+**`tooling_friction`** — friction you absorb about **git-paw itself** (as
+distinct from the four project-scoped categories above): a tool behaviour that
+made you repeat work or work around the tool — a permission prompt you cleared
+on every sweep, a helper too narrow so you fell back to raw curl, a detector
+that over-escalated. This is the prime tool-improvement signal. Primary
+identifier: `friction`.
+
+```json
+{ "friction": "the worktree-confined git commit prompt re-appears every sweep",
+  "occurrences": 3,
+  "suggestion": "pre-approve worktree-confined `git commit` in the auto-approve preset" }
+```
+
+> **Heuristic:** the same friction was absorbed repeatedly this session — the
+> same prompt cleared on two or more sweeps, or the same helper/tooling gap
+> worked around two or more times. **Do not publish unless** you absorbed the
+> same friction **at least twice this session**; a one-off friction is not
+> publish-worthy. Record `occurrences` as the count you observed (≥ 2).
+
 #### Dedup discipline
 
 Before publishing, consult the `agent.learning` records you have already
@@ -1611,6 +1671,7 @@ already emitted:
 - `doc_gap` — same `convention`.
 - `adr_drift` — same `decision_area`.
 - `scope_mistake` — same set of `branches`.
+- `tooling_friction` — same `friction`.
 
 The same recurring shape should appear **once** per session, not once per
 sweep. The aggregator applies the same suppression on its side as a
