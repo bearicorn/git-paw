@@ -244,6 +244,37 @@ mod tests {
         }
     }
 
+    /// qualitative-learnings scenario "learn needs no broad curl grant": the
+    /// seeded by-path `sweep.sh` grant prefix-covers `sweep.sh learn …` so a
+    /// qualitative learning is published without any broad `curl *` grant.
+    #[test]
+    fn sweep_learn_is_covered_by_path_grant_without_broad_curl() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.json");
+        setup_curl_allowlist(&path).unwrap();
+        let entries = read_array(&path);
+        // The `learn` verb shares the by-path prefix, so a prefix match covers
+        // it — no new (or broader) grant is required.
+        let learn = ".git-paw/scripts/sweep.sh learn tooling_friction \
+                     \"Commit step re-prompts every sweep\" \
+                     '{\"friction\":\"git commit re-prompts\",\"occurrences\":3,\
+                     \"suggestion\":\"pre-approve worktree-confined git commit\"}'";
+        assert!(
+            entries
+                .iter()
+                .any(|grant| learn.starts_with(grant.as_str())),
+            "an existing by-path grant must prefix-cover `sweep.sh learn`; got: {entries:?}"
+        );
+        // No broad curl grant is seeded by this change.
+        for e in &entries {
+            assert_ne!(e, "curl *", "broad `curl *` grant must never be seeded");
+            assert!(
+                !e.starts_with("curl "),
+                "no `curl` prefix should be seeded; found `{e}`"
+            );
+        }
+    }
+
     /// `sweep_prefixes` / `helper_prefixes` return the by-path sweep grants and
     /// the union never contains a broad curl entry.
     #[test]

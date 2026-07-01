@@ -26,6 +26,11 @@
 #                                       — publish agent.status as supervisor
 #                                         (--phase / --detail are optional; the
 #                                         plain <msg…> form is unchanged)
+#   learn <category> <title> <body-json>
+#                                       — publish agent.learning as supervisor
+#                                         (least-privilege publish path for
+#                                         qualitative learnings; body passes
+#                                         through verbatim)
 
 set -u
 
@@ -368,6 +373,9 @@ usage: $0 <subcommand> [args]
   status-publish [--phase <p>] [--detail '<obj>'] <msg…>
                                       publish an agent.status from agent_id="supervisor";
                                       --phase adds a phase label, --detail a JSON-object detail
+  learn <category> <title> <body-json>
+                                      publish an agent.learning from agent_id="supervisor"
+                                      (least-privilege qualitative-learning publish path)
 
 Discovered configuration:
   session:        ${SESSION:-<none>}
@@ -674,6 +682,61 @@ PY
   fi
   publish "${payload}" >/dev/null
   echo "supervisor status published"
+}
+
+# Publish an agent.learning from agent_id="supervisor" — the least-privilege
+# publish path for qualitative learnings (mirrors cmd_feedback_gate /
+# cmd_verified so the supervisor never hand-rolls a raw curl to /publish for a
+# learning). <category> and <title> pass through unchanged; <body-json> is
+# parsed and passed through verbatim as the payload body (the supervisor skill
+# documents the per-category body shape). The id is a stable 16-hex content
+# hash and the timestamp is the current UTC time; both are shaped internally so
+# the caller supplies only simple args. A <body-json> that is not a JSON object
+# is rejected (non-zero exit, stderr diagnostic) and nothing is published.
+cmd_learn() {
+  local category=${1:-}
+  local title=${2:-}
+  local body=${3:-}
+  if [[ -z "${category}" || -z "${title}" || -z "${body}" ]]; then
+    echo "usage: $0 learn <category> <title> <body-json>" >&2
+    exit 2
+  fi
+  local payload rc
+  payload=$("${PY}" - "${category}" "${title}" "${body}" <<'PY'
+import hashlib, json, sys
+from datetime import datetime, timezone
+
+category, title, body_raw = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    body = json.loads(body_raw)
+except ValueError as exc:
+    print(f"sweep.sh: learn <body-json> is not valid JSON: {exc}", file=sys.stderr)
+    sys.exit(6)
+if not isinstance(body, dict):
+    print("sweep.sh: learn <body-json> must be a JSON object", file=sys.stderr)
+    sys.exit(6)
+ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+canon = category + "|" + title + "|" + json.dumps(body, sort_keys=True)
+rec_id = hashlib.sha1(canon.encode("utf-8")).hexdigest()[:16]
+print(json.dumps({
+    "type": "agent.learning",
+    "payload": {
+        "id": rec_id,
+        "agent_id": "supervisor",
+        "category": category,
+        "title": title,
+        "body": body,
+        "timestamp": ts,
+    },
+}))
+PY
+)
+  rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    exit "${rc}"
+  fi
+  publish "${payload}" >/dev/null
+  echo "learning published (${category})"
 }
 
 # Resolve the agent_id owning a tmux pane via its current path. Pane indices
@@ -1323,6 +1386,7 @@ main() {
     feedback-gate) cmd_feedback_gate "$@" ;;
     verified) cmd_verified "$@" ;;
     status-publish) cmd_status_publish "$@" ;;
+    learn) cmd_learn "$@" ;;
     -h|--help|help|"") usage; [[ -z "${sub}" ]] && exit 2 || exit 0 ;;
     *) echo "sweep.sh: unknown subcommand '${sub}'" >&2; usage; exit 2 ;;
   esac

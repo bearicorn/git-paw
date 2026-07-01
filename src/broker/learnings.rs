@@ -93,6 +93,20 @@ pub const CATEGORY_ADR_DRIFT: &str = "adr_drift";
 /// ```
 /// Primary identifier: the `branches` set.
 pub const CATEGORY_SCOPE_MISTAKE: &str = "scope_mistake";
+/// Category tag for tooling-friction learnings: friction the supervisor
+/// absorbs about git-paw *itself* — a tool behaviour that made the supervisor
+/// repeat work or work around the tool — as distinct from the four
+/// project-scoped qualitative categories above (which describe friction in the
+/// *user's project*).
+///
+/// Documented body shape:
+/// ```json
+/// { "friction": "git commit re-prompts every sweep",
+///   "occurrences": 3,
+///   "suggestion": "pre-approve worktree-confined git commit" }
+/// ```
+/// Primary identifier: `friction`.
+pub const CATEGORY_TOOLING_FRICTION: &str = "tooling_friction";
 
 /// Publishing `agent_id` for aggregator-produced learnings. The aggregator
 /// runs inside the broker/supervisor process, so every record is attributed
@@ -1205,6 +1219,7 @@ const QUALITATIVE_SECTIONS: &[(&str, &str)] = &[
     (CATEGORY_DOC_GAP, "Documentation gaps"),
     (CATEGORY_ADR_DRIFT, "ADR / architectural drift"),
     (CATEGORY_SCOPE_MISTAKE, "Scope-mistake signals"),
+    (CATEGORY_TOOLING_FRICTION, "Tooling friction"),
 ];
 
 /// Returns `true` for the four v0.5.0 deterministic categories the aggregator
@@ -1290,6 +1305,7 @@ fn qualitative_dedup_key(p: &LearningPayload) -> String {
         CATEGORY_DOC_GAP => string_field(&p.body, "convention"),
         CATEGORY_ADR_DRIFT => string_field(&p.body, "decision_area"),
         CATEGORY_SCOPE_MISTAKE => sorted_array_field(&p.body, "branches"),
+        CATEGORY_TOOLING_FRICTION => string_field(&p.body, "friction"),
         _ => None,
     };
     match primary {
@@ -1362,6 +1378,18 @@ fn render_qualitative_structured(p: &LearningPayload) -> Option<String> {
             }
             let suggestion = string_field(&p.body, "suggestion")?;
             Some(format!("- {} — {suggestion}\n", names.join(" and ")))
+        }
+        CATEGORY_TOOLING_FRICTION => {
+            let friction = string_field(&p.body, "friction")?;
+            let suggestion = string_field(&p.body, "suggestion")?;
+            let occurrences = p
+                .body
+                .get("occurrences")
+                .and_then(serde_json::Value::as_u64);
+            match occurrences {
+                Some(n) => Some(format!("- {friction} ({n}×) — {suggestion}\n")),
+                None => Some(format!("- {friction} — {suggestion}\n")),
+            }
         }
         _ => None,
     }
@@ -2484,6 +2512,155 @@ mod tests {
             serde_json::json!({"note": "no branches b"}),
         ));
         assert_eq!(a.qualitative_events().len(), 2);
+    }
+
+    // === tooling_friction: routing, tolerant rendering, regression ===
+
+    // Task 3.3: a tooling_friction record renders under "Tooling friction" and
+    // NOT under the "Other learnings" fallback.
+    #[test]
+    fn tooling_friction_routes_to_its_section_not_other_learnings() {
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        a.observe(&learning(
+            CATEGORY_TOOLING_FRICTION,
+            "Commit step re-prompts every sweep",
+            serde_json::json!({
+                "friction": "git commit re-prompts every sweep",
+                "occurrences": 3,
+                "suggestion": "pre-approve worktree-confined git commit"
+            }),
+        ));
+        a.flush().unwrap();
+
+        let md = read_md(a.file_path());
+        assert!(md.contains("### Tooling friction"), "{md}");
+        // Structured rendering landed (friction + occurrences + suggestion).
+        assert!(
+            md.contains(
+                "- git commit re-prompts every sweep (3×) — pre-approve worktree-confined git commit"
+            ),
+            "{md}"
+        );
+        // A recognised category MUST NOT leak into the Other-learnings fallback.
+        assert!(
+            !md.contains("### Other learnings"),
+            "tooling_friction must not fall through to Other learnings:\n{md}"
+        );
+    }
+
+    // Task 3.4: a tooling_friction body lacking the documented `friction` field
+    // falls back to the title + JSON dump, still under the Tooling friction
+    // section (design D5, tolerant rendering).
+    #[test]
+    fn malformed_tooling_friction_renders_as_title_plus_json() {
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        // Lacks the documented `friction` field.
+        a.observe(&learning(
+            CATEGORY_TOOLING_FRICTION,
+            "friction record with no friction field",
+            serde_json::json!({"occurrences": 2, "suggestion": "do the thing"}),
+        ));
+        a.flush().unwrap();
+
+        let md = read_md(a.file_path());
+        // Still under the Tooling friction section.
+        assert!(md.contains("### Tooling friction"), "{md}");
+        // Title line present.
+        assert!(
+            md.contains("- friction record with no friction field"),
+            "{md}"
+        );
+        // Body serialised as JSON present (not dropped), order-independent.
+        assert!(md.contains(r#""suggestion":"do the thing""#), "{md}");
+        assert!(md.contains(r#""occurrences":2"#), "{md}");
+        assert!(!md.contains("### Other learnings"), "{md}");
+    }
+
+    // Task 3.5: adding the fifth category leaves the four existing qualitative
+    // sections + the v0.5.0 deterministic sections rendering byte-for-byte
+    // unchanged, and a genuinely unknown category still falls through to
+    // "Other learnings".
+    #[test]
+    fn tooling_friction_addition_leaves_existing_sections_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        // A v0.5.0 deterministic signal.
+        for _ in 0..PERMISSION_PATTERN_THRESHOLD {
+            a.record_auto_approve("cargo check");
+        }
+        // One of each of the four existing qualitative categories.
+        a.observe(&learning(
+            CATEGORY_RECURRING_FAILURE_SHAPE,
+            "rfs",
+            serde_json::json!({
+                "shape": "import cycle in payments module",
+                "instances": [{"branch_id": "feat/a"}, {"branch_id": "feat/b"}]
+            }),
+        ));
+        a.observe(&learning(
+            CATEGORY_DOC_GAP,
+            "dg",
+            serde_json::json!({
+                "convention": "agents run lint before commit",
+                "suggestion": "add a Conventions section to AGENTS.md"
+            }),
+        ));
+        a.observe(&learning(
+            CATEGORY_ADR_DRIFT,
+            "adr",
+            serde_json::json!({
+                "decision_area": "async runtime",
+                "observed_pattern": "a background runtime added in the broker server"
+            }),
+        ));
+        a.observe(&learning(
+            CATEGORY_SCOPE_MISTAKE,
+            "sm",
+            serde_json::json!({
+                "branches": ["feat/a", "feat/b"],
+                "suggestion": "merge the feat/a and feat/b scopes"
+            }),
+        ));
+        // A genuinely unknown category still falls through.
+        a.observe(&learning(
+            "some_future_category",
+            "a future learning shape",
+            serde_json::json!({"note": "from a later version"}),
+        ));
+        a.flush().unwrap();
+
+        let md = read_md(a.file_path());
+        // v0.5.0 deterministic section unchanged.
+        assert!(md.contains("### Permission patterns"), "{md}");
+        assert!(md.contains("- `cargo check` auto-approved 5 times"), "{md}");
+        // The four existing qualitative sections + exact structured bullets.
+        assert!(md.contains("### Recurring failure shapes"), "{md}");
+        assert!(
+            md.contains("- import cycle in payments module: 2 instances across feat/a, feat/b"),
+            "{md}"
+        );
+        assert!(md.contains("### Documentation gaps"), "{md}");
+        assert!(
+            md.contains("- agents run lint before commit — add a Conventions section to AGENTS.md"),
+            "{md}"
+        );
+        assert!(md.contains("### ADR / architectural drift"), "{md}");
+        assert!(
+            md.contains("- async runtime: a background runtime added in the broker server"),
+            "{md}"
+        );
+        assert!(md.contains("### Scope-mistake signals"), "{md}");
+        assert!(
+            md.contains("- feat/a and feat/b — merge the feat/a and feat/b scopes"),
+            "{md}"
+        );
+        // Unknown category still routes to Other learnings.
+        assert!(md.contains("### Other learnings"), "{md}");
+        assert!(md.contains("- a future learning shape"), "{md}");
+        // No Tooling friction section: no such record was published.
+        assert!(!md.contains("### Tooling friction"), "{md}");
     }
 
     // Spec scenario `Hour-bucket id collisions are independently handled`:

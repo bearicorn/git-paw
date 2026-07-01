@@ -2451,6 +2451,109 @@ mod tests {
         }
     }
 
+    // === learnings-supervisor-observation-channel: tooling_friction + wiring ===
+
+    /// Task 6.1 / spec scenario "`tooling_friction` body shape is documented" +
+    /// "`tooling_friction` requires repeated absorption": the embedded
+    /// supervisor skill documents the fifth category, its body fields, and the
+    /// ≥2-occurrence gate (with the one-off friction forbidden).
+    #[test]
+    fn supervisor_skill_documents_tooling_friction_category() {
+        let tmpl = resolve("supervisor").unwrap();
+        let c = &tmpl.content;
+        let start = c
+            .find("**`tooling_friction`**")
+            .expect("supervisor skill must document the tooling_friction category");
+        let after = &c[start..];
+        // Scope to the tooling_friction block (it is the last qualitative
+        // category, before the Dedup discipline subsection).
+        let end = after.find("#### Dedup discipline").unwrap_or(after.len());
+        let block = &after[..end];
+        for field in ["friction", "occurrences", "suggestion"] {
+            assert!(
+                block.contains(field),
+                "tooling_friction block must document the `{field}` body field; block:\n{block}"
+            );
+        }
+        assert!(
+            block.contains("at least twice this session"),
+            "tooling_friction heuristic must gate on the same friction absorbed at least twice this session; block:\n{block}"
+        );
+        assert!(
+            block.contains("one-off friction"),
+            "tooling_friction heuristic must forbid publishing a one-off friction; block:\n{block}"
+        );
+    }
+
+    /// Task 6.2 / spec "The supervisor skill SHALL NOT hand-roll a raw
+    /// `curl …/publish` call to emit `agent.learning`": the skill references
+    /// `sweep.sh learn` and contains no raw curl publish envelope for
+    /// `agent.learning`.
+    #[test]
+    fn supervisor_skill_publishes_learnings_via_helper_not_raw_curl() {
+        let tmpl = resolve("supervisor").unwrap();
+        let c = &tmpl.content;
+        assert!(
+            c.contains("sweep.sh learn"),
+            "supervisor skill must reference the `sweep.sh learn` helper verb"
+        );
+        assert!(
+            !c.contains(r#"{"type":"agent.learning""#),
+            "supervisor skill must not hand-roll a raw curl `/publish` envelope for agent.learning"
+        );
+    }
+
+    /// Task 6.3 / spec scenarios "Continuous sweep section includes a capture
+    /// step" + "Wind-down section includes a synthesis pass": the sweep loop's
+    /// opportunistic capture step is ordered after approval clearing and stuck
+    /// detection (terminal, non-blocking) and publishes via `sweep.sh learn`;
+    /// the wind-down includes a synthesis pass that dedups by each category's
+    /// primary identifier.
+    #[test]
+    fn supervisor_skill_wires_capture_into_sweep_and_winddown() {
+        let tmpl = resolve("supervisor").unwrap();
+        let c = &tmpl.content;
+
+        // Opportunistic capture step, ordered after approval clearing
+        // (safe-command policy) and stuck detection (stall detection).
+        let capture = c
+            .find("Opportunistic qualitative capture")
+            .expect("sweep loop must include an opportunistic qualitative capture step");
+        let approve = c
+            .find("Safe-command policy for permission prompts")
+            .expect("sweep loop must clear permission prompts");
+        let stuck = c
+            .find("**Stall detection**")
+            .expect("sweep loop must run stuck detection");
+        assert!(
+            capture > approve && capture > stuck,
+            "capture step must be ordered after approval clearing and stuck detection"
+        );
+        let cap_window = &c[capture..(capture + 1000).min(c.len())];
+        assert!(
+            cap_window.contains("terminal") && cap_window.contains("non-blocking"),
+            "capture step must be described as terminal and non-blocking; window:\n{cap_window}"
+        );
+        assert!(
+            cap_window.contains("sweep.sh learn"),
+            "capture step must publish via sweep.sh learn; window:\n{cap_window}"
+        );
+
+        // Session-end synthesis pass with dedup-by-primary-identifier wording.
+        let synth = c
+            .find("session-end synthesis pass")
+            .expect("wind-down must include a session-end synthesis pass");
+        let synth_window = &c[synth..(synth + 900).min(c.len())];
+        assert!(
+            synth_window.contains("sweep.sh learn"),
+            "synthesis pass must publish via sweep.sh learn; window:\n{synth_window}"
+        );
+        assert!(
+            synth_window.contains("primary identifier"),
+            "synthesis pass must dedup against in-session records by each category's primary identifier; window:\n{synth_window}"
+        );
+    }
+
     // -----------------------------------------------------------------
     // render_dev_allowlist_preset (lang-agnostic-skills)
     // -----------------------------------------------------------------

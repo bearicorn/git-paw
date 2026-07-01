@@ -23,7 +23,7 @@ use tempfile::TempDir;
 use git_paw::broker::delivery::{poll_messages, publish_message};
 use git_paw::broker::learnings::{
     CATEGORY_ADR_DRIFT, CATEGORY_DOC_GAP, CATEGORY_RECURRING_FAILURE_SHAPE, CATEGORY_SCOPE_MISTAKE,
-    LearningsAggregator,
+    CATEGORY_TOOLING_FRICTION, LearningsAggregator,
 };
 use git_paw::broker::messages::{BrokerMessage, LearningPayload};
 use git_paw::broker::{BrokerState, WatchTarget, start_broker_with};
@@ -201,6 +201,66 @@ fn broker_on_routes_four_categories_to_four_sections() {
         "- agents run the linter before committing — add a Conventions section to AGENTS.md"
     ));
     assert!(md.contains("- feat/a and feat/b — merge the feat/a and feat/b scopes"));
+}
+
+// Task 7.1: publish an `agent.learning` with `category=tooling_friction` to a
+// test broker → the aggregator's flushed `session-learnings.md` contains the
+// record under the "Tooling friction" section (and not "Other learnings").
+#[test]
+#[serial]
+fn broker_routes_tooling_friction_to_its_section() {
+    let tmp = TempDir::new().unwrap();
+    let md_path = tmp.path().join(".git-paw").join("session-learnings.md");
+
+    let mut state = BrokerState::new(None);
+    let agg = Arc::new(Mutex::new(LearningsAggregator::new(md_path.clone())));
+    state.attach_learnings(Arc::clone(&agg));
+
+    let config = broker_config();
+    let Ok(handle) = start_broker_with(
+        &config,
+        state,
+        vec![watch_target("feat-x", &tmp)],
+        None,
+        3600,
+    ) else {
+        // Port collision — skip without failing CI.
+        return;
+    };
+
+    publish_message(
+        &handle.state,
+        &learning(
+            "tf00000000000001",
+            CATEGORY_TOOLING_FRICTION,
+            "Commit prompt re-appears every sweep",
+            serde_json::json!({
+                "friction": "the worktree-confined git commit prompt re-appears every sweep",
+                "occurrences": 3,
+                "suggestion": "pre-approve worktree-confined git commit in the auto-approve preset"
+            }),
+        ),
+    );
+
+    {
+        let mut a = handle.state.learnings.as_ref().unwrap().lock().unwrap();
+        a.flush().unwrap();
+    }
+    drop(handle);
+
+    let md = std::fs::read_to_string(&md_path).expect("file written");
+    assert!(
+        md.contains("### Tooling friction"),
+        "missing `### Tooling friction` section in:\n{md}"
+    );
+    assert!(
+        md.contains("the worktree-confined git commit prompt re-appears every sweep"),
+        "tooling_friction record not rendered in:\n{md}"
+    );
+    assert!(
+        !md.contains("### Other learnings"),
+        "tooling_friction must not fall through to Other learnings:\n{md}"
+    );
 }
 
 // Task 6.2: the same recurring_failure_shape published twice in a session is

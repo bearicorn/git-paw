@@ -509,8 +509,13 @@ configuration, and escalation behaviour.
 When `[supervisor.learnings] enabled = true`, the supervisor session
 records deterministic friction signals (sandbox warnings, approval
 patterns, recurring errors) into a markdown file you can review after the
-run. See [Learnings Mode](learnings.md) for the file format and how to
-opt in.
+run. The supervisor also records *qualitative* learnings it reasons out over
+the run — recurring failure shapes, doc gaps, ADR drift, scope mistakes, and
+**tooling friction** with git-paw itself — publishing each through the bundled
+`.git-paw/scripts/sweep.sh learn <category> <title> <body-json>` helper (never
+a raw curl). It captures them opportunistically during each sweep and again in
+a session-end synthesis pass. See [Learnings Mode](learnings.md) for the file
+format, the category set, and how to opt in.
 
 ## When the user types in your pane
 

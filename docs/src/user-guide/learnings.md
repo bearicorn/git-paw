@@ -158,10 +158,13 @@ Spec Kit ownership declaration parsed at session start.
 
 The five categories above are *deterministic* — the broker derives them
 mechanically from message traffic. As of v0.6.0 the supervisor also
-records four *qualitative* signals: observations that require reasoning
+records *qualitative* signals: observations that require reasoning
 over the whole session, which only the supervisor LLM can make during its
 normal sweep and audit work. They ride the same `agent.learning` wire
-format and land in their own sections of `session-learnings.md`.
+format and land in their own sections of `session-learnings.md`. The
+supervisor publishes them through the bundled
+`.git-paw/scripts/sweep.sh learn <category> <title> <body-json>` helper — a
+least-privilege, by-path publish path, never a raw curl.
 
 Because these are LLM judgments, the supervisor skill gates each one
 behind a heuristic and a "do not publish unless…" rule, and suppresses
@@ -198,6 +201,19 @@ Two or more branches coordinated heavily because the original spec scope
 drew the boundary in the wrong place. The record names the `branches`, the
 shared files, and a suggestion. **What to do:** consider re-cutting the
 scope for the next change so the same work lands in one branch.
+
+### Tooling friction
+
+Friction the supervisor absorbed about **git-paw itself** — a tool behaviour
+that made it repeat work or work around the tool (a permission prompt cleared
+on every sweep, a helper too narrow so it fell back to raw curl, a detector
+that over-escalated) — as distinct from the four project-scoped categories
+above. The record names the `friction`, the `occurrences` (how many times it
+was absorbed this session), and a `suggestion`. The supervisor publishes it
+only when the same friction was absorbed **at least twice in the session**, so
+a one-off is never recorded. **What to do:** treat it as the prime
+tool-improvement signal — fold it into a git-paw issue or a config/allowlist
+change.
 
 ### Unknown categories
 

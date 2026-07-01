@@ -628,11 +628,13 @@ broker_publish = "auto"
 | `broker_publish` | `"auto"` | Whether flushed entries are *also* published to the broker as `agent.learning` messages. `"auto"` follows `[broker] enabled` (publish when the broker is running, file-only when it is not); `"force_off"` keeps file-only output even with an active broker. The Markdown file is written either way. |
 
 There are **no configuration fields for the qualitative signals**
-(`recurring_failure_shape`, `doc_gap`, `adr_drift`, `scope_mistake`) added
-in v0.6.0. Their detection thresholds live in the supervisor skill prose,
-not in `[supervisor.learnings_config]` — to tune how readily the
+(`recurring_failure_shape`, `doc_gap`, `adr_drift`, `scope_mistake`,
+`tooling_friction`). Their detection thresholds live in the supervisor skill
+prose, not in `[supervisor.learnings_config]` — to tune how readily the
 supervisor publishes a category, edit your local copy of the supervisor
-skill rather than a config value.
+skill rather than a config value. The supervisor publishes each qualitative
+learning through the bundled `.git-paw/scripts/sweep.sh learn` helper, so no
+broad `curl` allowlist grant is required.
 
 See the [Learnings Mode chapter](../user-guide/learnings.md) for the
 category-by-category walkthrough, the output-file format, and how to consume
