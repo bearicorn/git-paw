@@ -15,7 +15,8 @@
 # Subcommands implemented (per supervisor-bugfixes-v0-5-x §3.2):
 #   snapshot                            — capture-pane tail of every coding pane
 #   capture <pane>                      — single-pane full tail-50 capture
-#   approve <pane>                      — Down + Enter (sticky-yes)
+#   approve <pane>                      — re-confirm live prompt in tail, then
+#                                         Down + Enter (sticky-yes); refuses pane 0
 #   status [--all]                      — broker /status, phantoms filtered by default
 #   worktrees-status                    — uncommitted-file count per agent worktree
 #   inbox                               — agent.question/feedback/blocked from supervisor inbox
@@ -354,7 +355,7 @@ usage: $0 <subcommand> [args]
 
   snapshot                            capture-pane tail of every coding-agent pane
   capture <pane>                      single-pane full tail-50 capture
-  approve <pane>                      Down + Enter to <pane> (sticky-yes)
+  approve <pane>                      re-confirm live prompt (last 4 lines) then Down+Enter; refuses pane 0
   detect-stuck                        flag stuck agents (prompt/stream-timeout/bloat/no-progress/blocked)
   stuck-eval <agent> <last_seen> [checkbox_count] [commit_count] [blocked_age]
                                       (stdin: capture) run the stuck decision for one agent
@@ -413,12 +414,46 @@ cmd_capture() {
   tmux capture-pane -t "${SESSION}:0.${pane}" -p -S -50 2>&1 | tail -50
 }
 
+# Reads a pane capture on stdin; exits 0 when a permission-prompt marker
+# (STUCK_MARKERS_REGEX) is present within the last 4 non-blank lines of the
+# capture, non-zero otherwise. This is the shell half of the
+# broker-mediated-approvals re-confirm gate — it agrees with the Rust
+# live_prompt_in_tail check on what a live prompt looks like, so the bundled
+# helper and the in-binary auto-approver treat "live" identically.
+approve_prompt_is_live() {
+  MARKERS="${STUCK_MARKERS_REGEX}" "${PY}" -c "$(cat <<'PY'
+import os, re, sys
+cap = sys.stdin.read()
+markers = os.environ["MARKERS"]
+nonblank = [ln for ln in cap.splitlines() if ln.strip()]
+tail = nonblank[-4:]
+raise SystemExit(0 if any(re.search(markers, ln) for ln in tail) else 1)
+PY
+)"
+}
+
 cmd_approve() {
   require_session
   local pane=${1:-}
   if [[ -z "${pane}" ]]; then
     echo "usage: $0 approve <pane>" >&2
     exit 2
+  fi
+  # Pane 0 is the supervisor's own pane; never blind-send keys into it
+  # (broker-mediated-approvals). Clearing pane 0's own prompt is a non-blind
+  # concern owned by the drive loop.
+  if [[ "${pane}" == "0" ]]; then
+    echo "pane 0 excluded from blind send-keys (supervisor pane)"
+    return 0
+  fi
+  # Re-confirm a live permission prompt in the last 4 non-blank lines
+  # immediately before sending keys. If the prompt cleared between the decision
+  # and now, send NOTHING (no stray input into the agent's CLI).
+  local cap
+  cap=$(tmux capture-pane -t "${SESSION}:0.${pane}" -p -S -50 2>/dev/null | tail -50)
+  if ! printf '%s' "${cap}" | approve_prompt_is_live; then
+    echo "prompt cleared, no keys sent (pane ${pane})"
+    return 0
   fi
   tmux send-keys -t "${SESSION}:0.${pane}" Down >/dev/null 2>&1
   sleep 0.05

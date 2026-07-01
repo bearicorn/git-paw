@@ -26,6 +26,7 @@ use crate::broker::BrokerState;
 use crate::config::AutoApproveConfig;
 use crate::error::PawError;
 
+use super::approval_gate::PaneCapturer;
 use super::approve::{ApprovalRequest, KeyDispatcher, auto_approve_pane};
 use super::auto_approve::{
     detect_prompt_shape, extract_command_slice, is_dangerous, is_live_prompt, is_safe_command,
@@ -95,28 +96,31 @@ where
     }
 }
 
-/// Trait providing the captured pane content for an agent.
+/// Trait providing the classification of a captured agent pane.
 ///
-/// In production this is a thin shim over [`super::permission_prompt::capture_pane`].
-/// Tests inject a stub so the captured text is deterministic.
-pub trait PaneInspector {
+/// In production this is a thin shim over
+/// [`super::permission_prompt::detect_permission_prompt`]. Tests inject a stub
+/// so the classification is deterministic. The raw captured text is supplied
+/// by the [`PaneCapturer`] supertrait — the poll loop's re-confirm gate re-uses
+/// the same capture method, so an inspector doubles as the gate's capturer.
+pub trait PaneInspector: PaneCapturer {
     /// Captures the pane and returns the classification, or `None` when
     /// no approval marker is present.
     fn inspect(&self, session: &str, pane_index: usize) -> Option<PermissionType>;
-    /// Returns the raw captured content for whitelist matching, or empty
-    /// string when capture fails.
-    fn captured_text(&self, session: &str, pane_index: usize) -> String;
 }
 
 /// Production [`PaneInspector`] backed by `tmux capture-pane`.
 pub struct TmuxPaneInspector;
 
+impl PaneCapturer for TmuxPaneInspector {
+    fn capture(&self, session: &str, pane_index: usize) -> String {
+        super::permission_prompt::capture_pane(session, pane_index).unwrap_or_default()
+    }
+}
+
 impl PaneInspector for TmuxPaneInspector {
     fn inspect(&self, session: &str, pane_index: usize) -> Option<PermissionType> {
         detect_permission_prompt(session, pane_index)
-    }
-    fn captured_text(&self, session: &str, pane_index: usize) -> String {
-        super::permission_prompt::capture_pane(session, pane_index).unwrap_or_default()
     }
 }
 
@@ -314,7 +318,7 @@ where
             out.push((agent_id, TickOutcome::NoPrompt));
             continue;
         };
-        let captured = ctx.inspector.captured_text(ctx.session, pane_index);
+        let captured = ctx.inspector.capture(ctx.session, pane_index);
         // Classify against the prompted COMMAND slice (text between the
         // `Bash command` / `Bash(` header and the confirmation question), not
         // the surrounding narration. Fall back to the whole capture when no
@@ -406,7 +410,8 @@ where
                 option_index,
                 broker_url: ctx.broker_url,
             };
-            match auto_approve_pane(ctx.dispatcher, req) {
+            let inspector = ctx.inspector;
+            match auto_approve_pane(inspector, ctx.dispatcher, req) {
                 Ok(true) => out.push((
                     agent_id,
                     TickOutcome::Approved {
@@ -435,9 +440,10 @@ where
 /// outcome. Centralises the request build + dispatch shared by the
 /// scratch-rm, worktree-git, and whitelist approval paths.
 ///
-/// The caller has already passed the live-prompt gate, so `live_prompt: true`
-/// is set unconditionally here; `auto_approve_pane` re-checks it as a hard
-/// precondition.
+/// The caller has already passed the detection-time live-prompt gate, so
+/// `live_prompt: true` is set unconditionally here; `auto_approve_pane` then
+/// re-confirms a live prompt with a fresh capture immediately before the send
+/// (the `broker-mediated-approvals` approval-send gate) and refuses pane 0.
 fn dispatch_safe<R, I, D, Q, W>(
     ctx: &mut PollContext<'_, R, I, D, Q, W>,
     agent_id: &str,
@@ -464,7 +470,8 @@ where
         option_index,
         broker_url: ctx.broker_url,
     };
-    match auto_approve_pane(ctx.dispatcher, req) {
+    let inspector = ctx.inspector;
+    match auto_approve_pane(inspector, ctx.dispatcher, req) {
         Ok(true) => (
             agent_id.to_string(),
             TickOutcome::Approved {
@@ -508,12 +515,14 @@ mod tests {
         kind: Option<PermissionType>,
         captured: String,
     }
+    impl PaneCapturer for StubInspector {
+        fn capture(&self, _session: &str, _pane_index: usize) -> String {
+            self.captured.clone()
+        }
+    }
     impl PaneInspector for StubInspector {
         fn inspect(&self, _session: &str, _pane_index: usize) -> Option<PermissionType> {
             self.kind
-        }
-        fn captured_text(&self, _session: &str, _pane_index: usize) -> String {
-            self.captured.clone()
         }
     }
 
@@ -621,7 +630,7 @@ mod tests {
         let resolver = |id: &str| if id == "agent-a" { Some(2) } else { None };
         let inspector = StubInspector {
             kind: Some(PermissionType::Cargo),
-            captured: "cargo test --workspace\nEsc to cancel".into(),
+            captured: "cargo test --workspace\nDo you want to proceed?\nEsc to cancel".into(),
         };
         let (out, dispatcher, forwarder) = run_tick(&state, &cfg, &resolver, &inspector);
         assert_eq!(out.len(), 1);
@@ -826,7 +835,7 @@ mod tests {
         let resolver = |id: &str| if id == "agent-a" { Some(2) } else { None };
         let inspector = StubInspector {
             kind: Some(PermissionType::Cargo),
-            captured: "cargo test --workspace\nEsc to cancel".into(),
+            captured: "cargo test --workspace\nDo you want to proceed?\nEsc to cancel".into(),
         };
         let no_worktree = |_id: &str| None::<PathBuf>;
         let mut dispatcher = RecordingDispatcher { events: vec![] };

@@ -463,6 +463,19 @@ curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
    (acts within seconds of supervisor attach). Together they cover both the
    first-few-seconds window after launch and any prompts that appear later.
 
+   **Approvals fire only on a re-confirmed live prompt, and never on pane 0.**
+   Every keystroke approval — the `sweep.sh approve` helper above and the
+   `[supervisor.auto_approve]` poll thread alike — passes through the
+   broker-mediated-approvals send gate: it re-captures the target pane
+   immediately before sending and dispatches keys only when a permission-prompt
+   marker is still present in the last ~4 non-blank lines. A prompt that cleared
+   between your decision and the send therefore receives **no** stray keys
+   (which would otherwise land as literal chat text). The gate also refuses
+   pane 0 (your own pane): `sweep.sh approve 0` sends nothing and reports the
+   exclusion, and the auto-approver never blind-sends into pane 0. Clearing your
+   own prompt is a separate, non-blind action — never blind send-keys to
+   pane 0.
+
 2. **Watch** — poll `/status` and `/messages/supervisor` every ~30 seconds. React to
    `agent.artifact`, `agent.blocked`, and `agent.status` events. The filesystem watcher
    and git hooks auto-publish most status updates, so you will see agents appear on the
