@@ -4,6 +4,7 @@
 //! The submodules here keep auto-approval logic out of `main.rs` and
 //! testable in isolation.
 
+pub mod approval_gate;
 pub mod approve;
 pub mod auto_approve;
 pub mod curl_allowlist;

@@ -260,6 +260,29 @@ is never mistaken for a prompt to run it.
    danger-list above.
 6. Anything else is **Unknown** and forwarded to you.
 
+### Re-confirm before send, and the pane 0 exclusion
+
+The live-prompt gate above runs at *detection*. A second, independent check
+runs at *send* time: immediately before dispatching the approval keystrokes,
+the approver re-captures the target pane and confirms a permission-prompt
+marker is still present in the last ~4 non-blank lines. If the prompt cleared
+between the decision and the send — the agent moved on, or you answered it
+first — **no keystrokes are sent**. This closes the stray-input race where the
+option digit would otherwise land in the CLI's chat box as literal text,
+polluting context and leaving dangling unsubmitted commands.
+
+The blind send-keys path also never targets **pane 0** (the supervisor's own
+pane): `sweep.sh approve 0` sends nothing and reports that pane 0 is excluded,
+and the auto-approver skips pane 0 entirely. Clearing the supervisor's own
+prompt is a distinct, non-blind concern.
+
+Both the bundled `sweep.sh approve` helper and the in-binary auto-approver pass
+through this same gate, so the shell path and the Rust path stay race-safe in
+lockstep. No new broker message is involved: the trigger that a pane is
+awaiting approval is the existing `agent.status` with `phase:
+"stuck-on-prompt"`, and an unsafe or unknown prompt is escalated with the
+existing `agent.question`.
+
 ### Option selection and the arbitrary-code policy
 
 When the classifier approves, it selects the prompt option by shape: a 2-option

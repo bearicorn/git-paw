@@ -1,5 +1,8 @@
-## ADDED Requirements
+# broker-mediated-approvals Specification
 
+## Purpose
+TBD - created by archiving change broker-mediated-approvals. Update Purpose after archive.
+## Requirements
 ### Requirement: Approval keystrokes require a re-confirmed live prompt
 
 Any approver that clears an agent CLI permission prompt by sending keystrokes via `tmux send-keys` SHALL pass through a single approval-send gate. Immediately before dispatching the approval keystrokes, the gate SHALL capture the target pane (e.g. `tmux capture-pane -p -t <session>:<pane>`) and SHALL confirm that a live permission-prompt marker is present within the last 4 non-blank lines of the capture. Only when a live prompt is re-confirmed SHALL the gate dispatch the keystrokes.
@@ -81,3 +84,4 @@ The approval-send gate's approval-trigger signal and its escalation channel SHAL
 - **WHEN** the gate escalates the prompt for human review
 - **THEN** the escalation SHALL be published as an `agent.question` whose `agent_id` is the originating agent's slug
 - **AND** no new message type SHALL be sent
+

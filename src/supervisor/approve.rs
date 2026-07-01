@@ -17,6 +17,9 @@ use std::process::Command;
 
 use crate::broker::publish::{build_status_message, publish_to_broker_http};
 use crate::error::PawError;
+use crate::supervisor::approval_gate::{
+    GateOutcome, PaneCapturer, SUPERVISOR_PANE_INDEX, approval_send_gate,
+};
 use crate::supervisor::permission_prompt::PermissionType;
 
 /// Keystrokes (in tmux notation) that select the 1-based `option_index` at a
@@ -93,16 +96,27 @@ pub struct ApprovalRequest<'a> {
 ///
 /// 1. If `req.enabled == false`, `req.kind == Unknown`, or
 ///    `req.live_prompt == false`, return `Ok(false)` (no keystrokes). The
-///    live-prompt check is a hard precondition — a non-live capture is never
-///    acted on.
-/// 2. Publish an `agent.status` message tagged `auto_approved` to the
-///    broker. Failures are non-fatal — see the spec rationale.
-/// 3. Type the selected option digit, then `Enter`, as two separate
-///    `send-keys` calls (see [`approval_keystrokes`]).
+///    live-prompt check is a hard precondition — a non-live *detection*
+///    capture is never acted on.
+/// 2. If `req.pane_index` is 0 (the supervisor's own pane), return `Ok(false)`
+///    with no keystrokes — pane 0 is excluded from the blind send-keys path
+///    (`broker-mediated-approvals`). This is checked before the audit so a
+///    refused send is never logged as approved.
+/// 3. Publish an `agent.status` message tagged `auto_approved` to the
+///    broker. Failures are non-fatal — see the spec rationale. Kept BEFORE
+///    the re-confirm capture so no broker round-trip sits between the
+///    re-confirm and the send.
+/// 4. Pass the keystrokes through [`approval_send_gate`], which re-captures the
+///    pane immediately before the send and confirms a live prompt is still in
+///    the tail; only then are the option digit and `Enter` dispatched as two
+///    separate `send-keys` calls (see [`approval_keystrokes`]). When the prompt
+///    cleared between detection and send, the gate dispatches nothing and this
+///    returns `Ok(false)`.
 ///
 /// The `matched_entry` field is included in the audit log so the human
 /// can see which whitelist entry triggered the approval.
-pub fn auto_approve_pane<D: KeyDispatcher>(
+pub fn auto_approve_pane<C: PaneCapturer, D: KeyDispatcher>(
+    capturer: &C,
     dispatcher: &mut D,
     req: ApprovalRequest<'_>,
 ) -> Result<bool, PawError> {
@@ -110,8 +124,16 @@ pub fn auto_approve_pane<D: KeyDispatcher>(
         return Ok(false);
     }
 
-    // Publish the audit log BEFORE sending keystrokes so a crash mid-action
-    // still leaves a trail.
+    // Pane 0 (the supervisor's own pane) is excluded from the blind send-keys
+    // path. Refuse before the audit so a send we will not make is never logged
+    // as approved; the prompt is left for the non-blind supervisor-pane path.
+    if req.pane_index == SUPERVISOR_PANE_INDEX {
+        return Ok(false);
+    }
+
+    // Publish the audit log BEFORE the re-confirm+send so a crash mid-action
+    // still leaves a trail. Kept before the gate's re-confirm capture so no
+    // broker round-trip sits between the re-confirm and the send.
     if let Some(url) = req.broker_url {
         let summary = req.matched_entry.map_or_else(
             || "auto_approved".to_string(),
@@ -126,12 +148,13 @@ pub fn auto_approve_pane<D: KeyDispatcher>(
         }
     }
 
-    for key in approval_keystrokes(req.option_index) {
-        dispatcher
-            .send_key(req.session, req.pane_index, &key)
-            .map_err(|e| PawError::TmuxError(format!("send-keys {key} failed: {e}")))?;
+    // Re-confirm a live prompt with a fresh capture immediately before the
+    // send. A cleared prompt dispatches nothing — no stray input.
+    let keys = approval_keystrokes(req.option_index);
+    match approval_send_gate(capturer, dispatcher, req.session, req.pane_index, &keys)? {
+        GateOutcome::Sent => Ok(true),
+        GateOutcome::PromptCleared | GateOutcome::Pane0Excluded => Ok(false),
     }
-    Ok(true)
 }
 
 #[cfg(test)]
@@ -158,6 +181,25 @@ mod tests {
         }
     }
 
+    /// Capturer returning a fixed capture, so the approval-send gate's
+    /// re-confirm step sees a deterministic pane state without tmux.
+    struct StubCapturer(String);
+    impl StubCapturer {
+        /// A capture whose tail carries a live permission-prompt marker.
+        fn live() -> Self {
+            Self("Bash command\n  cargo test\nDo you want to proceed?".to_string())
+        }
+        /// A capture with no permission-prompt marker (the prompt cleared).
+        fn cleared() -> Self {
+            Self("$ \nagent moved on\nall done\n".to_string())
+        }
+    }
+    impl PaneCapturer for StubCapturer {
+        fn capture(&self, _session: &str, _pane_index: usize) -> String {
+            self.0.clone()
+        }
+    }
+
     fn req(
         enabled: bool,
         kind: PermissionType,
@@ -180,6 +222,7 @@ mod tests {
     fn safe_prompt_types_option_digit_then_enter() {
         let mut rec = Recorder::new();
         let fired = auto_approve_pane(
+            &StubCapturer::live(),
             &mut rec,
             req(true, PermissionType::Cargo, Some("cargo test")),
         )
@@ -200,7 +243,7 @@ mod tests {
             option_index: 2,
             ..req(true, PermissionType::SafeCommand, Some("git"))
         };
-        auto_approve_pane(&mut rec, request).unwrap();
+        auto_approve_pane(&StubCapturer::live(), &mut rec, request).unwrap();
         let keys: Vec<&str> = rec.events.iter().map(|(_, _, k)| k.as_str()).collect();
         assert_eq!(keys, vec!["2", "Enter"], "option 2 => type `2` then Enter");
     }
@@ -208,7 +251,12 @@ mod tests {
     #[test]
     fn each_key_dispatched_separately() {
         let mut rec = Recorder::new();
-        auto_approve_pane(&mut rec, req(true, PermissionType::Curl, None)).unwrap();
+        auto_approve_pane(
+            &StubCapturer::live(),
+            &mut rec,
+            req(true, PermissionType::Curl, None),
+        )
+        .unwrap();
         // Two distinct invocations (digit + Enter), no concatenated string.
         assert_eq!(rec.events.len(), 2);
     }
@@ -217,6 +265,7 @@ mod tests {
     fn disabled_config_is_noop() {
         let mut rec = Recorder::new();
         let fired = auto_approve_pane(
+            &StubCapturer::live(),
             &mut rec,
             req(false, PermissionType::Cargo, Some("cargo test")),
         )
@@ -228,7 +277,12 @@ mod tests {
     #[test]
     fn unknown_class_is_noop() {
         let mut rec = Recorder::new();
-        let fired = auto_approve_pane(&mut rec, req(true, PermissionType::Unknown, None)).unwrap();
+        let fired = auto_approve_pane(
+            &StubCapturer::live(),
+            &mut rec,
+            req(true, PermissionType::Unknown, None),
+        )
+        .unwrap();
         assert!(!fired);
         assert!(rec.events.is_empty(), "Unknown => no keystrokes");
     }
@@ -242,9 +296,43 @@ mod tests {
             live_prompt: false,
             ..req(true, PermissionType::SafeCommand, Some("cargo test"))
         };
-        let fired = auto_approve_pane(&mut rec, request).unwrap();
+        let fired = auto_approve_pane(&StubCapturer::live(), &mut rec, request).unwrap();
         assert!(!fired, "non-live prompt must not fire");
         assert!(rec.events.is_empty(), "non-live => no keystrokes");
+    }
+
+    /// Spec scenario `automatic-approval` "Cleared prompt suppresses the
+    /// keystroke sequence": a prompt that classified safe and live at detection
+    /// time but has cleared by the re-confirm capture receives NO keystrokes.
+    #[test]
+    fn cleared_prompt_suppresses_keystrokes_via_auto_approve() {
+        let mut rec = Recorder::new();
+        let fired = auto_approve_pane(
+            &StubCapturer::cleared(),
+            &mut rec,
+            req(true, PermissionType::Cargo, Some("cargo test")),
+        )
+        .unwrap();
+        assert!(!fired, "cleared prompt must not fire");
+        assert!(
+            rec.events.is_empty(),
+            "cleared prompt => no stray keystrokes into the CLI"
+        );
+    }
+
+    /// Spec scenario `automatic-approval` "Auto-approval never types into
+    /// pane 0": a safe, live, enabled request whose resolved target pane index
+    /// is 0 receives NO keystrokes via the blind send-keys path.
+    #[test]
+    fn pane_zero_is_never_auto_approved() {
+        let mut rec = Recorder::new();
+        let request = ApprovalRequest {
+            pane_index: 0,
+            ..req(true, PermissionType::SafeCommand, Some("cargo test"))
+        };
+        let fired = auto_approve_pane(&StubCapturer::live(), &mut rec, request).unwrap();
+        assert!(!fired, "pane 0 must never be blind-approved");
+        assert!(rec.events.is_empty(), "pane 0 => no keystrokes");
     }
 
     #[test]
@@ -337,7 +425,7 @@ mod tests {
         let req = ApprovalRequest {
             enabled: true,
             session: "paw-test",
-            pane_index: 0,
+            pane_index: 2,
             agent_id: "feat-foo",
             kind: PermissionType::Cargo,
             matched_entry: Some("cargo test"),
@@ -345,7 +433,8 @@ mod tests {
             option_index: 1,
             broker_url: Some(&broker_url),
         };
-        let fired = auto_approve_pane(&mut dispatcher, req).expect("auto_approve_pane");
+        let fired = auto_approve_pane(&StubCapturer::live(), &mut dispatcher, req)
+            .expect("auto_approve_pane");
         assert!(fired, "safe class with enabled=true must fire");
 
         // Wait for the server thread so the Published event is recorded.
