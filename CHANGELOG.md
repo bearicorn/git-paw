@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-07-03
+
+### Features
+
+- *(supervisor)* Add git paw start --unattended in-process drive loop
+- *(supervisor)* Capture qualitative learnings via sweep.sh learn and the tooling_friction category
+- *(supervisor)* Add a broker-mediated approval-send gate with live-prompt re-confirm
+- *(broker)* Widen the sweep.sh helper surface for status-publish and by-path grants
+- *(supervisor)* Detect stream-timeout, context-bloat, no-progress, and blocked stalls
+- *(broker)* Classify in-flight overlaps as additive vs true conflicts
+- *(cli)* Add git paw selftest subcommand with an isolated lifecycle harness
+- *(supervisor)* Auto-approve classifier for safe permission prompts
+- *(interactive)* Add fuzzy-filter multi-select branch and spec pickers
+
+### Bug Fixes
+
+- *(supervisor)* Run the five verification gates against the re-resolved branch tip
+- *(skills)* De-opinionate commit-message format in the bundled coordination skill
+- *(worktree)* Ignore git-paw-managed files in the remove dirty-check
+
+### Documentation
+
+- *(governance)* Add behavioral guidelines to AGENTS.md
+- *(readme)* Refresh logo and banner assets, resize logo to 288px
 ## [0.8.0] - 2026-06-26
 
 ### Features
@@ -122,6 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 - Add CLI tool for parallel AI coding sessions across git worktrees
+[0.9.0]: https://github.com/bearicorn/git-paw/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/bearicorn/git-paw/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/bearicorn/git-paw/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/bearicorn/git-paw/compare/v0.5.0...v0.6.0
