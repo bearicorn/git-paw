@@ -21,7 +21,9 @@ The system SHALL implement `cmd_supervisor()` in `src/main.rs` that orchestrates
 12. **Inject the initial prompt for ALL panes including the supervisor (pane 0)** via `tmux send-keys`. The supervisor's initial prompt is its boot block + a "Begin observing" message.
 13. **Self-register the supervisor in the broker** via an HTTP POST publishing `agent.status` with `agent_id = "supervisor"`, `status = "working"`, `message = "Supervisor booting"`.
 14. Save session state.
-15. **Print an attach-hint and return `Ok(())`**: `cmd_supervisor()` does NOT block on a foreground supervisor CLI any more. The user runs `tmux attach -t paw-<project>` to interact with the supervisor pane.
+15. **Branch on `--unattended`:**
+    - When `--unattended` is **absent**: **print an attach-hint and return `Ok(())`**: `cmd_supervisor()` does NOT block on a foreground supervisor CLI. The user runs `tmux attach -t paw-<project>` to interact with the supervisor pane. (v0.5.0 behaviour, unchanged.)
+    - When `--unattended` is **present**: instead of returning immediately, `cmd_supervisor()` SHALL run the in-process unattended drive loop (per the `unattended-operation` capability) which blocks until a completion, escalation-summary, stuck, or heartbeat exit condition is reached, then prints the exit summary and returns. The drive loop SHALL NOT require an attached interactive terminal. The unattended path SHALL NOT replace the foreground terminal with an interactive supervisor CLI.
 
 The Rust merge loop SHALL NOT be invoked from `cmd_supervisor`. Merge orchestration is supervisor-skill territory (see the `agent-skills` capability and the "Merge orchestration" requirement on the supervisor skill).
 
@@ -69,13 +71,22 @@ The Rust merge loop SHALL NOT be invoked from `cmd_supervisor`. Merge orchestrat
 - **WHEN** `cmd_supervisor()` constructs each agent's launch command
 - **THEN** the command SHALL include `--dangerously-skip-permissions`
 
-#### Scenario: cmd_supervisor returns immediately with attach hint
+#### Scenario: cmd_supervisor returns immediately with attach hint when --unattended is absent
 
-- **GIVEN** `cmd_supervisor()` completes the launch sequence successfully
+- **GIVEN** `cmd_supervisor()` completes the launch sequence successfully WITHOUT `--unattended`
 - **WHEN** all panes are created and prompts injected
 - **THEN** stdout SHALL contain "Supervisor session 'paw-<project>' launched" and the manual-attach command (`tmux attach -t paw-<project>`)
 - **AND** `cmd_supervisor()` SHALL return `Ok(())` without blocking on any process
 - **AND** the foreground terminal SHALL NOT be replaced with an interactive supervisor CLI
+
+#### Scenario: cmd_supervisor drives the loop in-process when --unattended is present
+
+- **GIVEN** `cmd_supervisor()` completes the launch sequence successfully WITH `--unattended`
+- **WHEN** all panes are created and prompts injected
+- **THEN** `cmd_supervisor()` SHALL run the in-process unattended drive loop (per the `unattended-operation` capability) rather than returning immediately
+- **AND** the drive loop SHALL block until a completion, escalation-summary, stuck, or heartbeat exit condition is reached
+- **AND** the foreground terminal SHALL NOT be replaced with an interactive supervisor CLI
+- **AND** on exit the process SHALL print the drive-loop summary and return
 
 #### Scenario: cmd_supervisor does NOT call the Rust merge loop
 

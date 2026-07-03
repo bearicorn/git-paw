@@ -81,6 +81,7 @@ Options:
                                 `[supervisor] enabled = true` in config
       --force                  With `--from-all-specs`/`--specs`, bypass the uncommitted-spec warning
       --no-rebase              Skip rebasing existing agent branches onto the default branch
+      --unattended             Run the supervisor wave to completion with no human babysitting
   -h, --help                   Print help
 ```
 
@@ -97,9 +98,20 @@ Options:
 | `--no-supervisor` | (flag) | Force supervisor mode off (highest precedence in the resolution chain). Mutually exclusive with `--supervisor`. |
 | `--force` | (flag) | Bypass the uncommitted-spec validation warning when launching from specs. |
 | `--no-rebase` | (flag) | Skip the default-on rebase of existing agent branches onto the repository's default branch. |
+| `--unattended` | (flag) | Run the supervisor wave to completion with no human in the seat: engages supervisor mode and drives an in-process loop that auto-approves classifier-safe prompts, escalates the rest for later review, detects completion, and exits with a summary. Mutually exclusive with `--no-supervisor`. |
 
 `--from-all-specs` and `--specs` are mutually exclusive — one launches every
 discovered spec, the other narrows to a subset or opens the picker.
+
+`--unattended` engages supervisor mode (equivalent to also passing
+`--supervisor`) and then drives the wave to completion in-process instead of
+returning with an attach hint: it polls the panes on a ~15-second cadence,
+auto-approves classifier-**safe** permission prompts (including the
+supervisor's own pane), escalates risky/unknown prompts for later human review
+WITHOUT blocking the rest of the wave, and exits with a summary on completion,
+a stuck signal, or a ~25-minute heartbeat. It is designed for detached
+operation and needs no attached terminal. It is mutually exclusive with
+`--no-supervisor`. See [Supervisor → Unattended mode](user-guide/supervisor.md).
 
 The selection flags compose with `--supervisor`: `git paw start --supervisor
 --specs a,b` launches a supervisor session for **only** the named subset (`a`
@@ -131,6 +143,10 @@ git paw start --supervisor --from-all-specs        # one agent per discovered sp
 # Skip supervisor for this session even when `[supervisor] enabled = true` is set
 git paw start --no-supervisor
 git paw start --from-all-specs --no-supervisor
+
+# Run the whole wave to completion with no human in the seat (detached)
+git paw start --unattended --from-all-specs
+git paw start --unattended --branches feat/auth,feat/api
 ```
 
 ### Supervisor mode resolution chain

@@ -1,5 +1,8 @@
-## ADDED Requirements
+# unattended-operation Specification
 
+## Purpose
+TBD - created by archiving change unattended-drive-loop. Update Purpose after archive.
+## Requirements
 ### Requirement: Unattended drive loop runs a supervisor wave to completion
 
 When `git paw start --unattended` is invoked (supervisor mode active), the system SHALL run an in-process **drive loop** that keeps the multi-agent wave moving with no human in the seat: it SHALL poll on an approximately 15-second cadence, sweep the supervisor pane and every coding-agent pane, act on live prompts, detect completion, and then exit with a summary.
@@ -285,3 +288,4 @@ The `--unattended` drive loop SHALL be the supported mechanism for running a wav
 - **WHEN** an `--unattended` drive loop runs against the isolated session
 - **THEN** the loop SHALL auto-approve the dummy safe prompt, detect the completion signal, and exit with a summary
 - **AND** the test SHALL require no real LLM backend and no interactive terminal
+

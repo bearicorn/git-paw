@@ -53,6 +53,15 @@ fn start_help_shows_flags() {
     );
 }
 
+// Task 1.4 (cli-parsing): `git paw start --help` surfaces `--unattended` and
+// describes it as running the wave to completion without human babysitting.
+#[test]
+fn start_help_shows_unattended_flag() {
+    cmd().args(["start", "--help"]).assert().success().stdout(
+        predicate::str::contains("--unattended").and(predicate::str::contains("babysitting")),
+    );
+}
+
 #[test]
 fn purge_help_shows_force_flag() {
     cmd()

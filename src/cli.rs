@@ -193,6 +193,27 @@ pub enum Command {
             help = "Skip rebasing existing agent branches onto the default branch before opening worktrees"
         )]
         no_rebase: bool,
+
+        /// Run the supervisor wave to completion with no human babysitting.
+        ///
+        /// Engages supervisor mode (equivalent to `--supervisor`) and then
+        /// drives an in-process loop that sweeps the supervisor pane and every
+        /// coding-agent pane on a ~15s cadence: it auto-approves
+        /// classifier-safe permission prompts, escalates risky/unknown prompts
+        /// for later human review WITHOUT blocking the rest of the wave,
+        /// detects completion, and exits with a summary. Designed for detached
+        /// operation — it does not require an attached interactive terminal.
+        ///
+        /// Mutually exclusive with `--no-supervisor` (they express opposing
+        /// intents). May be combined with `--supervisor`, `--from-all-specs`,
+        /// `--specs`, `--cli`, and `--branches`.
+        #[arg(
+            long,
+            default_value_t = false,
+            conflicts_with = "no_supervisor",
+            help = "Run the supervisor wave to completion with no human babysitting (auto-approve safe prompts, escalate the rest, detect completion, exit with a summary)"
+        )]
+        unattended: bool,
     },
 
     /// Attach a new worktree + agent pane to a running session
@@ -601,6 +622,7 @@ mod tests {
                 no_supervisor,
                 force,
                 no_rebase,
+                unattended,
             } => {
                 assert!(cli.is_none());
                 assert!(branches.is_none());
@@ -613,6 +635,7 @@ mod tests {
                 assert!(!no_supervisor);
                 assert!(!force);
                 assert!(!no_rebase);
+                assert!(!unattended);
             }
             other => panic!("expected Start, got {other:?}"),
         }
@@ -625,6 +648,49 @@ mod tests {
             Command::Start { cli, .. } => assert_eq!(cli.as_deref(), Some("claude")),
             other => panic!("expected Start, got {other:?}"),
         }
+    }
+
+    // -- Task 1.3 / cli-parsing: --unattended flag --
+
+    #[test]
+    fn start_unattended_sets_flag() {
+        let cli = parse(&["start", "--unattended"]);
+        match cli.command.unwrap() {
+            Command::Start { unattended, .. } => assert!(unattended),
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_unattended_combines_with_from_specs_and_cli() {
+        let cli = parse(&["start", "--unattended", "--from-specs", "--cli", "claude"]);
+        match cli.command.unwrap() {
+            Command::Start {
+                unattended,
+                from_all_specs,
+                cli,
+                ..
+            } => {
+                assert!(unattended);
+                assert!(from_all_specs, "--from-specs sets the launch-all state");
+                assert_eq!(cli.as_deref(), Some("claude"));
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_unattended_with_no_supervisor_is_rejected() {
+        let result = Cli::try_parse_from(["git-paw", "start", "--unattended", "--no-supervisor"]);
+        assert!(
+            result.is_err(),
+            "--unattended and --no-supervisor express opposing intents and must conflict"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("--unattended") && msg.contains("--no-supervisor"),
+            "the parse error should name both conflicting flags; got: {msg}"
+        );
     }
 
     #[test]
