@@ -9,6 +9,7 @@ pub mod approve;
 pub mod auto_approve;
 pub mod curl_allowlist;
 pub mod dev_allowlist;
+pub mod drive;
 pub mod layout;
 pub mod manual_approvals;
 pub mod permission_prompt;

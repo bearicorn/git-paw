@@ -79,6 +79,7 @@ git-paw lets you run multiple AI coding assistants in parallel, each in its own 
 - **Spec Kit backend** — first-class support for [GitHub Spec Kit](https://github.com/github/spec-kit) projects via `[specs] type = "speckit"`; `.specify/specs/` is auto-detected at the repo root and the `[P]`/non-`[P]` task split decomposes into per-task and consolidated worktrees
 - **`--specs-format` override** — force-select the spec backend (`openspec`, `markdown`, `speckit`) on the command line, overriding both `[specs] type` in config and the `.specify/` auto-detection
 - **`--no-supervisor`** — single-session override of `[supervisor] enabled = true` for plain (non-supervisor) operation without editing config
+- **`start --unattended`** — run a supervisor wave to completion with no human in the seat: engages supervisor mode and drives an in-process loop that auto-approves classifier-safe prompts, escalates the rest for later review without blocking the wave, detects completion, and exits with a summary (designed for detached operation; mutually exclusive with `--no-supervisor`). See [Supervisor → Unattended mode](docs/src/user-guide/supervisor.md#unattended-mode---unattended)
 - **`start --force`** — bypass the uncommitted-spec validation warning when launching with `--from-all-specs` or `--specs`
 - **Forward coordination** — agents publish `agent.intent` before they begin editing so peers (and the broker conflict detector) see the planned file set ahead of the first commit
 - **Automatic conflict detection** — the broker auto-emits `[conflict-detector]`-tagged `agent.feedback` for forward (overlapping intents), in-flight (overlapping `modified_files`), and ownership-violation conflicts; an unresolved in-flight overlap is classified from the agents' declared regions — a true collision escalates to the supervisor inbox via `agent.question`, while an additive overlap (disjoint declared regions) is downgraded to an informational `agent.feedback` and never blocks on human input
@@ -152,9 +153,15 @@ git paw start --no-supervisor
 # Bypass the uncommitted-spec validation warning when launching from specs
 git paw start --from-all-specs --force
 git paw start --supervisor --force
+
+# Drive the whole wave to completion with no human in the seat (detached)
+git paw start --unattended --from-all-specs
+git paw start --unattended --branches feat/auth,feat/api
 ```
 
 The supervisor agent runs in its own pane, polls each worker agent for progress and artifacts via the broker, runs the configured test command between merges, and writes a session summary when work completes. Use this mode when you want to leave a multi-branch session running without continually steering each agent yourself.
+
+By default `git paw start --supervisor` builds the session and returns, expecting you to watch the panes and clear safe permission prompts. Add **`--unattended`** to fold that operator loop into the tool: it engages supervisor mode and drives an in-process loop that sweeps every pane (including the supervisor's own) on a ~15-second cadence, auto-approves classifier-safe prompts, escalates risky/unknown prompts for later review without blocking the wave, and exits with a summary on completion or a ~25-minute heartbeat. It needs no attached terminal. See [Supervisor → Unattended mode](docs/src/user-guide/supervisor.md#unattended-mode---unattended).
 
 In v0.5.0 supervisor mode also seeds a curated dev-command allowlist into `.claude/settings.json` on session start so common dev-loop commands (`cargo build`, `git commit`, `just`, `mdbook build`, `openspec validate`, ...) bypass per-prompt approval. Opt out with `[supervisor.common_dev_allowlist] enabled = false`; extend with `extra = [...]`.
 

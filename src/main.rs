@@ -41,6 +41,7 @@ fn main() {
         no_supervisor: false,
         force: false,
         no_rebase: false,
+        unattended: false,
     });
 
     if let Err(err) = run(command) {
@@ -63,14 +64,21 @@ fn run(command: Command) -> Result<(), PawError> {
             no_supervisor,
             force,
             no_rebase,
+            unattended,
         } => {
             // Resolve supervisor-mode-enabled state BEFORE dispatching so the
             // user's --supervisor flag (or [supervisor] config) is honoured
             // when combined with --from-all-specs (or its hidden alias).
             // `--no-supervisor` (added in no-supervisor-flag) wins over both
             // the flag and any [supervisor] config setting.
+            //
+            // `--unattended` engages supervisor mode (per the cli-parsing
+            // delta): it is treated as an implicit `--supervisor` so the
+            // dispatch routes to the supervisor launch path, where step 15
+            // branches on the flag to drive the in-process loop. clap already
+            // rejects `--unattended --no-supervisor`.
             let supervisor_enabled =
-                resolve_supervisor_mode_from_cwd(no_supervisor, supervisor, dry_run)?;
+                resolve_supervisor_mode_from_cwd(no_supervisor, supervisor || unattended, dry_run)?;
             let spec_mode = SpecMode::from_flags(from_all_specs, specs.as_deref());
             let specs_format_str = specs_format.map(SpecsFormat::as_str);
             match resolve_dispatch_target(&spec_mode, supervisor_enabled) {
@@ -89,6 +97,7 @@ fn run(command: Command) -> Result<(), PawError> {
                         specs_format_str,
                         dry_run,
                         no_rebase,
+                        unattended,
                     )
                 }
                 DispatchTarget::StartWithSpecs(mode) => cmd_start_with_specs(
@@ -520,6 +529,11 @@ fn cmd_start(
     // --no-supervisor explicitly overrides this so a user can skip the auto-start
     // flow without editing config.
     if !no_supervisor && config.supervisor.as_ref().is_some_and(|s| s.enabled) {
+        // This config-driven handoff is only reachable when `--unattended` was
+        // NOT passed: `--unattended` resolves supervisor mode active in the
+        // dispatch, which routes straight to `cmd_supervisor` and never falls
+        // through to `cmd_start`. So the drive loop is off (`unattended: false`)
+        // on this path.
         return cmd_supervisor(
             &repo_root,
             &config,
@@ -529,6 +543,7 @@ fn cmd_start(
             None,
             dry_run,
             no_rebase,
+            false,
         );
     }
 
@@ -1030,6 +1045,7 @@ fn cmd_supervisor(
     specs_format_override: Option<&str>,
     dry_run: bool,
     no_rebase: bool,
+    unattended: bool,
 ) -> Result<(), PawError> {
     // Fall back to a synthesized default when [supervisor] is absent.
     // `resolve_supervisor_mode` already prompts the user to opt in to
@@ -1307,11 +1323,19 @@ fn cmd_supervisor(
         worktree_entries.push(attached.entry);
     }
 
-    let env_vars: Vec<(String, String)> = if broker_config.enabled {
+    let mut env_vars: Vec<(String, String)> = if broker_config.enabled {
         vec![("GIT_PAW_BROKER_URL".to_string(), broker_config.url())]
     } else {
         Vec::new()
     };
+    if unattended {
+        // Injected into the session environment (before the dashboard pane is
+        // split, so that pane inherits it): the `__dashboard` subprocess reads
+        // it to DISABLE its auto-approve thread. For an unattended session the
+        // in-process drive loop is the sole approver, so two approvers never
+        // race on the same pane (D1).
+        env_vars.push((UNATTENDED_ENV.to_string(), "1".to_string()));
+    }
 
     let tmux_session = tmux::build_supervisor_session(
         &project,
@@ -1426,7 +1450,83 @@ fn cmd_supervisor(
         tmux_session.name,
         branches.len()
     );
+
+    // Step 15 (supervisor-launch): branch on `--unattended`.
+    //
+    // Without it the launch returns immediately with the manual-attach hint
+    // (v0.5.0 behaviour). With it, drive the in-process unattended loop
+    // (`unattended-operation`): it blocks until a completion, escalation-
+    // summary, stuck, or heartbeat exit condition, prints the summary, and
+    // returns — it does NOT replace the foreground terminal with an
+    // interactive supervisor CLI and does NOT require an attached terminal.
+    if unattended {
+        return drive_unattended_loop(
+            repo_root,
+            supervisor_cfg,
+            &broker_config,
+            &tmux_session.name,
+            &state,
+        );
+    }
+
     println!("Attach with:  tmux attach -t {}", tmux_session.name);
+    Ok(())
+}
+
+/// Runs the in-process unattended drive loop for a freshly-launched supervisor
+/// session (supervisor-launch step 15, `unattended-operation`).
+///
+/// Builds the coding-agent roster from the saved session (each pane resolved by
+/// `worktree_path`, per D2), resolves the classifier whitelist and
+/// worktree-write policy from `[supervisor.auto_approve]`, points the summary at
+/// the broker log and the learnings file, then drives the loop to an exit
+/// condition and prints the summary. Blocks in the foreground process; requires
+/// no attached interactive terminal.
+fn drive_unattended_loop(
+    repo_root: &Path,
+    supervisor_cfg: &SupervisorConfig,
+    broker_config: &git_paw::config::BrokerConfig,
+    session_name: &str,
+    state: &Session,
+) -> Result<(), PawError> {
+    use git_paw::supervisor::drive::{self, AgentPane, DriveRunOptions};
+
+    let agents: Vec<AgentPane> = state
+        .worktrees
+        .iter()
+        .map(|wt| AgentPane {
+            agent_id: broker::messages::slugify_branch(&wt.branch),
+            worktree_path: wt.worktree_path.clone(),
+        })
+        .collect();
+
+    // The classifier the loop consumes mirrors the dashboard poll loop's
+    // resolved whitelist + worktree-write policy so unattended and attended
+    // sessions auto-approve the same set.
+    let auto_approve = supervisor_cfg
+        .auto_approve
+        .clone()
+        .unwrap_or_default()
+        .resolved();
+
+    let options = DriveRunOptions {
+        broker_url: broker_config.enabled.then(|| broker_config.url()),
+        whitelist: auto_approve.effective_whitelist(),
+        approve_worktree_writes: auto_approve.approve_worktree_writes(),
+        broker_log_hint: state
+            .broker_log_path
+            .as_ref()
+            .map(|p| p.display().to_string()),
+        learnings_hint: supervisor_cfg.learnings.then(|| {
+            repo_root
+                .join(".git-paw")
+                .join("session-learnings.md")
+                .display()
+                .to_string()
+        }),
+    };
+
+    drive::run_drive_loop(session_name, repo_root, &agents, options)?;
     Ok(())
 }
 
@@ -2668,6 +2768,24 @@ fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Result<(), PawE
 // Command: __dashboard
 // ---------------------------------------------------------------------------
 
+/// Session-environment flag the launcher sets for an `--unattended` supervisor
+/// session. The `__dashboard` subprocess reads it to disable its auto-approve
+/// thread (the in-process drive loop is the sole approver, D1).
+const UNATTENDED_ENV: &str = "GIT_PAW_UNATTENDED";
+
+/// Whether the dashboard subprocess should spawn its auto-approve thread.
+///
+/// It runs only for a broker-enabled supervisor session, and NOT for an
+/// `--unattended` session — there the in-process drive loop is the sole
+/// approver, so a dashboard-side approver would race it on the same pane.
+fn dashboard_should_auto_approve(
+    mode: SessionMode,
+    broker_enabled: bool,
+    unattended: bool,
+) -> bool {
+    mode == SessionMode::Supervisor && broker_enabled && !unattended
+}
+
 /// Runs the broker and dashboard in pane 0 (internal command).
 #[allow(clippy::too_many_lines)]
 fn cmd_dashboard() -> Result<(), PawError> {
@@ -2857,9 +2975,15 @@ fn cmd_dashboard() -> Result<(), PawError> {
     // lived dashboard subprocess. Killing the dashboard pane terminates the
     // thread, matching user expectation that supervision stops when the
     // dashboard is gone.
+    //
+    // For an `--unattended` session the in-process drive loop is the sole
+    // approver, so this thread is disabled to avoid two approvers racing on
+    // the same pane (D1). The launcher signals that via `GIT_PAW_UNATTENDED`
+    // in the session environment, which this pane inherits.
+    let unattended = std::env::var(UNATTENDED_ENV).is_ok();
     let auto_approve_handle = saved_session
         .as_ref()
-        .filter(|sess| sess.mode == SessionMode::Supervisor && broker_config.enabled)
+        .filter(|sess| dashboard_should_auto_approve(sess.mode, broker_config.enabled, unattended))
         .and_then(|sess| {
             let auto_approve_cfg = config
                 .supervisor
@@ -3796,6 +3920,74 @@ mod tests {
         );
     }
 
+    // Task 2.3 — `--unattended --branches feat/a,feat/b` routes to the
+    // supervisor launch path. `--unattended` engages supervisor mode via the
+    // `supervisor || unattended` coupling `run()` applies before resolving the
+    // dispatch target, so the wave routes to cmd_supervisor even with
+    // `--supervisor` absent and `[supervisor]` config disabled.
+    #[test]
+    fn dispatch_unattended_routes_to_supervisor_launch_path() {
+        let cfg = cfg_with_supervisor(false);
+        let mut prompt = StubPrompt {
+            answer: false,
+            called: false,
+        };
+        let (supervisor_flag, unattended) = (false, true);
+        // `run()` passes `supervisor || unattended` as the supervisor flag.
+        let supervisor_enabled = resolve_supervisor_mode(
+            false,
+            supervisor_flag || unattended,
+            false,
+            &cfg,
+            &mut prompt,
+        )
+        .unwrap();
+        assert!(
+            supervisor_enabled,
+            "--unattended resolves supervisor mode active"
+        );
+        assert!(!prompt.called, "the flag short-circuits before any prompt");
+        // With `--branches` the spec mode is None; the target is the supervisor
+        // launch path carrying that mode.
+        let target = resolve_dispatch_target(&SpecMode::None, supervisor_enabled);
+        assert_eq!(
+            target,
+            DispatchTarget::Supervisor {
+                spec_mode: SpecMode::None
+            }
+        );
+    }
+
+    // Task 6.4 — the dashboard's auto-approve thread is disabled for an
+    // `--unattended` session so the in-process drive loop is the sole approver
+    // (no two approvers racing on the same pane).
+    #[test]
+    fn dashboard_auto_approve_disabled_under_unattended() {
+        // Attended supervisor + broker → the dashboard thread runs.
+        assert!(dashboard_should_auto_approve(
+            SessionMode::Supervisor,
+            true,
+            false
+        ));
+        // Unattended → disabled even for a broker-enabled supervisor session.
+        assert!(!dashboard_should_auto_approve(
+            SessionMode::Supervisor,
+            true,
+            true
+        ));
+        // Never runs outside supervisor mode or without a broker.
+        assert!(!dashboard_should_auto_approve(
+            SessionMode::Bare,
+            true,
+            false
+        ));
+        assert!(!dashboard_should_auto_approve(
+            SessionMode::Supervisor,
+            false,
+            false
+        ));
+    }
+
     #[test]
     fn spec_mode_from_flags_translates_each_combination() {
         assert_eq!(SpecMode::from_flags(true, None), SpecMode::All);
@@ -3987,14 +4179,15 @@ mod tests {
             supervisor_prompt.starts_with(&boot_block),
             "supervisor pane prompt should begin with the boot block; got:\n{supervisor_prompt}"
         );
-        // The boot-block template uses `{{BRANCH_ID}}` as a placeholder
-        // that `build_boot_block` substitutes to the slugified agent id.
-        // For the supervisor pane the substituted value is the literal
-        // string `"supervisor"`, which appears in every `agent.*` curl
-        // payload as `"agent_id":"supervisor"`. That is the production
-        // shape of "BRANCH_ID=supervisor" from the spec scenario.
+        // The boot-block template uses `{{BRANCH_ID}}` as a placeholder that
+        // `build_boot_block` substitutes to the slugified agent id. For the
+        // supervisor pane the substituted value is the literal string
+        // `supervisor`, which appears in every bundled-helper call as
+        // `broker.sh --agent supervisor ...` (the boot block calls the helper,
+        // never a raw broker curl). That is the production shape of
+        // "BRANCH_ID=supervisor" from the spec scenario.
         assert!(
-            boot_block.contains("\"agent_id\":\"supervisor\""),
+            boot_block.contains(".git-paw/scripts/broker.sh --agent supervisor status booting"),
             "boot block must carry the supervisor agent_id substitution; got:\n{boot_block}"
         );
         let framing_idx = supervisor_prompt

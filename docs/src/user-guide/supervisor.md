@@ -11,6 +11,73 @@ For the launcher-level "how do I start supervisor mode" walkthrough, see
 broker-side message contract the supervisor exchanges with coding agents, see
 [Agent Coordination](coordination.md).
 
+## Unattended mode (`--unattended`)
+
+`git paw start --unattended` runs a supervisor wave to completion with **no
+human in the seat**. Without it, `git paw start --supervisor` builds the tmux
+session and returns immediately with an attach hint, expecting a human (or a
+throwaway pane-scraper script) to watch the panes, clear safe permission
+prompts, and notice when the work is done. `--unattended` folds that operator
+loop into the tool itself.
+
+`--unattended` engages supervisor mode (you do not also need `--supervisor`),
+then — instead of returning — runs an **in-process drive loop** in the
+foreground `git paw start` process. It is designed for detached operation: it
+does not attach a terminal and does not replace your shell with an interactive
+supervisor CLI. It is mutually exclusive with `--no-supervisor`.
+
+Each poll (~15 seconds) the loop:
+
+- **Sweeps every pane** — the supervisor's own pane (pane 0) and every
+  coding-agent pane. It enumerates panes and resolves each to its agent by
+  `pane_current_path` (never by pane index, which drifts), capturing each pane
+  with its own `capture-pane` call.
+- **Acts only on a live prompt** — a recognized permission-prompt footer within
+  the last few non-blank lines of the capture. Prompt-like text scrolled up in
+  history is ignored.
+- **Auto-approves classifier-safe prompts** using the same
+  [auto-approve classification](#auto-approve-classification) the attended
+  dashboard approver uses. The supervisor's pane 0 is covered too, but is only
+  ever sent the minimal approval keystrokes the prompt consumes — never
+  free-text or a stray newline that could pollute the supervisor's
+  conversation.
+- **Escalates risky/unknown prompts without blocking** — anything the
+  classifier does not consider safe is surfaced for later human review (via the
+  broker and the exit summary) while the rest of the wave keeps moving. A
+  single risky prompt on one agent never freezes the others. Repeated
+  escalations are deduplicated per `(agent, command-shape)` within a five-minute
+  window.
+
+The loop keeps polling until one of:
+
+1. **Completion** — a terminal PASS/FAIL verdict is signalled, or every agent's
+   tasks are checked complete.
+2. **Stuck / bloat** — the stuck-detection signal fires.
+3. **Heartbeat** — about 25 minutes elapse with no completion, so you are
+   re-engaged with a status summary rather than the loop running forever.
+
+On exit it prints a summary: the outcome (`completed` /
+`escalated-for-review` / `stuck` / `heartbeat`), each agent's final state, the
+deduped list of prompts escalated for human review, and pointers to the broker
+log and captured learnings. Because there is no human to hand-write findings,
+the loop self-captures qualitative learnings during the run and once more at
+wind-down.
+
+For an unattended session the in-process loop is the **sole** approver: the
+dashboard subprocess's auto-approve thread is disabled so two approvers never
+race on the same pane.
+
+```bash
+# Drive every discovered spec to completion, unattended
+git paw start --unattended --from-all-specs
+
+# Or a fixed branch set
+git paw start --unattended --branches feat/auth,feat/api
+```
+
+Multiple feedback → fix → re-verify cycles per agent are normal and are **not**
+treated as a stuck signal — the loop lets agents iterate.
+
 ## Pane Layout and Labelling
 
 When you attach to a supervisor session, git-paw styles the tmux panes so the
