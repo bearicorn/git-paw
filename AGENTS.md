@@ -75,6 +75,23 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 These guidelines are working if: fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
 
+## Design Principles
+
+Durable principles that govern this project (consolidated here 2026-07-07 from the roadmap doc).
+
+### Exported assets must be project-agnostic
+
+Anything the binary EXPORTS to a consumer — bundled skills (`assets/agent-skills/*`), helper scripts, boot blocks, the `git paw init` default config, allowlist/classifier presets — MUST be project-agnostic. Per-project *conventions* (commit-message format, stack/test/build commands, governance docs, spec-workflow tooling) belong to the CONSUMER via their injected `AGENTS.md`/config, and must never be baked into the export. git-paw's OWN conventions (Conventional Commits for its changelog, its cargo/just/openspec stack) are repo-specific and live ONLY in this file / `cliff.toml` — never in `assets/`. Check every new bundled asset against this before shipping; this explicitly includes the auto-approve safe-command classifier (it must not hard-code git-paw's toolchain as always-safe for every consumer — source toolchain verbs from the resolved stack preset instead).
+
+### Supervisor verification is a five-gate framework
+
+`/opsx:verify` is supervisor-only (coding agents never invoke it), and `agent.verified` is published only after ALL five gates pass, in order:
+1. **Testing** — the change's own tests pass (`cargo test --no-fail-fast`, so the env-guard test can't abort the run early and mask failures).
+2. **Regression** — the full suite is green diffed against the merge-base, not a stale branch tip.
+3. **Spec audit** — every OpenSpec scenario maps to a test; no SHALL/MUST requirement left unimplemented or contradicted.
+4. **Doc audit** — `--help`, README, mdBook, and the configuration reference updated to match the change.
+5. **Security** — no secrets, no unsafe shell/path handling, least-privilege preserved (path-scoped allowlists, never `curl *` / `cd *`).
+
 ## Project Structure
 
 The project follows a modular architecture with clear separation of concerns. Detailed architecture documentation can be found in the technical documentation.
@@ -498,5 +515,4 @@ Commits should not include any reference to AI assistants. It should also be one
 
 ## MCP
 When you need to search docs, use `context7` tools.
-
 

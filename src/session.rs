@@ -149,7 +149,7 @@ pub struct WorktreeEntry {
     /// Set only when an agent is attached via `git paw add` to a *paused*
     /// session (design D4): the pane is created and the boot block injected,
     /// but the prompt is held unsubmitted so the new agent stays paused with
-    /// the rest of the session. `git paw resume` (restart-from-pause) submits
+    /// the rest of the session. `git paw start` (restart-from-pause) submits
     /// any entry carrying a pending prompt and clears the field. `None` for
     /// every start-time agent and for adds to an active session (submitted
     /// immediately). Omitted from JSON when `None`.

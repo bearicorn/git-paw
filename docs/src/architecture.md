@@ -55,6 +55,8 @@ This chapter covers git-paw's internal architecture: module structure, data flow
 | **Broker** | `src/broker/` | HTTP coordination server (axum) with watcher + conflict detector + learnings subsystems. Detail below. |
 | **Supervisor** | `src/supervisor/` | Supervisor-mode subsystems (auto-approve, dev allowlist, stall sweeps, permission prompts, pane layout). Detail below. |
 | **Specs** | `src/specs/` | Spec scanning. Three backends (`openspec`, `markdown`, `speckit`); `resolve.rs` is the dispatch entry point. |
+| **MCP** | `src/mcp/` | `git paw mcp`. Read-only Model Context Protocol server over stdio — exposes coordination, governance, specs, session, learnings, skills, git, and source-browsing state to MCP-aware clients. Runs standalone (no session/broker/supervisor). Detail below. |
+| **Coordination** | `src/coordination/` | User→agent coordination helpers (inventory + target validation) backing the `/agents` and `/tell` supervisor commands. Distinct from `src/broker/` peer-to-peer (agent↔agent) coordination. Detail below. |
 
 ### `src/broker/` modules
 
@@ -98,6 +100,28 @@ mode.
 | `src/specs/openspec.rs` | OpenSpec backend: scans `<dir>/<change>/tasks.md` directories, skips `<dir>/archive/`. |
 | `src/specs/markdown.rs` | Markdown backend: scans flat `.md` files with YAML frontmatter; only `paw_status: pending` is picked up. |
 | `src/specs/speckit.rs` | Spec Kit backend: scans `.specify/specs/<feature>/`, decomposes the current phase into `[P]`-task worktrees plus one consolidated `phase/…` worktree; probes `<dir>/../memory/constitution.md` for the governance auto-wire. |
+
+### `src/mcp/` modules
+
+The MCP subsystem follows a strict one-way dependency direction — `query` knows
+nothing about MCP, `tools` knows about MCP and `query`, and `server` only wires
+`tools` onto a transport — so a future HTTP transport stays additive.
+
+| File | Purpose |
+|------|---------|
+| `src/mcp/mod.rs` | Entry point: `cmd_mcp()`, `RepoContext`, and repository resolution (`--repo` wins, else nearest `.git` ancestor). |
+| `src/mcp/server.rs` | stdio transport setup, tool-registry wiring, and process lifecycle (exits when stdin closes). |
+| `src/mcp/logging.rs` | Tracing setup — diagnostics to stderr and, with `--log-file`, tee'd to a file; stdout stays reserved for the JSON-RPC stream. |
+| `src/mcp/query/*` | Data-layer reads (no MCP types): `conflicts.rs`, `docs.rs`, `git.rs`, `governance.rs`, `intents.rs`, `learnings.rs`, `session.rs`, `source.rs`, `specs.rs`, plus `mod.rs`. Built from broker HTTP state, files on disk, and git output. |
+| `src/mcp/tools/*` | MCP tool surfaces (one file per category): `coordination.rs`, `docs.rs`, `git.rs`, `governance.rs`, `project.rs`, `session.rs`, `source.rs`, plus `mod.rs`. Each maps a `query` reader onto an MCP tool definition. |
+
+### `src/coordination/` modules
+
+| File | Purpose |
+|------|---------|
+| `src/coordination/mod.rs` | Public surface for the user→agent coordination helpers. |
+| `src/coordination/inventory.rs` | Agent inventory + target-validation helpers (unknown-target rejection) shared by the supervisor routing commands. |
+| `src/coordination/tell.rs` | Backs the `/tell` supervisor command — routes a user message to a named agent, mediated by the supervisor. |
 
 ## Start Flow
 

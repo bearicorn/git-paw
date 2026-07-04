@@ -172,7 +172,7 @@ restart, at most one sweep-interval of latency.
 **Paused sessions:** if the session is paused when you `add`, the new
 pane is created but its prompt is held unsubmitted — the agent stays
 paused with the rest of the session and begins on the next
-`git paw resume`.
+`git paw start`.
 
 ### `git paw remove` — detach a single agent
 
