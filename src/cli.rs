@@ -227,7 +227,7 @@ pub enum Command {
                       Provide a branch name, or use --from-spec to derive the branch (and CLI) \
                       from a discovered spec. Adding past the 25-agent cap is rejected. When the \
                       session is paused, the new pane starts paused too and begins on the next \
-                      `git paw resume`. The supervisor (if any) discovers the new agent on its \
+                      `git paw start`. The supervisor (if any) discovers the new agent on its \
                       next broker poll — no restart.\n\n\
                       Examples:\n  \
                       git paw add feat/new-thing\n  \

@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/bearicorn/git-paw/main/.github/assets/logo.jpg" alt="git-paw logo" width="288">
+<img src="https://raw.githubusercontent.com/bearicorn/git-paw/main/.github/assets/logo.jpg" alt="git-paw logo" width="152">
 
 # git-paw
 
@@ -91,12 +91,17 @@ git-paw lets you run multiple AI coding assistants in parallel, each in its own 
 - **Routing through the supervisor** — type `/agents` in the supervisor pane to see the live agent inventory (status, mode, pane) and `/tell <agent> <prompt>` to route a prompt to one agent without tab-switching into its pane; `[supervisor.tell] mode` picks the delivery channel (`feedback` queue by default, `send-keys` for accept-edits agents) and every route is recorded in the session learnings
 - **MCP server (v0.7.0+)** — `git paw mcp` exposes this repo's read-only state (coordination intents/conflicts, governance docs, specs/tasks, session status/learnings, agent skills, git context) over the [Model Context Protocol](https://modelcontextprotocol.io) so any MCP-aware client can query it; runs standalone over stdio, degrades gracefully when no session is active, and never invokes an agent CLI as a backend
 
-> **Tip:** git-paw uses `AGENTS.md` as the standard agent instruction file. If your AI CLI reads a different file (e.g., `CLAUDE.md`, `GEMINI.md`), you can symlink it:
-> ```bash
-> ln -s AGENTS.md CLAUDE.md   # Claude Code reads CLAUDE.md
-> ln -s AGENTS.md GEMINI.md   # Gemini reads GEMINI.md
-> ```
-> Add these symlinks to `.gitignore` so they stay local to each developer.
+> **Tip:** git-paw uses `AGENTS.md` as the standard agent instruction file. Point your CLI at it without duplicating content:
+> - **Claude Code** reads only `CLAUDE.md` and supports imports, so create a `CLAUDE.md` whose first line imports `AGENTS.md`, then add any machine-local notes below it:
+>   ```markdown
+>   @AGENTS.md
+>
+>   # personal, machine-local notes (optional)
+>   ```
+>   The import stays in sync with `AGENTS.md` and survives tools that rewrite `CLAUDE.md` (e.g. `rtk init`) — a symlink gets clobbered by those and can't carry CLI-specific additions.
+> - **Other CLIs** that read a fixed file and have no import syntax (e.g. Gemini → `GEMINI.md`) can symlink instead: `ln -s AGENTS.md GEMINI.md`.
+>
+> Add the local `CLAUDE.md` / symlinks to `.gitignore` so they stay per-developer.
 
 ## Platform Support
 
@@ -221,256 +226,43 @@ All examples below use `git paw`, but `git-paw` works identically.
 
 ## Usage
 
-### `init` — Initialize project
+`git paw <command>` (equivalently `git-paw <command>`). One-line summary below — the **full reference, with every flag and example, lives in the [CLI Reference](https://bearicorn.github.io/git-paw/cli-reference.html)**.
 
-```bash
-git paw init
-```
+| Command | What it does |
+|---------|--------------|
+| `init` | Scaffold `.git-paw/` (default config + `.gitignore`). |
+| `start` | Launch or reattach a session — interactive, `--cli`/`--branches`, or spec-driven (`--from-all-specs`, `--specs`, `--preset`, `--dry-run`, `--unattended`). Auto-recovers a stopped session. |
+| `add` | Attach a branch + agent pane mid-session (v0.6.0+). |
+| `remove` | Detach one agent — pane + worktree — with `--force` / `--keep-worktree` (v0.6.0+). |
+| `pause` | Soft-stop: detach and stop the broker, keep CLI panes for instant resume (v0.5.0+). |
+| `stop` | Kill the tmux session and CLIs; keep worktrees + state. |
+| `purge` | Remove the session, all worktrees, and state (`--force` to skip the prompt). |
+| `status` | Show session name, branches, CLIs, and state. |
+| `list-clis` / `add-cli` / `remove-cli` | Manage auto-detected and custom AI CLIs. |
+| `replay` | View session logs (`--list`, `--color`, `--session`). |
+| `mcp` | Read-only [MCP](https://modelcontextprotocol.io) server over stdio — no session or broker required (v0.7.0+). |
+| `selftest` | Run a full lifecycle against a throwaway repo + dummy CLI to verify the plumbing (v0.9.0+). |
 
-Creates `.git-paw/` directory with default config and sets up `.gitignore` for logs.
-
-### `start` — Launch or reattach
-
-```bash
-# Interactive launch
-git paw start
-
-# Specify CLI and branches
-git paw start --cli claude --branches feat/auth,feat/api
-
-# Launch every discovered spec (OpenSpec, Markdown, or Spec Kit)
-git paw start --from-all-specs
-git paw start --from-all-specs --cli claude
-
-# Force-select the spec backend, overriding [specs] type and .specify/ auto-detection
-git paw start --from-all-specs --specs-format speckit
-
-# Narrow to specific specs, or open a multi-select picker
-git paw start --specs add-auth,fix-session
-git paw start --specs   # interactive picker (requires a TTY)
-
-# Use a preset from config
-git paw start --preset backend
-
-# Preview without executing
-git paw start --dry-run
-
-# Bypass the uncommitted-spec validation warning
-git paw start --from-all-specs --force
-```
-
-Smart behavior:
-- **Active session exists** → reattaches
-- **Stopped/crashed session** → auto-recovers (reuses worktrees, relaunches CLIs)
-- **No session** → full interactive launch
-
-### `add` — Attach a branch mid-session (v0.6.0+)
-
-```bash
-git paw add feat/new-thing            # attach a worktree + agent pane (session's default CLI)
-git paw add feat/api --cli codex      # choose the CLI for the new pane
-git paw add --from-spec add-export    # derive branch + CLI from a discovered spec
-```
-
-Hot-attaches a worktree and agent pane to a running supervisor session — no stop/purge/restart, the other agents keep working. The grid re-tiles to the layout a `start` of that many agents would produce, the new agent boots with the same broker boot block + prompt a start-time agent gets, and the supervisor discovers it on its next sweep. Adding past the 25-agent cap is rejected; adding to a paused session leaves the new pane paused until `git paw resume`. See [Session Lifecycle](docs/src/user-guide/session-lifecycle.md#adding-and-removing-branches-mid-session).
-
-### `remove` — Detach a single agent (v0.6.0+)
-
-```bash
-git paw remove feat/done-thing            # close pane, remove worktree, drop from session
-git paw remove feat/wip --force           # remove even with uncommitted changes
-git paw remove feat/keep --keep-worktree  # detach pane only; leave worktree + branch on disk
-```
-
-Detaches one agent: closes its pane, re-tiles the grid for the smaller agent count, removes its worktree (reusing `purge`'s teardown), and drops it from the session. Safe by default — refuses a worktree with uncommitted changes (listing what would be lost) unless `--force`; `--keep-worktree` detaches the pane but leaves the worktree on disk. `git paw remove supervisor` is refused — use `git paw stop` to end the whole session.
-
-### `pause` — Soft-stop the session (v0.5.0+)
-
-```bash
-git paw pause
-```
-
-Detaches the tmux client, stops the broker, and leaves every CLI pane running. Preserves agent conversation state for instant resume via `git paw start`. Holds RAM (~300 MB per Claude pane), so use it for short breaks (lunch, meetings, end-of-day). See [Pause and Resume](docs/src/user-guide/pause.md) for the full trade-off.
-
-### `stop` — Kill the CLIs, keep the worktrees
-
-```bash
-git paw stop          # prompts for confirmation in a TTY
-git paw stop --force  # skip the prompt (scripts)
-```
-
-Kills the tmux session and every CLI pane process but preserves worktrees and state on disk. CLI conversation context is lost. Run `git paw start` later to recover with fresh CLI processes.
-
-### `purge` — Remove everything
-
-```bash
-# With confirmation prompt
-git paw purge
-
-# Skip confirmation
-git paw purge --force
-```
-
-Removes the tmux session, all worktrees, and session state.
-
-### `status` — Check session state
-
-```bash
-git paw status
-```
-
-Shows session name, branches, CLIs, and status (active/stopped/no session).
-
-### `list-clis` — Show available CLIs
-
-```bash
-git paw list-clis
-```
-
-Lists auto-detected and custom AI CLIs with their source.
-
-### `add-cli` — Register a custom CLI
-
-```bash
-# With absolute path
-git paw add-cli my-agent /usr/local/bin/my-agent
-
-# With display name
-git paw add-cli my-agent my-agent --display-name "My Agent"
-```
-
-### `remove-cli` — Unregister a custom CLI
-
-```bash
-git paw remove-cli my-agent
-```
-
-Only custom CLIs can be removed — auto-detected CLIs cannot.
-
-### `replay` — View session logs
-
-```bash
-# List available log sessions
-git paw replay --list
-
-# View a branch's log (ANSI stripped)
-git paw replay feat/auth
-
-# View with colors via less -R
-git paw replay feat/auth --color
-
-# Replay from a specific session
-git paw replay feat/auth --session paw-myproject
-```
-
-Requires session logging to be enabled in config.
-
-### `mcp` — Read-only MCP server (v0.7.0+)
-
-Runs a [Model Context Protocol](https://modelcontextprotocol.io) server on
-stdio so any MCP-aware client (Claude Desktop, Cursor, ChatGPT Desktop,
-Windsurf, VS Code MCP) can query this repository's read-only state:
-coordination intents/conflicts, governance docs, specs and tasks, session
-status and learnings, agent skills, and git context. It runs standalone — no
-tmux session or broker required.
-
-```bash
-# Serve the repo in the current directory
-git paw mcp
-
-# Serve a specific repo (required for clients that spawn from a fixed dir,
-# notably Claude Desktop)
-git paw mcp --repo /path/to/your/repo
-
-# Tee diagnostics to a file (stderr is always used; stdout is JSON-RPC only)
-git paw mcp --repo /path/to/your/repo --log-file /tmp/git-paw-mcp.log
-```
-
-Claude Desktop config (`claude_desktop_config.json`):
-
-```json
-{
-  "mcpServers": {
-    "git-paw": {
-      "command": "git",
-      "args": ["paw", "mcp", "--repo", "/absolute/path/to/your/repo"]
-    }
-  }
-}
-```
-
-See the [MCP user-guide chapter](https://bearicorn.github.io/git-paw/user-guide/mcp.html)
-for per-client setup (Cursor, ChatGPT Desktop, Windsurf, VS Code MCP), the full
-tool reference, and known limitations.
-
-### `selftest` — Verify the orchestration plumbing (v0.9.0+)
-
-```bash
-git paw selftest
-```
-
-Runs a full session lifecycle (start → add → remove → stop) against a throwaway
-repo and a dummy CLI (`cat`) — no real LLM backend and no interactive terminal.
-Every external resource is isolated (private tmux socket, ephemeral broker port,
-isolated `HOME`, throwaway repo under `.git-paw/tmp/`) and cleaned up afterward.
-Exits `0` on a healthy build (or when tmux is unavailable, printing a skip),
-non-zero and naming the failing step on an actual lifecycle failure. See the
-[Selftest chapter](docs/src/user-guide/selftest.md).
+Full flags, examples, and per-client MCP setup: **[CLI Reference](https://bearicorn.github.io/git-paw/cli-reference.html)**.
 
 ## Configuration
 
-### Per-repo config (`.git-paw/config.toml`)
+git-paw reads a per-repo `.git-paw/config.toml` and a global `~/.config/git-paw/config.toml` (per-repo overrides global for overlapping fields). The common fields:
 
 ```toml
-# Pre-select a CLI in the interactive picker
-default_cli = "my-cli"
-mouse = true
+default_cli = "claude"        # pre-select in the interactive picker
+default_spec_cli = "claude"   # skip the picker for spec-mode launches
+branch_prefix = "spec/"       # prefix for spec-derived branches
 
-# Bypass picker entirely for spec-mode launches (--from-all-specs, --specs)
-default_spec_cli = "my-cli"
-
-# Prefix for spec-derived branches (default: "spec/")
-branch_prefix = "spec/"
-
-# Spec scanning
 [specs]
-dir = "specs"
-type = "openspec"  # "openspec", "markdown", or "speckit"
-
-# Session logging
-[logging]
-enabled = true
-
-# Dashboard configuration
-[dashboard]
-# Show broker messages panel for real-time agent communication
-show_message_log = true
+type = "openspec"             # "openspec" | "markdown" | "speckit"
 
 [presets.backend]
 branches = ["feat/api", "fix/db"]
-cli = "my-cli"
+cli = "claude"
 ```
 
-### Global config (`~/.config/git-paw/config.toml`)
-
-```toml
-default_cli = "my-cli"
-mouse = true
-
-[clis.my-agent]
-command = "/usr/local/bin/my-agent"
-display_name = "My Agent"
-
-[clis.local-llm]
-command = "ollama-code"
-display_name = "Local LLM"
-
-[presets.backend]
-branches = ["feat/api", "fix/db"]
-cli = "my-cli"
-```
-
-Per-repo config overrides global config for overlapping fields.
+Custom CLIs, dashboard, logging, broker, supervisor, and worktree placement each have their own sections — see the **[Configuration reference](https://bearicorn.github.io/git-paw/configuration/index.html)** for the full schema and defaults.
 
 ## Supported AI CLIs
 
@@ -535,11 +327,12 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 
 ## Releases
 
-Releases follow a single `chore: prepare vX.Y.Z release` commit on `main` that
-bumps `Cargo.toml`, regenerates `CHANGELOG.md` via `git cliff`, and archives
-completed OpenSpec changes (moving them under
-`openspec/changes/archive/<date>-<change>/` and syncing their delta specs into
-`openspec/specs/`). Pushing the `vX.Y.Z` tag triggers
+OpenSpec changes are archived **per-change on the feature branch** as they land
+(syncing their delta specs into `openspec/specs/`); the archive directories are
+gitignored, so the canonical post-archive state lives in `openspec/specs/`. The
+`chore: prepare vX.Y.Z release` commit therefore touches **only** the version
+bump in `Cargo.toml` and the `CHANGELOG.md` regenerated via `git cliff` — no
+archive moves. Pushing the `vX.Y.Z` tag triggers
 [`cargo-dist`](https://github.com/axodotdev/cargo-dist) on GitHub Actions to
 build cross-platform binaries and update the Homebrew tap.
 

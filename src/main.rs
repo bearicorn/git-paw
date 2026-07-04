@@ -2586,7 +2586,7 @@ fn cmd_add(
     if paused {
         println!(
             "Added '{branch}' to paused session '{}' (pane {new_pane_idx}); it will start on \
-             `git paw resume`.",
+             `git paw start`.",
             updated.session_name
         );
     } else {

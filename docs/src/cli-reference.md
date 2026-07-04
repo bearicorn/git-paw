@@ -13,16 +13,19 @@ Usage: git-paw [COMMAND]
 
 Commands:
   start       Launch a new session or reattach to an existing one
-  pause       Soft-stop: detach client, stop broker, keep CLIs running
+  add         Attach a new worktree + agent pane to a running session
+  remove      Detach a single agent from a running session
+  pause       Pause the session (detaches client, stops broker, leaves CLIs running)
   stop        Stop the session (kills tmux, keeps worktrees and state)
   purge       Remove everything (tmux session, worktrees, and state)
   status      Show session state for the current repo
   list-clis   List detected and custom AI CLIs
   add-cli     Register a custom AI CLI
   remove-cli  Unregister a custom AI CLI
-  init        Initialize the repository for git-paw (creates .git-paw/)
-  replay      Replay a captured pane log (requires session logging)
+  init        Initialize .git-paw/ directory and configuration
+  replay      View captured session logs
   approvals   Report manually-approved command patterns for a session
+  mcp         Run a read-only Model Context Protocol (MCP) server over stdio
   selftest    Run an isolated end-to-end session-lifecycle smoke check
   help        Print this message or the help of the given subcommand(s)
 
@@ -169,7 +172,7 @@ See [Spec-Driven Launch](user-guide/spec-driven-launch.md) for details on spec f
 
 Hot-attaches a worktree and agent pane to a running **supervisor-mode** session without a stop/purge/restart. The agent grid re-tiles to the layout a `start` of that many agents would produce, the new branch is registered in the session, and the agent boots with the same broker boot block + initial prompt a start-time agent receives. The supervisor discovers it on its next broker poll — no restart.
 
-Provide a branch name, or use `--from-spec` to derive the branch (and CLI) from a discovered spec across the OpenSpec / Markdown / Spec Kit backends (same resolution as `start --specs NAME`). Adding past the 25-agent cap is rejected with the same "split into multiple sessions" message `start` uses. Adding to a paused session leaves the new pane paused until `git paw resume`.
+Provide a branch name, or use `--from-spec` to derive the branch (and CLI) from a discovered spec across the OpenSpec / Markdown / Spec Kit backends (same resolution as `start --specs NAME`). Adding past the 25-agent cap is rejected with the same "split into multiple sessions" message `start` uses. Adding to a paused session leaves the new pane paused until `git paw start`.
 
 ```
 Usage: git-paw add [OPTIONS] [BRANCH]
@@ -449,6 +452,60 @@ git paw approvals --limit 5
 The `--json` output is a `{ "session", "approvals": [...] }` object where each
 entry carries `pattern`, `count`, `suggested_target`, `first_seen`, and
 `last_seen`. An empty or missing log yields `{ "session": "...", "approvals": [] }`.
+
+## `git paw mcp`
+
+Starts a read-only [Model Context Protocol](https://modelcontextprotocol.io/)
+(MCP) server on stdin/stdout so any MCP-aware client (Claude Desktop, Cursor,
+ChatGPT Desktop, Windsurf, VS Code MCP) can query this repository's read-only
+state: agent coordination intents/conflicts, governance docs, specs and tasks,
+session status and learnings, agent skills, git context, source browsing
+(`list_files`, `read_file`, `search_code` over the local working tree), and the
+repository's own README and documentation.
+
+The server is client-spawned and one-shot: the MCP client owns the process
+lifecycle and the server exits when stdin is closed. It runs **standalone** — no
+tmux session, broker, or supervisor is required. When a data source is
+unavailable (no broker, no session, no governance config) tools return
+well-formed empty/null results rather than errors.
+
+```
+Usage: git-paw mcp [OPTIONS]
+
+Options:
+      --repo <PATH>      Repository to serve (overrides current-directory discovery; required for Claude Desktop)
+      --log-file <PATH>  Also write tracing output to this file (stderr is always used)
+  -h, --help             Print help
+```
+
+Repository resolution: `--repo` wins; otherwise the nearest ancestor of the
+current directory containing `.git` is used (worktrees resolve to their own
+root). Clients that spawn servers from a fixed directory — notably Claude
+Desktop, which launches from its app-support directory — **must** pass `--repo`
+with an absolute path.
+
+`--log-file` tees tracing diagnostics to a file in addition to stderr; stdout
+always stays reserved for the JSON-RPC stream.
+
+**Claude Desktop config** (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "git-paw": {
+      "command": "git",
+      "args": ["paw", "mcp", "--repo", "/absolute/path/to/your/repo"]
+    }
+  }
+}
+```
+
+**Examples:**
+```bash
+git paw mcp
+git paw mcp --repo /path/to/repo
+git paw mcp --repo /path/to/repo --log-file /tmp/git-paw-mcp.log
+```
 
 ## `git paw selftest`
 
