@@ -40,6 +40,10 @@ GEMINI.md
 # mdBook build output
 docs/book/
 
+# Python bytecode cache from the docs build-tooling generator
+__pycache__/
+*.pyc
+
 # Added by cargo
 
 /target

@@ -139,6 +139,12 @@ jobs:
         run: mdbook build docs/
       - name: Generate coverage report
         run: cargo llvm-cov --html --output-dir docs/book/coverage
+      # Emit the agent-friendly discovery surface (llms.txt, sitemap.xml,
+      # robots.txt, per-page metadata) into docs/book so it deploys with the
+      # Pages artifact. Runs after the book is built and before the upload; the
+      # date is passed in as a build input, so the generator never reads the clock.
+      - name: Generate agent-friendly docs surface
+        run: python3 docs/generate_agent_metadata.py --src-dir docs/src --book-dir docs/book --build-date "$(date -u +%F)"
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v4
         with:

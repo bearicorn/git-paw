@@ -1,5 +1,8 @@
-## ADDED Requirements
+# agent-friendly-docs-site Specification
 
+## Purpose
+TBD - created by archiving change agent-friendly-docs-site. Update Purpose after archive.
+## Requirements
 ### Requirement: llms.txt index
 
 The published docs site SHALL expose an `llms.txt` file at the site root that indexes the documentation for LLM consumers, following the llmstxt.org convention: an H1 title, a one-line summary of git-paw, and grouped sections of page entries in the form `- [Page Title](absolute-url): one-line summary`, ordered by the mdBook table of contents.
@@ -47,3 +50,4 @@ The `llms.txt`, `sitemap.xml`, `robots.txt`, and per-page metadata SHALL be gene
 #### Scenario: generation is reproducible
 - **WHEN** the docs build runs twice against unchanged sources
 - **THEN** the generated `llms.txt`, `sitemap.xml`, and `robots.txt` are byte-identical between runs (any date field is supplied as a build input, not read from the wall clock)
+
