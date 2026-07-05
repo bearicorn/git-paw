@@ -1574,6 +1574,19 @@ worktree_placement = "child"
 # Dashboard message log configuration.
 # [dashboard]
 # show_message_log = false
+#
+# Broker log panel — a scrolling, type-filterable view of recent broker
+# messages. An absent table loads these defaults.
+# [dashboard.broker_log]
+# max_messages = 500
+# default_visible = true
+# height_lines = 20
+
+# Pane affordances for git-paw-managed (paw-*) sessions: heavy pane borders,
+# a per-pane label strip, and dim-inactive / cyan-bold-active borders.
+# Set false to inherit your own tmux styling (default: true).
+# [layout]
+# border_affordances = true
 
 # Spec scanning configuration.
 # [specs]
@@ -1598,6 +1611,12 @@ worktree_placement = "child"
 # enabled = true
 # port = 9119
 # bind = "127.0.0.1"
+#
+# Filesystem watcher. After a `committed` event, a file write within this
+# TTL re-publishes `working` so the dashboard reflects continued activity.
+# 0 disables; non-zero values below 5 clamp to 5 (default: 60).
+# [broker.watcher]
+# republish_working_ttl_seconds = 60
 
 # Supervisor mode — git-paw acts as a coordinating layer in front of the
 # agent CLI, enforcing approval policy and running configured gate
@@ -1650,6 +1669,27 @@ worktree_placement = "child"
 # window_seconds = 120          # escalate unresolved in-flight conflicts after this many seconds
 # warn_on_intent_overlap = true # emit feedback when two agent.intent declarations overlap
 # escalate_on_violation = true  # also publish agent.question to supervisor on ownership violations
+#
+# Auto-approve known-safe permission prompts in stalled agent panes so the
+# supervisor need not dismiss each by hand. `approval_level` is a coarse
+# preset ("off" | "conservative" | "safe"); `safe_commands` are extra prefixes
+# appended to the built-ins; `stall_threshold_seconds` is the last_seen lag
+# before a stalled pane is polled (minimum 5); `approve_worktree_writes`
+# auto-approves file writes whose target resolves inside the agent's worktree.
+# [supervisor.auto_approve]
+# enabled = true
+# safe_commands = ["just lint", "just test"]
+# stall_threshold_seconds = 30
+# approval_level = "safe"
+# approve_worktree_writes = true
+#
+# Learnings subsystem flush cadence. The master switch is the `learnings`
+# field on [supervisor] above; this sub-table only tunes the flush. Set
+# broker_publish = "force_off" to keep file-only output even when the broker
+# is running ("auto" follows [broker] enabled).
+# [supervisor.learnings_config]
+# flush_interval_seconds = 60
+# broker_publish = "auto"
 
 # Common dev-command allowlist. When supervisor mode starts a session,
 # git-paw seeds .claude/settings.json::allowed_bash_prefixes with the
@@ -1674,6 +1714,23 @@ worktree_placement = "child"
 # The guard is inert under non-OpenSpec engines (speckit, markdown).
 # [opsx]
 # role_gating = "warn"
+
+# Pointers to your project's existing governance docs so the supervisor can
+# read them as context. All fields optional — list only the docs you have.
+# [governance]
+# adr = "docs/adr"                                  # directory of ADR files
+# test_strategy = "docs/test-strategy.md"           # single Markdown file
+# security = "docs/security-checklist.md"           # single Markdown file
+# dod = "docs/definition-of-done.md"                # single Markdown file
+# constitution = ".specify/memory/constitution.md"  # single Markdown file
+# readme = "README.md"                              # repository README
+# docs = "docs/src"                                 # documentation root directory
+
+# MCP server identity for `git paw mcp` (advertised as serverInfo.name in the
+# initialize handshake). Set to distinguish multiple repos each running a
+# server; defaults to "git-paw".
+# [mcp]
+# name = "git-paw"
 
 # Custom CLI definitions.
 # [clis.my-agent]
@@ -2243,6 +2300,117 @@ enabled = true
             parsed.worktree_placement(),
             WorktreePlacement::Child,
             "generated config must resolve to child placement"
+        );
+    }
+
+    // --- Template completeness (init-config-template-completeness) ---
+
+    /// Normalize a TOML table path to its section "family": parameterized
+    /// tables (`clis.<name>`, `presets.<name>`) collapse to their prefix,
+    /// while every other path (including sub-tables like `broker.watcher`) is
+    /// kept verbatim.
+    fn section_family(path: &str) -> String {
+        for family in ["clis", "presets"] {
+            if path == family || path.starts_with(&format!("{family}.")) {
+                return family.to_string();
+            }
+        }
+        path.to_string()
+    }
+
+    /// Return the TOML table path on a line when the line is a table header,
+    /// tolerating an optional leading `#` so commented template stanzas and
+    /// bare TOML examples are both recognized. Non-header lines return `None`.
+    fn table_header(line: &str) -> Option<String> {
+        let trimmed = line.trim();
+        let body = trimmed.strip_prefix('#').map_or(trimmed, str::trim_start);
+        let inner = body.strip_prefix('[')?.strip_suffix(']')?;
+        if inner.starts_with('[')
+            || inner.is_empty()
+            || inner.contains(' ')
+            || inner.contains('=')
+            || inner.contains('"')
+        {
+            return None;
+        }
+        Some(inner.to_string())
+    }
+
+    /// Section families that appear (commented) in the generated init template.
+    fn template_section_families() -> std::collections::BTreeSet<String> {
+        generate_default_config()
+            .lines()
+            .filter_map(table_header)
+            .map(|path| section_family(&path))
+            .collect()
+    }
+
+    #[test]
+    fn generated_template_documents_the_six_added_sections() {
+        let template = generate_default_config();
+        for header in [
+            "# [mcp]",
+            "# [layout]",
+            "# [broker.watcher]",
+            "# [supervisor.auto_approve]",
+            "# [supervisor.learnings_config]",
+            "# [governance]",
+        ] {
+            assert!(
+                template.contains(header),
+                "generated template should contain a commented stanza for {header}",
+            );
+        }
+    }
+
+    #[test]
+    fn generated_template_covers_every_documented_config_section() {
+        // Parity guard: every TOML table documented in the configuration
+        // reference must have a corresponding commented stanza in the init
+        // template, so the two cannot silently drift apart.
+        let reference = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/src/configuration/README.md"),
+        )
+        .expect("configuration reference should be readable");
+
+        let mut documented = std::collections::BTreeSet::new();
+        let mut in_toml_fence = false;
+        for line in reference.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("```") {
+                in_toml_fence = trimmed.starts_with("```toml");
+                continue;
+            }
+            if in_toml_fence && let Some(path) = table_header(line) {
+                documented.insert(section_family(&path));
+            }
+        }
+        assert!(
+            !documented.is_empty(),
+            "expected to extract documented config sections from the reference",
+        );
+
+        let template = template_section_families();
+        let missing: Vec<_> = documented.difference(&template).cloned().collect();
+        assert!(
+            missing.is_empty(),
+            "config sections documented in the reference but missing a commented stanza \
+             in the init template: {missing:?}",
+        );
+    }
+
+    #[test]
+    fn untouched_generated_template_resolves_to_unchanged_defaults() {
+        // Every added stanza is commented, so parsing the generated template
+        // must yield exactly the same effective config as its sole active
+        // line (worktree_placement) on its own — no new behavior is activated.
+        let generated: PawConfig =
+            toml::from_str(&generate_default_config()).expect("generated template parses");
+        let baseline: PawConfig =
+            toml::from_str("worktree_placement = \"child\"\n").expect("baseline parses");
+        assert_eq!(
+            generated, baseline,
+            "commented stanzas must not change the effective configuration",
         );
     }
 
