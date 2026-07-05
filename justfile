@@ -35,9 +35,13 @@ deny:
 audit:
     cargo audit
 
-# Build and open mdBook docs
-docs:
+# Build the docs site + agent-friendly surface (llms.txt, sitemap, robots, per-page metadata); date is a build input for reproducibility
+docs-build date=`date -u +%F`:
     mdbook build docs/
+    python3 docs/generate_agent_metadata.py --src-dir docs/src --book-dir docs/book --build-date {{ date }}
+
+# Build and open mdBook docs
+docs: docs-build
     open docs/book/index.html || xdg-open docs/book/index.html
 
 # Build and open Rustdoc API docs

@@ -75,3 +75,22 @@ Each pane runs in its own git worktree, so there are no branch conflicts. Your A
 - [Install git-paw](installation.md)
 - [Quick Start: Same CLI Mode](quick-start-same-cli.md) — get running in 2 minutes
 - [Quick Start: Per-Branch CLI Mode](quick-start-per-branch.md) — mix different AI CLIs
+
+## Machine-Readable Docs (for Agents)
+
+This site — <https://bearicorn.github.io/git-paw/> — also publishes an
+agent-friendly discovery surface so an LLM can find and target the right page
+without crawling every chapter:
+
+- **[`llms.txt`](https://bearicorn.github.io/git-paw/llms.txt)** — an
+  [llmstxt.org](https://llmstxt.org)-style index listing every page with a
+  one-line summary and its absolute URL.
+- **[`sitemap.xml`](https://bearicorn.github.io/git-paw/sitemap.xml)** and
+  **[`robots.txt`](https://bearicorn.github.io/git-paw/robots.txt)** — standard
+  crawl and discovery files.
+- **Per-page metadata** — each page embeds a `<meta name="description">` and a
+  JSON block (title, canonical URL, section anchor ids) in its `<head>`, so an
+  agent can identify a page and jump to a section from a single fetch.
+
+These artifacts are generated deterministically from the documentation sources
+on every build, so they never drift from the published content.
