@@ -251,8 +251,10 @@ pub const SIDECAR_REL_PATH: &str = ".git-paw/AGENTS.local.md";
 /// just-provisioned but otherwise-clean worktree is not refused because of the
 /// injected sidecar (the v0.8.0 regression). A path is git-paw-managed when:
 ///
-/// - it is the injected sidecar [`SIDECAR_REL_PATH`]
-///   (`.git-paw/AGENTS.local.md`), which is always ephemeral git-paw state; or
+/// - it lives anywhere under git-paw's own `.git-paw/` directory — the injected
+///   sidecar [`SIDECAR_REL_PATH`] (`.git-paw/AGENTS.local.md`), bundled scripts,
+///   `tmp/`, or the collapsed `.git-paw/` entry `git status` emits for a
+///   wholly-untracked directory — all of which are ephemeral git-paw state; or
 /// - it is the tracked `AGENTS.md` whose ONLY uncommitted change is the
 ///   presence of git-paw's managed `<!-- git-paw:start -->` block — i.e. the
 ///   file is byte-identical to its `HEAD` revision once that block is removed.
@@ -266,6 +268,14 @@ pub const SIDECAR_REL_PATH: &str = ".git-paw/AGENTS.local.md";
 /// so `remove` still refuses on it.
 pub fn is_managed_path(worktree_root: &Path, rel: &str) -> bool {
     if rel == SIDECAR_REL_PATH {
+        return true;
+    }
+    // Everything under git-paw's own `.git-paw/` directory is ephemeral git-paw
+    // state (the injected sidecar, bundled scripts, `tmp/`), never user work —
+    // including the collapsed `.git-paw/` entry that `git status` reports for a
+    // wholly-untracked directory. Filtering the whole subtree keeps `remove`
+    // from refusing on git-paw's own bookkeeping however git status names it.
+    if rel == ".git-paw" || rel == ".git-paw/" || rel.starts_with(".git-paw/") {
         return true;
     }
     if rel != "AGENTS.md" {
@@ -1464,6 +1474,39 @@ mod tests {
         assert!(
             !is_managed_path(wt.path(), "AGENTS.md"),
             "an AGENTS.md edited outside the managed block must NOT be managed"
+        );
+    }
+
+    #[test]
+    fn is_managed_path_classifies_git_paw_subtree_managed() {
+        // Everything under git-paw's own `.git-paw/` directory is ephemeral
+        // state — including the collapsed `.git-paw/` entry `git status` reports
+        // for a wholly-untracked directory — so `remove` never refuses on
+        // git-paw's own bookkeeping however git names it.
+        let wt = tempfile::tempdir().unwrap();
+        init_git_repo(wt.path());
+
+        for rel in [
+            ".git-paw",
+            ".git-paw/",
+            ".git-paw/scripts/broker.sh",
+            ".git-paw/tmp/baseline.md",
+            SIDECAR_REL_PATH,
+        ] {
+            assert!(
+                is_managed_path(wt.path(), rel),
+                "'{rel}' under .git-paw/ must be classified managed"
+            );
+        }
+
+        // Paths that only SHARE the prefix are still user work.
+        assert!(
+            !is_managed_path(wt.path(), ".git-paw-notes.md"),
+            "a top-level file that only shares the .git-paw prefix must NOT be managed"
+        );
+        assert!(
+            !is_managed_path(wt.path(), "src/git_paw.rs"),
+            "an ordinary source file must NOT be classified managed"
         );
     }
 

@@ -567,15 +567,22 @@ pub fn check_uncommitted_specs(
 
 /// Returns the list of files with uncommitted changes in `worktree_root`.
 ///
-/// Runs `git status --porcelain` inside the worktree and parses each line's
-/// path (the portion after the 3-character XY-status prefix). Untracked,
-/// modified, staged, and renamed entries are all included. An empty vec means
-/// the worktree is clean. Used by `git paw remove`'s uncommitted-work safety
-/// check (design D7) to tell the user exactly what would be lost.
+/// Runs `git status --porcelain -z` inside the worktree and parses each
+/// NUL-terminated record's path (the portion after the 3-character XY-status
+/// prefix). NUL-delimiting — rather than newline-splitting — is what makes
+/// this robust: with `-z`, git emits paths verbatim (never quoted) and never
+/// wraps a record across delimiters, so a path that itself contains a newline,
+/// or file content that would otherwise bleed across lines, always stays a
+/// single record. Newline-splitting `git status --porcelain` (the prior
+/// implementation) could mis-read such a fragment as a phantom "file" — which
+/// surfaced as `git paw remove` refusing a clean just-started worktree over a
+/// bogus dirty entry. Untracked, modified, staged, and renamed entries are all
+/// included. An empty vec means the worktree is clean. Used by `git paw
+/// remove`'s uncommitted-work safety check (design D7).
 pub fn uncommitted_files(worktree_root: &Path) -> Result<Vec<String>, PawError> {
     let output = Command::new("git")
         .current_dir(worktree_root)
-        .args(["status", "--porcelain"])
+        .args(["status", "--porcelain", "-z"])
         .output()
         .map_err(|e| {
             PawError::WorktreeError(format!(
@@ -593,17 +600,25 @@ pub fn uncommitted_files(worktree_root: &Path) -> Result<Vec<String>, PawError> 
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    // Porcelain v1 with `-z`: each entry is a NUL-terminated record `XY <path>`
+    // (status in bytes 0..2, a space at byte 2, path from byte 3). A
+    // rename/copy carries `R`/`C` in the index (X) column and is followed by a
+    // SECOND NUL-terminated field holding the original path; report the new
+    // path and consume that origin field. Splitting on NUL (not newlines) means
+    // a path containing a newline stays one record, so content can never be
+    // mistaken for a filename.
     let mut files = Vec::new();
-    for line in stdout.lines() {
-        if line.len() <= 3 {
+    let mut records = stdout.split('\0');
+    while let Some(rec) = records.next() {
+        if rec.len() <= 3 {
             continue;
         }
-        // Porcelain v1 format: `XY <path>` (or `XY <old> -> <new>` for
-        // renames). The path starts at byte 3. For renames, report the new
-        // path (the portion after `-> `).
-        let path = &line[3..];
-        let reported = path.rsplit(" -> ").next().unwrap_or(path);
-        files.push(reported.trim().to_string());
+        let is_rename_or_copy = matches!(rec.as_bytes()[0], b'R' | b'C');
+        files.push(rec[3..].to_string());
+        if is_rename_or_copy {
+            // The origin path occupies the next NUL-delimited field.
+            let _ = records.next();
+        }
     }
     Ok(files)
 }
@@ -1089,6 +1104,39 @@ mod tests {
         assert!(
             !sibling.path.starts_with(r.path()),
             "sibling must be outside repo"
+        );
+    }
+
+    /// Regression: a `git status --porcelain` entry whose path contains a
+    /// newline must stay ONE record, not split into phantom "files." The old
+    /// newline-splitting parser bled such content into bogus entries, which
+    /// made `git paw remove` refuse a clean just-started worktree over a
+    /// non-existent dirty file. `-z` (NUL-delimited) parsing fixes it.
+    #[test]
+    fn uncommitted_files_keeps_newline_bearing_path_as_one_record() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        run_git(repo, &["init", "-b", "main"]);
+        run_git(repo, &["config", "user.email", "test@test.com"]);
+        run_git(repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("tracked.txt"), "x\n").unwrap();
+        run_git(repo, &["add", "."]);
+        run_git(repo, &["commit", "-m", "init"]);
+
+        // One untracked file whose NAME embeds a newline plus the exact boot
+        // warning text that previously surfaced as a phantom `**WARNING:` path.
+        let evil = repo.join("evil\n**WARNING: Do NOT publish");
+        std::fs::write(&evil, "content\n").unwrap();
+
+        let files = crate::git::uncommitted_files(repo).expect("uncommitted_files");
+        assert_eq!(
+            files.len(),
+            1,
+            "newline-bearing path must be one record, not split into phantoms: {files:?}"
+        );
+        assert!(
+            files[0].contains("evil") && files[0].contains("**WARNING"),
+            "the single record should carry the whole path: {files:?}"
         );
     }
 }
