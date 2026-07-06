@@ -9,7 +9,6 @@ pub mod broker_log;
 use std::collections::HashMap;
 use std::io::{self, Stdout};
 use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -26,19 +25,51 @@ use crate::broker::{AgentStatusEntry, BrokerHandle, BrokerState};
 use crate::dashboard::broker_log::{BrokerLog, LogKeyAction};
 use crate::error::PawError;
 
-/// Tick interval for the dashboard draw loop.
+/// Idle refresh interval for the dashboard draw loop.
 ///
-/// Also bounds the worst-case typing latency: any keystroke that arrives
-/// mid-sleep is picked up on the next tick. 50ms is comfortably below the
-/// ~100ms perceptual threshold for interactive UIs while keeping the
-/// broker-state snapshot rate modest (~20 Hz against an in-process lock).
-const TICK_INTERVAL: Duration = Duration::from_millis(50);
+/// The loop blocks in `event::poll(TICK_INTERVAL)`, so a keystroke wakes it
+/// immediately — typing latency is near-zero and independent of this value —
+/// while an *idle* dashboard only re-renders the broker-state snapshot once
+/// per interval instead of busy-redrawing. 800ms (~1.25 Hz) keeps the status
+/// panel current without burning CPU on a near-static view; the previous 50ms
+/// (~20 Hz) unconditional redraw was the ~10%-per-dashboard idle cost. Input
+/// stays instant regardless, since a keystroke wakes the blocking poll.
+const TICK_INTERVAL: Duration = Duration::from_millis(800);
 
 /// Placeholder shown in the agent table's CLI column when an agent's CLI
 /// cannot be resolved (neither its `agent.status` payload nor the seeded
 /// `agent_clis` map names one). A visible `"?"` reads as "unknown" rather
 /// than a blank cell that looks like a rendering bug (W15-15).
 const UNKNOWN_CLI: &str = "?";
+
+/// Returns `true` when this dashboard process has been orphaned — its parent
+/// died and it was reparented to init (PID 1).
+///
+/// `git paw start` launches the dashboard as a child of its tmux pane. When
+/// the session or pane is torn down, tmux normally delivers SIGHUP (see the
+/// handler in `cmd_dashboard`) and the draw loop exits. But teardown paths
+/// that skip SIGHUP — an abrupt `tmux kill-server`, a crash, the machine
+/// sleeping, or an e2e test dropping the session — leave the dashboard alive,
+/// reparented to PID 1, where it would otherwise busy-render to a dead
+/// terminal forever (the leaked-process CPU-drain bug). Polling `getppid` each
+/// tick lets the loop notice the reparent and exit on its own, so no dashboard
+/// can outlive its session however that session ended.
+#[cfg(unix)]
+fn orphaned() -> bool {
+    // SAFETY: `getppid` is async-signal-safe, takes no arguments, and cannot
+    // fail — it just returns this process's current parent PID.
+    unsafe extern "C" {
+        fn getppid() -> i32;
+    }
+    (unsafe { getppid() }) == 1
+}
+
+/// Non-unix stub: reparent-to-init is a POSIX concept and the dashboard only
+/// runs on unix (tmux). Always reports "not orphaned".
+#[cfg(not(unix))]
+fn orphaned() -> bool {
+    false
+}
 
 /// The `agent_id` of the supervisor's pinned row. The supervisor is the only
 /// publisher whose `phase` introspection field is surfaced unconditionally in
@@ -473,32 +504,45 @@ pub fn run_dashboard_with_panes<S: std::hash::BuildHasher>(
     let mut broker_log = BrokerLog::new(max_messages, default_visible);
 
     loop {
-        // Check for SIGHUP-triggered shutdown (e.g. tmux kill-session)
-        if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+        // Exit promptly on a clean SIGHUP (tmux kill-session) OR when orphaned
+        // (parent gone → reparented to init), so the dashboard can never linger
+        // busy-rendering to a dead terminal after its session ends.
+        if shutdown.load(std::sync::atomic::Ordering::Relaxed) || orphaned() {
             break;
         }
 
-        // Drain up to 32 pending input events before re-rendering. `q` quits;
-        // the Broker log panel claims its own keys (l / a / 1-9 / Up / Down /
-        // Enter / Esc); everything else is ignored.
-        for _ in 0..32 {
-            if !event::poll(Duration::ZERO)
-                .map_err(|e| PawError::DashboardError(format!("event poll failed: {e}")))?
-            {
-                break;
-            }
-            let ev = event::read()
-                .map_err(|e| PawError::DashboardError(format!("event read failed: {e}")))?;
-            if let Event::Key(key) = ev
-                && key.kind == KeyEventKind::Press
-            {
-                // Offer the key to the panel first. It returns `Ignored` for
-                // keys it does not own (notably `q`), which then fall through
-                // to the quit check.
-                if broker_log::handle_key(&mut broker_log, key.code) == LogKeyAction::Ignored
-                    && should_quit(key.code)
-                {
-                    return restore_terminal(&mut guard.terminal);
+        // Block up to TICK_INTERVAL for input. This yields the CPU while idle
+        // instead of redrawing every tick, yet wakes the instant a key arrives
+        // — decoupling typing latency from the redraw cadence. A poll error
+        // means the terminal is gone; exit rather than spin against it.
+        match event::poll(TICK_INTERVAL) {
+            Ok(false) => {}
+            Err(_) => break,
+            Ok(true) => {
+                // Drain up to 32 pending input events before re-rendering. `q`
+                // quits; the Broker log panel claims its own keys (l / a / 1-9
+                // / Up / Down / Enter / Esc); everything else is ignored.
+                for _ in 0..32 {
+                    if !event::poll(Duration::ZERO)
+                        .map_err(|e| PawError::DashboardError(format!("event poll failed: {e}")))?
+                    {
+                        break;
+                    }
+                    let ev = event::read()
+                        .map_err(|e| PawError::DashboardError(format!("event read failed: {e}")))?;
+                    if let Event::Key(key) = ev
+                        && key.kind == KeyEventKind::Press
+                    {
+                        // Offer the key to the panel first. It returns `Ignored`
+                        // for keys it does not own (notably `q`), which then
+                        // fall through to the quit check.
+                        if broker_log::handle_key(&mut broker_log, key.code)
+                            == LogKeyAction::Ignored
+                            && should_quit(key.code)
+                        {
+                            return restore_terminal(&mut guard.terminal);
+                        }
+                    }
                 }
             }
         }
@@ -526,8 +570,6 @@ pub fn run_dashboard_with_panes<S: std::hash::BuildHasher>(
                 draw_frame(f, &rows, &status_line, &broker_log, height_lines);
             })
             .map_err(|e| PawError::DashboardError(format!("draw failed: {e}")))?;
-
-        thread::sleep(TICK_INTERVAL);
     }
 
     // Explicit restore for clean exit; guard also restores on drop as a safety net.
@@ -550,6 +592,19 @@ mod tests {
     /// height_lines`), for `draw_frame` calls in tests.
     fn default_panel_height() -> u16 {
         crate::config::BrokerLogConfig::default().height_lines
+    }
+
+    /// The orphan guard must run without panicking and report "not orphaned"
+    /// for a normal process — the test runner is its live parent, so `getppid`
+    /// is not 1. It only trips once the parent dies and the process reparents
+    /// to init, which is exactly when the draw loop should exit on its own.
+    #[cfg(unix)]
+    #[test]
+    fn orphaned_is_false_when_parent_alive() {
+        assert!(
+            !orphaned(),
+            "a process with a live parent must not be reported orphaned"
+        );
     }
 
     // -----------------------------------------------------------------------
