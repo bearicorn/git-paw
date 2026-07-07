@@ -1204,7 +1204,24 @@ pub struct PawConfig {
     /// pre-existing configs byte-stable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_placement: Option<WorktreePlacement>,
+
+    /// Base URL of the documentation site the bundled `docs-fetch` helper
+    /// targets for discovery (`llms.txt`) and page retrieval.
+    ///
+    /// Absent (every config without the field) resolves to
+    /// [`DEFAULT_DOCS_BASE_URL`] via [`PawConfig::docs_base_url`] — git-paw's
+    /// published documentation site. A fork or mirror sets this to retarget
+    /// the helper. Serialised with `skip_serializing_if` so the default never
+    /// appears in round-tripped configs, keeping pre-existing configs
+    /// byte-stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs_base_url: Option<String>,
 }
+
+/// Default documentation site the `docs-fetch` helper targets when
+/// `docs_base_url` is unset. Kept in sync with the fallback baked into
+/// `assets/scripts/docs-fetch.sh`.
+pub const DEFAULT_DOCS_BASE_URL: &str = "https://bearicorn.github.io/git-paw";
 
 impl PawConfig {
     /// Returns a new config that merges `overlay` on top of `self`.
@@ -1294,7 +1311,20 @@ impl PawConfig {
                 name: overlay.mcp.name.clone().or_else(|| self.mcp.name.clone()),
             },
             worktree_placement: overlay.worktree_placement.or(self.worktree_placement),
+            docs_base_url: overlay
+                .docs_base_url
+                .clone()
+                .or_else(|| self.docs_base_url.clone()),
         }
+    }
+
+    /// Resolves the effective docs base URL for the `docs-fetch` helper,
+    /// defaulting to [`DEFAULT_DOCS_BASE_URL`] when `docs_base_url` is absent.
+    #[must_use]
+    pub fn docs_base_url(&self) -> &str {
+        self.docs_base_url
+            .as_deref()
+            .unwrap_or(DEFAULT_DOCS_BASE_URL)
     }
 
     /// Resolves the effective worktree placement for this config, defaulting
@@ -1561,6 +1591,11 @@ pub fn generate_default_config() -> String {
 
 # Prefix for spec-derived branch names (default: "spec/" ).
 # branch_prefix = "spec/"
+
+# Documentation site the bundled docs-fetch helper consults on demand.
+# Defaults to git-paw's published docs; set this to point a fork or mirror
+# at its own site.
+# docs_base_url = "https://bearicorn.github.io/git-paw"
 
 # Where agent worktrees are created relative to the repository.
 #   "child"   — inside the repo at .git-paw/worktrees/<branch-slug> (contained
@@ -2179,6 +2214,7 @@ enabled = true
             opsx: None,
             mcp: McpConfig::default(),
             worktree_placement: Some(WorktreePlacement::Child),
+            docs_base_url: Some("https://docs.example.test".into()),
         };
 
         save_config_to(&config_path, &original).unwrap();

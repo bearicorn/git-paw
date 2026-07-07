@@ -36,6 +36,13 @@ const SWEEP_SCRIPT: &str = include_str!("../assets/scripts/sweep.sh");
 /// instead of inlining raw `curl` commands.
 const BROKER_SCRIPT: &str = include_str!("../assets/scripts/broker.sh");
 
+/// Bundled agent-side docs-fetch helper script, embedded at compile time and
+/// written to `<repo>/.git-paw/scripts/docs-fetch.sh` by [`run_init`]. Like
+/// [`BROKER_SCRIPT`], it wraps the agent's `curl` behind one stable script
+/// path so the launch path can grant that exact path instead of a broad
+/// `curl *` rule.
+const DOCS_FETCH_SCRIPT: &str = include_str!("../assets/scripts/docs-fetch.sh");
+
 /// Runs the `git paw init` command.
 ///
 /// Creates `.git-paw/` directory structure, generates a default config,
@@ -77,7 +84,8 @@ pub fn run_init() -> Result<(), PawError> {
     }
 
     // 3. Create .git-paw/scripts/ directory and install the bundled helpers
-    //    (sweep.sh for the supervisor, broker.sh for the coding agents).
+    //    (sweep.sh for the supervisor, broker.sh and docs-fetch.sh for the
+    //    coding agents).
     let created_scripts = create_dir_if_missing(&scripts_dir)?;
     if created_scripts {
         println!("  Created .git-paw/scripts/");
@@ -97,6 +105,14 @@ pub fn run_init() -> Result<(), PawError> {
         println!("  Updated .git-paw/scripts/broker.sh");
     } else {
         println!("  Created .git-paw/scripts/broker.sh");
+    }
+    let docs_fetch_path = scripts_dir.join("docs-fetch.sh");
+    let docs_fetch_existed = docs_fetch_path.exists();
+    install_script(&docs_fetch_path, DOCS_FETCH_SCRIPT)?;
+    if docs_fetch_existed {
+        println!("  Updated .git-paw/scripts/docs-fetch.sh");
+    } else {
+        println!("  Created .git-paw/scripts/docs-fetch.sh");
     }
 
     // 4. Generate or migrate config. For a fresh config, prompt for supervisor

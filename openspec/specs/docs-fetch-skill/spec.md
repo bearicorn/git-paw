@@ -1,5 +1,8 @@
-## ADDED Requirements
+# docs-fetch-skill Specification
 
+## Purpose
+TBD - created by archiving change docs-fetch-skill. Update Purpose after archive.
+## Requirements
 ### Requirement: Bundled docs-fetch skill and helper
 
 git-paw SHALL bundle an agent skill and a `docs-fetch` helper script, and `git paw init` SHALL install the helper into the project's `.git-paw/scripts/` directory and grant the agent allowlist that exact script path — never a broad `curl` grant — mirroring the least-privilege model of the existing broker helper.
@@ -11,6 +14,22 @@ git-paw SHALL bundle an agent skill and a `docs-fetch` helper script, and `git p
 #### Scenario: the skill instructs invoking the helper, not raw curl
 - **WHEN** the bundled docs-fetch skill is rendered into an agent's instructions
 - **THEN** it directs the agent to invoke the `docs-fetch` helper to consult docs, and does not instruct the agent to construct a raw `curl` to the docs site
+
+### Requirement: Gated injection into agent sessions
+
+The docs-fetch skill SHALL be injected into each coding agent's managed `AGENTS.md` block if and only if `docs_base_url` is explicitly configured. Because the effective docs base URL defaults to git-paw's own published site when unset, injecting the skill unconditionally would point every consumer's agents at git-paw's documentation — so the skill is withheld until the operator has pointed git-paw at their own docs, keeping the exported skill project-agnostic. When injected alongside the coordination skill, the two occupy one managed block, each retaining its own heading structure.
+
+#### Scenario: injected when docs_base_url is configured
+- **WHEN** a session starts (or an agent is added) in a project whose config sets `docs_base_url`
+- **THEN** each agent's managed `AGENTS.md` block includes the docs-fetch skill content directing it to the `docs-fetch` helper
+
+#### Scenario: withheld when docs_base_url is unset
+- **WHEN** a session starts in a project that has not configured `docs_base_url`
+- **THEN** no docs-fetch skill content is injected into any agent's `AGENTS.md`, so agents are not pointed at git-paw's own docs by default
+
+#### Scenario: coexists with the coordination skill in one block
+- **WHEN** both the coordination skill (broker enabled) and the docs-fetch skill (`docs_base_url` set) apply
+- **THEN** the agent's managed block carries both, coordination first, each keeping its own headings
 
 ### Requirement: On-demand discovery via llms.txt
 
@@ -55,3 +74,4 @@ Documentation lookup SHALL be best-effort: on an unreachable site or missing pag
 #### Scenario: no doc content is bundled or boot-injected
 - **WHEN** an agent session starts with the docs-fetch skill enabled
 - **THEN** no documentation page content is embedded in the binary or the boot prompt; the agent retrieves docs only on demand via the helper
+

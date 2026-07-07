@@ -17,6 +17,7 @@
   - [Dashboard](user-guide/dashboard.md)
   - [Pause and Resume](user-guide/pause.md)
   - [Skill Templates](user-guide/skill-templates.md)
+  - [Docs Fetch Skill](user-guide/docs-fetch.md)
   - [Governance](user-guide/governance.md)
   - [Learnings Mode](user-guide/learnings.md)
   - [Conflict Detection](user-guide/conflict-detection.md)

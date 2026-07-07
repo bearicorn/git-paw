@@ -5,12 +5,12 @@
 //! agents nor the supervisor hit a permission prompt when they invoke a
 //! bundled broker helper (`agent-broker-helper`) on every broker round-trip.
 //!
-//! Two bundled helpers are granted by their single, stable relative paths:
-//! `.git-paw/scripts/broker.sh` (the agent-side helper) and
-//! `.git-paw/scripts/sweep.sh` (the supervisor-side helper). For each, both
-//! the bare path and the `bash <path>` form the boot block may emit are
-//! seeded — NOT per-endpoint `curl <broker-url><endpoint>` prefixes and never
-//! a broad `curl *` rule. A single literal path cannot drift with URL
+//! Three bundled helpers are granted by their single, stable relative paths:
+//! `.git-paw/scripts/broker.sh` and `.git-paw/scripts/docs-fetch.sh` (the
+//! agent-side helpers) and `.git-paw/scripts/sweep.sh` (the supervisor-side
+//! helper). For each, both the bare path and the `bash <path>` form the boot
+//! block may emit are seeded — NOT per-endpoint `curl <broker-url><endpoint>`
+//! prefixes and never a broad `curl *` rule. A single literal path cannot drift with URL
 //! normalisation or curl flag order, which was the root cause of the
 //! boot-publish dead-stall; and because a subcommand shares its script's path
 //! prefix, one by-path grant covers every verb — including the widened
@@ -32,6 +32,10 @@ pub const BROKER_HELPER_PATH: &str = ".git-paw/scripts/broker.sh";
 /// Stable relative path of the bundled supervisor-sweep helper, installed by
 /// `git paw init` at `<repo>/.git-paw/scripts/sweep.sh`.
 pub const SWEEP_HELPER_PATH: &str = ".git-paw/scripts/sweep.sh";
+
+/// Stable relative path of the bundled agent docs-fetch helper, installed by
+/// `git paw init` at `<repo>/.git-paw/scripts/docs-fetch.sh`.
+pub const DOCS_FETCH_HELPER_PATH: &str = ".git-paw/scripts/docs-fetch.sh";
 
 /// Returns the least-privilege allowlist prefixes authorising the bundled
 /// agent-broker helper (`broker.sh`).
@@ -67,12 +71,29 @@ pub fn sweep_prefixes() -> Vec<String> {
     ]
 }
 
+/// Returns the least-privilege allowlist prefixes authorising the bundled
+/// agent docs-fetch helper (`docs-fetch.sh`).
+///
+/// The agent invokes this helper by its stable relative path to discover
+/// (`find`) and retrieve (`get`) documentation. Both the bare path and the
+/// `bash .git-paw/scripts/docs-fetch.sh` form are returned. A single by-path
+/// grant covers every subcommand, so no broad `curl *` grant to the docs site
+/// is ever required.
+#[must_use]
+pub fn docs_fetch_prefixes() -> Vec<String> {
+    vec![
+        DOCS_FETCH_HELPER_PATH.to_string(),
+        format!("bash {DOCS_FETCH_HELPER_PATH}"),
+    ]
+}
+
 /// Returns the union of every bundled-helper by-path grant seeded into a
-/// session's Claude settings: [`broker_prefixes`] (agent side) followed by
-/// [`sweep_prefixes`] (supervisor side).
+/// session's Claude settings: [`broker_prefixes`] and [`docs_fetch_prefixes`]
+/// (agent side) followed by [`sweep_prefixes`] (supervisor side).
 #[must_use]
 pub fn helper_prefixes() -> Vec<String> {
     let mut prefixes = broker_prefixes();
+    prefixes.extend(docs_fetch_prefixes());
     prefixes.extend(sweep_prefixes());
     prefixes
 }
@@ -284,12 +305,49 @@ mod tests {
         assert!(all.iter().any(|s| s == "bash .git-paw/scripts/broker.sh"));
         assert!(all.iter().any(|s| s == ".git-paw/scripts/sweep.sh"));
         assert!(all.iter().any(|s| s == "bash .git-paw/scripts/sweep.sh"));
+        assert!(all.iter().any(|s| s == ".git-paw/scripts/docs-fetch.sh"));
+        assert!(
+            all.iter()
+                .any(|s| s == "bash .git-paw/scripts/docs-fetch.sh")
+        );
         for e in &all {
             assert!(
                 !e.starts_with("curl "),
                 "no curl prefix in union; found `{e}`"
             );
             assert_ne!(e, "curl *");
+        }
+    }
+
+    /// docs-fetch-skill scenario "init installs and path-allowlists the
+    /// helper": the seeded allowlist SHALL grant the exact docs-fetch helper
+    /// path (both bare and `bash <path>` forms) and NEVER a broad `curl`
+    /// grant, so an agent consults docs without a wildcard `curl` rule.
+    #[test]
+    fn seeds_docs_fetch_helper_by_path_without_broad_curl() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.json");
+        setup_curl_allowlist(&path).unwrap();
+        let entries = read_array(&path);
+        assert!(
+            entries
+                .iter()
+                .any(|s| s == ".git-paw/scripts/docs-fetch.sh"),
+            "docs-fetch helper must be granted by path; got: {entries:?}"
+        );
+        // The `find`/`get` verbs share the by-path prefix, so a prefix match
+        // covers them without any new (or broader) grant.
+        let get = ".git-paw/scripts/docs-fetch.sh get user-guide/coordination.html intent";
+        assert!(
+            entries.iter().any(|grant| get.starts_with(grant.as_str())),
+            "an existing by-path grant must prefix-cover `docs-fetch.sh get`; got: {entries:?}"
+        );
+        for e in &entries {
+            assert_ne!(e, "curl *", "broad `curl *` grant must never be seeded");
+            assert!(
+                !e.starts_with("curl "),
+                "no `curl` prefix should be seeded; found `{e}`"
+            );
         }
     }
 
