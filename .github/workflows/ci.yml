@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Manual trigger: re-run the pipeline (and the docs/Pages deploy) on demand
+  # with a fresh run id. This is the recovery lever for the upstream
+  # upload-pages-artifact retry-dup transient (actions/upload-pages-artifact#97),
+  # where a finalize-timeout retry uploads a second `github-pages` artifact and
+  # deploy-pages aborts with "Multiple artifacts named github-pages". A new run
+  # id starts with zero artifacts, so a clean dispatch redeploys successfully.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -106,7 +113,9 @@ jobs:
   docs:
     name: Build & Deploy Docs
     needs: [lint, test, audit]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.ref == 'refs/heads/main'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     concurrency:
       group: pages
