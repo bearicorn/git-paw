@@ -23,6 +23,10 @@ default_cli = "my-cli"
 # Prefix for spec-derived branch names (default: "spec/")
 # branch_prefix = "spec/"
 
+# Documentation site the bundled docs-fetch helper consults on demand
+# (default: git-paw's published docs). Set to retarget a fork or mirror.
+# docs_base_url = "https://bearicorn.github.io/git-paw"
+
 # Enable mouse mode in tmux sessions (default: true)
 mouse = true
 
@@ -157,6 +161,22 @@ Placement only governs **new** worktree creation. Existing worktrees stay
 where they are: each session records the concrete worktree path it created,
 and resume/status/purge operate on that recorded path — so flipping the
 config mid-project never orphans an already-created worktree.
+
+### `docs_base_url`
+
+Base URL of the documentation site the bundled [docs-fetch
+skill](../user-guide/docs-fetch.md) consults on demand. Defaults to git-paw's
+published documentation site; set it so a fork or mirror can point the helper
+at its own docs.
+
+```toml
+docs_base_url = "https://bearicorn.github.io/git-paw"
+```
+
+The `docs-fetch.sh` helper resolves this value from `.git-paw/config.toml` for
+both discovery (`llms.txt`) and page retrieval, falling back to the built-in
+default when the field is absent. Documentation lookup is best-effort: an
+unreachable site or missing page never blocks the agent.
 
 ## Custom CLIs
 

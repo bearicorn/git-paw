@@ -930,6 +930,11 @@ struct AttachContext<'a> {
     agent_flags: &'a str,
     /// Pre-resolved coordination skill template (`None` when broker disabled).
     coordination_template: Option<&'a git_paw::skills::SkillTemplate>,
+    /// Pre-resolved docs-fetch skill template (`None` unless `docs_base_url` is
+    /// explicitly configured). Gated on explicit config so a consumer that has
+    /// not pointed git-paw at their own docs never has the skill (which defaults
+    /// to git-paw's site) injected into their agents.
+    docs_fetch_template: Option<&'a git_paw::skills::SkillTemplate>,
     /// Gate-command substitutions for skill rendering.
     gate_commands: &'a git_paw::skills::GateCommands<'a>,
     /// Distinct spec backends in the session (for `{{SPEC_PATH_DOCTRINE}}`).
@@ -974,7 +979,7 @@ fn attach_agent(
     let wt = git::create_worktree(ctx.repo_root, branch, !ctx.no_rebase, ctx.placement)?;
     let wt_str = wt.path.to_string_lossy().to_string();
 
-    let rendered_skill = ctx.coordination_template.map(|tmpl| {
+    let render_tmpl = |tmpl: &git_paw::skills::SkillTemplate| {
         git_paw::skills::render(
             tmpl,
             branch,
@@ -983,7 +988,14 @@ fn attach_agent(
             ctx.gate_commands,
             ctx.session_backends,
         )
-    });
+    };
+    // Combine the coordination and docs-fetch skills into one managed block.
+    // Either may be absent (coordination when broker is off; docs-fetch unless
+    // `docs_base_url` is configured); the block carries whichever are present.
+    let rendered_skill = git_paw::skills::combine_agent_skills(
+        ctx.coordination_template.map(&render_tmpl),
+        ctx.docs_fetch_template.map(&render_tmpl),
+    );
 
     let spec_content = spec_entry.map(|s| s.prompt.clone());
     let owned_files = spec_entry.and_then(|s| s.owned_files.clone());
@@ -1254,6 +1266,16 @@ fn cmd_supervisor(
         None
     };
 
+    // Resolve the docs-fetch skill once, gated on an explicitly-configured
+    // `docs_base_url`. Left unset (the default points at git-paw's own site),
+    // the skill is not injected — a consumer only gets it once they have
+    // pointed git-paw at their own docs, keeping the exported skill agnostic.
+    let docs_fetch_template = if config.docs_base_url.is_some() {
+        Some(git_paw::skills::resolve("docs-fetch")?)
+    } else {
+        None
+    };
+
     // Build the inter-agent rules block for this session.
     let branch_refs: Vec<&str> = branches.iter().map(String::as_str).collect();
     let inter_agent_rules = git_paw::agents::build_inter_agent_rules(&branch_refs);
@@ -1308,6 +1330,7 @@ fn cmd_supervisor(
         agent_cli: &agent_cli,
         agent_flags,
         coordination_template: coordination_template.as_ref(),
+        docs_fetch_template: docs_fetch_template.as_ref(),
         gate_commands: &gate_commands,
         session_backends: &session_backends,
         inter_agent_rules: Some(inter_agent_rules.as_str()),
@@ -2491,6 +2514,13 @@ fn cmd_add(
     } else {
         None
     };
+    // Gated on explicit `docs_base_url` (see cmd_supervisor) so an added agent
+    // is byte-identical to a start-time one.
+    let docs_fetch_template = if config.docs_base_url.is_some() {
+        Some(git_paw::skills::resolve("docs-fetch")?)
+    } else {
+        None
+    };
     let session_backends: Vec<git_paw::specs::SpecBackendKind> = spec_entry
         .as_ref()
         .map(|s| vec![s.backend])
@@ -2513,6 +2543,7 @@ fn cmd_add(
         agent_cli: &agent_cli,
         agent_flags,
         coordination_template: coordination_template.as_ref(),
+        docs_fetch_template: docs_fetch_template.as_ref(),
         gate_commands: &gate_commands,
         session_backends: &session_backends,
         inter_agent_rules: Some(inter_agent_rules.as_str()),

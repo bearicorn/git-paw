@@ -39,6 +39,9 @@ const COORDINATION_DEFAULT: &str = include_str!("../assets/agent-skills/coordina
 /// The embedded supervisor skill, compiled into the binary.
 const SUPERVISOR_DEFAULT: &str = include_str!("../assets/agent-skills/supervisor.md");
 
+/// The embedded docs-fetch skill, compiled into the binary.
+const DOCS_FETCH_DEFAULT: &str = include_str!("../assets/agent-skills/docs-fetch.md");
+
 /// Indicates where a resolved skill's content originated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Source {
@@ -141,6 +144,7 @@ fn embedded_default(skill_name: &str) -> Option<&'static str> {
     match skill_name {
         "coordination" => Some(COORDINATION_DEFAULT),
         "supervisor" => Some(SUPERVISOR_DEFAULT),
+        "docs-fetch" => Some(DOCS_FETCH_DEFAULT),
         _ => None,
     }
 }
@@ -605,6 +609,26 @@ pub fn render(
     output
 }
 
+/// Combines the rendered coordination and docs-fetch skill blocks into the
+/// single managed skill section written to an agent's `AGENTS.md`.
+///
+/// Either input may be absent: coordination is `None` when the broker is
+/// disabled, and docs-fetch is `None` unless `docs_base_url` is explicitly
+/// configured (see the `docs-fetch-skill` capability). When both are present
+/// they are joined with a blank line so each keeps its own heading structure;
+/// when neither is present the agent gets no managed skill section.
+#[must_use]
+pub fn combine_agent_skills(
+    coordination: Option<String>,
+    docs_fetch: Option<String>,
+) -> Option<String> {
+    match (coordination, docs_fetch) {
+        (Some(coordination), Some(docs)) => Some(format!("{coordination}\n\n{docs}")),
+        (Some(only), None) | (None, Some(only)) => Some(only),
+        (None, None) => None,
+    }
+}
+
 /// Marker opening an opsx role-gating region in a bundled skill template.
 pub(crate) const OPSX_REGION_BEGIN: &str = "<!-- opsx-role-gating:begin -->";
 /// Marker closing an opsx role-gating region in a bundled skill template.
@@ -828,6 +852,74 @@ mod tests {
         let tmpl = resolve("coordination").expect("should resolve coordination");
         assert_eq!(tmpl.source, Source::Embedded);
         assert!(!tmpl.content.is_empty());
+    }
+
+    #[test]
+    fn embedded_docs_fetch_is_reachable() {
+        let tmpl = resolve("docs-fetch").expect("should resolve docs-fetch");
+        assert_eq!(tmpl.source, Source::Embedded);
+        assert!(!tmpl.content.is_empty());
+        // Frontmatter is parsed into standardized metadata.
+        let metadata = tmpl.metadata.expect("docs-fetch has frontmatter metadata");
+        assert_eq!(metadata.name, "docs-fetch");
+    }
+
+    #[test]
+    fn combine_agent_skills_joins_both_when_present() {
+        let combined = combine_agent_skills(
+            Some("## Coordination\nbody".to_string()),
+            Some("## Consulting Docs\nbody".to_string()),
+        )
+        .expect("both present yields a block");
+        assert!(combined.contains("## Coordination"));
+        assert!(combined.contains("## Consulting Docs"));
+        // Coordination precedes docs-fetch, separated by a blank line so each
+        // keeps its own heading structure.
+        let coord = combined.find("## Coordination").unwrap();
+        let docs = combined.find("## Consulting Docs").unwrap();
+        assert!(coord < docs);
+        assert!(combined.contains("body\n\n## Consulting Docs"));
+    }
+
+    #[test]
+    fn combine_agent_skills_passes_through_single_present_block() {
+        assert_eq!(
+            combine_agent_skills(Some("only-coordination".to_string()), None).as_deref(),
+            Some("only-coordination"),
+        );
+        assert_eq!(
+            combine_agent_skills(None, Some("only-docs-fetch".to_string())).as_deref(),
+            Some("only-docs-fetch"),
+        );
+    }
+
+    #[test]
+    fn combine_agent_skills_is_none_when_both_absent() {
+        // Broker disabled AND docs_base_url unset ⇒ no managed skill section.
+        assert!(combine_agent_skills(None, None).is_none());
+    }
+
+    #[test]
+    fn docs_fetch_skill_bundles_no_documentation_content() {
+        // docs-fetch-skill scenario "no doc content is bundled or boot-injected":
+        // the bundled skill must be instructions-only — it teaches the agent to
+        // fetch docs on demand via the helper and must NOT embed documentation
+        // page bodies. Guard against a future edit that inlines doc prose.
+        let body = resolve("docs-fetch").unwrap().content;
+        // It references the helper and states docs are fetched on demand.
+        assert!(body.contains(".git-paw/scripts/docs-fetch.sh"));
+        assert!(body.to_lowercase().contains("on demand") || body.contains("live"));
+        // It carries no fetched documentation page content. mdBook chapters are
+        // authored with H1 titles (`# Title`); an instructions-only skill uses
+        // only `##`/`###` sub-headings, so a top-level `# ` heading here would
+        // signal an inlined doc page.
+        assert!(
+            !body.lines().any(|l| l.starts_with("# ")),
+            "docs-fetch skill must not inline a documentation page (found an H1)",
+        );
+        // Nor should the binary embed any docs/src page for docs-fetch: the only
+        // include_str! assets for this feature are the skill + the helper script.
+        assert!(!body.contains("<!DOCTYPE html>") && !body.contains("<html"));
     }
 
     // 9.3: Embedded coordination skill contains all four operations
@@ -5445,6 +5537,41 @@ mod tests {
             &GateCommands::default(),
             backends,
         )
+    }
+
+    // docs-fetch-skill scenario "the skill instructs invoking the helper, not
+    // raw curl": the RENDERED docs-fetch skill directs the agent to the
+    // docs-fetch helper (find then get) and never hands the agent a raw curl
+    // command to the docs site.
+    #[test]
+    fn docs_fetch_skill_instructs_helper_not_raw_curl() {
+        let out = render_skill("docs-fetch", &[]);
+        assert!(
+            out.contains(".git-paw/scripts/docs-fetch.sh find"),
+            "rendered docs-fetch skill should instruct the `find` op via the helper"
+        );
+        assert!(
+            out.contains(".git-paw/scripts/docs-fetch.sh get"),
+            "rendered docs-fetch skill should instruct the `get` op via the helper"
+        );
+        // No raw curl command to the docs site: the skill may mention the word
+        // `curl` to forbid it, but must never emit an actual curl invocation.
+        assert!(
+            !out.contains("curl http") && !out.contains("curl -"),
+            "docs-fetch skill must not instruct constructing a raw curl to the docs site"
+        );
+    }
+
+    // docs-fetch-skill scenario "fetch failure does not block the agent": the
+    // rendered skill tells the agent to continue its task without the docs
+    // when a lookup fails.
+    #[test]
+    fn docs_fetch_skill_instructs_degrade_gracefully() {
+        let out = render_skill("docs-fetch", &[]).to_lowercase();
+        assert!(
+            out.contains("continue your task without the docs"),
+            "docs-fetch skill must instruct the agent to proceed without the docs on failure"
+        );
     }
 
     #[test]
