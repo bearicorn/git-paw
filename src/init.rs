@@ -160,6 +160,39 @@ pub fn run_init() -> Result<(), PawError> {
     Ok(())
 }
 
+/// Provisions the agent-side bundled helper scripts into an agent worktree's
+/// `.git-paw/scripts/` directory, from the same embedded assets [`run_init`]
+/// uses. Called at per-worktree setup (`git paw start` / `git paw add`) so the
+/// agent finds the helpers at the relative path its boot block invokes —
+/// without hand-copying them from `assets/`.
+///
+/// A fresh worktree checkout has no `.git-paw/scripts/` (it is gitignored, so
+/// not part of the checked-out tree), so an agent's relative
+/// `.git-paw/scripts/broker.sh` invocation would otherwise fail until the
+/// agent copied it by hand. Sourcing the content from the embedded assets (the
+/// same ones `git paw init` installs) guarantees a worktree's helper matches
+/// the running binary's version rather than the repo's possibly-stale copy.
+///
+/// Idempotent — always (re)writes the scripts and re-sets the executable bit,
+/// so re-attaching a reused worktree refreshes them without error. `broker.sh`
+/// is provisioned when `broker_enabled`; `docs-fetch.sh` when
+/// `docs_base_url_configured` (mirroring the docs-fetch skill's injection gate).
+pub fn provision_worktree_helpers(
+    worktree_root: &Path,
+    broker_enabled: bool,
+    docs_base_url_configured: bool,
+) -> Result<(), PawError> {
+    let scripts_dir = worktree_root.join(".git-paw").join("scripts");
+    create_dir_if_missing(&scripts_dir)?;
+    if broker_enabled {
+        install_script(&scripts_dir.join("broker.sh"), BROKER_SCRIPT)?;
+    }
+    if docs_base_url_configured {
+        install_script(&scripts_dir.join("docs-fetch.sh"), DOCS_FETCH_SCRIPT)?;
+    }
+    Ok(())
+}
+
 /// Writes a bundled helper script `content` to `path` and marks it
 /// executable (mode `0o755` on Unix). Overwrites any existing file at `path`
 /// (the scripts are treated as binary-managed content — users with local
@@ -793,5 +826,106 @@ test_command = "just check"
         ensure_gitignore_entry(dir.path()).unwrap();
         let second = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         assert_eq!(first, second);
+    }
+
+    // --- provision_worktree_helpers ---
+
+    /// Returns `true` if `path` exists and carries the Unix executable bit.
+    /// Non-Unix targets only assert existence (mode bits are Unix-only, matching
+    /// [`install_script`]'s `#[cfg(unix)]` gate).
+    fn is_executable(path: &Path) -> bool {
+        if !path.exists() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(path).unwrap().permissions().mode();
+            mode & 0o111 == 0o111
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    }
+
+    // Scenario: start provisions the broker helper into each worktree — after a
+    // worktree setup with the broker enabled, broker.sh exists and is executable.
+    #[test]
+    fn provision_writes_executable_broker_helper_when_broker_enabled() {
+        let dir = TempDir::new().unwrap();
+        provision_worktree_helpers(dir.path(), true, false).unwrap();
+        let broker = dir.path().join(".git-paw/scripts/broker.sh");
+        assert!(
+            is_executable(&broker),
+            "broker.sh must exist and be executable"
+        );
+        // Version-matched: content is byte-identical to the embedded asset the
+        // running binary ships (the same one `git paw init` installs).
+        assert_eq!(fs::read_to_string(&broker).unwrap(), BROKER_SCRIPT);
+    }
+
+    // Scenario: docs-fetch helper provisioned only when configured — docs-fetch.sh
+    // is provisioned iff `docs_base_url` is configured, alongside broker.sh.
+    #[test]
+    fn provision_writes_docs_fetch_only_when_configured() {
+        // docs_base_url unset → docs-fetch.sh is NOT provisioned.
+        let unset = TempDir::new().unwrap();
+        provision_worktree_helpers(unset.path(), true, false).unwrap();
+        assert!(
+            !unset.path().join(".git-paw/scripts/docs-fetch.sh").exists(),
+            "docs-fetch.sh must not be provisioned when docs_base_url is unset"
+        );
+
+        // docs_base_url configured → docs-fetch.sh provisioned alongside broker.sh.
+        let set = TempDir::new().unwrap();
+        provision_worktree_helpers(set.path(), true, true).unwrap();
+        let docs_fetch = set.path().join(".git-paw/scripts/docs-fetch.sh");
+        assert!(
+            is_executable(&docs_fetch),
+            "docs-fetch.sh must be provisioned and executable when configured"
+        );
+        assert_eq!(fs::read_to_string(&docs_fetch).unwrap(), DOCS_FETCH_SCRIPT);
+        assert!(
+            is_executable(&set.path().join(".git-paw/scripts/broker.sh")),
+            "broker.sh is provisioned alongside docs-fetch.sh"
+        );
+    }
+
+    // Broker disabled → broker.sh is not provisioned (mirrors the docs-fetch gate
+    // for the broker side of the requirement).
+    #[test]
+    fn provision_skips_broker_helper_when_broker_disabled() {
+        let dir = TempDir::new().unwrap();
+        provision_worktree_helpers(dir.path(), false, false).unwrap();
+        assert!(
+            !dir.path().join(".git-paw/scripts/broker.sh").exists(),
+            "broker.sh must not be provisioned when the broker is disabled"
+        );
+    }
+
+    // Scenario: provisioning is idempotent and version-matched — re-attaching an
+    // existing worktree refreshes the scripts without error, and a stale on-disk
+    // helper is overwritten with the running binary's bundled version.
+    #[test]
+    fn provision_is_idempotent_and_refreshes_stale_helper() {
+        let dir = TempDir::new().unwrap();
+        // First attach seeds the helper.
+        provision_worktree_helpers(dir.path(), true, true).unwrap();
+        // Simulate a stale worktree copy from an older binary.
+        let broker = dir.path().join(".git-paw/scripts/broker.sh");
+        fs::write(&broker, "#!/usr/bin/env bash\n# stale\n").unwrap();
+        // Re-attach: must succeed (no error on the pre-existing scripts dir) and
+        // refresh the helper back to the embedded version.
+        provision_worktree_helpers(dir.path(), true, true).unwrap();
+        assert!(
+            is_executable(&broker),
+            "broker.sh stays executable after refresh"
+        );
+        assert_eq!(
+            fs::read_to_string(&broker).unwrap(),
+            BROKER_SCRIPT,
+            "re-attach refreshes the helper to the running binary's version"
+        );
     }
 }

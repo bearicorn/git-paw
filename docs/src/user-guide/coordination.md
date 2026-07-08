@@ -23,9 +23,15 @@ When skill templates are enabled (the default), each agent's `AGENTS.md` boot bl
 
 `git paw init` installs a bundled agent-side helper at
 `.git-paw/scripts/broker.sh` — the agent-facing analogue of the supervisor's
-`sweep.sh`. Because `.git-paw/scripts/` is part of the repo tree, the helper
-is present in every agent worktree, and the agent invokes it by its stable
-relative path.
+`sweep.sh`. `.git-paw/scripts/` is gitignored, so a fresh agent-worktree
+checkout does not contain it. `git paw start` and `git paw add` therefore
+**auto-provision the helper into each agent worktree** at setup: they write
+`broker.sh` (whenever the broker is enabled) and `docs-fetch.sh` (whenever
+`docs_base_url` is configured) into the worktree's `.git-paw/scripts/`,
+executable, from the same bundled assets `init` installs. The scripts are
+(re)written on every attach, so a worktree's helper always matches the running
+binary's version and agents never copy it by hand from `assets/`. The agent
+invokes the helper by its stable relative path.
 
 The helper wraps every agent→broker `curl` an agent is allowed to make. It
 discovers the broker URL from `.git-paw/config.toml` `[broker]` (defaulting to
