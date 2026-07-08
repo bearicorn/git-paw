@@ -979,6 +979,21 @@ fn attach_agent(
     let wt = git::create_worktree(ctx.repo_root, branch, !ctx.no_rebase, ctx.placement)?;
     let wt_str = wt.path.to_string_lossy().to_string();
 
+    // Provision the bundled helper scripts the agent's boot block invokes into
+    // this worktree's `.git-paw/scripts/` (idempotent, executable). A fresh
+    // worktree checkout has no `.git-paw/scripts/` (it is gitignored), so
+    // without this the agent's relative `.git-paw/scripts/broker.sh` call fails
+    // until it hand-copies from `assets/`. Sourced from the same embedded
+    // assets `git paw init` uses so the worktree's helper matches the running
+    // binary's version. `broker.sh` when the broker is enabled; `docs-fetch.sh`
+    // when `docs_base_url` is configured (the same gate as the docs-fetch skill
+    // injection — `ctx.docs_fetch_template` is `Some` iff it is configured).
+    git_paw::init::provision_worktree_helpers(
+        &wt.path,
+        ctx.broker_config.enabled,
+        ctx.docs_fetch_template.is_some(),
+    )?;
+
     let render_tmpl = |tmpl: &git_paw::skills::SkillTemplate| {
         git_paw::skills::render(
             tmpl,
