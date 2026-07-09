@@ -827,6 +827,30 @@ mod tests {
     }
 
     #[test]
+    fn start_broker_on_occupied_port_returns_error_not_loop() {
+        use std::net::TcpListener;
+        // Occupy a port with a plain TCP listener that never speaks HTTP, so
+        // the broker's probe cannot mistake it for a live git-paw broker and
+        // reattach. This is the bind-failure seam the dashboard relies on to
+        // exit non-zero instead of busy-looping: the call must return an error
+        // promptly, not spin or block.
+        let squatter = TcpListener::bind("127.0.0.1:0").expect("bind squatter listener");
+        let port = squatter.local_addr().expect("squatter addr").port();
+        let config = BrokerConfig {
+            enabled: true,
+            port,
+            bind: "127.0.0.1".to_string(),
+            ..Default::default()
+        };
+        let state = BrokerState::new(None);
+        let result = start_broker(&config, state, Vec::new());
+        assert!(
+            result.is_err(),
+            "starting a broker on a port held by a foreign process must return an error (terminal), not loop or reattach"
+        );
+    }
+
+    #[test]
     fn start_broker_no_log_path_no_flush_thread() {
         let config = BrokerConfig {
             enabled: true,

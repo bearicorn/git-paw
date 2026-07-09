@@ -2966,13 +2966,26 @@ fn cmd_dashboard() -> Result<(), PawError> {
         broker_state.attach_learnings(std::sync::Arc::new(std::sync::Mutex::new(aggregator)));
     }
 
-    let handle = broker::start_broker_with(
+    // Start the in-process broker. A bind/probe failure — most often a stale
+    // dashboard still squatting the port — is terminal: emit a diagnostic and
+    // exit non-zero rather than fall through to the render loop. A second
+    // dashboard busy-rendering against a contended port is exactly the
+    // CPU-pegging leak this guards against, so we never retry or loop here.
+    let handle = match broker::start_broker_with(
         &broker_config,
         broker_state,
         watch_targets,
         conflict_cfg,
         learnings_interval_seconds,
-    )?;
+    ) {
+        Ok(handle) => handle,
+        Err(err) => {
+            eprintln!(
+                "git-paw dashboard: broker failed to start ({err}); exiting instead of busy-looping"
+            );
+            return Err(err.into());
+        }
+    };
     let state = std::sync::Arc::clone(&handle.state);
 
     // Set up a flag that SIGHUP sets to signal the dashboard to exit gracefully.

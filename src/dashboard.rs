@@ -71,6 +71,25 @@ fn orphaned() -> bool {
     false
 }
 
+/// The dashboard draw loop's lifecycle gate: returns `true` when the loop must
+/// exit. It folds the three terminal conditions checked on every iteration:
+///
+/// - `shutdown` — a clean SIGHUP set the shutdown flag (tmux kill-session).
+/// - `orphaned` — the process was reparented to init (see [`orphaned`]), so its
+///   session was torn down without SIGHUP (`tmux kill-server`, a crash, sleep).
+/// - `tty_gone` — the controlling terminal is gone: an `event::poll` error or a
+///   failed write to the terminal was observed. This catches the
+///   reparent-to-a-lingering-shell case, where `orphaned` stays `false` (the
+///   parent is a live but unrelated process) yet the pane is already dead.
+///
+/// Extracting the gate as a pure predicate lets it be evaluated identically on
+/// *every* loop path — the normal poll arm and any error/degraded arm alike, so
+/// no branch can bypass it and busy-loop — and makes the exit decision
+/// unit-testable without a live terminal.
+fn should_exit(shutdown: bool, orphaned: bool, tty_gone: bool) -> bool {
+    shutdown || orphaned || tty_gone
+}
+
 /// The `agent_id` of the supervisor's pinned row. The supervisor is the only
 /// publisher whose `phase` introspection field is surfaced unconditionally in
 /// the agent table (see [`format_agent_rows`]).
@@ -503,33 +522,57 @@ pub fn run_dashboard_with_panes<S: std::hash::BuildHasher>(
     // transient broker-watcher restart leaves history intact (design.md D8).
     let mut broker_log = BrokerLog::new(max_messages, default_visible);
 
-    loop {
-        // Exit promptly on a clean SIGHUP (tmux kill-session) OR when orphaned
-        // (parent gone → reparented to init), so the dashboard can never linger
-        // busy-rendering to a dead terminal after its session ends.
-        if shutdown.load(std::sync::atomic::Ordering::Relaxed) || orphaned() {
+    // Latches once the controlling terminal is observed to be gone — a poll
+    // error or a failed terminal write. It is consulted by `should_exit` at the
+    // top of every iteration, so once set the loop exits on its next pass no
+    // matter which branch set it. This is the reparent-to-a-lingering-shell
+    // leak path, where `orphaned()` stays false but the pane is already dead.
+    let mut tty_gone = false;
+
+    'draw: loop {
+        // Unified lifecycle gate, evaluated on EVERY loop path before any work:
+        // exit promptly on a clean SIGHUP (tmux kill-session), when orphaned
+        // (reparented to init), or when the controlling terminal is gone.
+        // Hoisting the single check here means no branch below — normal or
+        // error/degraded — can bypass it and busy-render to a dead terminal.
+        if should_exit(
+            shutdown.load(std::sync::atomic::Ordering::Relaxed),
+            orphaned(),
+            tty_gone,
+        ) {
             break;
         }
 
         // Block up to TICK_INTERVAL for input. This yields the CPU while idle
         // instead of redrawing every tick, yet wakes the instant a key arrives
         // — decoupling typing latency from the redraw cadence. A poll error
-        // means the terminal is gone; exit rather than spin against it.
+        // means the controlling terminal is gone: latch tty_gone and loop back
+        // to the gate rather than spin against a dead terminal.
         match event::poll(TICK_INTERVAL) {
             Ok(false) => {}
-            Err(_) => break,
+            Err(_) => {
+                tty_gone = true;
+                continue;
+            }
             Ok(true) => {
                 // Drain up to 32 pending input events before re-rendering. `q`
                 // quits; the Broker log panel claims its own keys (l / a / 1-9
-                // / Up / Down / Enter / Esc); everything else is ignored.
+                // / Up / Down / Enter / Esc); everything else is ignored. A
+                // poll/read error here is the same tty-gone signal — latch it
+                // and return to the gate instead of propagating an error.
                 for _ in 0..32 {
-                    if !event::poll(Duration::ZERO)
-                        .map_err(|e| PawError::DashboardError(format!("event poll failed: {e}")))?
-                    {
-                        break;
+                    match event::poll(Duration::ZERO) {
+                        Ok(true) => {}
+                        Ok(false) => break,
+                        Err(_) => {
+                            tty_gone = true;
+                            continue 'draw;
+                        }
                     }
-                    let ev = event::read()
-                        .map_err(|e| PawError::DashboardError(format!("event read failed: {e}")))?;
+                    let Ok(ev) = event::read() else {
+                        tty_gone = true;
+                        continue 'draw;
+                    };
                     if let Event::Key(key) = ev
                         && key.kind == KeyEventKind::Press
                     {
@@ -564,12 +607,19 @@ pub fn run_dashboard_with_panes<S: std::hash::BuildHasher>(
         // the same in-process state the agent table reads — no extra traffic.
         broker_log.ingest(delivery::full_log(state, broker_log.last_seq()));
 
-        guard
+        // A failed draw means the write to the terminal failed — the same
+        // tty-gone signal as a poll error. Latch it; the gate at the top of the
+        // next iteration exits rather than propagating an error or spinning
+        // against a dead terminal.
+        if guard
             .terminal
             .draw(|f| {
                 draw_frame(f, &rows, &status_line, &broker_log, height_lines);
             })
-            .map_err(|e| PawError::DashboardError(format!("draw failed: {e}")))?;
+            .is_err()
+        {
+            tty_gone = true;
+        }
     }
 
     // Explicit restore for clean exit; guard also restores on drop as a safety net.
@@ -604,6 +654,42 @@ mod tests {
         assert!(
             !orphaned(),
             "a process with a live parent must not be reported orphaned"
+        );
+    }
+
+    /// The lifecycle gate exits on the tty-gone signal even when the process is
+    /// neither shut down nor orphaned — the reparent-to-a-lingering-shell leak
+    /// path, where `orphaned()` is false but the controlling terminal is gone.
+    #[test]
+    fn should_exit_on_tty_gone_signal() {
+        assert!(
+            should_exit(false, false, true),
+            "a set tty-gone signal must exit the loop even when not shut down or orphaned"
+        );
+    }
+
+    /// The gate also exits on the shutdown flag and on the orphan signal, the
+    /// two conditions the pre-hardening loop already honoured.
+    #[test]
+    fn should_exit_on_shutdown_or_orphaned() {
+        assert!(
+            should_exit(true, false, false),
+            "shutdown must exit the loop"
+        );
+        assert!(
+            should_exit(false, true, false),
+            "orphaned (reparented to init) must exit the loop"
+        );
+    }
+
+    /// The gate keeps the loop running only while all three terminal conditions
+    /// are clear: not shut down, parent alive, and the controlling terminal
+    /// present.
+    #[test]
+    fn should_not_exit_while_all_clear() {
+        assert!(
+            !should_exit(false, false, false),
+            "the loop must continue while not shut down, not orphaned, and the tty is present"
         );
     }
 
