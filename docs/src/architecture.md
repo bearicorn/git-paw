@@ -260,6 +260,8 @@ Dashboard pane process (git paw __dashboard):
     └── ratatui dashboard (1s tick)
 ```
 
+The main-thread render loop is bound to the session's lifecycle: it checks a single exit gate every iteration (on all paths, including error/degraded branches) and terminates on a clean `SIGHUP`, on reparent-to-init (`getppid() == 1`, Unix only), or when the controlling terminal is gone (a poll error or a failed terminal write — catching reparent-to-a-lingering-shell). If the in-process broker fails to bind its port at startup, the process emits a diagnostic and exits non-zero instead of busy-looping. Together these keep an orphaned `__dashboard` from lingering and pegging CPU. See the [Dashboard chapter](user-guide/dashboard.md#lifecycle-and-exit-conditions) for the user-facing description.
+
 ### Broker state
 
 The broker state is held in `Arc<Mutex<...>>` by `src/broker/mod.rs` and shared

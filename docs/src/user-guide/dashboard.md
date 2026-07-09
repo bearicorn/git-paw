@@ -170,6 +170,17 @@ config compatibility.
 
 The dashboard and broker run in the same process (`git paw __dashboard`). The dashboard reads from shared state that the broker's HTTP handlers (and the watcher, conflict detector, and learnings aggregator subsystems) write to. There is no separate broker process to manage.
 
+## Lifecycle and exit conditions
+
+The dashboard process is bound to its session: when the session ends, the dashboard exits on its own rather than lingering and busy-rendering to a dead terminal (a leaked `__dashboard` process pegging CPU). Its draw loop checks a single lifecycle gate on **every** iteration — including any error or degraded path, so no branch can bypass it — and exits when any of the following holds:
+
+- **Clean shutdown.** tmux delivers `SIGHUP` when it kills the session or pane; the signal handler sets a shutdown flag and the loop exits, flushing the broker log on the way out.
+- **Orphaned to init.** On Unix, if the parent process is gone the dashboard has been reparented to init (`getppid() == 1`) — the tell-tale of a session torn down *without* `SIGHUP` (an abrupt `tmux kill-server`, a crash, or the machine sleeping). The loop notices the reparent and exits. On non-Unix platforms this check is inert and only the `SIGHUP` shutdown path applies.
+- **Controlling terminal gone.** If reading input (`event::poll`) errors, or a write to the terminal fails, the dashboard treats its controlling terminal as gone and exits. This catches the case where the pane was killed but the dashboard was reparented to a *lingering shell* (a live but unrelated parent), so the orphan-to-init check alone would miss it.
+- **Broker fails to bind.** If the in-process broker cannot bind its port — most often because a stale dashboard is still squatting it — the process emits a diagnostic to stderr and exits non-zero rather than entering a render/retry loop, so a bind failure can never spin up a second CPU-pegging dashboard.
+
+Because the dashboard is cheap to relaunch (`git paw start` re-attaches to the session), exiting eagerly on any of these signals is preferred over risking a leaked, busy-looping process.
+
 ## Replying to agent questions
 
 Earlier dashboard versions included a "Questions" panel and a "Reply to" input field for human-typed answers to `agent.question` events. The panel was removed in v0.5.0 because the supervisor pane is the natural input surface — typed questions and replies go through `tmux send-keys` and the supervisor agent's own curl machinery, not through the dashboard.
