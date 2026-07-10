@@ -1,7 +1,8 @@
 # supervisor-skill-discipline Specification
 
 ## Purpose
-TBD - created by archiving change supervisor-skill-discipline-v0-6-x. Update Purpose after archive.
+Encodes the operational disciplines the bundled supervisor skill teaches the supervisor agent: drive pane work through `sweep.sh` (never inline loops), never send-keys to its own pane, use `git -C` for cross-worktree git, nudge on commit cadence and rely on agents standing by post-commit, and create isolated verification worktrees under a repo-local gitignored scratch dir checked out at the re-resolved branch tip.
+
 ## Requirements
 ### Requirement: Mandate sweep.sh; forbid inline pane loops
 

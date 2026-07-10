@@ -1,7 +1,8 @@
 # supervisor-pane-affordances Specification
 
 ## Purpose
-TBD - created by archiving change supervisor-pane-affordances-v0-6-x. Update Purpose after archive.
+Applies tmux visual affordances to git-paw sessions — double-line pane borders, per-pane role labels via a stable `@paw_role` option, a reverse-video border-format header bar, and active-pane border styling — gated by the `[layout].border_affordances` config field and degrading gracefully on older tmux.
+
 ## Requirements
 ### Requirement: Session builder applies double-line borders
 

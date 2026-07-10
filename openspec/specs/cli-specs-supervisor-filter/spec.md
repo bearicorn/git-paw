@@ -1,7 +1,8 @@
 # cli-specs-supervisor-filter Specification
 
 ## Purpose
-TBD - created by archiving change session-bugfixes-v0-6-x. Update Purpose after archive.
+Ensures `git paw start --supervisor --specs <names>` launches worktrees only for the named subset — passing the resolved `--specs` value (not just its presence) to the supervisor launch path so it matches non-supervisor behaviour exactly. It pins this with a regression matrix across every selection-flag/supervisor-flag combination and requires identical behaviour across all spec backends (OpenSpec, Markdown, Spec Kit).
+
 ## Requirements
 ### Requirement: --specs list honoured under --supervisor
 

@@ -1,7 +1,7 @@
 # custom-cli-curl-seeding Specification
 
 ## Purpose
-TBD - created by archiving change claude-oss-launch-v0-6-x. Update Purpose after archive.
+Seeds the broker-curl allowlist into each session CLI's configured `settings_path` — resolved from `[clis.<name>]` config with no hardcoded CLI names or paths — in addition to the repo-local `.claude/settings.json`, so custom CLIs can reach the broker at boot without a permission prompt. Seeding is idempotent, deduped, per-path-once, and never creates a CLI's config directory or aborts launch on failure.
 ## Requirements
 ### Requirement: Config-driven broker-curl seeding for custom CLIs
 

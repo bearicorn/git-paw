@@ -1,7 +1,8 @@
 # remove-branch Specification
 
 ## Purpose
-TBD - created by archiving change git-paw-add. Update Purpose after archive.
+Provides `git paw remove <branch>` to detach a single agent from an active session — closing its tmux pane (resolved by worktree path), re-tiling the grid, deregistering the session entry, and reusing purge logic to delete the worktree — with an uncommitted-work safety check (bypassable via `--force`, skippable via `--keep-worktree`) that ignores git-paw's own injected files.
+
 ## Requirements
 ### Requirement: git paw remove subcommand
 

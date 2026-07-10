@@ -1,7 +1,8 @@
 # session-summary Specification
 
 ## Purpose
-TBD - created by archiving change session-summary. Update Purpose after archive.
+Renders a Markdown session summary from `BrokerState` and `PawSession` — metadata, per-agent details (status, modified files, exports, blocked time), merge order, and totals — which the supervisor writes to a timestamped, filesystem-safe file under `.git-paw/sessions/` so multiple runs coexist without overwriting.
+
 ## Requirements
 ### Requirement: write_session_summary function
 

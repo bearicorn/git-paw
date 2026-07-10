@@ -1,7 +1,8 @@
 # add-branch Specification
 
 ## Purpose
-TBD - created by archiving change git-paw-add. Update Purpose after archive.
+Provides the `git paw add <branch-name>` subcommand that attaches a new worktree and agent pane to an already-running session, re-tiling the agent grid, registering the branch in session JSON, and injecting the same boot block a start-time agent receives. This lets a supervisor grow a live session incrementally without restarting it or dropping existing agents' panes.
+
 ## Requirements
 ### Requirement: git paw add subcommand
 

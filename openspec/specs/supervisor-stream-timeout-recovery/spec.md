@@ -1,7 +1,8 @@
 # supervisor-stream-timeout-recovery Specification
 
 ## Purpose
-TBD - created by archiving change supervisor-stream-timeout-recovery. Update Purpose after archive.
+Teaches the supervisor skill to recover from API stream timeouts mid-sweep — recognizing the error shape (including a coding agent's `stuck-stream-timeout`), taking a pre-action `checkpoint` `agent.status`, replaying only the missing downstream publishes idempotently, and emitting a `recovery_cycles` learning — while treating repeated re-verify cycles as normal progress rather than a stall.
+
 ## Requirements
 ### Requirement: Stream-timeout recovery section in supervisor skill
 

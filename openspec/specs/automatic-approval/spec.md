@@ -1,7 +1,8 @@
 # automatic-approval Specification
 
 ## Purpose
-TBD - created by archiving change auto-approve-patterns. Update Purpose after archive.
+Defines how the supervisor dispatches approval keystrokes for safe-classified permission prompts: firing only from stall detection, only when a live-prompt marker is present and re-confirmed immediately before send, never into the supervisor's own pane 0, and never taking a permanent broad grant for arbitrary-code runners. Unknown prompts escalate to the human as an `agent.question`, and every auto-approval is logged to the broker for audit.
+
 ## Requirements
 ### Requirement: Auto-approval keystroke sequence
 

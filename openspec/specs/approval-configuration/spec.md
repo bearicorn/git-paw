@@ -1,7 +1,8 @@
 # approval-configuration Specification
 
 ## Purpose
-TBD - created by archiving change auto-approve-patterns. Update Purpose after archive.
+Defines the `[supervisor.auto_approve]` config section that controls the supervisor's auto-approval behaviour: an enable flag, an extensible safe-command list appended to built-in defaults, a clamped stall threshold, and a coarse `approval_level` preset (`safe`/`conservative`/`off`). Existing configs without the section parse unchanged with sensible defaults.
+
 ## Requirements
 ### Requirement: `[supervisor.auto_approve]` config section
 

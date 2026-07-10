@@ -1,7 +1,8 @@
 # unattended-operation Specification
 
 ## Purpose
-TBD - created by archiving change unattended-drive-loop. Update Purpose after archive.
+Runs an in-process drive loop under `git paw start --unattended` that keeps a supervisor wave moving with no human present — polling every ~15 seconds to sweep all panes, auto-approving classifier-safe prompts (and acting as the sole approver), detecting completion, and exiting with a per-agent summary.
+
 ## Requirements
 ### Requirement: Unattended drive loop runs a supervisor wave to completion
 

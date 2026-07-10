@@ -1,7 +1,8 @@
 # shared-helper Specification
 
 ## Purpose
-TBD - created by archiving change boot-prompt-standard. Update Purpose after archive.
+Provides a shared, pure `build_boot_block(branch_id, broker_url) -> String` helper in `src/skills.rs` so both supervisor and manual mode assemble the identical agent boot block from the same code path, with no reliance on global state or external services.
+
 ## Requirements
 ### Requirement: Shared boot block helper function
 

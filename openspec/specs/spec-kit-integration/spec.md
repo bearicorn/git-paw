@@ -1,7 +1,8 @@
 # spec-kit-integration Specification
 
 ## Purpose
-TBD - created by archiving change spec-kit-format. Update Purpose after archive.
+Provides a `SpecKitBackend` implementing the `SpecBackend` trait that scans Spec Kit feature directories, parses each `tasks.md`, identifies the current phase (first with incomplete tasks), and decomposes it into `SpecEntry` values — one per `[P]` task plus one consolidated entry for non-`[P]` tasks — assembling boot prompts from spec/plan/checklists and probing for the project's `constitution.md`.
+
 ## Requirements
 ### Requirement: SpecKitBackend implements SpecBackend trait
 

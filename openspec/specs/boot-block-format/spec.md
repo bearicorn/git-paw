@@ -1,7 +1,8 @@
 # boot-block-format Specification
 
 ## Purpose
-TBD - created by archiving change boot-prompt-standard. Update Purpose after archive.
+Defines the standardized boot-instruction block injected into each agent, covering exactly four runtime events — register, done, blocked, question — expressed as `broker.sh` helper invocations rather than raw curl. It establishes commit-first task completion (the post-commit hook auto-publishes the artifact) with a manual done fallback scoped to code-less tasks, and includes paste-handling instructions for paste-collapsing CLIs.
+
 ## Requirements
 ### Requirement: Standard boot block format
 

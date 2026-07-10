@@ -1,7 +1,8 @@
 # status-republish-on-write Specification
 
 ## Purpose
-TBD - created by archiving change auto-approve-scope-v0-6-x. Update Purpose after archive.
+Has the filesystem watcher republish an agent's status from `committed` back to `working` (once per rate-limited burst) when it observes a worktree file write within a configurable post-commit TTL (default 60s, `0` disabling it), and accepts the `committed → working` transition in the dashboard so continued post-commit activity is reflected.
+
 ## Requirements
 ### Requirement: Watcher republishes working on post-commit file writes
 

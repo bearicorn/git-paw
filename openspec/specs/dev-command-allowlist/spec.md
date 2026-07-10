@@ -1,7 +1,7 @@
 # dev-command-allowlist Specification
 
 ## Purpose
-TBD - created by archiving change common-dev-allowlist-preset. Update Purpose after archive.
+Seeds a curated, stack-neutral set of common dev-command prefix grants into the CLI's `allowed_bash_prefixes` on supervisor start (config-gated, broker-independent, non-fatal on failure) so routine dev-loop commands prompt at most once, with opt-in named stack presets (`rust`, `node`, `python`, `go`) and a user `extra` list layered on top via idempotent, dedup-preserving merge.
 ## Requirements
 ### Requirement: Common dev allowlist seeded on supervisor start
 

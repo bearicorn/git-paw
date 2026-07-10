@@ -1,7 +1,7 @@
 # git-hook-injection Specification
 
 ## Purpose
-TBD - created by archiving change hook-injection. Update Purpose after archive.
+Installs a shared post-commit dispatcher and pre-push block hook in the common git dir plus a per-worktree `paw-agent-id` marker, so that committing in any worktree publishes an `agent.artifact` (under the correct agent id and pre-expanded broker URL) while pushes are blocked. Hooks preserve pre-existing user content between managed markers, no-op outside a git-paw session, and are cleaned up on purge.
 ## Requirements
 ### Requirement: Install post-commit dispatcher in the common git dir (shared hook pattern)
 

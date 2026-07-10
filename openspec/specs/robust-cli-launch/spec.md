@@ -1,7 +1,8 @@
 # robust-cli-launch Specification
 
 ## Purpose
-TBD - created by archiving change supervisor-cli-launch-robustness-v0-6-x. Update Purpose after archive.
+Hardens CLI-pane launch so a shell startup prompt cannot strand the pane at a bare shell: it clears the shell input line before sending the launch command, suppresses known auto-update/confirmation prompts in the launched pane's environment, and verifies the CLI started within a bounded window, retrying the launch once on failure.
+
 ## Requirements
 ### Requirement: Clean the shell input line before the CLI-launch command
 

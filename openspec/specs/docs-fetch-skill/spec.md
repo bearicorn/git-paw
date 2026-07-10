@@ -1,7 +1,7 @@
 # docs-fetch-skill Specification
 
 ## Purpose
-TBD - created by archiving change docs-fetch-skill. Update Purpose after archive.
+Bundles a path-allowlisted `docs-fetch` helper and agent skill that let coding agents discover (via `llms.txt`) and retrieve documentation pages or sections on demand from a configurable docs base URL. The skill is injected only when `docs_base_url` is explicitly set, ships no doc content in the binary or boot prompt, and degrades gracefully so a fetch failure never blocks the agent.
 ## Requirements
 ### Requirement: Bundled docs-fetch skill and helper
 

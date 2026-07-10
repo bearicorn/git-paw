@@ -1,7 +1,7 @@
 # dashboard Specification
 
 ## Purpose
-TBD - created by archiving change dashboard-tui. Update Purpose after archive.
+A ratatui TUI that observes broker state, rendering an agent-status table (with pinned supervisor row, status symbols, and relative-age formatting) plus a title and status line, driven by an event-based draw loop that shares `BrokerState` without holding locks during rendering. It manages terminal lifecycle across clean exit, error, and panic, and terminates cleanly when its session is torn down or it is orphaned rather than busy-looping.
 ## Requirements
 ### Requirement: Dashboard entry point
 

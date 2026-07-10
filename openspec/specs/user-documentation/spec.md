@@ -1,7 +1,8 @@
 # user-documentation Specification
 
 ## Purpose
-TBD - created by archiving change docs-v0.5.0-refresh. Update Purpose after archive.
+Requires the README (and companion docs) to document the full v0.5.0 user-facing surface — the new CLI flags, the three `[specs] type` backends, the governance/conflict/learnings config tables, forward coordination, and conflict detection — so adopters can discover the feature set from the landing page.
+
 ## Requirements
 ### Requirement: README features section enumerates v0.5.0 user-facing surface
 

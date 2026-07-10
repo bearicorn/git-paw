@@ -1,7 +1,8 @@
 # auto-approve-file-edits Specification
 
 ## Purpose
-TBD - created by archiving change auto-approve-scope-v0-6-x. Update Purpose after archive.
+Extends the auto-approve classifier to recognise Claude's filesystem-prompt patterns (write/edit/create/delete) and treat them as safe when the canonicalized target path resolves inside the agent's own worktree, so an unattended agent edits its own files without stalling. The behaviour is gated by `approve_worktree_writes` (default true), guards against symlink escape, and is purely additive to the existing shell-command auto-approval.
+
 ## Requirements
 ### Requirement: Worktree-confined file operations classify as safe
 

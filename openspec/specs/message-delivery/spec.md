@@ -1,7 +1,7 @@
 # message-delivery Specification
 
 ## Purpose
-TBD - created by archiving change peer-messaging. Update Purpose after archive.
+The broker's in-memory message routing and state layer: publishing updates the sender's agent record and lazily registers its inbox, then routes each `BrokerMessage` variant by its delivery rule (status logged-only, artifact/verified/intent broadcast to peers, blocked/feedback targeted, question routed to the supervisor inbox). It assigns globally-monotonic sequence numbers, serves non-destructive cursor-based polling and lock-scoped status snapshots, and flushes an append-only message log to disk best-effort.
 ## Requirements
 ### Requirement: Publish updates sender's agent record
 

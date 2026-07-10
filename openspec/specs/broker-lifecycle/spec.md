@@ -1,7 +1,8 @@
 # broker-lifecycle Specification
 
 ## Purpose
-TBD - created by archiving change broker-integration. Update Purpose after archive.
+Wires the broker and dashboard into the session lifecycle: the hidden `__dashboard` subcommand starts the broker and TUI (and hosts the auto-approve thread), start/stop/pause/resume/purge manage the dashboard pane and broker shutdown, and `GIT_PAW_BROKER_URL` is injected into the tmux session environment. It also defines the pause soft-stop (detach clients and stop the broker while leaving coding-agent panes running) and the restart-from-pause flow, and how `git paw status` surfaces broker and paused-session state.
+
 ## Requirements
 ### Requirement: Dashboard subcommand starts broker and dashboard
 

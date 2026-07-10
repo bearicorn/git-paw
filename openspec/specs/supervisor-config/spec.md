@@ -1,7 +1,8 @@
 # supervisor-config Specification
 
 ## Purpose
-TBD - created by archiving change supervisor-config. Update Purpose after archive.
+Defines the `[supervisor]` config schema — the `SupervisorConfig` struct, its `ApprovalLevel` and nested sub-tables (learnings, conflict, common dev allowlist, gate-command templates), the enabled-mode resolution chain, the `approval_flags` CLI-permission mapping, and the `git paw init` prompts and commented-block that generate it.
+
 ## Requirements
 ### Requirement: SupervisorConfig struct with defaults
 

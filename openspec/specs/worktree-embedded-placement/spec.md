@@ -1,7 +1,8 @@
 # worktree-embedded-placement Specification
 
 ## Purpose
-TBD - created by archiving change worktree-embedded-placement. Update Purpose after archive.
+Makes agent worktree placement configurable via `worktree_placement`: `"child"` nests worktrees inside the repo at `.git-paw/worktrees/<branch-slug>/` while `"sibling"` (the default when unset, preserving the v0.7.0 layout) places them beside the repo, with the child-layout slug derived from the branch name alone.
+
 ## Requirements
 ### Requirement: Worktree placement is configurable as child or sibling
 

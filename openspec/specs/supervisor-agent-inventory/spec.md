@@ -1,7 +1,8 @@
 # supervisor-agent-inventory Specification
 
 ## Purpose
-TBD - created by archiving change supervisor-tell. Update Purpose after archive.
+Provides an `/agents` supervisor-pane directive that returns the current agent inventory (each row carrying branch_id, status, last_seen, cli, best-effort mode, and path-resolved pane_index), composed from broker `/status` and `tmux list-panes`, cached in memory with a refresh cadence, and exposed as a reusable `coordination::inventory` library helper with target validation.
+
 ## Requirements
 ### Requirement: /agents inventory command in the supervisor pane
 

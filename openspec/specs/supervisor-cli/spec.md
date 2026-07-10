@@ -1,7 +1,8 @@
 # supervisor-cli Specification
 
 ## Purpose
-TBD - created by archiving change supervisor-mode. Update Purpose after archive.
+Resolves whether `git paw start` enters supervisor mode from CLI flags, config, and interactive prompts, and adds the launch- and purge-time git safety guards (warning on uncommitted specs before `--from-specs` launch and on unmerged worktree commits before `purge`).
+
 ## Requirements
 ### Requirement: Supervisor mode resolution chain
 

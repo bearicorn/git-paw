@@ -1,7 +1,8 @@
 # broker-endpoints Specification
 
 ## Purpose
-TBD - created by archiving change http-broker. Update Purpose after archive.
+Defines the broker's HTTP surface: `POST /publish` to accept and validate broker messages, `GET /messages/:agent_id` for non-destructive cursor-based inbox polling, `GET /status` for broker and agent state, `GET /log` for the full chronological message log (the IPC seam the supervisor process replays), and `POST /watch` to register live filesystem-watch targets for hot-added agents. It specifies the status codes, response shapes, loopback-only binding, and error handling for each route.
+
 ## Requirements
 ### Requirement: POST /publish accepts and validates broker messages
 

@@ -1,7 +1,7 @@
 # conflict-detector-fn-granularity Specification
 
 ## Purpose
-TBD - created by archiving change conflict-detector-fn-granularity. Update Purpose after archive.
+Extends `agent.intent` file entries with optional sub-file `regions` (function, class, block, or line range) so the conflict detector can distinguish disjoint edits within a shared file from true collisions, falling back to file-level conflict detection whenever regions are omitted to preserve v0.5.0 safety.
 ## Requirements
 ### Requirement: Optional regions field on agent.intent files
 

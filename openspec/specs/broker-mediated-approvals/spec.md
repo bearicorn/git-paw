@@ -1,7 +1,8 @@
 # broker-mediated-approvals Specification
 
 ## Purpose
-TBD - created by archiving change broker-mediated-approvals. Update Purpose after archive.
+Defines a single approval-send gate every approver passes through before clearing a permission prompt: it re-captures the pane immediately before send and only dispatches keystrokes when a live prompt marker is still present in the last 4 non-blank lines, never types into the supervisor's own pane 0, and keys approval dedup on command/agent identity rather than shared footer text. The gate reuses the existing `BrokerMessage` variants for its trigger and escalation signals rather than introducing a new variant or per-CLI hook.
+
 ## Requirements
 ### Requirement: Approval keystrokes require a re-confirmed live prompt
 

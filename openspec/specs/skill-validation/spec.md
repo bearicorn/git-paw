@@ -1,7 +1,8 @@
 # skill-validation Specification
 
 ## Purpose
-TBD - created by archiving change standardize-agent-skills. Update Purpose after archive.
+Validates standardized-format skills against the agentskills.io schema, accepting conforming skills and rejecting those with missing or invalid fields via clear, actionable error messages that name the specific offending fields.
+
 ## Requirements
 ### Requirement: Schema validation
 The system SHALL validate that new format skills conform to the agentskills.io schema specification.

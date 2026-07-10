@@ -1,7 +1,8 @@
 # agent-skills Specification
 
 ## Purpose
-TBD - created by archiving change skill-templates. Update Purpose after archive.
+Defines the embedded coordination and supervisor skill templates git-paw injects into agents, their resolution order (user override then embedded default), and the placeholder-rendering contract. This gives coding agents their broker coordination discipline (intent, heartbeats, stash hygiene, cherry-pick) and gives the supervisor its verification, merge-orchestration, permission-sweep, and user-interaction procedures, all as project-agnostic bundled content.
+
 ## Requirements
 ### Requirement: Embedded coordination skill
 

@@ -1,7 +1,8 @@
 # agent-friendly-docs-site Specification
 
 ## Purpose
-TBD - created by archiving change agent-friendly-docs-site. Update Purpose after archive.
+Makes the published documentation site machine-consumable by generating, deterministically from the mdBook sources at build time, an `llms.txt` index, a `sitemap.xml`, a `robots.txt`, and per-page structured metadata. This lets an agent identify pages and target sections without fetching siblings, and guarantees the machine-readable surface never drifts from the published content.
+
 ## Requirements
 ### Requirement: llms.txt index
 

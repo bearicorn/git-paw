@@ -1,7 +1,8 @@
 # supervisor-tell Specification
 
 ## Purpose
-TBD - created by archiving change supervisor-tell. Update Purpose after archive.
+Provides the supervisor-pane `/tell <agent_id> <prompt>` directive that validates the target against the agent inventory and routes a prompt to that agent via a selectable delivery mode (`agent.feedback` or `tmux send-keys`), recording each route in learnings, requiring user confirmation for proactive routes, and never invoking another CLI to generate the prompt.
+
 ## Requirements
 ### Requirement: /tell routing command in the supervisor pane
 

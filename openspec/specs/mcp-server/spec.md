@@ -1,7 +1,7 @@
 # mcp-server Specification
 
 ## Purpose
-TBD - created by archiving change mcp-server. Update Purpose after archive.
+A `git paw mcp` subcommand that runs a stdio JSON-RPC MCP server exposing read-only, deterministically-sourced tools (never invoking an agent CLI as an inference backend) over a resolved repository/worktree root. It advertises a schema-carrying tool registry and git-paw server identity, keeps stdout reserved for protocol frames with logging on stderr, and distinguishes graceful empty/null degradation from hard errors on malformed configuration.
 ## Requirements
 ### Requirement: MCP server subcommand
 

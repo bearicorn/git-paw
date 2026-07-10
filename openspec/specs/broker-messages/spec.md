@@ -1,7 +1,8 @@
 # broker-messages Specification
 
 ## Purpose
-TBD - created by archiving change message-types. Update Purpose after archive.
+Defines the `BrokerMessage` wire protocol: a single JSON-tagged enum with seven variants (Status, Artifact, Blocked, Verified, Feedback, Question, Intent), their payload shapes, validating construction, `Display` formatting, and `status_label`/`agent_id` accessors. It also specifies the `slugify_branch` branch-to-`agent_id` conversion, the `build_status_message` helper, and the broker `/publish` agent_id and placeholder validation every message is checked against.
+
 ## Requirements
 ### Requirement: Broker message envelope
 

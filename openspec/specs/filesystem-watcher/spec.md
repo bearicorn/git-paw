@@ -1,7 +1,7 @@
 # filesystem-watcher Specification
 
 ## Purpose
-TBD - created by archiving change hook-injection. Update Purpose after archive.
+A broker-internal watcher that polls each mapped worktree's `git status --porcelain` on a fixed 2-second interval and auto-publishes `agent.status` (with the current `modified_files`) for the owning agent whenever the reported path set changes, collapsing rapid edits into a single publish and staying silent while state is unchanged.
 ## Requirements
 ### Requirement: Watch worktree git state for changes
 

@@ -1,7 +1,7 @@
 # learnings-mode Specification
 
 ## Purpose
-TBD - created by archiving change learnings-mode. Update Purpose after archive.
+An opt-in, broker-internal aggregator (active only under supervisor mode with `learnings = true`) that observes broker messages to derive stuck-duration, recovery-cycle, conflict-event, and permission-pattern signals, appending them under per-session, per-category headings in a local `.git-paw/session-learnings.md`. It flushes periodically and on shutdown, performs no telemetry, and prints a privacy disclosure at session start.
 ## Requirements
 ### Requirement: Learnings aggregator lifecycle
 

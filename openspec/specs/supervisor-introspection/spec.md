@@ -1,7 +1,8 @@
 # supervisor-introspection Specification
 
 ## Purpose
-TBD - created by archiving change supervisor-introspection. Update Purpose after archive.
+Adds optional `phase` and `detail` fields to the `agent.status` broker message and a documented supervisor phase taxonomy, so the supervisor emits structured progress that the dashboard and the MCP `get_session_status` tool surface on the supervisor row.
+
 ## Requirements
 ### Requirement: Optional phase and detail fields on agent.status
 

@@ -1,7 +1,8 @@
 # per-commit-verification Specification
 
 ## Purpose
-TBD - created by archiving change per-commit-verification-v0-6-x. Update Purpose after archive.
+Drives the supervisor to verify each agent's commit as its `committed` event arrives rather than batching verifications: the bundled skill mandates per-event (concurrent, non-deferred) verification, and the broker optionally publishes a `supervisor.verify-now` nudge on each committed artifact.
+
 ## Requirements
 ### Requirement: Skill mandates per-event verification
 
