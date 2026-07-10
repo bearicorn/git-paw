@@ -1,7 +1,8 @@
 # advanced-main-event Specification
 
 ## Purpose
-TBD - created by archiving change advanced-main-event. Update Purpose after archive.
+Defines the `agent.advanced-main` broker event the supervisor publishes after every successful merge to the main branch, plus the supervisor and coding-agent skill guidance that surrounds it. This tells running agents when main has advanced so they can decide whether to rebase — without auto-rebasing — and lets the dashboard surface the merge stream.
+
 ## Requirements
 ### Requirement: agent.advanced-main broker variant
 

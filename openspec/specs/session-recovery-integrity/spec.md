@@ -1,7 +1,8 @@
 # session-recovery-integrity Specification
 
 ## Purpose
-TBD - created by archiving change session-recovery-pane-integrity-v0-6-x. Update Purpose after archive.
+Guarantees session recovery rebuilds exactly the panes a session defines (`N + 2` in supervisor mode) on a headless canvas sized to tile them without overflow, and preserves the persisted session JSON when a `git paw start` errors mid-launch so an aborted start cannot destroy a recoverable session.
+
 ## Requirements
 ### Requirement: Recovery rebuilds exactly the session's panes
 

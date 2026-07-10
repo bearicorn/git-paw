@@ -1,7 +1,8 @@
 # session-receipt-hygiene Specification
 
 ## Purpose
-TBD - created by archiving change session-bugfixes-v0-6-x. Update Purpose after archive.
+Distinguishes stale session receipts from live ones via a single cheap `tmux has-session` probe: `status` reports `🔴 stale` (and a `"stale"` JSON value) when a receipt claims active but its tmux session is gone, `start` auto-invalidates such receipts before launching, and `purge --stale` prunes only stale entries.
+
 ## Requirements
 ### Requirement: Status distinguishes stale receipts from active sessions
 

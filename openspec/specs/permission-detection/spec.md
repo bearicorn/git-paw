@@ -1,7 +1,8 @@
 # permission-detection Specification
 
 ## Purpose
-TBD - created by archiving change auto-approve-patterns. Update Purpose after archive.
+Detects agent-CLI permission prompts non-invasively via rate-limited `tmux capture-pane`, classifying each stalled prompt into a fixed permission type (Curl, Cargo, Unknown, etc.) so callers can decide whether to auto-approve.
+
 ## Requirements
 ### Requirement: Permission prompt detection via tmux capture-pane
 

@@ -1,7 +1,8 @@
 # start-force-flag Specification
 
 ## Purpose
-TBD - created by archiving change start-force-flag. Update Purpose after archive.
+Adds a `--force` flag to `git paw start` that suppresses the uncommitted-spec validation warning (which otherwise lists the IDs of pending specs with uncommitted git changes and continues), logging force usage to stderr for audit and propagating `git status` failures as `PawError::GitError`.
+
 ## Requirements
 ### Requirement: Force flag definition
 

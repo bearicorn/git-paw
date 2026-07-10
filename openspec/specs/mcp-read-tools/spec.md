@@ -1,7 +1,7 @@
 # mcp-read-tools Specification
 
 ## Purpose
-TBD - created by archiving change mcp-server. Update Purpose after archive.
+Defines the read-only MCP tool set the server advertises — coordination (intents/conflicts), governance docs, project knowledge (specs/tasks/skills), session state, git context, documentation, and source/file tools — each with a JSON Schema and deterministic, path-confined reads. Tools degrade gracefully to empty arrays or null when their data source is absent and refuse path traversal or gitignored reads outside the repository/docs roots.
 ## Requirements
 ### Requirement: Coordination tools
 

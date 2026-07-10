@@ -1,7 +1,8 @@
 # session-json-location Specification
 
 ## Purpose
-TBD - created by archiving change session-bugfixes-v0-6-x. Update Purpose after archive.
+Has `git paw start` write (and `purge` remove) a per-repo session JSON at `.git-paw/sessions/paw-<project>.json` — carrying the session name and each agent's branch_id, worktree path, CLI, and pane index — as the discovery surface the bundled `sweep.sh` helper reads, with a live-tmux fallback (`$TMUX` / `tmux display-message`) when the file is absent.
+
 ## Requirements
 ### Requirement: start writes a per-repo session JSON
 

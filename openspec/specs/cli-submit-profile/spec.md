@@ -1,7 +1,8 @@
 # cli-submit-profile Specification
 
 ## Purpose
-TBD - created by archiving change claude-oss-launch-v0-6-x. Update Purpose after archive.
+Reliably submits a boot block across CLIs by injecting the prompt text literally and then sending `Enter` as a separate keystroke after a settle delay, rather than a same-call trailing `Enter`. The delay is resolved per CLI from `[clis.<name>].submit_delay_ms` (keyed on the leading binary token) with a single CLI-agnostic default, applies to supervisor and agent panes alike, and contains no hardcoded CLI names, so a fresh supervisor session boots and all agents self-register unattended.
+
 ## Requirements
 ### Requirement: Boot prompt submitted via split-send + settle delay
 

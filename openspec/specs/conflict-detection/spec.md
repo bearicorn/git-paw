@@ -1,7 +1,7 @@
 # conflict-detection Specification
 
 ## Purpose
-TBD - created by archiving change conflict-detection. Update Purpose after archive.
+A broker-internal detector, active only in supervisor mode, that tracks agent intents and modified-file sets to flag three classes of coordination conflict — forward (overlapping intents), in-flight (concurrent edits to the same file), and ownership violations (editing files claimed by another agent) — auto-emitting `agent.feedback` to the involved agents and escalating unresolved collisions to the supervisor inbox.
 ## Requirements
 ### Requirement: Conflict detector lifecycle
 

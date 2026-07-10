@@ -1,7 +1,8 @@
 # broker-server Specification
 
 ## Purpose
-TBD - created by archiving change http-broker. Update Purpose after archive.
+Defines the broker's runtime: the optional `[broker]` config section (enabled/port/bind), the synchronous `start_broker` entry point that owns a tokio runtime and spawns the axum server plus per-worktree watcher tasks, stale-broker detection (probe then bind, reattach, or refuse), `SO_REUSEADDR` restart, `Arc`-shared `BrokerState`, SIGINT and panic isolation, and the stable `delivery.rs` contract. It confines tokio to the `src/broker/` tree so every other module stays synchronous.
+
 ## Requirements
 ### Requirement: Broker configuration schema
 

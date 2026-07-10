@@ -1,7 +1,7 @@
 # curl-allowlist Specification
 
 ## Purpose
-TBD - created by archiving change auto-approve-patterns. Update Purpose after archive.
+Seeds a least-privilege, path-based command allowlist into the agent CLI's settings at session startup so agents can invoke the bundled broker helper without a permission prompt, and keeps that allowlist current as broker URLs or endpoints change.
 ## Requirements
 ### Requirement: Curl allowlist setup
 

@@ -1,7 +1,7 @@
 # dashboard-broker-log Specification
 
 ## Purpose
-TBD - created by archiving change dashboard-broker-log. Update Purpose after archive.
+Adds a scrolling, filterable Broker log panel to the dashboard that displays recent broker messages newest-first from a bounded ring buffer, with per-type filter chips, a toggle hotkey, compact rows, a JSON details overlay, and buffer resilience across watcher restarts.
 ## Requirements
 ### Requirement: Broker log panel exists in the dashboard
 

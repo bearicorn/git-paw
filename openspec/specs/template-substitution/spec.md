@@ -1,7 +1,8 @@
 # template-substitution Specification
 
 ## Purpose
-TBD - created by archiving change boot-prompt-standard. Update Purpose after archive.
+Substitutes `{{VARIABLE_NAME}}` placeholders (e.g. `BRANCH_ID`, `GIT_PAW_BROKER_URL`) in boot-block templates at render time, slugifying branch IDs and fully pre-expanding all variables before injection so agent CLIs never hit shell-expansion permission prompts.
+
 ## Requirements
 ### Requirement: Template variable substitution
 

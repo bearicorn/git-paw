@@ -1,7 +1,8 @@
 # opsx-role-gating Specification
 
 ## Purpose
-TBD - created by archiving change opsx-role-gating. Update Purpose after archive.
+Enforces the supervisor-only boundary on `/opsx:verify` and `/opsx:archive` under the OpenSpec engine: bundled skills name these forbidden commands, and a post-commit guard detects archive-activity commits by coding agents (via message or diff shape) to warn, learn, or request a supervisor revert per the configured mode.
+
 ## Requirements
 ### Requirement: Role-gating is scoped to the OpenSpec spec engine
 

@@ -1,7 +1,8 @@
 # test-coverage-v0-5-0 Specification
 
 ## Purpose
-TBD - created by archiving change test-coverage-v0-5-0. Update Purpose after archive.
+Records the scenario-to-test mapping that backfills test coverage for the v0.5.0 archived changes, naming the specific `#[test]` functions that must exist for each previously-uncovered spec scenario. This is a bookkeeping spec, not a runtime capability.
+
 ## Requirements
 ### Requirement: Scenario-to-test mapping for from-specs-launch-fixes
 

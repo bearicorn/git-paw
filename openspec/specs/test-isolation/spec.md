@@ -1,7 +1,8 @@
 # test-isolation Specification
 
 ## Purpose
-TBD - created by archiving change test-tmux-isolation. Update Purpose after archive.
+Isolates the test suite from the developer's live environment: tmux-spawning tests use a tempdir-rooted socket via a shared helper, `setup_test_repo` guards against running while a live `paw-*` session exists, `git paw` subcommand tests override `HOME`/`XDG_DATA_HOME`, and broker ports come from an OS-assigned ephemeral bind rather than a collision-prone PID-modulo scheme.
+
 ## Requirements
 ### Requirement: Tmux-spawning tests SHALL use a dedicated tmux socket
 

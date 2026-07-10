@@ -1,7 +1,8 @@
 # supervisor-injection Specification
 
 ## Purpose
-TBD - created by archiving change boot-prompt-standard. Update Purpose after archive.
+Prepends the standardized boot instruction block (and, when configured, a governance-documents section) to every pane-bound agent's initial prompt — coding agents and the supervisor pane — during the supervisor launch sequence, so each agent reads its runtime-event instructions before its task content.
+
 ## Requirements
 ### Requirement: Supervisor mode boot block prepending
 

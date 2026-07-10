@@ -1,7 +1,7 @@
 # from-specs-launch Specification
 
 ## Purpose
-TBD - created by archiving change from-specs-launch-fixes. Update Purpose after archive.
+Gives the bare `git paw start --from-specs` path broker boot-block parity with `cmd_start`: when the broker is enabled it injects a per-agent boot block (carrying `BRANCH_ID`, broker URL, and publish patterns) into each spec pane via `tmux send-keys`, accounting for the dashboard pane offset, best-effort and skipped entirely when the broker is disabled.
 ## Requirements
 ### Requirement: Boot-block injection in cmd_start_from_specs
 

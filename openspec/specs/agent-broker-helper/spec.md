@@ -1,7 +1,8 @@
 # agent-broker-helper Specification
 
 ## Purpose
-TBD - created by archiving change agent-broker-helper. Update Purpose after archive.
+Provides bundled shell helpers (`broker.sh` for agents, `sweep.sh` for the supervisor) that wrap every agent→broker interaction — status, artifact, blocked, question, intent, poll, and the supervisor status/verified/feedback-gate verbs — so no participant hand-rolls a raw `curl …/publish`. The helpers discover the broker URL from config, shape all JSON internally, and are provisioned into each agent worktree at start/add time.
+
 ## Requirements
 ### Requirement: Bundled agent-broker helper script
 

@@ -1,7 +1,7 @@
 # no-fail-fast-verification Specification
 
 ## Purpose
-TBD - created by archiving change verification-no-fail-fast-v0-6-x. Update Purpose after archive.
+Ensures the supervisor's testing gate runs the whole test suite without fail-fast so an early-aborted run (e.g. from an environment guard test) is never mistaken for a PASS: the bundled supervisor skill states this discipline stack-agnostically, git-paw ships a guard-neutralised `just verify` recipe, and its config routes `{{TEST_COMMAND}}` through that recipe.
 ## Requirements
 ### Requirement: Testing gate states the full-suite discipline generically
 

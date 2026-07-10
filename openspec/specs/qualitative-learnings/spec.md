@@ -1,7 +1,8 @@
 # qualitative-learnings Specification
 
 ## Purpose
-TBD - created by archiving change qualitative-learnings. Update Purpose after archive.
+Extends `agent.learning` with qualitative categories (recurring_failure_shape, doc_gap, adr_drift, scope_mistake, tooling_friction) that the supervisor publishes through the `sweep.sh learn` helper under gated heuristics, and renders them into dedicated sections of `.git-paw/session-learnings.md` so durable, judgment-based signals are captured without changing the broker wire format.
+
 ## Requirements
 ### Requirement: Four qualitative category values
 

@@ -1,7 +1,8 @@
 # terminal-status-protection Specification
 
 ## Purpose
-TBD - created by archiving change terminal-status-sticky. Update Purpose after archive.
+Makes an agent's terminal status (`done`, `verified`, `blocked`, `committed`) sticky in `update_agent_record`, overwriting it only with another terminal status so that later non-terminal updates — such as the watcher inferring `working` from filesystem activity — cannot downgrade a completed agent.
+
 ## Requirements
 ### Requirement: Terminal status helper
 

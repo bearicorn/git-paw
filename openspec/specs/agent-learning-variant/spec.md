@@ -1,7 +1,8 @@
 # agent-learning-variant Specification
 
 ## Purpose
-TBD - created by archiving change agent-learning-variant. Update Purpose after archive.
+Defines the `agent.learning` broker message variant and the aggregator behaviour that emits it: categorised learning records (conflict events, stall durations, recovery cycles, permission patterns) carrying a deterministic hour-bucketed id for idempotent re-emission. When the broker is enabled the aggregator publishes each record in addition to appending it to `session-learnings.md`, and the MCP `get_learnings` tool reads from the broker when running or the file otherwise — preserving v0.5.0 file-only behaviour when the broker is off.
+
 ## Requirements
 ### Requirement: agent.learning broker message variant
 

@@ -1,7 +1,7 @@
 # governance-config Specification
 
 ## Purpose
-TBD - created by archiving change governance-config. Update Purpose after archive.
+Defines `PawConfig.governance`, a config section holding optional, root-relative path pointers to a project's governance and documentation artifacts (ADRs, test strategy, security checklist, Definition of Done, constitution, README, docs root). It stores paths only (no gating semantics), auto-wires a Spec Kit `constitution.md` when detected and unset, and loads pre-v0.5 configs to all-`None` defaults for backward compatibility.
 ## Requirements
 ### Requirement: GovernanceConfig struct with optional paths
 

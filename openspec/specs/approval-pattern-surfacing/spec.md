@@ -1,7 +1,8 @@
 # approval-pattern-surfacing Specification
 
 ## Purpose
-TBD - created by archiving change approval-pattern-surfacing. Update Purpose after archive.
+Records every command the auto-approve loop forwards for a manual human decision to a per-session JSONL log, and provides the `git paw approvals` subcommand to aggregate those patterns by frequency with a promotion-target hint (project allowlist vs bundled preset candidate). First-seen patterns can also emit a `permission_pattern` learning record, surfacing which prompts recur so they can be promoted into the allowlist. The whole channel is opt-out via config.
+
 ## Requirements
 ### Requirement: Manual-decision log file
 

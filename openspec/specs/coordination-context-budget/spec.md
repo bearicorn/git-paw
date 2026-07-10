@@ -1,7 +1,7 @@
 # coordination-context-budget Specification
 
 ## Purpose
-TBD - created by archiving change coordination-context-budget. Update Purpose after archive.
+Adds a "Context budget" section to the bundled coordination skill teaching agents when to compact, clear, or summarise (with a residual-budget heuristic and commit-before-compact discipline), and gives the supervisor a configurable token threshold so `sweep.sh` can proactively flag context-bloated agents via a synthetic `agent.status` before they freeze.
 ## Requirements
 ### Requirement: Context budget section in coordination skill
 

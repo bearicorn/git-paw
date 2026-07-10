@@ -1,7 +1,8 @@
 # safe-command-classification Specification
 
 ## Purpose
-TBD - created by archiving change auto-approve-patterns. Update Purpose after archive.
+Classifies a captured command's command slice as auto-approvable or escalate-to-human by prefix-matching a configurable safe-command whitelist, while a terminal, curated per-OS danger-list (force-push, hard reset, sudo, device writes, process kills, etc.) always escalates — subject only to a scratch-path exception for `rm -rf` targeting repo/OS scratch paths.
+
 ## Requirements
 ### Requirement: Whitelist of safe command classes
 

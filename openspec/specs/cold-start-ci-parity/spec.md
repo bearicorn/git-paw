@@ -1,7 +1,8 @@
 # cold-start-ci-parity Specification
 
 ## Purpose
-TBD - created by archiving change cold-start-ci-parity. Update Purpose after archive.
+Closes the gap between passing tests on a developer's machine and passing in CI by providing cold-start smoke recipes (`just smoke`, `smoke-container`, `smoke-all`) that strip inherited tmux/broker context and mirror CI's environment, plus convention-enforcement tests (every `new-session` carries `-x`/`-y`/`-c`, no stdin-claiming pipe in `sweep.sh`), an expanded CI matrix (headless Linux + macOS), and a CONTRIBUTING rule to run the smoke suite before pushing tmux/broker/worktree changes.
+
 ## Requirements
 ### Requirement: just smoke recipe
 

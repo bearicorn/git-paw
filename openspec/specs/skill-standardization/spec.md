@@ -1,7 +1,8 @@
 # skill-standardization Specification
 
 ## Purpose
-TBD - created by archiving change standardize-agent-skills. Update Purpose after archive.
+Supports the agentskills.io standardized skill format — a directory containing a `SKILL.md` plus optional resource subdirectories — auto-detecting the directory format and loading/parsing such skills with their required fields present.
+
 ## Requirements
 ### Requirement: Standardized skill format
 The system SHALL support the agentskills.io standardized format for agent skills, which includes a directory structure with SKILL.md as the main file plus optional subdirectories for resources.

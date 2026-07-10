@@ -1,7 +1,8 @@
 # stuck-prompt-detection Specification
 
 ## Purpose
-TBD - created by archiving change auto-approve-scope-v0-6-x. Update Purpose after archive.
+Has the bundled `sweep.sh` helper detect stuck-agent shapes from live pane capture plus broker heartbeats — stuck-on-prompt (including paste-buffer), no-progress, and blocked-on-supervisor — and publish deduplicated synthetic `agent.status` messages, while gating its `approve <pane>` subcommand to re-confirm a live prompt before sending keys and to refuse pane 0; the supervisor skill names the helper as the canonical mechanism and forbids inline-bash reinvention.
+
 ## Requirements
 ### Requirement: sweep.sh detects stuck-on-prompt agents
 

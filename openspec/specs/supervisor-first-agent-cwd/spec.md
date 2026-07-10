@@ -1,7 +1,8 @@
 # supervisor-first-agent-cwd Specification
 
 ## Purpose
-TBD - created by archiving change supervisor-first-agent-cwd-v0-6-x. Update Purpose after archive.
+Ensures the first coding agent's pane runs its CLI in that agent's own worktree rather than the supervisor's repo root, by assigning the split-time `-c <cwd>` values to compensate for the pane-1/2 swap so each post-swap pane's cwd matches the command sent to it.
+
 ## Requirements
 ### Requirement: First agent pane launches in its own worktree
 

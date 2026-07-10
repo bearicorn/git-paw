@@ -1,7 +1,7 @@
 # lang-agnostic-skills Specification
 
 ## Purpose
-TBD - created by archiving change lang-agnostic-assets. Update Purpose after archive.
+Keeps the bundled supervisor and coordination skills project-agnostic by driving stack- and backend-specific content through config-sourced placeholder substitutions (`{{DOC_TOOL_COMMAND}}`, `{{DEV_ALLOWLIST_PRESET}}`, `{{SPEC_PATH_DOCTRINE}}`) that read naturally when empty, and enforcing a CI no-language-leak audit that flags hardcoded implementation-language tokens or project-specific commit conventions in the exported skills.
 ## Requirements
 ### Requirement: New supervisor config keys for doc tooling
 

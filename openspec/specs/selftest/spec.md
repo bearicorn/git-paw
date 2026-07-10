@@ -1,7 +1,8 @@
 # selftest Specification
 
 ## Purpose
-TBD - created by archiving change selftest-harness. Update Purpose after archive.
+Provides `git paw selftest`, which runs an isolated end-to-end session lifecycle (start → add/remove roster transitions → stop) against a throwaway repo under `.git-paw/tmp/` using a dummy CLI, a private tmux socket, and an ephemeral broker port, then reports a single pass/fail verdict without any real LLM backend or interactive terminal.
+
 ## Requirements
 ### Requirement: `git paw selftest` subcommand
 

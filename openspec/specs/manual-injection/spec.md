@@ -1,7 +1,7 @@
 # manual-injection Specification
 
 ## Purpose
-TBD - created by archiving change boot-prompt-standard. Update Purpose after archive.
+Pre-fills the broker boot block into each agent pane's input line — without sending Enter — immediately after tmux session creation in manual (non-supervisor) broker mode, so the user can append their own task and submit the combined content, using the same boot-block configuration as supervisor mode.
 ## Requirements
 ### Requirement: Manual mode boot block pre-fill
 

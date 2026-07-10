@@ -1,7 +1,8 @@
 # broker-roster-hygiene Specification
 
 ## Purpose
-TBD - created by archiving change broker-roster-hygiene-v0-6-x. Update Purpose after archive.
+Keeps the broker `/status` roster honest: a row appears only once a pane actually publishes `agent.status` — never from the identity fields of feedback/question/verified messages, and never for a seeded-but-unpublished pane — so no phantom rows appear and none survive a restart. It also specifies that each row's CLI column is filled authoritatively from the launcher-known value (session JSON or `[supervisor].cli`), so a self-reported guess never clobbers it and the column is never blank.
+
 ## Requirements
 ### Requirement: Roster populated only from agent.status publishers
 

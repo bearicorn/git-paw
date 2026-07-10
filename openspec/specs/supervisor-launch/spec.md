@@ -1,7 +1,8 @@
 # supervisor-launch Specification
 
 ## Purpose
-TBD - created by archiving change supervisor-agent. Update Purpose after archive.
+Orchestrates the full supervisor session launch via `cmd_supervisor()` — computing the layout, creating worktrees and the tmux pane structure (supervisor, dashboard, coding-agent grid), injecting the broker URL and per-pane boot prompts, and branching between the return-with-attach-hint and `--unattended` in-process drive-loop paths.
+
 ## Requirements
 ### Requirement: Supervisor auto-start flow
 

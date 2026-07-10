@@ -1,7 +1,8 @@
 # worktree-branch-guard Specification
 
 ## Purpose
-TBD - created by archiving change session-bugfixes-v0-6-x. Update Purpose after archive.
+Guards against cross-worktree branch contamination in shared `.git/refs`: a pre-commit hook refuses a commit whose worktree branch does not match the branch being advanced (opt-out via `strict_branch_guard = false`), a post-commit hook publishes `agent.feedback` and a `permission_pattern` learning on mismatch, both hooks install idempotently per worktree, and the coordination skill teaches agents to stay inside their worktree.
+
 ## Requirements
 ### Requirement: Post-commit hook detects branch mismatch
 
