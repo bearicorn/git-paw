@@ -77,6 +77,42 @@ fn write_log(repo_root: &Path, session: &str, entries: &[(&str, &str, bool, &str
     std::fs::write(&path, body).unwrap();
 }
 
+// --- temporal ordering: first_seen/last_seen track the MIN/MAX timestamp ---
+
+/// The aggregation must derive a pattern's `first_seen`/`last_seen` from the
+/// earliest/latest timestamp across its entries, NOT from the order the lines
+/// happen to appear in the JSONL log. Feed the same pattern with timestamps
+/// deliberately out of chronological order (middle, earliest, latest) and
+/// assert the aggregated row reports the true min and max. (v0.10.0
+/// approval-log temporal-ordering assertion.)
+#[test]
+fn aggregate_first_and_last_seen_track_min_and_max_timestamp() {
+    let repo = setup_repo();
+    let session = "paw-order";
+    write_log(
+        repo.path(),
+        session,
+        &[
+            ("feat/a", "cargo test", false, "2026-07-10T12:00:00Z"),
+            ("feat/a", "cargo test", true, "2026-07-10T09:00:00Z"),
+            ("feat/a", "cargo test", false, "2026-07-10T15:00:00Z"),
+        ],
+    );
+    let log = manual_approvals::log_path(repo.path(), session);
+    let rows = manual_approvals::aggregate(&log).expect("aggregate reads the log");
+    assert_eq!(rows.len(), 1, "one distinct pattern");
+    let row = &rows[0];
+    assert_eq!(row.count, 3);
+    assert_eq!(
+        row.first_seen, "2026-07-10T09:00:00Z",
+        "first_seen must be the earliest timestamp regardless of log line order"
+    );
+    assert_eq!(
+        row.last_seen, "2026-07-10T15:00:00Z",
+        "last_seen must be the latest timestamp regardless of log line order"
+    );
+}
+
 // --- §9.1: lists patterns with counts + suggested targets ---
 
 #[test]
