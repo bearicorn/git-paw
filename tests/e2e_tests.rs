@@ -1294,16 +1294,30 @@ fn broker_session_full_lifecycle() {
         .assert()
         .success();
 
-    // Wait for broker to shut down
-    std::thread::sleep(std::time::Duration::from_secs(3));
-
-    // Verify the broker port is freed — binding to it should succeed
-    let bind_result = std::net::TcpListener::bind(format!("127.0.0.1:{broker_port}"));
+    // Verify the broker released the port: no process accepts connections on
+    // it any more. We poll a *connect* (refused = no listener), not a *bind*.
+    // A fresh bind can spuriously fail while the just-closed listener's port
+    // lingers in TCP TIME_WAIT even though the broker is gone; connect is
+    // refused as soon as there is no listener — the condition we actually care
+    // about, and it is immune to TIME_WAIT (v0.10.0 test-isolation hardening).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut freed = false;
+    while std::time::Instant::now() < deadline {
+        let listening = std::net::TcpStream::connect_timeout(
+            &format!("127.0.0.1:{broker_port}").parse().unwrap(),
+            std::time::Duration::from_millis(200),
+        )
+        .is_ok();
+        if !listening {
+            freed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     assert!(
-        bind_result.is_ok(),
-        "broker port {broker_port} should be freed after stop"
+        freed,
+        "broker port {broker_port} should be released (no listener) after stop"
     );
-    drop(bind_result);
 
     // -----------------------------------------------------------------------
     // Step 10: Purge — remove worktrees and branches
