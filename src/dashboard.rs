@@ -27,7 +27,7 @@ use crate::error::PawError;
 
 /// Idle refresh interval for the dashboard draw loop.
 ///
-/// The loop blocks in `event::poll(TICK_INTERVAL)`, so a keystroke wakes it
+/// The loop waits in `poll_tty(TICK_INTERVAL)`, so a keystroke wakes it
 /// immediately — typing latency is near-zero and independent of this value —
 /// while an *idle* dashboard only re-renders the broker-state snapshot once
 /// per interval instead of busy-redrawing. 800ms (~1.25 Hz) keeps the status
@@ -69,6 +69,91 @@ fn orphaned() -> bool {
 #[cfg(not(unix))]
 fn orphaned() -> bool {
     false
+}
+
+/// Outcome of one draw-loop input wait ([`poll_tty`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TtyPoll {
+    /// The interval elapsed with no input pending — re-run the gate and render.
+    Timeout,
+    /// Input is readable now — drain and handle events.
+    Readable,
+    /// The controlling terminal hung up (pane/pty destroyed) — the loop must exit.
+    HangUp,
+}
+
+/// Waits up to `timeout` for input on the controlling terminal (stdin, fd 0),
+/// reporting timeout / readable / hang-up.
+///
+/// This replaces a bare `crossterm::event::poll(TICK_INTERVAL)` for the *outer*
+/// wait because that call does not return on a dead terminal: when the tmux pane
+/// is torn down (`git paw stop`, `kill-session`, a crash), the pty hangs up, and
+/// a hung-up fd is *perpetually* ready to `poll(2)`. crossterm therefore keeps
+/// seeing readiness, reads EOF, and busy-loops internally — never returning to
+/// the draw loop, never honoring its timeout, so the loop's lifecycle gate
+/// ([`should_exit`]) is never re-reached and the orphaned process spins at ~100%
+/// CPU forever while its in-process broker keeps its port bound. Polling the fd
+/// ourselves lets us (a) honor the timeout so the gate re-runs every tick
+/// (catching the reparent case) and (b) detect `POLLHUP`/`POLLERR`/`POLLNVAL`
+/// and exit instead of trapping. Only when the fd is readable *without* hang-up
+/// do we delegate to crossterm's non-blocking read, which then returns promptly.
+#[cfg(unix)]
+fn poll_tty(timeout: Duration) -> TtyPoll {
+    // poll(2) event bits — identical values on Linux and macOS.
+    const POLLIN: i16 = 0x0001;
+    const POLLERR: i16 = 0x0008;
+    const POLLHUP: i16 = 0x0010;
+    const POLLNVAL: i16 = 0x0020;
+
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+
+    // SAFETY: `poll` is async-signal-safe; we pass one initialized `PollFd`,
+    // `nfds` = 1 matching that single element, and a millisecond timeout. `poll`
+    // only writes `revents`, which we read back afterwards.
+    unsafe extern "C" {
+        fn poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
+    }
+
+    let mut pfd = PollFd {
+        fd: 0, // stdin — the tmux pane's pty
+        events: POLLIN,
+        revents: 0,
+    };
+    let ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    // SAFETY: see the extern block above — `&mut pfd` is a single valid PollFd.
+    let rc = unsafe { poll(&raw mut pfd, 1, ms) };
+
+    if rc < 0 {
+        // EINTR or an unexpected error. Sleep out the interval so a persistent
+        // error (e.g. a bad fd) degrades to a quiet tick rather than a busy
+        // loop, then report a timeout so the gate — which checks `orphaned()` —
+        // still runs and can exit.
+        std::thread::sleep(timeout);
+        return TtyPoll::Timeout;
+    }
+    if rc == 0 {
+        return TtyPoll::Timeout;
+    }
+    if pfd.revents & (POLLHUP | POLLERR | POLLNVAL) != 0 {
+        return TtyPoll::HangUp;
+    }
+    if pfd.revents & POLLIN != 0 {
+        return TtyPoll::Readable;
+    }
+    TtyPoll::Timeout
+}
+
+/// Non-unix stub: the dashboard only runs on unix (tmux). Sleeps out the
+/// interval and reports a timeout so the draw loop keeps ticking.
+#[cfg(not(unix))]
+fn poll_tty(timeout: Duration) -> TtyPoll {
+    std::thread::sleep(timeout);
+    TtyPoll::Timeout
 }
 
 /// The dashboard draw loop's lifecycle gate: returns `true` when the loop must
@@ -543,18 +628,20 @@ pub fn run_dashboard_with_panes<S: std::hash::BuildHasher>(
             break;
         }
 
-        // Block up to TICK_INTERVAL for input. This yields the CPU while idle
+        // Wait up to TICK_INTERVAL for input. This yields the CPU while idle
         // instead of redrawing every tick, yet wakes the instant a key arrives
-        // — decoupling typing latency from the redraw cadence. A poll error
-        // means the controlling terminal is gone: latch tty_gone and loop back
-        // to the gate rather than spin against a dead terminal.
-        match event::poll(TICK_INTERVAL) {
-            Ok(false) => {}
-            Err(_) => {
+        // — decoupling typing latency from the redraw cadence. We poll the fd
+        // ourselves (see `poll_tty`) rather than block in `event::poll`: on a
+        // dead terminal the latter never returns, so it would trap the loop
+        // before the gate above could exit. A hang-up latches tty_gone and
+        // loops back to the gate; a timeout falls through to re-render.
+        match poll_tty(TICK_INTERVAL) {
+            TtyPoll::Timeout => {}
+            TtyPoll::HangUp => {
                 tty_gone = true;
                 continue;
             }
-            Ok(true) => {
+            TtyPoll::Readable => {
                 // Drain up to 32 pending input events before re-rendering. `q`
                 // quits; the Broker log panel claims its own keys (l / a / 1-9
                 // / Up / Down / Enter / Esc); everything else is ignored. A
