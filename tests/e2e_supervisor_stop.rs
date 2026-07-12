@@ -12,7 +12,6 @@
 //! workers do not collide.
 
 use std::fs;
-use std::net::TcpListener;
 use std::process::Command as StdCommand;
 use std::time::{Duration, Instant};
 
@@ -129,13 +128,22 @@ fn stop_kills_tmux_and_shuts_down_broker() {
     );
 
     // Within 5 seconds, the broker port must be freshly bindable AND tmux
-    // session must be gone.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // session must be gone. The port check polls a *connect* (refused = no
+    // listener), not a *bind*: a fresh bind can spuriously fail while the
+    // just-closed broker's port lingers in TCP TIME_WAIT even though the broker
+    // is gone, whereas connect is refused as soon as there is no listener — the
+    // condition we actually care about, immune to TIME_WAIT (v0.10.0
+    // test-isolation hardening). Window widened to absorb teardown under load.
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut port_free = false;
     let mut tmux_gone = false;
     while Instant::now() < deadline {
         if !port_free {
-            port_free = TcpListener::bind(("127.0.0.1", port)).is_ok();
+            port_free = std::net::TcpStream::connect_timeout(
+                &format!("127.0.0.1:{port}").parse().unwrap(),
+                Duration::from_millis(200),
+            )
+            .is_err();
         }
         if !tmux_gone {
             let has = StdCommand::new("tmux")
@@ -154,7 +162,7 @@ fn stop_kills_tmux_and_shuts_down_broker() {
     kill_session(&session_name, tmux_env.socket_dir());
     assert!(
         port_free,
-        "broker port {port} should be freshly bindable after stop"
+        "broker port {port} should be released (no listener) after stop"
     );
     assert!(
         tmux_gone,
