@@ -71,7 +71,7 @@ The system SHALL manage terminal state transitions for the ratatui TUI. On entry
 
 ### Requirement: Periodic state polling
 
-The system SHALL poll `BrokerState` via `agent_status_snapshot` and SHALL render a new frame whenever a draw is needed. The dashboard SHALL wait for input and events by BLOCKING on the event poll with a bounded idle timeout rather than busy-polling; the idle timeout SHALL be at least 800 milliseconds so that an idle dashboard consumes negligible CPU. Key input and redraw-triggering events SHALL wake the poll immediately, so responsiveness does not depend on the idle timeout. If the event poll returns an error (the terminal is gone), the loop SHALL exit.
+The system SHALL poll `BrokerState` via `agent_status_snapshot` and SHALL render a new frame whenever a draw is needed. The dashboard SHALL wait for input by polling its controlling terminal with a bounded idle timeout rather than busy-polling; the idle timeout SHALL be at least 800 milliseconds so that an idle dashboard consumes negligible CPU. Key input and redraw-triggering events SHALL wake the wait immediately, so responsiveness does not depend on the idle timeout. The wait SHALL be bounded even when the terminal is gone: a hung-up controlling terminal SHALL be detected and SHALL cause the loop to exit rather than trap the wait indefinitely.
 
 The system SHALL NOT hold the `BrokerState` read lock across a draw call or a poll/wait. The lock SHALL be acquired, data cloned, and the lock released before any rendering or waiting occurs.
 
@@ -91,12 +91,12 @@ The system SHALL NOT hold the `BrokerState` read lock across a draw call or a po
 
 - **GIVEN** a running dashboard awaiting input
 - **WHEN** the user presses `q`
-- **THEN** the dashboard reacts immediately — the blocking poll returns on the keypress rather than after the idle timeout
+- **THEN** the dashboard reacts immediately — the terminal poll returns on the keypress rather than after the idle timeout
 
 #### Scenario: Idle dashboard does not busy-loop
 
 - **GIVEN** a running dashboard with no pending input and no state changes
-- **THEN** it blocks on the event poll for the idle timeout (at least 800 ms) between wakeups instead of redrawing continuously, keeping idle CPU negligible
+- **THEN** it waits on the bounded terminal poll for the idle timeout (at least 800 ms) between wakeups instead of redrawing continuously, keeping idle CPU negligible
 
 ### Requirement: Quit keybind
 
@@ -399,7 +399,7 @@ The `q` keybind SHALL remain the sole keyboard input handled by the dashboard.
 The dashboard SHALL terminate when its session is gone, and SHALL NOT busy-loop after that point regardless of how the session ended or whether its in-process broker started. Specifically:
 
 - The dashboard SHALL exit when its parent process is no longer present — on Unix, when it has been reparented to init (`getppid() == 1`) — so it never outlives a session torn down without SIGHUP (an abrupt `tmux kill-server`, a crash, or machine sleep). On platforms without this signal the prior SIGHUP-based shutdown behavior is retained.
-- The dashboard SHALL additionally exit when its controlling terminal / stdout is gone (the event poll returns an error, or a write to the terminal fails), so a dashboard reparented to a lingering shell (a parent that is alive but is not init) still terminates once its pane is gone.
+- The dashboard SHALL additionally exit when its controlling terminal is gone — detected by polling the controlling terminal for hang-up (`POLLHUP`/`POLLERR`/`POLLNVAL`) or by a failed write to the terminal — so a dashboard reparented to a lingering shell (a parent that is alive but is not init) still terminates once its pane is gone. The terminal wait SHALL be bounded so a hung-up terminal cannot trap the loop before the lifecycle check runs; the dashboard SHALL NOT rely on the event-input poll returning an error to notice the hang-up, because a hung-up terminal is perpetually readable and would otherwise busy-loop the input poll without ever returning.
 - If the in-process broker fails to bind its port, the dashboard SHALL emit a diagnostic and exit rather than enter a render/retry busy-loop.
 - The shutdown / orphan / tty-gone check SHALL be evaluated on every loop path, including any error or degraded path, so no branch can bypass it and busy-loop.
 
@@ -432,4 +432,10 @@ The dashboard SHALL terminate when its session is gone, and SHALL NOT busy-loop 
 - **GIVEN** a running dashboard that takes an error or degraded branch of its loop
 - **WHEN** that branch executes
 - **THEN** the same shutdown / orphan / tty-gone check applies, so the dashboard cannot busy-loop on any path
+
+#### Scenario: Session teardown releases the dashboard and its broker port
+
+- **GIVEN** a running supervisor dashboard hosting the in-process broker
+- **WHEN** the session is stopped and the dashboard's tmux pane pty hangs up
+- **THEN** the dashboard's terminal wait returns (rather than trapping on the perpetually-readable hung-up pty), the lifecycle check exits the loop, and the in-process broker's port is released — a fresh connection to it is refused rather than the port remaining bound by a spinning orphan
 
