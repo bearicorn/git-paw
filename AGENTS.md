@@ -77,7 +77,7 @@ These guidelines are working if: fewer unnecessary changes in diffs, fewer rewri
 
 ## Design Principles
 
-Durable principles that govern this project (consolidated here 2026-07-07 from the roadmap doc).
+Durable principles that govern this project.
 
 ### Exported assets must be project-agnostic
 

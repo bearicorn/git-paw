@@ -5,7 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.9.0] - 2026-07-03
+## [0.10.0] - 2026-07-13
+
+### Features
+
+- *(cli,init)* Provision bundled helpers into agent worktrees
+- *(skills)* Bundle the on-demand docs-fetch skill and helper, gated on docs_base_url
+- *(docs)* Generate agent-friendly discovery surface at build time
+- *(init)* Document every config section in the generated init template
+
+### Bug Fixes
+
+- *(dashboard)* Exit on tty hang-up instead of trapping the input poll
+- *(dashboard)* Harden orphan-exit against bind-failure and shell-reparent busy-loops
+- *(dashboard)* Exit when orphaned and stop busy-redrawing while idle
+- *(git,agents)* Harden the remove dirty-check against porcelain parse bleed
+
+### Documentation
+
+- *(specs)* Index every capability on the specifications page
+- *(specs)* Backfill Purpose sections across archived capability specs
+- Align docs with shipped behavior and add design principles
+
+### Testing
+
+- *(e2e)* Make broker-port-release checks TIME_WAIT-immune
+- *(supervisor)* Assert approval-log rows track first/last-seen
+- *(specs)* Guard against the archived Purpose placeholder
+
+### CI/CD
+
+- *(docs)* Add workflow_dispatch for on-demand pages redeploy
+## [0.9.0] - 2026-07-06
 
 ### Features
 
@@ -146,6 +177,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 - Add CLI tool for parallel AI coding sessions across git worktrees
+[0.10.0]: https://github.com/bearicorn/git-paw/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/bearicorn/git-paw/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/bearicorn/git-paw/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/bearicorn/git-paw/compare/v0.6.0...v0.7.0

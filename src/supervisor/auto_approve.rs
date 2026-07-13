@@ -544,10 +544,7 @@ fn rm_rf_targets(slice: &str) -> Option<Vec<String>> {
         if tok.starts_with('-') {
             continue;
         }
-        match resolve_target(tok, &assignments) {
-            Some(resolved) => targets.push(resolved),
-            None => return None,
-        }
+        targets.push(resolve_target(tok, &assignments)?);
     }
     Some(targets)
 }
