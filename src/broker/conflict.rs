@@ -88,7 +88,8 @@ pub struct FileConflict {
     /// file-level conflict (at least one side declared no regions).
     pub regions: Vec<Region>,
     /// `true` when at least one intersecting pair was a conservative
-    /// cross-kind match (a named region vs a line range).
+    /// cross-kind match (a named region vs a line range, or named regions
+    /// of differing kinds with matching normalized names).
     pub cross_kind: bool,
 }
 
@@ -106,16 +107,67 @@ fn ranges_overlap(s1: u32, e1: u32, s2: u32, e2: u32) -> bool {
     s1 <= e2 && s2 <= e1
 }
 
+/// Deterministically normalizes a declared region name so spelling variants
+/// of the same symbol compare equal: case-folded, trimmed, a trailing `()`
+/// stripped, a leading declaration keyword (`fn`, `def`, `function`,
+/// `class`) stripped, and separator runs (space, underscore, hyphen)
+/// collapsed to a single `_`.
+///
+/// Normalization is deliberately rule-based rather than fuzzy: every step
+/// maps to an observed declaration habit (`validate_token()` vs
+/// `Validate Token` vs `fn validate_token`), so a match is always
+/// explainable. Genuinely distinct symbols (`foo_bar` vs `foobar`) stay
+/// distinct.
+fn normalize_region_name(name: &str) -> String {
+    let lowered = name.trim().to_lowercase();
+    // Strip one trailing `()` — `validate_token()` names the same symbol
+    // as `validate_token`.
+    let stripped = lowered.strip_suffix("()").unwrap_or(&lowered).trim_end();
+    // Strip one leading declaration keyword when a separator follows it
+    // (`fn validate_token`, `class Config`). A bare keyword or a name that
+    // merely starts with one (`classify`) is left alone.
+    let mut rest = stripped;
+    for kw in ["function", "class", "def", "fn"] {
+        if let Some(tail) = rest.strip_prefix(kw)
+            && tail.starts_with([' ', '\t', '_', '-'])
+        {
+            rest = tail;
+            break;
+        }
+    }
+    // Collapse each separator run to a single `_`, dropping leading and
+    // trailing runs.
+    let mut out = String::with_capacity(rest.len());
+    let mut pending_sep = false;
+    for c in rest.chars() {
+        if matches!(c, ' ' | '\t' | '_' | '-') {
+            pending_sep = true;
+        } else {
+            if pending_sep && !out.is_empty() {
+                out.push('_');
+            }
+            pending_sep = false;
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Computes the intersection of two region sets per the detector rules:
 ///
 /// - Same kind + matching name (function / class / block) → intersect,
-///   contributing that region.
+///   contributing that region. Names are compared NORMALIZED (see
+///   [`normalize_region_name`]) so spelling variants of one symbol match.
 /// - Two ranges with overlapping intervals → intersect, contributing the
 ///   overlapping sub-range.
 /// - A named region vs a range (either order) → conservative intersect
 ///   (we can't resolve a name to lines without source parsing); contributes
 ///   both regions and sets the cross-kind flag.
-/// - Named regions of differing kinds, or same kind with differing names →
+/// - Named regions of DIFFERING kinds with matching normalized names →
+///   conservative intersect (almost always the same construct declared
+///   through different lenses); contributes both regions and sets the
+///   cross-kind flag.
+/// - Same kind, or differing named kinds, with differing normalized names →
 ///   no intersection.
 ///
 /// Returns the de-duplicated list of intersecting regions (sorted for
@@ -134,7 +186,7 @@ fn regions_intersect(a: &[Region], b: &[Region]) -> (Vec<Region>, bool) {
                 (Region::Function { name: n1 }, Region::Function { name: n2 })
                 | (Region::Class { name: n1 }, Region::Class { name: n2 })
                 | (Region::Block { anchor: n1 }, Region::Block { anchor: n2 })
-                    if n1 == n2 =>
+                    if normalize_region_name(n1) == normalize_region_name(n2) =>
                 {
                     push(ra.clone(), &mut hits);
                 }
@@ -171,8 +223,26 @@ fn regions_intersect(a: &[Region], b: &[Region]) -> (Vec<Region>, bool) {
                     push(ra.clone(), &mut hits);
                     push(rb.clone(), &mut hits);
                 }
+                // Cross-kind: named regions of DIFFERING kinds whose
+                // normalized names match — `function foo` vs `block foo` is
+                // almost always the same construct declared through
+                // different lenses, so intersect conservatively and name
+                // both regions. (Same-kind matches were consumed by the
+                // first arm, so only genuine cross-kind pairs reach this.)
+                (
+                    Region::Function { name: n1 }
+                    | Region::Class { name: n1 }
+                    | Region::Block { anchor: n1 },
+                    Region::Function { name: n2 }
+                    | Region::Class { name: n2 }
+                    | Region::Block { anchor: n2 },
+                ) if normalize_region_name(n1) == normalize_region_name(n2) => {
+                    cross_kind = true;
+                    push(ra.clone(), &mut hits);
+                    push(rb.clone(), &mut hits);
+                }
                 // Same-shape named regions with differing names, or differing
-                // named kinds: no intersection.
+                // named kinds with differing names: no intersection.
                 _ => {}
             }
         }
@@ -1937,14 +2007,120 @@ mod tests {
     }
 
     #[test]
-    fn regions_intersect_different_named_kinds_empty() {
-        // function "a" vs class "a" — different kinds, no intersection.
-        let class_a = Region::Class {
-            name: "a".to_string(),
+    fn regions_intersect_different_named_kinds_different_names_empty() {
+        // function "a" vs class "b" — different kinds AND different names,
+        // no intersection (keeps the additive downgrade meaningful).
+        let class_b = Region::Class {
+            name: "b".to_string(),
         };
-        let (hits, cross) = regions_intersect(&[func("a")], &[class_a]);
+        let (hits, cross) = regions_intersect(&[func("a")], &[class_b]);
         assert!(hits.is_empty());
         assert!(!cross);
+    }
+
+    #[test]
+    fn regions_intersect_named_cross_kind_same_name_conservative() {
+        // Spec: Named regions of different kinds with the same name
+        // intersect conservatively. function "foo" vs block "foo" is almost
+        // always the same construct declared through different lenses.
+        let block_foo = Region::Block {
+            anchor: "foo".to_string(),
+        };
+        let (hits, cross) = regions_intersect(&[func("foo")], std::slice::from_ref(&block_foo));
+        assert!(cross, "named cross-kind name match must flag cross_kind");
+        assert!(hits.contains(&func("foo")));
+        assert!(hits.contains(&block_foo));
+    }
+
+    #[test]
+    fn regions_intersect_named_cross_kind_different_names_empty() {
+        // function "foo" vs block "bar" — different kinds, different names:
+        // still no intersection.
+        let block_bar = Region::Block {
+            anchor: "bar".to_string(),
+        };
+        let (hits, cross) = regions_intersect(&[func("foo")], &[block_bar]);
+        assert!(hits.is_empty());
+        assert!(!cross);
+    }
+
+    // ====================================================================
+    // Region-name normalization (conflict-detector-same-region task 1.1)
+    // ====================================================================
+
+    #[test]
+    fn regions_intersect_normalizes_case() {
+        let (hits, cross) = regions_intersect(&[func("Validate_Token")], &[func("validate_token")]);
+        assert_eq!(hits, vec![func("Validate_Token")]);
+        assert!(!cross, "same-kind normalized match is not cross-kind");
+    }
+
+    #[test]
+    fn regions_intersect_normalizes_separators() {
+        // Space, underscore, and hyphen collapse to one separator form.
+        let (hits, _) = regions_intersect(&[func("validate token")], &[func("validate_token")]);
+        assert!(!hits.is_empty());
+        let (hits, _) = regions_intersect(&[func("validate-token")], &[func("validate_token")]);
+        assert!(!hits.is_empty());
+        let (hits, _) = regions_intersect(&[func("validate  token")], &[func("validate-token")]);
+        assert!(!hits.is_empty());
+    }
+
+    #[test]
+    fn regions_intersect_normalizes_trim() {
+        let (hits, _) = regions_intersect(&[func("  validate_token  ")], &[func("validate_token")]);
+        assert!(!hits.is_empty());
+    }
+
+    #[test]
+    fn regions_intersect_normalizes_trailing_parens() {
+        let (hits, _) = regions_intersect(&[func("validate_token()")], &[func("validate_token")]);
+        assert!(!hits.is_empty());
+    }
+
+    #[test]
+    fn regions_intersect_normalizes_leading_declaration_keyword() {
+        for declared in [
+            "fn validate_token",
+            "def validate_token",
+            "function validate_token",
+        ] {
+            let (hits, _) = regions_intersect(&[func(declared)], &[func("validate_token")]);
+            assert!(!hits.is_empty(), "`{declared}` must equate the bare symbol");
+        }
+        let class_bare = Region::Class {
+            name: "Config".to_string(),
+        };
+        let class_kw = Region::Class {
+            name: "class Config".to_string(),
+        };
+        let (hits, _) = regions_intersect(&[class_kw], &[class_bare]);
+        assert!(!hits.is_empty());
+    }
+
+    #[test]
+    fn regions_intersect_combined_spelling_variant() {
+        // Spec: Spelling variants of the same symbol intersect —
+        // `validate_token` vs `Validate Token()`.
+        let (hits, cross) =
+            regions_intersect(&[func("validate_token")], &[func("Validate Token()")]);
+        assert!(!hits.is_empty());
+        assert!(!cross);
+    }
+
+    #[test]
+    fn regions_intersect_distinct_symbols_stay_distinct() {
+        // Normalization must not equate genuinely different symbols.
+        let (hits, _) = regions_intersect(&[func("validate_token")], &[func("validate_tokens")]);
+        assert!(hits.is_empty());
+        // Separator collapse keeps runs as ONE separator — it does not
+        // delete them, so `foo_bar` != `foobar`.
+        let (hits, _) = regions_intersect(&[func("foo_bar")], &[func("foobar")]);
+        assert!(hits.is_empty());
+        // A leading keyword is stripped only when a separator follows —
+        // `classify` is not `class ify`.
+        let (hits, _) = regions_intersect(&[func("classify")], &[func("ify")]);
+        assert!(hits.is_empty());
     }
 
     #[test]
@@ -2108,6 +2284,64 @@ mod tests {
                 payload.errors[0].contains(CROSS_KIND_HINT),
                 "cross-kind conflict must include the hint; got: {}",
                 payload.errors[0]
+            );
+        }
+    }
+
+    #[test]
+    fn detector_spelling_variants_conflict() {
+        // Spec: Spelling variants of the same symbol intersect —
+        // `function validate_token` vs `function Validate Token()` must
+        // trigger a forward-conflict warning.
+        let a = intent_msg_with_regions(
+            "feat-x",
+            &[("src/auth.rs", vec![func("validate_token")])],
+            "x",
+            600,
+        );
+        let b = intent_msg_with_regions(
+            "feat-y",
+            &[("src/auth.rs", vec![func("Validate Token()")])],
+            "y",
+            600,
+        );
+        let (state, _) = run_two_intents(&a, &b);
+        let x_fb = supervisor_feedbacks_in_inbox(&state, "feat-x");
+        assert_eq!(x_fb.len(), 1, "spelling variants must warn");
+        if let BrokerMessage::Feedback { payload, .. } = &x_fb[0] {
+            assert!(payload.errors[0].contains("forward conflict"));
+            assert!(payload.errors[0].contains("src/auth.rs"));
+        }
+        assert_eq!(supervisor_feedbacks_in_inbox(&state, "feat-y").len(), 1);
+    }
+
+    #[test]
+    fn detector_named_cross_kind_same_name_conflict_includes_hint() {
+        // Spec: Named regions of different kinds with the same name
+        // intersect conservatively — `function DEV_ALLOWLIST_PRESET` vs
+        // `block DEV_ALLOWLIST_PRESET` conflicts with the conservative hint.
+        let a = intent_msg_with_regions(
+            "feat-x",
+            &[("src/config.rs", vec![func("DEV_ALLOWLIST_PRESET")])],
+            "x",
+            600,
+        );
+        let b = intent_msg_with_regions(
+            "feat-y",
+            &[("src/config.rs", vec![block("DEV_ALLOWLIST_PRESET")])],
+            "y",
+            600,
+        );
+        let (state, _) = run_two_intents(&a, &b);
+        let x_fb = supervisor_feedbacks_in_inbox(&state, "feat-x");
+        assert_eq!(x_fb.len(), 1);
+        if let BrokerMessage::Feedback { payload, .. } = &x_fb[0] {
+            let err = &payload.errors[0];
+            assert!(err.contains("forward conflict"));
+            assert!(err.contains("DEV_ALLOWLIST_PRESET"));
+            assert!(
+                err.contains(CROSS_KIND_HINT),
+                "named cross-kind conflict must carry the conservative hint; got: {err}"
             );
         }
     }
@@ -2385,6 +2619,28 @@ mod tests {
                 panic!("expected Feedback");
             }
         }
+    }
+
+    #[test]
+    fn detector_normalized_match_upgrades_additive_to_true() {
+        // conflict-detector-same-region task 1.3: a same-symbol pair spelled
+        // two ways used to slip through name equality and downgrade to
+        // Additive; normalization upgrades it to a True collision that
+        // escalates as a question, with no additive downgrade.
+        let (state, mut t, cfg, now) = setup_in_flight(
+            vec![func("validate_token")],
+            vec![func("Validate Token()")],
+            "src/auth.rs",
+        );
+        let due = now + Duration::from_secs(10);
+        let emitted = tick(&state, &mut t, &cfg, due);
+        assert_eq!(emitted, 1, "a true collision emits exactly one question");
+        assert_eq!(supervisor_questions(&state).len(), 1);
+        assert!(
+            additive_downgrade_feedbacks(&state, "feat-x").is_empty(),
+            "normalized-match pair must not downgrade to additive"
+        );
+        assert!(additive_downgrade_feedbacks(&state, "feat-y").is_empty());
     }
 
     #[test]
