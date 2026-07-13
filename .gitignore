@@ -71,12 +71,9 @@ openspec/changes/archive/
 openspec/changes/_release-notes/
 .git-paw/session-summary.md
 
-# Operator/monitor scratch scripts live locally under .git-paw/scripts/ but are
-# NOT part of the tool — only the bundled sweep.sh (written by `git paw init`
-# from assets/scripts/sweep.sh) is tracked here. (v0.8.0 will fold the monitor
-# logic into `git paw start --unattended`.)
+# Bundled helpers (sweep.sh/broker.sh/docs-fetch.sh) are provisioned into
+# .git-paw/scripts/ by `git paw init` from assets/scripts/ — never tracked.
 .git-paw/scripts/*
-!.git-paw/scripts/sweep.sh
 
 # Root-level operator scratch logs (drive/sweep/verify/docbuild/baseline runs)
 .git-paw/*.log
