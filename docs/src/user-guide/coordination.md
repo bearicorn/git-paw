@@ -613,18 +613,38 @@ Because the declared functions differ, **no** forward-conflict warning fires —
 the two agents proceed in parallel on the same file. Had both named
 `validate_token`, the warning would fire and name the intersecting function.
 
-Three rules govern detection:
+Four rules govern detection:
 
 - **Both sides must declare regions** for region-level matching. If **either**
   side omits regions (a bare path string), the detector conservatively falls
   back to a file-level warning — the v0.5.0 safety net.
+- **Name matching is normalized.** Region names are compared after
+  case-folding, trimming, collapsing separator runs (space, underscore,
+  hyphen) to a single form, stripping a trailing `()`, and stripping a leading
+  declaration keyword (`fn`, `def`, `function`, `class`) — so spelling
+  variants of the same symbol intersect: `validate_token` matches
+  `Validate Token()` and `fn validate_token`. Genuinely distinct symbols
+  (`foo_bar` vs `foobar`) stay distinct.
 - **Cross-kind comparisons are conservative.** A `function`/`class`/`block`
   region compared against a `range` always intersects (the detector can't
-  resolve a symbol to line numbers without parsing source), and the warning
-  carries a hint suggesting both sides use the same region kind for narrower
-  matching.
+  resolve a symbol to line numbers without parsing source). Named regions of
+  **different** kinds — say `function foo` vs `block foo` — intersect when
+  their normalized names match, because they almost always describe the same
+  construct through different lenses. Both shapes carry a hint noting the
+  comparison was conservative.
 - **Don't manufacture narrow regions to dodge a warning.** A region you don't
   really own hides a collision that resurfaces later as a merge conflict.
+
+Because matching is string-based, three declaration rules keep intents
+detector-comparable:
+
+- **Use the canonical source spelling** — declare `validate_token`, not a
+  paraphrase like `token validation logic`; the detector cannot equate two
+  paraphrases of the same symbol.
+- **Declare all the regions the work touches**, including shared constant
+  blocks, import sections, and asset files — not only the headline function.
+- **Re-publish `agent.intent` when scope grows** mid-task, before touching a
+  region that was never declared.
 
 This guidance is taught to agents by the bundled coordination skill
 (`assets/agent-skills/coordination.md`, the "Declaring regions" section),

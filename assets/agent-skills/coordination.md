@@ -221,6 +221,24 @@ narrow regions just to suppress the overlap warning — defeats the detector and
 hides a collision that will surface later as a merge conflict; the detector is
 on your side, so when in doubt, claim the file.
 
+**How to declare so the detector can compare.** The detector matches region
+names as strings (it tolerates case, separator, a trailing `()`, and a leading
+declaration keyword — but nothing smarter), so how you spell and scope your
+declarations decides whether a real overlap is caught:
+
+- **Use the canonical source spelling.** Declare the region name exactly as
+  the symbol appears in source — `validate_token`, not a paraphrase like
+  `token validation logic`. Two paraphrases of the same symbol are different
+  strings, and the detector cannot equate them.
+- **Declare ALL the regions your work touches**, not only the headline
+  function: shared constant blocks, import sections, and asset files you edit
+  along the way all belong in your declaration. An undeclared shared block is
+  exactly where two agents collide silently.
+- **Re-publish `agent.intent` when your scope grows.** If mid-task you find
+  yourself editing a region you never declared, re-publish the intent with the
+  full region list before touching it — an outdated declaration understates
+  your footprint just like a manufactured-narrow one.
+
 ### While you're editing
 
 Keep the intent up to date and ask, don't race:

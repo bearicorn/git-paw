@@ -80,6 +80,34 @@ fn forbids_manufacturing_narrow_regions_with_rationale() {
     );
 }
 
+// Requirement: Coordination skill teaches region declaration / Scenario:
+// Skill prose requires canonical names, full coverage, and re-publication.
+#[test]
+fn requires_canonical_spelling_full_coverage_and_republication() {
+    let section = regions_section();
+    assert!(
+        section.contains("canonical source spelling"),
+        "section must instruct declaring region names with the canonical source spelling"
+    );
+    assert!(
+        section.contains("declare all the regions your work touches"),
+        "section must require declaring every touched region, not only the headline function"
+    );
+    // Full coverage names the shared-block shapes explicitly.
+    assert!(
+        section.contains("shared constant blocks"),
+        "full-coverage guidance must name shared constant blocks"
+    );
+    assert!(
+        section.contains("import sections") && section.contains("asset files"),
+        "full-coverage guidance must name import sections and asset files"
+    );
+    assert!(
+        section.contains("re-publish `agent.intent` when your scope grows"),
+        "section must require re-publishing agent.intent on scope growth"
+    );
+}
+
 #[test]
 fn names_all_four_region_kinds() {
     let section = regions_section();
