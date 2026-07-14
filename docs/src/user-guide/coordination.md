@@ -139,12 +139,12 @@ Every broker message uses the same JSON envelope:
 }
 ```
 
-`<variant>` is one of seven shipped values; `<slug>` is the agent's slugified
+`<variant>` is one of eight shipped values; `<slug>` is the agent's slugified
 branch name (lowercase alphanumeric + `-` / `_`; slashes from a branch name
-like `feat/auth` become hyphens — `feat-auth`). The seven variants are
+like `feat/auth` become hyphens — `feat-auth`). The eight variants are
 `agent.status`, `agent.artifact`, `agent.blocked`, `agent.intent`,
-`agent.question`, `agent.feedback`, and `agent.verified`; `src/broker/messages.rs`
-is the source of truth for the payload schemas.
+`agent.question`, `agent.feedback`, `agent.answer`, and `agent.verified`;
+`src/broker/messages.rs` is the source of truth for the payload schemas.
 
 > **`agent.status` and `agent.artifact` are normally automatic.** The
 > filesystem watcher publishes `agent.status` (with `modified_files`) whenever
@@ -226,6 +226,23 @@ envelope is the *receiver*; `from` inside the payload is the *sender*.
 curl -s -X POST "$GIT_PAW_BROKER_URL/publish" \
   -H "Content-Type: application/json" \
   -d '{"type":"agent.feedback","agent_id":"feat-auth","payload":{"from":"supervisor","errors":["missing rustdoc on AuthClient::new","test for HS256 path is failing"]}}'
+```
+
+### Answer
+
+A supervisor replies to an asking agent's `agent.question` with a non-error
+answer. Like feedback, the envelope `agent_id` is the *receiver* (the agent
+being answered) and `from` inside the payload is the *sender*; the message
+routes to the target agent's inbox only. `answer` carries the reply text and
+the optional `re` field is a short reference to the question being answered
+(omitted when absent). An answer is authoritative guidance to act on — it is
+not an error report, so the receiving agent has nothing to fix and nothing to
+re-publish. Reserve `agent.feedback` for corrective errors.
+
+```bash
+curl -s -X POST "$GIT_PAW_BROKER_URL/publish" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"agent.answer","agent_id":"feat-auth","payload":{"from":"supervisor","answer":"Use RS256; the key rotation tooling assumes it","re":"RS256 or HS256?"}}'
 ```
 
 ### Verified
@@ -496,15 +513,16 @@ not recommended.
 ## Supervisor Acknowledgement of `agent.question`
 
 When an agent publishes `agent.question`, it blocks at its prompt waiting for a
-typed reply. v0.5.0 agents do not poll their inbox for `agent.feedback`
-responses, so a supervisor that only publishes `agent.feedback` to the broker
+typed reply. A blocked agent does not poll its inbox for `agent.answer`
+responses, so a supervisor that only publishes `agent.answer` to the broker
 will see its answer recorded on the dashboard while the asking agent stays
 blocked indefinitely.
 
 The supervisor skill therefore instructs supervisors (both human and LLM) to
-**both** publish `agent.feedback` **and** send the answer text to the asking
-agent's tmux pane via `tmux send-keys`. This dual write is transitional;
-MCP-mediated inbox access in v0.6.0 will let agents consume `agent.feedback`
+**both** publish `agent.answer` (the non-error reply shape — `agent.feedback`
+stays reserved for corrective errors) **and** send the answer text to the
+asking agent's tmux pane via `tmux send-keys`. This dual write is
+transitional; MCP-mediated inbox access will let agents consume `agent.answer`
 directly and remove the second step.
 
 ## Spec Kit Consolidated Worktrees

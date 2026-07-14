@@ -60,6 +60,12 @@ pub const BIT_VERIFY_NOW: u16 = 1 << 7;
 pub const BIT_ADVANCED_MAIN: u16 = 1 << 8;
 /// Filter bit for `agent.learning` messages.
 pub const BIT_LEARNING: u16 = 1 << 9;
+/// Filter bit for `agent.answer` messages. Carries its own bit so the mask
+/// stays one-bit-per-variant, but has no chip row entry yet — the digit
+/// hotkeys (`1`-`9` then `0`) are exhausted at ten chips, so answers are
+/// visible in the default `All` mode and a dedicated chip awaits a keybinding
+/// decision in a dashboard-scoped change.
+pub const BIT_ANSWER: u16 = 1 << 10;
 
 /// The "show everything" sentinel. Distinct from the bitwise-OR of every
 /// known bit so that selecting every chip individually is still treated as
@@ -102,6 +108,7 @@ pub fn message_bit(msg: &BrokerMessage) -> u16 {
         BrokerMessage::VerifyNow { .. } => BIT_VERIFY_NOW,
         BrokerMessage::AdvancedMain { .. } => BIT_ADVANCED_MAIN,
         BrokerMessage::Learning { .. } => BIT_LEARNING,
+        BrokerMessage::Answer { .. } => BIT_ANSWER,
     }
 }
 
@@ -348,6 +355,7 @@ pub fn type_short(msg: &BrokerMessage) -> &'static str {
         BrokerMessage::VerifyNow { .. } => "verify-now",
         BrokerMessage::AdvancedMain { .. } => "advanced-main",
         BrokerMessage::Learning { .. } => "learning",
+        BrokerMessage::Answer { .. } => "answer",
     }
 }
 
@@ -406,6 +414,12 @@ pub fn derive_summary(msg: &BrokerMessage) -> String {
         BrokerMessage::Learning { payload, .. } => {
             format!("{}: {}", payload.category, payload.title)
         }
+        BrokerMessage::Answer { payload, .. } => match &payload.re {
+            Some(re) if !re.trim().is_empty() => {
+                format!("from {} (re: {re}): {}", payload.from, payload.answer)
+            }
+            _ => format!("from {}: {}", payload.from, payload.answer),
+        },
     }
 }
 
@@ -670,7 +684,7 @@ fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
 mod tests {
     use super::*;
     use crate::broker::messages::{
-        ArtifactPayload, BlockedPayload, FeedbackPayload, FileIntent, IntentPayload,
+        AnswerPayload, ArtifactPayload, BlockedPayload, FeedbackPayload, FileIntent, IntentPayload,
         QuestionPayload, StatusPayload, VerifiedPayload,
     };
 
@@ -1173,6 +1187,36 @@ mod tests {
                 "digit {key} must toggle chip index {i}"
             );
         }
+    }
+
+    /// agent-answer-variant (dashboard-broker-log MODIFIED chips requirement):
+    /// message types beyond the ten digit-keyed chips — currently
+    /// `agent.answer` — carry their own filter bit, render under the default
+    /// `All` filter, and have no dedicated chip.
+    #[test]
+    fn answer_visible_under_all_without_dedicated_chip() {
+        let mut log = BrokerLog::new(10, true);
+        log.push(entry(
+            1,
+            BrokerMessage::Answer {
+                agent_id: "feat-a".to_string(),
+                payload: AnswerPayload {
+                    from: "supervisor".to_string(),
+                    answer: "use rs256".to_string(),
+                    re: None,
+                },
+            },
+        ));
+        assert!(log.filter().is_all(), "fresh panel defaults to All");
+        assert_eq!(log.visible_count(), 1, "answer row renders under All");
+        let visible: Vec<_> = log.iter_visible().collect();
+        assert_eq!(type_short(&visible[0].2), "answer");
+        assert!(
+            CHIPS
+                .iter()
+                .all(|(bit, label)| *bit != BIT_ANSWER && *label != "answer"),
+            "the chip row must not carry a dedicated answer chip"
+        );
     }
 
     #[test]

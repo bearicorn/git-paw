@@ -15,9 +15,9 @@ use super::{AgentRecord, AgentStatusEntry, BrokerState, BrokerStateInner};
 
 /// Returns the sender's `agent_id` for a message.
 ///
-/// For most variants this is the top-level `agent_id` field. For `Verified`
-/// and `Feedback`, the `agent_id` identifies the target, so the sender lives
-/// inside the payload (`verified_by` / `from`).
+/// For most variants this is the top-level `agent_id` field. For `Verified`,
+/// `Feedback`, and `Answer`, the `agent_id` identifies the target, so the
+/// sender lives inside the payload (`verified_by` / `from`).
 fn sender_id(msg: &BrokerMessage) -> &str {
     match msg {
         BrokerMessage::Status { agent_id, .. }
@@ -27,6 +27,9 @@ fn sender_id(msg: &BrokerMessage) -> &str {
         | BrokerMessage::Intent { agent_id, .. } => agent_id,
         BrokerMessage::Verified { payload, .. } => &payload.verified_by,
         BrokerMessage::Feedback { payload, .. } => &payload.from,
+        // Like Feedback: the envelope names the target, the sender is
+        // the payload's `from` (typically "supervisor").
+        BrokerMessage::Answer { payload, .. } => &payload.from,
         // The sender identity lives in the payload's `from` (typically
         // "supervisor"), like Verified/Feedback.
         BrokerMessage::AdvancedMain { payload } => &payload.from,
@@ -40,8 +43,8 @@ fn sender_id(msg: &BrokerMessage) -> &str {
 ///
 /// Only messages whose sender is the real top-level `agent_id` —
 /// `Status`, `Artifact`, `Blocked`, `Intent` — may mint or mutate a roster
-/// row. `Feedback`, `Question`, `Verified`, and `AdvancedMain` carry the
-/// sender's identity in *payload* fields (`from` / `verified_by`); harvesting
+/// row. `Feedback`, `Answer`, `Question`, `Verified`, and `AdvancedMain` carry
+/// the sender's identity in *payload* fields (`from` / `verified_by`); harvesting
 /// those into the roster mints phantom rows (W15-16: a `from:"human"` feedback
 /// created a `"human"` agent that never heartbeats). `VerifyNow` is
 /// broker-internal. All excluded variants are still routed and stored by
@@ -242,6 +245,15 @@ fn route_message(inner: &mut BrokerStateInner, msg: &BrokerMessage, seq: u64) {
         }
         BrokerMessage::Feedback { agent_id, .. } => {
             // Deliver to the target agent's inbox if it exists
+            if let Some(inbox) = inner.queues.get_mut(agent_id) {
+                inbox.push((seq, msg.clone()));
+            }
+            // Silently drop if target has no inbox (not yet registered)
+        }
+        BrokerMessage::Answer { agent_id, .. } => {
+            // Deliver to the target agent's inbox if it exists — the
+            // envelope's `agent_id` names the agent being answered,
+            // mirroring Feedback routing.
             if let Some(inbox) = inner.queues.get_mut(agent_id) {
                 inbox.push((seq, msg.clone()));
             }
@@ -499,8 +511,8 @@ fn flush_entries(state: &Arc<BrokerState>, log_path: &std::path::Path, last_flus
 mod tests {
     use super::*;
     use crate::broker::messages::{
-        ArtifactPayload, BlockedPayload, FeedbackPayload, IntentPayload, QuestionPayload,
-        StatusPayload, VerifiedPayload,
+        AnswerPayload, ArtifactPayload, BlockedPayload, FeedbackPayload, IntentPayload,
+        QuestionPayload, StatusPayload, VerifiedPayload,
     };
     use crate::broker::start_broker;
     use crate::config::BrokerConfig;
@@ -563,6 +575,17 @@ mod tests {
             agent_id: agent_id.to_string(),
             payload: QuestionPayload {
                 question: question.to_string(),
+            },
+        }
+    }
+
+    fn make_answer(agent_id: &str, from: &str, answer: &str) -> BrokerMessage {
+        BrokerMessage::Answer {
+            agent_id: agent_id.to_string(),
+            payload: AnswerPayload {
+                from: from.to_string(),
+                answer: answer.to_string(),
+                re: None,
             },
         }
     }
@@ -914,6 +937,66 @@ mod tests {
         let inner = state.read();
         assert!(!inner.agents.contains_key("reviewer-bot"));
         assert!(!inner.agents.contains_key("feat-x"));
+        assert_eq!(
+            inner.agents.len(),
+            1,
+            "only the status-publishing supervisor is a roster row",
+        );
+    }
+
+    // === Answer routing (agent-answer-variant) ===
+
+    #[test]
+    fn answer_delivered_to_target_agent() {
+        // Spec scenario: answer lands in the target agent's inbox.
+        let state = fresh_state();
+        publish_message(&state, &make_status("feat-x", "working"));
+        publish_message(&state, &make_status("supervisor", "working"));
+
+        publish_message(&state, &make_answer("feat-x", "supervisor", "use rs256"));
+
+        let (msgs, _) = poll_messages(&state, "feat-x", 0);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].status_label(), "answer");
+    }
+
+    #[test]
+    fn answer_not_delivered_to_other_agents() {
+        // Spec scenario: other agents' inboxes do not receive the answer.
+        let state = fresh_state();
+        publish_message(&state, &make_status("feat-x", "working"));
+        publish_message(&state, &make_status("feat-y", "working"));
+        publish_message(&state, &make_status("supervisor", "working"));
+
+        publish_message(&state, &make_answer("feat-x", "supervisor", "use rs256"));
+
+        let (other_msgs, _) = poll_messages(&state, "feat-y", 0);
+        assert!(other_msgs.is_empty());
+    }
+
+    #[test]
+    fn answer_publish_does_not_distort_roster() {
+        // Spec scenario: the publish is attributed to the `from` sender, so
+        // it neither mints a roster row for the target nor mutates the
+        // sender's row.
+        let state = fresh_state();
+        publish_message(&state, &make_status("supervisor", "working"));
+
+        publish_message(&state, &make_answer("feat-x", "supervisor", "use rs256"));
+
+        let inner = state.read();
+        assert!(
+            !inner.agents.contains_key("feat-x"),
+            "an answer's target must never mint a roster row",
+        );
+        let record = inner
+            .agents
+            .get("supervisor")
+            .expect("supervisor record exists");
+        assert_eq!(
+            record.status, "working",
+            "an Answer message must not mutate the sender's roster row",
+        );
         assert_eq!(
             inner.agents.len(),
             1,

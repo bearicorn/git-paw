@@ -39,6 +39,10 @@ pub enum MessageError {
     #[error("question field must not be empty")]
     EmptyQuestionField,
 
+    /// The `answer` field is empty or whitespace-only.
+    #[error("answer field must not be empty")]
+    EmptyAnswerField,
+
     /// The intent `files` array is empty.
     #[error("intent files list must not be empty")]
     EmptyIntentFiles,
@@ -302,6 +306,25 @@ pub struct FeedbackPayload {
     pub errors: Vec<String>,
 }
 
+/// Payload for `agent.answer` messages.
+///
+/// Carries a non-error supervisor→agent reply to an `agent.question`. The
+/// envelope's `agent_id` names the TARGET agent (the one being answered);
+/// the sender lives in the payload's `from` field, mirroring
+/// [`FeedbackPayload`]. Unlike feedback, an answer is authoritative guidance
+/// to act on — not a corrective error list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerPayload {
+    /// Agent ID of the sender (typically `"supervisor"`).
+    pub from: String,
+    /// The reply text.
+    pub answer: String,
+    /// Optional short free-text reference to the question being answered;
+    /// omitted from the wire bytes when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub re: Option<String>,
+}
+
 /// Payload for `agent.advanced-main` messages.
 ///
 /// Published by the supervisor after a successful merge to the repository's
@@ -432,8 +455,9 @@ pub struct LearningPayload {
 ///
 /// The wire format uses JSON with an internally tagged `"type"` discriminator
 /// whose values are `"agent.status"`, `"agent.artifact"`, `"agent.blocked"`,
-/// `"agent.verified"`, `"agent.feedback"`, `"agent.question"`, `"agent.intent"`,
-/// `"agent.advanced-main"`, `"agent.learning"`, and `"supervisor.verify-now"`.
+/// `"agent.verified"`, `"agent.feedback"`, `"agent.answer"`,
+/// `"agent.question"`, `"agent.intent"`, `"agent.advanced-main"`,
+/// `"agent.learning"`, and `"supervisor.verify-now"`.
 /// The last is broker-emitted rather than agent-published; see
 /// [`BrokerMessage::VerifyNow`].
 ///
@@ -481,6 +505,18 @@ pub enum BrokerMessage {
         agent_id: String,
         /// Feedback payload (contains `from` -- the sender).
         payload: FeedbackPayload,
+    },
+    /// Non-error supervisor reply -- delivered to the target agent only.
+    ///
+    /// Answers an `agent.question` with authoritative guidance; corrective
+    /// errors stay on `agent.feedback`. Routed like feedback: the envelope's
+    /// `agent_id` names the TARGET agent and the sender is `payload.from`.
+    #[serde(rename = "agent.answer")]
+    Answer {
+        /// Target agent ID (the agent being answered).
+        agent_id: String,
+        /// Answer payload (contains `from` -- the sender).
+        payload: AnswerPayload,
     },
     /// Agent question -- delivered to the `"supervisor"` inbox for human reply.
     #[serde(rename = "agent.question")]
@@ -568,6 +604,7 @@ impl BrokerMessage {
             | Self::Blocked { agent_id, .. }
             | Self::Verified { agent_id, .. }
             | Self::Feedback { agent_id, .. }
+            | Self::Answer { agent_id, .. }
             | Self::Question { agent_id, .. }
             | Self::Intent { agent_id, .. } => agent_id,
             // `AdvancedMain` has no top-level `agent_id`; the sender identity
@@ -588,6 +625,7 @@ impl BrokerMessage {
     /// - `Blocked` returns `"blocked"`
     /// - `Verified` returns `"verified"`
     /// - `Feedback` returns `"feedback"`
+    /// - `Answer` returns `"answer"`
     /// - `Question` returns `"question"`
     /// - `Intent` returns `"intent"`
     /// - `AdvancedMain` returns `"advanced-main"`
@@ -599,6 +637,7 @@ impl BrokerMessage {
             Self::Blocked { .. } => "blocked",
             Self::Verified { .. } => "verified",
             Self::Feedback { .. } => "feedback",
+            Self::Answer { .. } => "answer",
             Self::Question { .. } => "question",
             Self::Intent { .. } => "intent",
             Self::AdvancedMain { .. } => "advanced-main",
@@ -650,6 +689,14 @@ impl BrokerMessage {
                 }
                 if payload.errors.is_empty() {
                     return Err(MessageError::EmptyErrors);
+                }
+            }
+            Self::Answer { payload, .. } => {
+                if payload.from.trim().is_empty() {
+                    return Err(MessageError::EmptyFromField);
+                }
+                if payload.answer.trim().is_empty() {
+                    return Err(MessageError::EmptyAnswerField);
                 }
             }
             Self::Question { payload, .. } => {
@@ -713,6 +760,7 @@ impl BrokerMessage {
 }
 
 impl fmt::Display for BrokerMessage {
+    #[allow(clippy::too_many_lines)] // one display arm per message variant
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Status { agent_id, payload } => {
@@ -768,6 +816,23 @@ impl fmt::Display for BrokerMessage {
                     payload.from,
                     payload.errors.len()
                 )
+            }
+            Self::Answer {
+                agent_id, payload, ..
+            } => {
+                if let Some(re) = &payload.re {
+                    write!(
+                        f,
+                        "[{agent_id}] answer from {} (re: {re}): {}",
+                        payload.from, payload.answer
+                    )
+                } else {
+                    write!(
+                        f,
+                        "[{agent_id}] answer from {}: {}",
+                        payload.from, payload.answer
+                    )
+                }
             }
             Self::Question {
                 agent_id, payload, ..
@@ -1374,6 +1439,109 @@ mod tests {
         assert_eq!(msg.agent_id(), "feat-x");
     }
 
+    fn make_answer(agent_id: &str, from: &str, answer: &str, re: Option<&str>) -> BrokerMessage {
+        BrokerMessage::Answer {
+            agent_id: agent_id.to_string(),
+            payload: AnswerPayload {
+                from: from.to_string(),
+                answer: answer.to_string(),
+                re: re.map(str::to_string),
+            },
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_answer_with_re() {
+        // Spec scenario: valid answer round-trips through serde.
+        let json = r#"{"type":"agent.answer","agent_id":"feat-x","payload":{"from":"supervisor","answer":"Use the existing helper; do not add a dependency","re":"add crate X?"}}"#;
+        let msg = BrokerMessage::from_json(json).unwrap();
+        assert_eq!(
+            msg,
+            make_answer(
+                "feat-x",
+                "supervisor",
+                "Use the existing helper; do not add a dependency",
+                Some("add crate X?"),
+            )
+        );
+        let back = serde_json::to_string(&msg).unwrap();
+        assert!(back.contains("\"type\":\"agent.answer\""));
+        assert!(back.contains("\"re\":\"add crate X?\""));
+        let reparsed: BrokerMessage = serde_json::from_str(&back).unwrap();
+        assert_eq!(reparsed, msg);
+    }
+
+    #[test]
+    fn serde_roundtrip_answer_without_re_omits_field() {
+        // Spec scenario: `re` is optional and omitted from serialization.
+        let msg = make_answer("feat-x", "supervisor", "yes, proceed", None);
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"agent.answer\""));
+        assert!(
+            !json.contains("\"re\""),
+            "absent re must be omitted: {json}"
+        );
+        let back: BrokerMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn from_json_answer_without_re_validates() {
+        let json = r#"{"type":"agent.answer","agent_id":"feat-x","payload":{"from":"supervisor","answer":"yes"}}"#;
+        let msg = BrokerMessage::from_json(json).unwrap();
+        match &msg {
+            BrokerMessage::Answer { payload, .. } => assert_eq!(payload.re, None),
+            other => panic!("expected Answer variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_json_empty_answer_rejected() {
+        // Spec scenario: empty answer is rejected with a named error.
+        let json = r#"{"type":"agent.answer","agent_id":"feat-x","payload":{"from":"supervisor","answer":""}}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        assert!(matches!(err, MessageError::EmptyAnswerField));
+    }
+
+    #[test]
+    fn from_json_empty_answer_from_rejected() {
+        // Spec scenario: empty from is rejected with a named error.
+        let json =
+            r#"{"type":"agent.answer","agent_id":"feat-x","payload":{"from":"","answer":"yes"}}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        assert!(matches!(err, MessageError::EmptyFromField));
+    }
+
+    #[test]
+    fn display_answer_with_re() {
+        let msg = make_answer("feat-x", "supervisor", "use the helper", Some("crate X?"));
+        assert_eq!(
+            msg.to_string(),
+            "[feat-x] answer from supervisor (re: crate X?): use the helper"
+        );
+    }
+
+    #[test]
+    fn display_answer_without_re() {
+        let msg = make_answer("feat-x", "supervisor", "use the helper", None);
+        assert_eq!(
+            msg.to_string(),
+            "[feat-x] answer from supervisor: use the helper"
+        );
+    }
+
+    #[test]
+    fn status_label_answer() {
+        let msg = make_answer("feat-x", "supervisor", "yes", None);
+        assert_eq!(msg.status_label(), "answer");
+    }
+
+    #[test]
+    fn agent_id_answer_is_the_target() {
+        let msg = make_answer("feat-x", "supervisor", "yes", None);
+        assert_eq!(msg.agent_id(), "feat-x");
+    }
+
     fn make_question(agent_id: &str, question: &str) -> BrokerMessage {
         BrokerMessage::Question {
             agent_id: agent_id.to_string(),
@@ -1884,6 +2052,17 @@ mod tests {
                 "agent.feedback",
             ),
             (
+                BrokerMessage::Answer {
+                    agent_id: "feat-a".to_string(),
+                    payload: AnswerPayload {
+                        from: "supervisor".to_string(),
+                        answer: "use rs256".to_string(),
+                        re: Some("rs256 or hs256?".to_string()),
+                    },
+                },
+                "agent.answer",
+            ),
+            (
                 BrokerMessage::Question {
                     agent_id: "feat-a".to_string(),
                     payload: QuestionPayload {
@@ -1940,14 +2119,14 @@ mod tests {
             ),
         ];
 
-        // Sanity: assert we constructed ten distinct variants, matching the
-        // spec'd count (nine `agent.*` — now including both `agent.advanced-main`
-        // and `agent.learning` — plus the broker-emitted `supervisor.verify-now`
-        // nudge).
+        // Sanity: assert we constructed eleven distinct variants, matching the
+        // spec'd count (ten `agent.*` — now including `agent.answer` alongside
+        // `agent.advanced-main` and `agent.learning` — plus the broker-emitted
+        // `supervisor.verify-now` nudge).
         assert_eq!(
             variants.len(),
-            10,
-            "expected exactly ten BrokerMessage variants"
+            11,
+            "expected exactly eleven BrokerMessage variants"
         );
 
         for (msg, expected_tag) in &variants {

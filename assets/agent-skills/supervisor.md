@@ -179,9 +179,34 @@ Equivalent wire-format payload (for reference — the helper emits this):
 "type":"agent.feedback","agent_id":"__FILL_IN_AGENT_ID__","payload":{"from":"supervisor","errors":["[__FILL_IN_GATE__] __FILL_IN_MESSAGE__"]}}'
 ```
 
+`agent.feedback` is reserved for **corrective errors** — verification-gate
+findings, scope violations, directives the agent must act on to fix its work.
+To answer a peer's `agent.question`, publish `agent.answer` instead (next
+section): a plain answer packed into an `errors` array gets mis-read as
+corrective feedback.
+
+### Answer a peer agent's question
+
+Answer an asking peer with the `agent.answer` broker message — a non-error
+reply the agent treats as authoritative guidance. The `from` field names the
+**sender** (you, `"supervisor"`), `answer` carries the reply text, and the
+optional `re` field is a short reference to the question being answered — the
+top-level `agent_id` names the **recipient** (the asking agent):
+
+```bash
+curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
+  -H "Content-Type: application/json" \
+  -d '{"type":"agent.answer","agent_id":"__FILL_IN_AGENT_ID__","payload":{"from":"supervisor","answer":"__FILL_IN_ANSWER__","re":"__FILL_IN_QUESTION_REF__"}}'
+```
+
+Omit the `re` field entirely when a question reference adds nothing. The
+answer routes to the asking agent's inbox only, like `agent.feedback` — and
+like feedback, the payload's `from` (not the envelope `agent_id`) is the
+sender for roster purposes.
+
 ### Send the answer to the agent pane too
 
-When the `agent.feedback` you publish is the answer to an asking peer's
+When the `agent.answer` you publish replies to an asking peer's
 `agent.question`, you MUST ALSO send the answer text to that agent's pane via
 `tmux send-keys`:
 
@@ -189,13 +214,13 @@ When the `agent.feedback` you publish is the answer to an asking peer's
 tmux send-keys -t paw-{{PROJECT_NAME}}:0.<pane-index> "<answer>" Enter
 ```
 
-Rationale: **agents do not poll their inbox** for `agent.feedback` responses on
-v0.5.0. The asking agent published `agent.question` and then blocks at the
-prompt waiting for a typed reply; the broker `agent.feedback` you publish is
-recorded for the dashboard and audit log, but the agent itself only resumes
-when fresh text arrives in its pane. This workaround is transitional —
-MCP-mediated inbox access in v0.6.0 will let agents consume `agent.feedback`
-directly and remove the dual-write step.
+Rationale: **agents do not poll their inbox** while blocked at a prompt. The
+asking agent published `agent.question` and then blocks at the prompt waiting
+for a typed reply; the broker `agent.answer` you publish is recorded for the
+inbox, dashboard, and audit log, but the agent itself only resumes when fresh
+text arrives in its pane. This workaround is transitional — MCP-mediated inbox
+access will let agents consume `agent.answer` directly and remove the
+dual-write step.
 
 If the answer text is long enough to trigger a paste-buffer indicator (e.g.
 `Pasted text #N` on Claude Code), follow the existing paste-buffer follow-up

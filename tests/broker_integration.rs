@@ -600,6 +600,78 @@ fn http_publish_and_poll_verified_and_feedback() {
 }
 
 // ---------------------------------------------------------------------------
+// Supervisor answers: agent.answer end-to-end (agent-answer-variant)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn http_publish_and_poll_answer_targets_only_the_answered_agent() {
+    let (handle, url) = spawn_test_broker_with(|| git_paw::broker::BrokerState::new(None));
+
+    // Register three agents via agent.status so their inboxes exist.
+    for agent in ["feat-auth", "feat-peer", "supervisor"] {
+        let body = format!(
+            r#"{{"type":"agent.status","agent_id":"{agent}","payload":{{"status":"working","modified_files":[]}}}}"#
+        );
+        let (status, _) = http_req(
+            &url,
+            "POST",
+            "/publish",
+            &[("Content-Type", "application/json")],
+            &body,
+        );
+        assert_eq!(status, 202);
+    }
+
+    // Publish agent.answer from supervisor for feat-auth.
+    let (status, _) = http_req(
+        &url,
+        "POST",
+        "/publish",
+        &[("Content-Type", "application/json")],
+        r#"{"type":"agent.answer","agent_id":"feat-auth","payload":{"from":"supervisor","answer":"Use the existing helper; do not add a dependency","re":"add crate X?"}}"#,
+    );
+    assert_eq!(status, 202, "answer publish should return 202");
+
+    // feat-auth (the target) receives the answer with all fields intact.
+    let (status, body) = http_req(&url, "GET", "/messages/feat-auth?since=0", &[], "");
+    assert_eq!(status, 200);
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    let messages = json["messages"].as_array().expect("messages is array");
+    assert_eq!(
+        messages.len(),
+        1,
+        "feat-auth should have exactly the answer"
+    );
+    assert_eq!(messages[0]["type"], "agent.answer");
+    assert_eq!(messages[0]["payload"]["from"], "supervisor");
+    assert_eq!(
+        messages[0]["payload"]["answer"],
+        "Use the existing helper; do not add a dependency"
+    );
+    assert_eq!(messages[0]["payload"]["re"], "add crate X?");
+
+    // feat-peer (a peer) does not receive the answer.
+    let (status, body) = http_req(&url, "GET", "/messages/feat-peer?since=0", &[], "");
+    assert_eq!(status, 200);
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    let messages = json["messages"].as_array().expect("messages is array");
+    assert!(messages.is_empty(), "feat-peer must not receive the answer");
+
+    // supervisor (the sender) does not receive its own answer.
+    let (status, body) = http_req(&url, "GET", "/messages/supervisor?since=0", &[], "");
+    assert_eq!(status, 200);
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    let messages = json["messages"].as_array().expect("messages is array");
+    assert!(
+        messages.is_empty(),
+        "supervisor should not receive its own answer"
+    );
+
+    drop(handle);
+}
+
+// ---------------------------------------------------------------------------
 // Test 2: __dashboard subcommand — TMUX env var path
 // ---------------------------------------------------------------------------
 

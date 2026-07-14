@@ -502,6 +502,14 @@ When polling `/messages/{{BRANCH_ID}}`, in addition to peer `agent.artifact` and
   problems to fix. Read each error, fix the underlying issues in your
   worktree, then re-publish `agent.artifact` when the fixes are done.
 
+- **`agent.answer`** — an authoritative supervisor reply to an
+  `agent.question` you asked. The payload contains `from` (typically
+  `"supervisor"`), `answer` (the reply text), and optionally `re` (a short
+  reference to the question being answered). Act on the answer and continue —
+  it is guidance to follow, not an error report: unlike `agent.feedback`,
+  which carries corrective errors to fix, an answer requires no fixes and no
+  re-published `agent.artifact`.
+
 ### When working in a Spec Kit consolidated worktree
 
 If your worktree branch begins with `phase/` (e.g. `phase/003-user-list-foundational`),

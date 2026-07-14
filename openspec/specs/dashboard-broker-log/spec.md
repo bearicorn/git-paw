@@ -95,12 +95,18 @@ new messages arrive.
 
 ### Requirement: Per-type filter chips
 
-The panel SHALL render a header row of filter chips, one per
-broker message type the panel knows about, plus an `All` reset
-chip. The user SHALL toggle individual chips with hotkeys
-without leaving the keyboard. Filtering SHALL be a render-time
-view operation; the underlying ring buffer SHALL retain all
-messages regardless of active filters.
+The panel SHALL render a header row of filter chips covering the ten
+digit-hotkey message types (toggled with `1`-`9` then `0`), plus an
+`All` reset chip. The user SHALL toggle individual chips with hotkeys
+without leaving the keyboard. Filtering SHALL be a render-time view
+operation; the underlying ring buffer SHALL retain all messages
+regardless of active filters.
+
+Message types beyond the tenth (currently `agent.answer`) SHALL carry
+their own filter-mask bit, be retained in the ring buffer, and render
+under the `All` filter without a dedicated chip — the digit hotkey
+scheme is exhausted at ten chips, and a future change MAY extend the
+hotkey scheme to give them chips.
 
 #### Scenario: All chip is the default
 
@@ -130,6 +136,13 @@ messages regardless of active filters.
 - **GIVEN** any active filter state
 - **WHEN** the user presses the `All` chip hotkey
 - **THEN** every retained message SHALL be visible again
+
+#### Scenario: Answer rows are visible under All without a dedicated chip
+
+- **GIVEN** the panel with an `agent.answer` message in the buffer
+- **WHEN** the `All` filter is active
+- **THEN** the answer row SHALL be visible with type label `answer`
+- **AND** the chip row SHALL contain no `answer` chip
 
 ### Requirement: Panel toggle hotkey
 
