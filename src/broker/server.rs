@@ -20,13 +20,23 @@ use super::messages::BrokerMessage;
 use super::{WatchTarget, watcher};
 
 /// Compiled-once regex matching the only `agent_id` shapes the broker accepts:
-/// `"supervisor"`, or a `feat-{name}` / `feat/{name}` slug whose `{name}`
-/// begins with `[a-z0-9]` and consists of `[a-z0-9-]+`. See
+/// `"supervisor"`, or a `{prefix}/{name}` / `{prefix}-{name}` slug whose two
+/// segments each begin with `[a-z0-9]` and consist of `[a-z0-9-]`. See
 /// `supervisor-bugfixes-v0-5-x` §4 + `broker-messages` spec.
+///
+/// The prefix is deliberately *not* restricted to `feat`. git-paw creates
+/// worktrees on whatever branch it is given — `branch_prefix` is user-
+/// configurable (documented default `"spec/"`), and the shipped config example
+/// advertises `branches = ["feat/api", "fix/db"]` — so pinning the broker to
+/// `feat` left every `fix/`, `spec/`, `chore/`… agent unable to register,
+/// report, ask, or block, with no way to reach the supervisor to say so.
+///
+/// The two-segment shape is still enforced: it is what keeps a bare word (a
+/// typo, or an unsubstituted `<agent-id>` label) from being accepted as an id.
 fn agent_id_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"^(supervisor|feat/[a-z0-9][a-z0-9-]+|feat-[a-z0-9][a-z0-9-]+)$")
+        Regex::new(r"^(supervisor|[a-z0-9][a-z0-9-]*[/-][a-z0-9][a-z0-9-]*)$")
             .expect("AGENT_ID_RE compiles")
     })
 }
@@ -46,7 +56,7 @@ fn agent_id_rejection(value: &str) -> Response {
         axum::Json(serde_json::json!({
             "error": "invalid agent_id",
             "value": value,
-            "detail": "agent_id must be 'supervisor' or match feat-{name} / feat/{name}",
+            "detail": "agent_id must be 'supervisor' or a {prefix}/{name} / {prefix}-{name} slug (lowercase, e.g. feat/add-auth, fix-db-timeout)",
         })),
     )
         .into_response()
@@ -639,6 +649,77 @@ mod tests {
             status == StatusCode::ACCEPTED || status == StatusCode::OK,
             "feat/test-branch should be accepted; got: {status}"
         );
+    }
+
+    /// A `fix/` agent must be able to publish. git-paw itself creates worktrees
+    /// on any branch — its own config documents `branches = ["feat/api", "fix/db"]`
+    /// as a valid preset — so a broker that only accepts `feat` leaves every
+    /// non-feat agent unable to register, report, ask, or block.
+    #[tokio::test]
+    async fn agent_id_accepts_fix_slash() {
+        let (status, _) = post_publish(
+            r#"{"type":"agent.status","agent_id":"fix/olx-auth-error-mapping","payload":{"status":"working","modified_files":[]}}"#,
+        )
+        .await;
+        assert!(
+            status == StatusCode::ACCEPTED || status == StatusCode::OK,
+            "fix/olx-auth-error-mapping should be accepted; got: {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_id_accepts_fix_dash() {
+        let (status, _) = post_publish(
+            r#"{"type":"agent.status","agent_id":"fix-olx-auth-error-mapping","payload":{"status":"working","modified_files":[]}}"#,
+        )
+        .await;
+        assert!(
+            status == StatusCode::ACCEPTED || status == StatusCode::OK,
+            "fix-olx-auth-error-mapping should be accepted; got: {status}"
+        );
+    }
+
+    /// `branch_prefix` is user-configurable and documented with a default of
+    /// `"spec/"`, so spec-derived branches must be accepted too — otherwise the
+    /// broker rejects the very branches git-paw creates by default.
+    #[tokio::test]
+    async fn agent_id_accepts_configured_branch_prefix() {
+        for id in ["spec/add-auth", "chore-bump-deps", "hotfix/prod-outage"] {
+            let body = format!(
+                r#"{{"type":"agent.status","agent_id":"{id}","payload":{{"status":"working","modified_files":[]}}}}"#
+            );
+            let app = test_router();
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/publish")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                resp.status() == StatusCode::ACCEPTED || resp.status() == StatusCode::OK,
+                "{id} should be accepted; got: {}",
+                resp.status()
+            );
+        }
+    }
+
+    /// Widening the prefix must not degrade into "accept anything": the id still
+    /// has to be a `{prefix}{/ or -}{name}` slug, so a bare word with no
+    /// separator (a typo, or an unsubstituted label) is still rejected.
+    #[tokio::test]
+    async fn agent_id_rejects_prefixless_word() {
+        let (status, body) = post_publish(
+            r#"{"type":"agent.status","agent_id":"agent","payload":{"status":"working","modified_files":[]}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("invalid agent_id"), "body: {text}");
     }
 
     #[tokio::test]
