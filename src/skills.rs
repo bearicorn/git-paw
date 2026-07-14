@@ -5720,6 +5720,10 @@ mod tests {
                 !coord.contains("Commands you must not run"),
                 "coordination forbidden section must be omitted for {backends:?}"
             );
+            assert!(
+                !coord.contains("/opsx:"),
+                "no /opsx:* literal may leak into coordination for {backends:?}"
+            );
             let sup = render_skill("supervisor", &backends);
             assert!(
                 !sup.contains("Commands you must run (not coding agents)"),
@@ -5728,6 +5732,10 @@ mod tests {
             assert!(
                 !sup.contains("Handling an opsx-role-gating revert request"),
                 "revert flow must be omitted for {backends:?}"
+            );
+            assert!(
+                !sup.contains("/opsx:"),
+                "no /opsx:* literal may leak into supervisor for {backends:?}"
             );
         }
     }

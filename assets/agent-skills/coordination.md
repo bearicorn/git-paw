@@ -56,8 +56,8 @@ deliberation windows the watcher cannot see.
 
 ### Commit cadence
 
-Commit per **task group**, not per individual task. When your change has an
-OpenSpec-style `tasks.md` with numbered groups (`## 1.`, `## 2.`, ...), the
+Commit per **task group**, not per individual task. When your change has a
+`tasks.md` with numbered groups (`## 1.`, `## 2.`, ...), the
 default unit of commit is the GROUP: after every `- [ ]` item in a group is
 `- [x]`, commit before starting the next group. You SHALL NOT accumulate more
 than roughly **ten uncommitted files** at a time.
@@ -374,9 +374,9 @@ Your terminal action as a coding agent is one of two things:
    outside this worktree) or to announce named `exports` that peers should
    cherry-pick.
 
-That is it. Specifically, you SHALL NOT invoke `/opsx:verify <change-id>` or
-`/opsx:archive <change-id>` yourself. **Both `/opsx:verify` and `/opsx:archive`
-are off-limits for the coding agent — they are the supervisor's job.**
+That is it. Specifically, you SHALL NOT verify or archive the change yourself.
+**Both verification and archival are off-limits for the coding agent — they
+are the supervisor's job, run per your project's spec workflow.**
 
 Why this rule is explicit:
 
@@ -395,9 +395,9 @@ Why this rule is explicit:
 to *wait* — not to push the change further through its lifecycle. Let the
 post-commit hook publish `agent.artifact { status: "committed" }` (or, for
 code-less work, publish a manual `agent.artifact { status: "done" }`), then
-**stand by**. While standing by you SHALL NOT run `/opsx:verify` or
-`/opsx:archive` — those are supervisor-only, as the rule above states. This
-stand-by protocol is the positive counterpart to that forbidden-commands rule —
+**stand by**. While standing by you SHALL NOT verify or archive the change —
+those steps are supervisor-only, as the rule above states. This stand-by
+protocol is the positive counterpart to that supervisor-only rule —
 *what to do instead* of reaching for verify/archive. What you wait *for* is one
 of three supervisor messages:
 
