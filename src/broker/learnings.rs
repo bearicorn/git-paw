@@ -578,11 +578,13 @@ impl LearningsAggregator {
                 // section — see [`Self::record_qualitative`].
                 self.record_qualitative(payload);
             }
-            // `supervisor.verify-now` is a broker-emitted operational nudge and
-            // `agent.advanced-main` is a supervisor-published merge notification
-            // — both are coordination signals, not agent learnings, and are
-            // ignored.
-            BrokerMessage::VerifyNow { .. } | BrokerMessage::AdvancedMain { .. } => {}
+            // `supervisor.verify-now` is a broker-emitted operational nudge,
+            // `agent.advanced-main` is a supervisor-published merge notification,
+            // and `agent.answer` is a non-error supervisor reply — all are
+            // coordination signals, not agent learnings, and are ignored.
+            BrokerMessage::VerifyNow { .. }
+            | BrokerMessage::AdvancedMain { .. }
+            | BrokerMessage::Answer { .. } => {}
         }
     }
 

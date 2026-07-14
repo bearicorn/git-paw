@@ -72,10 +72,10 @@ fn placeholder_rejection(field: &str, value: &str) -> Response {
 ///
 /// Per `supervisor-bugfixes-v0-5-x` design D5, the placeholder check covers
 /// only the fields the supervisor skill's example curls populate:
-/// `payload.question`, `payload.needs`, and each string element of
-/// `payload.errors[]`. Other free-form string fields (`StatusPayload.message`,
-/// `VerifiedPayload.message`) are left alone — real human content sometimes
-/// uses angle brackets inline.
+/// `payload.question`, `payload.needs`, each string element of
+/// `payload.errors[]`, and `payload.answer` / `payload.re`. Other free-form
+/// string fields (`StatusPayload.message`, `VerifiedPayload.message`) are
+/// left alone — real human content sometimes uses angle brackets inline.
 fn check_placeholder_fields(msg: &BrokerMessage) -> Option<Response> {
     let re = placeholder_regex();
     match msg {
@@ -94,6 +94,16 @@ fn check_placeholder_fields(msg: &BrokerMessage) -> Option<Response> {
                 if re.is_match(err) {
                     return Some(placeholder_rejection("errors", err));
                 }
+            }
+        }
+        BrokerMessage::Answer { payload, .. } => {
+            if re.is_match(&payload.answer) {
+                return Some(placeholder_rejection("answer", &payload.answer));
+            }
+            if let Some(re_field) = &payload.re
+                && re.is_match(re_field)
+            {
+                return Some(placeholder_rejection("re", re_field));
             }
         }
         BrokerMessage::Status { .. }
@@ -682,6 +692,46 @@ mod tests {
         assert!(
             text.contains("placeholder") && text.contains("errors"),
             "body: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn payload_answer_rejects_placeholder() {
+        let (status, body) = post_publish(
+            r#"{"type":"agent.answer","agent_id":"feat-test-branch","payload":{"from":"supervisor","answer":"<your answer>"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("placeholder") && text.contains("answer"),
+            "body should mention both 'placeholder' and 'answer'; got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn payload_answer_rejects_placeholder_re() {
+        let (status, body) = post_publish(
+            r#"{"type":"agent.answer","agent_id":"feat-test-branch","payload":{"from":"supervisor","answer":"use the helper","re":"<the question>"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("placeholder") && text.contains("re"),
+            "body: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn payload_answer_accepts_real_content() {
+        let (status, _) = post_publish(
+            r#"{"type":"agent.answer","agent_id":"feat-test-branch","payload":{"from":"supervisor","answer":"Use the existing helper; do not add a dependency","re":"add crate X?"}}"#,
+        )
+        .await;
+        assert!(
+            status == StatusCode::ACCEPTED || status == StatusCode::OK,
+            "real human content should be accepted; got: {status}"
         );
     }
 

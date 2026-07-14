@@ -943,6 +943,84 @@ mod tests {
         assert!(tmpl.content.contains("re-publish"));
     }
 
+    /// agent-answer-variant scenario "Answer is not an error channel": the
+    /// coordination skill's message documentation describes `agent.answer` as
+    /// an authoritative supervisor reply to act on — distinct from
+    /// `agent.feedback`, which carries corrective errors.
+    #[test]
+    fn embedded_coordination_documents_answer_as_authoritative_reply() {
+        let tmpl = resolve("coordination").unwrap();
+        let start = tmpl
+            .content
+            .find("### Messages you may receive")
+            .expect("coordination skill has a Messages you may receive section");
+        let rest = &tmpl.content[start..];
+        let end = rest[1..].find("\n### ").map_or(rest.len(), |idx| idx + 1);
+        let section = rest[..end].to_lowercase();
+
+        assert!(
+            section.contains("`agent.answer`"),
+            "messages-you-receive section must document agent.answer"
+        );
+        assert!(
+            section.contains("authoritative"),
+            "agent.answer must be described as an authoritative supervisor reply"
+        );
+        for field in ["`from`", "`answer`", "`re`"] {
+            assert!(
+                section.contains(field),
+                "agent.answer documentation must name the {field} payload field"
+            );
+        }
+        assert!(
+            section.contains("not an error"),
+            "agent.answer must be distinguished from an error report"
+        );
+        assert!(
+            section.contains("unlike `agent.feedback`"),
+            "agent.answer must be contrasted with corrective agent.feedback"
+        );
+    }
+
+    /// agent-answer-variant skill docs: the supervisor skill instructs
+    /// answering `agent.question` via `agent.answer` (with the from/answer/re
+    /// wire fields), reserving `agent.feedback` for corrective errors.
+    #[test]
+    fn supervisor_skill_answers_questions_via_agent_answer() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            tmpl.content.contains("### Answer a peer agent's question"),
+            "supervisor skill must carry an answer-a-question section"
+        );
+        let example_start = tmpl
+            .content
+            .find("\"type\":\"agent.answer\"")
+            .expect("supervisor skill should contain an agent.answer curl example");
+        let example_end = tmpl.content[example_start..]
+            .find("}}'")
+            .map(|i| example_start + i)
+            .expect("agent.answer curl example should terminate with the closing payload `}}'`");
+        let example = &tmpl.content[example_start..example_end];
+        assert!(
+            example.contains("\"from\":\"supervisor\""),
+            "agent.answer example must use the `from` payload field: {example}"
+        );
+        assert!(
+            example.contains("\"answer\":"),
+            "agent.answer example must use the `answer` payload field: {example}"
+        );
+        assert!(
+            example.contains("\"re\":"),
+            "agent.answer example must show the optional `re` payload field: {example}"
+        );
+        assert!(
+            tmpl.content
+                .to_lowercase()
+                .contains("reserved for **corrective errors**"),
+            "supervisor skill must reserve agent.feedback for corrective errors"
+        );
+    }
+
     // === forward-coordination: existing-scenario coverage gaps ===
 
     #[test]
@@ -4405,10 +4483,12 @@ mod tests {
         );
     }
 
-    /// drift 34 — supervisor skill instructs `tmux send-keys` alongside
-    /// `agent.feedback` answers, with the "agents do not poll" rationale.
+    /// drift 34 — supervisor skill instructs `tmux send-keys` alongside the
+    /// published answer, with the "agents do not poll" rationale. Since
+    /// agent-answer-variant, question replies ride `agent.answer` (feedback is
+    /// reserved for corrective errors), so the dual-write pins to that shape.
     #[test]
-    fn supervisor_skill_documents_tmux_send_keys_alongside_feedback() {
+    fn supervisor_skill_documents_tmux_send_keys_alongside_answer() {
         let tmpl = resolve("supervisor").unwrap();
         let start = tmpl
             .content
@@ -4423,8 +4503,8 @@ mod tests {
             "section should contain `tmux send-keys`"
         );
         assert!(
-            section.contains("agent.feedback"),
-            "section should reference agent.feedback in the same section"
+            section.contains("agent.answer"),
+            "section should reference agent.answer in the same section"
         );
         let lowered_section = section.to_lowercase();
         assert!(
