@@ -152,3 +152,216 @@ fn non_live_capture_is_noop() {
         "non-live capture must be a no-op, got: {out}"
     );
 }
+
+/// Appends a raw TOML snippet to the fixture repo's `.git-paw/config.toml`.
+fn append_config(fx: &Fixture, snippet: &str) {
+    use std::io::Write as _;
+    let path = fx.root.join(".git-paw/config.toml");
+    let mut f = fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("open config.toml for append");
+    writeln!(f, "{snippet}").expect("append config snippet");
+}
+
+// --- stack-driven composition (classifier-stack-de-opinionation) ---
+
+/// Spec scenario "sweep.sh composes the same whitelist": with
+/// `stacks = ["rust"]` declared in `.git-paw/config.toml`, a `cargo fmt`
+/// prompt approves via the whitelist — agreeing with the Rust classifier.
+#[test]
+#[serial]
+fn declared_rust_stack_approves_cargo_via_config() {
+    let fx = setup();
+    append_config(
+        &fx,
+        "\n[supervisor.common_dev_allowlist]\nstacks = [\"rust\"]\n",
+    );
+    let out = classify(
+        &fx,
+        "Bash command\n  cargo fmt --check\nDo you want to proceed?\nEsc to cancel",
+        None,
+    );
+    assert!(
+        out.contains("approve") && out.contains("whitelist"),
+        "declared rust stack must approve cargo fmt, got: {out}"
+    );
+}
+
+/// Spec scenario "Default whitelist is stack-neutral" through the helper:
+/// without a declared stack, a cargo prompt escalates as unknown.
+#[test]
+#[serial]
+fn undeclared_stack_cargo_escalates_unknown() {
+    let fx = setup();
+    let out = classify(
+        &fx,
+        "Bash command\n  cargo test --workspace\nDo you want to proceed?\nEsc to cancel",
+        None,
+    );
+    assert!(
+        out.contains("escalate") && out.contains("unknown"),
+        "cargo without a declared stack must escalate, got: {out}"
+    );
+}
+
+/// The third whitelist source: `[supervisor.auto_approve] safe_commands`
+/// entries read from config.toml extend the helper's whitelist.
+#[test]
+#[serial]
+fn safe_commands_extension_approves_via_config() {
+    let fx = setup();
+    append_config(
+        &fx,
+        "\n[supervisor.auto_approve]\nsafe_commands = [\"just smoke\"]\n",
+    );
+    let out = classify(
+        &fx,
+        "Bash command\n  just smoke -v\nDo you want to proceed?\nEsc to cancel",
+        None,
+    );
+    assert!(
+        out.contains("approve") && out.contains("whitelist"),
+        "safe_commands extension must approve, got: {out}"
+    );
+}
+
+// --- worktree-confined dev-test shapes (rider mirror) ---
+
+/// Rider scenario "bash -n on a worktree script is safe" through the helper.
+#[test]
+#[serial]
+fn worktree_dev_test_bash_n_approves() {
+    let fx = setup();
+    fs::create_dir_all(fx.root.join("scripts")).expect("mkdir scripts");
+    fs::write(fx.root.join("scripts/helper.sh"), "echo hi\n").expect("write helper");
+    let root = fx.root.to_string_lossy().to_string();
+    let out = classify(
+        &fx,
+        "Bash command\n  bash -n scripts/helper.sh\nDo you want to proceed?\nEsc to cancel",
+        Some(&root),
+    );
+    assert!(
+        out.contains("approve") && out.contains("worktree-dev-test"),
+        "bash -n on a worktree script must approve, got: {out}"
+    );
+}
+
+/// Rider scenario "Inline code strings do not match" through the helper.
+#[test]
+#[serial]
+fn inline_code_string_escalates_unknown() {
+    let fx = setup();
+    let root = fx.root.to_string_lossy().to_string();
+    let out = classify(
+        &fx,
+        "Bash command\n  python3 -c \"import os\"\nDo you want to proceed?\nEsc to cancel",
+        Some(&root),
+    );
+    assert!(
+        out.contains("escalate") && out.contains("unknown"),
+        "inline -c code string must escalate, got: {out}"
+    );
+}
+
+/// Rider scenario "Out-of-worktree script does not match" through the helper.
+#[test]
+#[serial]
+fn out_of_worktree_script_escalates_unknown() {
+    let fx = setup();
+    let root = fx.root.to_string_lossy().to_string();
+    let out = classify(
+        &fx,
+        "Bash command\n  bash /etc/init.d/thing\nDo you want to proceed?\nEsc to cancel",
+        Some(&root),
+    );
+    assert!(
+        out.contains("escalate") && out.contains("unknown"),
+        "out-of-worktree script must escalate, got: {out}"
+    );
+}
+
+// --- list-parity guard (Rust ↔ sweep.sh lockstep) ---
+
+/// Extracts the string items of a Python list literal `NAME = [...]` from the
+/// sweep.sh source. Items are plain double-quoted command prefixes (no
+/// escaped quotes), so splitting on `"` yields the contents at odd indices.
+fn extract_py_array(src: &str, name: &str) -> Vec<String> {
+    let marker = format!("{name} = [");
+    let start = src
+        .find(&marker)
+        .unwrap_or_else(|| panic!("{name} array not found in sweep.sh"));
+    let body = &src[start + marker.len()..];
+    let end = body.find(']').expect("closing bracket");
+    body[..end]
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(String::from)
+        .collect()
+}
+
+fn to_strings(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// Spec scenario "sweep.sh composes the same whitelist" (parity clause): the
+/// helper's built-in verb arrays equal the Rust classifier's constants
+/// byte-for-byte, closing the audit-flagged behavioural-only gap.
+#[test]
+fn sweep_sh_verb_lists_match_rust_constants() {
+    use git_paw::supervisor::auto_approve::{READ_MOSTLY_VERBS, default_safe_commands};
+    use git_paw::supervisor::dev_allowlist::{
+        DEV_ALLOWLIST_PRESET, GO_STACK_PRESET, NODE_STACK_PRESET, PYTHON_STACK_PRESET,
+        RUST_STACK_PRESET,
+    };
+
+    let src = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/scripts/sweep.sh"
+    ))
+    .expect("read assets/scripts/sweep.sh");
+
+    let read_mostly = extract_py_array(&src, "READ_MOSTLY");
+    assert_eq!(
+        read_mostly,
+        to_strings(READ_MOSTLY_VERBS),
+        "sweep.sh READ_MOSTLY must equal READ_MOSTLY_VERBS"
+    );
+
+    // EXPLICIT_SAFE + READ_MOSTLY is the helper's built-in whitelist; it must
+    // equal the Rust default_safe_commands(), in order.
+    let explicit = extract_py_array(&src, "EXPLICIT_SAFE");
+    let combined: Vec<String> = explicit.iter().chain(read_mostly.iter()).cloned().collect();
+    assert_eq!(
+        combined,
+        to_strings(default_safe_commands()),
+        "sweep.sh EXPLICIT_SAFE + READ_MOSTLY must equal default_safe_commands()"
+    );
+
+    assert_eq!(
+        extract_py_array(&src, "DEV_UNIVERSAL"),
+        to_strings(DEV_ALLOWLIST_PRESET),
+        "sweep.sh DEV_UNIVERSAL must equal DEV_ALLOWLIST_PRESET"
+    );
+    assert_eq!(
+        extract_py_array(&src, "STACK_RUST"),
+        to_strings(RUST_STACK_PRESET),
+        "sweep.sh STACK_RUST must equal RUST_STACK_PRESET"
+    );
+    assert_eq!(
+        extract_py_array(&src, "STACK_NODE"),
+        to_strings(NODE_STACK_PRESET),
+        "sweep.sh STACK_NODE must equal NODE_STACK_PRESET"
+    );
+    assert_eq!(
+        extract_py_array(&src, "STACK_PYTHON"),
+        to_strings(PYTHON_STACK_PRESET),
+        "sweep.sh STACK_PYTHON must equal PYTHON_STACK_PRESET"
+    );
+    assert_eq!(
+        extract_py_array(&src, "STACK_GO"),
+        to_strings(GO_STACK_PRESET),
+        "sweep.sh STACK_GO must equal GO_STACK_PRESET"
+    );
+}

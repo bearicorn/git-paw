@@ -462,7 +462,7 @@ approve_worktree_writes = true
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `true` | Master switch for auto-approval. Set to `false` to disable. |
-| `safe_commands` | `[]` | Project-specific command prefixes appended to the built-in defaults. |
+| `safe_commands` | `[]` | Project-specific command prefixes appended to the composed whitelist (see *Whitelist sourcing* below). |
 | `stall_threshold_seconds` | `30` | Seconds an agent's `last_seen` must lag before its pane is polled (minimum `5`). |
 | `approval_level` | `"safe"` | Coarse preset: `"off"`, `"conservative"`, or `"safe"`. |
 | `approve_worktree_writes` | `true` | Auto-approve file write/edit/create prompts whose target resolves **inside the agent's own worktree**. Set `false` to require manual approval for all file operations. |
@@ -477,16 +477,44 @@ so confining auto-approval to the worktree boundary is safe by construction; set
 `approve_worktree_writes = false` to opt out. Paths outside the worktree (the parent
 repo, your home directory, system paths) always require manual approval.
 
-**Built-in safe commands:** `cargo fmt`, `cargo clippy`, `cargo test`, `cargo build`,
-`git commit`, `git push`, `curl http://127.0.0.1:`.
+**Whitelist sourcing.** The effective whitelist is composed from three
+sources, in order, de-duplicated:
+
+1. **Stack-neutral built-ins** — the read-mostly verbs (`curl`, `cat`, `ls`,
+   `grep`, `rg`, `git`, `echo`, `sed`, `awk`, `find`, `wc`, `head`, `tail`,
+   `jq`, `mkdir`, `touch`, `export`, `tmux`, `env`), plus `git commit`,
+   `git push`, and the broker-localhost prefix `curl http://127.0.0.1:`.
+   The built-ins carry **no** toolchain verbs.
+2. **Resolved dev-allowlist patterns** — the universal preset, the stack
+   presets selected by [`[supervisor.common_dev_allowlist]
+   stacks`](#common-dev-command-allowlist), and its `extra` entries. Declaring
+   `stacks = ["rust"]` is what makes `cargo test` auto-approve; a node-stack
+   project gets `npm test` instead and its `cargo` prompts escalate.
+3. **`safe_commands`** — the per-project extension above.
+
+A whitelist match is always subordinate to the danger-list: `git push`
+escalates even though the `git` verb is whitelisted. The bundled
+`sweep.sh classify` helper composes its whitelist from the same three sources
+(reading the resolved stacks and extensions from `.git-paw/config.toml`, with
+a fail-safe fallback to built-ins only when the config is unreadable), so the
+helper and the Rust classifier agree.
+
+> **Migration note (v0.11.0).** Earlier releases baked `cargo fmt`,
+> `cargo clippy`, `cargo test`, `cargo build`, `openspec`, and `just` into the
+> built-in whitelist for every project. These are no longer built in. If your
+> agents' toolchain prompts (e.g. `cargo test`) stopped auto-approving,
+> declare your stack once — `[supervisor.common_dev_allowlist]
+> stacks = ["rust"]` — and put anything bespoke (e.g. `just`, `openspec`) in
+> that section's `extra` or in `safe_commands`. This is strictly a
+> de-escalation: a project that never used cargo no longer auto-approves it.
 
 **Approval-level presets:**
 
 | Preset | Behavior |
 |--------|----------|
 | `off` | Forces `enabled = false`. No detection or approval runs. |
-| `conservative` | Drops `git push` and `curl` from the effective whitelist. |
-| `safe` (default) | Approve every entry in the built-in whitelist plus configured extras. |
+| `conservative` | Drops `git push` and `curl` entries from the effective whitelist. The strip is applied **after** composition, so it governs built-ins, stack patterns, and configured extras alike. |
+| `safe` (default) | Approve every entry in the composed whitelist. |
 
 **How it works:** when an agent's status is non-terminal (`done`, `verified`, `blocked`,
 `committed` are skipped) and its `last_seen` exceeds the threshold, git-paw runs
@@ -508,6 +536,11 @@ prefix patterns into `.claude/settings.json::allowed_bash_prefixes` so agents
 do not hit a permission prompt for each variant of `git commit`, `git diff`,
 `grep`, etc. The mechanism is the same one Claude uses for its "Yes, don't ask
 again" flow — but seeded up-front rather than approved one-by-one.
+
+The same `stacks` / `extra` declaration also feeds the
+[auto-approve classifier whitelist](#auto-approve-safe-permission-prompts):
+one stack declaration drives both the CLI allowlist seeding and the
+supervisor's prompt classification, so the two never drift.
 
 Each seeded value is a command **prefix** (a verb or verb + subcommand) that
 subsumes every argument variant — `git diff` covers `git diff --stat HEAD~1`,

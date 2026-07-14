@@ -4,7 +4,7 @@ This walkthrough shows how to launch git-paw in **supervisor mode** — git-paw'
 
 ## What Supervisor Mode Does
 
-Supervisor mode (`git paw start --supervisor`) launches every pending spec as its own coding agent in a background tmux pane and gives you an interactive supervisor agent in the foreground pane. The supervisor automatically launches all agents per spec, runs the configured `test_command` between merges, walks branches in topological order based on declared dependencies, writes a `.git-paw/session-summary.md` when the run is complete, and auto-approves common safe permission prompts (e.g. `cargo test`, `git commit`, broker `curl` calls) so the run can proceed unattended.
+Supervisor mode (`git paw start --supervisor`) launches every pending spec as its own coding agent in a background tmux pane and gives you an interactive supervisor agent in the foreground pane. The supervisor automatically launches all agents per spec, runs the configured `test_command` between merges, walks branches in topological order based on declared dependencies, writes a `.git-paw/session-summary.md` when the run is complete, and auto-approves common safe permission prompts (e.g. `git commit`, broker `curl` calls, and your declared stack's toolchain verbs such as `cargo test` for `stacks = ["rust"]`) so the run can proceed unattended.
 
 ## Prerequisites
 
@@ -82,10 +82,11 @@ The full reference lives in [Configuration → Supervisor](configuration/README.
 | `[supervisor].test_command` | Command run after each agent reports `done` and again after every merge. |
 | `[supervisor].agent_approval` | `"manual"`, `"auto"`, or `"full-auto"` — translates into CLI permission flags. |
 | `[supervisor.auto_approve].enabled` | Master switch for git-paw's safe-prompt auto-dismisser. |
-| `[supervisor.auto_approve].safe_commands` | Project-specific command prefixes appended to the built-in safe list. |
+| `[supervisor.auto_approve].safe_commands` | Project-specific command prefixes appended to the composed safe list. |
 | `[supervisor.auto_approve].approval_level` | `"off"`, `"conservative"`, or `"safe"` preset for the auto-approve whitelist. |
 | `[supervisor.common_dev_allowlist].enabled` | Seeds Claude's `allowed_bash_prefixes` with a curated preset of safe dev-loop commands on supervisor start. Default `true`. |
-| `[supervisor.common_dev_allowlist].extra` | Project-specific prefix patterns appended to the built-in preset (e.g. `["pnpm test", "deno fmt"]`). |
+| `[supervisor.common_dev_allowlist].stacks` | Named stack presets (`rust` / `node` / `python` / `go`) whose toolchain verbs are seeded AND folded into the auto-approve whitelist (e.g. `["rust"]` makes `cargo test` auto-approve). |
+| `[supervisor.common_dev_allowlist].extra` | Project-specific prefix patterns appended to the built-in preset (e.g. `["pnpm test", "deno fmt"]`). Also folded into the auto-approve whitelist. |
 
 See [Configuration → Broker](configuration/README.md#broker) for `[broker]` settings and [Configuration → Dashboard](configuration/README.md#dashboard) if you want the live broker-message panel turned on.
 

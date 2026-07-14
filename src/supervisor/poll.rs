@@ -23,14 +23,15 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::broker::BrokerState;
-use crate::config::AutoApproveConfig;
+use crate::config::{AutoApproveConfig, CommonDevAllowlistConfig};
 use crate::error::PawError;
 
 use super::approval_gate::PaneCapturer;
 use super::approve::{ApprovalRequest, KeyDispatcher, auto_approve_pane};
 use super::auto_approve::{
     detect_prompt_shape, extract_command_slice, is_dangerous, is_live_prompt, is_safe_command,
-    is_scratch_rm, is_worktree_file_op, is_worktree_git_op, select_option_index,
+    is_scratch_rm, is_worktree_dev_test_op, is_worktree_file_op, is_worktree_git_op,
+    select_option_index,
 };
 use super::permission_prompt::{PermissionType, detect_permission_prompt};
 use super::stall::detect_stalled_agents;
@@ -155,6 +156,10 @@ where
     pub session: &'a str,
     /// Auto-approve config (presets applied by [`poll_tick`]).
     pub config: &'a AutoApproveConfig,
+    /// Resolved `[supervisor.common_dev_allowlist]` section — its `stacks` +
+    /// `extra` patterns are folded into the classifier whitelist by
+    /// [`AutoApproveConfig::effective_whitelist`].
+    pub dev_allowlist: &'a CommonDevAllowlistConfig,
     /// Resolves agent ID to pane index.
     pub resolver: &'a R,
     /// Inspects pane content.
@@ -190,7 +195,7 @@ where
     };
     let threshold = Duration::from_secs(cfg.stall_threshold_seconds);
     let stalled = detect_stalled_agents(state, threshold);
-    let whitelist = cfg.effective_whitelist();
+    let whitelist = cfg.effective_whitelist(ctx.dev_allowlist);
     drive_outcomes(stalled, ctx, &cfg, &whitelist)
 }
 
@@ -292,7 +297,7 @@ where
         return Vec::new();
     }
     let stalled = stalled_from_status(rows, cfg.stall_threshold_seconds);
-    let whitelist = cfg.effective_whitelist();
+    let whitelist = cfg.effective_whitelist(ctx.dev_allowlist);
     drive_outcomes(stalled, ctx, &cfg, &whitelist)
 }
 
@@ -360,23 +365,33 @@ where
             continue;
         }
 
-        // Worktree-confined `git add` / `git commit` pre-approval (F2
-        // keystone): an unattended agent stages and commits its own work
-        // without stalling, since its cwd resolves inside its isolated
-        // worktree. `git push` is NOT covered — the danger-list above already
-        // escalated it.
-        if let Some(root) = ctx.worktree_resolver.worktree_root_for(&agent_id)
-            && is_worktree_git_op(&slice, &root)
-        {
-            out.push(dispatch_safe(
-                ctx,
-                &agent_id,
-                pane_index,
-                cfg.enabled,
-                option_index,
-                "worktree-git",
-            ));
-            continue;
+        // Worktree-confined rules — apply only when a worktree root is known
+        // (the supervisor pane has none):
+        // - `git add` / `git commit` pre-approval (F2 keystone): an unattended
+        //   agent stages and commits its own work without stalling. `git push`
+        //   is NOT covered — the danger-list above already escalated it.
+        // - dev-test shapes (`bash -n`, non-recursive chmod, mktemp,
+        //   interpreter-of-worktree-script): safe-by-pattern when every
+        //   referenced path resolves inside the agent's worktree.
+        if let Some(root) = ctx.worktree_resolver.worktree_root_for(&agent_id) {
+            let matched = if is_worktree_git_op(&slice, &root) {
+                Some("worktree-git")
+            } else if is_worktree_dev_test_op(&slice, &root) {
+                Some("worktree-dev-test")
+            } else {
+                None
+            };
+            if let Some(entry) = matched {
+                out.push(dispatch_safe(
+                    ctx,
+                    &agent_id,
+                    pane_index,
+                    cfg.enabled,
+                    option_index,
+                    entry,
+                ));
+                continue;
+            }
         }
 
         // Shell whitelist (read-mostly verbs + configured safe commands),
@@ -585,6 +600,7 @@ mod tests {
     ) {
         // Default: no worktree mapping (file-op classifier inert).
         let no_worktree = |_id: &str| None::<PathBuf>;
+        let dev_allowlist = CommonDevAllowlistConfig::default();
         let mut dispatcher = RecordingDispatcher { events: vec![] };
         let mut forwarder = RecordingForwarder::default();
         let out = {
@@ -592,6 +608,7 @@ mod tests {
                 state: Some(state),
                 session: "paw-x",
                 config: cfg,
+                dev_allowlist: &dev_allowlist,
                 resolver,
                 inspector,
                 dispatcher: &mut dispatcher,
@@ -629,8 +646,8 @@ mod tests {
         let cfg = AutoApproveConfig::default();
         let resolver = |id: &str| if id == "agent-a" { Some(2) } else { None };
         let inspector = StubInspector {
-            kind: Some(PermissionType::Cargo),
-            captured: "cargo test --workspace\nDo you want to proceed?\nEsc to cancel".into(),
+            kind: Some(PermissionType::Unknown),
+            captured: "grep -rn TODO src/\nDo you want to proceed?\nEsc to cancel".into(),
         };
         let (out, dispatcher, forwarder) = run_tick(&state, &cfg, &resolver, &inspector);
         assert_eq!(out.len(), 1);
@@ -641,7 +658,7 @@ mod tests {
                 matched_entry,
                 kind,
             } => {
-                assert_eq!(matched_entry, "cargo test");
+                assert_eq!(matched_entry, "grep");
                 assert_eq!(*kind, PermissionType::SafeCommand);
             }
             _ => panic!("expected Approved, got {outcome:?}"),
@@ -828,10 +845,17 @@ mod tests {
         assert_eq!(stalled, vec!["e".to_string()]);
     }
 
+    /// A declared rust stack contributes `cargo test` to the whitelist the
+    /// tick consumes (spec scenario "Declared stack contributes its
+    /// toolchain verbs" through the poll path).
     #[test]
     fn tick_from_status_dispatches_safe_prompt() {
         let rows = vec![row("agent-a", "working", 300)];
         let cfg = AutoApproveConfig::default();
+        let dev_allowlist = CommonDevAllowlistConfig {
+            stacks: vec!["rust".to_string()],
+            ..CommonDevAllowlistConfig::default()
+        };
         let resolver = |id: &str| if id == "agent-a" { Some(2) } else { None };
         let inspector = StubInspector {
             kind: Some(PermissionType::Cargo),
@@ -845,6 +869,7 @@ mod tests {
                 state: None,
                 session: "paw-x",
                 config: &cfg,
+                dev_allowlist: &dev_allowlist,
                 resolver: &resolver,
                 inspector: &inspector,
                 dispatcher: &mut dispatcher,
@@ -881,6 +906,7 @@ mod tests {
         I: PaneInspector,
         Wt: WorktreeResolver,
     {
+        let dev_allowlist = CommonDevAllowlistConfig::default();
         let mut dispatcher = RecordingDispatcher { events: vec![] };
         let mut forwarder = RecordingForwarder::default();
         let out = {
@@ -888,6 +914,7 @@ mod tests {
                 state: Some(state),
                 session: "paw-x",
                 config: cfg,
+                dev_allowlist: &dev_allowlist,
                 resolver,
                 inspector,
                 dispatcher: &mut dispatcher,
@@ -982,6 +1009,72 @@ mod tests {
         }
         assert!(!dispatcher.events.is_empty());
         assert!(forwarder.forwards.borrow().is_empty());
+    }
+
+    /// Rider scenario through the poll loop: a worktree-confined dev-test
+    /// shape (interpreter run of a worktree script) is approved via the
+    /// dedicated path (`matched_entry` `worktree-dev-test`), while the same
+    /// capture without a known worktree root (the supervisor pane) forwards.
+    #[test]
+    fn worktree_dev_test_shape_is_auto_approved_only_with_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("tools")).unwrap();
+        std::fs::write(tmp.path().join("tools/gen.py"), "print(1)\n").unwrap();
+        let root = tmp.path().to_path_buf();
+        let state = BrokerState::new(None);
+        insert_stalled(&state, "agent-d", 600);
+        let cfg = AutoApproveConfig::default();
+        let resolver = |id: &str| if id == "agent-d" { Some(2) } else { None };
+        let inspector = StubInspector {
+            kind: Some(PermissionType::Unknown),
+            captured:
+                "Bash command\n  python3 tools/gen.py\nDo you want to proceed?\nEsc to cancel"
+                    .into(),
+        };
+        let worktree = move |id: &str| {
+            if id == "agent-d" {
+                Some(root.clone())
+            } else {
+                None
+            }
+        };
+        let (out, dispatcher, forwarder) =
+            run_tick_with_worktree(&state, &cfg, &resolver, &inspector, &worktree);
+        assert_eq!(out.len(), 1);
+        match &out[0].1 {
+            TickOutcome::Approved {
+                matched_entry,
+                kind,
+            } => {
+                assert_eq!(matched_entry, "worktree-dev-test");
+                assert_eq!(*kind, PermissionType::SafeCommand);
+            }
+            other => panic!("expected Approved worktree-dev-test, got {other:?}"),
+        }
+        assert!(!dispatcher.events.is_empty());
+        assert!(forwarder.forwards.borrow().is_empty());
+
+        // Supervisor-pane counterpart: no worktree root — the same capture
+        // must forward instead of approving.
+        let state2 = BrokerState::new(None);
+        insert_stalled(&state2, "agent-d", 600);
+        let inspector2 = StubInspector {
+            kind: Some(PermissionType::Unknown),
+            captured:
+                "Bash command\n  python3 tools/gen.py\nDo you want to proceed?\nEsc to cancel"
+                    .into(),
+        };
+        let no_root = |_id: &str| None::<PathBuf>;
+        let (out2, dispatcher2, forwarder2) =
+            run_tick_with_worktree(&state2, &cfg, &resolver, &inspector2, &no_root);
+        assert_eq!(out2.len(), 1);
+        assert!(
+            matches!(out2[0].1, TickOutcome::Forwarded { .. }),
+            "no worktree root must forward, got {:?}",
+            out2[0].1
+        );
+        assert!(dispatcher2.events.is_empty());
+        assert_eq!(forwarder2.forwards.borrow().len(), 1);
     }
 
     #[test]

@@ -1150,23 +1150,27 @@ cmd_stuck_eval() {
 # Auto-approve classification, mirroring the Rust classifier
 # (src/supervisor/auto_approve.rs) so the bundled helper decides identically:
 # command-slice extraction, the curated danger-list (+ per-OS addendum) with
-# the rm -rf scratch exception, the read-mostly verb allowlist, worktree-
-# confined git add/commit, the live-prompt gate, and option-index selection.
+# the rm -rf scratch exception, the stack-neutral whitelist composed with the
+# [supervisor.common_dev_allowlist] stack presets and safe_commands from
+# .git-paw/config.toml (fail-safe: built-ins only when unreadable), worktree-
+# confined git add/commit and dev-test shapes, the live-prompt gate, and
+# option-index selection.
 #
 # Reads a pane capture on stdin; takes an optional worktree root (defaults to
-# the project root) used by the worktree-git pre-approval. Prints one of:
+# the project root) used by the worktree-confined rules. Prints one of:
 #   no-op (not live)
 #   escalate (danger|unknown)
-#   approve option=<N> (scratch-rm|worktree-git|whitelist)
+#   approve option=<N> (scratch-rm|worktree-git|worktree-dev-test|whitelist)
 cmd_classify() {
   local root=${1:-${PROJECT_ROOT}}
   local cap
   cap=$(cat)
-  printf '%s' "${cap}" | WORKTREE_ROOT="${root}" "${PY}" -c "$(cat <<'PY'
+  printf '%s' "${cap}" | WORKTREE_ROOT="${root}" CONFIG_TOML="${CONFIG_TOML}" "${PY}" -c "$(cat <<'PY'
 import os, platform, re, sys
 
 cap = sys.stdin.read()
 worktree_root = os.environ.get("WORKTREE_ROOT", "")
+config_toml = os.environ.get("CONFIG_TOML", "")
 
 # --- command-slice extraction --------------------------------------------
 DECOR = " \t│─╭╮╰╯├┤┐└┘┌⎿❯●•*·"
@@ -1293,12 +1297,71 @@ def is_scratch_rm(s):
         return False
     return rm_all_scratch(s) and not is_dangerous(s)
 
-# --- read-mostly allowlist + worktree git --------------------------------
+# --- composed whitelist + worktree git -----------------------------------
+# Stack-neutral built-ins, kept in lockstep with the Rust constants
+# (READ_MOSTLY_VERBS / default_safe_commands in src/supervisor/auto_approve.rs
+# and the presets in src/supervisor/dev_allowlist.rs) — a list-parity test in
+# tests/sweep_sh_classify.rs asserts byte-for-byte equality.
 READ_MOSTLY = ["curl", "cat", "ls", "grep", "rg", "git", "echo", "sed", "awk",
-    "find", "wc", "head", "tail", "jq", "mkdir", "touch", "openspec", "just",
-    "export", "tmux", "env"]
-EXPLICIT_SAFE = ["cargo fmt", "cargo clippy", "cargo test", "cargo build",
-    "git commit", "git push", "curl http://127.0.0.1:"]
+    "find", "wc", "head", "tail", "jq", "mkdir", "touch", "export", "tmux",
+    "env"]
+EXPLICIT_SAFE = ["git commit", "git push", "curl http://127.0.0.1:"]
+DEV_UNIVERSAL = ["git status", "git log", "git diff", "git show", "git fetch",
+    "git commit", "git push", "git pull", "git merge", "git stash", "git add",
+    "git restore", "git rm", "find", "grep", "sed -n"]
+STACK_RUST = ["cargo build", "cargo test", "cargo clippy", "cargo fmt",
+    "cargo check", "cargo tree", "cargo deny", "cargo update"]
+STACK_NODE = ["npm install", "npm ci", "npm test", "npm run", "pnpm install",
+    "pnpm test", "pnpm run", "yarn install", "yarn test"]
+STACK_PYTHON = ["pytest", "pip install", "ruff", "black", "mypy", "flake8",
+    "uv pip", "uv sync"]
+STACK_GO = ["go build", "go test", "go vet", "go fmt", "gofmt", "go mod",
+    "golangci-lint"]
+STACKS = {"rust": STACK_RUST, "node": STACK_NODE, "python": STACK_PYTHON,
+    "go": STACK_GO}
+
+def read_allowlist_config(path):
+    # Resolved stacks / extra / safe_commands from .git-paw/config.toml.
+    # Fail-safe: any read or parse problem (missing file, malformed TOML,
+    # pre-3.11 Python without tomllib) composes built-ins only — fewer
+    # auto-approvals, never more.
+    try:
+        import tomllib
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+        sup = data.get("supervisor", {})
+        dev = sup.get("common_dev_allowlist", {})
+        stacks = [s for s in dev.get("stacks", []) if isinstance(s, str)]
+        extra = [s for s in dev.get("extra", []) if isinstance(s, str)]
+        aa = sup.get("auto_approve", {})
+        safe_cmds = [s for s in aa.get("safe_commands", []) if isinstance(s, str)]
+        return stacks, extra, safe_cmds
+    except Exception:
+        return [], [], []
+
+def compose_whitelist(stacks, extra, safe_cmds):
+    # Composition order mirrors AutoApproveConfig::effective_whitelist:
+    # built-ins, then universal + stack + extra dev patterns, then
+    # safe_commands, de-duplicated.
+    out = []
+    def push(p):
+        if p not in out:
+            out.append(p)
+    for p in EXPLICIT_SAFE + READ_MOSTLY:
+        push(p)
+    for p in DEV_UNIVERSAL:
+        push(p)
+    for name in stacks:
+        for p in STACKS.get(name, []):
+            push(p)
+    for p in extra:
+        push(p)
+    for p in safe_cmds:
+        push(p)
+    return out
+
+CFG_STACKS, CFG_EXTRA, CFG_SAFE = read_allowlist_config(config_toml)
+WHITELIST = compose_whitelist(CFG_STACKS, CFG_EXTRA, CFG_SAFE)
 
 def leading_verb(s):
     for tok in s.split():
@@ -1317,12 +1380,65 @@ def starts_with_boundary(s, entry):
     return nxt == "" or nxt.isspace()
 
 def is_safe_command(s):
-    return any(starts_with_boundary(s, e) for e in EXPLICIT_SAFE + READ_MOSTLY)
+    return any(starts_with_boundary(s, e) for e in WHITELIST)
 
 def is_worktree_git_op(s, root):
     if not (starts_with_boundary(s, "git add") or starts_with_boundary(s, "git commit")):
         return False
     return bool(root) and os.path.isdir(root)
+
+# --- worktree-confined dev-test shapes (rider rules) ----------------------
+# Mirrors is_worktree_dev_test_op in src/supervisor/auto_approve.rs: bash -n
+# on a worktree script, non-recursive chmod on worktree paths, mktemp, and
+# interpreter runs of worktree-resident scripts. Inline -c code strings,
+# shell metacharacters, and out-of-worktree paths never match (fail-closed).
+INTERPRETERS = ("bash", "sh", "python3", "python", "node")
+# chr(96) is the backtick — spelled numerically so the bash heredoc that
+# carries this Python body never sees a literal backtick (quote-tracking).
+METACHARS = (";", "|", "&", "$", chr(96), ">", "<")
+
+def inside_worktree(p, root):
+    rp = os.path.realpath(os.path.join(root, p))
+    rr = os.path.realpath(root)
+    return rp == rr or rp.startswith(rr + os.sep)
+
+def command_args(s):
+    # Tokens with leading VAR=value assignments skipped.
+    toks = s.split()
+    while toks:
+        head = toks[0]
+        if "=" in head:
+            k = head.split("=", 1)[0]
+            if k and all(c.isalnum() or c == "_" for c in k):
+                toks = toks[1:]
+                continue
+        break
+    return toks
+
+def is_worktree_dev_test(s, root):
+    s = s.strip()
+    if any(m in s for m in METACHARS):
+        return False
+    if not (root and os.path.isdir(root)):
+        return False
+    toks = command_args(s)
+    if not toks:
+        return False
+    verb = toks[0].rsplit("/", 1)[-1]
+    args = toks[1:]
+    if "-c" in args:
+        return False
+    if verb == "mktemp":
+        return all(t.startswith("-") for t in args)
+    if verb == "chmod":
+        if any(t.startswith("-") for t in args):
+            return False
+        paths = args[1:]
+        return bool(paths) and all(inside_worktree(p, root) for p in paths)
+    if verb in INTERPRETERS:
+        paths = [t for t in args if not t.startswith("-")]
+        return bool(paths) and all(inside_worktree(p, root) for p in paths)
+    return False
 
 # --- live-prompt gate -----------------------------------------------------
 def is_live(cap):
@@ -1362,6 +1478,8 @@ elif is_scratch_rm(s):
     print(f"approve option={opt} (scratch-rm)")
 elif is_worktree_git_op(s, worktree_root):
     print(f"approve option={opt} (worktree-git)")
+elif is_worktree_dev_test(s, worktree_root):
+    print(f"approve option={opt} (worktree-dev-test)")
 elif is_safe_command(s):
     print(f"approve option={opt} (whitelist)")
 else:

@@ -808,6 +808,7 @@ fn spawn_auto_approve_thread(
     session_name: String,
     broker_url: String,
     config: Option<config::AutoApproveConfig>,
+    dev_allowlist: config::CommonDevAllowlistConfig,
     pane_map: std::collections::HashMap<String, usize>,
     worktree_map: std::collections::HashMap<String, std::path::PathBuf>,
     recorder: git_paw::supervisor::manual_approvals::ManualDecisionRecorder,
@@ -901,6 +902,7 @@ fn spawn_auto_approve_thread(
                 state: None,
                 session: &session_name,
                 config: &cfg,
+                dev_allowlist: &dev_allowlist,
                 resolver: &resolver,
                 inspector: &inspector,
                 dispatcher: &mut dispatcher,
@@ -1549,7 +1551,7 @@ fn drive_unattended_loop(
 
     let options = DriveRunOptions {
         broker_url: broker_config.enabled.then(|| broker_config.url()),
-        whitelist: auto_approve.effective_whitelist(),
+        whitelist: auto_approve.effective_whitelist(&supervisor_cfg.common_dev_allowlist),
         approve_worktree_writes: auto_approve.approve_worktree_writes(),
         broker_log_hint: state
             .broker_log_path
@@ -3093,6 +3095,9 @@ fn cmd_dashboard() -> Result<(), PawError> {
                 sess.session_name.clone(),
                 broker_config.url(),
                 Some(auto_approve_cfg),
+                supervisor
+                    .map(|s| s.common_dev_allowlist.clone())
+                    .unwrap_or_default(),
                 pane_map,
                 worktree_map,
                 recorder,

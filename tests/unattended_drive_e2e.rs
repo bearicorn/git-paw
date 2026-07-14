@@ -507,9 +507,9 @@ fn unattended_approves_supervisor_pane_zero_safe_prompt() {
     let port = pick_broker_port();
     let url = format!("http://127.0.0.1:{port}");
 
-    // The SUPERVISOR pane shows a safe (`cargo test`) prompt; the coding agent
+    // The SUPERVISOR pane shows a safe (`ls -la`) prompt; the coding agent
     // just holds.
-    let safe = write_prompt_dummy(tr.path(), "dummy_sup.sh", "cargo test");
+    let safe = write_prompt_dummy(tr.path(), "dummy_sup.sh", "ls -la");
     write_config(tr.path(), port, &safe.to_string_lossy(), plain_dummy());
 
     let (mut child, stdout_path) = spawn_unattended(
