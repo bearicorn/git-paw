@@ -572,10 +572,10 @@ curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
     The verify-then-archive workflow depends on coding agents **standing by**
     after their final commit: once an agent has committed and published
     `agent.artifact { status: "committed" }` (or a manual `status: "done"`), it
-    is **you** — the supervisor, not the agent — who runs `/opsx:verify` and
-    `/opsx:archive`. That post-commit `agent.artifact` is your cue to begin the
-    five-gate sweep; an agent should never be expected or instructed to
-    self-verify or self-archive. This is the supervisor side of the agent's
+    is **you** — the supervisor, not the agent — who verifies and archives the
+    change per your project's spec workflow. That post-commit `agent.artifact`
+    is your cue to begin the five-gate sweep; an agent should never be expected
+    or instructed to self-verify or self-archive. This is the supervisor side of the agent's
     stand-by-after-commit protocol in `coordination.md` (its *Terminal action*
     section), which tells agents to publish the terminal signal and then wait
     for your `agent.verified` / `agent.feedback`.
@@ -769,8 +769,10 @@ of running the command — `git paw` does not substitute it at render time.
    `[regression] <test name>: was passing on main, fails now`.
 
 6. **Spec audit** — after tests pass and no regression, run the Spec Audit
-   Procedure below to verify the implementation matches the change's OpenSpec
-   specs. When `{{SPEC_VALIDATE_COMMAND}}` is configured (i.e. does not render
+   Procedure below to verify the implementation matches the change's specs,
+   located per the session's **Spec layout** doctrine (see *Spec layout for
+   this session* under the Spec Audit Procedure). When
+   `{{SPEC_VALIDATE_COMMAND}}` is configured (i.e. does not render
    as `(not configured)`), also run it as a tooling-aided pre-check;
    substitute `{{CHANGE_ID}}` in the rendered command with the change name
    being audited. Assess *what the change added* from the **merge-base** diff

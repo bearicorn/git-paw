@@ -69,25 +69,29 @@ fn coordination_instructs_standby_after_final_commit() {
 // Requirement: Coordination skill — stand-by after final commit /
 // Scenario: Stand-by protocol forbids self-verify and self-archive.
 #[test]
-fn standby_forbids_self_verify_and_archive_and_cross_references_role_gating() {
+fn standby_forbids_self_verify_and_archive_in_generic_terms() {
     let section = section_after(
         &coordination_skill(),
         "### Terminal action: commit then publish, never archive",
     );
     assert!(
-        section.contains("shall not run `/opsx:verify`")
-            || (section.contains("shall not")
-                && section.contains("/opsx:verify")
-                && section.contains("/opsx:archive")),
-        "stand-by guidance must state the agent SHALL NOT run /opsx:verify or /opsx:archive"
+        section.contains("shall not verify or archive"),
+        "stand-by guidance must state the agent SHALL NOT verify or archive the change"
     );
-    // Cross-references the supervisor-only / forbidden-commands guidance rather
-    // than re-deriving its own enforcement. (Must NOT reproduce the literal
-    // `Commands you must not run` heading, which lives inside the
-    // `opsx-role-gating` sentinel block stripped for non-OpenSpec backends.)
+    // The always-rendered Terminal-action prose stays engine-generic: the
+    // `/opsx:*` literals live ONLY inside the `opsx-role-gating` sentinel
+    // block below it, which is stripped for non-OpenSpec backends.
     assert!(
-        section.contains("supervisor-only") && section.contains("forbidden-commands rule"),
-        "stand-by guidance must cross-reference the supervisor-only forbidden-commands rule"
+        !section.contains("/opsx:"),
+        "un-gated Terminal-action prose must not name /opsx:* commands"
+    );
+    // Cross-references the supervisor-only guidance rather than re-deriving
+    // its own enforcement. (Must NOT reproduce the literal `Commands you must
+    // not run` heading, which lives inside the `opsx-role-gating` sentinel
+    // block stripped for non-OpenSpec backends.)
+    assert!(
+        section.contains("supervisor-only"),
+        "stand-by guidance must cross-reference the supervisor-only rule"
     );
 }
 
