@@ -53,8 +53,8 @@ use super::approval_gate::{approval_dedup_key, live_prompt_in_tail};
 use super::approve::{KeyDispatcher, TmuxKeyDispatcher, approval_keystrokes};
 use super::auto_approve::{
     detect_prompt_shape, extract_command_slice, extract_path_from_file_prompt, is_dangerous,
-    is_live_prompt, is_safe_command, is_scratch_rm, is_worktree_file_op, is_worktree_git_op,
-    select_option_index,
+    is_live_prompt, is_safe_command, is_scratch_rm, is_worktree_dev_test_op, is_worktree_file_op,
+    is_worktree_git_op, select_option_index,
 };
 use super::poll::{AgentStatusRow, fetch_status_over_http};
 
@@ -210,8 +210,9 @@ impl PromptVerdict {
 /// danger-first decision order the dashboard poll loop uses
 /// ([`crate::supervisor::poll`]): danger-list first (terminal escalate), then
 /// the scratch-`rm` exception, the worktree-confined `git add`/`git commit`
-/// pre-approval, the shell whitelist, and finally the worktree file-op
-/// boundary. Anything unmatched is [`PromptVerdict::Unknown`].
+/// pre-approval, the worktree-confined dev-test shapes, the shell whitelist,
+/// and finally the worktree file-op boundary. Anything unmatched is
+/// [`PromptVerdict::Unknown`].
 ///
 /// `worktree_root` is `None` for panes without a known worktree (the supervisor
 /// pane), which suppresses the worktree-scoped rules for that pane.
@@ -244,6 +245,17 @@ pub fn classify_prompt(
         return PromptVerdict::Safe {
             option_index,
             matched: "worktree-git".to_string(),
+        };
+    }
+    // Worktree-confined dev-test shapes (`bash -n`, non-recursive chmod,
+    // mktemp, interpreter-of-worktree-script). Suppressed for panes without a
+    // known worktree (the supervisor pane).
+    if let Some(root) = worktree_root
+        && is_worktree_dev_test_op(&slice, root)
+    {
+        return PromptVerdict::Safe {
+            option_index,
+            matched: "worktree-dev-test".to_string(),
         };
     }
     // Shell whitelist (read-mostly verbs + configured safe commands).
@@ -1291,6 +1303,32 @@ mod tests {
         let cap = "Bash command\n  frobnicate --all\nDo you want to proceed?\n(esc to cancel)";
         assert_eq!(
             classify_prompt(cap, &[], None, false),
+            PromptVerdict::Unknown
+        );
+    }
+
+    /// Rider scenario: a worktree-confined dev-test shape classifies safe for
+    /// an agent pane (known worktree root)…
+    #[test]
+    fn classifies_worktree_dev_test_shape_safe_for_agent_pane() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("scripts")).unwrap();
+        std::fs::write(tmp.path().join("scripts/helper.sh"), "echo hi\n").unwrap();
+        let cap = live_safe_capture("bash -n scripts/helper.sh");
+        match classify_prompt(&cap, &[], Some(tmp.path()), false) {
+            PromptVerdict::Safe { matched, .. } => assert_eq!(matched, "worktree-dev-test"),
+            other => panic!("expected Safe worktree-dev-test, got {other:?}"),
+        }
+    }
+
+    /// …and the supervisor pane, which has no worktree root, is unaffected:
+    /// the same capture stays Unknown (spec scenario "supervisor pane
+    /// unaffected").
+    #[test]
+    fn worktree_dev_test_shape_stays_unknown_without_worktree_root() {
+        let cap = live_safe_capture("bash -n scripts/helper.sh");
+        assert_eq!(
+            classify_prompt(&cap, &[], None, false),
             PromptVerdict::Unknown
         );
     }

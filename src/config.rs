@@ -791,10 +791,11 @@ impl ConflictConfig {
 /// they just want a sensible default for the project. The mapping is:
 ///
 /// - `Off` — auto-approval is disabled regardless of other fields.
-/// - `Conservative` — auto-approve `cargo`/`git commit` style commands but
-///   strip `git push` and `curl` from the effective whitelist.
-/// - `Safe` — the built-in default; auto-approve everything in
-///   [`default_safe_commands()`](crate::supervisor::auto_approve::default_safe_commands).
+/// - `Conservative` — auto-approve the composed whitelist but strip
+///   `git push` and `curl` entries AFTER composition, so the strip governs
+///   built-ins, stack patterns, and configured extras alike.
+/// - `Safe` — the built-in default; auto-approve the whole composed
+///   whitelist (see [`AutoApproveConfig::effective_whitelist`]).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ApprovalLevelPreset {
@@ -822,9 +823,11 @@ pub struct AutoApproveConfig {
     /// Master enable flag. When `false`, no detection or approval runs.
     #[serde(default = "AutoApproveConfig::default_enabled")]
     pub enabled: bool,
-    /// Project-specific safe-command prefixes appended to the built-in
-    /// defaults from
-    /// [`default_safe_commands()`](crate::supervisor::auto_approve::default_safe_commands).
+    /// Project-specific safe-command prefixes appended to the composed
+    /// whitelist defaults — the stack-neutral built-ins from
+    /// [`default_safe_commands()`](crate::supervisor::auto_approve::default_safe_commands)
+    /// plus the resolved `[supervisor.common_dev_allowlist]` patterns (see
+    /// [`Self::effective_whitelist`]).
     #[serde(default)]
     pub safe_commands: Vec<String>,
     /// Threshold (in seconds) of `last_seen` staleness before an agent in
@@ -911,18 +914,37 @@ impl AutoApproveConfig {
         self.approve_worktree_writes.unwrap_or(true)
     }
 
-    /// Returns the effective whitelist for this config, applying the preset
-    /// to the union of built-in defaults and user-configured `safe_commands`.
+    /// Returns the effective whitelist for this config, composed from three
+    /// sources in order, de-duplicated:
     ///
-    /// - `Off` and `Safe` both return defaults plus configured extras.
-    /// - `Conservative` returns the same union with `git push` and any
-    ///   `curl` entries filtered out.
+    /// 1. the **stack-neutral built-ins**
+    ///    ([`default_safe_commands()`](crate::supervisor::auto_approve::default_safe_commands));
+    /// 2. the **resolved dev-allowlist patterns** —
+    ///    [`effective_patterns`](crate::supervisor::dev_allowlist::effective_patterns)
+    ///    over `[supervisor.common_dev_allowlist]` `stacks` + `extra`, so a
+    ///    project's declared stack contributes its toolchain verbs (e.g. the
+    ///    `rust` stack contributes `cargo test`) from the same declaration
+    ///    that seeds the CLI allowlist;
+    /// 3. the **configured extension** `[supervisor.auto_approve]
+    ///    safe_commands`.
+    ///
+    /// The `Conservative` preset strip (`git push` and `curl` entries) is
+    /// applied AFTER composition so it governs the whole composed set.
+    /// `Off` and `Safe` return the composed union unchanged.
     #[must_use]
-    pub fn effective_whitelist(&self) -> Vec<String> {
+    pub fn effective_whitelist(&self, dev_allowlist: &CommonDevAllowlistConfig) -> Vec<String> {
         let mut out: Vec<String> = crate::supervisor::auto_approve::default_safe_commands()
             .iter()
             .map(|s| (*s).to_string())
             .collect();
+        for pat in crate::supervisor::dev_allowlist::effective_patterns(
+            &dev_allowlist.stacks,
+            &dev_allowlist.extra,
+        ) {
+            if !out.contains(&pat) {
+                out.push(pat);
+            }
+        }
         for extra in &self.safe_commands {
             if !out.iter().any(|e| e == extra) {
                 out.push(extra.clone());
@@ -1706,11 +1728,15 @@ worktree_placement = "child"
 # escalate_on_violation = true  # also publish agent.question to supervisor on ownership violations
 #
 # Auto-approve known-safe permission prompts in stalled agent panes so the
-# supervisor need not dismiss each by hand. `approval_level` is a coarse
-# preset ("off" | "conservative" | "safe"); `safe_commands` are extra prefixes
-# appended to the built-ins; `stall_threshold_seconds` is the last_seen lag
-# before a stalled pane is polled (minimum 5); `approve_worktree_writes`
-# auto-approves file writes whose target resolves inside the agent's worktree.
+# supervisor need not dismiss each by hand. The whitelist is composed from
+# stack-neutral built-ins plus the [supervisor.common_dev_allowlist] stacks /
+# extra patterns below (declare your toolchain there — e.g. stacks = ["rust"]
+# makes `cargo test` auto-approve). `approval_level` is a coarse preset
+# ("off" | "conservative" | "safe"); `safe_commands` are extra prefixes
+# appended to the composed whitelist; `stall_threshold_seconds` is the
+# last_seen lag before a stalled pane is polled (minimum 5);
+# `approve_worktree_writes` auto-approves file writes whose target resolves
+# inside the agent's worktree.
 # [supervisor.auto_approve]
 # enabled = true
 # safe_commands = ["just lint", "just test"]
@@ -3741,10 +3767,12 @@ enabled = true
             approval_level: ApprovalLevelPreset::Safe,
             ..AutoApproveConfig::default()
         };
-        let wl = cfg.effective_whitelist();
-        assert!(wl.iter().any(|c| c == "cargo test"));
+        let wl = cfg.effective_whitelist(&CommonDevAllowlistConfig::default());
+        assert!(wl.iter().any(|c| c == "git commit"));
         assert!(wl.iter().any(|c| c == "git push"));
         assert!(wl.iter().any(|c| c.starts_with("curl")));
+        // The universal dev-allowlist patterns are folded in.
+        assert!(wl.iter().any(|c| c == "git diff"));
     }
 
     #[test]
@@ -3753,8 +3781,8 @@ enabled = true
             approval_level: ApprovalLevelPreset::Conservative,
             ..AutoApproveConfig::default()
         };
-        let wl = cfg.effective_whitelist();
-        assert!(wl.iter().any(|c| c == "cargo test"));
+        let wl = cfg.effective_whitelist(&CommonDevAllowlistConfig::default());
+        assert!(wl.iter().any(|c| c == "git commit"));
         assert!(
             !wl.iter().any(|c| c.starts_with("git push")),
             "conservative drops git push"
@@ -3771,8 +3799,8 @@ enabled = true
             safe_commands: vec!["just lint".to_string(), "just test".to_string()],
             ..AutoApproveConfig::default()
         };
-        let wl = cfg.effective_whitelist();
-        assert!(wl.iter().any(|c| c == "cargo fmt"));
+        let wl = cfg.effective_whitelist(&CommonDevAllowlistConfig::default());
+        assert!(wl.iter().any(|c| c == "grep"));
         assert!(wl.iter().any(|c| c == "just lint"));
         assert!(wl.iter().any(|c| c == "just test"));
     }
@@ -3780,8 +3808,89 @@ enabled = true
     #[test]
     fn auto_approve_empty_extras_keep_defaults() {
         let cfg = AutoApproveConfig::default();
-        let wl = cfg.effective_whitelist();
-        assert!(wl.iter().any(|c| c == "cargo test"));
+        let wl = cfg.effective_whitelist(&CommonDevAllowlistConfig::default());
+        assert!(wl.iter().any(|c| c == "git commit"));
+        assert!(wl.iter().any(|c| c == "grep"));
+    }
+
+    /// Spec scenario "Default whitelist is stack-neutral": no stacks declared
+    /// and no `safe_commands` — the composed whitelist carries no toolchain
+    /// entries, but keeps the read-mostly verbs, `git commit`, and the
+    /// broker-localhost curl prefix.
+    #[test]
+    fn effective_whitelist_default_is_stack_neutral() {
+        let cfg = AutoApproveConfig::default();
+        let wl = cfg.effective_whitelist(&CommonDevAllowlistConfig::default());
+        for gone in ["cargo", "openspec", "just"] {
+            assert!(
+                !wl.iter()
+                    .any(|c| c == gone || c.starts_with(&format!("{gone} "))),
+                "stack-neutral default must not contain {gone} entries: {wl:?}"
+            );
+        }
+        for verb in crate::supervisor::auto_approve::READ_MOSTLY_VERBS {
+            assert!(wl.iter().any(|c| c == verb), "missing read-mostly {verb}");
+        }
+        assert!(wl.iter().any(|c| c == "git commit"));
+        assert!(wl.iter().any(|c| c == "curl http://127.0.0.1:"));
+    }
+
+    /// Spec scenario "Declared stack contributes its toolchain verbs": the
+    /// rust stack preset contributes `cargo test` to the composed whitelist.
+    #[test]
+    fn effective_whitelist_rust_stack_contributes_cargo() {
+        use crate::supervisor::auto_approve::is_safe_command;
+        let cfg = AutoApproveConfig::default();
+        let dev = CommonDevAllowlistConfig {
+            stacks: vec!["rust".to_string()],
+            ..CommonDevAllowlistConfig::default()
+        };
+        let wl = cfg.effective_whitelist(&dev);
+        assert!(is_safe_command("cargo test --workspace", &wl));
+        assert!(is_safe_command("cargo fmt --check", &wl));
+    }
+
+    /// Spec scenario "Undeclared stack's verbs stay unknown": a node-stack
+    /// project gets no cargo entries.
+    #[test]
+    fn effective_whitelist_node_stack_has_no_cargo() {
+        use crate::supervisor::auto_approve::is_safe_command;
+        let cfg = AutoApproveConfig::default();
+        let dev = CommonDevAllowlistConfig {
+            stacks: vec!["node".to_string()],
+            ..CommonDevAllowlistConfig::default()
+        };
+        let wl = cfg.effective_whitelist(&dev);
+        assert!(!is_safe_command("cargo test", &wl));
+        assert!(is_safe_command("npm test", &wl));
+    }
+
+    /// The `Conservative` strip applies AFTER composition, so it governs
+    /// stack-contributed and `safe_commands` entries as well as built-ins.
+    #[test]
+    fn effective_whitelist_conservative_strips_post_composition() {
+        let cfg = AutoApproveConfig {
+            approval_level: ApprovalLevelPreset::Conservative,
+            safe_commands: vec!["curl -X POST".to_string()],
+            ..AutoApproveConfig::default()
+        };
+        let dev = CommonDevAllowlistConfig {
+            stacks: vec!["rust".to_string()],
+            ..CommonDevAllowlistConfig::default()
+        };
+        let wl = cfg.effective_whitelist(&dev);
+        assert!(
+            !wl.iter().any(|c| c.starts_with("curl")),
+            "conservative must strip curl entries from every source: {wl:?}"
+        );
+        assert!(
+            !wl.iter().any(|c| c.starts_with("git push")),
+            "conservative must strip git push contributed by the dev preset"
+        );
+        assert!(
+            wl.iter().any(|c| c == "cargo test"),
+            "stack-contributed non-push/curl entries survive the strip"
+        );
     }
 
     /// Spec scenario `auto-approve-patterns/safe-command-classification`:
@@ -3806,20 +3915,22 @@ enabled = true
              safe_commands = [\"just smoke\"]\n",
         );
         let extras_config = load_config_file(&extras_path).unwrap().unwrap();
-        let extras_aa = extras_config.supervisor.unwrap().auto_approve.unwrap();
-        let extras_whitelist = extras_aa.effective_whitelist();
+        let extras_supervisor = extras_config.supervisor.unwrap();
+        let extras_aa = extras_supervisor.auto_approve.unwrap();
+        let extras_whitelist =
+            extras_aa.effective_whitelist(&extras_supervisor.common_dev_allowlist);
         assert!(
             is_safe_command("just smoke -v", &extras_whitelist),
             "TOML extra `just smoke` must accept `just smoke -v`"
         );
         // The defaults must still be present alongside the extra.
         assert!(
-            is_safe_command("cargo test", &extras_whitelist),
+            is_safe_command("grep -rn \"foo\" src/", &extras_whitelist),
             "extras must not displace built-in defaults"
         );
 
         // (2) Empty extras: the effective whitelist must still classify the
-        //     built-in defaults (e.g. `cargo test`) as safe.
+        //     composed defaults (e.g. `grep`) as safe.
         let empty_path = tmp.path().join("empty.toml");
         write_file(
             &empty_path,
@@ -3829,15 +3940,16 @@ enabled = true
              safe_commands = []\n",
         );
         let empty_config = load_config_file(&empty_path).unwrap().unwrap();
-        let empty_aa = empty_config.supervisor.unwrap().auto_approve.unwrap();
-        let empty_whitelist = empty_aa.effective_whitelist();
+        let empty_supervisor = empty_config.supervisor.unwrap();
+        let empty_aa = empty_supervisor.auto_approve.unwrap();
+        let empty_whitelist = empty_aa.effective_whitelist(&empty_supervisor.common_dev_allowlist);
         assert!(
-            is_safe_command("cargo test", &empty_whitelist),
+            is_safe_command("grep -rn \"foo\" src/", &empty_whitelist),
             "empty safe_commands must keep built-in defaults"
         );
         assert!(
-            is_safe_command("cargo fmt --check", &empty_whitelist),
-            "empty safe_commands must keep `cargo fmt` default"
+            is_safe_command("git commit -m hi", &empty_whitelist),
+            "empty safe_commands must keep `git commit` default"
         );
         // A command outside the defaults must still be rejected.
         assert!(

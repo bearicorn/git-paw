@@ -2,7 +2,6 @@
 
 ## Purpose
 Defines the `[supervisor.auto_approve]` config section that controls the supervisor's auto-approval behaviour: an enable flag, an extensible safe-command list appended to built-in defaults, a clamped stall threshold, and a coarse `approval_level` preset (`safe`/`conservative`/`off`). Existing configs without the section parse unchanged with sensible defaults.
-
 ## Requirements
 ### Requirement: `[supervisor.auto_approve]` config section
 
@@ -41,7 +40,7 @@ The `enabled` field SHALL gate the entire auto-approval feature.
 
 ### Requirement: Configurable safe-command list
 
-The `safe_commands` field SHALL be a list of strings that are appended to the built-in defaults.
+The `safe_commands` field SHALL be a list of strings that are appended to the composed whitelist defaults (the stack-neutral built-ins plus the resolved dev-allowlist patterns, per `safe-command-classification`).
 
 #### Scenario: Custom command added
 
@@ -52,8 +51,8 @@ The `safe_commands` field SHALL be a list of strings that are appended to the bu
 #### Scenario: Empty list keeps defaults
 
 - **GIVEN** `safe_commands = []`
-- **WHEN** classification runs against `cargo test`
-- **THEN** `is_safe_command(...)` SHALL still return `true`
+- **WHEN** classification runs against `grep -rn "foo" src/`
+- **THEN** `is_safe_command(...)` SHALL still return `true` (the composed defaults apply unchanged)
 
 ### Requirement: Configurable stall threshold
 

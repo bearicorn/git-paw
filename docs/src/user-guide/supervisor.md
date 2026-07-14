@@ -268,6 +268,11 @@ captured command line, the same way the universal patterns are. See
 [Configuration](../configuration/README.md) for the named-preset contents and
 the full schema.
 
+The same declaration also feeds the auto-approve classifier below: the
+resolved universal + stack + `extra` patterns are folded into the classifier's
+whitelist, so declaring `stacks = ["rust"]` is what makes a `cargo test`
+prompt auto-approve. One declaration drives both systems — they cannot drift.
+
 ### Run dev commands bare — no exit-code-probe wrappers
 
 The allowlist works because each grant is a bare command **prefix** that
@@ -320,12 +325,26 @@ is never mistaken for a prompt to run it.
    `starts_with` boundary check used for file edits), so an unattended agent can
    stage and commit its own work without stalling. `git push` is **not** covered
    — the danger-list escalates it.
-5. **Read-mostly verb allowlist.** Routine verbs auto-approve: `curl`, `cat`,
-   `ls`, `grep`, `rg`, `git`, `echo`, `sed`, `awk`, `find`, `wc`, `head`,
-   `tail`, `jq`, `mkdir`, `touch`, `openspec`, `just`, `export`, `tmux`, `env`
-   (plus your configured `safe_commands`). This is subordinate to the
+5. **Worktree-confined dev-test shapes.** `bash -n <script>`, non-recursive
+   `chmod <mode> <path…>`, `mktemp` / `mktemp -d`, and interpreter runs of a
+   worktree-resident script (`bash`, `sh`, `python3`, `python`, `node`
+   followed by a worktree file) classify safe when **every** referenced path
+   resolves inside the agent's worktree (same canonicalized, fail-closed
+   boundary check). Inline `-c` code strings, shell metacharacters, and
+   out-of-worktree paths never match; `chmod -R` stays on the danger-list.
+   These rules apply only to panes with a known worktree — the supervisor
+   pane is unaffected. Interpreter runs are one-time approvals only (see the
+   arbitrary-code policy below).
+6. **Composed command whitelist.** The whitelist is composed from the
+   stack-neutral read-mostly verbs (`curl`, `cat`, `ls`, `grep`, `rg`, `git`,
+   `echo`, `sed`, `awk`, `find`, `wc`, `head`, `tail`, `jq`, `mkdir`, `touch`,
+   `export`, `tmux`, `env`, plus `git commit` and the broker-localhost curl
+   prefix), the resolved `[supervisor.common_dev_allowlist]` patterns (your
+   declared stack presets and `extra`), and your configured `safe_commands`.
+   Toolchain verbs are **not** built in — a `cargo test` prompt auto-approves
+   only when the `rust` stack is declared. This is subordinate to the
    danger-list above.
-6. Anything else is **Unknown** and forwarded to you.
+7. Anything else is **Unknown** and forwarded to you.
 
 ### Re-confirm before send, and the pane 0 exclusion
 

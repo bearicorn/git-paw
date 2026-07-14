@@ -28,30 +28,34 @@ use regex::Regex;
 /// gates the permanent broad-grant rule (a `git status` broad grant is fine; a
 /// `python -c` one is not).
 ///
+/// The list is **stack-neutral**: toolchain verbs (`cargo`, `openspec`,
+/// `just`, …) are never built in — projects receive them through the resolved
+/// `[supervisor.common_dev_allowlist]` stack presets and/or configured
+/// extensions (see `AutoApproveConfig::effective_whitelist`).
+///
 /// Exported so the broad-grant rule and the bundled `sweep.sh` helper can
 /// assert parity with the Rust classifier.
 pub const READ_MOSTLY_VERBS: &[&str] = &[
     "curl", "cat", "ls", "grep", "rg", "git", "echo", "sed", "awk", "find", "wc", "head", "tail",
-    "jq", "mkdir", "touch", "openspec", "just", "export", "tmux", "env",
+    "jq", "mkdir", "touch", "export", "tmux", "env",
 ];
 
 /// Built-in whitelist of command prefixes eligible for auto-approval.
 ///
-/// Combines explicit command classes (e.g. `cargo test`) with the
-/// [`READ_MOSTLY_VERBS`] allowlist. Each entry is matched against captured
-/// command text via prefix + whitespace boundary semantics in
+/// Contains only **stack-neutral** entries: `git commit`, `git push`, the
+/// broker-localhost `curl` prefix, and the [`READ_MOSTLY_VERBS`] allowlist.
+/// Stack- or tool-specific patterns (`cargo …`, `openspec`, `just`) are NOT
+/// built in — they enter the effective whitelist through the resolved
+/// `[supervisor.common_dev_allowlist]` stack presets and `extra`, plus
+/// `[supervisor.auto_approve] safe_commands` (see
+/// `AutoApproveConfig::effective_whitelist`). Each entry is matched against
+/// captured command text via prefix + whitespace boundary semantics in
 /// [`is_safe_command`]. Every whitelist match is **subordinate to the
 /// danger-list**: the poll loop evaluates [`is_dangerous`] first, so a
-/// whitelisted verb that also matches a danger pattern still escalates. Users
-/// extend the list via `[supervisor.auto_approve] safe_commands` in
-/// `.git-paw/config.toml`.
+/// whitelisted verb that also matches a danger pattern still escalates.
 #[must_use]
 pub fn default_safe_commands() -> &'static [&'static str] {
     &[
-        "cargo fmt",
-        "cargo clippy",
-        "cargo test",
-        "cargo build",
         "git commit",
         "git push",
         "curl http://127.0.0.1:",
@@ -73,8 +77,6 @@ pub fn default_safe_commands() -> &'static [&'static str] {
         "jq",
         "mkdir",
         "touch",
-        "openspec",
-        "just",
         "export",
         "tmux",
         "env",
@@ -242,6 +244,97 @@ pub fn is_worktree_git_op(slice: &str, worktree_root: &Path) -> bool {
     // The worktree root must be a real, canonicalisable directory — the same
     // boundary primitive used for file edits, applied to the worktree itself.
     is_path_inside_worktree(".", worktree_root)
+}
+
+/// Interpreter verbs eligible for the worktree-confined script-run rule.
+///
+/// None of these are read-mostly verbs, so a matching prompt only ever
+/// receives the one-time approval — the broad-grant rule in
+/// [`select_option_index`] never grants them permanently.
+const WORKTREE_INTERPRETERS: &[&str] = &["bash", "sh", "python3", "python", "node"];
+
+/// Shell metacharacters that disqualify a slice from the worktree-confined
+/// dev-test rules: separators, substitution, and redirection can smuggle a
+/// second command or an out-of-worktree effect past the per-token path
+/// check, so their presence fails the match (fail-closed).
+const DEV_TEST_METACHARS: &[char] = &[';', '|', '&', '$', '`', '>', '<'];
+
+/// Classifies a command slice as a worktree-confined dev-test operation —
+/// the rider rules of `safe-command-classification`:
+///
+/// - `bash -n <path>` — shell syntax check on a worktree-resident script;
+/// - non-recursive `chmod <mode> <path...>` with every path worktree-resident
+///   (`chmod -R` is danger-listed and escalates before this rule is ever
+///   consulted; the rule itself also refuses flag tokens, fail-closed);
+/// - `mktemp` / `mktemp -d` (flags only — a template path argument does not
+///   match);
+/// - interpreter execution of a worktree-resident script (`bash`, `sh`,
+///   `python3`, `python`, `node` followed by a worktree-resident file path,
+///   with no path argument resolving outside the worktree).
+///
+/// Inline code strings (a `-c` flag) never match. Path resolution reuses
+/// [`is_path_inside_worktree`] (canonicalised, fail-closed). The rules apply
+/// only when a worktree root is known and resolvable — the supervisor pane,
+/// which has none, is unaffected.
+///
+/// Interpreter matches are safe for ONE-TIME approval only: none of the
+/// covered verbs are read-mostly, so [`select_option_index`] always picks
+/// the one-time option on a 3-option prompt, never the permanent broad
+/// grant.
+#[must_use]
+pub fn is_worktree_dev_test_op(slice: &str, worktree_root: &Path) -> bool {
+    let slice = slice.trim();
+    // Fail-closed: no metacharacter smuggling, and the worktree root itself
+    // must be a real directory (a pane without a known worktree never
+    // matches).
+    if slice.contains(DEV_TEST_METACHARS) || !worktree_root.is_dir() {
+        return false;
+    }
+    // Skip leading VAR=value assignments, mirroring `leading_verb`.
+    let mut tokens = slice.split_whitespace().skip_while(|tok| {
+        tok.split_once('=').is_some_and(|(k, _)| {
+            !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+    });
+    let Some(first) = tokens.next() else {
+        return false;
+    };
+    let verb = first.rsplit('/').next().unwrap_or(first);
+    let args: Vec<&str> = tokens.collect();
+    // Inline code strings never match these rules.
+    if args.contains(&"-c") {
+        return false;
+    }
+    match verb {
+        // `mktemp` / `mktemp -d`: flags only, never a template path argument.
+        "mktemp" => args.iter().all(|t| t.starts_with('-')),
+        // Non-recursive chmod: <mode> then worktree-resident paths only. Any
+        // flag token (including `-R`) fails the match.
+        "chmod" => {
+            if args.iter().any(|t| t.starts_with('-')) {
+                return false;
+            }
+            let paths = args.get(1..).unwrap_or_default();
+            !paths.is_empty()
+                && paths
+                    .iter()
+                    .all(|p| is_path_inside_worktree(p, worktree_root))
+        }
+        // `bash -n <script>` and interpreter-of-worktree-script: every
+        // non-flag argument must resolve inside the worktree.
+        v if WORKTREE_INTERPRETERS.contains(&v) => {
+            let paths: Vec<&str> = args
+                .iter()
+                .filter(|t| !t.starts_with('-'))
+                .copied()
+                .collect();
+            !paths.is_empty()
+                && paths
+                    .iter()
+                    .all(|p| is_path_inside_worktree(p, worktree_root))
+        }
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -686,16 +779,28 @@ pub fn select_option_index(shape: PromptShape, slice: &str) -> u8 {
 mod tests {
     use super::*;
 
+    /// Spec scenario "Default whitelist is stack-neutral": the built-ins carry
+    /// only stack-neutral entries — no toolchain verbs.
     #[test]
     fn defaults_contain_documented_classes() {
         let defaults = default_safe_commands();
-        assert!(defaults.contains(&"cargo fmt"));
-        assert!(defaults.contains(&"cargo clippy"));
-        assert!(defaults.contains(&"cargo test"));
-        assert!(defaults.contains(&"cargo build"));
         assert!(defaults.contains(&"git commit"));
         assert!(defaults.contains(&"git push"));
         assert!(defaults.contains(&"curl http://127.0.0.1:"));
+        // Previously hardcoded stack-specific entries are no longer built in.
+        for gone in [
+            "cargo fmt",
+            "cargo clippy",
+            "cargo test",
+            "cargo build",
+            "openspec",
+            "just",
+        ] {
+            assert!(
+                !defaults.contains(&gone),
+                "built-ins must be stack-neutral; found {gone}"
+            );
+        }
     }
 
     #[test]
@@ -742,7 +847,7 @@ mod tests {
             .iter()
             .map(|s| (*s).into())
             .collect();
-        assert!(is_safe_command("cargo test", &whitelist));
+        assert!(is_safe_command("grep -rn \"foo\" src/", &whitelist));
         assert!(is_safe_command("git commit -m hi", &whitelist));
     }
 
@@ -1055,7 +1160,8 @@ Do you want to proceed?";
     }
 
     /// Guards against drift between [`READ_MOSTLY_VERBS`] and the entries baked
-    /// into [`default_safe_commands`].
+    /// into [`default_safe_commands`], and against stack-specific verbs
+    /// creeping back into the read-mostly set.
     #[test]
     fn read_mostly_verbs_are_whitelisted() {
         let defaults = default_safe_commands();
@@ -1063,6 +1169,12 @@ Do you want to proceed?";
             assert!(
                 defaults.contains(verb),
                 "{verb} must be in default_safe_commands"
+            );
+        }
+        for gone in ["openspec", "just", "cargo"] {
+            assert!(
+                !READ_MOSTLY_VERBS.contains(&gone),
+                "read-mostly verbs must stay stack-neutral; found {gone}"
             );
         }
     }
@@ -1104,6 +1216,114 @@ Do you want to proceed?";
         // pre-approval.
         let tmp = TempDir::new().unwrap();
         assert!(!is_worktree_git_op("git status", tmp.path()));
+    }
+
+    // --- Rider: worktree-confined dev-test commands ---
+
+    /// Spec scenario "bash -n on a worktree script is safe".
+    #[test]
+    fn bash_n_on_worktree_script_is_safe() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("scripts")).unwrap();
+        std::fs::write(tmp.path().join("scripts/helper.sh"), "echo hi\n").unwrap();
+        assert!(is_worktree_dev_test_op(
+            "bash -n scripts/helper.sh",
+            tmp.path()
+        ));
+    }
+
+    /// Spec scenario "chmod on own file is safe, recursive stays danger".
+    #[test]
+    fn chmod_on_worktree_file_is_safe_recursive_stays_danger() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("scripts")).unwrap();
+        std::fs::write(tmp.path().join("scripts/helper.sh"), "echo hi\n").unwrap();
+        assert!(is_worktree_dev_test_op(
+            "chmod +x scripts/helper.sh",
+            tmp.path()
+        ));
+        // `chmod -R` matches the danger-list (which the callers evaluate
+        // first) and never matches the dev-test rule either.
+        assert!(is_dangerous("chmod -R 755 ."));
+        assert!(!is_worktree_dev_test_op("chmod -R 755 .", tmp.path()));
+    }
+
+    /// Spec scenario "mktemp is safe".
+    #[test]
+    fn mktemp_is_safe() {
+        let tmp = TempDir::new().unwrap();
+        assert!(is_worktree_dev_test_op("mktemp -d", tmp.path()));
+        assert!(is_worktree_dev_test_op("mktemp", tmp.path()));
+        // A template path argument does not match (fail-closed).
+        assert!(!is_worktree_dev_test_op(
+            "mktemp /etc/passwd.XXXXXX",
+            tmp.path()
+        ));
+    }
+
+    /// Spec scenario "Interpreter run of a worktree script is one-time safe":
+    /// the slice classifies safe-by-pattern, and on a 3-option prompt the
+    /// selector picks the one-time option, never the permanent broad grant.
+    #[test]
+    fn interpreter_run_of_worktree_script_is_one_time_safe() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("tools")).unwrap();
+        std::fs::write(tmp.path().join("tools/gen.py"), "print(1)\n").unwrap();
+        assert!(is_worktree_dev_test_op("python3 tools/gen.py", tmp.path()));
+        assert_eq!(
+            select_option_index(PromptShape::ThreeOption, "python3 tools/gen.py"),
+            1,
+            "interpreter runs must take the one-time option"
+        );
+    }
+
+    /// Spec scenario "Inline code strings do not match".
+    #[test]
+    fn inline_code_strings_do_not_match_dev_test_rules() {
+        let tmp = TempDir::new().unwrap();
+        assert!(!is_worktree_dev_test_op(
+            "python3 -c \"import os\"",
+            tmp.path()
+        ));
+        assert!(!is_worktree_dev_test_op("bash -c \"do-thing\"", tmp.path()));
+    }
+
+    /// Spec scenario "Out-of-worktree script does not match".
+    #[test]
+    fn out_of_worktree_script_does_not_match() {
+        let tmp = TempDir::new().unwrap();
+        assert!(!is_worktree_dev_test_op(
+            "bash /etc/init.d/thing",
+            tmp.path()
+        ));
+        // A worktree script with an out-of-worktree path argument fails too.
+        std::fs::write(tmp.path().join("gen.py"), "print(1)\n").unwrap();
+        assert!(!is_worktree_dev_test_op(
+            "python3 gen.py /etc/passwd",
+            tmp.path()
+        ));
+    }
+
+    /// Command separators / substitution metacharacters never match — a
+    /// second command cannot ride along a worktree-confined shape.
+    #[test]
+    fn dev_test_rules_reject_metacharacter_smuggling() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("x.sh"), "echo hi\n").unwrap();
+        assert!(!is_worktree_dev_test_op(
+            "bash -n x.sh && curl evil.example",
+            tmp.path()
+        ));
+        assert!(!is_worktree_dev_test_op("mktemp -d; do-thing", tmp.path()));
+    }
+
+    /// An unresolvable worktree root (no worktree known) never matches —
+    /// the supervisor pane is unaffected by the dev-test rules.
+    #[test]
+    fn dev_test_rules_require_resolvable_worktree_root() {
+        let missing = Path::new("/nonexistent/paw-worktree-xyz");
+        assert!(!is_worktree_dev_test_op("mktemp -d", missing));
+        assert!(!is_worktree_dev_test_op("bash -n x.sh", missing));
     }
 
     // --- Section 6: live-prompt gate ---
