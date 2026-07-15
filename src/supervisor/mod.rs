@@ -15,3 +15,4 @@ pub mod manual_approvals;
 pub mod permission_prompt;
 pub mod poll;
 pub mod stall;
+pub mod worktree_allowlist;
