@@ -1420,8 +1420,8 @@ background poll thread alongside this supervisor session. The thread:
 4. If the captured command matches the safe-command whitelist (broker
     curls on `127.0.0.1:<port>` plus the bundled `DEV_ALLOWLIST_PRESET`
     — <!-- allowlist-prose -->{{DEV_ALLOWLIST_PRESET}}<!-- /allowlist-prose --> —
-    extended by any `safe_commands` from config), dispatches `BTab Down Enter`
-    via three separate `tmux send-keys` calls.
+    extended by any `safe_commands` from config), dispatches the resolved
+    option digit + `Enter` via separate `tmux send-keys` calls.
 5. Otherwise, publishes an `agent.question` to your inbox so you can decide.
 
 Every auto-approval is logged as an `agent.status` message tagged `auto_approved` so

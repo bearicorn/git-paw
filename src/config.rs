@@ -812,7 +812,7 @@ pub enum ApprovalLevelPreset {
 ///
 /// Auto-approval detects permission prompts in stalled agent panes via
 /// `tmux capture-pane`, classifies the pending command, and dispatches the
-/// `BTab Down Enter` keystroke sequence when the command matches the
+/// resolved option digit + `Enter` keystrokes when the command matches the
 /// whitelist.
 ///
 /// Embedded as `Option<AutoApproveConfig>` on [`SupervisorConfig`] so

@@ -668,27 +668,73 @@ pub fn is_scratch_rm(slice: &str) -> bool {
 // Live-prompt gate (Section 6)
 // ---------------------------------------------------------------------------
 
-/// Footer marker that indicates an active, foreground permission prompt.
-const LIVE_PROMPT_MARKER: &str = "esc to cancel";
+/// Footer marker of an active, foreground permission prompt (`Esc to cancel`).
+///
+/// Exported so the bundled `sweep.sh` helper's mirror
+/// (`LIVE_PROMPT_MARKERS_REGEX`) can be asserted against the Rust gate.
+pub const LIVE_PROMPT_FOOTER: &str = "esc to cancel";
 
-/// Number of trailing non-blank lines scanned for the live-prompt footer.
-const LIVE_PROMPT_WINDOW: usize = 4;
+/// Confirmation-question marker of a permission prompt. The shared prefix
+/// covers every documented wording (`Do you want to proceed?`, `Do you want
+/// to allow this write to …?`, `Do you want to make this edit to …?`).
+pub const LIVE_PROMPT_PROCEED: &str = "do you want to";
 
-/// Returns `true` when the capture shows a LIVE prompt: the footer marker
-/// `Esc to cancel` appears within the last ~4 non-blank lines.
+/// Trailing non-blank lines that must ANCHOR the prompt: a textual marker or
+/// a numbered option line must sit within this window for the capture to be
+/// live. Output printed after an answered prompt evicts it from the anchor,
+/// so a prompt scrolled into history never counts.
+pub const LIVE_PROMPT_TAIL: usize = 4;
+
+/// Widest window of trailing non-blank lines inspected for the prompt's
+/// textual markers — wide enough to span a full multi-option prompt block
+/// (`Do you want to proceed?` + numbered options, possibly wrapped, + the
+/// footer), so a prompt offering a "don't ask again" option is detected
+/// rather than missed by a narrow tail.
+pub const LIVE_PROMPT_BLOCK: usize = 15;
+
+/// Shared structural live-prompt check: `true` when a textual marker sits in
+/// the last [`LIVE_PROMPT_TAIL`] non-blank lines, OR a numbered option line
+/// anchors that tail while a textual marker sits within the last
+/// [`LIVE_PROMPT_BLOCK`] non-blank lines (a multi-option prompt bottoms out
+/// in its option list, with the question above it).
+///
+/// Textual markers are matched case-insensitively as substrings. This is the
+/// one structural algorithm behind [`is_live_prompt`] and the
+/// `broker-mediated-approvals` re-confirm
+/// ([`crate::supervisor::approval_gate::live_prompt_in_tail`]), so detection
+/// and send-time re-confirm agree on what "live" means.
+#[must_use]
+pub fn live_prompt_markers_at_tail(capture: &str, textual_markers: &[&str]) -> bool {
+    let nonblank: Vec<&str> = capture.lines().filter(|l| !l.trim().is_empty()).collect();
+    let has_textual = |lines: &[&str]| {
+        lines.iter().any(|line| {
+            let lower = line.to_ascii_lowercase();
+            textual_markers
+                .iter()
+                .any(|m| lower.contains(&m.to_ascii_lowercase()))
+        })
+    };
+    let tail = &nonblank[nonblank.len().saturating_sub(LIVE_PROMPT_TAIL)..];
+    if has_textual(tail) {
+        return true;
+    }
+    let block = &nonblank[nonblank.len().saturating_sub(LIVE_PROMPT_BLOCK)..];
+    tail.iter().any(|l| is_option_line(strip_decoration(l))) && has_textual(block)
+}
+
+/// Returns `true` when the capture shows a LIVE prompt: its structural
+/// markers — the numbered option glyphs and/or the `Do you want to …`
+/// question, together with the `Esc to cancel` footer — are present at the
+/// capture's tail, over a window wide enough to span a full multi-option
+/// prompt block (see [`live_prompt_markers_at_tail`]).
 ///
 /// This is the precondition for any keystroke dispatch — a supervisor merely
 /// narrating about a pane, or an earlier prompt that has scrolled away, will
-/// not have the footer in the live window and so cannot trip a phantom
+/// not have the markers in the live window and so cannot trip a phantom
 /// approval.
 #[must_use]
 pub fn is_live_prompt(capture: &str) -> bool {
-    capture
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .rev()
-        .take(LIVE_PROMPT_WINDOW)
-        .any(|l| l.to_ascii_lowercase().contains(LIVE_PROMPT_MARKER))
+    live_prompt_markers_at_tail(capture, &[LIVE_PROMPT_FOOTER, LIVE_PROMPT_PROCEED])
 }
 
 // ---------------------------------------------------------------------------
@@ -1367,6 +1413,58 @@ output line 5";
         assert!(
             !is_live_prompt(capture),
             "footer scrolled past the last 4 non-blank lines is not live"
+        );
+    }
+
+    /// Spec scenario "Live multi-option prompt is detected": the proceed
+    /// question sits above a 3-option list (with a "don't ask again" option)
+    /// whose last line carries only an inline `(esc)` — no separate footer.
+    /// The option glyphs anchor the tail; the question is within the block.
+    #[test]
+    fn live_prompt_multi_option_block_is_detected() {
+        let capture = "\
+╭──────────────────────────────────────────────────────────────╮
+│ Bash command                                                 │
+│   cargo test --workspace                                     │
+│   Run the full test suite                                    │
+│ Do you want to proceed?                                      │
+│ ❯ 1. Yes                                                     │
+│   2. Yes, and don't ask again for cargo test in this project │
+│   3. No, and tell Claude what to do differently (esc)        │
+╰──────────────────────────────────────────────────────────────╯";
+        assert!(
+            is_live_prompt(capture),
+            "a multi-option prompt block must be detected as live"
+        );
+    }
+
+    /// Spec scenario "Live multi-option prompt is detected" (footer variant):
+    /// the same block with an explicit `Esc to cancel` footer line, the
+    /// proceed question more than 4 non-blank lines above the bottom.
+    #[test]
+    fn live_prompt_multi_option_with_footer_is_detected() {
+        let capture = "\
+Do you want to proceed?
+❯ 1. Yes
+  2. Yes, and don't ask again for: git status
+  3. No
+  Esc to cancel";
+        assert!(is_live_prompt(capture));
+    }
+
+    /// A numbered list at the tail of plain narration (no proceed question or
+    /// footer anywhere in the block window) is NOT a live prompt — option
+    /// glyphs alone cannot bridge to liveness.
+    #[test]
+    fn numbered_list_without_prompt_markers_is_not_live() {
+        let capture = "\
+Here is my plan:
+1. run the tests
+2. commit the work
+3. stand by for verification";
+        assert!(
+            !is_live_prompt(capture),
+            "a prose numbered list must not be detected as live"
         );
     }
 

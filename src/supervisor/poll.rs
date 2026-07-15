@@ -330,10 +330,12 @@ where
         // header is present.
         let slice = extract_command_slice(&captured).unwrap_or_else(|| captured.clone());
 
-        // Live-prompt gate: act only when the footer marker `Esc to cancel`
-        // is within the last ~4 non-blank lines. A non-live capture (mere
-        // narration, or a prompt scrolled away) is never acted on — no
-        // keystrokes and no forward — so it cannot trip a phantom approval.
+        // Live-prompt gate: act only when the prompt's structural markers
+        // (option glyphs / `Do you want to …` / `Esc to cancel`) are at the
+        // capture's tail, over a window wide enough for a full multi-option
+        // prompt block. A non-live capture (mere narration, or a prompt
+        // scrolled away) is never acted on — no keystrokes and no forward —
+        // so it cannot trip a phantom approval.
         if !is_live_prompt(&captured) {
             out.push((agent_id, TickOutcome::NoPrompt));
             continue;
@@ -663,7 +665,7 @@ mod tests {
             }
             _ => panic!("expected Approved, got {outcome:?}"),
         }
-        // BTab + Down + Enter dispatched in order.
+        // Resolved option digit + Enter dispatched in order.
         let keys: Vec<&str> = dispatcher
             .events
             .iter()

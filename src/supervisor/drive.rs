@@ -17,9 +17,11 @@
 //! The v0.6.0 dogfood proved a handful of operator-loop rules are load-bearing;
 //! they are encoded as normative behaviour so they survive in-tool:
 //!
-//! - **Act only on a LIVE prompt** — a recognized footer within the last ~4
-//!   non-blank lines ([`crate::supervisor::auto_approve::is_live_prompt`]);
-//!   prompt-like text scrolled into history is ignored (D4).
+//! - **Act only on a LIVE prompt** — the prompt's structural markers (option
+//!   glyphs / `Do you want to …` / `Esc to cancel`) at the capture's tail,
+//!   over a window spanning a full multi-option prompt block
+//!   ([`crate::supervisor::auto_approve::is_live_prompt`]); prompt-like text
+//!   scrolled into history is ignored (D4).
 //! - **Explicit per-pane capture** — one `tmux capture-pane` per pane, never a
 //!   `for p in …` shell loop (D3).
 //! - **Pane→agent resolution via `pane_current_path`** — never pane index or
@@ -1127,6 +1129,33 @@ mod tests {
         }
     }
 
+    /// Returns scripted captures in call order — one per `capture` call, the
+    /// last repeating once exhausted — so a test can model a prompt that
+    /// clears between the sweep capture and the send-time re-confirm capture.
+    struct SequencedCapturer {
+        captures: Vec<String>,
+        idx: Cell<usize>,
+    }
+    impl SequencedCapturer {
+        fn new(captures: &[&str]) -> Self {
+            Self {
+                captures: captures.iter().map(|c| (*c).to_string()).collect(),
+                idx: Cell::new(0),
+            }
+        }
+    }
+    impl PaneCapture for SequencedCapturer {
+        fn capture(&self, _session: &str, _pane_index: usize) -> String {
+            let i = self.idx.get();
+            self.idx.set(i + 1);
+            self.captures
+                .get(i)
+                .or_else(|| self.captures.last())
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
     #[derive(Default)]
     struct RecordingDispatcher {
         events: Vec<(usize, String)>,
@@ -1876,6 +1905,58 @@ mod tests {
         assert!(
             dispatcher.events.is_empty(),
             "a scrollback prompt must not trigger keystrokes"
+        );
+    }
+
+    /// Spec scenario "Prompt cleared before send sends nothing"
+    /// (`approve-send-gate-hardening`): the sweep capture shows a live safe
+    /// prompt, but the FRESH re-confirm capture taken immediately before
+    /// sending shows it cleared — zero keystrokes are dispatched, so no
+    /// approval digit lands as stray chat input.
+    #[test]
+    fn prompt_cleared_between_decision_and_send_sends_nothing() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+        }];
+        let enumerator = FakeEnumerator {
+            panes: vec![PaneInfo {
+                pane_index: 2,
+                pane_current_path: "/repo-feat-a".to_string(),
+            }],
+        };
+        let live = "Bash command\n  cargo test --workspace\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n(esc to cancel)";
+        let cleared = "$ cargo test --workspace\nrunning 5 tests\nall passed\n$ ";
+        let capturer = SequencedCapturer::new(&[live, cleared]);
+        let mut dispatcher = RecordingDispatcher::default();
+        let status = ScriptedStatus::new(vec![vec![row("supervisor", "done")]]);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            clock: &clock,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+        };
+        let config = DriveConfig {
+            whitelist: vec!["cargo test".to_string()],
+            poll_interval: Duration::from_secs(1),
+            heartbeat: Duration::from_hours(1),
+            ..DriveConfig::default()
+        };
+        drive_loop("paw-test", &agents, &mut deps, &config);
+        assert!(
+            dispatcher.events.is_empty(),
+            "a prompt that cleared between decision and send must dispatch zero keystrokes"
+        );
+        assert_eq!(
+            alerts.approvals.len(),
+            1,
+            "the safe decision was made (and audit-logged) before the prompt cleared"
         );
     }
 }

@@ -32,8 +32,11 @@ Each poll (~15 seconds) the loop:
   coding-agent pane. It enumerates panes and resolves each to its agent by
   `pane_current_path` (never by pane index, which drifts), capturing each pane
   with its own `capture-pane` call.
-- **Acts only on a live prompt** — a recognized permission-prompt footer within
-  the last few non-blank lines of the capture. Prompt-like text scrolled up in
+- **Acts only on a live prompt** — the prompt's structural markers (numbered
+  option glyphs and/or the `Do you want to …` question, with the
+  `Esc to cancel` footer) at the tail of the capture, over a window wide
+  enough to span a full multi-option prompt block — so a prompt offering a
+  "don't ask again" option is detected too. Prompt-like text scrolled up in
   history is ignored.
 - **Auto-approves classifier-safe prompts** using the same
   [auto-approve classification](#auto-approve-classification) the attended
@@ -299,11 +302,16 @@ is never mistaken for a prompt to run it.
 
 ### Decision order
 
-1. **Live-prompt gate.** The classifier acts only when the footer marker
-   `Esc to cancel` appears within the last ~4 non-blank lines of the capture.
-   A prompt that has scrolled away, or pane text that is just narration, is
-   treated as *not live* — no keystrokes are sent. This kills phantom
-   approvals.
+1. **Live-prompt gate.** The classifier acts only when the prompt's
+   structural markers are at the tail of the capture: a textual marker (the
+   `Do you want to …` question or the `Esc to cancel` footer) within the last
+   ~4 non-blank lines, or a numbered option line anchoring that tail with a
+   textual marker within the last ~15 non-blank lines. The wider block window
+   means **multi-option prompts** — `Do you want to proceed?` above a
+   numbered list with a "don't ask again" option — are detected and
+   auto-clearable rather than missed. A prompt that has scrolled away, or
+   pane text that is just narration, is treated as *not live* — no keystrokes
+   are sent. This kills phantom approvals.
 2. **Danger-list (escalate wins).** A curated danger-list is evaluated
    **first** and overrides any allowlist match. It covers `rm -rf` / `rm -fr`,
    `git push`, `--force` / `force-push`, `reset --hard`, `git rebase`,
@@ -350,12 +358,14 @@ is never mistaken for a prompt to run it.
 
 The live-prompt gate above runs at *detection*. A second, independent check
 runs at *send* time: immediately before dispatching the approval keystrokes,
-the approver re-captures the target pane and confirms a permission-prompt
-marker is still present in the last ~4 non-blank lines. If the prompt cleared
-between the decision and the send — the agent moved on, or you answered it
-first — **no keystrokes are sent**. This closes the stray-input race where the
-option digit would otherwise land in the CLI's chat box as literal text,
-polluting context and leaving dangling unsubmitted commands.
+the approver takes a **fresh capture** of the target pane and confirms the
+prompt's live structural markers are still at the tail (the same
+multi-option-wide window as detection, not a fixed ~4-line scan). If the
+prompt cleared between the decision and the send — the agent moved on, or you
+answered it first — **no keystrokes are sent**, and `sweep.sh approve`
+reports `cleared before send, no keys sent`. This closes the stray-input race
+where the option digit would otherwise land in the CLI's chat box as literal
+text, polluting context and leaving dangling unsubmitted commands.
 
 The blind send-keys path also never targets **pane 0** (the supervisor's own
 pane): `sweep.sh approve 0` sends nothing and reports that pane 0 is excluded,
@@ -379,6 +389,15 @@ an arbitrary-code runner. Arbitrary-code runners — `python`, `bash -c`,
 `sh -c`, `eval`, `node`, or any bare ` -c ` code-string flag — take the
 one-time `Yes` only and **never** receive a permanent grant: a standing grant
 on `python -c` is effectively a standing grant on anything.
+
+`sweep.sh approve <pane>` follows the same option-index selection: it parses
+the prompt from the fresh pre-send capture and dispatches the **resolved
+option digit** followed by `Enter` (two separate keystrokes), reporting
+`approved pane <N> (option <digit>)`. It never dispatches a blind
+cursor-movement sequence — `Down` + `Enter` lands on `No` on a 2-option
+prompt and takes the permanent broad grant on a 3-option one, so the helper
+resolves the digit through the same shape and broad-grant rules as the
+in-tool auto-approver.
 
 ## Manual approvals
 
