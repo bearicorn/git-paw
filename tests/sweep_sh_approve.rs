@@ -159,7 +159,7 @@ fn approve_sends_keys_on_live_prompt() {
         "live prompt must be approved, got: {out}"
     );
     assert!(
-        !out.contains("prompt cleared"),
+        !out.contains("cleared before send"),
         "live prompt must not report cleared, got: {out}"
     );
 
@@ -190,8 +190,8 @@ fn approve_sends_nothing_when_prompt_cleared() {
 
     let out = run_approve(repo.path(), &sweep, "2");
     assert!(
-        out.contains("prompt cleared, no keys sent"),
-        "cleared prompt must report no keys sent, got: {out}"
+        out.contains("cleared before send, no keys sent"),
+        "cleared prompt must report cleared before send, got: {out}"
     );
     assert!(
         !out.contains("approved pane"),

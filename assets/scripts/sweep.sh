@@ -15,8 +15,9 @@
 # Subcommands implemented (per supervisor-bugfixes-v0-5-x §3.2):
 #   snapshot                            — capture-pane tail of every coding pane
 #   capture <pane>                      — single-pane full tail-50 capture
-#   approve <pane>                      — re-confirm live prompt in tail, then
-#                                         Down + Enter (sticky-yes); refuses pane 0
+#   approve <pane>                      — re-confirm live prompt on a fresh capture,
+#                                         then send the resolved option digit + Enter
+#                                         (option-index selection); refuses pane 0
 #   status [--all]                      — broker /status, phantoms filtered by default
 #   worktrees-status                    — uncommitted-file count per agent worktree
 #   inbox                               — agent.question/feedback/blocked from supervisor inbox
@@ -302,6 +303,15 @@ STUCK_DEDUP_WINDOW_SECONDS=300
 STUCK_MARKERS_REGEX='Do you want to proceed|Do you want to allow|requires approval|Allow this command|\(y/n\)|\[y/N\]'
 STUCK_DEDUP_FILE="${PAW_DIR}/.sweep-stuck-dedup"
 
+# Live-prompt structural markers (approve-send gate). Textual markers of a
+# LIVE permission prompt, matched case-insensitively; numbered option lines
+# (`1.` / `2)`) anchor a multi-option prompt whose question sits above the
+# 4-line tail (block window: last 15 non-blank lines). Kept in lockstep with
+# the Rust gate in src/supervisor/auto_approve.rs (LIVE_PROMPT_FOOTER /
+# LIVE_PROMPT_PROCEED / LIVE_PROMPT_TAIL / LIVE_PROMPT_BLOCK) so `approve`
+# and `classify` agree with the in-tool auto-approver on what "live" means.
+LIVE_PROMPT_MARKERS_REGEX='do you want to|esc to cancel'
+
 # --- Additional stuck shapes: stream-timeout, context-bloat, no-progress -----
 # A coding agent's CLI API call can fail mid-stream (transport error / timeout)
 # and sit dead with no permission marker present; and its context can bloat past
@@ -360,7 +370,8 @@ usage: $0 <subcommand> [args]
 
   snapshot                            capture-pane tail of every coding-agent pane
   capture <pane>                      single-pane full tail-50 capture
-  approve <pane>                      re-confirm live prompt (last 4 lines) then Down+Enter; refuses pane 0
+  approve <pane>                      re-confirm live prompt on a fresh capture, then send
+                                      the resolved option digit + Enter; refuses pane 0
   detect-stuck                        flag stuck agents (prompt/stream-timeout/bloat/no-progress/blocked)
   stuck-eval <agent> <last_seen> [checkbox_count] [commit_count] [blocked_age]
                                       (stdin: capture) run the stuck decision for one agent
@@ -422,24 +433,6 @@ cmd_capture() {
   tmux capture-pane -t "${SESSION}:0.${pane}" -p -S -50 2>&1 | tail -50
 }
 
-# Reads a pane capture on stdin; exits 0 when a permission-prompt marker
-# (STUCK_MARKERS_REGEX) is present within the last 4 non-blank lines of the
-# capture, non-zero otherwise. This is the shell half of the
-# broker-mediated-approvals re-confirm gate — it agrees with the Rust
-# live_prompt_in_tail check on what a live prompt looks like, so the bundled
-# helper and the in-binary auto-approver treat "live" identically.
-approve_prompt_is_live() {
-  MARKERS="${STUCK_MARKERS_REGEX}" "${PY}" -c "$(cat <<'PY'
-import os, re, sys
-cap = sys.stdin.read()
-markers = os.environ["MARKERS"]
-nonblank = [ln for ln in cap.splitlines() if ln.strip()]
-tail = nonblank[-4:]
-raise SystemExit(0 if any(re.search(markers, ln) for ln in tail) else 1)
-PY
-)"
-}
-
 cmd_approve() {
   require_session
   local pane=${1:-}
@@ -454,19 +447,27 @@ cmd_approve() {
     echo "pane 0 excluded from blind send-keys (supervisor pane)"
     return 0
   fi
-  # Re-confirm a live permission prompt in the last 4 non-blank lines
-  # immediately before sending keys. If the prompt cleared between the decision
-  # and now, send NOTHING (no stray input into the agent's CLI).
-  local cap
+  # Re-confirm a live permission prompt on a FRESH capture taken immediately
+  # before sending keys (structural markers at the tail), and resolve the
+  # option index from that same capture: the classifier mirror
+  # (run_classifier RESOLVE_OPTION mode) parses the prompt and applies the
+  # same shape detection and broad-grant rule as the in-tool auto-approver,
+  # so both resolve the same index. If the prompt cleared between the
+  # decision and now, send NOTHING (no stray digits into the agent's CLI).
+  local cap opt
   cap=$(tmux capture-pane -t "${SESSION}:0.${pane}" -p -S -50 2>/dev/null | tail -50)
-  if ! printf '%s' "${cap}" | approve_prompt_is_live; then
-    echo "prompt cleared, no keys sent (pane ${pane})"
+  if ! opt=$(printf '%s' "${cap}" | run_classifier "${PROJECT_ROOT}" resolve); then
+    echo "cleared before send, no keys sent (pane ${pane})"
     return 0
   fi
-  tmux send-keys -t "${SESSION}:0.${pane}" Down >/dev/null 2>&1
+  # Dispatch the resolved option digit + Enter as two separate keystrokes —
+  # never a blind cursor-movement sequence, whose landing option depends on
+  # the prompt shape (Down+Enter selects "No" on a 2-option prompt and the
+  # permanent broad grant on a 3-option one).
+  tmux send-keys -t "${SESSION}:0.${pane}" "${opt}" >/dev/null 2>&1
   sleep 0.05
   tmux send-keys -t "${SESSION}:0.${pane}" Enter >/dev/null 2>&1
-  echo "approved pane ${pane}"
+  echo "approved pane ${pane} (option ${opt})"
 }
 
 cmd_status() {
@@ -1163,9 +1164,18 @@ cmd_stuck_eval() {
 #   approve option=<N> (scratch-rm|worktree-git|worktree-dev-test|whitelist)
 cmd_classify() {
   local root=${1:-${PROJECT_ROOT}}
-  local cap
-  cap=$(cat)
-  printf '%s' "${cap}" | WORKTREE_ROOT="${root}" CONFIG_TOML="${CONFIG_TOML}" "${PY}" -c "$(cat <<'PY'
+  run_classifier "${root}" ""
+}
+
+# Shared classifier invocation (stdin: pane capture). $1 = worktree root,
+# $2 = non-empty to run the approve-path RESOLVE_OPTION mode: liveness on
+# the fresh capture plus option-index resolution only — prints `cleared`
+# (exit 1) or the resolved option digit (exit 0). Both `classify` and
+# `approve` run this one Python body, so the live-prompt gate, shape
+# detection, and broad-grant rule cannot drift between them.
+run_classifier() {
+  RESOLVE_OPTION="${2:-}" WORKTREE_ROOT="${1}" CONFIG_TOML="${CONFIG_TOML}" \
+    LIVE_MARKERS="${LIVE_PROMPT_MARKERS_REGEX}" "${PY}" -c "$(cat <<'PY'
 import os, platform, re, sys
 
 cap = sys.stdin.read()
@@ -1441,9 +1451,22 @@ def is_worktree_dev_test(s, root):
     return False
 
 # --- live-prompt gate -----------------------------------------------------
+# Structural mirror of is_live_prompt in src/supervisor/auto_approve.rs: a
+# textual marker (LIVE_MARKERS, case-insensitive) within the last 4 non-blank
+# lines, or a numbered option line anchoring that tail with a textual marker
+# within the last 15 non-blank lines (a multi-option prompt bottoms out in
+# its numbered option list, with the question above it).
+LIVE_MARKERS = os.environ.get("LIVE_MARKERS", "do you want to|esc to cancel")
+
+def live_textual(lines):
+    return any(re.search(LIVE_MARKERS, l, re.IGNORECASE) for l in lines)
+
 def is_live(cap):
     nonblank = [l for l in cap.splitlines() if l.strip()]
-    return any("esc to cancel" in l.lower() for l in nonblank[-4:])
+    tail, block = nonblank[-4:], nonblank[-15:]
+    if live_textual(tail):
+        return True
+    return any(is_option_line(strip_decoration(l)) for l in tail) and live_textual(block)
 
 # --- prompt shape + option-index selection -------------------------------
 def detect_shape(cap):
@@ -1461,6 +1484,22 @@ def select_option(shape, s):
     if leading_verb(s) in READ_MOSTLY and not is_arbitrary(s):
         return 2
     return 1
+
+# --- approve-path option resolution ----------------------------------------
+# `sweep.sh approve` reuses this classifier body (RESOLVE_OPTION non-empty)
+# for its pre-send gate: liveness is re-checked on the FRESH capture, then
+# the option index is resolved with the same shape detection and broad-grant
+# rule (READ_MOSTLY + arbitrary-code check) as the full classification below,
+# so the helper and the in-tool auto-approver resolve the same index.
+if os.environ.get("RESOLVE_OPTION"):
+    if not is_live(cap):
+        print("cleared")
+        raise SystemExit(1)
+    s = extract_slice(cap)
+    if s is None:
+        s = cap
+    print(select_option(detect_shape(cap), s))
+    raise SystemExit(0)
 
 # --- decision -------------------------------------------------------------
 if not is_live(cap):

@@ -15,7 +15,7 @@ use std::process::Command;
 /// Coarse classification of a detected permission prompt.
 ///
 /// The auto-approver consults this to decide whether to send the
-/// `BTab Down Enter` keystroke sequence. Anything that classifies as
+/// approval keystrokes (resolved option digit + `Enter`). Anything that classifies as
 /// [`PermissionType::Unknown`] is left for human review via the dashboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PermissionType {

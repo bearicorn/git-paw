@@ -519,7 +519,7 @@ helper and the Rust classifier agree.
 **How it works:** when an agent's status is non-terminal (`done`, `verified`, `blocked`,
 `committed` are skipped) and its `last_seen` exceeds the threshold, git-paw runs
 `tmux capture-pane`, classifies the pending command, and either dispatches
-`BTab Down Enter` (if safe) or publishes an `agent.question` to the supervisor inbox
+the resolved option digit + `Enter` (if safe) or publishes an `agent.question` to the supervisor inbox
 (if not).
 
 git-paw also seeds `.claude/settings.json::allowed_bash_prefixes` with the

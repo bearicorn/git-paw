@@ -13,12 +13,14 @@
 //!
 //! 1. Refuse pane index 0 — the supervisor's own pane is never sent blind
 //!    keystrokes (Decision 2).
-//! 2. Re-capture the target pane *immediately before* the send and confirm a
-//!    live permission-prompt marker is present within the last
-//!    [`APPROVAL_TAIL_LINES`] non-blank lines (Decision 1). This is a fresh
-//!    capture — the detection/decision-stage capture SHALL NOT substitute for
-//!    it — and there is deliberately no classification work or broker
-//!    round-trip between the re-confirm and the send.
+//! 2. Re-capture the target pane *immediately before* the send and confirm the
+//!    prompt's live structural markers are present at the capture's tail, per
+//!    the Live-prompt gate — a window wide enough to span a full multi-option
+//!    prompt block, not a fixed ~4-line tail (Decision 1;
+//!    `approve-send-gate-hardening`). This is a fresh capture — the
+//!    detection/decision-stage capture SHALL NOT substitute for it — and there
+//!    is deliberately no classification work or broker round-trip between the
+//!    re-confirm and the send.
 //! 3. Only on a re-confirmed live prompt does it dispatch the keys.
 //!
 //! The tail check reuses the permission-prompt marker set shared with
@@ -34,41 +36,30 @@
 
 use crate::error::PawError;
 use crate::supervisor::approve::KeyDispatcher;
-use crate::supervisor::auto_approve::extract_command_slice;
+use crate::supervisor::auto_approve::{
+    extract_command_slice, is_live_prompt, live_prompt_markers_at_tail,
+};
 use crate::supervisor::permission_prompt::APPROVAL_MARKERS;
-
-/// Number of trailing non-blank lines the re-confirm check scans for a live
-/// permission-prompt marker. The approval footer ("Do you want to proceed?" /
-/// "❯ 1. Yes" / "No") is always the bottommost interactive region, so a match
-/// anywhere above the tail is a prompt the agent already answered (scrolled up
-/// into history) and SHALL NOT count as live.
-pub const APPROVAL_TAIL_LINES: usize = 4;
 
 /// Pane index reserved for the supervisor's own CLI. The blind send-keys gate
 /// never types into it under any classification; clearing pane 0's own prompt
 /// is a non-blind concern owned by the unattended drive loop.
 pub const SUPERVISOR_PANE_INDEX: usize = 0;
 
-/// Returns whether a live permission-prompt marker is present within the last
-/// [`APPROVAL_TAIL_LINES`] non-blank lines of `capture`.
+/// Returns whether the prompt's live structural markers are present at the
+/// tail of `capture`.
 ///
-/// Reuses the [`APPROVAL_MARKERS`] set (matched case-insensitively) so the
-/// re-confirm agrees with `permission-detection` on what a permission prompt
-/// looks like. A marker found only in scrollback above the tail is treated as
-/// *not live* — that is a prompt already answered and scrolled away.
+/// Delegates to the Live-prompt gate's structural check
+/// ([`is_live_prompt`] — option glyphs / `Do you want to …` / `Esc to
+/// cancel`, tail-anchored over a window wide enough to span a full
+/// multi-option prompt block), extended with the [`APPROVAL_MARKERS`] set so
+/// the re-confirm also recognises other agent CLIs' prompt wordings
+/// (`requires approval`, `(y/n)`, …) that `permission-detection` accepts. A
+/// marker found only in scrollback above the tail is treated as *not live* —
+/// that is a prompt already answered and scrolled away.
 #[must_use]
 pub fn live_prompt_in_tail(capture: &str) -> bool {
-    capture
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .rev()
-        .take(APPROVAL_TAIL_LINES)
-        .any(|line| {
-            let lower = line.to_ascii_lowercase();
-            APPROVAL_MARKERS
-                .iter()
-                .any(|marker| lower.contains(&marker.to_ascii_lowercase()))
-        })
+    is_live_prompt(capture) || live_prompt_markers_at_tail(capture, APPROVAL_MARKERS)
 }
 
 /// Abstraction over "capture the current text of a pane", so the gate's
@@ -232,6 +223,22 @@ mod tests {
         // falls outside the tail window.
         let capture = "Do you want to proceed?\nran it\nline b\nline c\nline d\n$ ";
         assert!(!live_prompt_in_tail(capture));
+    }
+
+    /// A multi-option prompt whose confirmation question sits above the
+    /// 4-line tail anchor is still live: the numbered option list anchors the
+    /// tail and the question is within the block window (spec scenario "Live
+    /// multi-option prompt is detected", `approve-send-gate-hardening`).
+    #[test]
+    fn multi_option_block_above_narrow_tail_is_live() {
+        let capture = "\
+Bash command
+  cargo test --workspace
+Do you want to proceed?
+❯ 1. Yes
+  2. Yes, and don't ask again for cargo test in this project
+  3. No, and tell Claude what to do differently (esc)";
+        assert!(live_prompt_in_tail(capture));
     }
 
     /// Blank lines between the marker and the bottom do not push the marker
