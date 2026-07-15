@@ -104,6 +104,13 @@ holding RAM, complementing pause for the short-break case.
 
 ## See also
 
+- Pause behavior is formally specified in the
+  [`broker-lifecycle`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/broker-lifecycle/spec.md)
+  capability spec (pause flow, idempotency, restart-from-pause),
+  alongside the `pause` subcommand contract in
+  [`cli-parsing`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/cli-parsing/spec.md)
+  and the paused status variant in
+  [`session-state`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/session-state/spec.md).
 - [`git paw stop`](../cli-reference.md#git-paw-stop) — the
   destructive teardown verb with its new confirmation prompt.
 - [`git paw purge`](../cli-reference.md#git-paw-purge) — the full
