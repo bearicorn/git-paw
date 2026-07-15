@@ -110,6 +110,20 @@ broad `curl *` grant is ever seeded. Seeding is idempotent and preserves any
 existing entries (including stale per-endpoint `curl` prefixes from older
 versions, which remain harmless).
 
+The same grants also land **inside every agent worktree**: at `git paw start`,
+`git paw add`, and session recovery, git-paw merges the helper-path prefixes
+and the resolved [`[supervisor.common_dev_allowlist]`
+patterns](../configuration/README.md#common-dev-command-allowlist) into
+`<worktree>/.claude/settings.json`. A claude-format CLI resolves its project
+settings from its working directory — the agent's worktree — so the repo-root
+file alone never applied inside agent panes. With the per-worktree copy in
+place, agents no longer prompt on preset-safe commands (`git status`, `grep`,
+`find`, a declared stack's build/test verbs, …) — previously each variant
+stalled until someone approved it by hand. The seeded `.claude/` directory is
+kept out of version control through the worktree's own `info/exclude`, so an
+agent's `git add .` can never commit it and no tracked `.gitignore` is
+edited.
+
 ### Boot Block Injection Modes
 
 - **Supervisor Mode**: Boot block is prepended to each agent's task prompt before injection

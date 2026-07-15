@@ -949,6 +949,9 @@ struct AttachContext<'a> {
     no_rebase: bool,
     /// Worktree placement (child vs sibling) for `create_worktree`.
     placement: git_paw::config::WorktreePlacement,
+    /// Resolved `[supervisor.common_dev_allowlist]` config for the
+    /// per-worktree allowlist seeding (gating + stacks + extra).
+    common_dev_allowlist: &'a git_paw::config::CommonDevAllowlistConfig,
 }
 
 /// Artifacts produced by attaching one agent's worktree: the tmux pane spec to
@@ -995,6 +998,24 @@ fn attach_agent(
         ctx.broker_config.enabled,
         ctx.docs_fetch_template.is_some(),
     )?;
+
+    // Seed the worktree-local allowlists next to the helper scripts they
+    // authorize: a claude-format CLI resolves project settings from its
+    // working directory (this worktree), so the repo-root seeding never
+    // applies inside the agent pane. Same gates as the script provisioning
+    // above plus `[supervisor.common_dev_allowlist]`; failures are non-fatal
+    // warnings, matching the repo-root seeding.
+    for (path, err) in git_paw::supervisor::worktree_allowlist::seed_worktree_allowlists(
+        &wt.path,
+        ctx.broker_config.enabled,
+        ctx.docs_fetch_template.is_some(),
+        Some(ctx.common_dev_allowlist),
+    ) {
+        eprintln!(
+            "warning: failed to seed agent-worktree allowlist for {}: {err}",
+            path.display()
+        );
+    }
 
     let render_tmpl = |tmpl: &git_paw::skills::SkillTemplate| {
         git_paw::skills::render(
@@ -1354,6 +1375,7 @@ fn cmd_supervisor(
         strict_guard,
         no_rebase,
         placement: config.worktree_placement(),
+        common_dev_allowlist: &supervisor_cfg.common_dev_allowlist,
     };
 
     for branch in &branches {
@@ -2217,6 +2239,32 @@ fn recover_session(repo_root: &Path, existing: &Session) -> Result<(), PawError>
         }
     }
 
+    // Re-seed every restored agent worktree's local allowlists (the same
+    // seeding `attach_agent` performs at start/add) so restored panes pick up
+    // preset updates before their CLIs boot. Gates mirror the repo-root
+    // re-seeds above; failures are non-fatal warnings.
+    let default_supervisor_cfg = SupervisorConfig::default();
+    let recovery_dev_allowlist = (mode == SessionMode::Supervisor).then(|| {
+        &config
+            .supervisor
+            .as_ref()
+            .unwrap_or(&default_supervisor_cfg)
+            .common_dev_allowlist
+    });
+    for wt in &existing.worktrees {
+        for (path, err) in git_paw::supervisor::worktree_allowlist::seed_worktree_allowlists(
+            &wt.worktree_path,
+            broker_url.is_some(),
+            config.docs_base_url.is_some(),
+            recovery_dev_allowlist,
+        ) {
+            eprintln!(
+                "warning: failed to seed agent-worktree allowlist for {}: {err}",
+                path.display()
+            );
+        }
+    }
+
     // Tear down any stale tmux session of this name before rebuilding so the
     // recovery starts from a clean `new-session`. A half-built session left
     // by a prior crashed/aborted launch would otherwise let the rebuild's
@@ -2567,6 +2615,7 @@ fn cmd_add(
         strict_guard,
         no_rebase: false,
         placement: config.worktree_placement(),
+        common_dev_allowlist: &supervisor_cfg.common_dev_allowlist,
     };
 
     // 4.6 Reuse create_worktree + attach_agent to build the new pane's setup.

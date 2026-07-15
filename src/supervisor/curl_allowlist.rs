@@ -110,8 +110,29 @@ pub fn helper_prefixes() -> Vec<String> {
 /// - When the file exists but is not valid JSON, an error is returned.
 ///   The function never panics.
 pub fn setup_curl_allowlist(settings_path: &Path) -> Result<(), PawError> {
-    let new_entries = helper_prefixes();
+    merge_allowlist_entries(settings_path, &helper_prefixes())
+}
 
+/// Merges `new_entries` into the `allowed_bash_prefixes` array of the
+/// claude-format settings file at `settings_path`.
+///
+/// This is the shared merge primitive behind [`setup_curl_allowlist`] and
+/// the per-worktree seeding
+/// ([`crate::supervisor::worktree_allowlist::seed_worktree_allowlists`]):
+/// existing entries are preserved, missing entries are appended in input
+/// order, duplicates are never written, unrelated top-level fields are left
+/// untouched, and the parent directory is created when missing.
+///
+/// # Errors
+///
+/// Returns [`PawError::ConfigError`] when the file cannot be read, contains
+/// invalid JSON, has a non-object top level, has a non-array
+/// `allowed_bash_prefixes`, or cannot be written back. The function never
+/// panics.
+pub fn merge_allowlist_entries(
+    settings_path: &Path,
+    new_entries: &[String],
+) -> Result<(), PawError> {
     // Load existing JSON or start from a fresh object.
     let mut value: serde_json::Value = if settings_path.exists() {
         let raw = std::fs::read_to_string(settings_path).map_err(|e| {
@@ -152,7 +173,7 @@ pub fn setup_curl_allowlist(settings_path: &Path) -> Result<(), PawError> {
             .iter()
             .any(|v| v.as_str().is_some_and(|s| s == new_entry));
         if !already_present {
-            array.push(serde_json::Value::String(new_entry));
+            array.push(serde_json::Value::String(new_entry.clone()));
         }
     }
 

@@ -529,6 +529,16 @@ permission prompt. This is a single stable path grant — not per-endpoint
 `curl` prefixes and never a broad `curl *` rule — so it cannot drift with URL
 normalisation or flag order. Existing entries in that file are preserved.
 
+The helper grants are seeded into each **agent worktree's own**
+`<worktree>/.claude/settings.json` as well — at `git paw start`,
+`git paw add`, and session recovery, right where the helper scripts
+themselves are provisioned. A claude-format CLI resolves its project settings
+from its working directory (the worktree), so the repo-root file alone never
+reaches the agent panes. The broker/sweep grants follow the broker gate; the
+`docs-fetch.sh` grant follows the `docs_base_url` gate. The seeded `.claude/`
+directory is excluded via the worktree's own `info/exclude` (never a tracked
+`.gitignore`), so it cannot be committed by an agent's `git add .`.
+
 ### Common dev-command allowlist
 
 On every supervisor session start, git-paw seeds a curated preset of dev-loop
@@ -605,6 +615,12 @@ never validated).
   `[clis.<name>].settings_path` whose parent directory already exists (the
   CLI-agnostic alt-config path — register a claude-family variant's settings
   file there to have it seeded too) but never creates a missing directory.
+- Also merged into every **agent worktree's** `<worktree>/.claude/settings.json`
+  at `git paw start`, `git paw add`, and session recovery — a claude-format
+  CLI reads project settings from its working directory, so this is the copy
+  that actually applies inside agent panes. The seeded `.claude/` is kept out
+  of version control via the worktree-local `info/exclude`; no tracked
+  `.gitignore` is edited.
 - Entries persist after `git paw stop` — prune `.claude/settings.json` manually
   if you want a clean slate.
 
