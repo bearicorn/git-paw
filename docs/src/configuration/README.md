@@ -867,6 +867,8 @@ When both global and repo configs exist, they merge with these rules:
 | `dashboard` | Repo wins |
 | `governance` | Per-field merge (repo wins on each set field, unset fields fall back to global) |
 | `layout` | Repo wins |
+| `opsx` | Repo wins |
+| `mcp` | Per-field merge (repo wins on each set field, unset fields fall back to global) |
 
 **Example:** If global config defines `[clis.my-agent]` and repo config defines `[clis.my-agent]` with a different command, the repo version wins. But a `[clis.other-tool]` in global config still appears — maps are merged, not replaced.
 
