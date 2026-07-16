@@ -42,6 +42,17 @@ pub struct CustomCli {
     /// is seeded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings_path: Option<String>,
+    /// Per-approval-level flag overrides, consulted BEFORE the built-in
+    /// table by [`resolve_approval_flags`].
+    ///
+    /// Keys are the kebab-case approval-level names (`"manual"`, `"auto"`,
+    /// `"full-auto"`); values are the flag string appended verbatim to the
+    /// CLI launch command. This is the seam for custom or variant CLIs
+    /// (e.g. a claude-oss entry launched via `CLAUDE_CONFIG_DIR`) to get
+    /// native permission flags without a built-in table row. Unknown level
+    /// keys are rejected at config load with an error naming the key.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub approval_args: HashMap<String, String>,
 }
 
 /// A named preset defining branches and a CLI to use.
@@ -212,6 +223,24 @@ pub enum ApprovalLevel {
     FullAuto,
 }
 
+impl ApprovalLevel {
+    /// The valid kebab-case level names — the accepted key set of
+    /// [`CustomCli::approval_args`].
+    pub const KEBAB_NAMES: [&'static str; 3] = ["manual", "auto", "full-auto"];
+
+    /// Returns this level's kebab-case wire name (`"manual"`, `"auto"`,
+    /// `"full-auto"`), matching the serde serialization and the key format
+    /// of [`CustomCli::approval_args`].
+    #[must_use]
+    pub fn kebab_name(&self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Auto => "auto",
+            Self::FullAuto => "full-auto",
+        }
+    }
+}
+
 /// Dashboard configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DashboardConfig {
@@ -369,6 +398,18 @@ pub struct SupervisorConfig {
     /// Approval policy applied to agent actions.
     #[serde(default)]
     pub agent_approval: ApprovalLevel,
+    /// The SUPERVISOR pane's own approval level, decoupled from
+    /// [`Self::agent_approval`].
+    ///
+    /// `None` (the default — every pre-v0.11.0 config) makes the supervisor
+    /// pane inherit `agent_approval`, preserving the pre-v0.11.0 behavior
+    /// exactly. Setting `approval = "full-auto"` launches only the
+    /// supervisor pane with its CLI's native skip-permissions flags while
+    /// coding agents keep resolving from `agent_approval` (trusted-pane
+    /// semantics: the supervisor runs in the repo root, not a worktree, so
+    /// relaxing it is a deliberate, supervisor-scoped choice).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalLevel>,
     /// Auto-approval configuration for safe permission prompts.
     ///
     /// When present, the supervisor automatically approves stalled agents
@@ -957,8 +998,14 @@ impl AutoApproveConfig {
     }
 }
 
-/// Returns the CLI-specific permission flag for `cli` at the given approval
-/// `level`, or an empty string if the combination has no mapped flag.
+/// Returns the built-in CLI-specific permission flag for `cli` at the given
+/// approval `level`, or an empty string if the combination has no mapped
+/// flag.
+///
+/// This is the built-in-table step of [`resolve_approval_flags`]; prefer
+/// that function when a loaded config (and thus its `[clis.<name>]`
+/// overrides) is available. Rows verified against upstream CLI docs
+/// 2026-07-15.
 ///
 /// # Examples
 ///
@@ -971,8 +1018,9 @@ impl AutoApproveConfig {
 /// );
 /// assert_eq!(
 ///     approval_flags("codex", &ApprovalLevel::Auto),
-///     "--approval-mode=auto-edit",
+///     "--sandbox workspace-write",
 /// );
+/// assert_eq!(approval_flags("gemini", &ApprovalLevel::FullAuto), "--yolo");
 /// assert_eq!(approval_flags("claude", &ApprovalLevel::Manual), "");
 /// assert_eq!(approval_flags("some-agent", &ApprovalLevel::FullAuto), "");
 /// ```
@@ -980,10 +1028,66 @@ impl AutoApproveConfig {
 pub fn approval_flags(cli: &str, level: &ApprovalLevel) -> &'static str {
     match (cli, level) {
         ("claude", ApprovalLevel::FullAuto) => "--dangerously-skip-permissions",
-        ("codex", ApprovalLevel::FullAuto) => "--approval-mode=full-auto",
-        ("codex", ApprovalLevel::Auto) => "--approval-mode=auto-edit",
+        ("codex", ApprovalLevel::FullAuto) => "--dangerously-bypass-approvals-and-sandbox",
+        ("codex", ApprovalLevel::Auto) => "--sandbox workspace-write",
+        ("gemini" | "qwen", ApprovalLevel::FullAuto) => "--yolo",
         _ => "",
     }
+}
+
+/// Resolves the permission flags for `cli` at `level`, consulting (in
+/// order): the per-CLI `[clis.<name>].approval_args` override, the built-in
+/// [`approval_flags`] table, then `""` (no flags).
+///
+/// The override is the seam for custom or variant CLIs (e.g. a claude-oss
+/// entry launched via `CLAUDE_CONFIG_DIR`) to get native flags without a
+/// built-in table row. Resolution is deterministic: the same
+/// `(cli, level, clis)` triple always yields the same value.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::HashMap;
+/// use git_paw::config::{resolve_approval_flags, ApprovalLevel, CustomCli};
+///
+/// let mut clis: HashMap<String, CustomCli> = HashMap::new();
+/// // No override: the built-in table answers.
+/// assert_eq!(
+///     resolve_approval_flags("claude", &ApprovalLevel::FullAuto, &clis),
+///     "--dangerously-skip-permissions",
+/// );
+/// // An override wins over the built-in row.
+/// clis.insert(
+///     "claude".to_string(),
+///     CustomCli {
+///         command: "claude".to_string(),
+///         display_name: None,
+///         submit_delay_ms: None,
+///         settings_path: None,
+///         approval_args: HashMap::from([(
+///             "full-auto".to_string(),
+///             "--my-custom-flag".to_string(),
+///         )]),
+///     },
+/// );
+/// assert_eq!(
+///     resolve_approval_flags("claude", &ApprovalLevel::FullAuto, &clis),
+///     "--my-custom-flag",
+/// );
+/// ```
+#[must_use]
+pub fn resolve_approval_flags<S: std::hash::BuildHasher>(
+    cli: &str,
+    level: &ApprovalLevel,
+    clis: &HashMap<String, CustomCli, S>,
+) -> String {
+    if let Some(args) = clis
+        .get(cli)
+        .and_then(|c| c.approval_args.get(level.kebab_name()))
+    {
+        return args.clone();
+    }
+    approval_flags(cli, level).to_string()
 }
 
 /// Configuration for the broker filesystem watcher.
@@ -1419,11 +1523,33 @@ fn load_config_file(path: &Path) -> Result<Option<PawConfig>, PawError> {
         Ok(contents) => {
             let config: PawConfig = toml::from_str(&contents)
                 .map_err(|e| PawError::ConfigError(format!("{}: {e}", path.display())))?;
+            validate_approval_args(&config, path)?;
             Ok(Some(config))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(PawError::ConfigError(format!("{}: {e}", path.display()))),
     }
+}
+
+/// Rejects `[clis.<name>].approval_args` maps whose keys are not one of the
+/// three kebab-case approval-level names.
+///
+/// A typo'd level key would otherwise be silently ignored at flag
+/// resolution, downgrading the security posture the operator explicitly
+/// requested — so an unknown key fails the load, naming the bad key.
+fn validate_approval_args(config: &PawConfig, path: &Path) -> Result<(), PawError> {
+    for (name, cli) in &config.clis {
+        for key in cli.approval_args.keys() {
+            if !ApprovalLevel::KEBAB_NAMES.contains(&key.as_str()) {
+                return Err(PawError::ConfigError(format!(
+                    "{}: [clis.{name}] approval_args has invalid level key '{key}' \
+                     (expected one of: \"manual\", \"auto\", \"full-auto\")",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Loads only the repo-level configuration (`.git-paw/config.toml`).
@@ -1587,6 +1713,7 @@ pub fn add_custom_cli_to(
             display_name: display_name.map(String::from),
             submit_delay_ms: None,
             settings_path: None,
+            approval_args: HashMap::new(),
         },
     );
 
@@ -1699,6 +1826,7 @@ worktree_placement = "child"
 # spec_validate_command = "openspec validate {{CHANGE_ID}} --strict"  # OpenSpec only
 # security_audit_command = "cargo audit"                       # or: "npm audit", "bandit -r ."
 # agent_approval = "auto"  # one of: "manual", "auto", "full-auto"
+# approval = "manual"  # supervisor pane's own level: "manual" | "auto" | "full-auto"
 # verify_on_commit_nudge = true  # broker nudges the supervisor to verify each commit promptly (default true)
 #
 # Stuck/bloat detection thresholds, read by .git-paw/scripts/sweep.sh. Each is
@@ -2221,6 +2349,7 @@ enabled = true
                     display_name: Some("Test CLI".into()),
                     submit_delay_ms: None,
                     settings_path: None,
+                    approval_args: HashMap::new(),
                 },
             )]),
             presets: HashMap::from([(
@@ -2246,6 +2375,79 @@ enabled = true
         save_config_to(&config_path, &original).unwrap();
         let loaded = load_config_file(&config_path).unwrap().unwrap();
         assert_eq!(original, loaded);
+    }
+
+    // --- CustomCli approval_args (supervisor-native-auto-mode) ---
+
+    #[test]
+    fn custom_cli_approval_args_parses_and_round_trips() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[clis.mycli]\n\
+             command = \"mycli\"\n\
+             approval_args = { \"full-auto\" = \"--yolo\" }\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let cli = config.clis.get("mycli").expect("mycli entry");
+        assert_eq!(
+            cli.approval_args.get("full-auto").map(String::as_str),
+            Some("--yolo")
+        );
+
+        let round_trip_path = tmp.path().join("round-trip.toml");
+        save_config_to(&round_trip_path, &config).unwrap();
+        let reloaded = load_config_file(&round_trip_path).unwrap().unwrap();
+        assert_eq!(reloaded.clis, config.clis);
+    }
+
+    #[test]
+    fn custom_cli_without_approval_args_parses_unchanged() {
+        // A pre-v0.11.0 [clis.<name>] entry — no approval_args key — must
+        // load without error and leave the map empty.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[clis.mycli]\ncommand = \"mycli\"\n");
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let cli = config.clis.get("mycli").expect("mycli entry");
+        assert!(cli.approval_args.is_empty());
+    }
+
+    #[test]
+    fn custom_cli_empty_approval_args_omitted_on_serialize() {
+        let cli = CustomCli {
+            command: "mycli".into(),
+            display_name: None,
+            submit_delay_ms: None,
+            settings_path: None,
+            approval_args: HashMap::new(),
+        };
+        let serialized = toml::to_string_pretty(&cli).unwrap();
+        assert!(
+            !serialized.contains("approval_args"),
+            "empty approval_args must not serialize, got:\n{serialized}"
+        );
+    }
+
+    #[test]
+    fn custom_cli_invalid_approval_args_key_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[clis.mycli]\n\
+             command = \"mycli\"\n\
+             approval_args = { \"yolo-mode\" = \"--x\" }\n",
+        );
+
+        let err = load_config_file(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("yolo-mode"),
+            "error should name the invalid key, got: {err}"
+        );
     }
 
     // --- Gap #1: Parse [specs] section with populated fields ---
@@ -2584,6 +2786,7 @@ enabled = true
         assert_eq!(supervisor.cli, None);
         assert_eq!(supervisor.test_command, None);
         assert_eq!(supervisor.agent_approval, ApprovalLevel::Auto);
+        assert_eq!(supervisor.approval, None);
     }
 
     // --- verify_on_commit_nudge (per-commit-verification-v0-6-x) ---
@@ -2652,6 +2855,77 @@ enabled = true
         );
     }
 
+    // --- supervisor approval (supervisor-native-auto-mode) ---
+
+    #[test]
+    fn supervisor_approval_parses_all_three_levels() {
+        let tmp = TempDir::new().unwrap();
+        for (value, expected) in [
+            ("manual", ApprovalLevel::Manual),
+            ("auto", ApprovalLevel::Auto),
+            ("full-auto", ApprovalLevel::FullAuto),
+        ] {
+            let path = tmp.path().join(format!("config-{value}.toml"));
+            write_file(&path, &format!("[supervisor]\napproval = \"{value}\"\n"));
+
+            let config = load_config_file(&path).unwrap().unwrap();
+            let supervisor = config.supervisor.unwrap();
+            assert_eq!(
+                supervisor.approval,
+                Some(expected),
+                "approval = \"{value}\" should parse"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_supervisor_approval_value() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, "[supervisor]\napproval = \"yolo\"\n");
+
+        let err = load_config_file(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("yolo"),
+            "error should mention invalid value, got: {err}"
+        );
+    }
+
+    #[test]
+    fn pre_v0_11_supervisor_config_loads_with_approval_none() {
+        // A [supervisor] section exactly as v0.10.0 wrote it — no `approval`
+        // key — must load without error and leave the field unset.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(
+            &path,
+            "[supervisor]\n\
+             enabled = true\n\
+             cli = \"claude\"\n\
+             test_command = \"just check\"\n\
+             agent_approval = \"full-auto\"\n",
+        );
+
+        let config = load_config_file(&path).unwrap().unwrap();
+        let supervisor = config.supervisor.unwrap();
+        assert_eq!(supervisor.approval, None);
+    }
+
+    #[test]
+    fn unset_supervisor_approval_omitted_on_round_trip() {
+        let supervisor = SupervisorConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let serialized = toml::to_string_pretty(&supervisor).unwrap();
+        assert!(
+            !serialized
+                .lines()
+                .any(|l| l.trim_start().starts_with("approval =")),
+            "unset approval must not serialize, got:\n{serialized}"
+        );
+    }
+
     #[test]
     fn supervisor_round_trips_through_save_and_load() {
         let tmp = TempDir::new().unwrap();
@@ -2670,6 +2944,7 @@ enabled = true
                 fmt_check_command: None,
                 security_audit_command: None,
                 agent_approval: ApprovalLevel::FullAuto,
+                approval: Some(ApprovalLevel::FullAuto),
                 auto_approve: None,
                 conflict: ConflictConfig::default(),
                 learnings: false,
@@ -3522,7 +3797,7 @@ enabled = true
     fn approval_flags_codex_auto() {
         assert_eq!(
             approval_flags("codex", &ApprovalLevel::Auto),
-            "--approval-mode=auto-edit"
+            "--sandbox workspace-write"
         );
     }
 
@@ -3530,8 +3805,14 @@ enabled = true
     fn approval_flags_codex_full_auto() {
         assert_eq!(
             approval_flags("codex", &ApprovalLevel::FullAuto),
-            "--approval-mode=full-auto"
+            "--dangerously-bypass-approvals-and-sandbox"
         );
+    }
+
+    #[test]
+    fn approval_flags_gemini_and_qwen_full_auto_are_yolo() {
+        assert_eq!(approval_flags("gemini", &ApprovalLevel::FullAuto), "--yolo");
+        assert_eq!(approval_flags("qwen", &ApprovalLevel::FullAuto), "--yolo");
     }
 
     #[test]
@@ -3549,6 +3830,84 @@ enabled = true
     fn approval_flags_is_deterministic() {
         let first = approval_flags("claude", &ApprovalLevel::FullAuto);
         let second = approval_flags("claude", &ApprovalLevel::FullAuto);
+        assert_eq!(first, second);
+    }
+
+    // --- resolve_approval_flags (override → built-in table → "") ---
+
+    fn cli_with_approval_args(command: &str, args: &[(&str, &str)]) -> CustomCli {
+        CustomCli {
+            command: command.into(),
+            display_name: None,
+            submit_delay_ms: None,
+            settings_path: None,
+            approval_args: args
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn resolve_approval_flags_override_wins_over_built_in_table() {
+        let clis = HashMap::from([(
+            "claude".to_string(),
+            cli_with_approval_args("claude", &[("full-auto", "--my-custom-flag")]),
+        )]);
+        assert_eq!(
+            resolve_approval_flags("claude", &ApprovalLevel::FullAuto, &clis),
+            "--my-custom-flag"
+        );
+    }
+
+    #[test]
+    fn resolve_approval_flags_override_enables_cli_without_built_in_row() {
+        // The claude-oss scenario: a variant CLI with no built-in table row
+        // gets native flags purely from its [clis.<name>] override.
+        let clis = HashMap::from([(
+            "claude-oss".to_string(),
+            cli_with_approval_args(
+                "claude-oss",
+                &[("full-auto", "--dangerously-skip-permissions")],
+            ),
+        )]);
+        assert_eq!(
+            resolve_approval_flags("claude-oss", &ApprovalLevel::FullAuto, &clis),
+            "--dangerously-skip-permissions"
+        );
+    }
+
+    #[test]
+    fn resolve_approval_flags_falls_back_to_table_when_level_not_overridden() {
+        // An override map that lacks the requested level falls through to
+        // the built-in row for that CLI.
+        let clis = HashMap::from([(
+            "claude".to_string(),
+            cli_with_approval_args("claude", &[("auto", "--some-auto-flag")]),
+        )]);
+        assert_eq!(
+            resolve_approval_flags("claude", &ApprovalLevel::FullAuto, &clis),
+            "--dangerously-skip-permissions"
+        );
+    }
+
+    #[test]
+    fn resolve_approval_flags_unknown_cli_no_override_is_empty() {
+        let clis = HashMap::new();
+        assert_eq!(
+            resolve_approval_flags("some-agent", &ApprovalLevel::FullAuto, &clis),
+            ""
+        );
+    }
+
+    #[test]
+    fn resolve_approval_flags_is_deterministic() {
+        let clis = HashMap::from([(
+            "claude".to_string(),
+            cli_with_approval_args("claude", &[("full-auto", "--my-custom-flag")]),
+        )]);
+        let first = resolve_approval_flags("claude", &ApprovalLevel::FullAuto, &clis);
+        let second = resolve_approval_flags("claude", &ApprovalLevel::FullAuto, &clis);
         assert_eq!(first, second);
     }
 
