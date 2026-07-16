@@ -11,12 +11,12 @@ use assert_cmd::Command;
 mod helpers;
 use helpers::*;
 
-/// Returns the seven `[supervisor]` keys that the commented teaching block
-/// MUST enumerate. Listed in the order they appear in
-/// `generate_default_config`. The trailing `agent_approval` is part of the
-/// block but is not in scope for the gate-templating spec, so this list
-/// omits it.
-const SUPERVISOR_KEYS: [&str; 9] = [
+/// Returns the `[supervisor]` keys that the commented teaching block MUST
+/// enumerate. Listed in the order they appear in `generate_default_config`.
+/// The trailing `agent_approval` is part of the block but is not in scope
+/// for the gate-templating spec, so this list omits it. `approval` (the
+/// supervisor pane's own level, supervisor-native-auto-mode) IS asserted.
+const SUPERVISOR_KEYS: [&str; 10] = [
     "enabled",
     "cli",
     "test_command",
@@ -26,6 +26,7 @@ const SUPERVISOR_KEYS: [&str; 9] = [
     "doc_build_command",
     "spec_validate_command",
     "security_audit_command",
+    "approval",
 ];
 
 #[test]
@@ -156,6 +157,11 @@ fn init_commented_supervisor_block_parses_as_valid_config_when_uncommented() {
     assert!(
         supervisor.security_audit_command.is_some(),
         "security_audit_command parsed"
+    );
+    assert_eq!(
+        supervisor.approval,
+        Some(git_paw::config::ApprovalLevel::Manual),
+        "uncommented approval line parses as the supervisor pane's own level"
     );
 
     // The spec_validate_command value SHALL still contain the literal

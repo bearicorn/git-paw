@@ -81,6 +81,38 @@ git paw start --unattended --branches feat/auth,feat/api
 Multiple feedback → fix → re-verify cycles per agent are normal and are **not**
 treated as a stuck signal — the loop lets agents iterate.
 
+### Run the supervisor pane at native full-auto
+
+Even with the drive loop sweeping prompts, the dominant residual babysitting
+cost of an unattended wave is the supervisor pane's **own** permission
+prompts: its compound verification commands (subshells, `$(mktemp)`,
+`git -C … diff <merge-base>...<tip>`) cannot be prefix-matched by allowlists,
+so each one otherwise waits for a sweep to clear it. For fully unattended
+runs, set the supervisor pane's own approval level to `full-auto`:
+
+```toml
+[supervisor]
+approval = "full-auto"   # the supervisor pane only
+agent_approval = "auto"  # coding agents keep their guardrails
+```
+
+The supervisor pane then launches with its CLI's native skip-permissions
+flags (for example `claude --dangerously-skip-permissions`) and simply stops
+presenting prompts to sweep. Coding agents are unaffected — they keep
+resolving their flags from `agent_approval`. When the field is unset, the
+supervisor pane inherits `agent_approval`, exactly as before v0.11.0.
+
+**Blast radius.** This is a trusted-pane relaxation, not a session-wide one:
+the supervisor runs in the **repo root**, not a scoped worktree, so a
+full-auto supervisor can touch anything in the repository and carries its
+CLI's own persistent memory across sessions. Opt in deliberately, and pair it
+with agent-memory-isolation (shipping in the same release), which scopes each
+pane CLI's persistent memory so an unattended full-auto pane cannot bleed
+state across projects. For a CLI with no known full-auto flags, git-paw warns
+at launch and degrades the pane to flagless (`auto`) rather than failing —
+supply native flags for unlisted CLIs via
+[`[clis.<name>] approval_args`](../configuration/README.md#custom-clis).
+
 ## Pane Layout and Labelling
 
 When you attach to a supervisor session, git-paw styles the tmux panes so the

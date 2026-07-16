@@ -1085,6 +1085,32 @@ fn attach_agent(
     })
 }
 
+/// Resolves the supervisor pane's approval flags at its effective level,
+/// warning (never failing) when `full-auto` has no known flag mapping for
+/// the CLI.
+///
+/// The warning names the CLI and the `[clis.<name>].approval_args` override
+/// so the operator can supply native flags; the pane then launches flagless
+/// (`auto` behavior) rather than bricking the session on a typo'd CLI name.
+/// Used by every path that builds the supervisor pane command: the
+/// `cmd_supervisor` auto-start flow and session recovery.
+fn resolve_supervisor_flags(
+    supervisor_cli: &str,
+    level: config::ApprovalLevel,
+    clis: &std::collections::HashMap<String, config::CustomCli>,
+) -> String {
+    let flags = config::resolve_approval_flags(supervisor_cli, &level, clis);
+    if level == config::ApprovalLevel::FullAuto && flags.is_empty() {
+        eprintln!(
+            "warning: [supervisor] approval is \"full-auto\" but no permission flags are known \
+             for CLI '{supervisor_cli}'; launching the supervisor pane without flags (auto \
+             behavior). Define [clis.{supervisor_cli}] approval_args = {{ \"full-auto\" = \
+             \"<flags>\" }} to supply them."
+        );
+    }
+    flags
+}
+
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn cmd_supervisor(
     repo_root: &Path,
@@ -1180,17 +1206,34 @@ fn cmd_supervisor(
     let session_name = tmux::resolve_session_name(&project)?;
     let mouse = config.mouse.unwrap_or(true);
     let broker_config = config.broker.clone();
-    let approval = &supervisor_cfg.agent_approval;
-    let agent_flags = config::approval_flags(&agent_cli, approval);
-    let supervisor_flags = config::approval_flags(&supervisor_cli, approval);
+    let agent_approval = &supervisor_cfg.agent_approval;
+    // The supervisor pane resolves its own level, inheriting agent_approval
+    // when [supervisor] approval is unset (pre-v0.11.0 behavior). Coding
+    // agents always resolve from agent_approval.
+    let supervisor_approval = supervisor_cfg
+        .approval
+        .unwrap_or(supervisor_cfg.agent_approval);
+    let agent_flags = config::resolve_approval_flags(&agent_cli, agent_approval, &config.clis);
+    let supervisor_flags =
+        resolve_supervisor_flags(&supervisor_cli, supervisor_approval, &config.clis);
 
     // Dry-run: print the plan and exit without touching the filesystem.
     if dry_run {
+        let supervisor_cmd = if supervisor_flags.is_empty() {
+            supervisor_cli.clone()
+        } else {
+            format!("{supervisor_cli} {supervisor_flags}")
+        };
         println!("Dry run — supervisor session plan:\n");
         println!("  Session:    {session_name}");
-        println!("  Supervisor: {supervisor_cli}");
+        println!("  Supervisor: {supervisor_cmd}");
         println!("  Agent CLI:  {agent_cli}");
-        println!("  Approval:   {approval:?}");
+        if supervisor_approval == *agent_approval {
+            println!("  Approval:   {agent_approval:?}");
+        } else {
+            println!("  Supervisor approval: {supervisor_approval:?}");
+            println!("  Agent approval:      {agent_approval:?}");
+        }
         println!("  Mouse:      {}", if mouse { "on" } else { "off" });
         if broker_config.enabled {
             println!("  Broker URL: {}", broker_config.url());
@@ -1366,7 +1409,7 @@ fn cmd_supervisor(
         project: &project,
         broker_config: &broker_config,
         agent_cli: &agent_cli,
-        agent_flags,
+        agent_flags: &agent_flags,
         coordination_template: coordination_template.as_ref(),
         docs_fetch_template: docs_fetch_template.as_ref(),
         gate_commands: &gate_commands,
@@ -2370,7 +2413,13 @@ fn recover_supervisor_session(
                     .to_string(),
             )
         })?;
-    let supervisor_flags = config::approval_flags(&supervisor_cli, &supervisor_cfg.agent_approval);
+    // Same effective-level resolution as the auto-start flow: the
+    // supervisor's own `approval` when set, else `agent_approval`.
+    let supervisor_approval = supervisor_cfg
+        .approval
+        .unwrap_or(supervisor_cfg.agent_approval);
+    let supervisor_flags =
+        resolve_supervisor_flags(&supervisor_cli, supervisor_approval, &config.clis);
     let supervisor_cli_command = if supervisor_flags.is_empty() {
         supervisor_cli
     } else {
@@ -2568,7 +2617,7 @@ fn cmd_add(
     let default_sup = SupervisorConfig::default();
     let supervisor_cfg = config.supervisor.as_ref().unwrap_or(&default_sup);
     let approval = &supervisor_cfg.agent_approval;
-    let agent_flags = config::approval_flags(&agent_cli, approval);
+    let agent_flags = config::resolve_approval_flags(&agent_cli, approval, &config.clis);
     let strict_guard = config
         .supervisor
         .as_ref()
@@ -2606,7 +2655,7 @@ fn cmd_add(
         project: &project,
         broker_config: &broker_config,
         agent_cli: &agent_cli,
-        agent_flags,
+        agent_flags: &agent_flags,
         coordination_template: coordination_template.as_ref(),
         docs_fetch_template: docs_fetch_template.as_ref(),
         gate_commands: &gate_commands,
@@ -5271,6 +5320,7 @@ mod submit_delay_tests {
                 display_name: None,
                 submit_delay_ms,
                 settings_path: None,
+                approval_args: HashMap::new(),
             },
         );
         PawConfig {
@@ -5337,6 +5387,7 @@ mod submit_delay_tests {
                 display_name: None,
                 submit_delay_ms: None,
                 settings_path,
+                approval_args: HashMap::new(),
             },
         );
         PawConfig {

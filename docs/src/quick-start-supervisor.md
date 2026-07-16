@@ -80,7 +80,8 @@ The full reference lives in [Configuration → Supervisor](configuration/README.
 | `[supervisor].enabled` | Default to supervisor mode without passing `--supervisor`. |
 | `[supervisor].cli` | Which AI CLI runs as the supervisor (falls back to `default_cli`). |
 | `[supervisor].test_command` | Command run after each agent reports `done` and again after every merge. |
-| `[supervisor].agent_approval` | `"manual"`, `"auto"`, or `"full-auto"` — translates into CLI permission flags. |
+| `[supervisor].agent_approval` | `"manual"`, `"auto"`, or `"full-auto"` — translates into CLI permission flags for the coding agents. |
+| `[supervisor].approval` | The supervisor pane's **own** level, decoupled from `agent_approval` (unset → inherits it). Set `"full-auto"` for [unattended runs](user-guide/supervisor.md#run-the-supervisor-pane-at-native-full-auto) without dropping agent guardrails. |
 | `[supervisor.auto_approve].enabled` | Master switch for git-paw's safe-prompt auto-dismisser. |
 | `[supervisor.auto_approve].safe_commands` | Project-specific command prefixes appended to the composed safe list. |
 | `[supervisor.auto_approve].approval_level` | `"off"`, `"conservative"`, or `"safe"` preset for the auto-approve whitelist. |

@@ -208,6 +208,13 @@ submit_delay_ms = 1500
 # not raise a permission prompt. A leading `~` is expanded to the home
 # directory. Use for claude-family variants that read a non-default config dir.
 settings_path = "~/.config/claude-variant/settings.json"
+# Per-approval-level flag overrides, consulted BEFORE git-paw's built-in
+# flag table when composing launch commands. Keys are the approval level
+# names ("manual" | "auto" | "full-auto"); values are appended verbatim to
+# the launch command at that level. This is how a variant CLI with no
+# built-in table row gets native permission flags (e.g. full-auto for a
+# claude-oss variant). Unknown level keys fail the config load.
+approval_args = { "full-auto" = "--dangerously-skip-permissions" }
 ```
 
 | Field | Required | Purpose |
@@ -216,6 +223,7 @@ settings_path = "~/.config/claude-variant/settings.json"
 | `display_name` | no | Human-readable name shown in prompts. |
 | `submit_delay_ms` | no | Boot-prompt settle delay (ms) before the submit `Enter`; per-CLI so the launcher stays CLI-agnostic. |
 | `settings_path` | no | Path to the CLI's claude-format settings file; the agent-broker helper-path grant (`.git-paw/scripts/broker.sh`) is seeded here so the boot-time `broker.sh` call doesn't prompt. |
+| `approval_args` | no | Map from approval-level name (`"manual"`, `"auto"`, `"full-auto"`) to the flags appended to the launch command at that level. Consulted **before** the [built-in flag table](#supervisor); an unknown level key is rejected at config load with an error naming the key. |
 
 ### Via command line
 
@@ -380,6 +388,7 @@ doc_tool_command = "cargo doc --no-deps"
 spec_validate_command = "openspec validate {{CHANGE_ID}} --strict"
 security_audit_command = "cargo audit"
 agent_approval = "auto"
+approval = "full-auto"
 verify_on_commit_nudge = true
 strict_branch_guard = true
 manual_approvals_log = true
@@ -401,12 +410,30 @@ blocked_on_supervisor_window_seconds = 900
 | `spec_validate_command` | (none) | Spec validator — gate 3 (e.g. `"openspec validate {{CHANGE_ID}} --strict"` for OpenSpec). `{{CHANGE_ID}}` is substituted by the supervisor agent at verification time with the change name being audited; it is **not** expanded at config load |
 | `security_audit_command` | (none) | Security audit tooling — gate 5 (e.g. `"cargo audit"`, `"npm audit"`, `"bandit -r ."`, `"gosec ./..."`) |
 | `agent_approval` | `"auto"` | Permission level for coding agents: `"manual"`, `"auto"`, or `"full-auto"` |
+| `approval` | (inherits `agent_approval`) | The SUPERVISOR pane's **own** permission level: `"manual"`, `"auto"`, or `"full-auto"`, decoupled from `agent_approval`. Unset → the supervisor pane inherits `agent_approval` exactly as before v0.11.0. Trusted-pane semantics: the supervisor runs in the repo root, not a scoped worktree, so `"full-auto"` here relaxes only the orchestrator pane while every coding agent keeps resolving from `agent_approval`. When `"full-auto"` resolves to no known flags for the CLI, git-paw warns at launch and starts the pane flagless (`auto` behavior) instead of failing |
 | `verify_on_commit_nudge` | `true` | When on, the broker posts a `supervisor.verify-now` message to the supervisor inbox on every `agent.artifact { status: "committed" }`, so the supervisor verifies each commit promptly on an explicit event instead of batching. Set `false` to fall back to sweep-cadence verification |
 | `strict_branch_guard` | `true` | When `true`, a per-worktree **pre-commit** hook refuses any commit whose checked-out branch differs from the branch the worktree was created for, blocking cross-worktree contamination (linked worktrees share `.git/refs`, so a stray `cd` can otherwise advance the wrong branch). Set `false` to disable *enforcement* — the **post-commit** hook still publishes an `agent.feedback` + `agent.learning` record when it detects a mismatch (detection without enforcement) |
 | `manual_approvals_log` | `true` | When `true`, commands the supervisor forwards for a manual decision (prompts the auto-approve preset did not match) are appended to `.git-paw/sessions/<session>.manual-approvals.jsonl` and surfaced via [`git paw approvals`](../cli-reference.md). On a pattern's first sighting a `permission_pattern` learning is also emitted (when `learnings = true`). Set `false` to suppress both the log writes and the learnings emission; the opt-out affects writes only, so `git paw approvals` still reads any pre-existing log |
 | `no_progress_window_seconds` | `1500` (~25 min) | Read by `.git-paw/scripts/sweep.sh`: an agent is flagged `no-progress` when BOTH its completed-task-checkbox count AND its branch commit count stay unchanged for this many seconds. Set longer to tolerate long build/research steps, shorter to nudge sooner. Omitted → the documented default |
 | `context_bloat_threshold_k` | `250` (thousand tokens) | Read by `.git-paw/scripts/sweep.sh`: when an agent's pane shows a `/clear to save <N>k tokens` hint whose `N` meets or exceeds this value, the agent is proactively flagged `context-bloat` so the supervisor can pre-empt the eventual freeze. Omitted → the documented default |
 | `blocked_on_supervisor_window_seconds` | `900` (~15 min) | Read by `.git-paw/scripts/sweep.sh`: an agent whose latest unanswered `agent.blocked` names the supervisor as the blocker is flagged `blocked-on-supervisor` once it has waited longer than this window, forcing the supervisor to answer. Omitted → the documented default |
+
+**Approval flag resolution.** When composing a pane's launch command, git-paw
+resolves the permission flags for a `(CLI, level)` pair in order: (1) the
+per-CLI [`[clis.<name>] approval_args`](#custom-clis) override, (2) the
+built-in table below, (3) no flags. The supervisor pane resolves at its own
+effective level (`approval`, falling back to `agent_approval`); coding-agent
+panes always resolve at `agent_approval`.
+
+| CLI | `full-auto` | `auto` |
+|-----|-------------|--------|
+| `claude` | `--dangerously-skip-permissions` | (none) |
+| `codex` | `--dangerously-bypass-approvals-and-sandbox` | `--sandbox workspace-write` |
+| `gemini` | `--yolo` | (none) |
+| `qwen` | `--yolo` | (none) |
+
+Any other CLI (or `manual` anywhere) resolves to no flags — use
+`approval_args` to supply native flags for CLIs not in the table.
 
 **Gate-command templating.** The eight `*_command` keys feed the supervisor
 skill's five verification gates (testing, regression analysis, spec audit, doc
