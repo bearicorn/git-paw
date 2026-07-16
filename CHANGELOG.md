@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-07-17
+
+### Features
+
+- *(supervisor)* Isolate operator memory via config-driven protected-path denial
+- *(supervisor)* Supervisor-native approval mode decoupled from agent approval
+- *(supervisor)* Seed per-worktree claude settings allowlists at attach and recovery
+- *(supervisor)* Harden the approval send gate
+- *(supervisor)* Source auto-approve whitelist from stack presets, add worktree dev-test rules
+- *(broker,dashboard)* Add agent.answer message variant with targeted delivery (W15-11)
+- *(broker)* Detect same-region edits via normalized cross-kind matching (W15-22a)
+
+### Documentation
+
+- *(user-guide)* Close doc-audit low-severity gaps in config, pause, and specs index
+- *(skills)* De-opinionate exported verify/archive and spec-layout prose
+
+### Testing
+
+- *(e2e)* Force remove_middle_agent past the bare-shell boot-block artifact
+
+### CI/CD
+
+- *(docs)* Split docs job into build-docs and deploy-docs
 ## [0.10.0] - 2026-07-13
 
 ### Features
@@ -177,6 +201,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 - Add CLI tool for parallel AI coding sessions across git worktrees
+[0.11.0]: https://github.com/bearicorn/git-paw/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/bearicorn/git-paw/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/bearicorn/git-paw/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/bearicorn/git-paw/compare/v0.7.0...v0.8.0
