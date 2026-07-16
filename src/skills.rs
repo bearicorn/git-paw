@@ -1202,6 +1202,108 @@ mod tests {
         );
     }
 
+    /// `agent-memory-isolation` scenario "Rendered coordination skill carries
+    /// the section": worktree-scoped persistent artifacts, off-limits operator
+    /// dirs, and question-instead-of-write are all present.
+    #[test]
+    fn coordination_skill_carries_memory_isolation_section() {
+        let tmpl = resolve("coordination").unwrap();
+        let content = &tmpl.content;
+        let idx = content
+            .find("Memory isolation")
+            .expect("coordination skill has a 'Memory isolation' section");
+        let section = &content[idx..content[idx..]
+            .find("### Before you start editing")
+            .map_or(content.len(), |end| idx + end)];
+        let lowered = section.to_lowercase();
+        assert!(
+            lowered.contains("inside your own\nworktree")
+                || lowered.contains("inside your own worktree"),
+            "section must scope persistent artifacts to the agent's worktree"
+        );
+        assert!(
+            lowered.contains("memory files") && lowered.contains("scratch state"),
+            "section must enumerate the persistent-artifact classes"
+        );
+        assert!(
+            lowered.contains("off-limits"),
+            "section must declare operator configuration directories off-limits"
+        );
+        assert!(
+            section.contains(".claude/") && section.contains(".git-paw/"),
+            "section must name the repo-root control directories"
+        );
+        assert!(
+            section.contains("agent.question") && lowered.contains("wait"),
+            "section must instruct question-instead-of-write with a wait"
+        );
+    }
+
+    /// `agent-memory-isolation` scenario "Guidance names no spec engine or CLI
+    /// product": the memory-isolation section is engine- and CLI-agnostic
+    /// (export policy) — the claude-format `.claude/` directory name is the
+    /// one documented default and not a product reference.
+    #[test]
+    fn memory_isolation_section_is_engine_and_cli_agnostic() {
+        let tmpl = resolve("coordination").unwrap();
+        let content = &tmpl.content;
+        let idx = content
+            .find("Memory isolation")
+            .expect("coordination skill has a 'Memory isolation' section");
+        let section = &content[idx..content[idx..]
+            .find("### Before you start editing")
+            .map_or(content.len(), |end| idx + end)];
+        for token in [
+            "OpenSpec",
+            "openspec",
+            "Spec Kit",
+            "speckit",
+            "opsx",
+            "Claude Code",
+            "claude-oss",
+            "codex",
+            "gemini",
+            "aider",
+        ] {
+            assert!(
+                !section.contains(token),
+                "memory-isolation section must not reference `{token}` (export policy)"
+            );
+        }
+    }
+
+    /// `agent-memory-isolation` scenario "Supervisor skill carries the
+    /// violation procedure": scoped feedback naming boundary + path on the
+    /// first sighting, operator escalation on repeat.
+    #[test]
+    fn supervisor_skill_carries_out_of_worktree_violation_procedure() {
+        let tmpl = resolve("supervisor").unwrap();
+        let content = &tmpl.content;
+        let idx = content
+            .find("Out-of-worktree write violations")
+            .expect("supervisor skill has an 'Out-of-worktree write violations' section");
+        let section = &content[idx..];
+        let lowered = section.to_lowercase();
+        assert!(
+            lowered.contains("boundary violation"),
+            "procedure must frame the write attempt as a boundary violation"
+        );
+        assert!(
+            section.contains("agent.feedback")
+                && section.contains("sweep.sh feedback-gate")
+                && lowered.contains("path"),
+            "first step must be scoped agent.feedback naming boundary and attempted path"
+        );
+        assert!(
+            lowered.contains("repeat") && lowered.contains("escalate"),
+            "repeat by the same agent must escalate to the operator"
+        );
+        assert!(
+            lowered.contains("danger-class escalation"),
+            "procedure must tie into the protected-path danger classification"
+        );
+    }
+
     #[test]
     fn supervisor_skill_contains_watch_peer_intents_section() {
         let tmpl = resolve("supervisor").unwrap();

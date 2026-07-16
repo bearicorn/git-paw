@@ -17,7 +17,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -29,9 +29,9 @@ use crate::error::PawError;
 use super::approval_gate::PaneCapturer;
 use super::approve::{ApprovalRequest, KeyDispatcher, auto_approve_pane};
 use super::auto_approve::{
-    detect_prompt_shape, extract_command_slice, is_dangerous, is_live_prompt, is_safe_command,
-    is_scratch_rm, is_worktree_dev_test_op, is_worktree_file_op, is_worktree_git_op,
-    select_option_index,
+    ProtectedPaths, detect_prompt_shape, extract_command_slice, is_dangerous, is_live_prompt,
+    is_protected_path_violation, is_safe_command, is_scratch_rm, is_worktree_dev_test_op,
+    is_worktree_file_op, is_worktree_git_op, select_option_index,
 };
 use super::permission_prompt::{PermissionType, detect_permission_prompt};
 use super::stall::detect_stalled_agents;
@@ -170,6 +170,9 @@ where
     pub forwarder: &'a mut Q,
     /// Resolves agent ID to worktree root for the file-op classifier (bug 3).
     pub worktree_resolver: &'a W,
+    /// Protected-path set for the operator config/memory danger rule
+    /// (`agent-memory-isolation`).
+    pub protected_paths: &'a ProtectedPaths,
     /// Optional broker URL for audit-log publishing.
     pub broker_url: Option<&'a str>,
 }
@@ -344,9 +347,17 @@ where
         // Option-index selection per the prompt shape and broad-grant rule.
         let option_index = select_option_index(detect_prompt_shape(&captured), &slice);
 
-        // Danger-first precedence: a curated danger-list match is a terminal
-        // escalate that overrides any whitelist / safe-by-pattern match.
-        if is_dangerous(&slice) {
+        // Danger-first precedence: a curated danger-list match — or a write
+        // targeting the operator's protected config/memory territory
+        // (`agent-memory-isolation`) — is a terminal escalate that overrides
+        // any whitelist / safe-by-pattern match.
+        let worktree_root = ctx.worktree_resolver.worktree_root_for(&agent_id);
+        if is_terminal_danger(
+            &captured,
+            &slice,
+            ctx.protected_paths,
+            worktree_root.as_deref(),
+        ) {
             ctx.forwarder.forward_question(&agent_id, kind, &captured);
             out.push((agent_id, TickOutcome::Forwarded { kind }));
             continue;
@@ -356,13 +367,14 @@ where
         // scratch classifies safe-by-pattern (the danger-list does not escalate
         // it).
         if is_scratch_rm(&slice) {
-            out.push(dispatch_safe(
+            out.push(dispatch_approval(
                 ctx,
                 &agent_id,
                 pane_index,
                 cfg.enabled,
                 option_index,
                 "scratch-rm",
+                PermissionType::SafeCommand,
             ));
             continue;
         }
@@ -375,22 +387,23 @@ where
         // - dev-test shapes (`bash -n`, non-recursive chmod, mktemp,
         //   interpreter-of-worktree-script): safe-by-pattern when every
         //   referenced path resolves inside the agent's worktree.
-        if let Some(root) = ctx.worktree_resolver.worktree_root_for(&agent_id) {
-            let matched = if is_worktree_git_op(&slice, &root) {
+        if let Some(root) = worktree_root.as_deref() {
+            let matched = if is_worktree_git_op(&slice, root) {
                 Some("worktree-git")
-            } else if is_worktree_dev_test_op(&slice, &root) {
+            } else if is_worktree_dev_test_op(&slice, root) {
                 Some("worktree-dev-test")
             } else {
                 None
             };
             if let Some(entry) = matched {
-                out.push(dispatch_safe(
+                out.push(dispatch_approval(
                     ctx,
                     &agent_id,
                     pane_index,
                     cfg.enabled,
                     option_index,
                     entry,
+                    PermissionType::SafeCommand,
                 ));
                 continue;
             }
@@ -399,13 +412,14 @@ where
         // Shell whitelist (read-mostly verbs + configured safe commands),
         // subordinate to the danger-list above.
         if let Some(entry) = first_whitelist_match(&slice, whitelist) {
-            out.push(dispatch_safe(
+            out.push(dispatch_approval(
                 ctx,
                 &agent_id,
                 pane_index,
                 cfg.enabled,
                 option_index,
                 &entry,
+                PermissionType::SafeCommand,
             ));
             continue;
         }
@@ -413,36 +427,18 @@ where
         // Bug 3: a Claude write / edit / create prompt whose target resolves
         // inside the agent's own worktree is auto-approved when
         // `approve_worktree_writes` is enabled.
-        if let Some(root) = ctx.worktree_resolver.worktree_root_for(&agent_id)
-            && is_worktree_file_op(&captured, &root, cfg.approve_worktree_writes())
+        if let Some(root) = worktree_root.as_deref()
+            && is_worktree_file_op(&captured, root, cfg.approve_worktree_writes())
         {
-            let req = ApprovalRequest {
-                enabled: cfg.enabled,
-                session: ctx.session,
+            out.push(dispatch_approval(
+                ctx,
+                &agent_id,
                 pane_index,
-                agent_id: &agent_id,
-                kind: PermissionType::WorktreeFileOp,
-                matched_entry: Some("worktree-file-op"),
-                live_prompt: true,
+                cfg.enabled,
                 option_index,
-                broker_url: ctx.broker_url,
-            };
-            let inspector = ctx.inspector;
-            match auto_approve_pane(inspector, ctx.dispatcher, req) {
-                Ok(true) => out.push((
-                    agent_id,
-                    TickOutcome::Approved {
-                        matched_entry: "worktree-file-op".to_string(),
-                        kind: PermissionType::WorktreeFileOp,
-                    },
-                )),
-                _ => out.push((
-                    agent_id,
-                    TickOutcome::Forwarded {
-                        kind: PermissionType::WorktreeFileOp,
-                    },
-                )),
-            }
+                "worktree-file-op",
+                PermissionType::WorktreeFileOp,
+            ));
             continue;
         }
 
@@ -452,22 +448,24 @@ where
     out
 }
 
-/// Dispatches the approval keystrokes for a command the classifier judged
-/// known-safe ([`PermissionType::SafeCommand`]) and returns the per-agent
-/// outcome. Centralises the request build + dispatch shared by the
-/// scratch-rm, worktree-git, and whitelist approval paths.
+/// Dispatches the approval keystrokes for a prompt the classifier judged
+/// safe and returns the per-agent outcome. Centralises the request build +
+/// dispatch shared by the scratch-rm, worktree-git, whitelist
+/// ([`PermissionType::SafeCommand`]) and worktree-file-op
+/// ([`PermissionType::WorktreeFileOp`]) approval paths.
 ///
 /// The caller has already passed the detection-time live-prompt gate, so
 /// `live_prompt: true` is set unconditionally here; `auto_approve_pane` then
 /// re-confirms a live prompt with a fresh capture immediately before the send
 /// (the `broker-mediated-approvals` approval-send gate) and refuses pane 0.
-fn dispatch_safe<R, I, D, Q, W>(
+fn dispatch_approval<R, I, D, Q, W>(
     ctx: &mut PollContext<'_, R, I, D, Q, W>,
     agent_id: &str,
     pane_index: usize,
     enabled: bool,
     option_index: u8,
     matched_entry: &str,
+    kind: PermissionType,
 ) -> (String, TickOutcome)
 where
     R: PaneResolver,
@@ -481,7 +479,7 @@ where
         session: ctx.session,
         pane_index,
         agent_id,
-        kind: PermissionType::SafeCommand,
+        kind,
         matched_entry: Some(matched_entry),
         live_prompt: true,
         option_index,
@@ -493,16 +491,23 @@ where
             agent_id.to_string(),
             TickOutcome::Approved {
                 matched_entry: matched_entry.to_string(),
-                kind: PermissionType::SafeCommand,
+                kind,
             },
         ),
-        _ => (
-            agent_id.to_string(),
-            TickOutcome::Forwarded {
-                kind: PermissionType::SafeCommand,
-            },
-        ),
+        _ => (agent_id.to_string(), TickOutcome::Forwarded { kind }),
     }
+}
+
+/// Terminal danger-precedence check: the curated danger-list plus the
+/// protected-path rule (`agent-memory-isolation`), evaluated before any
+/// whitelist or safe-by-pattern classification.
+fn is_terminal_danger(
+    captured: &str,
+    slice: &str,
+    protected: &ProtectedPaths,
+    worktree_root: Option<&Path>,
+) -> bool {
+    is_dangerous(slice) || is_protected_path_violation(captured, slice, protected, worktree_root)
 }
 
 fn first_whitelist_match(captured: &str, whitelist: &[String]) -> Option<String> {
@@ -603,6 +608,7 @@ mod tests {
         // Default: no worktree mapping (file-op classifier inert).
         let no_worktree = |_id: &str| None::<PathBuf>;
         let dev_allowlist = CommonDevAllowlistConfig::default();
+        let protected = ProtectedPaths::default();
         let mut dispatcher = RecordingDispatcher { events: vec![] };
         let mut forwarder = RecordingForwarder::default();
         let out = {
@@ -616,6 +622,7 @@ mod tests {
                 dispatcher: &mut dispatcher,
                 forwarder: &mut forwarder,
                 worktree_resolver: &no_worktree,
+                protected_paths: &protected,
                 broker_url: None,
             };
             poll_tick(&mut ctx)
@@ -864,6 +871,7 @@ mod tests {
             captured: "cargo test --workspace\nDo you want to proceed?\nEsc to cancel".into(),
         };
         let no_worktree = |_id: &str| None::<PathBuf>;
+        let protected = ProtectedPaths::default();
         let mut dispatcher = RecordingDispatcher { events: vec![] };
         let mut forwarder = RecordingForwarder::default();
         let out = {
@@ -877,6 +885,7 @@ mod tests {
                 dispatcher: &mut dispatcher,
                 forwarder: &mut forwarder,
                 worktree_resolver: &no_worktree,
+                protected_paths: &protected,
                 broker_url: None,
             };
             tick_from_status(&rows, &mut ctx)
@@ -909,6 +918,7 @@ mod tests {
         Wt: WorktreeResolver,
     {
         let dev_allowlist = CommonDevAllowlistConfig::default();
+        let protected = ProtectedPaths::default();
         let mut dispatcher = RecordingDispatcher { events: vec![] };
         let mut forwarder = RecordingForwarder::default();
         let out = {
@@ -922,6 +932,7 @@ mod tests {
                 dispatcher: &mut dispatcher,
                 forwarder: &mut forwarder,
                 worktree_resolver,
+                protected_paths: &protected,
                 broker_url: None,
             };
             poll_tick(&mut ctx)
@@ -1101,6 +1112,191 @@ mod tests {
             "out-of-worktree prompt must not dispatch keystrokes"
         );
         assert_eq!(forwarder.forwards.borrow().len(), 1);
+    }
+
+    // --- Protected-path danger rule (agent-memory-isolation) ---
+
+    /// Derives a real protected set from a config whose single CLI points its
+    /// `settings_path` into a fake operator home (no env mutation).
+    fn protected_for(op_home: &std::path::Path) -> ProtectedPaths {
+        let mut config = crate::config::PawConfig::default();
+        config.clis.insert(
+            "myvariant".to_string(),
+            crate::config::CustomCli {
+                command: "myvariant".to_string(),
+                display_name: None,
+                submit_delay_ms: None,
+                approval_args: std::collections::HashMap::new(),
+                settings_path: Some(
+                    op_home
+                        .join(".myvariant/settings.json")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            },
+        );
+        ProtectedPaths::derive(&config, None)
+    }
+
+    fn run_tick_with_protected<R, I, Wt>(
+        state: &BrokerState,
+        cfg: &AutoApproveConfig,
+        resolver: &R,
+        inspector: &I,
+        worktree_resolver: &Wt,
+        protected: &ProtectedPaths,
+    ) -> (
+        Vec<(String, TickOutcome)>,
+        RecordingDispatcher,
+        RecordingForwarder,
+    )
+    where
+        R: PaneResolver,
+        I: PaneInspector,
+        Wt: WorktreeResolver,
+    {
+        let dev_allowlist = CommonDevAllowlistConfig::default();
+        let mut dispatcher = RecordingDispatcher { events: vec![] };
+        let mut forwarder = RecordingForwarder::default();
+        let out = {
+            let mut ctx = PollContext {
+                state: Some(state),
+                session: "paw-x",
+                config: cfg,
+                dev_allowlist: &dev_allowlist,
+                resolver,
+                inspector,
+                dispatcher: &mut dispatcher,
+                forwarder: &mut forwarder,
+                worktree_resolver,
+                protected_paths: protected,
+                broker_url: None,
+            };
+            poll_tick(&mut ctx)
+        };
+        (out, dispatcher, forwarder)
+    }
+
+    /// Spec scenario "Write to operator memory escalates as danger" through
+    /// the poll loop: a file prompt targeting the operator's memory territory
+    /// forwards with zero keystrokes, even though the worktree file-op rule
+    /// is enabled.
+    #[test]
+    fn operator_memory_write_prompt_forwards_never_approves() {
+        let op_home = tempfile::tempdir().unwrap();
+        let memory = op_home.path().join(".myvariant/projects/-x-repo/memory");
+        std::fs::create_dir_all(&memory).unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let root = worktree.path().to_path_buf();
+        let state = BrokerState::new(None);
+        insert_stalled(&state, "agent-m", 600);
+        let cfg = AutoApproveConfig::default();
+        let resolver = |_id: &str| Some(2);
+        let inspector = StubInspector {
+            kind: Some(PermissionType::Unknown),
+            captured: format!(
+                "Do you want to allow this write to {}/MEMORY.md?\nEsc to cancel",
+                memory.to_string_lossy()
+            ),
+        };
+        let protected = protected_for(op_home.path());
+        let worktree_resolver = move |_id: &str| Some(root.clone());
+        let (out, dispatcher, forwarder) = run_tick_with_protected(
+            &state,
+            &cfg,
+            &resolver,
+            &inspector,
+            &worktree_resolver,
+            &protected,
+        );
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(out[0].1, TickOutcome::Forwarded { .. }),
+            "operator-memory write must forward, got {:?}",
+            out[0].1
+        );
+        assert!(
+            dispatcher.events.is_empty(),
+            "no auto-approval keystrokes may ever be dispatched for it"
+        );
+        assert_eq!(forwarder.forwards.borrow().len(), 1);
+    }
+
+    /// Spec scenario "Shell append to a configured settings file escalates":
+    /// the protected-path rule overrides the read-mostly whitelist (danger
+    /// precedence) — `echo`/`mkdir` are whitelisted verbs, yet the write
+    /// target inside the protected set forwards.
+    #[test]
+    fn protected_write_overrides_whitelisted_verb() {
+        let op_home = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let root = worktree.path().to_path_buf();
+        let state = BrokerState::new(None);
+        insert_stalled(&state, "agent-w", 600);
+        let cfg = AutoApproveConfig::default();
+        let resolver = |_id: &str| Some(3);
+        let settings = op_home.path().join(".myvariant/settings.json");
+        let inspector = StubInspector {
+            kind: Some(PermissionType::Unknown),
+            captured: format!(
+                "Bash command\n  echo '{{}}' >> {}\nDo you want to proceed?\nEsc to cancel",
+                settings.to_string_lossy()
+            ),
+        };
+        let protected = protected_for(op_home.path());
+        let worktree_resolver = move |_id: &str| Some(root.clone());
+        let (out, dispatcher, forwarder) = run_tick_with_protected(
+            &state,
+            &cfg,
+            &resolver,
+            &inspector,
+            &worktree_resolver,
+            &protected,
+        );
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(out[0].1, TickOutcome::Forwarded { .. }),
+            "settings append must forward, got {:?}",
+            out[0].1
+        );
+        assert!(dispatcher.events.is_empty());
+        assert_eq!(forwarder.forwards.borrow().len(), 1);
+    }
+
+    /// Spec scenario "In-worktree writes are unaffected" through the poll
+    /// loop: with the protected set armed, an in-worktree file prompt still
+    /// auto-approves via the worktree file-op rule.
+    #[test]
+    fn in_worktree_write_still_auto_approves_with_protected_set() {
+        let op_home = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let root = worktree.path().to_path_buf();
+        let state = BrokerState::new(None);
+        insert_stalled(&state, "agent-i", 600);
+        let cfg = AutoApproveConfig::default();
+        let resolver = |_id: &str| Some(4);
+        let inspector = StubInspector {
+            kind: Some(PermissionType::Unknown),
+            captured: "Do you want to allow this write to notes/memory.md?\nEsc to cancel".into(),
+        };
+        let protected = protected_for(op_home.path());
+        let worktree_resolver = move |_id: &str| Some(root.clone());
+        let (out, dispatcher, forwarder) = run_tick_with_protected(
+            &state,
+            &cfg,
+            &resolver,
+            &inspector,
+            &worktree_resolver,
+            &protected,
+        );
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(out[0].1, TickOutcome::Approved { .. }),
+            "in-worktree write must stay auto-approved, got {:?}",
+            out[0].1
+        );
+        assert!(!dispatcher.events.is_empty());
+        assert!(forwarder.forwards.borrow().is_empty());
     }
 
     #[test]
