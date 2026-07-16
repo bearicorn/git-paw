@@ -296,13 +296,22 @@ fn remove_middle_agent_kills_only_that_pane() {
     // The `echo` panes are bare shells (the CLI runs and exits), so removing
     // 'b' exercises the G1 shell-occupied-pane case: the pane is resolved via
     // pane_current_path and killed by id regardless of the running process.
+    //
+    // --force is deliberate: `git paw start` submits the boot block into that
+    // bare shell, which executes its backtick/redirect-bearing markdown and
+    // dirties the worktree — an artifact of the `echo` stand-in CLI (a real
+    // CLI consumes the prompt as input, never executing it as shell commands).
+    // Under load that surfaced as a flaky phantom `**WARNING:` dirty entry.
+    // This test verifies pane-kill/re-tile integrity, not the uncommitted-work
+    // gate (covered by the dedicated remove-dirty tests), so --force isolates
+    // the behavior under test and removes the load-dependent flake.
     let mut rm = cmd();
     tmux_env.apply_assert(&mut rm);
     let out = rm
         .current_dir(tr.path())
         .env("HOME", home.path())
         .env("GIT_PAW_READINESS_TIMEOUT_MS", FAST_READINESS_MS)
-        .args(["remove", "b"])
+        .args(["remove", "b", "--force"])
         .timeout(Duration::from_secs(40))
         .output()
         .expect("run remove");
