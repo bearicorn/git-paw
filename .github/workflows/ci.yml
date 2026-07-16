@@ -16,10 +16,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Least privilege by default: only the deploy-docs job needs pages/id-token
+# write (granted at the job level below). Every other job reads at most.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 jobs:
   lint:
@@ -110,16 +110,21 @@ jobs:
       - name: Run cargo deny
         run: cargo deny check
 
-  docs:
-    name: Build & Deploy Docs
+  # Docs are built and deployed as two separate jobs (the canonical GitHub
+  # Pages shape). Isolating the upload from the deploy means a deploy-only
+  # flake — notably the upstream upload-pages-artifact retry-dup transient
+  # (actions/upload-pages-artifact#97) — can be recovered by re-running the
+  # deploy without rebuilding the book + coverage. It does NOT fix the
+  # upstream retry-dup itself (that needs deploy-pages to accept an
+  # artifact_id, tracked in actions/deploy-pages#338); the workflow_dispatch
+  # fresh-run-id lever above stays the recovery path for that.
+  build-docs:
+    name: Build Docs
     needs: [lint, test, audit]
     if: >-
       github.ref == 'refs/heads/main'
       && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
-    concurrency:
-      group: pages
-      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -149,5 +154,23 @@ jobs:
         uses: actions/upload-pages-artifact@v4
         with:
           path: docs/book
+
+  deploy-docs:
+    name: Deploy Docs
+    needs: build-docs
+    runs-on: ubuntu-latest
+    # Only this job touches Pages, so scope the write grants here rather than
+    # at the workflow top level.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: true
+    steps:
       - name: Deploy to GitHub Pages
+        id: deployment
         uses: actions/deploy-pages@v5
