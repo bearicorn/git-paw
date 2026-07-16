@@ -225,6 +225,14 @@ approval_args = { "full-auto" = "--dangerously-skip-permissions" }
 | `settings_path` | no | Path to the CLI's claude-format settings file; the agent-broker helper-path grant (`.git-paw/scripts/broker.sh`) is seeded here so the boot-time `broker.sh` call doesn't prompt. |
 | `approval_args` | no | Map from approval-level name (`"manual"`, `"auto"`, `"full-auto"`) to the flags appended to the launch command at that level. Consulted **before** the [built-in flag table](#supervisor); an unknown level key is rejected at config load with an error naming the key. |
 
+Every configured `settings_path` also feeds the **protected-path set** used
+by the auto-approve classifier's memory-isolation rule: the file's parent
+directory (e.g. `~/.config/claude-variant/`) and its `projects/**/memory`
+subtrees are treated as operator territory, so a coding agent's write
+targeting them escalates as a danger-class prompt instead of ever being
+auto-approved. See the
+[supervisor decision order](../user-guide/supervisor.md#decision-order).
+
 ### Via command line
 
 ```bash

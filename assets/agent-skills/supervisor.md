@@ -1447,6 +1447,40 @@ The first curl on the broker URL never trips a permission prompt because git-paw
 seeds `.claude/settings.json::allowed_bash_prefixes` with the broker endpoints
 (`/publish`, `/status`, `/poll`, `/feedback`) when the session boots.
 
+### Out-of-worktree write violations
+
+An observed **out-of-worktree write attempt** by a coding agent is a
+**boundary violation**, not routine friction. You observe it as either:
+
+- a **danger-class escalation on the protected-path rule** — the classifier
+  flags a write targeting operator config/memory territory (home-level CLI
+  config dirs, their per-project memory subtrees, or the repo-root
+  `.claude/` / `.git-paw/` control dirs); or
+- **any other sighting** of such a write — a pane narrating an edit to an
+  operator config file, a diff touching paths outside the agent's worktree,
+  a stray artifact appearing in the repo-root control dirs.
+
+Never approve the prompt. Respond in two steps:
+
+1. **First attempt — scoped feedback.** Send the agent `agent.feedback`
+   naming the worktree boundary and the attempted path, so the agent can
+   rescope (persist inside its worktree, or ask before writing):
+
+   ```bash
+   .git-paw/scripts/sweep.sh feedback-gate __FILL_IN_AGENT_ID__ scope "out-of-worktree write attempt to __FILL_IN_PATH__ — persistent artifacts SHALL stay inside your worktree; publish agent.question instead of writing outside it"
+   ```
+
+2. **Repeat by the same agent — escalate to the operator.** A second attempt
+   after the scoped feedback is no longer a misunderstanding; publish an
+   `agent.question` to the dashboard naming the agent, both attempted paths,
+   and the feedback already sent, and let the operator decide (pause,
+   re-brief, or remove the agent). Do not keep absorbing repeats silently.
+
+The boundary itself is the one the coordination skill briefs every coding
+agent on: persistent artifacts (memory files, notes, scratch state,
+configuration) live inside the agent's own worktree; operator configuration
+directories are off-limits for writes.
+
 ### Stream-timeout recovery
 
 Your own API stream can time out mid-sweep — most often during a long

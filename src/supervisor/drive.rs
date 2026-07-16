@@ -54,9 +54,9 @@ use crate::error::PawError;
 use super::approval_gate::{approval_dedup_key, live_prompt_in_tail};
 use super::approve::{KeyDispatcher, TmuxKeyDispatcher, approval_keystrokes};
 use super::auto_approve::{
-    detect_prompt_shape, extract_command_slice, extract_path_from_file_prompt, is_dangerous,
-    is_live_prompt, is_safe_command, is_scratch_rm, is_worktree_dev_test_op, is_worktree_file_op,
-    is_worktree_git_op, select_option_index,
+    ProtectedPaths, detect_prompt_shape, extract_command_slice, extract_path_from_file_prompt,
+    is_dangerous, is_live_prompt, is_protected_path_violation, is_safe_command, is_scratch_rm,
+    is_worktree_dev_test_op, is_worktree_file_op, is_worktree_git_op, select_option_index,
 };
 use super::poll::{AgentStatusRow, fetch_status_over_http};
 
@@ -224,13 +224,18 @@ pub fn classify_prompt(
     whitelist: &[String],
     worktree_root: Option<&Path>,
     approve_worktree_writes: bool,
+    protected: &ProtectedPaths,
 ) -> PromptVerdict {
     let slice = extract_command_slice(captured).unwrap_or_else(|| captured.to_string());
     let option_index = select_option_index(detect_prompt_shape(captured), &slice);
 
-    // Danger-first precedence: a curated danger-list match is a terminal
-    // escalate that overrides any whitelist / safe-by-pattern match.
-    if is_dangerous(&slice) {
+    // Danger-first precedence: a curated danger-list match — or a write
+    // targeting the operator's protected config/memory territory
+    // (`agent-memory-isolation`) — is a terminal escalate that overrides any
+    // whitelist / safe-by-pattern match.
+    if is_dangerous(&slice)
+        || is_protected_path_violation(captured, &slice, protected, worktree_root)
+    {
         return PromptVerdict::Danger;
     }
     // Scratch-path exception: an `rm -rf` whose every target is repo/OS scratch.
@@ -579,6 +584,9 @@ pub struct DriveConfig {
     pub whitelist: Vec<String>,
     /// Whether in-worktree write/edit/create prompts auto-approve.
     pub approve_worktree_writes: bool,
+    /// Protected-path set for the operator config/memory danger rule
+    /// (`agent-memory-isolation`).
+    pub protected_paths: ProtectedPaths,
     /// Broker log pointer for the summary.
     pub broker_log_hint: Option<String>,
     /// Learnings file pointer for the summary.
@@ -593,6 +601,7 @@ impl Default for DriveConfig {
             dedup_window: DEDUP_WINDOW,
             whitelist: Vec::new(),
             approve_worktree_writes: true,
+            protected_paths: ProtectedPaths::default(),
             broker_log_hint: None,
             learnings_hint: None,
         }
@@ -666,6 +675,7 @@ pub fn drive_loop(
                 &config.whitelist,
                 worktree_root,
                 config.approve_worktree_writes,
+                &config.protected_paths,
             );
 
             match verdict {
@@ -1009,6 +1019,9 @@ pub struct DriveRunOptions {
     pub whitelist: Vec<String>,
     /// Whether in-worktree write/edit/create prompts auto-approve.
     pub approve_worktree_writes: bool,
+    /// Protected-path set for the operator config/memory danger rule
+    /// (`agent-memory-isolation`).
+    pub protected_paths: ProtectedPaths,
     /// Broker-log pointer for the exit summary.
     pub broker_log_hint: Option<String>,
     /// Learnings-file pointer for the exit summary.
@@ -1036,6 +1049,7 @@ pub fn run_drive_loop(
         broker_url,
         whitelist,
         approve_worktree_writes,
+        protected_paths,
         broker_log_hint,
         learnings_hint,
     } = options;
@@ -1064,6 +1078,7 @@ pub fn run_drive_loop(
         heartbeat: duration_from_env_ms("GIT_PAW_DRIVE_HEARTBEAT_MS", HEARTBEAT_INTERVAL),
         whitelist,
         approve_worktree_writes,
+        protected_paths,
         broker_log_hint,
         learnings_hint,
         ..DriveConfig::default()
@@ -1308,7 +1323,7 @@ mod tests {
     fn classifies_safe_cargo_test() {
         let whitelist = vec!["cargo test".to_string()];
         let cap = live_safe_capture("cargo test --workspace");
-        let v = classify_prompt(&cap, &whitelist, None, false);
+        let v = classify_prompt(&cap, &whitelist, None, false, &ProtectedPaths::default());
         assert!(matches!(
             v,
             PromptVerdict::Safe {
@@ -1322,16 +1337,75 @@ mod tests {
     fn classifies_danger_git_push() {
         let cap = "Bash command\n  git push origin main\nDo you want to proceed?\n(esc to cancel)";
         assert_eq!(
-            classify_prompt(cap, &[], None, false),
+            classify_prompt(cap, &[], None, false, &ProtectedPaths::default()),
             PromptVerdict::Danger
         );
+    }
+
+    /// Spec scenario "Write to operator memory escalates as danger" through
+    /// the drive-loop classifier: a write targeting the protected set is
+    /// [`PromptVerdict::Danger`] — terminal, never auto-approved — at the
+    /// same precedence as the curated danger-list.
+    #[test]
+    fn classifies_protected_path_write_as_danger() {
+        let op_home = tempfile::tempdir().unwrap();
+        let mut config = crate::config::PawConfig::default();
+        config.clis.insert(
+            "myvariant".to_string(),
+            crate::config::CustomCli {
+                command: "myvariant".to_string(),
+                display_name: None,
+                submit_delay_ms: None,
+                approval_args: std::collections::HashMap::new(),
+                settings_path: Some(
+                    op_home
+                        .path()
+                        .join(".myvariant/settings.json")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            },
+        );
+        let protected = ProtectedPaths::derive(&config, None);
+        let worktree = tempfile::tempdir().unwrap();
+        // File-prompt path: a write into the operator's config dir.
+        let cap = format!(
+            "Do you want to allow this write to {}/settings.json?\n(esc to cancel)",
+            op_home.path().join(".myvariant").to_string_lossy()
+        );
+        assert_eq!(
+            classify_prompt(&cap, &[], Some(worktree.path()), true, &protected),
+            PromptVerdict::Danger
+        );
+        // Shell write target: an append via a whitelisted verb still escalates.
+        let cap = format!(
+            "Bash command\n  echo x >> {}/settings.json\nDo you want to proceed?\n(esc to cancel)",
+            op_home.path().join(".myvariant").to_string_lossy()
+        );
+        assert_eq!(
+            classify_prompt(
+                &cap,
+                &["echo".to_string()],
+                Some(worktree.path()),
+                true,
+                &protected
+            ),
+            PromptVerdict::Danger
+        );
+        // In-worktree writes are unaffected: same protected set, target
+        // inside the agent's own worktree.
+        let cap = "Do you want to allow this write to notes/memory.md?\n(esc to cancel)";
+        assert!(matches!(
+            classify_prompt(cap, &[], Some(worktree.path()), true, &protected),
+            PromptVerdict::Safe { .. }
+        ));
     }
 
     #[test]
     fn classifies_unknown_when_no_rule_matches() {
         let cap = "Bash command\n  frobnicate --all\nDo you want to proceed?\n(esc to cancel)";
         assert_eq!(
-            classify_prompt(cap, &[], None, false),
+            classify_prompt(cap, &[], None, false, &ProtectedPaths::default()),
             PromptVerdict::Unknown
         );
     }
@@ -1344,7 +1418,13 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("scripts")).unwrap();
         std::fs::write(tmp.path().join("scripts/helper.sh"), "echo hi\n").unwrap();
         let cap = live_safe_capture("bash -n scripts/helper.sh");
-        match classify_prompt(&cap, &[], Some(tmp.path()), false) {
+        match classify_prompt(
+            &cap,
+            &[],
+            Some(tmp.path()),
+            false,
+            &ProtectedPaths::default(),
+        ) {
             PromptVerdict::Safe { matched, .. } => assert_eq!(matched, "worktree-dev-test"),
             other => panic!("expected Safe worktree-dev-test, got {other:?}"),
         }
@@ -1357,7 +1437,7 @@ mod tests {
     fn worktree_dev_test_shape_stays_unknown_without_worktree_root() {
         let cap = live_safe_capture("bash -n scripts/helper.sh");
         assert_eq!(
-            classify_prompt(&cap, &[], None, false),
+            classify_prompt(&cap, &[], None, false, &ProtectedPaths::default()),
             PromptVerdict::Unknown
         );
     }

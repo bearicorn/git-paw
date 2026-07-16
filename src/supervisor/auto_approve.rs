@@ -665,6 +665,332 @@ pub fn is_scratch_rm(slice: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Protected-path set (agent-memory-isolation)
+// ---------------------------------------------------------------------------
+
+/// Config-driven protected-path set covering operator configuration and
+/// memory territory (`agent-memory-isolation`).
+///
+/// The set derives from configuration and well-known defaults — never from
+/// hardcoded CLI product names (the export-agnosticism policy). Sources:
+///
+/// - the documented claude-format default config dir (`~/.claude`);
+/// - the directory named by `CLAUDE_CONFIG_DIR` when set;
+/// - the parent directory of every configured `[clis.<name>].settings_path`;
+/// - the `projects/**/memory` subtrees beneath the directories above;
+/// - the host repository root's `.claude/` and `.git-paw/` directories
+///   (the agent's own worktree subtree is carved out at match time, so an
+///   embedded worktree under `.git-paw/worktrees/` is unaffected).
+///
+/// Entries are canonicalized at derivation time when they exist; entries
+/// whose paths do not exist keep their lexically-normalized absolute form
+/// and are still matched syntactically (fail-closed).
+///
+/// The default value is the EMPTY set (matches nothing) — production callers
+/// build the real set via [`ProtectedPaths::derive`].
+#[derive(Debug, Clone, Default)]
+pub struct ProtectedPaths {
+    /// Absolute directory prefixes: the lexically-normalized spelling of each
+    /// source, plus its canonical spelling when the two differ.
+    entries: Vec<PathBuf>,
+    /// Home directory captured at derivation time, used to expand `~` in
+    /// match targets deterministically.
+    home: Option<PathBuf>,
+}
+
+impl ProtectedPaths {
+    /// Derives the protected-path set from the loaded config, the process
+    /// environment (`CLAUDE_CONFIG_DIR`), and the home directory.
+    ///
+    /// `repo_root` is the host repository root; pass it whenever known so the
+    /// repo-level `.claude/` and `.git-paw/` control directories join the set.
+    #[must_use]
+    pub fn derive(config: &crate::config::PawConfig, repo_root: Option<&Path>) -> Self {
+        let settings_paths: Vec<String> = config
+            .clis
+            .values()
+            .filter_map(|c| c.settings_path.clone())
+            .collect();
+        Self::derive_from_parts(
+            &settings_paths,
+            std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
+            crate::dirs::home_dir(),
+            repo_root,
+        )
+    }
+
+    /// Testable core of [`ProtectedPaths::derive`]: the environment inputs
+    /// (`CLAUDE_CONFIG_DIR` value, home directory) are passed explicitly so
+    /// unit tests never mutate process-global state.
+    fn derive_from_parts(
+        settings_paths: &[String],
+        claude_config_dir: Option<&str>,
+        home: Option<PathBuf>,
+        repo_root: Option<&Path>,
+    ) -> Self {
+        let mut sources: Vec<PathBuf> = Vec::new();
+        // The documented claude-format default config dir — the only
+        // built-in; every other entry traces to config or environment.
+        if let Some(h) = &home {
+            sources.push(h.join(".claude"));
+        }
+        if let Some(dir) = claude_config_dir {
+            let dir = dir.trim();
+            if !dir.is_empty() {
+                sources.push(expand_tilde(dir, home.as_deref()));
+            }
+        }
+        for raw in settings_paths {
+            let expanded = expand_tilde(raw, home.as_deref());
+            if let Some(parent) = expanded.parent() {
+                sources.push(parent.to_path_buf());
+            }
+        }
+        // Existing `projects/*/memory` subtrees beneath the config dirs.
+        // Their protected parents already cover them by prefix; enumerating
+        // the memory territory keeps the set explicit for auditability.
+        let memory: Vec<PathBuf> = sources.iter().flat_map(|d| memory_dirs_under(d)).collect();
+        sources.extend(memory);
+        if let Some(root) = repo_root {
+            sources.push(root.join(".claude"));
+            sources.push(root.join(".git-paw"));
+        }
+
+        let mut entries: Vec<PathBuf> = Vec::new();
+        for src in sources {
+            let lexical = lexical_normalize(&src);
+            if !entries.contains(&lexical) {
+                entries.push(lexical);
+            }
+            // Canonical spelling via the deepest EXISTING ancestor, so an
+            // entry that does not exist yet still gets the same spelling a
+            // resolvable target will resolve to (e.g. a symlinked temp dir).
+            if let Some(resolved) = resolve_for_boundary(&src) {
+                let resolved = lexical_normalize(&resolved);
+                if !entries.contains(&resolved) {
+                    entries.push(resolved);
+                }
+            }
+        }
+        Self { entries, home }
+    }
+
+    /// Returns `true` when `dir` is an entry of the derived set (compared by
+    /// lexical or canonical spelling). Exposed so callers and tests can audit
+    /// what the derivation produced.
+    #[must_use]
+    pub fn contains_dir(&self, dir: &Path) -> bool {
+        let lexical = lexical_normalize(dir);
+        if self.entries.contains(&lexical) {
+            return true;
+        }
+        dir.canonicalize().is_ok_and(|c| self.entries.contains(&c))
+    }
+
+    /// Returns `true` when `target` resolves inside the protected set —
+    /// excluding anything inside the agent's own worktree.
+    ///
+    /// `target` may be relative (resolved against `worktree_root`) or
+    /// `~`-prefixed (expanded against the derivation-time home directory).
+    /// Resolution is fail-closed: a target that cannot be canonicalized is
+    /// collapsed lexically, so a `..`/`~` spelling that syntactically reaches
+    /// into the protected set still matches. A relative target with no known
+    /// worktree root never matches (other classification rules decide).
+    #[must_use]
+    pub fn matches_target(&self, target: &str, worktree_root: Option<&Path>) -> bool {
+        if self.entries.is_empty() {
+            return false;
+        }
+        let cleaned = target
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'' || c == '`');
+        if cleaned.is_empty() {
+            return false;
+        }
+        let expanded = expand_tilde(cleaned, self.home.as_deref());
+        let joined = if expanded.is_absolute() {
+            expanded
+        } else if let Some(root) = worktree_root {
+            root.join(expanded)
+        } else {
+            return false;
+        };
+        let resolved = resolve_for_boundary(&joined).unwrap_or_else(|| lexical_normalize(&joined));
+        // The agent's own worktree subtree is never protected — in-worktree
+        // writes stay governed by the worktree-boundary rules. This is also
+        // what carves an embedded worktree out of the repo-root `.git-paw/`
+        // entry.
+        if let Some(root) = worktree_root {
+            let root_resolved = root
+                .canonicalize()
+                .unwrap_or_else(|_| lexical_normalize(root));
+            if resolved.starts_with(&root_resolved) {
+                return false;
+            }
+        }
+        self.entries.iter().any(|e| resolved.starts_with(e))
+    }
+}
+
+/// Expands a leading `~` / `~/` against `home`. Any other form (including
+/// `~user`, which the CLIs git-paw drives never emit) is returned as-is.
+fn expand_tilde(raw: &str, home: Option<&Path>) -> PathBuf {
+    let Some(home) = home else {
+        return PathBuf::from(raw);
+    };
+    if raw == "~" {
+        return home.to_path_buf();
+    }
+    match raw.strip_prefix("~/") {
+        Some(rest) => home.join(rest),
+        None => PathBuf::from(raw),
+    }
+}
+
+/// Collapses `.` / `..` components lexically — no filesystem access — for the
+/// fail-closed syntactic matching of paths that cannot be canonicalized.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                // Popping past the root leaves the root in place, matching
+                // how the OS resolves `/..`.
+                let _ = out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Enumerates the existing `projects/*/memory` directories beneath `dir` —
+/// the per-project memory territory of a claude-format config dir.
+fn memory_dirs_under(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(projects) = std::fs::read_dir(dir.join("projects")) else {
+        return out;
+    };
+    for entry in projects.flatten() {
+        let memory = entry.path().join("memory");
+        if memory.is_dir() {
+            out.push(memory);
+        }
+    }
+    out
+}
+
+/// Write-target extraction for the protected-path rule: the candidate paths a
+/// command slice writes to. Covers redirection targets (`>`, `>>`, attached
+/// and fd-prefixed forms) and the targets of common mutating verbs (`tee`,
+/// `cp`/`mv`/`ln` destinations, `touch`, `mkdir`, `rm`, `rmdir`, `truncate`,
+/// and in-place `sed -i`). Read-only operations contribute no targets.
+fn slice_write_targets(slice: &str) -> Vec<String> {
+    let mut targets: Vec<String> = Vec::new();
+    let mut segment: Vec<&str> = Vec::new();
+    for tok in slice.split_whitespace() {
+        if matches!(tok, "&&" | "||" | ";" | "|") {
+            collect_segment_write_targets(&segment, &mut targets);
+            segment.clear();
+        } else {
+            segment.push(tok);
+        }
+    }
+    collect_segment_write_targets(&segment, &mut targets);
+    targets
+}
+
+/// Collects the write targets of one pipeline segment into `out`.
+fn collect_segment_write_targets(tokens: &[&str], out: &mut Vec<String>) {
+    // Redirection targets anywhere in the segment; the remaining tokens feed
+    // the mutating-verb scan below.
+    let mut redirect_pending = false;
+    let mut rest: Vec<&str> = Vec::new();
+    for tok in tokens {
+        if redirect_pending {
+            out.push((*tok).to_string());
+            redirect_pending = false;
+            continue;
+        }
+        let stripped = tok.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&');
+        if let Some(after) = stripped.strip_prefix('>') {
+            let after = after.strip_prefix('>').unwrap_or(after);
+            if after.is_empty() {
+                redirect_pending = true;
+            } else if !after.starts_with('&') {
+                // `2>&1`-style fd duplication has no path target.
+                out.push(after.to_string());
+            }
+            continue;
+        }
+        rest.push(tok);
+    }
+
+    // Mutating-verb targets, with leading VAR=value assignments skipped
+    // (mirroring `leading_verb`).
+    let mut toks = rest.iter().copied().skip_while(|tok| {
+        tok.split_once('=').is_some_and(|(k, _)| {
+            !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+    });
+    let Some(first) = toks.next() else {
+        return;
+    };
+    let verb = first.rsplit('/').next().unwrap_or(first);
+    let args: Vec<&str> = toks.collect();
+    let paths: Vec<&str> = args
+        .iter()
+        .filter(|t| !t.starts_with('-'))
+        .copied()
+        .collect();
+    match verb {
+        "tee" | "touch" | "mkdir" | "rm" | "rmdir" | "truncate" => {
+            out.extend(paths.iter().map(|p| (*p).to_string()));
+        }
+        // Only the destination (last path argument) is a write target — the
+        // source of a `cp`/`mv` is a read.
+        "cp" | "mv" | "ln" => {
+            if paths.len() >= 2
+                && let Some(last) = paths.last()
+            {
+                out.push((*last).to_string());
+            }
+        }
+        // In-place edit only; a plain `sed` is a read.
+        "sed" if args.iter().any(|t| t.starts_with("-i")) => {
+            out.extend(paths.iter().map(|p| (*p).to_string()));
+        }
+        _ => {}
+    }
+}
+
+/// Returns `true` when a filesystem prompt or its command slice targets a
+/// write inside the protected set — the danger-class protected-path rule of
+/// `safe-command-classification`.
+///
+/// Callers evaluate this at the same precedence as the curated danger-list:
+/// a match is a terminal escalation, never auto-approved. Reads never match
+/// (only write targets are extracted). `worktree_root` carves out the
+/// agent's own worktree.
+#[must_use]
+pub fn is_protected_path_violation(
+    captured: &str,
+    slice: &str,
+    protected: &ProtectedPaths,
+    worktree_root: Option<&Path>,
+) -> bool {
+    if let Some(path) = extract_path_from_file_prompt(captured)
+        && protected.matches_target(&path, worktree_root)
+    {
+        return true;
+    }
+    slice_write_targets(slice)
+        .iter()
+        .any(|t| protected.matches_target(t, worktree_root))
+}
+
+// ---------------------------------------------------------------------------
 // Live-prompt gate (Section 6)
 // ---------------------------------------------------------------------------
 
@@ -1370,6 +1696,264 @@ Do you want to proceed?";
         let missing = Path::new("/nonexistent/paw-worktree-xyz");
         assert!(!is_worktree_dev_test_op("mktemp -d", missing));
         assert!(!is_worktree_dev_test_op("bash -n x.sh", missing));
+    }
+
+    // --- Protected-path set (agent-memory-isolation) ---
+
+    /// Builds a set from explicit parts with a temp home — no env mutation.
+    fn protected_from(
+        settings_paths: &[&str],
+        claude_config_dir: Option<&str>,
+        home: &Path,
+        repo_root: Option<&Path>,
+    ) -> ProtectedPaths {
+        let settings: Vec<String> = settings_paths.iter().map(|s| (*s).to_string()).collect();
+        ProtectedPaths::derive_from_parts(
+            &settings,
+            claude_config_dir,
+            Some(home.to_path_buf()),
+            repo_root,
+        )
+    }
+
+    /// Spec scenario "Configured `settings_path` parent joins the set": the
+    /// tilde-expanded parent of `[clis.myvariant].settings_path` is protected.
+    #[test]
+    fn configured_settings_path_parent_joins_the_set() {
+        let home = TempDir::new().unwrap();
+        let set = protected_from(&["~/.myvariant/settings.json"], None, home.path(), None);
+        assert!(set.contains_dir(&home.path().join(".myvariant")));
+    }
+
+    /// The same scenario through the config-driven entry point: a `PawConfig`
+    /// with `[clis.myvariant] settings_path` feeds the derivation.
+    #[test]
+    fn derive_reads_settings_paths_from_config() {
+        let mut config = crate::config::PawConfig::default();
+        config.clis.insert(
+            "myvariant".to_string(),
+            crate::config::CustomCli {
+                command: "myvariant".to_string(),
+                display_name: None,
+                submit_delay_ms: None,
+                settings_path: Some("/opt/myvariant-home/settings.json".to_string()),
+                approval_args: std::collections::HashMap::new(),
+            },
+        );
+        let set = ProtectedPaths::derive(&config, None);
+        assert!(set.contains_dir(Path::new("/opt/myvariant-home")));
+    }
+
+    /// Spec scenario "Repo-root control dirs are protected for embedded
+    /// worktrees": `<repo>/.claude` and `<repo>/.git-paw` join the set, while
+    /// the agent's own worktree subtree is carved out.
+    #[test]
+    fn repo_root_control_dirs_protected_for_embedded_worktrees() {
+        let home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        let worktree = repo.path().join(".git-paw/worktrees/feat-x");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let set = protected_from(&[], None, home.path(), Some(repo.path()));
+        assert!(set.contains_dir(&repo.path().join(".claude")));
+        assert!(set.contains_dir(&repo.path().join(".git-paw")));
+        // A write to the repo-root control area escalates...
+        let config_toml = repo.path().join(".git-paw/config.toml");
+        assert!(set.matches_target(&config_toml.to_string_lossy(), Some(&worktree)));
+        // ...but the agent's own worktree subtree (inside .git-paw) does not.
+        assert!(!set.matches_target("notes/memory.md", Some(&worktree)));
+        let own_file = worktree.join("src/lib.rs");
+        assert!(!set.matches_target(&own_file.to_string_lossy(), Some(&worktree)));
+    }
+
+    /// Spec scenario "No CLI product names are hardcoded beyond the
+    /// claude-format default": with empty config and no env, the set is the
+    /// home-level claude-format default only.
+    #[test]
+    fn derivation_has_no_hardcoded_cli_names() {
+        let home = TempDir::new().unwrap();
+        let set = protected_from(&[], None, home.path(), None);
+        assert!(set.contains_dir(&home.path().join(".claude")));
+        for product_dir in [".claude-oss", ".codex", ".gemini", ".aider"] {
+            assert!(
+                !set.contains_dir(&home.path().join(product_dir)),
+                "{product_dir} must not be built in — entries trace to config/env only"
+            );
+        }
+    }
+
+    /// `CLAUDE_CONFIG_DIR` (passed explicitly) joins the set.
+    #[test]
+    fn claude_config_dir_joins_the_set() {
+        let home = TempDir::new().unwrap();
+        let custom = TempDir::new().unwrap();
+        let set = protected_from(
+            &[],
+            Some(&custom.path().to_string_lossy()),
+            home.path(),
+            None,
+        );
+        assert!(set.contains_dir(custom.path()));
+        let target = custom.path().join("settings.json");
+        assert!(set.matches_target(&target.to_string_lossy(), None));
+    }
+
+    /// `projects/**/memory` subtrees beneath a config dir join the set.
+    #[test]
+    fn memory_subtrees_join_the_set() {
+        let home = TempDir::new().unwrap();
+        let memory = home.path().join(".claude/projects/-x-repo/memory");
+        std::fs::create_dir_all(&memory).unwrap();
+        let set = protected_from(&[], None, home.path(), None);
+        assert!(set.contains_dir(&memory));
+    }
+
+    /// Fail-closed: an entry whose path does not exist is still matched
+    /// syntactically.
+    #[test]
+    fn nonexistent_entry_matches_syntactically() {
+        let home = TempDir::new().unwrap();
+        // `~/.myvariant` is never created.
+        let set = protected_from(&["~/.myvariant/settings.json"], None, home.path(), None);
+        assert!(set.matches_target("~/.myvariant/settings.json", None));
+    }
+
+    // --- Protected-path violation rule (safe-command-classification) ---
+
+    /// Spec scenario "Write to operator memory escalates as danger": a
+    /// filesystem prompt targeting the operator's memory territory matches.
+    #[test]
+    fn operator_memory_write_prompt_is_violation() {
+        let home = TempDir::new().unwrap();
+        let memory = home.path().join(".claude/projects/-x-repo/memory");
+        std::fs::create_dir_all(&memory).unwrap();
+        let set = protected_from(&[], None, home.path(), None);
+        let target = memory.join("MEMORY.md");
+        let prompt = format!(
+            "Do you want to allow this write to {}?",
+            target.to_string_lossy()
+        );
+        let worktree = TempDir::new().unwrap();
+        assert!(is_protected_path_violation(
+            &prompt,
+            &prompt,
+            &set,
+            Some(worktree.path())
+        ));
+    }
+
+    /// Spec scenario "Shell append to a configured settings file escalates":
+    /// a `>>` redirect into a configured settings dir matches.
+    #[test]
+    fn shell_append_to_configured_settings_is_violation() {
+        let home = TempDir::new().unwrap();
+        let set = protected_from(&["~/.claude-oss/settings.json"], None, home.path(), None);
+        let capture =
+            "Bash command\n  echo '{}' >> ~/.claude-oss/settings.json\nDo you want to proceed?";
+        let slice = "echo '{}' >> ~/.claude-oss/settings.json";
+        assert!(is_protected_path_violation(capture, slice, &set, None));
+    }
+
+    /// Spec scenario "In-worktree writes are unaffected": a relative write
+    /// inside the agent's own worktree never matches this rule.
+    #[test]
+    fn in_worktree_write_is_not_violation() {
+        let home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        let worktree = repo.path().join(".git-paw/worktrees/feat-x");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let set = protected_from(&[], None, home.path(), Some(repo.path()));
+        let prompt = "Do you want to allow this write to notes/memory.md?";
+        assert!(!is_protected_path_violation(
+            prompt,
+            prompt,
+            &set,
+            Some(&worktree)
+        ));
+        // The existing worktree-confined classification still applies.
+        assert!(is_worktree_file_op(prompt, &worktree, true));
+    }
+
+    /// Spec scenario "Reads of operator config are not matched by this rule".
+    #[test]
+    fn reads_of_operator_config_are_not_violation() {
+        let home = TempDir::new().unwrap();
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        let set = protected_from(&[], None, home.path(), None);
+        let slice = "cat ~/.claude/settings.json";
+        let capture = format!("Bash command\n  {slice}\nDo you want to proceed?");
+        assert!(!is_protected_path_violation(&capture, slice, &set, None));
+        // Reading via cp FROM the protected dir is a read of the source too.
+        let slice = "cp ~/.claude/settings.json backup.json";
+        let worktree = TempDir::new().unwrap();
+        assert!(!is_protected_path_violation(
+            slice,
+            slice,
+            &set,
+            Some(worktree.path())
+        ));
+    }
+
+    /// Spec scenario "Path-escape into the protected set is caught": a
+    /// `..`-spelled target that resolves into `<repo>/.claude` matches.
+    #[test]
+    fn dotdot_escape_into_protected_set_is_violation() {
+        let home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        let worktree = repo.path().join(".git-paw/worktrees/feat-x");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(repo.path().join(".claude")).unwrap();
+        let set = protected_from(&[], None, home.path(), Some(repo.path()));
+        let target = format!(
+            "{}/../../../.claude/settings.json",
+            worktree.to_string_lossy()
+        );
+        let prompt = format!("Do you want to allow this write to {target}?");
+        assert!(is_protected_path_violation(
+            &prompt,
+            &prompt,
+            &set,
+            Some(&worktree)
+        ));
+    }
+
+    /// Mutating verbs (not just redirects) are covered: `mkdir`/`touch`/`rm`
+    /// into a protected dir match; `tee` and `sed -i` too.
+    #[test]
+    fn mutating_verbs_into_protected_set_are_violations() {
+        let home = TempDir::new().unwrap();
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        let set = protected_from(&[], None, home.path(), None);
+        let worktree = TempDir::new().unwrap();
+        let root = Some(worktree.path());
+        for slice in [
+            "mkdir -p ~/.claude/hooks",
+            "touch ~/.claude/settings.json",
+            "rm ~/.claude/settings.json",
+            "echo x | tee -a ~/.claude/settings.json",
+            "sed -i s/a/b/ ~/.claude/settings.json",
+            "cp evil.json ~/.claude/settings.json",
+        ] {
+            assert!(
+                is_protected_path_violation(slice, slice, &set, root),
+                "{slice} must match the protected-path rule"
+            );
+        }
+        // Plain sed (no -i) is a read.
+        let slice = "sed -n 1,10p ~/.claude/settings.json";
+        assert!(!is_protected_path_violation(slice, slice, &set, root));
+    }
+
+    /// The empty (default) set matches nothing — production derivation is
+    /// what arms the rule.
+    #[test]
+    fn empty_protected_set_matches_nothing() {
+        let set = ProtectedPaths::default();
+        assert!(!is_protected_path_violation(
+            "Do you want to allow this write to /etc/hosts?",
+            "echo x >> /etc/hosts",
+            &set,
+            None
+        ));
     }
 
     // --- Section 6: live-prompt gate ---

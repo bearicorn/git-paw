@@ -281,6 +281,125 @@ fn out_of_worktree_script_escalates_unknown() {
     );
 }
 
+// --- protected-path rule (agent-memory-isolation mirror) ---
+
+/// Appends a `[clis.myvariant]` entry whose `settings_path` points into
+/// `op_home`, arming the helper's protected-path set from config.
+fn append_settings_path_config(fx: &Fixture, op_home: &std::path::Path) {
+    let settings = op_home.join(".myvariant/settings.json");
+    append_config(
+        fx,
+        &format!(
+            "\n[clis.myvariant]\ncommand = \"myvariant\"\nsettings_path = \"{}\"\n",
+            settings.to_string_lossy()
+        ),
+    );
+}
+
+/// Spec scenario "Shell append to a configured settings file escalates"
+/// through the helper: the write target inside a configured settings dir
+/// escalates as danger even though `echo` is a whitelisted verb.
+#[test]
+#[serial]
+fn protected_settings_append_escalates_danger() {
+    let fx = setup();
+    let op_home = TempDir::new().expect("op home");
+    append_settings_path_config(&fx, op_home.path());
+    let settings = op_home.path().join(".myvariant/settings.json");
+    let out = classify(
+        &fx,
+        &format!(
+            "Bash command\n  echo '{{}}' >> {}\nDo you want to proceed?\nEsc to cancel",
+            settings.to_string_lossy()
+        ),
+        None,
+    );
+    assert!(
+        out.contains("escalate") && out.contains("danger"),
+        "settings append must escalate as danger, got: {out}"
+    );
+}
+
+/// Spec scenario "Write to operator memory escalates as danger" through the
+/// helper: a filesystem write prompt targeting a protected memory subtree
+/// escalates.
+#[test]
+#[serial]
+fn protected_memory_write_prompt_escalates_danger() {
+    let fx = setup();
+    let op_home = TempDir::new().expect("op home");
+    let memory = op_home.path().join(".myvariant/projects/-x-repo/memory");
+    fs::create_dir_all(&memory).expect("mkdir memory");
+    append_settings_path_config(&fx, op_home.path());
+    let out = classify(
+        &fx,
+        &format!(
+            "Do you want to allow this write to {}/MEMORY.md?\nEsc to cancel",
+            memory.to_string_lossy()
+        ),
+        None,
+    );
+    assert!(
+        out.contains("escalate") && out.contains("danger"),
+        "operator-memory write prompt must escalate as danger, got: {out}"
+    );
+}
+
+/// Spec scenario "Reads of operator config are not matched by this rule"
+/// through the helper: a `cat` of the protected settings file still approves
+/// via the read-mostly whitelist.
+#[test]
+#[serial]
+fn protected_config_read_still_approves() {
+    let fx = setup();
+    let op_home = TempDir::new().expect("op home");
+    append_settings_path_config(&fx, op_home.path());
+    let settings = op_home.path().join(".myvariant/settings.json");
+    let out = classify(
+        &fx,
+        &format!(
+            "Bash command\n  cat {}\nDo you want to proceed?\nEsc to cancel",
+            settings.to_string_lossy()
+        ),
+        None,
+    );
+    assert!(
+        out.contains("approve") && out.contains("whitelist"),
+        "read of operator config must stay whitelisted, got: {out}"
+    );
+}
+
+/// Spec scenarios "Repo-root control dirs are protected for embedded
+/// worktrees" + "Path-escape into the protected set is caught" + "In-worktree
+/// writes are unaffected" through the helper: from an embedded worktree, a
+/// `..`-escape into `.git-paw/` escalates while an in-worktree write approves.
+#[test]
+#[serial]
+fn repo_control_dir_write_from_embedded_worktree_escalates() {
+    let fx = setup();
+    let worktree = fx.root.join(".git-paw/worktrees/feat-x");
+    fs::create_dir_all(&worktree).expect("mkdir embedded worktree");
+    let root = worktree.to_string_lossy().to_string();
+    let out = classify(
+        &fx,
+        "Bash command\n  echo x >> ../../config.toml\nDo you want to proceed?\nEsc to cancel",
+        Some(&root),
+    );
+    assert!(
+        out.contains("escalate") && out.contains("danger"),
+        "..-escape into repo .git-paw must escalate as danger, got: {out}"
+    );
+    let out = classify(
+        &fx,
+        "Bash command\n  echo x >> notes.md\nDo you want to proceed?\nEsc to cancel",
+        Some(&root),
+    );
+    assert!(
+        out.contains("approve") && out.contains("whitelist"),
+        "in-worktree write must stay approved, got: {out}"
+    );
+}
+
 // --- list-parity guard (Rust ↔ sweep.sh lockstep) ---
 
 /// Extracts the string items of a Python list literal `NAME = [...]` from the

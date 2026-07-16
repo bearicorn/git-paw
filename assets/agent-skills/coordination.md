@@ -146,6 +146,45 @@ and retry. (The guard can be disabled repo-wide via
 `[supervisor] strict_branch_guard = false`, but the post-commit detection
 still reports any mismatch to the supervisor.)
 
+### Memory isolation — persistent artifacts live in your worktree
+
+Every persistent artifact you create — memory files, notes, scratch state,
+configuration you generate for yourself — SHALL live **inside your own
+worktree**. Your worktree is your entire writable territory; nothing you
+persist belongs anywhere else on the machine.
+
+**Operator configuration directories are off-limits for writes.** That means:
+
+- home-level CLI configuration directories (your own CLI's config/settings
+  directory under the operator's home, and any other tool's equivalent),
+  including any per-project memory files stored beneath them;
+- the host repository's `.claude/` and `.git-paw/` directories — supervisor
+  territory that configures the whole session, even though an embedded
+  worktree may physically sit beneath them.
+
+These locations belong to the OPERATOR, not to you. Writing there mutates
+state shared across sessions and agents: a memory file you overwrite is the
+operator's memory, and a settings file you append to changes what every
+future session is allowed to do. The permission classifier treats such
+writes as danger-class escalations — they are never auto-approved — but do
+not rely on the classifier: some persistence paths never raise a prompt at
+all, so the boundary is yours to respect whether or not anything asks.
+
+**When a task appears to require writing outside your worktree, do not
+write — ask.** Publish `agent.question` describing the path and why the task
+seems to need it, then WAIT for the answer:
+
+```bash
+curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
+  -H "Content-Type: application/json" \
+  -d '{"type":"agent.question","agent_id":"{{BRANCH_ID}}","payload":{"question":"task seems to require writing <path>, outside my worktree — proceed or rescope?"}}'
+```
+
+If you need somewhere to persist working state, create it inside the
+worktree (e.g. a `notes/` directory or your project's ignored scratch
+location) — never in the operator's home or the repository's control
+directories.
+
 ### Before you start editing
 
 Coordination is forward-looking. Before you touch any file:

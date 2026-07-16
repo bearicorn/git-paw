@@ -1151,7 +1151,9 @@ cmd_stuck_eval() {
 # Auto-approve classification, mirroring the Rust classifier
 # (src/supervisor/auto_approve.rs) so the bundled helper decides identically:
 # command-slice extraction, the curated danger-list (+ per-OS addendum) with
-# the rm -rf scratch exception, the stack-neutral whitelist composed with the
+# the rm -rf scratch exception, the protected-path rule (writes targeting
+# operator config/memory territory escalate as danger — agent-memory-
+# isolation), the stack-neutral whitelist composed with the
 # [supervisor.common_dev_allowlist] stack presets and safe_commands from
 # .git-paw/config.toml (fail-safe: built-ins only when unreadable), worktree-
 # confined git add/commit and dev-test shapes, the live-prompt gate, and
@@ -1175,6 +1177,7 @@ cmd_classify() {
 # detection, and broad-grant rule cannot drift between them.
 run_classifier() {
   RESOLVE_OPTION="${2:-}" WORKTREE_ROOT="${1}" CONFIG_TOML="${CONFIG_TOML}" \
+    PROJECT_ROOT="${PROJECT_ROOT}" \
     LIVE_MARKERS="${LIVE_PROMPT_MARKERS_REGEX}" "${PY}" -c "$(cat <<'PY'
 import os, platform, re, sys
 
@@ -1450,6 +1453,151 @@ def is_worktree_dev_test(s, root):
         return bool(paths) and all(inside_worktree(p, root) for p in paths)
     return False
 
+# --- protected-path set (agent-memory-isolation) ---------------------------
+# Mirrors ProtectedPaths / is_protected_path_violation in
+# src/supervisor/auto_approve.rs: a write targeting operator config/memory
+# territory escalates as danger at danger-list precedence. The set derives
+# from config and well-known defaults (the claude-format ~/.claude default,
+# CLAUDE_CONFIG_DIR, [clis.<name>].settings_path parents, their
+# projects/*/memory subtrees, and the repo-root .claude/.git-paw control
+# dirs) — never hardcoded CLI product names. Reads never match; the pane
+# worktree root is carved out.
+project_root = os.environ.get("PROJECT_ROOT", "")
+
+def read_settings_paths(path):
+    # [clis.<name>].settings_path values from .git-paw/config.toml.
+    # Fail-safe: any read or parse problem yields an empty list.
+    try:
+        import tomllib
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+        out = []
+        for cli in data.get("clis", {}).values():
+            sp = cli.get("settings_path") if isinstance(cli, dict) else None
+            if isinstance(sp, str):
+                out.append(sp)
+        return out
+    except Exception:
+        return []
+
+def protected_entries():
+    dirs = [os.path.expanduser(os.path.join("~", ".claude"))]
+    ccd = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if ccd:
+        dirs.append(os.path.expanduser(ccd))
+    for sp in read_settings_paths(config_toml):
+        parent = os.path.dirname(os.path.expanduser(sp))
+        if parent:
+            dirs.append(parent)
+    for d in list(dirs):
+        projects = os.path.join(d, "projects")
+        try:
+            for name in os.listdir(projects):
+                mem = os.path.join(projects, name, "memory")
+                if os.path.isdir(mem):
+                    dirs.append(mem)
+        except OSError:
+            pass
+    if project_root:
+        dirs.append(os.path.join(project_root, ".claude"))
+        dirs.append(os.path.join(project_root, ".git-paw"))
+    return [os.path.realpath(d) for d in dirs]
+
+PROTECTED = protected_entries()
+
+def protected_target(p, root):
+    p = p.strip().strip('"').strip("'").strip(chr(96))
+    if not p:
+        return False
+    p = os.path.expanduser(p)
+    if not os.path.isabs(p):
+        if not root:
+            return False
+        p = os.path.join(root, p)
+    rp = os.path.realpath(p)
+    if root:
+        rr = os.path.realpath(root)
+        if rp == rr or rp.startswith(rr + os.sep):
+            return False
+    return any(rp == e or rp.startswith(e + os.sep) for e in PROTECTED)
+
+# Mirror of extract_path_from_file_prompt (write/edit/create prompt shapes).
+FILE_PROMPT_RE = re.compile(
+    r"(?i)(?:allow this write to|allow this edit to|make this edit to"
+    r"|write to|create file|edit file|write file)"
+    r"\s+(?:the file\s+)?(.+?)\s*\??\s*$")
+
+def file_prompt_path(cap):
+    for line in cap.splitlines():
+        m = FILE_PROMPT_RE.search(line)
+        if m:
+            path = m.group(1).strip().strip('"').strip("'").strip(chr(96))
+            if path:
+                return path
+    return None
+
+# Mirror of slice_write_targets: redirect targets plus mutating-verb targets.
+WRITE_ALL_VERBS = ("tee", "touch", "mkdir", "rm", "rmdir", "truncate")
+WRITE_DEST_VERBS = ("cp", "mv", "ln")
+
+def segment_write_targets(toks, out):
+    rest = []
+    pending = False
+    for tok in toks:
+        if pending:
+            out.append(tok)
+            pending = False
+            continue
+        stripped = tok.lstrip("0123456789&")
+        if stripped.startswith(">"):
+            after = stripped.lstrip(">")
+            if not after:
+                pending = True
+            elif not after.startswith("&"):
+                out.append(after)
+            continue
+        rest.append(tok)
+    while rest:
+        head = rest[0]
+        if "=" in head:
+            k = head.split("=", 1)[0]
+            if k and all(c.isalnum() or c == "_" for c in k):
+                rest = rest[1:]
+                continue
+        break
+    if not rest:
+        return
+    verb = rest[0].rsplit("/", 1)[-1]
+    args = rest[1:]
+    paths = [t for t in args if not t.startswith("-")]
+    if verb in WRITE_ALL_VERBS:
+        out.extend(paths)
+    elif verb in WRITE_DEST_VERBS:
+        # Only the destination (last path arg) is a write; the source is a read.
+        if len(paths) >= 2:
+            out.append(paths[-1])
+    elif verb == "sed" and any(t.startswith("-i") for t in args):
+        out.extend(paths)
+
+def slice_write_targets(s):
+    out, seg = [], []
+    for tok in s.split():
+        if tok in ("&&", "||", ";", "|"):
+            segment_write_targets(seg, out)
+            seg = []
+        else:
+            seg.append(tok)
+    segment_write_targets(seg, out)
+    return out
+
+def protected_violation(cap, s, root):
+    if not PROTECTED:
+        return False
+    fp = file_prompt_path(cap)
+    if fp is not None and protected_target(fp, root):
+        return True
+    return any(protected_target(t, root) for t in slice_write_targets(s))
+
 # --- live-prompt gate -----------------------------------------------------
 # Structural mirror of is_live_prompt in src/supervisor/auto_approve.rs: a
 # textual marker (LIVE_MARKERS, case-insensitive) within the last 4 non-blank
@@ -1511,7 +1659,7 @@ if s is None:
     s = cap
 opt = select_option(detect_shape(cap), s)
 
-if is_dangerous(s):
+if is_dangerous(s) or protected_violation(cap, s, worktree_root):
     print("escalate (danger)")
 elif is_scratch_rm(s):
     print(f"approve option={opt} (scratch-rm)")

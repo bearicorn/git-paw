@@ -353,19 +353,35 @@ is never mistaken for a prompt to run it.
    and raw `/dev/disk*`; Linux/WSL `/dev/sd*`, `/dev/nvme*`, `mkfs*`). A
    danger match always escalates to you — even when the verb is otherwise
    whitelisted (so `git push` escalates although `git` is a safe verb).
-3. **Scratch-path exception.** An `rm -rf` / `rm -fr` does *not* escalate when
+3. **Protected paths (escalate wins).** Evaluated at the same precedence as
+   the danger-list: a filesystem write/edit/create prompt — or a shell write
+   target (a `>` / `>>` redirect, `tee`, a `cp`/`mv`/`ln` destination,
+   `touch`, `mkdir`, `rm`, `truncate`, in-place `sed -i`) — whose path
+   resolves inside the **protected-path set** escalates as danger, never
+   auto-approved. The set is config-driven (no CLI product names hardcoded):
+   the home-level claude-format default (`~/.claude`), the directory named by
+   `CLAUDE_CONFIG_DIR`, the parent of every configured
+   `[clis.<name>].settings_path`, their `projects/**/memory` subtrees, and
+   the repo-root `.claude/` + `.git-paw/` control directories. Targets are
+   canonicalized before matching with the same fail-closed posture as the
+   worktree boundary check (a `..`/`~` spelling that syntactically reaches
+   into the set matches even when the path cannot be canonicalized). The
+   agent's own worktree is carved out — in-worktree writes are unaffected —
+   and **reads never match** (`cat ~/.claude/settings.json` is decided by the
+   other rules).
+4. **Scratch-path exception.** An `rm -rf` / `rm -fr` does *not* escalate when
    **every** target is repo/OS scratch: `/tmp/paw-*`, `/private/tmp/paw-*`, a
    `$TMPDIR`-rooted `paw-*`, or any path under `.git-paw/tmp/`. This also covers
    `rm -rf "$VAR"` when `$VAR` resolves (via the captured environment or a
    preceding `VAR=…` assignment) to such a path. If a variable cannot be
    resolved, or **any** target lies outside the scratch set, the whole command
    escalates (fail-safe).
-4. **Worktree-confined `git add` / `git commit`.** These pre-approve when the
+5. **Worktree-confined `git add` / `git commit`.** These pre-approve when the
    agent's worktree resolves to a real directory (the same canonicalize-then-
    `starts_with` boundary check used for file edits), so an unattended agent can
    stage and commit its own work without stalling. `git push` is **not** covered
    — the danger-list escalates it.
-5. **Worktree-confined dev-test shapes.** `bash -n <script>`, non-recursive
+6. **Worktree-confined dev-test shapes.** `bash -n <script>`, non-recursive
    `chmod <mode> <path…>`, `mktemp` / `mktemp -d`, and interpreter runs of a
    worktree-resident script (`bash`, `sh`, `python3`, `python`, `node`
    followed by a worktree file) classify safe when **every** referenced path
@@ -375,7 +391,7 @@ is never mistaken for a prompt to run it.
    These rules apply only to panes with a known worktree — the supervisor
    pane is unaffected. Interpreter runs are one-time approvals only (see the
    arbitrary-code policy below).
-6. **Composed command whitelist.** The whitelist is composed from the
+7. **Composed command whitelist.** The whitelist is composed from the
    stack-neutral read-mostly verbs (`curl`, `cat`, `ls`, `grep`, `rg`, `git`,
    `echo`, `sed`, `awk`, `find`, `wc`, `head`, `tail`, `jq`, `mkdir`, `touch`,
    `export`, `tmux`, `env`, plus `git commit` and the broker-localhost curl
@@ -384,7 +400,7 @@ is never mistaken for a prompt to run it.
    Toolchain verbs are **not** built in — a `cargo test` prompt auto-approves
    only when the `rust` stack is declared. This is subordinate to the
    danger-list above.
-7. Anything else is **Unknown** and forwarded to you.
+8. Anything else is **Unknown** and forwarded to you.
 
 ### Re-confirm before send, and the pane 0 exclusion
 
@@ -430,6 +446,30 @@ cursor-movement sequence — `Down` + `Enter` lands on `No` on a 2-option
 prompt and takes the permanent broad grant on a 3-option one, so the helper
 resolves the digit through the same shape and broad-grant rules as the
 in-tool auto-approver.
+
+## Out-of-worktree write violations
+
+An observed out-of-worktree write attempt by a coding agent — a danger-class
+escalation on the protected-path rule above, or any other sighting of such a
+write (pane narration, a diff touching operator paths, a stray artifact in
+the repo-root control dirs) — is a **boundary violation**, and the supervisor
+skill instructs a two-step response:
+
+1. **First attempt — scoped feedback.** The supervisor sends the agent
+   `agent.feedback` (via `sweep.sh feedback-gate <agent> scope …`) naming the
+   worktree boundary and the attempted path, so the agent can rescope:
+   persist inside its worktree, or publish `agent.question` before any
+   outside write.
+2. **Repeat by the same agent — operator escalation.** A second attempt
+   after the scoped feedback escalates to you via `agent.question`, naming
+   the agent, both attempted paths, and the feedback already sent — the
+   decision (pause, re-brief, remove) is yours, not the supervisor's.
+
+The agent-side counterpart is the coordination skill's memory-isolation
+briefing (see [Agent Coordination](coordination.md#memory-isolation)):
+persistent artifacts live inside the agent's worktree, operator
+configuration directories are off-limits, and a task that seems to require
+an outside write becomes a question instead.
 
 ## Manual approvals
 

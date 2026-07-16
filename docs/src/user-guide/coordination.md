@@ -141,6 +141,34 @@ The boot block includes instructions for proper paste handling, particularly the
 - **Supervisor Visibility**: Questions and blockers surface to the dashboard promptly
 - **Audit Trail**: All boot operations are logged in the broker log
 
+## Memory Isolation
+
+Coding agents are briefed (via the bundled coordination skill) that their
+worktree is their entire writable territory:
+
+- **Persistent artifacts live in the worktree.** Memory files, notes,
+  scratch state, and any configuration an agent generates for itself SHALL
+  be created inside the agent's own worktree — never elsewhere on the
+  machine.
+- **Operator configuration directories are off-limits for writes.**
+  Home-level CLI configuration directories (and the per-project memory
+  subtrees beneath them) and the host repository's `.claude/` and
+  `.git-paw/` control directories belong to the operator. Writing there
+  mutates state shared across sessions and agents.
+- **Question instead of write.** When a task appears to require writing
+  outside the worktree, the agent publishes `agent.question` describing the
+  path and waits for an answer rather than writing.
+
+The permission classifier backs this boundary: writes targeting the
+protected-path set escalate as danger-class prompts that are never
+auto-approved (see the
+[supervisor decision order](supervisor.md#decision-order)), and the
+supervisor treats an observed out-of-worktree write attempt as a boundary
+violation with scoped feedback and repeat-escalation (see
+[Out-of-worktree write violations](supervisor.md#out-of-worktree-write-violations)).
+The guidance closes the remaining gap: persistence paths that never raise a
+prompt are governed by the briefing itself.
+
 ## Message Types
 
 Every broker message uses the same JSON envelope:

@@ -793,6 +793,20 @@ fn publish_supervisor_question(question: &str, broker_url: &str) -> Result<(), P
     publish_to_broker_http(broker_url, &msg)
 }
 
+/// Per-session classifier wiring for [`spawn_auto_approve_thread`], bundled
+/// so the spawn signature stays under the argument-count lint.
+struct AutoApproveWiring {
+    /// Agent ID → tmux pane index.
+    pane_map: std::collections::HashMap<String, usize>,
+    /// Agent ID → worktree root for the boundary-scoped classifier rules.
+    worktree_map: std::collections::HashMap<String, std::path::PathBuf>,
+    /// Manual-decision recorder for forwarded prompts.
+    recorder: git_paw::supervisor::manual_approvals::ManualDecisionRecorder,
+    /// Protected-path set for the operator config/memory danger rule
+    /// (`agent-memory-isolation`).
+    protected_paths: git_paw::supervisor::auto_approve::ProtectedPaths,
+}
+
 /// Spawns a background thread that periodically polls the broker `/status`
 /// endpoint and dispatches auto-approval keystrokes for stalled agents.
 ///
@@ -809,13 +823,17 @@ fn spawn_auto_approve_thread(
     broker_url: String,
     config: Option<config::AutoApproveConfig>,
     dev_allowlist: config::CommonDevAllowlistConfig,
-    pane_map: std::collections::HashMap<String, usize>,
-    worktree_map: std::collections::HashMap<String, std::path::PathBuf>,
-    recorder: git_paw::supervisor::manual_approvals::ManualDecisionRecorder,
+    wiring: AutoApproveWiring,
 ) -> Option<(
     std::sync::Arc<std::sync::atomic::AtomicBool>,
     std::thread::JoinHandle<()>,
 )> {
+    let AutoApproveWiring {
+        pane_map,
+        worktree_map,
+        recorder,
+        protected_paths,
+    } = wiring;
     let cfg = config?.resolved();
     if !cfg.enabled {
         return None;
@@ -908,6 +926,7 @@ fn spawn_auto_approve_thread(
                 dispatcher: &mut dispatcher,
                 forwarder: &mut forwarder,
                 worktree_resolver: &worktree_resolver,
+                protected_paths: &protected_paths,
                 broker_url: Some(&broker_url),
             };
             let _ = tick_from_status(&rows, &mut ctx);
@@ -1614,10 +1633,19 @@ fn drive_unattended_loop(
         .unwrap_or_default()
         .resolved();
 
+    // Protected-path set for the operator config/memory danger rule
+    // (`agent-memory-isolation`); config parse problems degrade to the
+    // defaults-only derivation rather than aborting the loop.
+    let protected_paths = git_paw::supervisor::auto_approve::ProtectedPaths::derive(
+        &config::load_config(repo_root, None).unwrap_or_default(),
+        Some(repo_root),
+    );
+
     let options = DriveRunOptions {
         broker_url: broker_config.enabled.then(|| broker_config.url()),
         whitelist: auto_approve.effective_whitelist(&supervisor_cfg.common_dev_allowlist),
         approve_worktree_writes: auto_approve.approve_worktree_writes(),
+        protected_paths,
         broker_log_hint: state
             .broker_log_path
             .as_ref()
@@ -3189,6 +3217,13 @@ fn cmd_dashboard() -> Result<(), PawError> {
                 sess.project_name.clone(),
                 cli,
             );
+            // Protected-path set for the operator config/memory danger rule
+            // (`agent-memory-isolation`), derived once before the thread
+            // spawns.
+            let protected_paths = git_paw::supervisor::auto_approve::ProtectedPaths::derive(
+                &config,
+                Some(&sess.repo_path),
+            );
             spawn_auto_approve_thread(
                 sess.session_name.clone(),
                 broker_config.url(),
@@ -3196,9 +3231,12 @@ fn cmd_dashboard() -> Result<(), PawError> {
                 supervisor
                     .map(|s| s.common_dev_allowlist.clone())
                     .unwrap_or_default(),
-                pane_map,
-                worktree_map,
-                recorder,
+                AutoApproveWiring {
+                    pane_map,
+                    worktree_map,
+                    recorder,
+                    protected_paths,
+                },
             )
         });
 
