@@ -31,14 +31,23 @@ fn tmux_available() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// Write a supervisor-mode config (broker disabled, `echo` CLI) so launches
-/// are fast and need no real agent binary.
+/// Write a supervisor-mode config (broker disabled) using `cat` as the
+/// stand-in CLI so launches are fast and need no real agent binary.
+///
+/// `cat` (not `echo`) is deliberate: `echo` exits immediately, leaving the
+/// pane a bare login shell that then EXECUTES the boot block git-paw injects
+/// via `send-keys -l` — its backtick/redirect-bearing markdown creates junk
+/// files, dirtying the worktree and flakily blocking a non-force `remove`
+/// under load. `cat` stays alive and consumes the boot block as stdin (like a
+/// real CLI, which reads the prompt rather than executing it), so the worktree
+/// keeps only git-paw's managed files — exactly the clean post-start state the
+/// non-force remove tests here assert.
 fn write_supervisor_config(repo: &Path) {
     let paw_dir = repo.join(".git-paw");
     fs::create_dir_all(&paw_dir).expect("create .git-paw");
     fs::write(
         paw_dir.join("config.toml"),
-        "default_cli = \"echo\"\n\n[supervisor]\nenabled = true\ncli = \"echo\"\n",
+        "default_cli = \"cat\"\n\n[supervisor]\nenabled = true\ncli = \"cat\"\n",
     )
     .expect("write config");
 }
