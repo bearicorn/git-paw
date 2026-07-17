@@ -151,7 +151,7 @@ jobs:
       - name: Generate agent-friendly docs surface
         run: python3 docs/generate_agent_metadata.py --src-dir docs/src --book-dir docs/book --build-date "$(date -u +%F)"
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: docs/book
 
