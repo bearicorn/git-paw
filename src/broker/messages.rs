@@ -650,7 +650,8 @@ impl BrokerMessage {
     ///
     /// The `agent_id` *shape* is enforced at the HTTP boundary by
     /// `src/broker/server.rs::publish` against the canonical regex
-    /// `^(supervisor|feat/[a-z0-9][a-z0-9-]+|feat-[a-z0-9][a-z0-9-]+)$`
+    /// `^(supervisor|[a-z0-9][a-z0-9-]*[/-][a-z0-9][a-z0-9-]*)$` (any
+    /// `{prefix}/{name}` or `{prefix}-{name}` slug, not just `feat`)
     /// — this validator only catches the empty-or-whitespace case so
     /// non-HTTP callers still trip a clear error on garbage input
     /// before the typed value flows further.
