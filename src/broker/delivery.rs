@@ -259,11 +259,34 @@ fn route_message(inner: &mut BrokerStateInner, msg: &BrokerMessage, seq: u64) {
             }
             // Silently drop if target has no inbox (not yet registered)
         }
-        BrokerMessage::Question { .. } | BrokerMessage::VerifyNow { .. } => {
+        BrokerMessage::Question { agent_id, payload } => {
             // Route to the supervisor inbox, creating it if absent.
             // Do NOT enqueue in sender's or any other agent's inbox.
-            // `VerifyNow` is broker-emitted; like a question it is a
-            // supervisor-directed signal.
+            //
+            // Duplicate suppression: a blocked agent that re-publishes the same
+            // question every poll must not flood the supervisor inbox (v0.11.0
+            // dogfood, 7x). Suppress the enqueue when an identical, still-resident
+            // question — same `agent_id` and same text — is already in the inbox.
+            // The first copy is always kept; only exact re-publishes of a
+            // still-resident question are dropped. A different question, or the
+            // same text from a different agent, still enqueues; once the
+            // supervisor drains this question a re-ask enqueues normally.
+            let inbox = inner.queues.entry("supervisor".to_string()).or_default();
+            let duplicate = inbox.iter().any(|(_, m)| {
+                matches!(
+                    m,
+                    BrokerMessage::Question { agent_id: a, payload: p }
+                        if a == agent_id && p.question == payload.question
+                )
+            });
+            if !duplicate {
+                inbox.push((seq, msg.clone()));
+            }
+        }
+        BrokerMessage::VerifyNow { .. } => {
+            // Route to the supervisor inbox, creating it if absent. A
+            // broker-emitted supervisor-directed signal; each nudge is a
+            // distinct event and is never deduplicated.
             let inbox = inner.queues.entry("supervisor".to_string()).or_default();
             inbox.push((seq, msg.clone()));
         }
@@ -316,9 +339,13 @@ fn route_message(inner: &mut BrokerStateInner, msg: &BrokerMessage, seq: u64) {
 
 /// Polls an agent's inbox for messages newer than `since`.
 ///
-/// Returns `(messages, last_seq)` where `last_seq` is the highest
-/// sequence number in the result, or `0` if no messages match.
-/// This is a non-destructive read -- messages remain in the inbox.
+/// Returns `(messages, last_seq)` where `last_seq` is the **greater of
+/// `since` and the highest sequence number in the result**. The cursor is
+/// monotonic: it never regresses below `since`, so an empty result (nothing
+/// newer than `since`, including an unknown agent) returns `since` itself,
+/// not `0`. A client can therefore advance with `cursor = last_seq` on every
+/// poll — including empty polls — without ever re-reading already-seen
+/// messages. This is a non-destructive read -- messages remain in the inbox.
 ///
 /// Uses a read lock only.
 pub fn poll_messages(
@@ -329,11 +356,11 @@ pub fn poll_messages(
     let inner = state.read();
 
     let Some(inbox) = inner.queues.get(agent_id) else {
-        return (Vec::new(), 0);
+        return (Vec::new(), since);
     };
 
     let mut messages = Vec::new();
-    let mut last_seq: u64 = 0;
+    let mut last_seq: u64 = since;
 
     for (seq, msg) in inbox {
         if *seq > since {
@@ -1241,17 +1268,107 @@ mod tests {
     }
 
     #[test]
-    fn poll_since_latest_returns_empty() {
+    fn poll_since_latest_holds_cursor_at_since() {
+        // Monotonic cursor: an empty poll (since == latest) returns `since`,
+        // not 0, so a client advancing with `cursor = last_seq` never regresses
+        // and re-reads its inbox (the v0.11.0 dogfood re-serve-question bug).
         let state = fresh_state();
         publish_message(&state, &make_status("a", "working"));
         publish_message(&state, &make_status("b", "working"));
         publish_message(&state, &make_artifact("b", "done", &[]));
 
         let (_, first_seq) = poll_messages(&state, "a", 0);
+        assert!(first_seq > 0);
 
         let (msgs, last_seq) = poll_messages(&state, "a", first_seq);
         assert!(msgs.is_empty());
-        assert_eq!(last_seq, 0);
+        assert_eq!(
+            last_seq, first_seq,
+            "empty poll must hold the cursor at `since`, not regress to 0"
+        );
+    }
+
+    #[test]
+    fn question_does_not_wedge_later_messages_in_mixed_inbox() {
+        // A Question in the supervisor inbox must not wedge the cursor: after the
+        // client drains it and advances, a later Artifact is still delivered, and
+        // the Question is never re-served past the advanced cursor. (v0.11.0
+        // dogfood: sweep.sh re-served one question ~30x and hid later artifacts.)
+        let state = fresh_state();
+
+        // Question routes to the supervisor inbox (and creates it).
+        publish_message(&state, &make_question("feat-x", "Which error type?"));
+
+        // Client poll #1: gets the question, advances its cursor.
+        let (msgs1, cursor1) = poll_messages(&state, "supervisor", 0);
+        assert!(
+            msgs1
+                .iter()
+                .any(|m| matches!(m, BrokerMessage::Question { .. })),
+            "first poll should surface the question"
+        );
+
+        // A later Artifact broadcast reaches the now-existing supervisor inbox.
+        publish_message(&state, &make_artifact("feat-x", "done", &[]));
+
+        // Client poll #2 with the advanced cursor: surfaces the later artifact,
+        // never the already-seen question.
+        let (msgs2, cursor2) = poll_messages(&state, "supervisor", cursor1);
+        assert!(
+            msgs2
+                .iter()
+                .any(|m| matches!(m, BrokerMessage::Artifact { .. })),
+            "second poll must surface the later artifact"
+        );
+        assert!(
+            !msgs2
+                .iter()
+                .any(|m| matches!(m, BrokerMessage::Question { .. })),
+            "the already-drained question must not re-appear"
+        );
+        assert!(cursor2 > cursor1);
+
+        // Fully drained: the cursor holds and nothing is re-served.
+        let (msgs3, cursor3) = poll_messages(&state, "supervisor", cursor2);
+        assert!(msgs3.is_empty());
+        assert_eq!(cursor3, cursor2, "drained inbox holds cursor; no re-serve");
+    }
+
+    fn supervisor_question_count(state: &Arc<BrokerState>) -> usize {
+        let (msgs, _) = poll_messages(state, "supervisor", 0);
+        msgs.iter()
+            .filter(|m| matches!(m, BrokerMessage::Question { .. }))
+            .count()
+    }
+
+    #[test]
+    fn identical_republished_question_enqueues_once() {
+        // A blocked agent that re-publishes the same question every poll must
+        // not flood the supervisor inbox (v0.11.0 dogfood, 7x).
+        let state = fresh_state();
+        publish_message(&state, &make_question("feat-x", "Which error type?"));
+        publish_message(&state, &make_question("feat-x", "Which error type?"));
+        assert_eq!(
+            supervisor_question_count(&state),
+            1,
+            "identical re-published question must enqueue only once"
+        );
+    }
+
+    #[test]
+    fn distinct_questions_from_same_agent_both_enqueue() {
+        let state = fresh_state();
+        publish_message(&state, &make_question("feat-x", "Which error type?"));
+        publish_message(&state, &make_question("feat-x", "Which module?"));
+        assert_eq!(supervisor_question_count(&state), 2);
+    }
+
+    #[test]
+    fn same_question_text_from_different_agents_both_enqueue() {
+        let state = fresh_state();
+        publish_message(&state, &make_question("feat-x", "Which error type?"));
+        publish_message(&state, &make_question("feat-y", "Which error type?"));
+        assert_eq!(supervisor_question_count(&state), 2);
     }
 
     #[test]
