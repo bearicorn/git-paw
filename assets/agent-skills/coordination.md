@@ -180,6 +180,19 @@ curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
   -d '{"type":"agent.question","agent_id":"{{BRANCH_ID}}","payload":{"question":"task seems to require writing <path>, outside my worktree — proceed or rescope?"}}'
 ```
 
+**Do not re-ask the same question in a loop.** After publishing, poll your
+inbox and WAIT for an `agent.answer` addressed to you before acting:
+
+```bash
+curl -s {{GIT_PAW_BROKER_URL}}/messages/{{BRANCH_ID}}
+```
+
+If no `agent.answer` has arrived yet, keep waiting — re-publishing the identical
+`agent.question` every poll only floods the supervisor's inbox. The broker drops
+exact duplicates of a still-unanswered question, but the right behaviour is to
+wait for the answer, not to re-ask. Only re-publish if the question's text
+actually changes.
+
 If you need somewhere to persist working state, create it inside the
 worktree (e.g. a `notes/` directory or your project's ignored scratch
 location) — never in the operator's home or the repository's control
