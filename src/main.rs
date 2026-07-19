@@ -1354,7 +1354,13 @@ fn cmd_supervisor(
         cli: supervisor_cli.clone(),
         spec_content: None,
         owned_files: None,
-        skill_content: Some(supervisor_md),
+        // When unattended, append the drive-loop coordination directive so the
+        // supervisor consumes the loop's escalations instead of blanket-approving
+        // (supervisor-loop-escalation-tiering).
+        skill_content: Some(git_paw::skills::with_drive_loop_directive(
+            supervisor_md,
+            unattended,
+        )),
         inter_agent_rules: None,
     };
     git_paw::agents::setup_worktree_agents_md(repo_root, repo_root, &supervisor_assignment)?;

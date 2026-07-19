@@ -297,6 +297,23 @@ your own input and interrupts the command you are mid-way through running.
 `sweep.sh` targets agent panes by design; when you send keys directly,
 always pass an explicit agent pane index and confirm it is not 0.
 
+**When a drive loop is running (unattended), do NOT blanket-approve safe
+prompts by sweeping.** An in-process drive loop already auto-approves
+classifier-safe prompts on every pane; if you also sweep-and-approve them you
+race it — the approval digit can land as literal pane text. Your boot context
+tells you when a drive loop is running. In that mode, each cycle:
+
+1. **Drain the loop's escalations first.** The prompts the loop could not
+   classify safe arrive as review items in your inbox. Reason about each and
+   either approve the specific escalated pane
+   (`.git-paw/scripts/sweep.sh approve <pane>`) or publish feedback — before
+   anything else, so blocked agents unblock fastest.
+2. **Then run your normal sweep** — verify, merge, conflicts, detect-stuck,
+   status — but WITHOUT approving safe prompts (the loop owns those).
+
+When NO drive loop is running (an attended session), you are the sole approver:
+sweep and approve classifier-safe prompts yourself, as usual.
+
 ### Cross-worktree git — `git -C <path>`, never `cd <path> && git`
 
 For every git command against an agent's worktree, use
