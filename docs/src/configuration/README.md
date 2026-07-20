@@ -61,7 +61,7 @@ cli = "codex"
 # Spec scanning configuration
 # [specs]
 # dir = "specs"
-# type = "openspec"    # "openspec", "markdown", or "speckit"
+# type = "openspec"    # "openspec", "markdown", "speckit", or "superpowers"
 
 # opsx (OpenSpec) role gating — active only under the OpenSpec engine
 # [opsx]
@@ -297,13 +297,13 @@ Configure spec file scanning for `--from-all-specs` and `--specs` mode.
 ```toml
 [specs]
 dir = "specs"         # Directory containing spec files (relative to repo root)
-type = "openspec"     # "openspec" (OpenSpec changes), "markdown" (flat .md files), or "speckit" (GitHub Spec Kit)
+type = "openspec"     # "openspec" (OpenSpec changes), "markdown" (flat .md files), "speckit" (GitHub Spec Kit), or "superpowers" (obra/superpowers plans)
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `dir` | `"specs"` | Directory to scan for spec files |
-| `type` | `"openspec"` | Spec backend: `"openspec"` (directory-based OpenSpec changes), `"markdown"` (flat `.md` files with YAML frontmatter), or `"speckit"` ([GitHub Spec Kit](https://github.com/github/spec-kit) `.specify/specs/<feature>/`) |
+| `type` | `"openspec"` | Spec backend: `"openspec"` (directory-based OpenSpec changes), `"markdown"` (flat `.md` files with YAML frontmatter), `"speckit"` ([GitHub Spec Kit](https://github.com/github/spec-kit) `.specify/specs/<feature>/`), or `"superpowers"` ([obra/superpowers](https://github.com/obra/superpowers) `docs/superpowers/plans/*.md`) |
 
 When `[specs]` is omitted and `.specify/specs/` exists at the repo root, the
 spec backend auto-detects to `type = "speckit"` with

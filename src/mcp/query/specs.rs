@@ -20,6 +20,7 @@ fn backend_str(kind: SpecBackendKind) -> &'static str {
         SpecBackendKind::OpenSpec => "openspec",
         SpecBackendKind::Markdown => "markdown",
         SpecBackendKind::SpecKit => "speckit",
+        SpecBackendKind::Superpowers => "superpowers",
     }
 }
 
@@ -72,7 +73,7 @@ fn derive_title(spec_dir: &Path, entry: &SpecEntry) -> String {
     let primary = match entry.backend {
         SpecBackendKind::OpenSpec => "proposal.md",
         SpecBackendKind::SpecKit => "spec.md",
-        SpecBackendKind::Markdown => "",
+        SpecBackendKind::Markdown | SpecBackendKind::Superpowers => "",
     };
     if !primary.is_empty()
         && let Ok(content) = std::fs::read_to_string(spec_dir.join(primary))
@@ -195,8 +196,9 @@ pub fn get_spec(ctx: &RepoContext, id: &str) -> Option<SpecDetail> {
                 }
             }
         }
-        SpecBackendKind::Markdown => {
-            // Markdown specs are single files; the entry prompt holds the body.
+        SpecBackendKind::Markdown | SpecBackendKind::Superpowers => {
+            // Single-file specs (a Markdown file or a superpowers plan); the
+            // entry prompt holds the assembled body.
             artifacts.push(Artifact {
                 name: id.to_string(),
                 content: entry.prompt.clone(),

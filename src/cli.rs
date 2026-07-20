@@ -8,10 +8,11 @@ use std::path::PathBuf;
 
 /// Spec format selector for the `--specs-format` flag.
 ///
-/// Three formats are supported:
+/// Four formats are supported:
 /// - `openspec` — `openspec/changes/<name>/` directory layout.
 /// - `markdown` — single-file Markdown specs with YAML frontmatter.
 /// - `speckit` — GitHub Spec Kit `.specify/specs/<feature>/` layout.
+/// - `superpowers` — obra/superpowers `docs/superpowers/plans/*.md` documents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "lowercase")]
 pub enum SpecsFormat {
@@ -21,6 +22,8 @@ pub enum SpecsFormat {
     Markdown,
     /// Spec Kit format (`.specify/specs/<feature>/`).
     Speckit,
+    /// Superpowers format (`docs/superpowers/plans/*.md` writing-plans docs).
+    Superpowers,
 }
 
 impl SpecsFormat {
@@ -31,6 +34,7 @@ impl SpecsFormat {
             Self::Openspec => "openspec",
             Self::Markdown => "markdown",
             Self::Speckit => "speckit",
+            Self::Superpowers => "superpowers",
         }
     }
 }
@@ -958,6 +962,22 @@ mod tests {
             }
             other => panic!("expected Start, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn start_with_specs_format_superpowers() {
+        let cli = parse(&["start", "--from-specs", "--specs-format", "superpowers"]);
+        match cli.command.unwrap() {
+            Command::Start { specs_format, .. } => {
+                assert_eq!(specs_format, Some(SpecsFormat::Superpowers));
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn specs_format_superpowers_maps_to_backend_string() {
+        assert_eq!(SpecsFormat::Superpowers.as_str(), "superpowers");
     }
 
     #[test]
