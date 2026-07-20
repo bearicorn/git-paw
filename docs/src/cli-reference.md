@@ -94,7 +94,7 @@ Options:
 | `--branches` | comma-separated branches | Skip the interactive branch picker; launch one worktree per branch. |
 | `--from-all-specs` | (flag) | Launch every discovered spec across the configured backend. Mutually exclusive with `--specs`. |
 | `--specs` | comma-separated spec names; bare flag opens a multi-select picker (TTY required) | Narrow the session to named specs or open the picker. Mutually exclusive with `--from-all-specs`. |
-| `--specs-format` | `openspec`, `markdown`, `speckit`, `superpowers` | Override `[specs] type` in config and the `.specify/` / `docs/superpowers/plans/` auto-detection for this launch. |
+| `--specs-format` | `openspec`, `markdown`, `speckit`, `superpowers` | Select the spec system for this launch (overrides `[specs] type` in config). git-paw does not auto-detect the spec system from the filesystem. |
 | `--dry-run` | (flag) | Print the session plan; create no worktrees and run no tmux commands. |
 | `--preset` | preset name from config | Use a named `[presets.<name>]` entry. |
 | `--supervisor` | (flag) | Force supervisor mode on. Mutually exclusive with `--no-supervisor`. |

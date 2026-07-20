@@ -146,9 +146,9 @@ Spec Kit projects place each feature in its own directory under `.specify/specs/
       tasks.md
 ```
 
-**Auto-detection.** When `.specify/specs/` exists at the repo root *and* you have no `[specs]` section in `.git-paw/config.toml`, `git paw start --from-all-specs` defaults to `specs.type = "speckit"` with `specs.dir = ".specify/specs"`. `git paw init` also detects `.specify/` and writes the matching `[specs]` section to the generated config so the choice is locked.
+**Selecting Spec Kit.** git-paw does not auto-detect the spec system from the filesystem — you set it explicitly. Either configure `[specs] type = "speckit"` with `dir = ".specify/specs"` in `.git-paw/config.toml` (`git paw init` prompts you to choose the spec system and writes this section), or pass `--specs-format speckit` for a single launch.
 
-You can override with `--specs-format`:
+Selecting a spec system for one launch with `--specs-format`:
 
 ```bash
 # Force Spec Kit even when [specs] config says otherwise
@@ -206,7 +206,7 @@ Unlike Spec Kit, a superpowers plan is **not** fanned out into per-task worktree
 
 **Discovery.** A plan is picked up when it has at least one incomplete `- [ ]` step. A plan whose every step is `- [x]` is skipped (with a warning); a `.md` file with no `### Task`/step lines — e.g. a design doc under `docs/superpowers/specs/` — is skipped silently.
 
-**Auto-detection.** When `docs/superpowers/plans/` holds at least one `.md` file *and* you have no `[specs]` section and pass no `--specs-format`, git-paw defaults to `specs.type = "superpowers"` with `specs.dir = "docs/superpowers/plans"`. If both `.specify/specs/` and `docs/superpowers/plans/` are present, Spec Kit wins (deterministic precedence); override with `--specs-format superpowers`.
+**Selecting Superpowers.** As with every format, git-paw does not auto-detect it — configure `[specs] type = "superpowers"` with `dir = "docs/superpowers/plans"` (`git paw init` prompts you to choose the spec system), or pass `--specs-format superpowers` for a single launch.
 
 **Boot prompt.** Each worktree's `.git-paw/AGENTS.local.md` sidecar contains: **Plan Context** (Goal / Architecture / Tech Stack), **Your Tasks** (the plan's task sections with their `Files:` and `Run:` metadata), and an **Execution** instruction to work the steps in order, flip `- [ ]` → `- [x]` in the plan file as each lands, and publish `agent.done` only when every step shows `- [x]`.
 

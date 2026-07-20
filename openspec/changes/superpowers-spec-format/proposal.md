@@ -20,11 +20,12 @@ already covers the new value.
   incomplete work, and produces **one `SpecEntry` per incomplete plan** (a
   superpowers plan is a sequential TDD chain for a single worktree — there is no
   `[P]` parallel-task fan-out as in Spec Kit).
-- **ADD** to `spec-scanning`: backend dispatch for the `superpowers` type;
-  auto-detection of superpowers projects (`docs/superpowers/plans/` present);
-  and `superpowers` as a valid `--specs-format` value. All additive — the
-  existing `openspec` / `markdown` / `speckit` dispatch, auto-detect, and flag
-  values are unchanged.
+- **ADD** to `spec-scanning`: backend dispatch for the `superpowers` type and
+  `superpowers` as a valid `--specs-format` value. Additive — the existing
+  `openspec` / `markdown` / `speckit` dispatch and flag values are unchanged.
+  (Filesystem auto-detection of the spec system is intentionally NOT added; the
+  spec system is chosen via config or `--specs-format` — see the
+  `spec-selection-explicit-only` change.)
 
 ## Capabilities
 
@@ -36,14 +37,14 @@ already covers the new value.
   checkbox contract).
 
 ### Modified Capabilities
-- `spec-scanning`: additive backend dispatch, auto-detection, and
-  `--specs-format` acceptance for the `superpowers` type.
+- `spec-scanning`: additive backend dispatch and `--specs-format` acceptance for
+  the `superpowers` type.
 
 ## Impact
 
 - **Code:** new `src/specs/superpowers.rs` (`SuperpowersBackend` + plan parser),
   a `SpecBackendKind::Superpowers` variant and dispatch arm in `src/specs/mod.rs`,
-  the `--specs-format` value list in CLI parsing, and the auto-detect probe.
+  and the `--specs-format` value list in CLI parsing.
   Reuses `slugify_branch` and the existing `- [ ]`/`- [x]` writeback machinery
   built for Spec Kit.
 - **Export-agnostic:** the format is CLI-neutral markdown; the scanner MUST make
