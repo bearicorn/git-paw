@@ -22,12 +22,11 @@
 - [x] 4.1 Test: prompt carries Plan Context (Goal/Architecture/Tech Stack) + Your Tasks (descriptions, `Files:`, `Run:`) + writeback/`agent.done` instruction
 - [x] 4.2 Implement boot-prompt assembly (sections joined by `\n\n---\n\n`)
 
-## 5. Auto-detection + CLI flag
+## 5. CLI flag + format-override default dir
 
-- [x] 5.1 Test: unconfigured repo with `docs/superpowers/plans/*.md` auto-selects superpowers (`specs.dir = docs/superpowers/plans`); empty/missing dir does not activate
-- [x] 5.2 Test: precedence when `.specify/specs/` and `docs/superpowers/plans/` co-exist → speckit chosen
-- [x] 5.3 Implement the auto-detect probe (`dir_has_md`) + deterministic precedence (speckit before superpowers) + format-override default dir
-- [x] 5.4 Add `SpecsFormat::Superpowers` (clap ValueEnum auto-lists it + rejects unknowns) + `as_str`; tests `start_with_specs_format_superpowers`, `specs_format_superpowers_maps_to_backend_string`
+- [x] 5.1 `--specs-format superpowers` selects the backend; when no `dir` is configured, it supplies the conventional `docs/superpowers/plans` default (`format_override_superpowers_supplies_default_dir`)
+- [x] 5.2 Add `SpecsFormat::Superpowers` (clap ValueEnum auto-lists it + rejects unknowns) + `as_str`; tests `start_with_specs_format_superpowers`, `specs_format_superpowers_maps_to_backend_string`
+- [x] 5.3 No filesystem auto-detection — the spec system comes from config `[specs]` or `--specs-format` only (see the `spec-selection-explicit-only` change)
 
 ## 6. Docs
 

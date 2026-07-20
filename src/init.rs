@@ -8,7 +8,7 @@ use std::fs;
 use std::io::IsTerminal;
 use std::path::Path;
 
-use dialoguer::{Confirm, Input};
+use dialoguer::{Confirm, Input, Select};
 
 use crate::config;
 use crate::error::PawError;
@@ -116,7 +116,7 @@ pub fn run_init() -> Result<(), PawError> {
     }
 
     // 4. Generate or migrate config. For a fresh config, prompt for supervisor
-    //    preferences and auto-detect `.specify/` to pre-fill `[specs]`. For an
+    //    preferences and for the spec system to record in `[specs]`. For an
     //    existing config without a [supervisor] section, append one (prompting
     //    if stdin is interactive). Init never mutates existing sections — only
     //    appends missing ones.
@@ -125,7 +125,10 @@ pub fn run_init() -> Result<(), PawError> {
         (false, migrated)
     } else {
         let supervisor_section = prompt_supervisor_section()?;
-        let specs_section = detect_speckit_section(&repo_root);
+        // The config is the source of truth for the spec system, so ASK the
+        // user to choose it at init (no filesystem auto-detection). A
+        // non-interactive init writes a commented template to fill in later.
+        let specs_section = Some(prompt_specs_section()?);
         write_config_if_missing(
             &config_path,
             Some(&supervisor_section),
@@ -276,9 +279,10 @@ fn has_section(content: &str, section: &str) -> bool {
 /// If `supervisor_section` is `Some`, it is appended to the generated config so
 /// the user's init-time choice is persisted.
 ///
-/// If `specs_section` is `Some`, it is appended to the generated config. This
-/// is how Spec Kit auto-detection persists `[specs] type = "speckit"` at init
-/// time.
+/// If `specs_section` is `Some`, it is appended to the generated config — the
+/// user's init-time spec-system choice, or a commented `[specs]` template when
+/// init runs non-interactively. The config is the source of truth for the spec
+/// system; git-paw never auto-detects it from the filesystem.
 fn write_config_if_missing(
     path: &Path,
     supervisor_section: Option<&str>,
@@ -299,20 +303,50 @@ fn write_config_if_missing(
     Ok(true)
 }
 
-/// Returns a TOML `[specs]` section for `speckit` if `.specify/specs/` is
-/// present at `repo_root`, otherwise `None`. The generated section locks the
-/// choice in the config so future runs do not depend on auto-detection.
-fn detect_speckit_section(repo_root: &Path) -> Option<String> {
-    let specify = repo_root.join(".specify");
-    if !specify.is_dir() || !specify.join("specs").is_dir() {
-        return None;
+/// The four spec systems git-paw can scan, and each one's conventional
+/// directory. Presented at init and written into `[specs]`.
+const SPEC_SYSTEMS: [(&str, &str); 4] = [
+    ("openspec", "specs"),
+    ("markdown", "specs"),
+    ("speckit", ".specify/specs"),
+    ("superpowers", "docs/superpowers/plans"),
+];
+
+/// Commented `[specs]` template written by a non-interactive init, so the user
+/// can uncomment and fill it in. The config — never filesystem detection — is
+/// the source of truth for which spec system to use.
+const COMMENTED_SPECS_TEMPLATE: &str = "\n# Spec system (required to launch from specs). Uncomment and pick one:\n\
+# [specs]\n\
+# type = \"openspec\"   # \"openspec\", \"markdown\", \"speckit\", or \"superpowers\"\n\
+# dir = \"specs\"       # openspec/markdown: \"specs\"; speckit: \".specify/specs\"; superpowers: \"docs/superpowers/plans\"\n";
+
+/// Prompts the user to choose the project's spec system and returns the
+/// matching TOML `[specs]` section. git-paw does NOT auto-detect the spec
+/// system from the filesystem — the config is the source of truth, so init
+/// records an explicit choice. A non-interactive init (CI, tests, piped stdin)
+/// writes a commented template instead so init stays scriptable.
+fn prompt_specs_section() -> Result<String, PawError> {
+    if !std::io::stdin().is_terminal() {
+        return Ok(COMMENTED_SPECS_TEMPLATE.to_string());
     }
-    Some(
-        "\n[specs]\n\
-         type = \"speckit\"\n\
-         dir = \".specify/specs\"\n"
-            .to_string(),
-    )
+
+    let labels: Vec<&str> = SPEC_SYSTEMS.iter().map(|(name, _)| *name).collect();
+    let idx = Select::new()
+        .with_prompt("Which spec system does this project use? (recorded in config; git-paw never auto-detects it)")
+        .items(&labels)
+        .default(0)
+        .interact()
+        .map_err(|e| PawError::InitError(format!("prompt failed: {e}")))?;
+    Ok(specs_section_for(idx))
+}
+
+/// Builds the active `[specs]` section for the spec system at `idx` in
+/// [`SPEC_SYSTEMS`]. Factored out of [`prompt_specs_section`] so the
+/// index-to-section mapping is unit-testable without a TTY; `idx` always
+/// comes from `Select`, which is bounded to `0..SPEC_SYSTEMS.len()`.
+fn specs_section_for(idx: usize) -> String {
+    let (spec_type, dir) = SPEC_SYSTEMS[idx];
+    format!("\n[specs]\ntype = \"{spec_type}\"\ndir = \"{dir}\"\n")
 }
 
 /// Prompts the user for their supervisor preferences and returns a TOML
@@ -324,7 +358,7 @@ fn prompt_supervisor_section() -> Result<String, PawError> {
     // In non-interactive contexts (CI, tests, piped stdin) fall back to an
     // explicit opt-out so init remains scriptable.
     if !std::io::stdin().is_terminal() {
-        return Ok("\n[supervisor]\nenabled = false\n".to_string());
+        return supervisor_section(false, "");
     }
 
     let enabled = Confirm::new()
@@ -334,7 +368,7 @@ fn prompt_supervisor_section() -> Result<String, PawError> {
         .map_err(|e| PawError::InitError(format!("prompt failed: {e}")))?;
 
     if !enabled {
-        return Ok("\n[supervisor]\nenabled = false\n".to_string());
+        return supervisor_section(false, "");
     }
 
     let test_command: String = Input::new()
@@ -343,6 +377,17 @@ fn prompt_supervisor_section() -> Result<String, PawError> {
         .interact_text()
         .map_err(|e| PawError::InitError(format!("prompt failed: {e}")))?;
 
+    supervisor_section(true, &test_command)
+}
+
+/// Builds the `[supervisor]` section for the chosen preferences. Factored out
+/// of [`prompt_supervisor_section`] so the enabled/test-command formatting
+/// (trimming and TOML-escaping the command) is unit-testable without a TTY.
+/// An empty (or whitespace-only) `test_command` omits the `test_command` key.
+fn supervisor_section(enabled: bool, test_command: &str) -> Result<String, PawError> {
+    if !enabled {
+        return Ok("\n[supervisor]\nenabled = false\n".to_string());
+    }
     let mut section = String::from("\n[supervisor]\nenabled = true\n");
     let trimmed = test_command.trim();
     if !trimmed.is_empty() {
@@ -457,26 +502,92 @@ mod tests {
     }
 
     #[test]
-    fn detect_speckit_section_returns_some_when_specify_present() {
-        let dir = setup_repo();
-        fs::create_dir_all(dir.path().join(".specify").join("specs")).unwrap();
-        let section = detect_speckit_section(dir.path()).expect("section");
-        assert!(section.contains("[specs]"));
-        assert!(section.contains("type = \"speckit\""));
-        assert!(section.contains("dir = \".specify/specs\""));
+    fn prompt_specs_section_non_interactive_writes_commented_template() {
+        // `cargo test` runs with a non-terminal stdin, so this exercises the
+        // non-interactive fallback: a commented [specs] template (no filesystem
+        // detection). An interactive `Select` cannot be driven from a test.
+        let section = prompt_specs_section().expect("section");
+        assert!(
+            section.contains("# [specs]"),
+            "non-interactive init writes a COMMENTED template; got: {section}"
+        );
+        for (name, _) in SPEC_SYSTEMS {
+            assert!(
+                section.contains(name),
+                "template lists {name}; got: {section}"
+            );
+        }
     }
 
     #[test]
-    fn detect_speckit_section_none_when_specify_missing() {
-        let dir = setup_repo();
-        assert!(detect_speckit_section(dir.path()).is_none());
+    fn spec_systems_cover_the_four_backends_in_order() {
+        let names: Vec<&str> = SPEC_SYSTEMS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, ["openspec", "markdown", "speckit", "superpowers"]);
     }
 
     #[test]
-    fn detect_speckit_section_none_when_specify_lacks_specs_subdir() {
-        let dir = setup_repo();
-        fs::create_dir_all(dir.path().join(".specify").join("memory")).unwrap();
-        assert!(detect_speckit_section(dir.path()).is_none());
+    fn specs_section_for_maps_each_index_to_its_backend_section() {
+        // The interactive `Select` yields the chosen index; this is the pure
+        // index -> `[specs]` section mapping it feeds into, unit-tested without
+        // a TTY. The end-to-end keystroke path (Select -> written config) is
+        // covered by the `tests/init_interactive_specs.rs` tmux integration
+        // test.
+        assert_eq!(
+            specs_section_for(0),
+            "\n[specs]\ntype = \"openspec\"\ndir = \"specs\"\n"
+        );
+        assert_eq!(
+            specs_section_for(1),
+            "\n[specs]\ntype = \"markdown\"\ndir = \"specs\"\n"
+        );
+        assert_eq!(
+            specs_section_for(2),
+            "\n[specs]\ntype = \"speckit\"\ndir = \".specify/specs\"\n"
+        );
+        assert_eq!(
+            specs_section_for(3),
+            "\n[specs]\ntype = \"superpowers\"\ndir = \"docs/superpowers/plans\"\n"
+        );
+    }
+
+    #[test]
+    fn supervisor_section_disabled_when_not_enabled() {
+        // Both the non-interactive fallback and a "No" answer route here.
+        assert_eq!(
+            supervisor_section(false, "").unwrap(),
+            "\n[supervisor]\nenabled = false\n"
+        );
+        // A test command is irrelevant when supervisor is disabled.
+        assert_eq!(
+            supervisor_section(false, "just check").unwrap(),
+            "\n[supervisor]\nenabled = false\n"
+        );
+    }
+
+    #[test]
+    fn supervisor_section_enabled_without_test_command() {
+        assert_eq!(
+            supervisor_section(true, "").unwrap(),
+            "\n[supervisor]\nenabled = true\n"
+        );
+        // Whitespace-only is treated as empty (no test_command line).
+        assert_eq!(
+            supervisor_section(true, "   ").unwrap(),
+            "\n[supervisor]\nenabled = true\n"
+        );
+    }
+
+    #[test]
+    fn supervisor_section_records_and_escapes_test_command() {
+        // Trimmed, and round-trips through TOML with quotes/backslashes intact.
+        let section = supervisor_section(true, "  just \"check\"\\x  ").unwrap();
+        let parsed: crate::config::PawConfig = toml::from_str(&section).unwrap();
+        let supervisor = parsed.supervisor.unwrap();
+        assert!(supervisor.enabled);
+        assert_eq!(
+            supervisor.test_command.as_deref(),
+            Some("just \"check\"\\x")
+        );
     }
 
     #[test]

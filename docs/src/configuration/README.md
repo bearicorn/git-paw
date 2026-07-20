@@ -305,10 +305,11 @@ type = "openspec"     # "openspec" (OpenSpec changes), "markdown" (flat .md file
 | `dir` | `"specs"` | Directory to scan for spec files |
 | `type` | `"openspec"` | Spec backend: `"openspec"` (directory-based OpenSpec changes), `"markdown"` (flat `.md` files with YAML frontmatter), `"speckit"` ([GitHub Spec Kit](https://github.com/github/spec-kit) `.specify/specs/<feature>/`), or `"superpowers"` ([obra/superpowers](https://github.com/obra/superpowers) `docs/superpowers/plans/*.md`) |
 
-When `[specs]` is omitted and `.specify/specs/` exists at the repo root, the
-spec backend auto-detects to `type = "speckit"` with
-`dir = ".specify/specs"`. Use the `--specs-format` CLI flag to override both
-the config value and the auto-detection for a single launch.
+git-paw does not auto-detect the spec system from the filesystem: the `[specs]`
+section is the source of truth. `git paw init` prompts you to choose the spec
+system and writes this section. When `[specs]` is omitted, launching from specs
+errors until you add it — or pass the `--specs-format` CLI flag, which selects
+the spec system for a single launch.
 
 See [Spec-Driven Launch](../user-guide/spec-driven-launch.md) for format details.
 
