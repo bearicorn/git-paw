@@ -795,6 +795,11 @@ pub fn render_spec_path_doctrine(backends: &[crate::specs::SpecBackendKind]) -> 
                 "Markdown specs are flat `.md` files with `paw_status: pending` frontmatter; \
                  the format has no per-artifact workflow — the file itself is the contract."
             }
+            SpecBackendKind::Superpowers => {
+                "Superpowers plans are flat files under `docs/superpowers/plans/*.md` \
+                 (obra/superpowers writing-plans documents); work each plan's `### Task N` steps \
+                 in order and flip `- [ ]` to `- [x]` in the plan file as each step lands."
+            }
         }
     };
 

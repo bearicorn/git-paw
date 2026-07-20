@@ -8,6 +8,7 @@ mod markdown;
 mod openspec;
 pub mod resolve;
 pub mod speckit;
+pub mod superpowers;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -17,6 +18,7 @@ use crate::config::PawConfig;
 use crate::error::PawError;
 use openspec::OpenSpecBackend;
 use speckit::SpecKitBackend;
+use superpowers::SuperpowersBackend;
 
 /// A discovered spec ready for session launch.
 ///
@@ -72,6 +74,8 @@ pub enum SpecBackendKind {
     Markdown,
     /// Produced by `SpecKitBackend` (`.specify/specs/<feature>/` layout).
     SpecKit,
+    /// Produced by `SuperpowersBackend` (`docs/superpowers/plans/*.md` files).
+    Superpowers,
 }
 
 use markdown::MarkdownBackend;
@@ -138,8 +142,9 @@ fn backend_for_type(spec_type: &str) -> Result<Box<dyn SpecBackend>, PawError> {
         "openspec" => Ok(Box::new(OpenSpecBackend)),
         "markdown" => Ok(Box::new(MarkdownBackend)),
         "speckit" => Ok(Box::new(SpecKitBackend)),
+        "superpowers" => Ok(Box::new(SuperpowersBackend)),
         _ => Err(PawError::SpecError(format!(
-            "unknown spec type: {spec_type}"
+            "unknown spec type: {spec_type} (known: openspec, markdown, speckit, superpowers)"
         ))),
     }
 }
@@ -172,8 +177,12 @@ fn resolve_specs_config(
     if let Some(format) = format_override {
         let mut base = config.specs.clone().unwrap_or_default();
         base.spec_type = Some(format.to_string());
-        if base.dir.is_none() && format == "speckit" {
-            base.dir = Some(".specify/specs".to_string());
+        if base.dir.is_none() {
+            if format == "speckit" {
+                base.dir = Some(".specify/specs".to_string());
+            } else if format == "superpowers" {
+                base.dir = Some(superpowers::PLANS_DIR.to_string());
+            }
         }
         return Some(base);
     }
@@ -191,7 +200,28 @@ fn resolve_specs_config(
         });
     }
 
+    // Auto-detect Superpowers when `docs/superpowers/plans/` holds at least one
+    // `.md` plan. Deterministic precedence: Spec Kit (above) wins when both
+    // layouts are present, so this only fires when `.specify/specs/` is absent.
+    let plans = repo_root.join(superpowers::PLANS_DIR);
+    if plans.is_dir() && dir_has_md(&plans) {
+        return Some(crate::config::SpecsConfig {
+            dir: Some(superpowers::PLANS_DIR.to_string()),
+            spec_type: Some("superpowers".to_string()),
+        });
+    }
+
     None
+}
+
+/// Returns `true` when `dir` contains at least one regular `*.md` file.
+fn dir_has_md(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|rd| {
+        rd.filter_map(Result::ok).any(|e| {
+            let p = e.path();
+            p.is_file() && p.extension().is_some_and(|ext| ext == "md")
+        })
+    })
 }
 
 /// Resolves the effective spec engine type for a repo, or `None` when no
@@ -334,10 +364,19 @@ mod tests {
     }
 
     #[test]
+    fn backend_for_type_superpowers() {
+        assert!(backend_for_type("superpowers").is_ok());
+    }
+
+    #[test]
     fn backend_for_type_unknown() {
         let err = backend_for_type("unknown").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unknown spec type"), "got: {msg}");
+        assert!(
+            msg.contains("superpowers"),
+            "unknown-type error lists known types incl superpowers; got: {msg}"
+        );
     }
 
     #[test]
@@ -515,6 +554,50 @@ mod tests {
         let resolved = resolve_specs_config(&config, tmp.path(), Some("speckit")).unwrap();
         assert_eq!(resolved.spec_type.as_deref(), Some("speckit"));
         assert_eq!(resolved.dir.as_deref(), Some(".specify/specs"));
+    }
+
+    // --- Superpowers auto-detection + override ---
+
+    #[test]
+    fn auto_detect_superpowers_activates_when_plans_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plans = tmp.path().join("docs").join("superpowers").join("plans");
+        fs::create_dir_all(&plans).unwrap();
+        fs::write(plans.join("2026-07-20-x.md"), "### Task 1: X\n- [ ] do\n").unwrap();
+        let resolved = resolve_specs_config(&PawConfig::default(), tmp.path(), None).unwrap();
+        assert_eq!(resolved.spec_type.as_deref(), Some("superpowers"));
+        assert_eq!(resolved.dir.as_deref(), Some("docs/superpowers/plans"));
+    }
+
+    #[test]
+    fn auto_detect_speckit_wins_over_superpowers() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".specify").join("specs")).unwrap();
+        let plans = tmp.path().join("docs").join("superpowers").join("plans");
+        fs::create_dir_all(&plans).unwrap();
+        fs::write(plans.join("p.md"), "### Task 1: X\n- [ ] do\n").unwrap();
+        let resolved = resolve_specs_config(&PawConfig::default(), tmp.path(), None).unwrap();
+        assert_eq!(
+            resolved.spec_type.as_deref(),
+            Some("speckit"),
+            "speckit precedes superpowers when both layouts are present"
+        );
+    }
+
+    #[test]
+    fn auto_detect_superpowers_skipped_when_plans_dir_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("docs").join("superpowers").join("plans")).unwrap();
+        assert!(resolve_specs_config(&PawConfig::default(), tmp.path(), None).is_none());
+    }
+
+    #[test]
+    fn format_override_superpowers_supplies_default_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resolved =
+            resolve_specs_config(&PawConfig::default(), tmp.path(), Some("superpowers")).unwrap();
+        assert_eq!(resolved.spec_type.as_deref(), Some("superpowers"));
+        assert_eq!(resolved.dir.as_deref(), Some("docs/superpowers/plans"));
     }
 
     #[test]

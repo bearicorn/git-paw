@@ -75,7 +75,7 @@ Options:
       --branches <BRANCHES>    Comma-separated branches (skips branch picker)
       --from-all-specs         Launch from every discovered spec across all configured formats
       --specs [<NAMES>...]     Comma-separated spec names; bare flag opens picker (TTY required)
-      --specs-format <FORMAT>  Override spec backend: openspec, markdown, speckit
+      --specs-format <FORMAT>  Override spec backend: openspec, markdown, speckit, superpowers
       --dry-run                Preview the session plan without executing
       --preset <PRESET>        Use a named preset from config
       --supervisor             Run the session in supervisor mode (auto-start agents,
@@ -94,7 +94,7 @@ Options:
 | `--branches` | comma-separated branches | Skip the interactive branch picker; launch one worktree per branch. |
 | `--from-all-specs` | (flag) | Launch every discovered spec across the configured backend. Mutually exclusive with `--specs`. |
 | `--specs` | comma-separated spec names; bare flag opens a multi-select picker (TTY required) | Narrow the session to named specs or open the picker. Mutually exclusive with `--from-all-specs`. |
-| `--specs-format` | `openspec`, `markdown`, `speckit` | Override `[specs] type` in config and the `.specify/` auto-detection for this launch. |
+| `--specs-format` | `openspec`, `markdown`, `speckit`, `superpowers` | Override `[specs] type` in config and the `.specify/` / `docs/superpowers/plans/` auto-detection for this launch. |
 | `--dry-run` | (flag) | Print the session plan; create no worktrees and run no tmux commands. |
 | `--preset` | preset name from config | Use a named `[presets.<name>]` entry. |
 | `--supervisor` | (flag) | Force supervisor mode on. Mutually exclusive with `--no-supervisor`. |
