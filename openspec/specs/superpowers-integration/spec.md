@@ -1,5 +1,8 @@
-## ADDED Requirements
+# superpowers-integration Specification
 
+## Purpose
+Integrate the [obra/superpowers](https://github.com/obra/superpowers) methodology's implementation plans as a first-class git-paw spec source. This capability defines how the `superpowers` spec backend scans `docs/superpowers/plans/*.md` plan documents, decomposes each incomplete plan into a launchable `SpecEntry`, derives its branch name, and builds the agent task prompt — so a superpowers-planned project drives spec-driven git-paw sessions the same way OpenSpec, Markdown, and Spec Kit projects do.
+## Requirements
 ### Requirement: SuperpowersBackend implements SpecBackend trait
 
 The system SHALL provide a `SuperpowersBackend` type that implements the existing `SpecBackend` trait. Unlike the Spec Kit backend (which treats the configured directory as a parent of feature *directories*), the `scan(&Path)` method SHALL treat the configured directory as a flat directory of plan **files**: each immediate `*.md` file in `<dir>/` is one obra/superpowers implementation plan (as produced by the `writing-plans` skill). The default directory SHALL be `docs/superpowers/plans/`.
@@ -135,3 +138,4 @@ The system SHALL skip plan files that cannot produce a `SpecEntry` — a fully-`
 - **THEN** the no-task file produces no `SpecEntry`
 - **AND** the other two plan files still produce their entries
 - **AND** the scan does not return an error
+
