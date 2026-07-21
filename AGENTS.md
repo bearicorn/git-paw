@@ -246,12 +246,47 @@ Every change (feature, fix, refactor) must complete ALL of the following before 
 - No `unwrap()`/`expect()` in non-test code
 - All public items have doc comments
 - Coverage >= 80% on logic (TUI draw loops exempt)
+- **Verify a gate by its real exit code, not piped output.** A trailing
+  `| tail` (or any pipe) makes a command's reported exit status the LAST
+  stage's (`tail` = 0), silently hiding a failed build, a `cargo fmt --check`
+  diff, or a clippy `-D warnings` error. For a must-pass check run
+  `cmd > log 2>&1; echo $?` (or `cmd; echo $?`) and confirm `$?` is 0 — then
+  read the log. (`rtk` itself propagates exit codes; the pipe is the trap.)
 
 ### 6. Backward compatibility preserved
 - New optional fields use `#[serde(default)]` and `skip_serializing_if`
 - Existing v0.2.0 configs/sessions load without error
 - When a feature is disabled (e.g. `[broker] enabled = false`), behavior is identical to the previous version
 - Existing tests pass unchanged
+
+### 7. Enum-variant ripple (`BrokerMessage`, `SpecBackendKind`)
+Adding or removing a variant of a widely-matched enum ripples across many
+exhaustive `match`es. A change that touches such an enum's variant set MUST
+scope these consumers **up front in the proposal's Impact section** (a
+mid-flight discovery costs a blocked round-trip). Two enums carry this hazard:
+
+**`BrokerMessage`** (broker changes):
+- Compile-forcing exhaustive matches (build breaks if missed):
+  - `src/broker/messages.rs` — the `enum` + `agent_id()` / `status_label()` /
+    `validate()` arms.
+  - `src/dashboard/broker_log.rs` — `message_bit()`, `type_short()`,
+    `derive_summary()`.
+  - `src/broker/learnings.rs` — `observe()`.
+- Semantic handling the compiler will NOT catch (a new variant is inert without
+  it): `src/broker/delivery.rs` routing (enqueue/broadcast), plus any reaction
+  in `src/broker/conflict.rs`, `src/broker/server.rs`, `src/broker/watcher.rs`,
+  `src/dashboard.rs`.
+
+**`SpecBackendKind`** (spec-format changes):
+- Compile-forcing exhaustive matches:
+  - `src/skills.rs` — `render_spec_path_doctrine`.
+  - `src/main.rs` — `build_task_prompt`.
+  - `src/mcp/query/specs.rs` — `backend_str`, `derive_title`, `get_spec`.
+- Plus the dispatch (`backend_for_type` in `src/specs/mod.rs`) and the
+  `SpecsFormat` CLI enum in `src/cli.rs`.
+
+Grep the variant name across `src/` before finishing to catch every site — but
+the point is to list them in Impact so the work is *scoped*, not *discovered*.
 
 ## Spec-Driven Development
 
