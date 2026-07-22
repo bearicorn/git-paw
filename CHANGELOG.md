@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-07-22
+
+### Features
+
+- *(specs)* Select the spec system from config/CLI only; remove filesystem auto-detection
+- *(specs)* Add superpowers as a fourth spec backend
+- *(supervisor)* Tier approval so the drive loop and supervisor act on disjoint sets
+
+### Bug Fixes
+
+- *(broker)* Monotonic poll cursor and duplicate-question suppression
+- *(broker)* Accept any branch prefix in agent_id, not just feat ([#58](https://github.com/bearicorn/git-paw/pull/58))
+
+### Documentation
+
+- *(agents)* Enum-variant-ripple checklist (BrokerMessage + SpecBackendKind) and gate-exit-code note
+- *(broker)* Update validate() rustdoc to the generalized agent_id regex
+
+### CI/CD
+
+- Scope caches to main and split coverage from the test matrix
 ## [0.11.0] - 2026-07-17
 
 ### Features
@@ -24,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- *(e2e)* Use cat stand-in in add-remove e2e to avoid bare-shell boot-block dirt
 - *(e2e)* Force remove_middle_agent past the bare-shell boot-block artifact
 
 ### CI/CD
@@ -201,6 +223,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 - Add CLI tool for parallel AI coding sessions across git worktrees
+[0.12.0]: https://github.com/bearicorn/git-paw/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/bearicorn/git-paw/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/bearicorn/git-paw/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/bearicorn/git-paw/compare/v0.8.0...v0.9.0
