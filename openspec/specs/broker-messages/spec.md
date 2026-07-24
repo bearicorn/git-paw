@@ -116,13 +116,14 @@ The `BlockedPayload` struct SHALL contain:
 
 ### Requirement: Message validation
 
-Construction of a `BrokerMessage` from untrusted input (e.g. an HTTP request body) SHALL go through a validating constructor. The system SHALL reject input where:
+Construction of a `BrokerMessage` from untrusted input (e.g. an HTTP request body) SHALL go through a validating constructor. The constructor SHALL reject input where:
 
 - `agent_id` is empty or contains only whitespace
-- `agent_id` contains characters outside the slug character set `[a-z0-9-_]`
 - For `Status`: `status` is empty
 - For `Artifact`: `status` is empty
 - For `Blocked`: `needs` is empty OR `from` is empty
+
+The constructor deliberately does NOT enforce an `agent_id` character set or shape: that is the HTTP boundary's responsibility (see "Broker `/publish` enforces agent_id validation in code"). The constructor's job is only to guarantee that no `BrokerMessage` value holds an empty or whitespace-only required field, so non-HTTP callers still trip a clear error on garbage input before the typed value flows further. A slug such as `feat/x` is therefore VALID at the constructor.
 
 Once a `BrokerMessage` value exists, it SHALL be valid by construction. Holders of a `BrokerMessage` MUST NOT need to revalidate it.
 
@@ -137,32 +138,11 @@ Once a `BrokerMessage` value exists, it SHALL be valid by construction. Holders 
 - **WHEN** a JSON message with `"agent_id": "   "` is parsed via the validating constructor
 - **THEN** validation fails with an error identifying `agent_id` as the cause
 
-#### Scenario: agent_id with invalid characters is rejected
+#### Scenario: Slash-containing agent_id passes the constructor
 
 - **WHEN** a JSON message with `"agent_id": "feat/x"` is parsed via the validating constructor
-- **THEN** validation fails with an error identifying `agent_id` as the cause
-- **AND** the error message indicates the slug character set is required
-
-#### Scenario: Empty status field in agent.status is rejected
-
-- **WHEN** a JSON message of type `agent.status` with `payload.status = ""` is parsed via the validating constructor
-- **THEN** validation fails with an error identifying the empty `status` field
-
-#### Scenario: Empty needs field in agent.blocked is rejected
-
-- **WHEN** a JSON message of type `agent.blocked` with `payload.needs = ""` is parsed via the validating constructor
-- **THEN** validation fails with an error identifying the empty `needs` field
-
-#### Scenario: Empty from field in agent.blocked is rejected
-
-- **WHEN** a JSON message of type `agent.blocked` with `payload.from = ""` is parsed via the validating constructor
-- **THEN** validation fails with an error identifying the empty `from` field
-
-#### Scenario: Valid message produces a BrokerMessage
-
-- **WHEN** a well-formed JSON message of any of the three types is parsed via the validating constructor
-- **THEN** a `BrokerMessage` value is produced
-- **AND** all fields of the resulting value match the input
+- **THEN** validation succeeds and a `BrokerMessage` value is produced
+- **AND** any shape restriction is left to the HTTP `/publish` boundary, not the constructor
 
 ### Requirement: Message display formatting
 
@@ -594,14 +574,14 @@ The function SHALL NOT populate the `phase` field — publishers that want to pu
 
 ### Requirement: Broker `/publish` enforces agent_id validation in code
 
-The `src/broker/server.rs::publish` HTTP handler SHALL execute the validation already specified in `openspec/specs/broker-messages/spec.md` under "Broker rejects invalid agent_id strings" and "Broker rejects payload fields matching placeholder syntax" (propagated from the archived `supervisor-as-pane-followups` change). Today those spec requirements describe behaviour the binary does NOT implement; this change closes the gap.
+The `src/broker/server.rs::publish` HTTP handler SHALL reject malformed publishers at the HTTP boundary, before the message reaches any inbox. It enforces the `agent_id` shape and the placeholder-syntax guard described in "Broker rejects invalid agent_id strings" and "Broker rejects payload fields matching placeholder syntax".
 
 Specifically, the handler SHALL:
 
-1. Reject the request with HTTP 400 when the deserialized `BrokerMessage`'s top-level `agent_id` does NOT match the regular expression `^(supervisor|feat/[a-z0-9][a-z0-9-]+|feat-[a-z0-9][a-z0-9-]+)$`.
+1. Reject the request with HTTP 400 when the deserialized `BrokerMessage`'s top-level `agent_id` does NOT match the regular expression `^(supervisor|[a-z0-9][a-z0-9-]*[/-][a-z0-9][a-z0-9-]*)$`. This accepts `supervisor` and any `{prefix}{/ or -}{name}` slug (lowercase alphanumeric plus hyphens, e.g. `feat/add-auth`, `feat-add-auth`, `fix/db-timeout`, `spec/add-thing`); it rejects a bare word with no separator, a single letter, and empty input. The prefix is NOT restricted to `feat` — `branch_prefix` is user-configurable (default `spec/`) and the shipped config advertises non-`feat` branches.
 2. Reject the request with HTTP 400 when any of `payload.question`, `payload.message`, `payload.needs`, or any string element of `payload.errors[]` matches `^<.*>$` exactly.
 
-The error body shape and error message text are as defined in the existing main-spec scenarios — no new wording.
+The 400 response body SHALL be a JSON object whose `error` is the substring `invalid agent_id` (for shape violations) or `unfilled placeholder` (for placeholder violations); the human-readable `detail` MAY name the accepted shapes. No inbox state is mutated for a rejected request.
 
 A single compiled `OnceLock<Regex>` per pattern is acceptable; the broker's hot path SHALL NOT rebuild the regex per request.
 
@@ -612,6 +592,13 @@ A single compiled `OnceLock<Regex>` per pattern is acceptable; the broker's hot 
 - **THEN** the HTTP response status SHALL be 400
 - **AND** the response body SHALL be a JSON object containing the substring `"invalid agent_id"`
 - **AND** a subsequent `GET /status` SHALL NOT contain an entry with `agent_id = "a"`
+
+#### Scenario: Prefixless bare-word agent_id is rejected by the running broker
+
+- **GIVEN** a running broker
+- **WHEN** a client POSTs a well-formed `agent.status` message with `agent_id = "foo"` (a bare word with no `/` or `-` separator)
+- **THEN** the HTTP response status SHALL be 400
+- **AND** the response body SHALL contain the substring `"invalid agent_id"`
 
 #### Scenario: Placeholder-shaped agent_id is rejected by the running broker
 
@@ -633,20 +620,25 @@ A single compiled `OnceLock<Regex>` per pattern is acceptable; the broker's hot 
 - **WHEN** a client POSTs a well-formed `agent.status` message with `agent_id = "supervisor"`
 - **THEN** the HTTP response status SHALL be 200 or 204
 - **AND** the message SHALL be appended to the supervisor's inbox
+- **AND** the same SHALL hold for `agent_id = "feat-test-branch"` and `agent_id = "feat/test-branch"`
 
-The same SHALL hold for `agent_id = "feat-test-branch"` and `agent_id = "feat/test-branch"`.
-
-#### Scenario: Real human content passes through
+#### Scenario: Slash-prefixed non-feat agent_id is accepted
 
 - **GIVEN** a running broker
-- **WHEN** a client POSTs `{"type":"agent.question","agent_id":"feat-x","payload":{"question":"Should we use bcrypt or argon2?"}}`
+- **WHEN** a client POSTs a well-formed `agent.status` message with `agent_id = "fix/olx-auth-error-mapping"`
 - **THEN** the HTTP response status SHALL be 200 or 204
 
-#### Scenario: Existing test fixtures using non-conforming agent_ids are updated
+#### Scenario: Dash-prefixed non-feat agent_id is accepted
 
-- **WHEN** the test suite is run after this change lands
-- **THEN** every `/publish` test caller in `tests/broker_integration.rs`, `tests/conflict_detection_integration.rs`, `tests/learnings_mode_integration.rs`, `tests/e2e_*.rs`, and any other broker-touching test file SHALL use an `agent_id` matching the regex (e.g. `feat-x`, `feat-test`, `supervisor`) and SHALL NOT use ad-hoc identifiers like `"test"`, `"agent1"`, or single letters
-- **AND** the broker-side validation SHALL be active for all those tests (no opt-out)
+- **GIVEN** a running broker
+- **WHEN** a client POSTs a well-formed `agent.status` message with `agent_id = "fix-db-timeout"`
+- **THEN** the HTTP response status SHALL be 200 or 204
+
+#### Scenario: Configured branch_prefix agent_id is accepted
+
+- **GIVEN** a running broker and a project whose configured `branch_prefix` is `spec/`
+- **WHEN** a client POSTs a well-formed `agent.status` message with `agent_id = "spec/add-thing"`
+- **THEN** the HTTP response status SHALL be 200 or 204
 
 ### Requirement: agent.answer message type
 

@@ -353,6 +353,12 @@ pub(crate) fn build_task_prompt(spec_entry: Option<&git_paw::specs::SpecEntry>) 
                  them all before starting.",
                 id = s.id,
             ),
+            SpecBackendKind::Superpowers => format!(
+                "Begin your assigned task. Read {SIDECAR_REL_PATH} first — it carries the \
+                 project rules and your full superpowers plan (goal, tasks, exact file \
+                 paths, and per-step verification commands). Work the steps in order and \
+                 flip `- [ ]` to `- [x]` in the plan as each one lands."
+            ),
         },
         None => format!(
             "Read {SIDECAR_REL_PATH} first for your assignment, then begin your assigned task."
@@ -1354,7 +1360,13 @@ fn cmd_supervisor(
         cli: supervisor_cli.clone(),
         spec_content: None,
         owned_files: None,
-        skill_content: Some(supervisor_md),
+        // When unattended, append the drive-loop coordination directive so the
+        // supervisor consumes the loop's escalations instead of blanket-approving
+        // (supervisor-loop-escalation-tiering).
+        skill_content: Some(git_paw::skills::with_drive_loop_directive(
+            supervisor_md,
+            unattended,
+        )),
         inter_agent_rules: None,
     };
     git_paw::agents::setup_worktree_agents_md(repo_root, repo_root, &supervisor_assignment)?;

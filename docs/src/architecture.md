@@ -48,7 +48,7 @@ This chapter covers git-paw's internal architecture: module structure, data flow
 | **Dirs** | `src/dirs.rs` | In-tree platform XDG path helper. Replaces the upstream `dirs` crate (removed in v0.5.0 for license reasons); see `AGENTS.md § Dependencies`. |
 | **Agents** | `src/agents.rs` | Generates the gitignored `.git-paw/AGENTS.local.md` sidecar (the combined view) per worktree; manages the `<!-- git-paw:start … end -->` marker region; leaves the tracked `AGENTS.md` committable. |
 | **Skills** | `src/skills.rs` | Loads standardized agent skills from `.agents/skills/` following the [agentskills.io specification](https://agentskills.io). Injects coordination + supervisor instructions into the worktree sidecar. |
-| **Init** | `src/init.rs` | `git paw init` bootstrap. Creates `.git-paw/`, default config, logs directory, gitignore entries. Auto-detects `.specify/` for Spec Kit. |
+| **Init** | `src/init.rs` | `git paw init` bootstrap. Creates `.git-paw/`, default config, logs directory, gitignore entries. Prompts for the spec system and records `[specs]` (no filesystem auto-detection). |
 | **Replay** | `src/replay.rs` | `git paw replay`. Reads pane logs from `.git-paw/logs/` and either strips ANSI or pipes through `less -R`. |
 | **Selftest** | `src/selftest.rs` | `git paw selftest`. Isolated end-to-end lifecycle smoke check (start → add → remove → stop) against a throwaway repo and a dummy CLI (`cat`) — private tmux socket, ephemeral broker port, isolated `HOME`, no LLM backend. The shipped form of the dogfood isolation recipe. |
 | **Logging** | `src/logging.rs` | Per-pane log capture via `tmux pipe-pane`. Files at `.git-paw/logs/<session>/<branch>.log`. |
@@ -96,7 +96,7 @@ mode.
 | File | Purpose |
 |------|---------|
 | `src/specs/mod.rs` | Public surface for the spec subsystem. |
-| `src/specs/resolve.rs` | Dispatch entry point. Picks the backend from `[specs] type`, the `--specs-format` CLI override, or `.specify/` auto-detection. |
+| `src/specs/resolve.rs` | Dispatch entry point. Picks the backend from the `--specs-format` CLI override or the `[specs] type` config — the only two sources (no filesystem auto-detection). |
 | `src/specs/openspec.rs` | OpenSpec backend: scans `<dir>/<change>/tasks.md` directories, skips `<dir>/archive/`. |
 | `src/specs/markdown.rs` | Markdown backend: scans flat `.md` files with YAML frontmatter; only `paw_status: pending` is picked up. |
 | `src/specs/speckit.rs` | Spec Kit backend: scans `.specify/specs/<feature>/`, decomposes the current phase into `[P]`-task worktrees plus one consolidated `phase/…` worktree; probes `<dir>/../memory/constitution.md` for the governance auto-wire. |

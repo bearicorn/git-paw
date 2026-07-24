@@ -15,6 +15,19 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # CI never runs a debugger; full DWARF only slows the link step and bloats
+  # target/ (larger caches, slower restore/save). Line-tables keeps readable
+  # test-failure backtraces and is compatible with llvm-cov (coverage uses the
+  # instrumentation counters, not DWARF). Set at workflow level so main and
+  # branches build with identical flags and their caches stay interchangeable.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+# Cancel superseded in-flight runs on the same ref, but only for pull requests.
+# A push to main is never cancelled mid-way, so an in-progress docs deploy is
+# never interrupted.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Least privilege by default: only the deploy-docs job needs pages/id-token
 # write (granted at the job level below). Every other job reads at most.
@@ -31,6 +44,15 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Standard (non-instrumented) build profile, shared with the test and
+          # smoke jobs. Swatinem folds the runner OS/arch into the key, so one
+          # shared-key still splits cleanly across Linux and macOS.
+          shared-key: std
+          # Only main writes caches; branches/PRs restore from main (cross-branch
+          # reads from the default branch are allowed) and never save. Stops
+          # per-branch cache churn from evicting the warm main caches.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check formatting
         run: cargo fmt --check
       - name: Clippy
@@ -46,15 +68,38 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: std
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install tmux (Ubuntu)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y tmux
       - name: Install tmux (macOS)
         if: runner.os == 'macOS'
         run: brew install tmux
+      - name: Run tests
+        run: cargo test
+
+  # Coverage runs once, on Linux, with the instrumented build profile. The
+  # coverage percentage is OS-independent for this Unix-only tool, so measuring
+  # it on both runners was pure duplicated instrumentation cost. Kept in its own
+  # `cov` cache so the instrumented artifacts never churn the standard-profile
+  # `std` cache used by lint/test/smoke.
+  coverage:
+    name: Coverage (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cov
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Run tests with coverage
@@ -87,6 +132,9 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: std
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install -y tmux
       - name: Run integration tests cold (no inherited TMUX, no live-session opt-out)
@@ -120,7 +168,7 @@ jobs:
   # fresh-run-id lever above stays the recovery path for that.
   build-docs:
     name: Build Docs
-    needs: [lint, test, audit]
+    needs: [lint, test, coverage, audit]
     if: >-
       github.ref == 'refs/heads/main'
       && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
@@ -131,6 +179,11 @@ jobs:
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Instrumented (llvm-cov) profile — same as the coverage job, so this
+          # restores that warm cache instead of a cold compile.
+          shared-key: cov
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install -y tmux
       - uses: taiki-e/install-action@mdbook

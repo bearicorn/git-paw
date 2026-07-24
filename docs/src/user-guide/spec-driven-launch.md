@@ -50,7 +50,7 @@ Unknown names error out before any worktrees are created. The error message incl
 
 ## Spec Formats
 
-git-paw supports three spec formats: **OpenSpec** (directory-based), **Markdown** (file-based), and **Spec Kit** (`.specify/`-based, [GitHub Spec Kit](https://github.com/github/spec-kit)).
+git-paw supports four spec formats: **OpenSpec** (directory-based), **Markdown** (file-based), **Spec Kit** (`.specify/`-based, [GitHub Spec Kit](https://github.com/github/spec-kit)), and **Superpowers** (`docs/superpowers/plans/`-based, [obra/superpowers](https://github.com/obra/superpowers)).
 
 ### OpenSpec Format (default)
 
@@ -146,9 +146,9 @@ Spec Kit projects place each feature in its own directory under `.specify/specs/
       tasks.md
 ```
 
-**Auto-detection.** When `.specify/specs/` exists at the repo root *and* you have no `[specs]` section in `.git-paw/config.toml`, `git paw start --from-all-specs` defaults to `specs.type = "speckit"` with `specs.dir = ".specify/specs"`. `git paw init` also detects `.specify/` and writes the matching `[specs]` section to the generated config so the choice is locked.
+**Selecting Spec Kit.** git-paw does not auto-detect the spec system from the filesystem — you set it explicitly. Either configure `[specs] type = "speckit"` with `dir = ".specify/specs"` in `.git-paw/config.toml` (`git paw init` prompts you to choose the spec system and writes this section), or pass `--specs-format speckit` for a single launch.
 
-You can override with `--specs-format`:
+Selecting a spec system for one launch with `--specs-format`:
 
 ```bash
 # Force Spec Kit even when [specs] config says otherwise
@@ -156,6 +156,9 @@ git paw start --from-all-specs --specs-format speckit
 
 # Force OpenSpec on a project that has a `.specify/` folder
 git paw start --from-all-specs --specs-format openspec
+
+# Force Superpowers on a project with docs/superpowers/plans/
+git paw start --from-all-specs --specs-format superpowers
 ```
 
 **`tasks.md` decomposition.** Spec Kit's `tasks.md` files use `## Phase N: <Name>` headings and `- [ ] T<NNN>` task lines. git-paw decomposes the **current phase** (the first phase with any incomplete task) into one worktree per kind:
@@ -187,6 +190,26 @@ In this example, one feature directory produces three worktrees and three branch
 
 **Constitution wiring.** When `.specify/memory/constitution.md` exists, git-paw exposes its path via the SpecKit backend's `detect_constitution` probe. A future `[governance.constitution]` config slot (the `governance-config` change) will consume this path automatically, so projects that already have a Spec Kit constitution get governance configured for free.
 
+### Superpowers Format
+
+[obra/superpowers](https://github.com/obra/superpowers) is a multi-CLI methodology plugin whose `writing-plans` skill saves implementation plans as flat Markdown files under `docs/superpowers/plans/`. git-paw scans those plans — **one worktree per incomplete plan**.
+
+```
+docs/superpowers/plans/
+  2026-07-20-add-auth.md       # one plan = one worktree
+  2026-07-21-export-csv.md
+```
+
+Unlike Spec Kit, a superpowers plan is **not** fanned out into per-task worktrees — a plan is a sequential TDD chain meant for a single `subagent-driven-development` worktree, so each plan file maps to exactly one branch: `plan/<plan-file-stem>`.
+
+**Plan structure.** Each plan carries a header (`**Goal:**`, `**Architecture:**`, `**Tech Stack:**`) and one or more `### Task N: <name>` sections, each with a `**Files:**` block (exact paths) and bite-sized `- [ ]` checkbox steps plus `Run:` verification commands.
+
+**Discovery.** A plan is picked up when it has at least one incomplete `- [ ]` step. A plan whose every step is `- [x]` is skipped (with a warning); a `.md` file with no `### Task`/step lines — e.g. a design doc under `docs/superpowers/specs/` — is skipped silently.
+
+**Selecting Superpowers.** As with every format, git-paw does not auto-detect it — configure `[specs] type = "superpowers"` with `dir = "docs/superpowers/plans"` (`git paw init` prompts you to choose the spec system), or pass `--specs-format superpowers` for a single launch.
+
+**Boot prompt.** Each worktree's `.git-paw/AGENTS.local.md` sidecar contains: **Plan Context** (Goal / Architecture / Tech Stack), **Your Tasks** (the plan's task sections with their `Files:` and `Run:` metadata), and an **Execution** instruction to work the steps in order, flip `- [ ]` → `- [x]` in the plan file as each lands, and publish `agent.done` only when every step shows `- [x]`.
+
 ## Configuration
 
 Configure spec scanning in `.git-paw/config.toml` (or the global config):
@@ -201,7 +224,7 @@ branch_prefix = "spec/"
 # Spec scanning configuration.
 [specs]
 dir = "specs"         # Directory containing spec files (relative to repo root)
-type = "openspec"     # "openspec" (default), "markdown", or "speckit"
+type = "openspec"     # "openspec" (default), "markdown", "speckit", or "superpowers"
 ```
 
 The interpretation of `dir` depends on the format:

@@ -401,6 +401,37 @@ pub fn build_boot_block(branch_id: &str, broker_url: &str) -> String {
         .replace("{{GIT_PAW_BROKER_URL}}", broker_url)
 }
 
+/// Boot-context directive appended to the supervisor's skill content when a
+/// session is `--unattended` — an in-process drive loop is the sole approver of
+/// classifier-safe permission prompts. It tells the supervisor to consume the
+/// loop's escalations rather than blanket-approving, upholding the disjoint-set
+/// approval model (see the `supervisor-loop-escalation-tiering` spec).
+const DRIVE_LOOP_DIRECTIVE: &str = "## Unattended: a drive loop is running\n\n\
+An in-process drive loop is auto-approving classifier-safe permission prompts on \
+every pane this session. It owns mechanical approval of safe prompts — do NOT \
+blanket-sweep-and-approve them yourself, or you will race the loop.\n\n\
+Your approval role this session is escalation-driven, in this order each cycle:\n\n\
+1. **Drain the loop's escalations first.** Prompts the loop could not classify \
+safe arrive as review items in your broker inbox. Reason about each and either \
+approve the specific escalated pane (`.git-paw/scripts/sweep.sh approve <pane>`) \
+or publish feedback — before anything else, so blocked agents unblock fastest.\n\
+2. **Then run your normal sweep** — verification, merge, conflict handling, \
+detect-stuck, and status — as usual, but WITHOUT blanket-approving safe prompts \
+(the loop owns those).";
+
+/// Appends the drive-loop coordination directive ([`DRIVE_LOOP_DIRECTIVE`]) to
+/// the supervisor's boot content when `unattended` is true; otherwise returns
+/// `supervisor_md` unchanged (attended: the supervisor is the sole approver and
+/// performs the full sweep + approve).
+#[must_use]
+pub fn with_drive_loop_directive(supervisor_md: String, unattended: bool) -> String {
+    if unattended {
+        format!("{supervisor_md}\n\n{DRIVE_LOOP_DIRECTIVE}")
+    } else {
+        supervisor_md
+    }
+}
+
 /// Borrowed view of the seven gate-command templates substituted by
 /// [`render`] into the supervisor skill.
 ///
@@ -763,6 +794,11 @@ pub fn render_spec_path_doctrine(backends: &[crate::specs::SpecBackendKind]) -> 
             SpecBackendKind::Markdown => {
                 "Markdown specs are flat `.md` files with `paw_status: pending` frontmatter; \
                  the format has no per-artifact workflow — the file itself is the contract."
+            }
+            SpecBackendKind::Superpowers => {
+                "Superpowers plans are flat files under `docs/superpowers/plans/*.md` \
+                 (obra/superpowers writing-plans documents); work each plan's `### Task N` steps \
+                 in order and flip `- [ ]` to `- [x]` in the plan file as each step lands."
             }
         }
     };
@@ -1301,6 +1337,23 @@ mod tests {
         assert!(
             lowered.contains("danger-class escalation"),
             "procedure must tie into the protected-path danger classification"
+        );
+    }
+
+    #[test]
+    fn supervisor_skill_defers_safe_approvals_to_drive_loop() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            tmpl.content.contains("do NOT blanket-approve safe"),
+            "supervisor skill must forbid blanket-approving safe prompts when a drive loop runs"
+        );
+        assert!(
+            tmpl.content.contains("Drain the loop's escalations first"),
+            "supervisor skill must tell it to drain loop escalations before sweeping"
+        );
+        assert!(
+            tmpl.content.contains("sole approver"),
+            "supervisor skill must state it is the sole approver when no loop runs"
         );
     }
 
@@ -3967,6 +4020,35 @@ mod tests {
         assert_eq!(tmpl.name, cloned.name);
         assert_eq!(tmpl.content, cloned.content);
         assert_eq!(tmpl.source, cloned.source);
+    }
+
+    // Drive-loop directive (supervisor boot-context injection when unattended)
+    #[test]
+    fn drive_loop_directive_present_when_unattended() {
+        let out = with_drive_loop_directive("BASE SKILL".to_string(), true);
+        assert!(out.contains("BASE SKILL"), "base content preserved");
+        assert!(
+            out.contains("a drive loop is running"),
+            "unattended boot context announces the drive loop; got:\n{out}"
+        );
+        assert!(
+            out.contains("do NOT") && out.contains("blanket"),
+            "directive forbids blanket-approving safe prompts"
+        );
+        assert!(
+            out.to_lowercase().contains("escalation")
+                || out.contains("Drain the loop's escalations"),
+            "directive tells the supervisor to consume escalations first"
+        );
+    }
+
+    #[test]
+    fn drive_loop_directive_absent_when_attended() {
+        let out = with_drive_loop_directive("BASE SKILL".to_string(), false);
+        assert_eq!(
+            out, "BASE SKILL",
+            "attended: content unchanged, no directive"
+        );
     }
 
     // Boot block function tests

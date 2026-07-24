@@ -8,6 +8,7 @@ mod markdown;
 mod openspec;
 pub mod resolve;
 pub mod speckit;
+pub mod superpowers;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -17,6 +18,7 @@ use crate::config::PawConfig;
 use crate::error::PawError;
 use openspec::OpenSpecBackend;
 use speckit::SpecKitBackend;
+use superpowers::SuperpowersBackend;
 
 /// A discovered spec ready for session launch.
 ///
@@ -72,6 +74,8 @@ pub enum SpecBackendKind {
     Markdown,
     /// Produced by `SpecKitBackend` (`.specify/specs/<feature>/` layout).
     SpecKit,
+    /// Produced by `SuperpowersBackend` (`docs/superpowers/plans/*.md` files).
+    Superpowers,
 }
 
 use markdown::MarkdownBackend;
@@ -138,8 +142,9 @@ fn backend_for_type(spec_type: &str) -> Result<Box<dyn SpecBackend>, PawError> {
         "openspec" => Ok(Box::new(OpenSpecBackend)),
         "markdown" => Ok(Box::new(MarkdownBackend)),
         "speckit" => Ok(Box::new(SpecKitBackend)),
+        "superpowers" => Ok(Box::new(SuperpowersBackend)),
         _ => Err(PawError::SpecError(format!(
-            "unknown spec type: {spec_type}"
+            "unknown spec type: {spec_type} (known: openspec, markdown, speckit, superpowers)"
         ))),
     }
 }
@@ -155,56 +160,48 @@ fn derive_branch(prefix: &str, id: &str) -> String {
     }
 }
 
-/// Resolves the effective spec configuration with auto-detection and CLI
-/// override applied.
+/// Resolves the effective spec configuration from EXPLICIT sources only.
 ///
 /// Precedence (highest to lowest):
-/// 1. `format_override` (typically the `--specs-format` CLI value).
+/// 1. `format_override` (the `--specs-format` CLI value).
 /// 2. Explicit `[specs]` section in TOML config.
-/// 3. Auto-detection of `.specify/specs/` at the repo root → Spec Kit defaults.
 ///
-/// Returns `None` when no source resolves a usable configuration.
+/// git-paw does NOT probe the filesystem to guess the spec system: the config
+/// `[specs]` section or `--specs-format` is the sole source of truth. When the
+/// override names a format but no `dir` is set, the format's conventional
+/// directory is supplied. Returns `None` when neither source is set — the
+/// caller turns that into an actionable error.
 fn resolve_specs_config(
     config: &PawConfig,
-    repo_root: &Path,
     format_override: Option<&str>,
 ) -> Option<crate::config::SpecsConfig> {
     if let Some(format) = format_override {
         let mut base = config.specs.clone().unwrap_or_default();
         base.spec_type = Some(format.to_string());
-        if base.dir.is_none() && format == "speckit" {
-            base.dir = Some(".specify/specs".to_string());
+        if base.dir.is_none() {
+            if format == "speckit" {
+                base.dir = Some(".specify/specs".to_string());
+            } else if format == "superpowers" {
+                base.dir = Some(superpowers::PLANS_DIR.to_string());
+            }
         }
         return Some(base);
     }
 
-    if config.specs.is_some() {
-        return config.specs.clone();
-    }
-
-    // Auto-detect Spec Kit when `.specify/specs/` exists at the repo root.
-    let specify = repo_root.join(".specify");
-    if specify.is_dir() && specify.join("specs").is_dir() {
-        return Some(crate::config::SpecsConfig {
-            dir: Some(".specify/specs".to_string()),
-            spec_type: Some("speckit".to_string()),
-        });
-    }
-
-    None
+    config.specs.clone()
 }
 
-/// Resolves the effective spec engine type for a repo, or `None` when no
-/// spec source is configured or auto-detected.
+/// Resolves the effective spec engine type for a repo from the config's
+/// `[specs]` section, or `None` when no `[specs]` section is configured.
 ///
-/// Applies the same precedence as [`scan_specs`] (explicit `[specs]` config,
-/// then `.specify/` auto-detection) and resolves a present-but-untyped
-/// `[specs]` section to the `"openspec"` default that `scan_specs` would use.
-/// Consumers that need to gate a capability on the `OpenSpec` engine — notably
-/// the `opsx-role-gating` guard — call this and compare against `"openspec"`.
+/// A present-but-untyped `[specs]` section resolves to the `"openspec"` default
+/// that `scan_specs` would use. Consumers that need to gate a capability on the
+/// `OpenSpec` engine — notably the `opsx-role-gating` guard — call this and
+/// compare against `"openspec"`. There is no filesystem auto-detection: an
+/// unconfigured repo returns `None`.
 #[must_use]
-pub fn resolved_spec_type(config: &PawConfig, repo_root: &Path) -> Option<String> {
-    resolve_specs_config(config, repo_root, None)
+pub fn resolved_spec_type(config: &PawConfig, _repo_root: &Path) -> Option<String> {
+    resolve_specs_config(config, None)
         .map(|c| c.spec_type.unwrap_or_else(|| "openspec".to_string()))
 }
 
@@ -214,7 +211,7 @@ pub fn resolved_spec_type(config: &PawConfig, repo_root: &Path) -> Option<String
 /// appropriate backend, scans for pending specs, and derives branch names.
 ///
 /// Returns an error if:
-/// - No `[specs]` section exists in config and no `.specify/` is auto-detected
+/// - No `[specs]` section is configured and no `--specs-format` is passed
 /// - The spec directory does not exist or is not a directory
 /// - The spec type is unknown
 pub fn scan_specs(config: &PawConfig, repo_root: &Path) -> Result<Vec<SpecEntry>, PawError> {
@@ -227,8 +224,14 @@ pub fn scan_specs_with_override(
     repo_root: &Path,
     format_override: Option<&str>,
 ) -> Result<Vec<SpecEntry>, PawError> {
-    let specs_config = resolve_specs_config(config, repo_root, format_override)
-        .ok_or_else(|| PawError::SpecError("no [specs] section in config".to_string()))?;
+    let specs_config = resolve_specs_config(config, format_override).ok_or_else(|| {
+        PawError::SpecError(
+            "no spec system configured: add a [specs] section to .git-paw/config.toml \
+             (type = \"openspec\" | \"markdown\" | \"speckit\" | \"superpowers\") or pass \
+             --specs-format"
+                .to_string(),
+        )
+    })?;
 
     let dir = specs_config.dir.as_deref().unwrap_or("specs");
     let specs_dir = repo_root.join(dir);
@@ -334,10 +337,19 @@ mod tests {
     }
 
     #[test]
+    fn backend_for_type_superpowers() {
+        assert!(backend_for_type("superpowers").is_ok());
+    }
+
+    #[test]
     fn backend_for_type_unknown() {
         let err = backend_for_type("unknown").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unknown spec type"), "got: {msg}");
+        assert!(
+            msg.contains("superpowers"),
+            "unknown-type error lists known types incl superpowers; got: {msg}"
+        );
     }
 
     #[test]
@@ -397,23 +409,43 @@ mod tests {
         assert!(entries.is_empty());
     }
 
-    // --- Auto-detection of .specify/ ---
+    // --- Explicit config / CLI are the only spec sources (no auto-detection) ---
 
     #[test]
-    fn auto_detect_specify_activates_speckit() {
+    fn unconfigured_repo_resolves_to_none_even_with_layouts_present() {
+        // Neither a [specs] section nor --specs-format: resolve to None even
+        // though `.specify/specs/` and `docs/superpowers/plans/` exist on disk.
+        // git-paw never probes the filesystem to guess the spec system.
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join(".specify").join("specs")).unwrap();
-        let config = PawConfig::default();
-        // The path exists but has no features — backend returns empty Vec.
-        let entries = scan_specs(&config, tmp.path()).unwrap();
-        assert!(entries.is_empty());
+        let plans = tmp.path().join("docs").join("superpowers").join("plans");
+        fs::create_dir_all(&plans).unwrap();
+        fs::write(plans.join("p.md"), "### Task 1: X\n- [ ] do\n").unwrap();
+
+        assert!(
+            resolve_specs_config(&PawConfig::default(), None).is_none(),
+            "no [specs] and no --specs-format must resolve to None (no auto-detection)"
+        );
     }
 
     #[test]
-    fn auto_detect_skipped_when_specs_section_present() {
+    fn unconfigured_scan_errors_with_actionable_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = scan_specs(&PawConfig::default(), tmp.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("[specs]"), "got: {msg}");
+        assert!(
+            msg.contains("--specs-format"),
+            "error names the CLI fix; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn config_specs_section_is_used_verbatim() {
+        // The config [specs] section is the source of truth — returned as-is,
+        // with no filesystem probing even when `.specify/specs/` exists.
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join(".specify").join("specs")).unwrap();
-        fs::create_dir(tmp.path().join("my-specs")).unwrap();
         let config = PawConfig {
             specs: Some(SpecsConfig {
                 dir: Some("my-specs".to_string()),
@@ -421,81 +453,13 @@ mod tests {
             }),
             ..Default::default()
         };
-        let resolved = resolve_specs_config(&config, tmp.path(), None).unwrap();
+        let resolved = resolve_specs_config(&config, None).unwrap();
         assert_eq!(resolved.spec_type.as_deref(), Some("markdown"));
         assert_eq!(resolved.dir.as_deref(), Some("my-specs"));
     }
 
     #[test]
-    fn auto_detect_skipped_when_no_specify_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = PawConfig::default();
-        assert!(resolve_specs_config(&config, tmp.path(), None).is_none());
-    }
-
-    #[test]
-    fn auto_detect_skipped_when_specify_missing_specs_subdir() {
-        let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join(".specify").join("memory")).unwrap();
-        let config = PawConfig::default();
-        assert!(resolve_specs_config(&config, tmp.path(), None).is_none());
-    }
-
-    // Maps to scenario `Explicit config in TOML wins over auto-detection`
-    // from spec-kit-format. The repo has BOTH a `.specify/specs/` directory
-    // (which would normally auto-activate the SpecKit backend) AND an
-    // explicit `[specs] type = "markdown"` config. The explicit config
-    // must win: the Markdown backend is selected, not SpecKit.
-    // (test-coverage-v0-5-0 task 11.5)
-    #[test]
-    fn explicit_config_wins_over_auto_detection() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Seed `.specify/specs/` so the auto-detection branch *would* fire.
-        fs::create_dir_all(tmp.path().join(".specify").join("specs")).unwrap();
-        // Seed a markdown specs directory the explicit config points at.
-        let md_dir = tmp.path().join("specs");
-        fs::create_dir(&md_dir).unwrap();
-
-        let config = PawConfig {
-            specs: Some(SpecsConfig {
-                dir: Some("specs".to_string()),
-                spec_type: Some("markdown".to_string()),
-            }),
-            ..Default::default()
-        };
-
-        // resolve_specs_config must select the explicit config without
-        // falling through to auto-detection.
-        let resolved = resolve_specs_config(&config, tmp.path(), None)
-            .expect("explicit config should resolve");
-        assert_eq!(
-            resolved.spec_type.as_deref(),
-            Some("markdown"),
-            "explicit type = markdown must win over the auto-detected speckit"
-        );
-        assert_eq!(
-            resolved.dir.as_deref(),
-            Some("specs"),
-            "explicit dir = specs must win over the auto-detected .specify/specs"
-        );
-
-        // End-to-end: scan_specs must run the Markdown backend and NOT the
-        // SpecKit backend. With an empty markdown specs/ dir the result is
-        // an empty entry list; with SpecKit on the `.specify/specs/` dir
-        // we would similarly get zero entries — but a SpecKit-routed scan
-        // would set up the `.specify/specs/` dir as its source. We assert
-        // success on the markdown path explicitly.
-        let entries = scan_specs(&config, tmp.path()).unwrap();
-        assert!(
-            entries.is_empty(),
-            "empty markdown specs dir should produce no entries; got: {entries:?}"
-        );
-    }
-
-    #[test]
-    fn format_override_wins_over_specs_config_and_auto_detection() {
-        let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join(".specify").join("specs")).unwrap();
+    fn format_override_wins_over_config() {
         let config = PawConfig {
             specs: Some(SpecsConfig {
                 dir: Some("my-specs".to_string()),
@@ -503,18 +467,24 @@ mod tests {
             }),
             ..Default::default()
         };
-        let resolved = resolve_specs_config(&config, tmp.path(), Some("openspec")).unwrap();
+        let resolved = resolve_specs_config(&config, Some("openspec")).unwrap();
         assert_eq!(resolved.spec_type.as_deref(), Some("openspec"));
+        // The override keeps the configured dir when one is set.
         assert_eq!(resolved.dir.as_deref(), Some("my-specs"));
     }
 
     #[test]
     fn format_override_speckit_supplies_default_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = PawConfig::default();
-        let resolved = resolve_specs_config(&config, tmp.path(), Some("speckit")).unwrap();
+        let resolved = resolve_specs_config(&PawConfig::default(), Some("speckit")).unwrap();
         assert_eq!(resolved.spec_type.as_deref(), Some("speckit"));
         assert_eq!(resolved.dir.as_deref(), Some(".specify/specs"));
+    }
+
+    #[test]
+    fn format_override_superpowers_supplies_default_dir() {
+        let resolved = resolve_specs_config(&PawConfig::default(), Some("superpowers")).unwrap();
+        assert_eq!(resolved.spec_type.as_deref(), Some("superpowers"));
+        assert_eq!(resolved.dir.as_deref(), Some("docs/superpowers/plans"));
     }
 
     #[test]

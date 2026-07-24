@@ -220,13 +220,13 @@ fn flipping_a_phase_two_task_to_x_advances_to_next_phase() {
 }
 
 #[test]
-fn auto_detect_via_cli_override_routes_to_speckit() {
+fn cli_override_speckit_routes_and_supplies_default_dir() {
     let tmp = tempfile::tempdir().unwrap();
     build_fixture(tmp.path());
 
-    // Config has no [specs] — without auto-detect the scan would fail. We
-    // pass --specs-format speckit to force the SpecKit backend, which carries
-    // its own ".specify/specs" default dir.
+    // Config has no [specs]. With filesystem auto-detection removed, the scan
+    // needs an explicit source: `--specs-format speckit` selects the SpecKit
+    // backend and supplies its ".specify/specs" default dir.
     let config = PawConfig::default();
     let entries = scan_specs_with_override(&config, tmp.path(), Some("speckit")).unwrap();
     assert!(
