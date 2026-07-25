@@ -104,6 +104,7 @@ The project uses standard Rust development tools along with additional quality a
 
 ### Code Style
 
+- **Structuring, decoupling, and refactoring code**: follow the `code-standards` agent skill (`.agents/skills/code-standards/SKILL.md`) — the decided patterns (process-execution `CommandRunner` seam, domain newtypes, hidden-subcommand IPC, domain-module layout), the frozen do-not-touch list, the refactor rules, and the bundled Rust API Guidelines / CLI-design / NFR references. Repo-local dev skill; conformance guarded by `tests/agent_skills_conform.rs`.
 - Formatting configured in `rustfmt.toml`
 - Clippy pedantic lints enabled (configured in `Cargo.toml` under `[lints.clippy]`)
 - All public functions and types must have doc comments (`///`)
