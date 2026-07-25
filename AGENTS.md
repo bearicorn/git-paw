@@ -158,6 +158,7 @@ The root command has `after_help` with a quick-start guide.
 
 ### Testing
 
+- **Choosing a test's type and writing it behaviorally**: follow the `test-strategy` agent skill (`.agents/skills/test-strategy/SKILL.md`) — the canonical decision procedure (unit-table / integration / e2e-PTY / asset-parity), robustness rules, and anti-pattern catalog. Repo-local dev skill; conformance guarded by `tests/agent_skills_conform.rs`.
 - Unit tests in `#[cfg(test)] mod tests {}` at bottom of each module
 - Integration tests in `tests/` directory
 - `tempfile` for filesystem-touching tests
