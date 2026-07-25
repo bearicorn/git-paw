@@ -1,0 +1,26 @@
+# Tasks — standards-skill-integration
+
+## 1. Supervisor gate consult (exported)
+- [ ] Edit `assets/agent-skills/supervisor.md`: add a review-gate step to consult the project's `.agents/skills/` standards skills (e.g. `test-strategy`, `code-standards`) when present and verify conformance — project-agnostic wording, no git-paw stack specifics
+- [ ] Confirm the step sits inside the appropriate (region-gated if applicable) section so non-OpenSpec/other consumers still parse cleanly
+
+## 2. Worker consult (exported)
+- [ ] Edit `assets/agent-skills/coordination.md` (and/or the boot-block guidance) to direct the implementing agent to consult the project's `.agents/skills/` standards skills during implementation — project-agnostic wording
+- [ ] Ensure absent standards → no-op (backward compatible)
+
+## 3. Ripple + sync (scope up front)
+- [ ] Grep `src/skills.rs` + `tests/*_skill_content.rs` (`coordination_region_skill_content.rs`, `supervisor_routing_skill_content.rs`, …) for the pinned literals; update those tests in lockstep with the prose edits
+- [ ] Sync the tracked `.git-paw/scripts`/skill copies from `assets/` (known drift hazard) with a `chore(init): sync ...` step
+- [ ] Extend the `lang-agnostic-skills` no-language-leak audit to cover the new consult wording (assert no stack/language token in the consult step)
+
+## 4. Verification (five gates)
+- [ ] Gate 1/2 — `skills.rs` + `*_skill_content.rs` updated and green; full suite green vs merge-base
+- [ ] Gate 3 — every `standards-skill-integration` scenario maps to a test (gate-step present, no-baked-standard, worker-step present, absent→no-op)
+- [ ] Gate 4 — mdBook/user-guide notes the supervisor consults project standards at the gate (if the supervisor chapter documents gates)
+- [ ] Gate 5 — security/agnosticism: exported assets carry only generic "consult the project's standards" wording; no git-paw specifics leaked
+- [ ] `just check` green; `cargo fmt` before commit
+- [ ] `openspec validate standards-skill-integration --strict` passes
+
+## Notes
+- Consumes `.agents/skills/` standards (git-paw's own `test-strategy` + `code-standards` for dogfood;
+  consumers supply their own). Additive + backward-compatible.
