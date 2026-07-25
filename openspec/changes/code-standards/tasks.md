@@ -5,11 +5,11 @@
 - [x] Author `references/rust-api-guidelines.md` (condensed Rust API Guidelines checklist + git-paw applicability)
 - [x] Author `references/cli-and-devtool-design.md` (condensed CLI/dev-tool guidelines + git-paw applicability)
 - [x] Author `references/non-functional-requirements.md` (NFR set + conflict resolutions + precedence spine — the rationale the standards serve)
-- [ ] Verify conformance against the agentskills.io spec (`name = "code-standards"` matches folder; `description` ≤ 1024 says what + when; SKILL.md < 500 lines; references linked one level deep)
-- [ ] Mark clearly which standards are enforced-now vs aspirational (seams/splits pending the refactor)
+- [x] Verify conformance against the agentskills.io spec (`name = "code-standards"` matches folder; `description` ≤ 1024 says what + when; SKILL.md < 500 lines; references linked one level deep)
+- [x] Mark clearly which standards are enforced-now vs aspirational (seams/splits pending the refactor)
 
 ## 2. Contributor guidance
-- [ ] Add an AGENTS.md code-style pointer naming the `code-standards` skill as the canonical reference for structuring/decoupling/refactoring
+- [x] Add an AGENTS.md code-style pointer naming the `code-standards` skill as the canonical reference for structuring/decoupling/refactoring
 - [ ] Cross-reference from CONTRIBUTING.md if it carries code-style guidance
 
 ## 3. Verification (five gates)
