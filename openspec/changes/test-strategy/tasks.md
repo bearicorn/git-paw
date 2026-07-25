@@ -2,15 +2,15 @@
 
 ## 1. The skill
 - [x] Author `.agents/skills/test-strategy/SKILL.md` in agentskills.io format (name↔folder, `name`/`description` frontmatter, layer-decision table, robustness rules, anti-pattern catalog, consolidation routing)
-- [ ] Verify conformance against the agentskills.io spec (frontmatter constraints; `name = "test-strategy"` matches folder; `description` ≤ 1024, says what + when)
+- [x] Verify conformance against the agentskills.io spec (frontmatter constraints; `name = "test-strategy"` matches folder; `description` ≤ 1024, says what + when)
 
 ## 2. CI validation guard
-- [ ] Add an integration test / CI step that loads every `.agents/skills/*/SKILL.md` via git-paw's own skill loader (`skill-standardization`/`skill-validation`) and asserts each parses with required fields + a name matching its folder; fails non-zero on a malformed skill
-- [ ] Wire it into the CI matrix (fmt/clippy/deny/audit-adjacent) so a non-conformant skill blocks merge
+- [x] Add an integration test / CI step that loads every `.agents/skills/*/SKILL.md` via git-paw's own skill loader (`skill-standardization`/`skill-validation`) and asserts each parses with required fields + a name matching its folder; fails non-zero on a malformed skill
+- [x] Wire it into the CI matrix (fmt/clippy/deny/audit-adjacent) so a non-conformant skill blocks merge
 - [ ] (Optional) document `skills-ref validate ./.agents/skills/<name>` as the external equivalent
 
 ## 3. Contributor guidance
-- [ ] Add an AGENTS.md testing-section pointer naming the `test-strategy` skill as the canonical procedure for choosing a test's type and writing it behaviorally
+- [x] Add an AGENTS.md testing-section pointer naming the `test-strategy` skill as the canonical procedure for choosing a test's type and writing it behaviorally
 - [ ] Cross-reference from CONTRIBUTING.md if it carries testing guidance
 
 ## 4. Verification (five gates)
