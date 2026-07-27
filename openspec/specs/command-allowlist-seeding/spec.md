@@ -1,8 +1,196 @@
-# dev-command-allowlist Specification
+# command-allowlist-seeding Specification
 
 ## Purpose
-Seeds a curated, stack-neutral set of common dev-command prefix grants into the CLI's `allowed_bash_prefixes` on supervisor start (config-gated, broker-independent, non-fatal on failure) so routine dev-loop commands prompt at most once, with opt-in named stack presets (`rust`, `node`, `python`, `go`) and a user `extra` list layered on top via idempotent, dedup-preserving merge.
+
+This capability seeds least-privilege command allowlists into agent CLI settings at session startup so routine agent actions run without permission prompts. It covers the path-based broker-helper (curl) allowlist grant and its updates, config-driven seeding of the broker allowlist into each session CLI's configured `settings_path` (no hardcoded CLI names or paths), and the curated, stack-neutral dev-command prefix allowlist with opt-in named stack presets (`rust`, `node`, `python`, `go`) and a user `extra` list. All seeding is idempotent, dedup-preserving, per-path-once, non-fatal on failure, and applied both at the repo root and per agent worktree.
+
 ## Requirements
+
+### Requirement: Curl allowlist setup
+
+The system SHALL automatically create and configure an allowlist during
+session startup to prevent permission prompts for broker communication.
+The seeded grant SHALL be the single stable path of the bundled
+agent-broker helper (`.git-paw/scripts/broker.sh`, the
+`agent-broker-helper` capability) — a least-privilege, path-based grant.
+The system SHALL NOT seed a broad `curl *` grant, and SHALL NOT depend
+on per-endpoint `curl <broker-url><endpoint>` prefixes for the agent's
+boot-time broker interactions.
+
+#### Scenario: Allowlist created on session start
+
+- **GIVEN** supervisor mode session with broker enabled
+- **WHEN** `cmd_supervisor()` starts the session
+- **THEN** an allowlist SHALL be created
+- **AND** it SHALL grant the agent-broker helper path
+
+#### Scenario: Allowlist grants the helper path, not broad curl
+
+- **GIVEN** broker URL `http://127.0.0.1:9119`
+- **WHEN** the allowlist is created
+- **THEN** it SHALL contain a prefix authorising
+  `.git-paw/scripts/broker.sh`
+- **AND** it SHALL NOT contain a `curl *` (broad curl) grant
+
+#### Scenario: Helper grant removes the boot-publish dead-stall
+
+- **GIVEN** an agent whose first boot action publishes its register
+  status via `.git-paw/scripts/broker.sh status booting`
+- **WHEN** the agent runs that boot action with the helper-path grant
+  seeded
+- **THEN** no permission prompt SHALL appear
+- **AND** the agent SHALL register with the broker without stalling
+
+### Requirement: Allowlist file format
+
+The system SHALL write the curl allowlist to the appropriate agent CLI configuration file with the correct format.
+
+#### Scenario: Allowlist written to Claude settings
+
+- **GIVEN** Claude CLI is used as supervisor
+- **WHEN** allowlist is created
+- **THEN** it SHALL be written to `.claude/settings.json`
+- **AND** use the `allowed_bash_prefixes` format
+
+#### Scenario: Allowlist format is valid JSON
+
+- **WHEN** allowlist file is created
+- **THEN** it SHALL be valid JSON
+- **AND** contain an `allowed_bash_prefixes` array
+
+### Requirement: Allowlist prevents permission prompts
+
+The curl allowlist SHALL effectively prevent permission prompts for whitelisted commands.
+
+#### Scenario: No permission prompt for allowlisted curl
+
+- **GIVEN** curl command in allowlist
+- **WHEN** agent executes the command
+- **THEN** no permission prompt SHALL appear
+- **AND** command executes immediately
+
+#### Scenario: Permission prompt for non-allowlisted commands
+
+- **GIVEN** curl command not in allowlist
+- **WHEN** agent executes the command
+- **THEN** permission prompt SHALL appear normally
+
+### Requirement: Allowlist updates
+
+The system SHALL support updating the curl allowlist when broker URL changes or new endpoints are added.
+
+#### Scenario: Allowlist updated on broker URL change
+
+- **GIVEN** session with broker URL change
+- **WHEN** allowlist is regenerated
+- **THEN** it SHALL contain the new broker URL
+
+#### Scenario: New endpoints added to allowlist
+
+- **GIVEN** new broker endpoint `/feedback`
+- **WHEN** allowlist is updated
+- **THEN** it SHALL include the new endpoint
+
+### Requirement: Helper allowlist seeded per agent worktree
+
+Under the same gating that governs the repo-root helper allowlist (broker enabled for the broker/sweep helper prefixes; docs base URL configured for the docs-fetch prefix), the system SHALL merge the helper-path allowlist into `<worktree>/.claude/settings.json` for every agent worktree at start, add, and session recovery — the same events that provision the helper scripts themselves. Merge semantics match the repo-root target; failures are non-fatal warnings.
+
+#### Scenario: Worktree carries the helper grants next to the helper scripts
+
+- **GIVEN** a broker-enabled session
+- **WHEN** an agent worktree is attached
+- **THEN** its `.claude/settings.json` `allowed_bash_prefixes` SHALL include the `.git-paw/scripts/broker.sh` path-scoped prefix
+- **AND** the worktree SHALL also contain the provisioned helper scripts (per `agent-broker-helper`)
+
+#### Scenario: Broker disabled seeds no broker prefix
+
+- **GIVEN** a session with `[broker] enabled = false`
+- **WHEN** an agent worktree is attached
+- **THEN** the worktree settings SHALL NOT gain the broker helper prefix from this seeder
+
+### Requirement: Config-driven broker-curl seeding for custom CLIs
+
+When the broker is enabled, the system SHALL seed the
+broker-curl allowlist into each session CLI's configured
+settings file, given by `[clis.<name>].settings_path`. The
+seeding target is CONFIG-DRIVEN — the system SHALL NOT
+hardcode any CLI's settings path or name. A leading `~` in
+the configured path SHALL be expanded to the home directory.
+This is in addition to the always-seeded repo-local
+`.claude/settings.json`.
+
+#### Scenario: Configured settings_path is seeded
+
+- **GIVEN** `[clis.mycli].settings_path = "~/.mycli/settings.json"`
+  with the `~/.mycli/` directory present, and a session using
+  `mycli` with the broker enabled
+- **WHEN** the session launches
+- **THEN** the broker endpoints SHALL be seeded into
+  `~/.mycli/settings.json` so the CLI's boot-time
+  `curl .../publish` does not raise a permission prompt
+
+#### Scenario: No hardcoded CLI name or path
+
+- **WHEN** the seeding code is inspected
+- **THEN** it SHALL NOT reference any specific CLI name or
+  settings path; custom-CLI seeding targets come only from
+  `[clis.<name>].settings_path`
+
+#### Scenario: CLI without settings_path seeds nothing extra
+
+- **GIVEN** a session CLI that has no `[clis.<name>]` entry, or
+  one without `settings_path`
+- **WHEN** the session launches
+- **THEN** only the repo-local `.claude/settings.json` SHALL be
+  seeded; no other settings file is written for that CLI
+
+### Requirement: Never create a CLI's config directory
+
+The system SHALL seed a configured `settings_path` only when
+its parent directory already exists, mirroring the
+dev-allowlist seeder's caution — git-paw SHALL NOT create a
+CLI's config directory.
+
+#### Scenario: Missing parent directory is skipped
+
+- **GIVEN** `[clis.mycli].settings_path` whose parent
+  directory does not exist
+- **WHEN** the session launches
+- **THEN** the system SHALL NOT create the directory and SHALL
+  NOT write the settings file for that path
+
+### Requirement: Seeding is idempotent, deduped, and non-fatal
+
+Seeding SHALL be idempotent (re-seeding never duplicates
+allowlist entries and preserves pre-existing entries), SHALL
+seed each distinct settings path at most once per launch even
+when supervisor and agent CLIs resolve to the same path, and
+SHALL be non-fatal (a write failure logs a stderr warning and
+session launch continues).
+
+#### Scenario: Re-attach does not duplicate entries
+
+- **GIVEN** a CLI whose configured settings file was already
+  seeded
+- **WHEN** seeding runs again on re-attach
+- **THEN** the broker-endpoint entries SHALL appear exactly
+  once and pre-existing unrelated entries SHALL remain
+
+#### Scenario: Same path for supervisor and agent seeds once
+
+- **GIVEN** the supervisor CLI and the agent CLI resolve to the
+  same configured `settings_path`
+- **WHEN** the session launches
+- **THEN** that path SHALL be seeded exactly once
+
+#### Scenario: Unwritable settings file warns and continues
+
+- **GIVEN** a configured `settings_path` whose parent exists
+  but the file cannot be written
+- **WHEN** seeding attempts to run
+- **THEN** the system SHALL emit a stderr warning and continue
+  launching the session
+
 ### Requirement: Common dev allowlist seeded on supervisor start
 
 The system SHALL seed a curated set of common dev-command prefix
@@ -409,4 +597,3 @@ The seeder SHALL create `<worktree>/.claude/` when absent (it lies inside a work
 - **GIVEN** `[supervisor.common_dev_allowlist] enabled = false`
 - **WHEN** a session starts
 - **THEN** no agent worktree `.claude/settings.json` SHALL be written by this seeder
-
