@@ -1,124 +1,25 @@
-//! Integration tests for the interactive `git paw init` prompts.
+//! Interactive `git paw init` prompt tests — the TTY-*shown* rows of the
+//! `cli-interaction-e2e` matrix.
 //!
-//! `dialoguer`'s `Select`/`Confirm`/`Input` need a real TTY, so they cannot be
-//! driven from an in-process unit test (`assert_cmd` gives the child pipes, not
-//! a terminal). git-paw depends on tmux, so these tests run the real binary
-//! inside a detached tmux pane — a genuine PTY — and drive it with `send-keys`,
-//! then assert on the observable outcome: the sections written into
-//! `.git-paw/config.toml`.
+//! `dialoguer`'s `Select`/`Confirm`/`Input` need a real TTY, so these drive the
+//! real binary inside a detached tmux pane via the shared PTY harness
+//! (`helpers::pty`) and assert on the written `.git-paw/config.toml`. Socket
+//! isolation via `helpers::TmuxTestEnv`; `#[serial]` + tmux-availability-gated.
 //!
-//! Covered here:
-//! - the `OpenSpec` scenario "interactive init records the chosen spec system"
-//!   (project-initialization) — the spec-system `Select`;
-//! - the supervisor `Confirm` + test-command `Input` path.
-//!
-//! The pure formatting each prompt feeds is unit-tested separately in
-//! `src/init.rs` (`specs_section_for`, `supervisor_section`); these tests cover
-//! only the keystroke -> written-config wiring the unit tests cannot reach.
-//!
-//! tmux socket isolation mirrors `auto_approve_integration.rs`: the test sets
-//! `TMUX_TMPDIR` on the current process via
-//! `helpers::tmux_test_env().apply_to_process()` so the `tmux` subprocesses it
-//! spawns share a test-owned socket, and is `#[serial]` because it mutates the
-//! process environment.
+//! The non-TTY *bypass* rows (the "bypassed when" half of the matrix) live in
+//! `cli_prompt_matrix.rs`; the pure formatting each prompt feeds is unit-tested
+//! in `src/init.rs`.
 
-use std::path::Path;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serial_test::serial;
 
 mod helpers;
-
-fn tmux_available() -> bool {
-    Command::new("tmux")
-        .arg("-V")
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
-
-fn unique_session_name() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    format!("paw-init-specs-{nanos}")
-}
-
-fn kill_session(name: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", name])
-        .output();
-}
-
-/// Detached tmux session running a long-lived shell we can `send-keys` into.
-fn create_detached_session(name: &str) {
-    let status = Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            name,
-            "-x",
-            "200",
-            "-y",
-            "50",
-            "sh",
-        ])
-        .status()
-        .expect("tmux new-session");
-    assert!(status.success(), "tmux new-session failed");
-    std::thread::sleep(Duration::from_millis(150));
-}
-
-/// Captures the visible buffer of pane 0 of `session`.
-fn capture(session: &str) -> String {
-    let out = Command::new("tmux")
-        .args(["capture-pane", "-t", &format!("{session}:0.0"), "-p"])
-        .output()
-        .expect("tmux capture-pane");
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-/// Sends `keys` (literal text or named keys like `Down`/`Enter`) to pane 0.
-fn send_keys(session: &str, keys: &[&str]) {
-    let target = format!("{session}:0.0");
-    let mut args = vec!["send-keys", "-t", &target];
-    args.extend_from_slice(keys);
-    let status = Command::new("tmux")
-        .args(&args)
-        .status()
-        .expect("tmux send-keys");
-    assert!(status.success(), "tmux send-keys failed");
-}
-
-/// Polls the pane until `needle` appears, or panics after `timeout`.
-fn wait_for_pane(session: &str, needle: &str, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let buf = capture(session);
-        if buf.contains(needle) {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for {needle:?} in pane; last capture:\n{buf}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
-/// Polls until `path` exists, or panics after `timeout`.
-fn wait_for_file(path: &Path, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while !path.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for {} to be written",
-            path.display()
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
+use helpers::pty::{
+    create_detached_session, kill_session, send_keys, tmux_available, unique_session_name,
+    wait_for_file, wait_for_pane,
+};
 
 #[test]
 #[serial]
@@ -140,7 +41,7 @@ fn interactive_init_records_chosen_spec_system_in_config() {
         .expect("git init");
     assert!(status.success(), "git init failed");
 
-    let session = unique_session_name();
+    let session = unique_session_name("paw-init-specs");
     create_detached_session(&session);
 
     // Launch the real binary in the pane. Paths from TempDir/Cargo never
@@ -166,10 +67,6 @@ fn interactive_init_records_chosen_spec_system_in_config() {
     let content = std::fs::read_to_string(&config_path).expect("read config");
     kill_session(&session);
 
-    // Parse the config the way git-paw itself does: commented documentation
-    // blocks (the base template ships a commented `# [specs]` example) are
-    // ignored, so only the active section the interactive choice appended is
-    // observed.
     let cfg: git_paw::config::PawConfig =
         toml::from_str(&content).unwrap_or_else(|e| panic!("parse config: {e}\n{content}"));
     let specs = cfg.specs.unwrap_or_else(|| {
@@ -205,7 +102,7 @@ fn interactive_init_records_supervisor_choice_in_config() {
         .expect("git init");
     assert!(status.success(), "git init failed");
 
-    let session = unique_session_name();
+    let session = unique_session_name("paw-init-sup");
     create_detached_session(&session);
 
     let bin = env!("CARGO_BIN_EXE_git-paw");
@@ -218,7 +115,6 @@ fn interactive_init_records_supervisor_choice_in_config() {
     send_keys(&session, &["y"]);
 
     // Prompt 2: the test-command Input (only shown when supervisor is on).
-    // Type a command and submit with Enter.
     wait_for_pane(&session, "Test command", Duration::from_secs(10));
     send_keys(&session, &["just check", "Enter"]);
 

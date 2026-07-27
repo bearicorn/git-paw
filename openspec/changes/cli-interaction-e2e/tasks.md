@@ -1,14 +1,14 @@
 # Tasks — cli-interaction-e2e
 
 ## 1. Shared PTY harness
-- [ ] Promote `create_detached_session` / `send_keys` / `wait_for_pane` / `wait_for_file` / `capture` / `tmux_available` out of `tests/init_interactive_specs.rs` into a shared module (`tests/support/pty.rs` or `tests/helpers/mod.rs`)
-- [ ] Wire socket isolation (`helpers::TmuxTestEnv`) and the tmux-availability skip guard into the shared harness
-- [ ] Refactor `init_interactive_specs.rs` to consume the shared harness (no behaviour change, remove the duplicated helpers)
+- [x] Promote `create_detached_session` / `send_keys` / `wait_for_pane` / `wait_for_file` / `capture` / `tmux_available` out of `tests/init_interactive_specs.rs` into a shared module (`tests/support/pty.rs` or `tests/helpers/mod.rs`)
+- [x] Wire socket isolation (`helpers::TmuxTestEnv`) and the tmux-availability skip guard into the shared harness
+- [x] Refactor `init_interactive_specs.rs` to consume the shared harness (no behaviour change, remove the duplicated helpers)
 
 ## 2. Prompt-matrix test binary (`#[serial]`)
-- [ ] init: supervisor confirm shown (fresh+TTY) / bypassed (non-TTY → `enabled=false`)
-- [ ] init: test-command input shown (after yes) / bypassed (no / non-TTY)
-- [ ] init: spec-system select shown (fresh+TTY) / bypassed (non-TTY → commented template)
+- [x] init: supervisor confirm shown (fresh+TTY, PTY test) / bypassed (non-TTY, matrix test → not enabled)
+- [x] init: test-command input shown (after yes, PTY test) / bypassed (non-TTY, matrix test)
+- [x] init: spec-system select shown (fresh+TTY, PTY test) / bypassed (non-TTY, matrix test → commented template)
 - [ ] init: migrate-supervisor confirm shown (existing config missing `[supervisor]`+TTY) / bypassed (present / non-TTY)
 - [ ] start: branch picker shown (¬`--branches`) / bypassed (`--branches`)
 - [ ] start: mode picker shown (¬`--cli`) / bypassed (`--cli`)
@@ -22,8 +22,8 @@
 - [ ] destructive: purge confirm shown (¬`--force`) / bypassed (`--force`)
 
 ## 3. Outcome assertions + flake resistance
-- [ ] Assert written config / `session.json` / tmux panes for each completed flow (not pane pixels)
-- [ ] Poll-until-rendered synchronisation with per-prompt timeouts; no fixed sleep as the primary gate
+- [x] Assert written config / `session.json` / tmux panes for each completed flow (not pane pixels) — init slice asserts the written config; extend to session.json/panes as start/from-specs rows land
+- [x] Poll-until-rendered synchronisation with per-prompt timeouts; no fixed sleep as the primary gate (in the shared `helpers::pty` harness)
 - [ ] `log`/document any combo deliberately skipped or CI-flag-gated so coverage isn't silently narrowed
 - [ ] Confirm the `--from-specs` non-TTY spec-picker behaviour and encode it
 
