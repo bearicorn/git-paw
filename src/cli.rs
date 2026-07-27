@@ -142,13 +142,14 @@ pub enum Command {
 
         /// Override the spec format used for `--from-all-specs` / `--specs` scanning.
         ///
-        /// Accepted values: `openspec`, `markdown`, `speckit`. Overrides both
-        /// the `[specs] type` setting in `.git-paw/config.toml` and the
-        /// auto-detection of `.specify/` at the repo root.
+        /// Accepted values: `openspec`, `markdown`, `speckit`, `superpowers`.
+        /// Overrides the `[specs] type` setting in `.git-paw/config.toml`. There
+        /// is no filesystem auto-detection — the format is resolved only from
+        /// this flag or the `[specs]` config.
         #[arg(
             long,
             value_enum,
-            help = "Override spec format (openspec, markdown, speckit)"
+            help = "Override spec format (openspec, markdown, speckit, superpowers)"
         )]
         specs_format: Option<SpecsFormat>,
 
@@ -978,6 +979,38 @@ mod tests {
     #[test]
     fn specs_format_superpowers_maps_to_backend_string() {
         assert_eq!(SpecsFormat::Superpowers.as_str(), "superpowers");
+    }
+
+    /// Standing guard (spec-traceability-audit C7): every `SpecsFormat` variant's
+    /// wire string appears in the `--specs-format` `--help`, so a new backend
+    /// can't ship without being surfaced (caught `superpowers` missing).
+    #[test]
+    fn specs_format_help_lists_every_variant() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let start = cmd
+            .find_subcommand("start")
+            .expect("start subcommand exists");
+        let arg = start
+            .get_arguments()
+            .find(|a| a.get_id().as_str() == "specs_format")
+            .expect("start has a --specs-format argument");
+        let help = arg
+            .get_help()
+            .map(std::string::ToString::to_string)
+            .unwrap_or_default();
+        for variant in [
+            SpecsFormat::Openspec,
+            SpecsFormat::Markdown,
+            SpecsFormat::Speckit,
+            SpecsFormat::Superpowers,
+        ] {
+            assert!(
+                help.contains(variant.as_str()),
+                "--specs-format help must list `{}`; got: {help}",
+                variant.as_str()
+            );
+        }
     }
 
     #[test]

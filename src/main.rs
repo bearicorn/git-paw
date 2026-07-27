@@ -4351,6 +4351,39 @@ mod tests {
         );
     }
 
+    /// Standing guard (spec-traceability-audit C3): every `build_task_prompt`
+    /// arm — including `Superpowers`, which lacked a dedicated test — points the
+    /// agent at the gitignored sidecar, since the CLIs no longer auto-load it.
+    #[test]
+    fn every_build_task_prompt_arm_points_at_the_sidecar() {
+        use git_paw::agents::SIDECAR_REL_PATH;
+        use git_paw::specs::{SpecBackendKind, SpecEntry};
+        for backend in [
+            SpecBackendKind::OpenSpec,
+            SpecBackendKind::Markdown,
+            SpecBackendKind::SpecKit,
+            SpecBackendKind::Superpowers,
+        ] {
+            let entry = SpecEntry {
+                id: "x".to_string(),
+                backend,
+                branch: "feat/x".to_string(),
+                cli: None,
+                prompt: String::new(),
+                owned_files: None,
+            };
+            let prompt = build_task_prompt(Some(&entry));
+            assert!(
+                prompt.contains(SIDECAR_REL_PATH),
+                "spec-backed arm must point at the sidecar, got: {prompt}"
+            );
+        }
+        assert!(
+            build_task_prompt(None).contains(SIDECAR_REL_PATH),
+            "no-spec arm must point at the sidecar"
+        );
+    }
+
     // Maps to scenario "Spec-derived task prompt points at the sidecar and
     // includes spec id" — fixes the named-test coverage gap from
     // boot-prompt-full-body. (test-coverage-v0-5-0 task 2.1)
