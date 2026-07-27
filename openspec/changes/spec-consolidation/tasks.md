@@ -55,13 +55,13 @@ its covering test.
 - [ ] Disambiguate duplicate requirement NAMES kept verbatim to hold the count: `supervisor-skill-discipline` 3×"Stack-agnostic phrasing"; `broker-watcher-and-state` 2×"Stack-agnostic phrasing"; `spec-backends` 2×"Extract paw_cli from frontmatter" + 2×"Boot-prompt assembly"; `session-logging` 2×"List available log sessions" (scope-suffix the headings; no scenario content change)
 - [ ] Fix `[[...]]` cross-reference tokens in moved content that now point at former source-dir names (e.g. `[[agent-learning-variant]]`/`[[qualitative-learnings]]`→`learnings`, `[[supervisor-introspection]]`→`broker-watcher-and-state`, `[[mcp-server]]`→`mcp`)
 
-## 6. Docs restructure (docs/src/) — first-class deliverable
-- [ ] Rewrite `docs/src/specifications/README.md`: domain-grouped sections aligned 1:1 with the ~46 consolidated capabilities (drop the flat A–Z list + the "foundational 8" split)
-- [ ] Lead each capability entry with its merged `Purpose` blurb (author merged Purposes as stand-alone doc paragraphs)
-- [ ] Fix/replace all `{{#include ../../../openspec/specs/<cap>/spec.md}}` paths to the new capability dirs; keep `mdbook build docs/` green at every merge wave
-- [ ] Cross-link each spec domain section to its matching `user-guide/` chapter (and back); mirror the SUMMARY.md domain order
-- [ ] Prefer a generated domain-grouped index (pairs with `agent-docs` — feeds llms.txt/sitemap). If hand-authored, add a convention test asserting every `openspec/specs/` dir appears on the page (anti-drift guard)
-- [ ] Update `docs/src/SUMMARY.md` if spec section anchors change
+## 6. Docs restructure (docs/src/) — Wave 6 DONE (domain-grouped index over the 46 caps; mdbook green; anti-drift guard added)
+- [x] Rewrote `docs/src/specifications/README.md`: replaced the flat A–Z list with a **domain-grouped, Purpose-led index** over all 46 caps (9 domains). Kept the 8 foundational `{{#include}}` blocks (full inline specs) — a lighter touch than removing them, still fixes the staleness + adds domain structure
+- [x] Each capability entry leads with a condensed Purpose blurb
+- [x] `{{#include}}` paths valid (only cli-detection→cli-resolution needed re-pointing, done in §2); mdbook green
+- [~] Cross-link each domain to its `user-guide/` chapter — DEFERRED (nice-to-have; the domain index + existing per-chapter links suffice for now)
+- [x] Hand-authored + **anti-drift guard** `tests/specifications_page_lists_every_capability.rs` (asserts every `openspec/specs/` dir appears on the page)
+- [x] `SUMMARY.md` unchanged — the Specifications page is a single entry (no per-cap anchors)
 
 ## 7. Verification (five gates, at every wave)
 - [ ] Gate 3 (spec audit): traceability map run before AND after each wave — every WHEN/THEN still maps to ≥1 test; `openspec validate --strict` passes for the touched specs
