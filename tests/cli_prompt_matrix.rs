@@ -18,6 +18,7 @@ use assert_cmd::Command;
 mod helpers;
 use helpers::{TmuxTestEnv, pty, setup_test_repo};
 use serial_test::serial;
+use std::fmt::Write as _;
 use std::time::Duration;
 
 /// init, non-TTY: the supervisor `Confirm` and the spec-system `Select` are
@@ -50,7 +51,7 @@ fn init_non_tty_bypasses_prompts_and_writes_commented_template() {
         cfg.specs.is_none(),
         "non-TTY init must leave [specs] commented (no active section chosen):\n{content}"
     );
-    let supervisor_enabled = cfg.supervisor.map(|s| s.enabled).unwrap_or(false);
+    let supervisor_enabled = cfg.supervisor.is_some_and(|s| s.enabled);
     assert!(
         !supervisor_enabled,
         "non-TTY init must not enable supervisor (Confirm bypassed):\n{content}"
@@ -100,9 +101,10 @@ fn write_echo_config(repo: &std::path::Path, supervisor: Option<bool>) {
         "default_cli = \"echo\"\n\n[clis.echo]\ncommand = \"echo\"\ndisplay_name = \"Echo\"\n",
     );
     if let Some(enabled) = supervisor {
-        cfg.push_str(&format!(
+        let _ = write!(
+            cfg,
             "\n[supervisor]\nenabled = {enabled}\ncli = \"echo\"\ntest_command = \"true\"\nagent_approval = \"manual\"\n"
-        ));
+        );
     }
     std::fs::write(paw.join("config.toml"), cfg).expect("write config");
 }
