@@ -23,7 +23,8 @@ fn supervisor_review_gate_consults_project_standards_skills() {
 fn coordination_directs_worker_to_consult_project_standards_skills() {
     assert!(
         COORDINATION.contains("consult the project's standards skills under\n`.agents/skills/`")
-            || COORDINATION.contains("consult the project's standards skills under `.agents/skills/`"),
+            || COORDINATION
+                .contains("consult the project's standards skills under `.agents/skills/`"),
         "coordination skill must direct the worker to consult the project's `.agents/skills/` standards"
     );
 }
