@@ -4,11 +4,11 @@ Full before→after map + per-requirement disposition: `.git-paw/v0.13.0-spec-co
 Run the `spec-traceability-audit` requirement→test map at every wave gate — no scenario may lose
 its covering test.
 
-## 1. Cleanup + error fixes (no merge)
-- [ ] Fix phantom `git paw resume` → `git paw start` in `add-branch` "Paused-session interplay" (delta authored)
-- [ ] Remove the obsolete negative `learnings-mode` "No agent.learning broker variant in v0.5.0" (delta authored)
-- [ ] Delete `test-coverage-v0-5-0` capability (meta/bookkeeping, no product SHALL); drop its callout + link from the docs Specifications page
-- [ ] Editorial pass: reframe dated "preserve v0.5.0 behaviour" wording where it appears (behaviour unchanged)
+## 1. Cleanup + error fixes (no merge) — Wave 1 DONE (applied directly to openspec/specs/)
+- [x] Fix phantom `git paw resume` → `git paw start` in `add-branch` "Paused-session interplay" (applied to main spec + delta is audit trail; archive with `--skip-specs`)
+- [x] Remove the obsolete negative `learnings-mode` "No agent.learning broker variant in v0.5.0" (applied to main spec; the forward-design note is re-added as a positive statement when `learnings-mode` merges into `learnings` in §5)
+- [x] Delete `test-coverage-v0-5-0` capability (meta/bookkeeping, no product SHALL); dropped its callout + index link from the docs Specifications page (src/tests comment references are historical annotations, left in place)
+- [ ] Editorial pass: reframe dated "preserve v0.5.0 behaviour" wording → **DEFERRED (cosmetic, behaviour unchanged)**; fold into the relevant §4/§5 merge passes where those specs are already open, rather than a separate churny sweep
 
 ## 2. Trivial 2→1 merges (zero overlap)
 - [ ] skill-standardization + skill-validation → `standardized-skills`
