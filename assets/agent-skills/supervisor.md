@@ -619,6 +619,15 @@ curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
     perishable specifics now (the exact prompt, which pane) that would be gone
     by wind-down.
 
+### Consult the project's standards at the review gate
+
+When you verify a change, consult the project's standards skills under `.agents/skills/`
+(e.g. `test-strategy`, `code-standards`) if the project provides them, and confirm the change
+conforms — tests chosen and written the way that project's `test-strategy` prescribes, and code
+structured per its `code-standards`. These skills, together with the project's `AGENTS.md`,
+define the standard; you enforce it at the gate. If the project ships no such skills this step is
+a no-op — verify against its `AGENTS.md` alone.
+
 ### Verify on each event, never batch
 
 Verify each agent's commit **as its `committed` event arrives** — do not let

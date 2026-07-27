@@ -200,7 +200,10 @@ directories.
 
 ### Before you start editing
 
-Coordination is forward-looking. Before you touch any file:
+Coordination is forward-looking. First, consult the project's standards skills under
+`.agents/skills/` (e.g. `test-strategy`, `code-standards`) if the project provides them, and
+follow them as you implement — they define how this project wants tests chosen and code
+structured. Then, before you touch any file:
 
 1. Read your spec or task description in full.
 2. Publish an `agent.intent` listing the specific files you plan to modify, a one-line
