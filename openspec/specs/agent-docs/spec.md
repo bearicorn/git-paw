@@ -1,8 +1,57 @@
-# docs-fetch-skill Specification
+# agent-docs Specification
 
 ## Purpose
-Bundles a path-allowlisted `docs-fetch` helper and agent skill that let coding agents discover (via `llms.txt`) and retrieve documentation pages or sections on demand from a configurable docs base URL. The skill is injected only when `docs_base_url` is explicitly set, ships no doc content in the binary or boot prompt, and degrades gracefully so a fetch failure never blocks the agent.
+Makes the published documentation site machine-consumable by generating, deterministically from the mdBook sources at build time, an `llms.txt` index, a `sitemap.xml`, a `robots.txt`, and per-page structured metadata so an agent can identify pages and target sections without fetching siblings and the machine-readable surface never drifts from the published content, and bundles a path-allowlisted `docs-fetch` helper and agent skill that let coding agents discover (via `llms.txt`) and retrieve documentation pages or sections on demand from a configurable docs base URL — injected only when `docs_base_url` is explicitly set, shipping no doc content in the binary or boot prompt, and degrading gracefully so a fetch failure never blocks the agent.
+
 ## Requirements
+### Requirement: llms.txt index
+
+The published docs site SHALL expose an `llms.txt` file at the site root that indexes the documentation for LLM consumers, following the llmstxt.org convention: an H1 title, a one-line summary of git-paw, and grouped sections of page entries in the form `- [Page Title](absolute-url): one-line summary`, ordered by the mdBook table of contents.
+
+#### Scenario: llms.txt is published and lists documented pages
+- **WHEN** the docs are built and deployed
+- **THEN** `llms.txt` exists at the site root, begins with an H1 title and a summary line, and contains a link entry (title + absolute URL + summary) for each page in `docs/src/SUMMARY.md`
+
+#### Scenario: a page summary can be overridden at the source
+- **WHEN** a source page begins with an `<!-- summary: ... -->` HTML comment
+- **THEN** that text is used as the page's summary in `llms.txt` instead of the auto-derived first sentence
+
+### Requirement: sitemap.xml
+
+The published docs site SHALL expose a valid `sitemap.xml` at the site root enumerating the canonical URL of every documentation page.
+
+#### Scenario: sitemap enumerates every page
+- **WHEN** the docs are built
+- **THEN** `sitemap.xml` is well-formed XML containing one `<url><loc>` entry with the canonical absolute URL for each page in the mdBook table of contents
+
+### Requirement: robots.txt
+
+The published docs site SHALL expose a `robots.txt` at the site root that permits documentation crawling and advertises the sitemap.
+
+#### Scenario: robots.txt allows crawling and points at the sitemap
+- **WHEN** the docs are built
+- **THEN** `robots.txt` exists at the site root, does not disallow the documentation paths, and includes a `Sitemap:` line referencing the absolute `sitemap.xml` URL
+
+### Requirement: per-page structured metadata
+
+Each rendered documentation page SHALL carry machine-readable metadata sufficient for an agent to identify the page and target a section without fetching sibling pages: at minimum a description, the canonical URL, and the list of the page's section anchors.
+
+#### Scenario: a built page exposes description, canonical URL, and section anchors
+- **WHEN** any documentation page is built
+- **THEN** its HTML `<head>` includes a `<meta name="description">` and a machine-readable metadata block giving the page title, canonical URL, and the anchor ids of its headings
+
+### Requirement: deterministic build-time generation
+
+The `llms.txt`, `sitemap.xml`, `robots.txt`, and per-page metadata SHALL be generated from the mdBook sources as part of the documentation build — never hand-maintained — so the machine-readable surface cannot drift from the published content.
+
+#### Scenario: the surface regenerates with the docs and cannot drift
+- **WHEN** the documentation build runs (locally via the docs recipe or in the CI `docs` job)
+- **THEN** the four artifacts are produced from the current `docs/src` sources and deployed alongside the site, with no manual step required
+
+#### Scenario: generation is reproducible
+- **WHEN** the docs build runs twice against unchanged sources
+- **THEN** the generated `llms.txt`, `sitemap.xml`, and `robots.txt` are byte-identical between runs (any date field is supplied as a build input, not read from the wall clock)
+
 ### Requirement: Bundled docs-fetch skill and helper
 
 git-paw SHALL bundle an agent skill and a `docs-fetch` helper script, and `git paw init` SHALL install the helper into the project's `.git-paw/scripts/` directory and grant the agent allowlist that exact script path — never a broad `curl` grant — mirroring the least-privilege model of the existing broker helper.
@@ -74,4 +123,3 @@ Documentation lookup SHALL be best-effort: on an unreachable site or missing pag
 #### Scenario: no doc content is bundled or boot-injected
 - **WHEN** an agent session starts with the docs-fetch skill enabled
 - **THEN** no documentation page content is embedded in the binary or the boot prompt; the agent retrieves docs only on demand via the helper
-

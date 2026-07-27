@@ -35,7 +35,7 @@ page links to every capability spec in the repository.
 
 ## CLI Detection
 
-{{#include ../../../openspec/specs/cli-detection/spec.md}}
+{{#include ../../../openspec/specs/cli-resolution/spec.md}}
 
 ---
 

@@ -1,7 +1,7 @@
-# cli-submit-profile Specification
+# cli-launch Specification
 
 ## Purpose
-Reliably submits a boot block across CLIs by injecting the prompt text literally and then sending `Enter` as a separate keystroke after a settle delay, rather than a same-call trailing `Enter`. The delay is resolved per CLI from `[clis.<name>].submit_delay_ms` (keyed on the leading binary token) with a single CLI-agnostic default, applies to supervisor and agent panes alike, and contains no hardcoded CLI names, so a fresh supervisor session boots and all agents self-register unattended.
+Reliably submits a boot block across CLIs by injecting the prompt text literally and then sending `Enter` as a separate keystroke after a settle delay resolved per CLI from `[clis.<name>].submit_delay_ms` (with a single CLI-agnostic default and no hardcoded CLI names), and hardens CLI-pane launch so a shell startup prompt cannot strand the pane at a bare shell — clearing the shell input line before sending the launch command, suppressing known auto-update/confirmation prompts in the launched pane's environment, and verifying the CLI started within a bounded window, retrying the launch once on failure — so a fresh supervisor session boots and all agents self-register unattended.
 
 ## Requirements
 ### Requirement: Boot prompt submitted via split-send + settle delay
@@ -97,3 +97,47 @@ intervention, for any CLI given an adequate settle delay
   list all N coding agents (plus the supervisor) with no human
   `Enter` or permission approval required
 
+### Requirement: Clean the shell input line before the CLI-launch command
+
+The system SHALL ensure a pane's shell input line is clean before sending
+the CLI-launch command — by sending a clearing keystroke (e.g. `C-u`/`C-c`)
+and/or a leading newline — so a pending shell startup prompt (auto-update
+confirmation, MOTD, etc.) cannot swallow the leading character of the launch
+command and strand the pane at a bare shell.
+
+#### Scenario: Launch keystroke is not corrupted by a startup prompt
+
+- **GIVEN** a pane whose interactive shell shows a startup prompt (e.g.
+  `[oh-my-zsh] Would you like to update? [Y/n]`) at launch time
+- **WHEN** git-paw sends the CLI-launch command
+- **THEN** the pane SHALL clear the pending prompt first so the full launch
+  command (not a keystroke-truncated variant like `laude-oss`) reaches the
+  shell and the CLI starts
+
+### Requirement: Suppress shell startup prompts in the launched pane
+
+The system SHALL suppress known shell auto-update / confirmation prompts in
+the pane it launches where it controls the pane environment (e.g. exporting
+`DISABLE_AUTO_UPDATE=true` or the equivalent), so such a prompt cannot fire
+mid-launch. The system SHALL NOT modify the user's global shell
+configuration.
+
+#### Scenario: Auto-update prompt suppressed for the launched pane
+
+- **WHEN** git-paw launches a CLI pane
+- **THEN** it SHALL set the pane environment so the shell's auto-update
+  prompt does not fire during launch, without editing the user's `~/.zshrc`
+  or global oh-my-zsh settings
+
+### Requirement: Verify the CLI started and retry once
+
+The system SHALL verify, within a bounded window after the launch keystroke,
+that the pane's CLI actually started (the shell prompt was replaced by the
+CLI), and SHALL retry the launch once if the first attempt did not take.
+
+#### Scenario: Failed launch is retried
+
+- **GIVEN** a pane where the first CLI-launch attempt did not start the CLI
+  (the shell prompt is still present after the bounded window)
+- **THEN** git-paw SHALL send the launch command once more before giving up,
+  so a single swallowed attempt does not permanently strand the pane

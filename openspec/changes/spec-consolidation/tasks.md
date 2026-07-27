@@ -10,21 +10,21 @@ its covering test.
 - [x] Delete `test-coverage-v0-5-0` capability (meta/bookkeeping, no product SHALL); dropped its callout + index link from the docs Specifications page (src/tests comment references are historical annotations, left in place)
 - [ ] Editorial pass: reframe dated "preserve v0.5.0 behaviour" wording → **DEFERRED (cosmetic, behaviour unchanged)**; fold into the relevant §4/§5 merge passes where those specs are already open, rather than a separate churny sweep
 
-## 2. Trivial 2→1 merges (zero overlap)
-- [ ] skill-standardization + skill-validation → `standardized-skills`
-- [ ] safe-command-classification + permission-detection → `command-classification`
-- [ ] supervisor-agent-inventory + supervisor-tell → `supervisor-directives`
-- [ ] session-logging + replay-command → `session-logging`
-- [ ] cli-detection + cli-selection → `cli-resolution`
-- [ ] cli-submit-profile + robust-cli-launch → `cli-launch`
-- [ ] conflict-detection ← conflict-detector-fn-granularity
-- [ ] git-hook-injection ← worktree-branch-guard
-- [ ] agents-md-injection ← worktree-agents-md
-- [ ] add-branch + remove-branch → `add-remove-branch` (carries the resume fix from §1)
-- [ ] dashboard ← dashboard-broker-log
-- [ ] mcp-server + mcp-read-tools → `mcp`
-- [ ] agent-friendly-docs-site + docs-fetch-skill → `agent-docs`
-- [ ] test-isolation + cold-start-ci-parity → `test-and-ci-hygiene`
+## 2. Trivial 2→1 merges (zero overlap) — Wave 2 DONE (14 merges; 730 reqs verbatim-preserved; mdbook green; 96→82 dirs)
+- [x] skill-standardization + skill-validation → `standardized-skills`
+- [x] safe-command-classification + permission-detection → `command-classification`
+- [x] supervisor-agent-inventory + supervisor-tell → `supervisor-directives`
+- [x] session-logging + replay-command → `session-logging` (anomaly: requirement name `List available log sessions` exists in BOTH with different bodies — `list_log_sessions()` lib fn vs `git paw replay --list` stdout; both preserved verbatim as two sections, no content dropped)
+- [x] cli-detection + cli-selection → `cli-resolution` (docs `{{#include}}` line 38 re-pointed)
+- [x] cli-submit-profile + robust-cli-launch → `cli-launch`
+- [x] conflict-detection ← conflict-detector-fn-granularity
+- [x] git-hook-injection ← worktree-branch-guard
+- [x] agents-md-injection ← worktree-agents-md
+- [x] add-branch + remove-branch → `add-remove-branch` (carries the resume fix from §1)
+- [x] dashboard ← dashboard-broker-log
+- [x] mcp-server + mcp-read-tools → `mcp`
+- [x] agent-friendly-docs-site + docs-fetch-skill → `agent-docs`
+- [x] test-isolation + cold-start-ci-parity → `test-and-ci-hygiene`
 
 ## 3. Micro-spec absorptions
 - [ ] cli-parsing ← start-force-flag + cli-specs-supervisor-filter
