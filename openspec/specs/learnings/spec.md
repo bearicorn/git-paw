@@ -254,7 +254,7 @@ The system SHALL recognise four new `agent.learning` category
 values: `recurring_failure_shape`, `doc_gap`, `adr_drift`, and
 `scope_mistake`. These values SHALL be carried on the existing
 `agent.learning` broker variant without any wire-format change;
-[[agent-learning-variant]]'s open-enum contract makes the
+[[learnings]]'s open-enum contract makes the
 additions transparent to the broker.
 
 #### Scenario: Broker routes a recurring_failure_shape record
@@ -333,7 +333,7 @@ primary identifier (`shape`, `convention`, `decision_area`, or
 
 - **GIVEN** an exact-duplicate publish within an hour
 - **WHEN** the broker accepts the duplicate
-- **THEN** the deterministic `id` from [[agent-learning-variant]]
+- **THEN** the deterministic `id` from [[learnings]]
   SHALL produce identical ids so broker consumers can dedupe at
   their boundary, even when the skill-level dedup misses
 
@@ -448,7 +448,7 @@ caller (the skill documents the per-category body).
 
 The system SHALL recognise a fifth `agent.learning` category value
 `tooling_friction`, carried on the existing `agent.learning` broker variant
-with no wire-format change ([[agent-learning-variant]]'s open-enum contract
+with no wire-format change ([[learnings]]'s open-enum contract
 makes the addition transparent). The category SHALL capture friction the
 supervisor absorbs about git-paw *itself* — a tool behaviour that made the
 supervisor repeat work or work around the tool — as distinct from the four
@@ -583,7 +583,7 @@ structured object), and `timestamp` (ISO 8601 UTC).
 
 #### Scenario: Broker accepts a category from a descendant change
 
-- **GIVEN** a descendant change ([[qualitative-learnings]]) adds
+- **GIVEN** a descendant change ([[learnings]]) adds
   a new category value
 - **WHEN** the aggregator publishes a record with the new
   category
@@ -678,7 +678,7 @@ The MCP get_learnings tool SHALL prefer broker records when the
 broker is running and SHALL fall back to parsing the learnings
 file when the broker is off. The tool's response SHALL include a
 `source` field indicating which path produced the records. This
-applies to the `get_learnings()` tool defined in [[mcp-server]]'s
+applies to the `get_learnings()` tool defined in [[mcp]]'s
 `mcp-read-tools` capability.
 
 #### Scenario: Broker-running mode returns broker records

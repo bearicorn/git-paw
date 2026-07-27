@@ -123,7 +123,7 @@ This SHALL hold for every v0.4 config shape, including configs with all subsyste
 - `readme: Option<PathBuf>` — path to the repository README (e.g. `README.md`).
 - `docs: Option<PathBuf>` — path to the documentation root directory (e.g. `docs/src`).
 
-Both are bring-your-own path pointers (no hardcoded locations) resolved against the repository root, consistent with the existing governance fields. They are surfaced by the MCP documentation tools ([[mcp-read-tools]]). A config file that omits them SHALL load with both set to `None`, leaving the documentation tools to degrade to empty/null results — so pre-existing `[governance]` sections load unchanged.
+Both are bring-your-own path pointers (no hardcoded locations) resolved against the repository root, consistent with the existing governance fields. They are surfaced by the MCP documentation tools ([[mcp]]). A config file that omits them SHALL load with both set to `None`, leaving the documentation tools to degrade to empty/null results — so pre-existing `[governance]` sections load unchanged.
 
 #### Scenario: GovernanceConfig parses readme and docs fields
 

@@ -57,7 +57,7 @@ Log files SHALL contain the raw terminal output including ANSI escape codes. No 
 - **WHEN** an AI CLI outputs colored text to the pane
 - **THEN** the log file SHALL contain the raw ANSI escape sequences
 
-### Requirement: List available log sessions
+### Requirement: List available log sessions (library API)
 
 The system SHALL enumerate session log directories under `.git-paw/logs/`.
 
@@ -102,7 +102,7 @@ The `LogEntry.branch` SHALL reverse the filename sanitization to recover the ori
 - **THEN** `LogEntry.branch` SHALL be `"feat/add-auth"`
 
 
-### Requirement: List available log sessions
+### Requirement: List available log sessions (replay --list output)
 
 The system SHALL display available log sessions and their branches when `--list` is passed.
 

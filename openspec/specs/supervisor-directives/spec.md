@@ -149,7 +149,7 @@ content).
 ### Requirement: Target validation against the inventory
 
 `/tell` SHALL validate the target agent identifier against the
-[[supervisor-agent-inventory]] cache. Unknown identifiers SHALL
+[[supervisor-directives]] cache. Unknown identifiers SHALL
 NOT be delivered; the supervisor SHALL respond in its own pane
 with the candidate-list error from the shared validation helper.
 
