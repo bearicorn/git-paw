@@ -18,9 +18,9 @@ skipped). Each dimension has its own skill — this is the index that ties them 
 - **Code** — conforms to `code-standards` (patterns, no `unwrap`/`expect`, docs, frozen do-not-touch).
 - **Tests** — behavioral, right-layer, and every scenario covered, per `test-strategy`.
 - **Docs** — complete and consistent across the four layers, per `doc-completeness`; `mdbook build` passes.
-- **Security** — passes `security-review` (external bad actors: least-privilege, injection, secrets, deps).
-- **Safety** — passes `safety-review` (rogue-agent blast radius: worktree confinement, danger-list, no
-  persistence / exfiltration).
+- **Security & safety** — passes `security-and-safety-review`: external bad actors (least-privilege,
+  injection, secrets, deps) AND the blast radius of a rogue agent git-paw runs (worktree confinement,
+  danger-list, no persistence / exfiltration).
 - **Export-agnosticism** — if the change touches an export, it passes `export-agnosticism`.
 - **Backward-compat** — existing configs / sessions / wire load unchanged; no breaking change (that is
   the v1.0.0 line).
@@ -31,8 +31,7 @@ skipped). Each dimension has its own skill — this is the index that ties them 
 - [ ] Code conforms (code-standards); `just check` green.
 - [ ] Tests behavioral + covering (test-strategy); full suite green vs merge-base.
 - [ ] Docs complete across all four layers (doc-completeness); `mdbook build` passes.
-- [ ] Security reviewed (security-review).
-- [ ] Safety / blast-radius reviewed (safety-review).
+- [ ] Security & safety reviewed (security-and-safety-review — external attackers + rogue-agent blast radius).
 - [ ] Export-agnostic if it touches an export (export-agnosticism).
 - [ ] Backward-compatible; no frozen surface broken.
 

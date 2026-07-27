@@ -115,9 +115,9 @@ Follow the CLI guidelines — full reference in
 ## Related review skills
 
 For the full change-completeness picture, see the `definition-of-done` skill — a change is done only
-when spec, code, tests, **docs** (`doc-completeness`), **security** (`security-review` — external bad
-actors), **safety** (`safety-review` — the blast radius of a rogue agent git-paw runs), and
-**export-agnosticism** (when it touches an export) are all satisfied.
+when spec, code, tests, **docs** (`doc-completeness`), **security & safety**
+(`security-and-safety-review` — external bad actors + the blast radius of a rogue agent git-paw runs),
+and **export-agnosticism** (when it touches an export) are all satisfied.
 
 ## Review-gate checklist (supervisor)
 
