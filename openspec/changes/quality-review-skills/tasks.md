@@ -2,8 +2,7 @@
 
 ## 1. The skills
 - [x] Author `.agents/skills/doc-completeness/SKILL.md` (four doc layers, per-change mapping, Gate-4 checklist)
-- [x] Author `.agents/skills/security-review/SKILL.md` (external bad actors: least-privilege, injection, secrets, deps, unsafe)
-- [x] Author `.agents/skills/safety-review/SKILL.md` (rogue-agent blast radius: out-of-worktree, irreversible git, persistence, exfiltration; the containment + the planned sandbox)
+- [x] Author `.agents/skills/security-and-safety-review/SKILL.md` — two lenses: security (external bad actors: least-privilege, injection, secrets, deps, unsafe) and safety (rogue-agent blast radius: out-of-worktree, irreversible git, persistence, exfiltration; the containment + the planned sandbox)
 - [x] Author `.agents/skills/definition-of-done/SKILL.md` (the completeness meta; references every dimension skill)
 - [x] Verify all four conform via the shared `tests/agent_skills_conform.rs` guard (now 7 skills)
 
@@ -19,5 +18,4 @@
 
 ## Notes
 - Repo-local DEV skills — do NOT ship via `git paw init` or place in `assets/agent-skills/`.
-- `safety-review` is the interim guard; once the roadmap v0.15.0 FS-scoped sandbox lands it becomes
-  defence-in-depth rather than the primary containment.
+- The safety lens of `security-and-safety-review` is the interim guard; once the roadmap v0.15.0 FS-scoped sandbox lands it becomes defence-in-depth rather than the primary containment.

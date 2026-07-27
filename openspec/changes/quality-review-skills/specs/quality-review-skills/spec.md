@@ -14,32 +14,21 @@ Gate-4 doc-audit checklist.
 - **WHEN** `.agents/skills/doc-completeness/SKILL.md` is loaded
 - **THEN** it SHALL parse as a valid agentskills.io skill (`name = "doc-completeness"`, non-empty description) and enumerate the four doc layers
 
-### Requirement: Security-review skill provided for external bad actors
+### Requirement: Security-and-safety-review skill provided
 
-The repository SHALL provide a `security-review` agent skill at
-`.agents/skills/security-review/SKILL.md` covering the Gate-5 external-threat concerns
-(least-privilege path-scoped allowlists, injection-safe construction, no secrets in flags/env,
-unsafe / path handling, vetted dependencies).
+The repository SHALL provide a `security-and-safety-review` agent skill at
+`.agents/skills/security-and-safety-review/SKILL.md` (agentskills.io; `name` matching the folder)
+covering two lenses — **security** (external bad actors: least-privilege path-scoped allowlists,
+injection-safe construction, no secrets in flags/env, unsafe / path handling, vetted dependencies) and
+**safety** (the blast radius of a rogue or mistaken agent git-paw runs: out-of-worktree actions,
+irreversible git, persistence / backdoors, exfiltration; the containment a change must not weaken; the
+interim role until the planned FS-scoped sandbox).
 
-#### Scenario: Skill present and scoped to external threats
+#### Scenario: Skill present and covers both lenses
 
-- **WHEN** the `security-review` skill is loaded
-- **THEN** it SHALL be a valid agentskills.io skill scoped to external-bad-actor security
-- **AND** it SHALL point at `safety-review` for the harm a rogue agent git-paw runs could cause
-
-### Requirement: Safety-review skill provided for rogue-agent blast radius
-
-The repository SHALL provide a `safety-review` agent skill at `.agents/skills/safety-review/SKILL.md`
-covering the blast radius of a rogue or mistaken agent that git-paw runs — out-of-worktree actions,
-irreversible git, persistence / backdoors, and exfiltration — the containment a change must not
-weaken (worktree confinement, the danger-list, the send-gate), and its interim role until the planned
-FS-scoped sandbox lands.
-
-#### Scenario: Skill present and scoped to agent blast radius
-
-- **WHEN** the `safety-review` skill is loaded
-- **THEN** it SHALL be a valid agentskills.io skill addressing the harm an orchestrated agent could cause, distinct from external attackers
-- **AND** it SHALL name the containment (worktree confinement, danger-list, send-gate) and the planned sandbox
+- **WHEN** the `security-and-safety-review` skill is loaded
+- **THEN** it SHALL be a valid agentskills.io skill with a security section (external bad actors) and a safety section (rogue-agent blast radius)
+- **AND** the safety section SHALL name the containment (worktree confinement, danger-list, send-gate) and the planned sandbox
 
 ### Requirement: Definition-of-done skill ties the dimensions together
 

@@ -14,12 +14,12 @@ then a continuous safety review is the guard.
 
 ## What Changes
 
-Four new repo-local dev skills at `.agents/skills/`:
+Three new repo-local dev skills at `.agents/skills/`:
 - **`doc-completeness`** — Gate 4: the four doc layers, per-change-type layer mapping, `mdbook build`.
-- **`security-review`** — Gate 5, external bad actors: least-privilege, injection, secrets, deps.
-- **`safety-review`** — rogue/mistaken-agent blast radius: out-of-worktree actions, irreversible git,
-  persistence/backdoors, exfiltration; the containment a change must not weaken; interim until the
-  v0.15.0 sandbox.
+- **`security-and-safety-review`** — two lenses: **security** (Gate 5, external bad actors:
+  least-privilege, injection, secrets, deps) and **safety** (rogue/mistaken-agent blast radius:
+  out-of-worktree actions, irreversible git, persistence/backdoors, exfiltration; the containment a
+  change must not weaken; interim until the v0.15.0 sandbox).
 - **`definition-of-done`** — the completeness meta-skill: a change is done only when spec + code +
   tests + docs + security + safety + (export-agnosticism if it touches an export) are all satisfied.
 
@@ -37,7 +37,7 @@ _None._ No product behavior, CLI, config, or wire change.
 
 ## Impact
 
-- **New:** `.agents/skills/{doc-completeness,security-review,safety-review,definition-of-done}/SKILL.md`;
+- **New:** `.agents/skills/{doc-completeness,security-and-safety-review,definition-of-done}/SKILL.md`;
   a cross-link edit in `.agents/skills/code-standards/SKILL.md`.
 - Consumed by the worker + supervisor via `standards-skill-integration`; the conformance guard now
   validates 7 skills.

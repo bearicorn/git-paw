@@ -8,19 +8,21 @@ the agent-safety concern, and the change-completeness meta. Extends the standard
 
 ## Decisions
 
-### D1 — Four repo-local skills at `.agents/skills/` (not exported)
+### D1 — Three repo-local skills at `.agents/skills/` (not exported)
 
 agentskills.io format; git-paw-specific dev tooling (its doc layers, its containment posture). They
 are NOT placed in `assets/agent-skills/` — a consumer applies its own review standards.
 
-### D2 — Security ≠ Safety (the key split)
+### D2 — Security and safety are two lenses of ONE skill
 
-`security-review` = external **bad actors** (attackers against the tool / consumer). `safety-review`
-= the blast radius of an agent git-paw *itself runs* (rogue or mistaken, with auto-approved execution
-power). A tool that auto-approves agent commands needs both, and they trigger on different diffs. The
-FS-scoped sandbox (roadmap v0.15.0) is the eventual **structural** containment for safety; the skill
-is the **interim + ongoing behavioral** guard that also ensures no change weakens the existing
-containment (worktree confinement, the classifier danger-list, the send-gate).
+The distinction is real — **security** = external bad actors (attackers against the tool / consumer);
+**safety** = the blast radius of an agent git-paw *itself runs* (rogue or mistaken, with auto-approved
+execution power) — but it is **section-level, not skill-level**: a reviewer asks one question ("how
+could this change cause harm?") and wants both lenses at once, so they live as two sections of a single
+`security-and-safety-review` skill. A tool that auto-approves agent commands needs both. The FS-scoped
+sandbox (roadmap v0.15.0) is the eventual **structural** containment for the safety lens; the skill is
+the **interim + ongoing behavioral** guard that also ensures no change weakens the existing containment
+(worktree confinement, the classifier danger-list, the send-gate).
 
 ### D3 — `definition-of-done` is the tie-together
 
@@ -44,5 +46,5 @@ supervisor (review gate) already consult the project's `.agents/skills/` standar
 ## Risks
 
 - **Very low** — dev-tooling skills. The main upkeep is keeping them in step as the gates / NFRs
-  evolve, and folding the safety guard into the FS sandbox once it lands (then `safety-review` shifts
+  evolve, and folding the safety guard into the FS sandbox once it lands (then the safety lens shifts
   from primary control to defence-in-depth).
