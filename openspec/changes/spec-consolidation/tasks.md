@@ -26,14 +26,16 @@ its covering test.
 - [x] agent-friendly-docs-site + docs-fetch-skill → `agent-docs`
 - [x] test-isolation + cold-start-ci-parity → `test-and-ci-hygiene`
 
-## 3. Micro-spec absorptions
-- [ ] cli-parsing ← start-force-flag + cli-specs-supervisor-filter
-- [ ] supervisor-skill-discipline ← supervisor-stream-timeout-recovery + per-commit-verification + no-fail-fast-verification (+ context-budget/advanced-main skill text)
-- [ ] supervisor-launch ← supervisor-cli + supervisor-first-agent-cwd + supervisor-pane-affordances
-- [ ] session-state ← session-json-location + session-receipt-hygiene + session-recovery-integrity
-- [ ] approval-configuration → fold into supervisor-config
-- [ ] agent-skills ← coordination-context-budget (keep `lang-agnostic-skills` standalone — load-bearing design principle + CI audit)
-- [ ] agent-broker-helper ← stuck-prompt-detection (keep the canonical `approve <pane>` gate in auto-approval; cross-ref)
+## 3. Micro-spec absorptions — Wave 3 DONE (7 absorptions; 730 reqs preserved; 82→68 dirs; mdbook green; corrections woven in)
+- [x] cli-parsing ← start-force-flag + cli-specs-supervisor-filter
+- [x] supervisor-skill-discipline ← supervisor-stream-timeout-recovery + per-commit-verification + no-fail-fast-verification (absorbed only these 3; `coordination-context-budget`/`advanced-main-event` left for §5/§6 per the parenthetical ambiguity)
+- [x] supervisor-launch ← supervisor-cli + supervisor-first-agent-cwd + supervisor-pane-affordances — **wove in C3** (Initial-prompt-injection → sidecar `.git-paw/AGENTS.local.md` model)
+- [x] session-state ← session-json-location + session-receipt-hygiene + session-recovery-integrity
+- [x] approval-configuration → folded into supervisor-config — **wove in C6** (safe preset → composed defaults) + **gemini `agy` flag-table** correction on "Permission flag mapping"
+- [x] agent-skills ← coordination-context-budget (kept `lang-agnostic-skills` standalone)
+- [x] agent-broker-helper ← stuck-prompt-detection
+
+**Normalization follow-up (accumulating; do in §6 or a normalization pass):** duplicate requirement NAMES within a merged spec, kept verbatim to preserve the 730 count — `supervisor-skill-discipline` now has 3 × `### Requirement: Stack-agnostic phrasing`; `session-logging` has 2 × `List available log sessions` (from §2). Disambiguate the headings (scope suffix) without changing scenario content.
 
 ## 4. Facet merges
 - [ ] broker-server + broker-endpoints + broker-lifecycle → `broker-runtime`

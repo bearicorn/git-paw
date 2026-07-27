@@ -1,7 +1,7 @@
 # supervisor-config Specification
 
 ## Purpose
-Defines the `[supervisor]` config schema — the `SupervisorConfig` struct, its `ApprovalLevel` and nested sub-tables (learnings, conflict, common dev allowlist, gate-command templates), the enabled-mode resolution chain, the `approval_flags` CLI-permission mapping, and the `git paw init` prompts and commented-block that generate it.
+Defines the `[supervisor]` config schema — the `SupervisorConfig` struct, its `ApprovalLevel` and nested sub-tables (learnings, conflict, common dev allowlist, gate-command templates), the enabled-mode resolution chain, the `approval_flags` CLI-permission mapping, and the `git paw init` prompts and commented-block that generate it. It also defines the `[supervisor.auto_approve]` config section that controls the supervisor's auto-approval behaviour: an enable flag, an extensible safe-command list appended to composed built-in defaults, a clamped stall threshold, and a coarse `approval_level` preset (`safe`/`conservative`/`off`), with existing configs lacking the section parsing unchanged under sensible defaults.
 ## Requirements
 ### Requirement: SupervisorConfig struct with defaults
 
@@ -134,7 +134,7 @@ The answers SHALL be written to the generated `.git-paw/config.toml` as a `[supe
 
 The system SHALL provide a flag-resolution function that maps a CLI name and approval level to the CLI-specific permission flags to append to the launch command. Resolution SHALL consult, in order:
 
-1. **Per-CLI config override**: when `[clis.<name>]` defines an `approval_args` map for the requested level (keys are the kebab-case level names), its value SHALL be used verbatim. This is the seam for custom or variant CLIs (e.g. a claude-oss entry launched via `CLAUDE_CONFIG_DIR`) to get native flags without a built-in table row.
+1. **Per-CLI config override**: when `[clis.<name>]` defines an `approval_args` map for the requested level (keys are the kebab-case level names), its value SHALL be used verbatim. This is the seam for custom or variant CLIs (e.g. a claude-oss entry launched via `CLAUDE_CONFIG_DIR`, or a retained `gemini` re-added as `[clis.gemini]`) to get native flags without a built-in table row.
 2. **Built-in table**: the following mappings SHALL be supported:
 
 | CLI | Level | Flags |
@@ -145,7 +145,7 @@ The system SHALL provide a flag-resolution function that maps a CLI name and app
 | `"codex"` | `FullAuto` | `"--dangerously-bypass-approvals-and-sandbox"` |
 | `"codex"` | `Auto` | `"--sandbox workspace-write"` |
 | `"codex"` | `Manual` | `""` |
-| `"gemini"` | `FullAuto` | `"--yolo"` |
+| `"agy"` | `FullAuto` | `"--dangerously-skip-permissions"` |
 | `"qwen"` | `FullAuto` | `"--yolo"` |
 | any other | any | `""` |
 
@@ -153,14 +153,13 @@ The system SHALL provide a flag-resolution function that maps a CLI name and app
 
 The built-in rows SHALL be verified against each CLI's upstream documentation at implementation time; a row whose upstream flag has changed SHALL be corrected via spec amendment before the change lands.
 
-> Verified against upstream docs 2026-07-15: gemini and qwen `--yolo` are current
-> (gemini documents it as the shortcut for `--approval-mode=yolo`). The codex rows
-> were amended here: the legacy TypeScript CLI's `--approval-mode=full-auto` /
-> `--approval-mode=auto-edit` no longer exist in the current Rust CLI. Their
-> current equivalents are `--dangerously-bypass-approvals-and-sandbox` (run every
-> command without approvals or sandboxing) and `--sandbox workspace-write` (the
-> documented low-friction sandboxed mode; upstream deprecated `--full-auto` in
-> its favor and prints a warning when it is used).
+> `agy` is the Antigravity CLI, which replaces the retired Gemini CLI. Antigravity's
+> full-auto / no-confirmation mode uses `--dangerously-skip-permissions` (the same flag
+> as Claude, launched at startup), NOT the Gemini `--yolo` flag — so the former `gemini`
+> row is removed and `agy` shares Claude's flag. `qwen` retains `--yolo`. Confirm the
+> `agy` full-auto flag against the official Antigravity migration guide at implementation
+> time; a retained Gemini install re-added via `[clis.gemini]` can still map `full-auto`
+> to `--yolo` through the per-CLI `approval_args` override (path 1).
 
 #### Scenario: Claude with full-auto returns skip-permissions flag
 
@@ -172,10 +171,20 @@ The built-in rows SHALL be verified against each CLI's upstream documentation at
 - **WHEN** flags are resolved for `("codex", Auto)` with no config override
 - **THEN** the result is `"--sandbox workspace-write"`
 
-#### Scenario: Gemini and qwen full-auto return yolo
+#### Scenario: Antigravity with full-auto returns skip-permissions flag
 
-- **WHEN** flags are resolved for `("gemini", FullAuto)` or `("qwen", FullAuto)` with no config override
+- **WHEN** flags are resolved for `("agy", FullAuto)` with no config override
+- **THEN** the result is `"--dangerously-skip-permissions"`
+
+#### Scenario: Qwen with full-auto returns yolo
+
+- **WHEN** flags are resolved for `("qwen", FullAuto)` with no config override
 - **THEN** the result is `"--yolo"`
+
+#### Scenario: Retired Gemini has no built-in row
+
+- **WHEN** flags are resolved for `("gemini", FullAuto)` with no config override
+- **THEN** the result is `""` (the built-in `gemini` row was removed; a retained install maps its flag via a `[clis.gemini] approval_args` override)
 
 #### Scenario: Per-CLI override takes precedence over the built-in table
 
@@ -470,4 +479,96 @@ The `CustomCli` struct (`[clis.<name>]`) SHALL gain an optional `approval_args` 
 - **GIVEN** a config with `[clis.mycli]` containing `approval_args = { "yolo-mode" = "--x" }`
 - **WHEN** the config is loaded
 - **THEN** loading SHALL fail with an error mentioning `yolo-mode`
+
+### Requirement: `[supervisor.auto_approve]` config section
+
+The system SHALL accept a `[supervisor.auto_approve]` table in `.git-paw/config.toml` to control auto-approval behaviour.
+
+#### Scenario: Default config when section absent
+
+- **GIVEN** a `.git-paw/config.toml` with no `[supervisor.auto_approve]` section
+- **WHEN** the config is loaded
+- **THEN** `AutoApproveConfig::default()` SHALL apply with `enabled = true`, `safe_commands = []` (defaults provided in code), and `stall_threshold_seconds = 30`
+
+#### Scenario: Backward-compatible parse
+
+- **GIVEN** an existing v0.3.0 config with no supervisor section
+- **WHEN** the config is loaded
+- **THEN** parsing SHALL succeed without error
+- **AND** the optional `supervisor.auto_approve` field SHALL serialise as `None` when not set
+
+### Requirement: Configurable enable flag
+
+The `enabled` field SHALL gate the entire auto-approval feature.
+
+#### Scenario: Disabled at runtime
+
+- **GIVEN** `[supervisor.auto_approve] enabled = false`
+- **WHEN** the supervisor poll loop runs
+- **THEN** detection SHALL NOT capture panes
+- **AND** auto-approval SHALL NOT fire
+- **AND** stall detection alone (without approval) MAY still run
+
+#### Scenario: Enabled by default
+
+- **GIVEN** the supervisor section is present but `enabled` is omitted
+- **WHEN** the config is loaded
+- **THEN** `enabled` SHALL default to `true`
+
+### Requirement: Configurable safe-command list
+
+The `safe_commands` field SHALL be a list of strings that are appended to the composed whitelist defaults (the stack-neutral built-ins plus the resolved dev-allowlist patterns, per `safe-command-classification`).
+
+#### Scenario: Custom command added
+
+- **GIVEN** `safe_commands = ["just smoke"]` in config
+- **WHEN** classification runs against the command `just smoke -v`
+- **THEN** `is_safe_command(...)` SHALL return `true`
+
+#### Scenario: Empty list keeps defaults
+
+- **GIVEN** `safe_commands = []`
+- **WHEN** classification runs against `grep -rn "foo" src/`
+- **THEN** `is_safe_command(...)` SHALL still return `true` (the composed defaults apply unchanged)
+
+### Requirement: Configurable stall threshold
+
+The `stall_threshold_seconds` field SHALL govern how long an agent's `last_seen` must be older than the current time before stall detection treats it as stuck.
+
+#### Scenario: Custom threshold
+
+- **GIVEN** `stall_threshold_seconds = 60`
+- **WHEN** an agent's `last_seen` is 45 seconds old
+- **THEN** stall detection SHALL NOT classify it as stalled
+
+#### Scenario: Threshold floor
+
+- **GIVEN** `stall_threshold_seconds = 0`
+- **WHEN** the config is loaded
+- **THEN** the system SHALL clamp the effective threshold to a minimum of 5 seconds to avoid pathological poll loops
+- **AND** SHALL emit a warning to stderr describing the clamp
+
+### Requirement: Approval level coarse switch
+
+The system SHALL accept a coarse `approval_level` field that maps to common policy presets.
+
+#### Scenario: `safe` preset
+
+- **GIVEN** `approval_level = "safe"`
+- **WHEN** the config is loaded
+- **THEN** the effective whitelist SHALL be the **composed** built-in defaults — the stack-neutral built-ins plus the resolved dev-allowlist patterns (per `safe-command-classification`) — with no user-supplied `safe_commands` extras
+- **AND** `enabled` SHALL be `true`
+
+#### Scenario: `conservative` preset
+
+- **GIVEN** `approval_level = "conservative"`
+- **WHEN** the config is loaded
+- **THEN** the effective whitelist SHALL exclude `git push` and `curl` entries
+- **AND** `enabled` SHALL be `true`
+
+#### Scenario: `off` preset
+
+- **GIVEN** `approval_level = "off"`
+- **WHEN** the config is loaded
+- **THEN** `enabled` SHALL be forced to `false` regardless of other fields
 

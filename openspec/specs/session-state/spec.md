@@ -1,6 +1,6 @@
 ## Purpose
 
-Persist session state to disk for recovery after crashes, reboots, or manual stops. Stores one JSON file per session under the XDG data directory, with atomic writes and tmux liveness checks.
+Persist session state to disk for recovery after crashes, reboots, or manual stops. Stores one JSON file per session under the XDG data directory, with atomic writes and tmux liveness checks. It also has `git paw start` write (and `purge` remove) a per-repo session JSON at `.git-paw/sessions/paw-<project>.json` — carrying the session name and each agent's branch_id, worktree path, CLI, and pane index — as the discovery surface the bundled `sweep.sh` helper reads, with a live-tmux fallback when the file is absent; distinguishes stale session receipts from live ones via a single cheap `tmux has-session` probe (`status` reports `🔴 stale`, `start` auto-invalidates stale receipts before launching, and `purge --stale` prunes only stale entries); and guarantees session recovery rebuilds exactly the panes a session defines (`N + 2` in supervisor mode) on a headless canvas sized to tile them without overflow, preserving the persisted session JSON when a `git paw start` errors mid-launch.
 ## Requirements
 ### Requirement: Save session state atomically
 
@@ -305,4 +305,266 @@ The restart-from-pause flow (specced in the broker-lifecycle delta) SHALL read t
 - **GIVEN** a `Session` with `dashboard_pane = None`
 - **WHEN** `save_session()` is called and the JSON file is inspected
 - **THEN** the JSON SHALL NOT contain a `dashboard_pane` field
+
+### Requirement: start writes a per-repo session JSON
+
+`git paw start` SHALL write a per-repo session JSON to
+`.git-paw/sessions/paw-<project>.json` describing the launched
+session. This is the discovery surface the bundled
+`sweep.sh` helper reads. The file SHALL be written on launch
+and removed on `purge`.
+
+#### Scenario: start writes the per-repo JSON
+
+- **WHEN** `git paw start` (any flags) succeeds
+- **THEN** `.git-paw/sessions/paw-<project>.json` SHALL exist
+  describing the session (name + agent list)
+
+#### Scenario: purge removes the per-repo JSON
+
+- **GIVEN** an active session with the per-repo JSON present
+- **WHEN** the user runs `git paw purge --force`
+- **THEN** the per-repo JSON SHALL be removed
+
+### Requirement: Per-repo JSON shape matches sweep.sh expectations
+
+The per-repo `paw-<project>.json` SHALL include the session
+name plus an agent list, each entry carrying `branch_id`,
+`worktree_path`, `cli`, and `pane_index`. The shape SHALL
+match what the bundled `assets/scripts/sweep.sh` helper reads
+so the helper works against the file without modification.
+
+#### Scenario: sweep.sh discovers agents via the per-repo JSON
+
+- **GIVEN** a freshly-started session and the bundled
+  `sweep.sh` helper invoked from the supervisor pane
+- **WHEN** sweep.sh reads
+  `.git-paw/sessions/paw-<project>.json`
+- **THEN** the helper SHALL enumerate the full agent list
+  with branch_id, worktree path, CLI, and pane index — no
+  fields missing or renamed relative to its expectations
+
+#### Scenario: Adding a field is backwards-compatible
+
+- **WHEN** a future change adds a new field to the per-repo
+  JSON
+- **THEN** the current `sweep.sh` SHALL still find every
+  documented field; unknown extra fields SHALL be ignored
+
+### Requirement: sweep.sh falls back to live tmux when the file is absent
+
+The bundled `sweep.sh` SHALL fall back to discovering the
+session name from the `$TMUX` environment variable, or
+`tmux display-message -p '#S'`, when
+`.git-paw/sessions/paw-<project>.json` is absent (e.g. the
+supervisor attached to a pre-existing `paw-*` session created
+outside the normal `git paw start` flow). The helper SHALL
+NOT require manual authoring of the session JSON.
+
+#### Scenario: Helper discovers the session with no JSON present
+
+- **GIVEN** a `paw-myproj` tmux session is active but
+  `.git-paw/sessions/paw-myproj.json` does not exist
+- **WHEN** `sweep.sh` runs inside the session
+- **THEN** the helper SHALL resolve the session name via
+  `$TMUX` / `tmux display-message -p '#S'` and operate
+  without error, instead of failing to discover the session
+
+#### Scenario: Per-repo JSON takes precedence when present
+
+- **GIVEN** both the per-repo JSON and a live tmux session
+  exist
+- **WHEN** `sweep.sh` runs
+- **THEN** the helper SHALL prefer the per-repo JSON's agent
+  list (richer — it carries worktree paths + pane indices)
+  over the bare session-name fallback
+
+### Requirement: Status distinguishes stale receipts from active sessions
+
+`git paw status` SHALL probe `tmux has-session -t paw-<project>`
+when the receipt claims `active`. When the probe shows the tmux
+session is absent, status SHALL report `🔴 stale` instead of
+`🟢 active`. The system SHALL preserve the existing `🟢 active`
+and `🟡 stopped` displays unchanged.
+
+#### Scenario: Active session reports active
+
+- **GIVEN** a session whose receipt says `active` AND
+  whose tmux session exists
+- **WHEN** the user runs `git paw status`
+- **THEN** the output SHALL display `🟢 active`
+
+#### Scenario: Stale receipt reports stale
+
+- **GIVEN** a session whose receipt says `active` AND whose
+  tmux session does NOT exist (crash or release-boundary
+  carry-over)
+- **WHEN** the user runs `git paw status`
+- **THEN** the output SHALL display `🔴 stale` (not
+  `🟢 active`)
+
+#### Scenario: Stopped session reports stopped
+
+- **GIVEN** a session whose receipt says `stopped`
+- **WHEN** the user runs `git paw status`
+- **THEN** the output SHALL display `🟡 stopped` regardless
+  of tmux liveness
+
+### Requirement: JSON status output adds stale value
+
+The system SHALL extend the JSON output of `git paw status`
+with a new `"stale"` value for the `status` field whenever the
+liveness probe identifies a stale receipt. The system SHALL
+preserve the existing `"active"` and `"stopped"` values from
+v0.5.0 without semantic change.
+
+#### Scenario: JSON output reports stale
+
+- **GIVEN** a stale-receipt session
+- **WHEN** the user runs `git paw status --json`
+- **THEN** the response object SHALL contain
+  `"status": "stale"`
+
+### Requirement: start invalidates stale receipts automatically
+
+`git paw start` SHALL run the same `tmux has-session` probe
+before deciding whether to recover or launch fresh. When the
+receipt claims `active` but the tmux session is absent, the
+system SHALL invalidate the receipt (purging the recorded
+worktrees + branches equivalent to `git paw purge --force`)
+and SHALL emit a stderr notice naming the invalidated entry
+before proceeding with the requested launch.
+
+#### Scenario: Stale receipt is invalidated before launch
+
+- **GIVEN** a stale receipt for `paw-myproj`
+- **WHEN** the user runs `git paw start` (any flags)
+- **THEN** the system SHALL purge the stale receipt's
+  worktrees + branches, SHALL emit a stderr notice
+  identifying the purged entry, and SHALL proceed with the
+  requested launch as if no prior session existed
+
+#### Scenario: Active receipt is NOT invalidated
+
+- **GIVEN** a live session whose receipt says `active` AND
+  whose tmux session exists
+- **WHEN** the user runs `git paw start` (no recovery flags)
+- **THEN** the system SHALL behave per its existing
+  reattach-or-error semantics; it SHALL NOT purge anything
+
+#### Scenario: Notice text identifies the purged entry
+
+- **WHEN** the auto-invalidation fires
+- **THEN** the stderr notice SHALL include the session name,
+  the receipt's `last_seen` timestamp (if present), and a
+  one-line explanation that the tmux session no longer
+  exists
+
+### Requirement: purge --stale flag
+
+`git paw purge` SHALL accept a `--stale` flag. When passed,
+the system SHALL purge only sessions whose receipt is stale
+per the probe. Live sessions SHALL be untouched. The flag is
+additive to existing `--force`.
+
+#### Scenario: --stale purges only stale entries
+
+- **GIVEN** two sessions on the machine — one active, one
+  stale
+- **WHEN** the user runs `git paw purge --stale`
+- **THEN** the stale session's worktrees + branches +
+  receipt SHALL be purged, and the active session SHALL
+  remain intact
+
+#### Scenario: --stale with nothing stale exits cleanly
+
+- **GIVEN** no stale receipts on the machine
+- **WHEN** the user runs `git paw purge --stale`
+- **THEN** the command SHALL exit 0 with a "nothing to
+  purge" message, and SHALL NOT touch any active session
+
+#### Scenario: --stale + --force is well-defined
+
+- **GIVEN** a stale receipt
+- **WHEN** the user runs `git paw purge --stale --force`
+- **THEN** the system SHALL behave equivalently to
+  `--stale` alone (the `--force` flag is redundant in this
+  combination; explicitly documented as a no-op pairing)
+
+### Requirement: Liveness probe is cheap
+
+The staleness check SHALL be a single `tmux has-session -t
+paw-<project>` invocation. The system SHALL NOT probe the
+broker, agent processes, or any other liveness signal as part
+of the receipt-staleness check.
+
+#### Scenario: Probe runs only one tmux call
+
+- **WHEN** any of `status`, `start`, or `purge --stale`
+  performs the staleness check
+- **THEN** the resulting process tree SHALL contain exactly
+  one `tmux has-session` invocation per session being
+  probed
+
+#### Scenario: Probe failure modes are tolerated
+
+- **GIVEN** a system where the `tmux` binary is absent or
+  unreachable
+- **WHEN** the staleness check runs
+- **THEN** the system SHALL treat the probe failure as
+  inconclusive (preserve the receipt's current state) and
+  SHALL NOT report `🔴 stale` based on a tmux-missing
+  failure
+
+### Requirement: Recovery rebuilds exactly the session's panes
+
+Recovering a stopped session SHALL rebuild exactly the panes the session
+defines — in supervisor mode, the supervisor pane plus the dashboard pane
+plus one pane per recorded worktree (`N + 2`). The recovery SHALL NOT create
+more panes than the session defines.
+
+#### Scenario: Recovery of an N-worktree supervisor session creates N+2 panes
+
+- **GIVEN** a stopped supervisor-mode session with 3 recorded worktrees
+- **WHEN** `git paw start` recovers it
+- **THEN** the rebuilt tmux session SHALL have exactly 5 panes (supervisor +
+  dashboard + 3 agents) — not a repeatedly-split column that overflows the
+  window
+
+#### Scenario: Recovery that cannot fit fails cleanly
+
+- **GIVEN** a recovery whose panes cannot be tiled in the available canvas
+- **WHEN** the rebuild fails
+- **THEN** it SHALL NOT leave a half-tiled session and SHALL NOT mutate the
+  persisted session state
+
+### Requirement: A failed start preserves persisted session state
+
+The system SHALL leave the persisted per-repo session JSON unchanged when a
+`git paw start` invocation errors before completing its launch. The session
+state file SHALL be rewritten only after a launch completes successfully, so
+an aborted start cannot destroy a recoverable session (e.g. rewrite it to an
+empty worktree list).
+
+#### Scenario: Aborted start does not corrupt the session JSON
+
+- **GIVEN** an existing saved session with N worktrees
+- **WHEN** a subsequent `git paw start` errors mid-launch
+- **THEN** the saved session JSON SHALL still list those N worktrees
+  (unchanged), so a later `git paw start` can still recover it
+
+### Requirement: Headless canvas fits multi-agent supervisor layouts
+
+The system SHALL size the detached/headless `new-session` canvas and the
+global `default-size` large enough to tile a supervisor session with the
+supported number of agents without tmux returning `no space for new pane`.
+An attached client still resizes the session to the real terminal on attach.
+
+#### Scenario: Headless supervisor session tiles without overflow
+
+- **GIVEN** a detached (no attached client) supervisor launch with several
+  agents
+- **WHEN** the session is built at the headless fallback size
+- **THEN** all panes SHALL tile successfully (no `no space for new pane`
+  error)
 

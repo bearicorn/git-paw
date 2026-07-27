@@ -1,7 +1,7 @@
 # supervisor-launch Specification
 
 ## Purpose
-Orchestrates the full supervisor session launch via `cmd_supervisor()` — computing the layout, creating worktrees and the tmux pane structure (supervisor, dashboard, coding-agent grid), injecting the broker URL and per-pane boot prompts, and branching between the return-with-attach-hint and `--unattended` in-process drive-loop paths.
+Orchestrates the full supervisor session launch via `cmd_supervisor()` — computing the layout, creating worktrees and the tmux pane structure (supervisor, dashboard, coding-agent grid), injecting the broker URL and per-pane boot prompts, and branching between the return-with-attach-hint and `--unattended` in-process drive-loop paths. It also resolves whether `git paw start` enters supervisor mode from CLI flags, config, and interactive prompts (with launch- and purge-time git safety guards warning on uncommitted specs before `--from-specs` launch and on unmerged worktree commits before `purge`); ensures the first coding agent's pane runs its CLI in that agent's own worktree rather than the supervisor's repo root (assigning split-time `-c <cwd>` values to compensate for the pane-1/2 swap); and applies tmux visual affordances (double-line pane borders, per-pane role labels via a stable `@paw_role` option, a reverse-video border-format header bar, and active-pane border styling) gated by the `[layout].border_affordances` config field and degrading gracefully on older tmux.
 ## Requirements
 ### Requirement: Supervisor auto-start flow
 
@@ -99,15 +99,16 @@ The Rust merge loop SHALL NOT be invoked from `cmd_supervisor`. Merge orchestrat
 
 After the tmux session is created in detached mode, the system SHALL wait approximately 2 seconds for all panes to reach an interactive state, then inject the initial task prompt for each coding agent pane via a single `tmux send-keys` invocation.
 
-The initial task prompt SHALL be constructed by appending a per-agent **task prompt** to the standardized boot block (separated by a blank line). The task prompt SHALL be derived from the agent's associated `SpecEntry` (if any) via the pure helper `build_task_prompt(spec_entry: Option<&SpecEntry>) -> String`, which SHALL dispatch on `SpecEntry.backend`:
+The initial task prompt SHALL be constructed by appending a per-agent **task prompt** to the standardized boot block (separated by a blank line). The task prompt SHALL be derived from the agent's associated `SpecEntry` (if any) via the pure helper `build_task_prompt(spec_entry: Option<&SpecEntry>) -> String`. Because the managed assignment block moved out of the worktree-root `AGENTS.md` into the gitignored sidecar `.git-paw/AGENTS.local.md` (`git_paw::agents::SIDECAR_REL_PATH`) — which coding CLIs do NOT auto-load — every arm of `build_task_prompt` SHALL first point the agent at that sidecar. `build_task_prompt` SHALL dispatch on `SpecEntry.backend`:
 
-1. When a spec is associated with the agent's branch (the `--from-specs` path) and `spec_entry.backend == SpecBackendKind::OpenSpec`, the task prompt SHALL be exactly the slash-command invocation `format!("/opsx:apply {id}", id = spec_entry.id)`. The task prompt SHALL NOT contain any prose surrounding the slash command, SHALL NOT contain `AGENTS.md`, and SHALL NOT contain `openspec/changes/`. The slash command SHALL be the entire returned string so that paste-aware CLIs parse it as a slash-command invocation at the start of the agent's first turn.
-2. When a spec is associated with the agent's branch and `spec_entry.backend == SpecBackendKind::Markdown` (or any other non-OpenSpec backend that lacks a slash-command apply workflow), the task prompt SHALL point the agent at the worktree's `AGENTS.md` for the full spec body AND include the spec's identifier so the agent can locate sibling artifacts (proposal, design, specs, tasks) under `openspec/changes/<id>/`. The task prompt SHALL NOT contain the spec body itself, nor a truncated heading from the spec body.
-3. When no spec is associated with the agent's branch (the `--branches` path), use the default fallback `"Begin your assigned task as described in AGENTS.md."` verbatim.
+1. `SpecBackendKind::OpenSpec` — the task prompt SHALL point the agent at the sidecar and then invoke the slash command `/opsx:apply {id}` (`{id} = spec_entry.id`). It SHALL contain the substring `/opsx:apply {id}` and SHALL NOT contain the path prose `openspec/changes/` (the sidecar already carries the artifact map). The slash command is retained so paste-aware CLIs parse it as a slash-command invocation.
+2. `SpecBackendKind::Markdown` or `SpecBackendKind::SpecKit` — the task prompt SHALL point the agent at the sidecar for the project rules and full spec, AND name the sibling-artifact directory `openspec/changes/{id}/`. It SHALL NOT contain `/opsx:apply` (these backends have no slash-command apply workflow).
+3. `SpecBackendKind::Superpowers` — the task prompt SHALL point the agent at the sidecar for the project rules and the full superpowers plan (goal, tasks, exact file paths, per-step verification commands), instructing the agent to work the steps in order and flip `- [ ]` to `- [x]` as each lands.
+4. When no spec is associated with the agent's branch (the `--branches` path), the task prompt SHALL be the verbatim fallback `"Read .git-paw/AGENTS.local.md first for your assignment, then begin your assigned task."`.
 
-The full spec body remains the source of truth for `AGENTS.md` generation (`WorktreeAssignment.spec_content` is unchanged); only the injected boot prompt's task-prompt portion changes per backend.
+The task prompt SHALL NOT contain the spec body itself, nor a truncated heading from the spec body. The full spec body remains the source of truth for the sidecar's generation (`WorktreeAssignment.spec_content` is unchanged); only the injected task-prompt portion changes per backend.
 
-The single `tmux send-keys` invocation SHALL pass the constructed prompt followed by the `Enter` keystroke. On paste-aware CLIs the slash-command form (OpenSpec branch) is short enough that paste-buffer capture is unlikely; the longer Markdown-branch pointer may still trip paste-buffer behaviour, which the supervisor agent recovers from via the paste-buffer-recovery skill (see the `agent-skills` capability).
+The single `tmux send-keys` invocation SHALL pass the constructed prompt followed by the `Enter` keystroke. The longer pointer prompts may still trip paste-aware CLIs' paste-buffer behaviour, which the supervisor agent recovers from via the paste-buffer-recovery skill (see the `agent-skills` capability).
 
 #### Scenario: Initial prompt is injected after boot delay
 
@@ -119,7 +120,7 @@ The single `tmux send-keys` invocation SHALL pass the constructed prompt followe
 
 - **GIVEN** an agent pane with no spec file assigned
 - **WHEN** the initial prompt is injected
-- **THEN** the injected task-prompt portion SHALL be the default fallback string `"Begin your assigned task as described in AGENTS.md."`
+- **THEN** the injected task-prompt portion SHALL be the verbatim fallback `"Read .git-paw/AGENTS.local.md first for your assignment, then begin your assigned task."`
 
 #### Scenario: Launch flow sends exactly one Enter per pane
 
@@ -136,30 +137,40 @@ The single `tmux send-keys` invocation SHALL pass the constructed prompt followe
 - **THEN** the supervisor SHALL apply the paste-buffer-recovery sub-case from the embedded skill (`agent-skills` capability)
 - **AND** the launch flow itself SHALL have already exited; the launch flow is NOT responsible for retrying the keystroke
 
-#### Scenario: OpenSpec-backed task prompt invokes the opsx:apply slash command
+#### Scenario: OpenSpec-backed task prompt points at the sidecar then invokes opsx:apply
 
-- **GIVEN** a coding agent on branch `feat/governance-config` whose associated spec entry has `id = "governance-config"` and `backend = SpecBackendKind::OpenSpec`
+- **GIVEN** a coding agent on branch `feat/my-change` whose associated spec entry has `id = "my-change"` and `backend = SpecBackendKind::OpenSpec`
 - **WHEN** the supervisor launch flow builds the task prompt for that agent
-- **THEN** `build_task_prompt(Some(&entry))` SHALL return exactly the string `"/opsx:apply governance-config"`
-- **AND** the returned string SHALL NOT contain the substring `AGENTS.md`
+- **THEN** `build_task_prompt(Some(&entry))` SHALL return a string containing the sidecar path `.git-paw/AGENTS.local.md`
+- **AND** the returned string SHALL contain the substring `/opsx:apply my-change`
 - **AND** the returned string SHALL NOT contain the substring `openspec/changes/`
 - **AND** the returned string SHALL NOT contain any portion of the spec's prompt body
 
-#### Scenario: Markdown-backed task prompt uses the generic AGENTS.md pointer
+Test: `main::tests::task_prompt_openspec_backend_points_at_sidecar_then_invokes_opsx_apply`
+
+#### Scenario: Markdown-backed task prompt uses the sidecar pointer
 
 - **GIVEN** a coding agent on branch `feat/my-feature` whose associated spec entry has `id = "my-feature"` and `backend = SpecBackendKind::Markdown`
 - **WHEN** the supervisor launch flow builds the task prompt for that agent
-- **THEN** the returned string SHALL contain the substring `AGENTS.md`
+- **THEN** the returned string SHALL contain the sidecar path `.git-paw/AGENTS.local.md`
 - **AND** the returned string SHALL contain the substring `openspec/changes/my-feature`
-- **AND** the returned string SHALL NOT begin with `/opsx:apply`
-- **AND** the returned string SHALL instruct the agent to read AGENTS.md and the sibling artifacts before starting
+- **AND** the returned string SHALL NOT contain `/opsx:apply`
+
+Test: `main::tests::task_prompt_markdown_backend_uses_sidecar_pointer`
+
+#### Scenario: No-spec fallback points at the sidecar verbatim
+
+- **WHEN** `build_task_prompt(None)` is called
+- **THEN** the returned string SHALL equal `"Read .git-paw/AGENTS.local.md first for your assignment, then begin your assigned task."` byte-for-byte
+
+Test: `main::tests::task_prompt_without_spec_points_at_sidecar_verbatim`
 
 #### Scenario: Backend dispatch is exhaustive over SpecBackendKind
 
-- **GIVEN** `SpecBackendKind` enumerates the backends supported in the current build (initially `OpenSpec` and `Markdown`)
+- **GIVEN** `SpecBackendKind` enumerates the backends supported in the current build (`OpenSpec`, `Markdown`, `SpecKit`, `Superpowers`)
 - **WHEN** the supervisor launch flow's task-prompt construction is inspected
 - **THEN** `build_task_prompt` SHALL match every variant of `SpecBackendKind` exhaustively
-- **AND** the compiler SHALL reject `build_task_prompt` if a future variant (e.g. `SpecKit`) is added to `SpecBackendKind` without a corresponding match arm
+- **AND** the compiler SHALL reject `build_task_prompt` if a future variant is added to `SpecBackendKind` without a corresponding match arm
 
 #### Scenario: build_task_prompt remains a pure function
 
@@ -361,4 +372,375 @@ The `--dry-run` plan output SHALL report the supervisor's effective approval lev
 - **GIVEN** a config with `[supervisor]` containing `agent_approval = "auto"` and no `approval` key
 - **WHEN** the supervisor session launch commands are built
 - **THEN** the supervisor pane and agent pane commands SHALL be identical to those v0.10.0 would build for the same config
+
+### Requirement: Supervisor mode resolution chain
+
+The system SHALL determine whether to enter supervisor mode using the following resolution chain, evaluated in order:
+
+1. If `--no-supervisor` flag is present → disable supervisor mode (no prompt, regardless of any other input)
+2. If `--supervisor` flag is present → enable supervisor mode (no prompt)
+3. If `[supervisor] enabled = true` in config → enable supervisor mode (no prompt)
+4. If `[supervisor] enabled = false` in config → disable supervisor mode (no prompt)
+5. If `[supervisor]` section is absent (`None`) → prompt "Start in supervisor mode? (y/n)"
+6. If `--dry-run` is present and step 5 would apply → assume no supervisor (skip prompt)
+
+`--no-supervisor` and `--supervisor` SHALL be mutually exclusive at parse time (per the `cli-parsing` requirement); the resolver therefore never sees both flags `true` simultaneously.
+
+When supervisor mode is enabled (steps 2 or 3), the system SHALL call `cmd_supervisor()`. When disabled (steps 1, 4, or 6), the system SHALL proceed with normal `cmd_start()`.
+
+#### Scenario: --no-supervisor disables regardless of config (config enabled)
+
+- **GIVEN** a config with `[supervisor] enabled = true`
+- **WHEN** `git paw start --no-supervisor` is run
+- **THEN** supervisor mode SHALL NOT be entered
+- **AND** `cmd_supervisor()` SHALL NOT be called
+- **AND** no interactive prompt SHALL be shown
+
+#### Scenario: --no-supervisor with no config section also disables
+
+- **GIVEN** a config with no `[supervisor]` section
+- **WHEN** `git paw start --no-supervisor` is run
+- **THEN** supervisor mode SHALL NOT be entered
+- **AND** no interactive prompt SHALL be shown
+
+#### Scenario: --no-supervisor with --dry-run also disables
+
+- **GIVEN** any config state
+- **WHEN** `git paw start --no-supervisor --dry-run` is run
+- **THEN** supervisor mode SHALL NOT be entered
+- **AND** the dry-run plan SHALL reflect supervisor-disabled state
+
+#### Scenario: --supervisor flag enables regardless of config
+
+- **GIVEN** a config with `[supervisor] enabled = false`
+- **WHEN** `git paw start --supervisor` is run
+- **THEN** supervisor mode SHALL be enabled
+- **AND** `cmd_supervisor()` SHALL be called
+
+#### Scenario: Config enabled = true enables without prompt
+
+- **GIVEN** a config with `[supervisor] enabled = true`
+- **WHEN** `git paw start` is run with no flags
+- **THEN** supervisor mode SHALL be enabled without any interactive prompt
+
+#### Scenario: Config enabled = false disables without prompt
+
+- **GIVEN** a config with `[supervisor] enabled = false`
+- **WHEN** `git paw start` is run with no flags
+- **THEN** supervisor mode SHALL NOT be entered
+- **AND** no interactive prompt SHALL be shown
+
+#### Scenario: No supervisor section prompts the user
+
+- **GIVEN** a config with no `[supervisor]` section
+- **WHEN** `git paw start` is run with no flags
+- **THEN** the system SHALL prompt "Start in supervisor mode?"
+
+#### Scenario: dry-run skips supervisor prompt
+
+- **GIVEN** a config with no `[supervisor]` section
+- **WHEN** `git paw start --dry-run` is run
+- **THEN** no interactive prompt SHALL be shown
+- **AND** supervisor mode SHALL NOT be entered
+
+### Requirement: Validate specs are committed before launching
+
+When `git paw start --from-specs` is used, the system SHALL verify that spec files discovered in the working directory are also present in the git index. This applies to both OpenSpec format (`openspec/changes/`) and Markdown format (the configured `[specs] dir`).
+
+If any spec change directory or file exists in the working tree but is untracked or has uncommitted changes, the system SHALL warn: "N spec(s) have uncommitted changes. Worktree agents will not see uncommitted specs. Commit first or use --force to proceed."
+
+The system SHALL NOT launch unless the user confirms or `--force` is passed.
+
+#### Scenario: Uncommitted OpenSpec changes trigger warning
+
+- **GIVEN** `openspec/changes/my-change/` exists but is not tracked by git
+- **WHEN** `git paw start --from-specs` is run
+- **THEN** the system SHALL warn about uncommitted specs
+- **AND** SHALL NOT launch without user confirmation
+
+#### Scenario: Uncommitted Markdown specs trigger warning
+
+- **GIVEN** a Markdown spec file in the configured `[specs] dir` has uncommitted modifications
+- **WHEN** `git paw start --from-specs` is run
+- **THEN** the system SHALL warn about uncommitted specs
+
+#### Scenario: All specs committed launches normally
+
+- **GIVEN** all spec files are committed and clean
+- **WHEN** `git paw start --from-specs` is run
+- **THEN** no warning is shown and the session launches normally
+
+#### Scenario: Force flag bypasses warning
+
+- **GIVEN** uncommitted spec changes exist
+- **WHEN** `git paw start --from-specs --force` is run
+- **THEN** the session launches without warning
+- **AND** if `just check` fails, the supervisor SHALL stop and report the failure
+
+### Requirement: Purge warns about unmerged commits
+
+Before destroying worktrees, `git paw purge` SHALL check each worktree branch for commits not yet merged to the default branch. The system SHALL:
+
+1. For each worktree branch, run `git log <branch> --not <default-branch> --oneline`
+2. If any branch has unmerged commits, display a warning listing each branch and its commit count
+3. Require either `--force` flag or interactive confirmation ("Y" response) to proceed
+4. If the user declines, exit without destroying any worktrees
+
+The default branch SHALL be resolved from `git symbolic-ref refs/remotes/origin/HEAD`, falling back to `main` if unavailable.
+
+#### Scenario: Purge with no unmerged commits proceeds without warning
+
+- **GIVEN** all worktree branches have no commits beyond the default branch
+- **WHEN** `git paw purge` is run
+- **THEN** no unmerged commit warning SHALL be shown
+- **AND** purge proceeds normally
+
+#### Scenario: Purge with unmerged commits warns before destroying
+
+- **GIVEN** one worktree branch has 3 commits not merged to main
+- **WHEN** `git paw purge` is run without `--force`
+- **THEN** a warning SHALL be displayed identifying the branch and the number of unmerged commits
+- **AND** the system SHALL prompt for confirmation before proceeding
+
+#### Scenario: Purge --force skips confirmation but still warns
+
+- **GIVEN** one worktree branch has unmerged commits
+- **WHEN** `git paw purge --force` is run
+- **THEN** the warning SHALL still be displayed
+- **AND** purge SHALL proceed without waiting for interactive confirmation
+
+#### Scenario: Purge cancelled by user preserves worktrees
+
+- **GIVEN** one worktree branch has unmerged commits
+- **WHEN** `git paw purge` is run and the user answers "N" to the confirmation
+- **THEN** no worktrees SHALL be removed
+- **AND** the system SHALL exit with a non-error message indicating purge was cancelled
+
+### Requirement: First agent pane launches in its own worktree
+
+The supervisor session build SHALL ensure the first coding agent's pane runs
+its CLI in that agent's worktree, never in the supervisor's repo-root working
+directory. Because the build swaps panes 1 and 2 (to order dashboard before
+the agent area) and sends each pane's CLI command after the swap by index,
+the split-time `-c <cwd>` values SHALL be assigned to compensate for the
+swap: the agent-area split takes the dashboard's cwd and the dashboard split
+takes the first agent's worktree, so that post-swap each index's cwd matches
+the command sent to it.
+
+#### Scenario: First agent's CLI runs in its worktree
+
+- **GIVEN** a supervisor session launched with at least one coding agent
+- **WHEN** the layout is built and the first agent's CLI command is sent to
+  its pane
+- **THEN** that pane's working directory SHALL be the first agent's worktree
+  (so its commits land on the agent's own branch), NOT the repo root
+
+#### Scenario: Compensated split cwds
+
+- **WHEN** the supervisor build's two top-region splits are inspected
+- **THEN** the agent-area (`split-window -v`) SHALL carry `-c <dashboard
+  cwd>` and the dashboard (`split-window -h`) SHALL carry `-c <first agent
+  worktree>`, the assignment that, after the pane-1/2 swap, places the first
+  agent's worktree under the agent's command
+
+#### Scenario: Later agents unaffected
+
+- **GIVEN** a supervisor session with two or more coding agents
+- **THEN** the second and later agents (created by their own
+  `split-window -c <worktree>` with no swap) SHALL each run in their own
+  worktree, as before
+
+### Requirement: Session builder applies double-line borders
+
+The tmux session builder SHALL set
+`pane-border-lines double` on the `paw-<project>` session
+immediately after the session is created. The option SHALL be
+scoped to the session (`tmux set-option -t <session>`), not
+to the tmux server or to other windows. Double lines (`═║`) read
+as a stronger row separator than single/heavy lines; tmux has no
+inter-pane margin or padding (panes tile flush), so the divider
+weight and the label bar are the only levers for perceived
+separation between rows.
+
+#### Scenario: Double-line border option is set on the session
+
+- **WHEN** the session builder constructs a new
+  `paw-<project>` session
+- **THEN** the resulting `tmux set-option` invocations
+  SHALL include `-t paw-<project> pane-border-lines double`
+
+#### Scenario: Option does not leak to other sessions
+
+- **GIVEN** another tmux session unrelated to git-paw
+- **WHEN** the git-paw session builder runs
+- **THEN** the other session's `pane-border-lines` setting
+  SHALL be unchanged (verified via
+  `tmux show-options -t <other-session> -v
+  pane-border-lines`)
+
+### Requirement: Per-pane title labelling
+
+The session builder SHALL set each pane's title via
+`tmux select-pane -t <pane> -T '<title>'` after pane
+creation. Pane 0 SHALL receive the title `supervisor`. Pane 1
+SHALL receive the title `dashboard`. Each agent pane SHALL
+receive a title equal to its branch_id (e.g.
+`feat/cold-start-ci-parity`).
+
+In addition to `select-pane -T`, the session builder SHALL set a
+pane-scoped user option `@paw_role` to the same label via
+`tmux set-option -p -t <pane> @paw_role '<title>'`. This option is
+the authoritative, stable source of the border label: the agent CLI
+running in a pane emits OSC title escape sequences that overwrite
+`#{pane_title}` with its current activity (e.g. `Searching files…`),
+so the `select-pane -T` value does not survive past the CLI's first
+title update. The `@paw_role` pane option is git-paw's own and is
+never overwritten by the CLI, so the role label remains stable for
+the life of the pane. The `set-option -p @paw_role` call SHALL be a
+*soft* command (a non-zero exit on older tmux warns and the build
+continues, matching the border affordances).
+
+#### Scenario: Each pane gets a stable @paw_role option
+
+- **GIVEN** an agent attached at pane index N for branch `feat/foo`
+- **WHEN** the session builder completes
+- **THEN** `tmux show-options -p -t paw-<project>:0.N @paw_role`
+  SHALL return `feat/foo`, and this value SHALL NOT change when the
+  CLI subsequently sets `#{pane_title}` via an OSC sequence
+
+#### Scenario: Supervisor pane title is supervisor
+
+- **WHEN** the session builder completes
+- **THEN** `tmux display-message -t paw-<project>:0.0 -p
+  '#{pane_title}'` SHALL return `supervisor`
+
+#### Scenario: Dashboard pane title is dashboard
+
+- **WHEN** the session builder completes
+- **THEN** `tmux display-message -t paw-<project>:0.1 -p
+  '#{pane_title}'` SHALL return `dashboard`
+
+#### Scenario: Agent pane title is the branch id
+
+- **GIVEN** an agent attached at pane index N for branch
+  `feat/foo`
+- **WHEN** the session builder completes
+- **THEN** `tmux display-message -t paw-<project>:0.N -p
+  '#{pane_title}'` SHALL return `feat/foo`
+
+#### Scenario: Add via git paw add sets the new pane's title
+
+- **GIVEN** an active session and the user runs
+  `git paw add feat/bar` per [[git-paw-add]]
+- **WHEN** the new pane is created
+- **THEN** the new pane's title SHALL be `feat/bar`
+
+### Requirement: Pane border format renders the role label
+
+The session builder SHALL set `pane-border-format` to a reverse-video
+label bar —
+`#[fg=colour39,bold,reverse] #{pane_index}: #{?#{@paw_role},#{@paw_role},#{pane_title}} #[default]`
+— and `pane-border-status top` so each pane shows its index and role
+label as a colored header chip above the pane content (the reverse-video
+styling makes the label read as a header bar rather than plain text on
+the divider line, aiding row separation). The format SHALL prefer the
+pane-scoped `@paw_role` option (set per [Per-pane title labelling]) and
+fall back to `#{pane_title}` only when `@paw_role` is unset (e.g. a
+user-created pane). This keeps the role label stable even after the agent
+CLI overwrites `#{pane_title}` with its current activity via OSC title
+escape sequences.
+
+#### Scenario: Border format is the reverse-video bar preferring @paw_role
+
+- **WHEN** the session builder completes
+- **THEN** the session's `pane-border-format` SHALL be exactly
+  `#[fg=colour39,bold,reverse] #{pane_index}: #{?#{@paw_role},#{@paw_role},#{pane_title}} #[default]`,
+  and `pane-border-status` SHALL be `top`
+
+#### Scenario: Role label survives a CLI title overwrite
+
+- **GIVEN** a built session where pane 0's `@paw_role` is `supervisor`
+- **WHEN** the CLI in pane 0 emits an OSC sequence that sets
+  `#{pane_title}` to `Thinking…`
+- **THEN** the rendered border label for pane 0 SHALL still read
+  `0: supervisor` (the format resolves `@paw_role`, not `#{pane_title}`)
+
+### Requirement: Active pane visually distinct
+
+The session builder SHALL set
+`pane-active-border-style fg=colour45,bold` and
+`pane-border-style fg=colour238` so the focused pane's
+border colour visually stands out from the others.
+
+#### Scenario: Active border style is applied
+
+- **WHEN** the session builder completes
+- **THEN** the session's `pane-active-border-style` SHALL
+  contain `colour45,bold`, and `pane-border-style` SHALL contain
+  `colour238`
+
+### Requirement: border_affordances config field
+
+The system SHALL accept `[layout].border_affordances` as a
+boolean config field defaulting to `true`. When `false`, the
+session builder SHALL skip every `set-option` invocation and
+every `select-pane -T` call described in this capability,
+leaving the user's tmux defaults in effect.
+
+#### Scenario: Default true applies all affordances
+
+- **GIVEN** no `[layout]` section in config (or
+  `border_affordances` unset)
+- **WHEN** the session builder runs
+- **THEN** all five `set-option` invocations and the
+  per-pane title sets SHALL be emitted
+
+#### Scenario: Explicit false skips all affordances
+
+- **GIVEN** `[layout].border_affordances = false`
+- **WHEN** the session builder runs
+- **THEN** none of the five `set-option` invocations and
+  none of the per-pane title sets SHALL be emitted; the
+  session SHALL inherit the user's default tmux styling
+
+### Requirement: Graceful degradation on older tmux
+
+The session builder SHALL tolerate `tmux set-option` failures
+for options unsupported by older tmux versions. The builder
+SHALL emit a stderr warning naming the unsupported option and
+SHALL continue building the session.
+
+#### Scenario: Unsupported option produces a stderr warning
+
+- **GIVEN** a tmux version where `pane-border-lines double`
+  is not recognised (pre-3.2)
+- **WHEN** the session builder runs
+- **THEN** the build SHALL complete without fatal error,
+  and stderr SHALL contain a warning naming the unsupported
+  option
+
+#### Scenario: Other affordances still apply when one fails
+
+- **GIVEN** the same older-tmux scenario where
+  `pane-border-lines double` fails
+- **WHEN** the session builder runs
+- **THEN** the other affordances (title format, status
+  position, active-border style) SHALL still be set, since
+  they have shipped in tmux since 2.3
+
+### Requirement: Applies to both supervisor and non-supervisor sessions
+
+The pane affordances SHALL apply to every git-paw-managed
+tmux session regardless of supervisor mode. The
+`[layout].border_affordances` config field SHALL govern both
+`git paw start` (no supervisor) and `git paw start
+--supervisor` paths.
+
+#### Scenario: Non-supervisor session also receives affordances
+
+- **GIVEN** a `git paw start` (no `--supervisor`) session
+  with `border_affordances = true`
+- **WHEN** the session builder completes
+- **THEN** all the documented affordances SHALL be applied
+  to the non-supervisor session's panes
 
