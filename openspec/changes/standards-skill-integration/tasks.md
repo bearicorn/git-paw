@@ -1,17 +1,17 @@
 # Tasks — standards-skill-integration
 
 ## 1. Supervisor gate consult (exported)
-- [ ] Edit `assets/agent-skills/supervisor.md`: add a review-gate step to consult the project's `.agents/skills/` standards skills (e.g. `test-strategy`, `code-standards`) when present and verify conformance — project-agnostic wording, no git-paw stack specifics
-- [ ] Confirm the step sits inside the appropriate (region-gated if applicable) section so non-OpenSpec/other consumers still parse cleanly
+- [x] Edit `assets/agent-skills/supervisor.md`: add a review-gate step to consult the project's `.agents/skills/` standards skills (e.g. `test-strategy`, `code-standards`) when present and verify conformance — project-agnostic wording, no git-paw stack specifics
+- [x] Confirm the step sits inside the appropriate (region-gated if applicable) section so non-OpenSpec/other consumers still parse cleanly
 
 ## 2. Worker consult (exported)
-- [ ] Edit `assets/agent-skills/coordination.md` (and/or the boot-block guidance) to direct the implementing agent to consult the project's `.agents/skills/` standards skills during implementation — project-agnostic wording
-- [ ] Ensure absent standards → no-op (backward compatible)
+- [x] Edit `assets/agent-skills/coordination.md` (and/or the boot-block guidance) to direct the implementing agent to consult the project's `.agents/skills/` standards skills during implementation — project-agnostic wording
+- [x] Ensure absent standards → no-op (backward compatible)
 
 ## 3. Ripple + sync (scope up front)
-- [ ] Grep `src/skills.rs` + `tests/*_skill_content.rs` (`coordination_region_skill_content.rs`, `supervisor_routing_skill_content.rs`, …) for the pinned literals; update those tests in lockstep with the prose edits
-- [ ] Sync the tracked `.git-paw/scripts`/skill copies from `assets/` (known drift hazard) with a `chore(init): sync ...` step
-- [ ] Extend the `lang-agnostic-skills` no-language-leak audit to cover the new consult wording (assert no stack/language token in the consult step)
+- [x] Grep `src/skills.rs` + `tests/*_skill_content.rs` (`coordination_region_skill_content.rs`, `supervisor_routing_skill_content.rs`, …) for the pinned literals; update those tests in lockstep with the prose edits
+- [x] Sync the tracked `.git-paw/scripts`/skill copies from `assets/` — N/A: this change edits only the exported skill prose; tests read `assets/` directly via `include_str!`, and the script-drift hazard (sweep.sh/broker.sh) is untouched
+- [x] Extend the `lang-agnostic-skills` no-language-leak audit to cover the new consult wording (assert no stack/language token in the consult step)
 
 ## 4. Verification (five gates)
 - [ ] Gate 1/2 — `skills.rs` + `*_skill_content.rs` updated and green; full suite green vs merge-base
