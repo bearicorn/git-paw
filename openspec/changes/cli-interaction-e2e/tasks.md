@@ -15,9 +15,9 @@
 - [ ] start: uniform CLI picker shown / bypassed (`--cli`)
 - [ ] start: per-branch CLI picker shown ×N / bypassed (`--cli`)
 - [ ] start: supervisor confirm shown (chain→prompt) / bypassed (`--supervisor` / `--no-supervisor` / `--unattended` / non-TTY)
-- [ ] from-specs: spec picker shown (from-specs+TTY)
-- [ ] from-specs: CLI picker short-circuits (`--cli` / `paw_cli` / `default_spec_cli`) vs shown on fallthrough
-- [ ] from-specs: spec-format resolution error when neither `--specs-format` nor `[specs]` configured
+- [ ] spec-launch: spec picker shown for bare `--specs` (+TTY); `--from-all-specs` launches all specs without a picker (deprecated `--from-specs` alias omitted — removal at v1.0.0)
+- [ ] spec-launch: CLI picker short-circuits (`--cli` / `paw_cli` / `default_spec_cli`) vs shown on fallthrough
+- [ ] spec-launch: spec-format resolution error when neither `--specs-format` nor `[specs]` configured (via `--from-all-specs`)
 - [ ] destructive: stop confirm shown (¬`--force`) / bypassed (`--force`)
 - [ ] destructive: purge confirm shown (¬`--force`) / bypassed (`--force`)
 
@@ -25,7 +25,7 @@
 - [x] Assert written config / `session.json` / tmux panes for each completed flow (not pane pixels) — init slice asserts the written config; extend to session.json/panes as start/from-specs rows land
 - [x] Poll-until-rendered synchronisation with per-prompt timeouts; no fixed sleep as the primary gate (in the shared `helpers::pty` harness)
 - [ ] `log`/document any combo deliberately skipped or CI-flag-gated so coverage isn't silently narrowed
-- [ ] Confirm the `--from-specs` non-TTY spec-picker behaviour and encode it
+- [ ] Confirm the bare `--specs` non-TTY spec-picker behaviour and encode it
 
 ## 4. Reconciliation (with the other v0.13.0 workstreams)
 - [ ] Cross-check the matrix against the spec-audit traceability pass so each scenario maps to a covering test

@@ -16,7 +16,7 @@ QA. This change closes that gap with true end-to-end tests before the freeze.
   `wait_for_file` / `capture`): spawn the real binary in a detached tmux pane, poll until a
   prompt renders, send keys, and assert on observable outcomes.
 - A **parameterised prompt-matrix test** per command family (`init`, `start`,
-  `start --from-specs`, destructive confirmations) asserting **prompt presence, order, and
+  `start --from-all-specs`, destructive confirmations) asserting **prompt presence, order, and
   bypass** for each config/flag/TTY precondition.
 - Assertions on **outcomes** (written config, `session.json`, tmux panes created), using
   `capture-pane` only for prompt-presence + synchronisation — never pixel-matching.
