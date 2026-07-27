@@ -24,7 +24,7 @@ git paw
 
 git-paw will:
 
-- **Detect** which AI CLIs you have installed (Claude, Codex, Gemini, Aider, etc.)
+- **Detect** which AI CLIs you have installed (Claude, Codex, Antigravity, Aider, etc.)
 - **Prompt** you to pick branches and a CLI (or different CLIs per branch)
 - **Create** git worktrees for each selected branch
 - **Launch** a tmux session with one pane per branch, each running your chosen AI CLI

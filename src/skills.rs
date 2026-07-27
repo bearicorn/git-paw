@@ -1299,6 +1299,7 @@ mod tests {
             "claude-oss",
             "codex",
             "gemini",
+            "agy",
             "aider",
         ] {
             assert!(

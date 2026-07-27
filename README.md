@@ -34,7 +34,7 @@ $ git paw
   ? Select AI CLI:
   > claude
     codex
-    gemini
+    agy
 
   ✔ Creating worktrees...
     ../myproject-feat-auth/
@@ -272,7 +272,7 @@ git-paw auto-detects the following AI coding CLIs when they are on `PATH`. The l
 |-----|--------|
 | Claude Code | `claude` |
 | OpenAI Codex | `codex` |
-| Google Gemini CLI | `gemini` |
+| Antigravity CLI | `agy` |
 | Aider | `aider` |
 | Vibe | `vibe` |
 | Qwen | `qwen` |

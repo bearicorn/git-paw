@@ -1020,17 +1020,17 @@ impl AutoApproveConfig {
 ///     approval_flags("codex", &ApprovalLevel::Auto),
 ///     "--sandbox workspace-write",
 /// );
-/// assert_eq!(approval_flags("gemini", &ApprovalLevel::FullAuto), "--yolo");
+/// assert_eq!(approval_flags("agy", &ApprovalLevel::FullAuto), "--dangerously-skip-permissions");
 /// assert_eq!(approval_flags("claude", &ApprovalLevel::Manual), "");
 /// assert_eq!(approval_flags("some-agent", &ApprovalLevel::FullAuto), "");
 /// ```
 #[must_use]
 pub fn approval_flags(cli: &str, level: &ApprovalLevel) -> &'static str {
     match (cli, level) {
-        ("claude", ApprovalLevel::FullAuto) => "--dangerously-skip-permissions",
+        ("claude" | "agy", ApprovalLevel::FullAuto) => "--dangerously-skip-permissions",
         ("codex", ApprovalLevel::FullAuto) => "--dangerously-bypass-approvals-and-sandbox",
         ("codex", ApprovalLevel::Auto) => "--sandbox workspace-write",
-        ("gemini" | "qwen", ApprovalLevel::FullAuto) => "--yolo",
+        ("qwen", ApprovalLevel::FullAuto) => "--yolo",
         _ => "",
     }
 }
@@ -3810,9 +3810,14 @@ enabled = true
     }
 
     #[test]
-    fn approval_flags_gemini_and_qwen_full_auto_are_yolo() {
-        assert_eq!(approval_flags("gemini", &ApprovalLevel::FullAuto), "--yolo");
+    fn approval_flags_qwen_yolo_agy_skip_permissions_gemini_empty() {
+        // qwen keeps --yolo; agy (Antigravity) shares Claude's flag; retired gemini has no built-in row.
         assert_eq!(approval_flags("qwen", &ApprovalLevel::FullAuto), "--yolo");
+        assert_eq!(
+            approval_flags("agy", &ApprovalLevel::FullAuto),
+            "--dangerously-skip-permissions"
+        );
+        assert_eq!(approval_flags("gemini", &ApprovalLevel::FullAuto), "");
     }
 
     #[test]

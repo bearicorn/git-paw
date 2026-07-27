@@ -102,7 +102,7 @@ pub enum Command {
                       git paw start --no-rebase   # skip rebasing agent branches onto the default branch"
     )]
     Start {
-        /// AI CLI to use (e.g., claude, codex, gemini). Skips CLI picker if provided.
+        /// AI CLI to use (e.g., claude, codex, agy). Skips CLI picker if provided.
         #[arg(long, help = "AI CLI to use (skips CLI picker)")]
         cli: Option<String>,
 
