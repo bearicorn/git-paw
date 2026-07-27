@@ -13,8 +13,8 @@ skipped). Each dimension has its own skill — this is the index that ties them 
 
 ## Dimensions (each links its standard)
 
-- **Spec** — the behavior is specified (OpenSpec); every SHALL/MUST has a WHEN/THEN scenario. (the
-  spec-driven / opsx workflow)
+- **Spec** — the behavior is specified (OpenSpec); every SHALL/MUST has a WHEN/THEN scenario, and the
+  capability set stays lean and coherent, per `spec-organization`. (the spec-driven / opsx workflow)
 - **Code** — conforms to `code-standards` (patterns, no `unwrap`/`expect`, docs, frozen do-not-touch).
 - **Tests** — behavioral, right-layer, and every scenario covered, per `test-strategy`.
 - **Docs** — complete and consistent across the four layers, per `doc-completeness`; `mdbook build` passes.
