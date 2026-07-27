@@ -77,106 +77,84 @@ page links to every capability spec in the repository.
 
 ## Complete capability index
 
-Every capability spec in the repository (links go to the canonical
-`openspec/specs/` source on GitHub).
+Every capability spec in the repository, grouped by domain (links go to the
+canonical `openspec/specs/` source on GitHub). Each entry's blurb is condensed
+from that spec's `## Purpose`.
 
 A few entries are **internal process specs** — they govern the test suite,
-CI, or the verification workflow itself (e.g. `test-isolation`,
-`cold-start-ci-parity`, `no-fail-fast-verification`)
-rather than a user-facing feature. These intentionally have no user-guide
-chapter: the spec itself is their documentation.
+CI, or the verification workflow itself (e.g. `test-and-ci-hygiene`,
+`selftest`) rather than a user-facing feature. These intentionally have no
+user-guide chapter: the spec itself is their documentation.
 
-- [`add-branch`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/add-branch/spec.md)
-- [`advanced-main-event`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/advanced-main-event/spec.md)
-- [`agent-broker-helper`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/agent-broker-helper/spec.md)
-- [`agent-friendly-docs-site`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/agent-friendly-docs-site/spec.md)
-- [`agent-learning-variant`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/agent-learning-variant/spec.md)
-- [`agent-skills`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/agent-skills/spec.md)
-- [`agents-md-injection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/agents-md-injection/spec.md)
-- [`approval-configuration`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/approval-configuration/spec.md)
-- [`approval-pattern-surfacing`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/approval-pattern-surfacing/spec.md)
-- [`auto-approve-file-edits`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/auto-approve-file-edits/spec.md)
-- [`automatic-approval`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/automatic-approval/spec.md)
-- [`boot-block-format`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/boot-block-format/spec.md)
-- [`broker-endpoints`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/broker-endpoints/spec.md)
-- [`broker-lifecycle`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/broker-lifecycle/spec.md)
-- [`broker-mediated-approvals`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/broker-mediated-approvals/spec.md)
-- [`broker-messages`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/broker-messages/spec.md)
-- [`broker-roster-hygiene`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/broker-roster-hygiene/spec.md)
-- [`broker-server`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/broker-server/spec.md)
-- [`cli-detection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/cli-detection/spec.md)
-- [`cli-parsing`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/cli-parsing/spec.md)
-- [`cli-selection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/cli-selection/spec.md)
-- [`cli-specs-supervisor-filter`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/cli-specs-supervisor-filter/spec.md)
-- [`cli-submit-profile`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/cli-submit-profile/spec.md)
-- [`cold-start-ci-parity`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/cold-start-ci-parity/spec.md)
-- [`configuration`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/configuration/spec.md)
-- [`conflict-detection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/conflict-detection/spec.md)
-- [`conflict-detector-fn-granularity`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/conflict-detector-fn-granularity/spec.md)
-- [`coordination-context-budget`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/coordination-context-budget/spec.md)
-- [`curl-allowlist`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/curl-allowlist/spec.md)
-- [`custom-cli-curl-seeding`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/custom-cli-curl-seeding/spec.md)
-- [`dashboard`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/dashboard/spec.md)
-- [`dashboard-broker-log`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/dashboard-broker-log/spec.md)
-- [`dev-command-allowlist`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/dev-command-allowlist/spec.md)
-- [`docs-fetch-skill`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/docs-fetch-skill/spec.md)
-- [`error-handling`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/error-handling/spec.md)
-- [`filesystem-watcher`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/filesystem-watcher/spec.md)
-- [`from-specs-launch`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/from-specs-launch/spec.md)
-- [`git-hook-injection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/git-hook-injection/spec.md)
-- [`git-operations`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/git-operations/spec.md)
-- [`governance-config`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/governance-config/spec.md)
-- [`interactive-selection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/interactive-selection/spec.md)
-- [`lang-agnostic-skills`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/lang-agnostic-skills/spec.md)
-- [`learnings-mode`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/learnings-mode/spec.md)
-- [`manual-injection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/manual-injection/spec.md)
-- [`markdown-integration`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/markdown-integration/spec.md)
-- [`mcp-read-tools`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/mcp-read-tools/spec.md)
-- [`mcp-server`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/mcp-server/spec.md)
-- [`message-delivery`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/message-delivery/spec.md)
-- [`no-fail-fast-verification`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/no-fail-fast-verification/spec.md)
-- [`openspec-integration`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/openspec-integration/spec.md)
-- [`opsx-role-gating`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/opsx-role-gating/spec.md)
-- [`per-commit-verification`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/per-commit-verification/spec.md)
-- [`permission-detection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/permission-detection/spec.md)
-- [`project-initialization`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/project-initialization/spec.md)
-- [`qualitative-learnings`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/qualitative-learnings/spec.md)
-- [`remove-branch`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/remove-branch/spec.md)
-- [`replay-command`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/replay-command/spec.md)
-- [`robust-cli-launch`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/robust-cli-launch/spec.md)
-- [`safe-command-classification`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/safe-command-classification/spec.md)
-- [`selftest`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/selftest/spec.md)
-- [`session-json-location`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/session-json-location/spec.md)
-- [`session-logging`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/session-logging/spec.md)
-- [`session-receipt-hygiene`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/session-receipt-hygiene/spec.md)
-- [`session-recovery-integrity`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/session-recovery-integrity/spec.md)
-- [`session-state`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/session-state/spec.md)
-- [`session-summary`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/session-summary/spec.md)
-- [`shared-helper`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/shared-helper/spec.md)
-- [`skill-standardization`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/skill-standardization/spec.md)
-- [`skill-validation`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/skill-validation/spec.md)
-- [`spec-kit-integration`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/spec-kit-integration/spec.md)
-- [`spec-scanning`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/spec-scanning/spec.md)
-- [`start-force-flag`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/start-force-flag/spec.md)
-- [`status-republish-on-write`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/status-republish-on-write/spec.md)
-- [`stuck-prompt-detection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/stuck-prompt-detection/spec.md)
-- [`supervisor-agent-inventory`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-agent-inventory/spec.md)
-- [`supervisor-cli`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-cli/spec.md)
-- [`supervisor-config`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-config/spec.md)
-- [`supervisor-first-agent-cwd`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-first-agent-cwd/spec.md)
-- [`supervisor-injection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-injection/spec.md)
-- [`supervisor-introspection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-introspection/spec.md)
-- [`supervisor-launch`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-launch/spec.md)
-- [`supervisor-pane-affordances`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-pane-affordances/spec.md)
-- [`supervisor-skill-discipline`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-skill-discipline/spec.md)
-- [`supervisor-stream-timeout-recovery`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-stream-timeout-recovery/spec.md)
-- [`supervisor-tell`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-tell/spec.md)
-- [`template-substitution`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/template-substitution/spec.md)
-- [`terminal-status-protection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/terminal-status-protection/spec.md)
-- [`test-isolation`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/test-isolation/spec.md)
-- [`tmux-orchestration`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/tmux-orchestration/spec.md)
-- [`unattended-operation`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/unattended-operation/spec.md)
-- [`user-documentation`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/user-documentation/spec.md)
-- [`worktree-agents-md`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/worktree-agents-md/spec.md)
-- [`worktree-branch-guard`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/worktree-branch-guard/spec.md)
-- [`worktree-embedded-placement`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/worktree-embedded-placement/spec.md)
+### CLI & session
+
+- [`cli-parsing`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/cli-parsing/spec.md) — the clap v4 CLI: all subcommands, flags, and argument validation, defaulting to `start` when no subcommand is given.
+- [`cli-resolution`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/cli-resolution/spec.md) — detects AI coding CLIs on PATH, merges user-defined custom CLIs, and resolves which CLI each branch uses via a priority chain.
+- [`cli-launch`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/cli-launch/spec.md) — reliably submits the boot block across CLIs (literal text then a separate `Enter` after a per-CLI settle delay) and hardens pane launch so a shell prompt can't strand the pane.
+- [`interactive-selection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/interactive-selection/spec.md) — interactive prompts for choosing branches and CLIs (uniform or per-branch), with logic separated from UI via the `Prompter` trait.
+- [`add-remove-branch`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/add-remove-branch/spec.md) — `git paw add`/`remove` attach or detach a single agent worktree+pane on a live session, re-tiling the grid without a restart.
+- [`session-state`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/session-state/spec.md) — persists one JSON file per session for crash recovery, with atomic writes, tmux-liveness stale detection, and per-repo session receipts.
+- [`session-logging`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/session-logging/spec.md) — captures raw per-pane terminal output via tmux pipe-pane and replays it (ANSI strip/preserve, fuzzy branch match, most-recent auto-select).
+- [`session-summary`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/session-summary/spec.md) — renders a Markdown session summary from broker + session state to a timestamped file under `.git-paw/sessions/`.
+- [`project-initialization`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/project-initialization/spec.md) — bootstraps a repo for git-paw (`.git-paw/` scaffold, default config, `.gitignore` update), idempotently.
+- [`worktree-embedded-placement`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/worktree-embedded-placement/spec.md) — makes worktree placement configurable: `child` nested under `.git-paw/worktrees/` vs `sibling` beside the repo (the default).
+- [`configuration`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/configuration/spec.md) — parses and merges TOML config from global and per-repo files, with repo config overriding global.
+- [`error-handling`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/error-handling/spec.md) — the central `PawError` type: every variant carries an actionable message and maps to a process exit code.
+- [`git-operations`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/git-operations/spec.md) — validates repos, lists branches, creates/removes worktrees, and derives worktree directory names — the git plumbing under parallel sessions.
+- [`tmux-orchestration`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/tmux-orchestration/spec.md) — orchestrates tmux sessions with per-pane CLIs in worktrees via a testable builder with dry-run and automatic tiled layout.
+- [`user-documentation`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/user-documentation/spec.md) — requires the README and companion docs to cover the full user-facing surface so adopters discover features from the landing page.
+
+### Supervisor & orchestration
+
+- [`supervisor-launch`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-launch/spec.md) — orchestrates the full supervisor session launch via `cmd_supervisor()`: layout, worktrees, pane structure, boot prompts, and the attach vs `--unattended` drive-loop branch.
+- [`supervisor-config`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-config/spec.md) — defines the `[supervisor]` config schema: approval level, nested sub-tables, gate-command templates, and `[supervisor.auto_approve]`.
+- [`supervisor-directives`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-directives/spec.md) — supervisor-pane directives: `/agents` inventory and `/tell` prompt routing to an agent via a selectable delivery mode.
+- [`supervisor-skill-discipline`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-skill-discipline/spec.md) — encodes the disciplines the bundled supervisor skill teaches: sweep-driven pane work, isolated verification worktrees, stream-timeout recovery, per-event verification, and the no-fail-fast testing gate.
+- [`unattended-operation`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/unattended-operation/spec.md) — the in-process drive loop under `--unattended` that keeps a wave moving with no human: polling, auto-approving safe prompts, detecting completion, and exiting with a summary.
+- [`dashboard`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/dashboard/spec.md) — a ratatui TUI observing broker state: an agent-status table with a pinned supervisor row plus a scrolling, filterable broker-log panel.
+- [`conflict-detection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/conflict-detection/spec.md) — a broker-internal, supervisor-mode detector that flags forward/in-flight/ownership conflicts across agent intents and modified-file sets (with sub-file regions).
+
+### Approval & safety
+
+- [`auto-approval`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/auto-approval/spec.md) — clears an unattended agent's safe permission prompts through three layers: keystroke approval gate, broker-mediated send-gate re-confirm, and worktree-confined file-edit auto-approval.
+- [`approval-pattern-surfacing`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/approval-pattern-surfacing/spec.md) — logs every manually-decided prompt to per-session JSONL and provides `git paw approvals` to aggregate recurring patterns with a promotion-target hint.
+- [`command-classification`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/command-classification/spec.md) — detects CLI permission prompts via rate-limited pane capture, classifies them into permission types, and marks a command safe or escalate against a configurable whitelist plus a terminal danger-list.
+- [`command-allowlist-seeding`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/command-allowlist-seeding/spec.md) — seeds least-privilege command allowlists (broker-helper curl grant + stack-neutral dev-command presets) into agent CLI settings idempotently at startup.
+- [`agent-memory-isolation`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/agent-memory-isolation/spec.md) — keeps coding agents from writing outside their worktree into the operator's config and memory territory via a config-driven protected-path set.
+
+### Broker
+
+- [`broker-runtime`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/broker-runtime/spec.md) — the in-process coordination server: `[broker]` config, the tokio/axum lifecycle, HTTP surface (`/publish`, `/messages`, `/status`, `/log`, `/watch`), and session-lifecycle integration.
+- [`broker-protocol`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/broker-protocol/spec.md) — the complete wire protocol: the `BrokerMessage` tagged enum, `agent_id` slugification, publish validation, and the delivery layer's per-variant routing, sequencing, and cursor polling.
+- [`broker-watcher-and-state`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/broker-watcher-and-state/spec.md) — keeps the `/status` roster honest as worktrees change: filesystem watcher, roster hygiene, working/committed republishing, terminal-status stickiness, and the introspection surface.
+- [`agent-broker-helper`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/agent-broker-helper/spec.md) — bundled shell helpers (`broker.sh` for agents, `sweep.sh` for the supervisor) that wrap every broker interaction and detect stuck-agent shapes.
+
+### Boot & injection
+
+- [`boot-block`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/boot-block/spec.md) — the standardized boot-instruction block injected into each agent: its format/content, `{{VARIABLE}}` substitution, and the shared `build_boot_block` renderer.
+- [`boot-block-injection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/boot-block-injection/spec.md) — every path by which the rendered boot block reaches an agent pane: supervisor prepend, manual pre-fill, and `--from-all-specs` parity.
+- [`agents-md-injection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/agents-md-injection/spec.md) — injects a marker-delimited git-paw section into AGENTS.md and writes per-worktree AGENTS.md combining root content with worktree assignment sections.
+- [`git-hook-injection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/git-hook-injection/spec.md) — installs a post-commit dispatcher, pre-push block, and per-worktree branch-guard hooks: committing publishes `agent.artifact`, pushes are blocked, and pre-existing user content is preserved.
+
+### Specs, MCP & governance
+
+- [`spec-backends`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/spec-backends/spec.md) — discovers pending specs and represents them as launchable `SpecEntry` values through a pluggable backend system (OpenSpec, Markdown, Spec Kit, superpowers plans).
+- [`mcp`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/mcp/spec.md) — `git paw mcp` runs a stdio JSON-RPC MCP server exposing read-only, deterministically-sourced tools over a resolved repo/worktree root.
+- [`agent-docs`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/agent-docs/spec.md) — makes the docs site machine-consumable (`llms.txt`, sitemap, robots, per-page metadata) and bundles a path-allowlisted `docs-fetch` helper and skill.
+- [`opsx-role-gating`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/opsx-role-gating/spec.md) — enforces the supervisor-only boundary on `/opsx:verify` and `/opsx:archive`, with a post-commit guard detecting archive activity by coding agents.
+- [`governance-config`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/governance-config/spec.md) — `PawConfig.governance`: optional root-relative pointers to a project's governance/doc artifacts, paths-only with no gating semantics.
+
+### Agent skills
+
+- [`agent-skills`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/agent-skills/spec.md) — defines the embedded coordination and supervisor skill templates git-paw injects, their resolution order (user override then embedded default), and the placeholder-rendering contract.
+- [`standardized-skills`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/standardized-skills/spec.md) — supports the agentskills.io standardized skill format (a `SKILL.md` directory): auto-detecting, loading, and schema-validating it with actionable errors.
+- [`lang-agnostic-skills`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/lang-agnostic-skills/spec.md) — keeps bundled skills project-agnostic via config-sourced placeholder substitutions and a CI no-language-leak audit.
+
+### Learnings
+
+- [`learnings`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/learnings/spec.md) — an opt-in, broker-internal aggregator that derives deterministic and qualitative learning signals into `.git-paw/session-learnings.md` (and the `agent.learning` broker variant), performing no telemetry.
+
+### Diagnostics & CI
+
+- [`selftest`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/selftest/spec.md) — `git paw selftest` runs an isolated end-to-end session lifecycle against a throwaway repo with a dummy CLI and reports a single pass/fail verdict.
+- [`test-and-ci-hygiene`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/test-and-ci-hygiene/spec.md) — isolates the test suite from the live environment and closes the local-vs-CI gap via cold-start smoke recipes and convention-enforcement tests.
