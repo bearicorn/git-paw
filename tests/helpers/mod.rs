@@ -33,6 +33,9 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+/// Shared PTY-driver harness for interactive-prompt e2e tests.
+pub mod pty;
+
 /// Low launch-readiness budget for socket-isolated e2e tests. Test launches use
 /// fake CLIs (`echo`) whose panes never match a CLI-readiness marker, so the
 /// gate always falls back after its per-attempt budget; a short timeout keeps
