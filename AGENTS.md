@@ -297,6 +297,8 @@ This project uses OpenSpec-style specifications in `openspec/changes/`.
 Specs use RFC 2119 keywords: **SHALL/MUST** (mandatory), **SHOULD** (recommended), **MAY** (optional).
 Requirements include GIVEN/WHEN/THEN scenarios. Each scenario maps to at least one test.
 
+**Keeping the spec set clean and coherent**: follow the `spec-organization` agent skill (`.agents/skills/spec-organization/SKILL.md`) — capability granularity (one change ≠ one permanent capability), contract-preserving verbatim reorganization, RFC-2119 + GIVEN/WHEN/THEN authoring (including the SHALL-on-first-line validator trap and the `## Purpose` placeholder guard), the requirement→test traceability doctrine, the docs `{{#include}}` coupling, and the errors a pre-freeze audit must catch. It is the Gate-3 spec audit. Repo-local dev skill; conformance guarded by `tests/agent_skills_conform.rs`.
+
 ### opsx skills are the canonical interface
 
 Agents MUST drive the OpenSpec workflow through the `opsx:*` slash-command skills, not hand-rolled file writes:
