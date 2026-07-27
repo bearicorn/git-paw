@@ -1,7 +1,7 @@
 # supervisor-skill-discipline Specification
 
 ## Purpose
-Encodes the operational disciplines the bundled supervisor skill teaches the supervisor agent: drive pane work through `sweep.sh` (never inline loops), never send-keys to its own pane, use `git -C` for cross-worktree git, nudge on commit cadence and rely on agents standing by post-commit, and create isolated verification worktrees under a repo-local gitignored scratch dir checked out at the re-resolved branch tip.
+Encodes the operational disciplines the bundled supervisor skill teaches the supervisor agent: drive pane work through `sweep.sh` (never inline loops), never send-keys to its own pane, use `git -C` for cross-worktree git, nudge on commit cadence and rely on agents standing by post-commit, and create isolated verification worktrees under a repo-local gitignored scratch dir checked out at the re-resolved branch tip. It also encodes stream-timeout recovery (recognizing the error shape including a coding agent's `stuck-stream-timeout`, taking a pre-action `checkpoint` `agent.status`, replaying only the missing downstream publishes idempotently, emitting a `recovery_cycles` learning, and treating repeated re-verify cycles as normal progress rather than a stall), per-event (concurrent, non-deferred) verification of each agent's commit as its `committed` event arrives (with an optional `supervisor.verify-now` broker nudge), and the full-suite / no-fail-fast testing-gate discipline — backed by git-paw's guard-neutralised `just verify` recipe wired through `{{TEST_COMMAND}}` — so an early-aborted run is never mistaken for a PASS.
 ## Requirements
 ### Requirement: Mandate sweep.sh; forbid inline pane loops
 
@@ -169,4 +169,323 @@ When no drive loop is running (an attended supervisor session), the supervisor p
 - **GIVEN** a supervisor whose boot context does NOT indicate a drive loop
 - **WHEN** it sweeps the panes
 - **THEN** it SHALL approve classifier-safe prompts itself as the sole approver
+
+### Requirement: Stream-timeout recovery section in supervisor skill
+
+The bundled supervisor skill SHALL include a "Stream-timeout
+recovery" section teaching the supervisor LLM how to recover
+from API stream timeouts mid-sweep. The section SHALL contain
+four ordered pieces: error-shape recognition, pre-action
+checkpoint, replay-missing-publishes recovery, and a
+confirmation rule.
+
+#### Scenario: Section exists with the four pieces in recovery order
+
+- **WHEN** the bundled `supervisor.md` is inspected
+- **THEN** the file SHALL contain a "Stream-timeout recovery"
+  heading whose subsections cover error-shape recognition,
+  pre-action checkpoint, replay-missing-publishes, and the
+  confirmation rule, in that order
+
+### Requirement: Error-shape recognition
+
+The skill SHALL describe the visible symptoms of an API
+stream timeout (mid-stream cutoff, transport error in the CLI
+output, or equivalent) so the supervisor LLM names the failure
+rather than continuing in silence. The phrasing SHALL be
+generic enough to apply across CLI variants (claude,
+claude-oss, future entries). The skill SHALL distinguish two
+cases: the supervisor's OWN stream timeout (recovered via the
+checkpoint/replay flow below) and a CODING AGENT's stream
+timeout observed in that agent's pane, which the supervisor
+detects via `.git-paw/scripts/sweep.sh detect-stuck` and which
+surfaces as a synthetic `agent.status` with
+`phase: "stuck-stream-timeout"`. A coding agent in
+`stuck-stream-timeout` SHALL be flagged for recovery (nudge or
+restart) rather than left stalled.
+
+#### Scenario: Symptoms are named generically across CLIs
+
+- **WHEN** the error-shape subsection is read
+- **THEN** the prose SHALL describe at least two visible
+  symptom patterns (e.g. "mid-stream cutoff" and "transport
+  error / stream error in the CLI output") and SHALL NOT name
+  a specific CLI's exact error string
+
+#### Scenario: Coding-agent stream timeout is a detected, recoverable state
+
+- **WHEN** the error-shape subsection is read
+- **THEN** the prose SHALL state that a coding agent whose
+  pane shows a stream-timeout / transport-error marker is
+  detected by `sweep.sh detect-stuck` and surfaced as
+  `phase: "stuck-stream-timeout"`, and that such an agent
+  SHALL be flagged for recovery rather than treated as
+  progressing
+
+### Requirement: Pre-action checkpoint via agent.status
+
+The skill SHALL teach the supervisor to publish a `phase: "checkpoint"`
+`agent.status` record — through the bundled `sweep.sh status-publish` helper
+(`--phase checkpoint --detail '{"intended_targets":[…]}'`), NOT a raw
+`curl …/publish` — before any sweep iteration that will publish more than one
+downstream record (e.g. multiple `agent.feedback` or `agent.verified`). The
+checkpoint SHALL describe the intended sub-actions via `detail.intended_targets`
+so the recovery path has a re-entry point.
+
+Because the checkpoint now routes through the helper (which shapes the payload
+as `status: "working"` with `phase: "checkpoint"`), the checkpoint is
+identified by its `phase` value rather than a `status` label — consumers route
+it by reading `phase`, consistent with the introspection phase taxonomy. This
+supersedes the earlier requirement that the documented shape carry
+`status: "checkpoint"`: routing every supervisor `agent.status` through the
+bundled helper ([[agent-broker-helper]], [[supervisor-introspection]]) is the
+governing constraint, and the helper does not emit a `checkpoint` status label.
+
+#### Scenario: Checkpoint shape is documented
+
+- **WHEN** the pre-action checkpoint subsection is read
+- **THEN** the prose SHALL show a concrete checkpoint emitted via
+  `sweep.sh status-publish --phase checkpoint` whose `--detail` object
+  enumerates the intended targets (`intended_targets`)
+- **AND** the checkpoint emission SHALL go through the bundled helper, NOT a
+  raw `curl …/publish`
+
+#### Scenario: Checkpoint required only for multi-publish iterations
+
+- **WHEN** the checkpoint subsection is read
+- **THEN** the prose SHALL state that the checkpoint applies
+  to iterations with more than one intended downstream publish,
+  not every sweep
+
+### Requirement: Replay-missing-publishes recovery
+
+The skill SHALL teach the supervisor, on recovery from a
+stream timeout, to re-read its prior checkpoint, poll each
+intended target's `/messages/<branch_id>` stream to identify
+which publishes completed, and re-publish only the missing
+ones. The replay SHALL be idempotent so duplicate publishes
+remain safe.
+
+#### Scenario: Per-target poll-then-replay pattern documented
+
+- **WHEN** the replay subsection is read
+- **THEN** the prose SHALL show the per-target loop: poll the
+  target's message stream for the supervisor's prior publish
+  since the checkpoint timestamp, and re-publish when the
+  prior publish is absent
+
+### Requirement: Confirmation rule
+
+The skill SHALL state explicitly that the supervisor SHALL
+NOT advance to the next sub-action just because a `publish`
+HTTP call returned. The system SHALL require either polling
+the target's message stream to confirm or re-publishing
+idempotently. The rule SHALL be marked prominently (bold,
+callout, or equivalent) so it is unmissable.
+
+#### Scenario: Confirmation rule appears prominently
+
+- **WHEN** the confirmation rule is rendered in the skill
+- **THEN** the rule SHALL appear with prominent formatting
+  (bold, callout block, or similar), and SHALL pair the rule
+  with a one-sentence rationale referencing stream-timeout
+  risk
+
+### Requirement: Recovery learning record
+
+On every recovery from a stream timeout, the supervisor SHALL
+publish an `agent.learning` record with `category =
+"recovery_cycles"`. The record's body SHALL identify the
+checkpoint id, the intended targets, the replayed targets,
+and any skipped targets so recurrent timeouts surface in
+qualitative-learnings output.
+
+#### Scenario: Skill prose names the recovery learning trigger
+
+- **WHEN** the replay subsection or its adjacent prose is
+  read
+- **THEN** the prose SHALL state explicitly that each
+  successful recovery emits a `recovery_cycles`
+  `agent.learning` record with a structured body covering
+  checkpoint id and target lists
+
+### Requirement: Stack-agnostic phrasing
+
+The new section SHALL pass the no-language-leak audit from
+[[lang-agnostic-assets]]. The section SHALL NOT use
+Rust-specific or any other stack-specific language in its
+prose or examples.
+
+#### Scenario: No-leak audit passes against the new section
+
+- **WHEN** the no-leak audit runs after the section lands
+- **THEN** the audit SHALL pass on the rendered supervisor
+  skill across all supported spec backends
+
+### Requirement: N re-verify cycles is not a stall
+
+The bundled supervisor skill SHALL state explicitly that
+multiple feedback→fix→re-verify cycles per agent are normal
+progress, not a stuck state. The skill SHALL teach the
+supervisor that an agent which is "not yet verified after N
+cycles" (observed examples: mcp-server took 7 cycles,
+dev-allowlist took 6) SHALL NOT be flagged, nudged, or wound
+down on the cycle count alone. The supervisor SHALL judge
+stall by the detected stuck shapes (stuck-on-prompt,
+stuck-stream-timeout, context-bloat, no-progress,
+blocked-on-supervisor) — never by how many verify rounds an
+agent has consumed.
+
+#### Scenario: Skill prose states re-verify cycles are normal
+
+- **WHEN** the supervisor skill is inspected
+- **THEN** the prose SHALL state that multiple
+  feedback→fix→re-verify cycles per agent are normal progress
+  and SHALL cite that real agents have taken 6–7 cycles
+
+#### Scenario: Cycle count alone SHALL NOT trigger a stall verdict
+
+- **WHEN** the same prose is read
+- **THEN** it SHALL state that "not yet verified after N
+  cycles" SHALL NOT by itself cause the supervisor to flag,
+  nudge, or wind down the agent, and that stall judgement uses
+  the detected stuck shapes instead
+
+### Requirement: Skill mandates per-event verification
+
+The bundled supervisor skill SHALL include a "Verify on each
+event, never batch" subsection stating in MUST/MUST-NOT terms
+that the supervisor verifies each agent's commit as its
+`committed` event arrives and SHALL NOT defer verification to
+batch it with other agents' commits. The subsection SHALL
+name the wave-1 batching failure mode by example.
+
+#### Scenario: Skill contains the per-event rule
+
+- **WHEN** the bundled `supervisor.md` is inspected
+- **THEN** it SHALL contain a "Verify on each event"
+  subsection with MUST/MUST-NOT language and a worked
+  example of the batching anti-pattern
+
+#### Scenario: Dependency-driven deferral remains permitted
+
+- **WHEN** the subsection is read
+- **THEN** it SHALL state that the only acceptable deferral
+  reason is a genuine dependency (one agent's work requires
+  another's merge first), which the supervisor SHALL state
+  explicitly when deferring
+
+### Requirement: Optional verify-now broker nudge
+
+The broker SHALL, when
+`[supervisor].verify_on_commit_nudge` is `true` (default),
+publish a `supervisor.verify-now` message to the supervisor
+inbox upon receiving `agent.artifact { status: "committed" }`.
+The nudge SHALL carry the committing `branch_id`. When the
+config field is `false`, no nudge SHALL be published.
+
+#### Scenario: Nudge published on committed event
+
+- **GIVEN** `verify_on_commit_nudge = true` (or unset)
+- **WHEN** the broker receives an
+  `agent.artifact { status: "committed" }` from `feat/foo`
+- **THEN** the broker SHALL publish a `supervisor.verify-now`
+  message carrying `branch_id: "feat/foo"` to the supervisor
+  inbox
+
+#### Scenario: Nudge suppressed when disabled
+
+- **GIVEN** `[supervisor].verify_on_commit_nudge = false`
+- **WHEN** the broker receives a committed artifact
+- **THEN** no `supervisor.verify-now` message SHALL be
+  published
+
+#### Scenario: Default config enables the nudge
+
+- **GIVEN** no `verify_on_commit_nudge` field in config
+- **WHEN** a committed artifact arrives
+- **THEN** the nudge SHALL be published (default true)
+
+### Requirement: Skill permits concurrent verification
+
+The supervisor skill SHALL state that verifying one agent's
+commit does not block starting another agent's verification,
+since gate sweeps run per-branch in isolated worktrees.
+
+#### Scenario: Concurrency permission documented
+
+- **WHEN** the "Verify on each event" subsection is read
+- **THEN** it SHALL state that per-branch verifications may
+  run concurrently and that verifying agent A does not block
+  verifying agent B
+
+### Requirement: Stack-agnostic phrasing
+
+The new subsection SHALL pass the no-language-leak audit from
+[[lang-agnostic-assets]].
+
+#### Scenario: No-leak audit passes
+
+- **WHEN** the no-leak audit runs against the updated
+  supervisor.md
+- **THEN** the audit SHALL pass across all supported spec
+  backends
+
+### Requirement: Testing gate states the full-suite discipline generically
+
+The bundled supervisor skill's testing gate SHALL direct the supervisor to
+run the configured test command (`{{TEST_COMMAND}}`) in a whole-suite /
+no-fail-fast mode, and SHALL state that a run which aborted early is
+incomplete — not a PASS. The wording SHALL remain stack-agnostic (no
+runner- or repo-specific literals), so it passes the no-language-leak audit
+across all supported spec backends.
+
+#### Scenario: Skill mandates running the whole suite
+
+- **WHEN** the supervisor.md testing-gate section is inspected
+- **THEN** it SHALL direct the gate to run `{{TEST_COMMAND}}` without
+  fail-fast (run every test group) and name the environment **guard test**
+  as the failure that must not be allowed to truncate the run
+
+#### Scenario: Early-aborted run is not a PASS
+
+- **WHEN** the testing-gate section is read
+- **THEN** it SHALL state that "the only failure is a known environment
+  guard" is NOT a pass unless the full suite ran to completion
+
+#### Scenario: Wording is stack-agnostic
+
+- **WHEN** the no-language-leak audit runs against the updated supervisor.md
+- **THEN** it SHALL pass across all supported spec backends (no
+  runner/repo-specific tokens in the testing-gate prose)
+
+### Requirement: git-paw provides a trustworthy verification recipe
+
+The repository SHALL provide a `just verify` recipe that runs the WHOLE
+test suite the correct way for git-paw — `cargo test --no-fail-fast` with
+the no-tmux-server guard neutralised via `GIT_PAW_ALLOW_LIVE_SESSION=1`
+(the suite is socket-isolated) — alongside the fmt, clippy, deny, and audit
+gates, exiting non-zero on any real (non-guard) failure.
+
+#### Scenario: just verify runs the full guard-neutralised suite
+
+- **WHEN** `just verify` is invoked
+- **THEN** it SHALL run `cargo test --no-fail-fast` with
+  `GIT_PAW_ALLOW_LIVE_SESSION=1` plus fmt/clippy/deny/audit, so a single
+  environmental guard failure can neither abort the run nor be mistaken for
+  a code failure
+
+### Requirement: git-paw routes verification through the recipe
+
+git-paw's repo config SHALL set `[supervisor].test_command` to the
+verification recipe (`just verify`) so the rendered supervisor skill's
+`{{TEST_COMMAND}}` resolves to the trustworthy, no-fail-fast invocation
+rather than a fail-fast-prone default.
+
+#### Scenario: Configured test command is the verify recipe
+
+- **GIVEN** git-paw's `.git-paw/config.toml`
+- **WHEN** the supervisor skill is rendered
+- **THEN** `{{TEST_COMMAND}}` SHALL resolve to `just verify` (the
+  no-fail-fast, guard-neutralised recipe)
 
