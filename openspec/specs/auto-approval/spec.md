@@ -223,28 +223,28 @@ The bundled `sweep.sh approve` helper SHALL follow the same option-index selecti
 
 ### Requirement: Approval keystrokes require a re-confirmed live prompt
 
-Any approver that clears an agent CLI permission prompt by sending keystrokes via `tmux send-keys` SHALL pass through a single approval-send gate. Immediately before dispatching the approval keystrokes, the gate SHALL capture the target pane (e.g. `tmux capture-pane -p -t <session>:<pane>`) and SHALL confirm that a live permission-prompt marker is present within the last 4 non-blank lines of the capture. Only when a live prompt is re-confirmed SHALL the gate dispatch the keystrokes.
+Any approver that clears an agent CLI permission prompt by sending keystrokes via `tmux send-keys` SHALL pass through a single approval-send gate. Immediately before dispatching the approval keystrokes, the gate SHALL capture the target pane (e.g. `tmux capture-pane -p -t <session>:<pane>`) and SHALL confirm that a live permission-prompt marker anchors the capture's tail per the **Live-prompt gate**: a textual marker within the last 4 non-blank lines, OR a numbered option line anchoring that tail together with a textual marker within the wider multi-option block window — so a multi-option prompt whose `Do you want to proceed?` header sits above the last 4 lines is still detected rather than missed. Only when a live prompt is re-confirmed SHALL the gate dispatch the keystrokes.
 
-If the re-confirm capture does NOT contain a live permission-prompt marker in the last 4 non-blank lines, the gate SHALL dispatch NO keystrokes to the pane. The capture used at the detection/decision stage SHALL NOT substitute for this re-confirm capture; the re-confirm capture SHALL be taken immediately before the send, with no classification work or broker round-trip between the re-confirm and the send.
+If the re-confirm capture does NOT show a live permission-prompt marker anchoring the tail (per the Live-prompt gate's tail-and-block window), the gate SHALL dispatch NO keystrokes to the pane. The capture used at the detection/decision stage SHALL NOT substitute for this re-confirm capture; the re-confirm capture SHALL be taken immediately before the send, with no classification work or broker round-trip between the re-confirm and the send.
 
-A permission-prompt marker matched anywhere outside the last 4 non-blank lines (i.e. only in scrollback above the tail) SHALL NOT count as a live prompt.
+A permission-prompt marker matched only in scrollback above the Live-prompt gate's inspected tail/block window SHALL NOT count as a live prompt.
 
 #### Scenario: Approval keys sent only when a live prompt is re-confirmed
 
 - **GIVEN** an approval decision has been made for a pane and approval keystrokes are about to be sent
-- **WHEN** the gate's immediate-before-send capture of the pane shows a permission-prompt marker within the last 4 non-blank lines
+- **WHEN** the gate's immediate-before-send capture of the pane shows a permission-prompt marker anchoring the tail (per the Live-prompt gate's tail/block window)
 - **THEN** the gate SHALL dispatch the approval keystrokes to that pane via `tmux send-keys`
 
 #### Scenario: Cleared prompt receives no stray keys
 
 - **GIVEN** an approval decision was made for a pane while it showed a permission prompt
-- **WHEN** the gate's immediate-before-send capture of the pane no longer shows a permission-prompt marker in the last 4 non-blank lines (the prompt has cleared)
+- **WHEN** the gate's immediate-before-send capture of the pane no longer shows a permission-prompt marker anchoring the tail (the prompt has cleared)
 - **THEN** the gate SHALL dispatch NO keystrokes to that pane
 - **AND** the agent's CLI input SHALL receive no stray text
 
 #### Scenario: A stale marker only in scrollback is not treated as live
 
-- **GIVEN** a pane whose capture contains a permission-prompt marker only in lines above the last 4 non-blank lines (a prompt the agent already answered, scrolled up into history)
+- **GIVEN** a pane whose capture contains a permission-prompt marker only in scrollback above the Live-prompt gate's inspected tail/block window (a prompt the agent already answered, scrolled up into history)
 - **WHEN** the gate evaluates the re-confirm capture
 - **THEN** the gate SHALL treat the prompt as cleared
 - **AND** SHALL dispatch NO keystrokes
