@@ -61,9 +61,7 @@ impl SpecsFormat {
                   # Stop session (kills CLIs, preserves worktrees for later)\n  \
                   git paw stop\n\n  \
                   # Remove everything\n  \
-                  git paw purge\n\n  \
-                  # Verify the orchestration plumbing end-to-end (isolated, no LLM)\n  \
-                  git paw selftest"
+                  git paw purge"
 )]
 pub struct Cli {
     /// Subcommand to run. Defaults to `start` if omitted.
@@ -564,8 +562,9 @@ pub enum Command {
         log_file: Option<PathBuf>,
     },
 
-    /// Run an isolated end-to-end session-lifecycle smoke check
+    /// Run an isolated end-to-end session-lifecycle smoke check (internal; the live arm of `doctor`)
     #[command(
+        hide = true,
         about = "Run an isolated end-to-end session-lifecycle smoke check",
         long_about = "Exercises the full session lifecycle (start \u{2192} add \u{2192} remove \u{2192} \
                       stop) against a throwaway repository and a dummy CLI, then reports a single \
@@ -581,6 +580,9 @@ pub enum Command {
                       Exits 0 when the lifecycle completes (printing `selftest passed`), or skips \
                       with a message and exits 0 when tmux is unavailable. Exits non-zero and \
                       names the failing step only on an actual lifecycle failure.\n\n\
+                      This is an internal diagnostic (hidden from the command list) \u{2014} the live \
+                      smoke-test arm of `git paw doctor`, whose static preflight checks it \
+                      complements.\n\n\
                       Example:\n  git paw selftest"
     )]
     Selftest,
@@ -1995,13 +1997,13 @@ mod tests {
     }
 
     #[test]
-    fn help_shows_selftest_subcommand() {
+    fn selftest_is_hidden_from_help() {
         let result = Cli::try_parse_from(["git-paw", "--help"]);
         let err = result.unwrap_err();
         let help = err.to_string();
         assert!(
-            help.contains("selftest"),
-            "root help should list the selftest subcommand, got: {help}"
+            !help.contains("selftest"),
+            "selftest is an internal diagnostic (the live arm of `git paw doctor`) and must be hidden from root help, got: {help}"
         );
     }
 }

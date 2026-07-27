@@ -6,6 +6,10 @@ riskiest orchestration plumbing (`start` → `add` → `remove` → `stop`) agai
 throwaway repository and a dummy CLI, then reports a single pass/fail verdict —
 with **no real LLM backend and no interactive terminal**.
 
+> **Internal diagnostic (hidden).** `selftest` is not shown in the main command
+> list — it is the **live** smoke-test arm of `git paw doctor`, whose static
+> preflight checks it complements. It stays available for dogfooding and CI.
+
 ```bash
 git paw selftest
 ```
