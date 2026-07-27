@@ -322,6 +322,40 @@ fn exit_probe_nudge_passes_no_leak_audit_across_backends() {
     }
 }
 
+/// `standards-skill-integration` / `Requirement: ... project-agnostic`: the review-gate
+/// consult step (supervisor) and the author-time consult step (coordination) SHALL pass the
+/// no-leak audit on the rendered skills across every spec backend. The consult wording names
+/// the *project's own* `.agents/skills/` standards, never a git-paw stack token — so this is a
+/// repo-internal guard that the exported skills stay stack-agnostic for polyglot consumers.
+#[test]
+fn standards_consult_step_passes_no_leak_audit_across_backends() {
+    for backends in [
+        vec![SpecBackendKind::OpenSpec],
+        vec![SpecBackendKind::SpecKit],
+        vec![SpecBackendKind::Markdown],
+        vec![
+            SpecBackendKind::OpenSpec,
+            SpecBackendKind::SpecKit,
+            SpecBackendKind::Markdown,
+        ],
+        vec![],
+    ] {
+        let supervisor = render_supervisor_for(&backends);
+        assert!(
+            supervisor.contains("Consult the project's standards at the review gate"),
+            "rendered supervisor skill should include the standards review-gate consult step"
+        );
+        assert_no_forbidden_tokens(&supervisor, "supervisor-standards-consult");
+
+        let coordination = render_coordination_for(&backends);
+        assert!(
+            coordination.contains("consult the project's standards skills under"),
+            "rendered coordination skill should include the standards consult step"
+        );
+        assert_no_forbidden_tokens(&coordination, "coordination-standards-consult");
+    }
+}
+
 #[test]
 fn audit_excludes_allowlist_prose_via_sentinel() {
     // The universal DEV_ALLOWLIST_PRESET is now stack-neutral, so the

@@ -11,7 +11,7 @@
 ## 3. Ripple + sync (scope up front)
 - [x] Grep `src/skills.rs` + `tests/*_skill_content.rs` (`coordination_region_skill_content.rs`, `supervisor_routing_skill_content.rs`, …) for the pinned literals; update those tests in lockstep with the prose edits
 - [x] Sync the tracked `.git-paw/scripts`/skill copies from `assets/` — N/A: this change edits only the exported skill prose; tests read `assets/` directly via `include_str!`, and the script-drift hazard (sweep.sh/broker.sh) is untouched
-- [x] Extend the `lang-agnostic-skills` no-language-leak audit to cover the new consult wording (assert no stack/language token in the consult step)
+- [x] Extend the `lang-agnostic-skills` no-language-leak audit to cover the new consult wording — added `standards_consult_step_passes_no_leak_audit_across_backends` (renders supervisor + coordination across every backend, asserts the consult step present + no stack/language token). Repo-internal guard on the EXPORTED skills, so consumers still get stack-agnostic assets
 
 ## 4. Verification (five gates)
 - [ ] Gate 1/2 — `skills.rs` + `*_skill_content.rs` updated and green; full suite green vs merge-base
