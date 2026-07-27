@@ -16,7 +16,9 @@
 use assert_cmd::Command;
 
 mod helpers;
-use helpers::setup_test_repo;
+use helpers::{TmuxTestEnv, pty, setup_test_repo};
+use serial_test::serial;
+use std::time::Duration;
 
 /// init, non-TTY: the supervisor `Confirm` and the spec-system `Select` are
 /// bypassed. The written config has no *active* `[specs]` section (the base
@@ -176,4 +178,77 @@ fn start_supervisor_flag_enters_supervisor_mode() {
         stdout.contains("Supervisor:"),
         "--supervisor must enter supervisor mode (flag short-circuits the confirm); got:\n{stdout}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// start family — SHOWN rows (TTY, driven via the PTY harness). We assert the
+// picker RENDERS (the "shown" gate) inside a `--dry-run` run, then tear down —
+// driving the fuzzy multi-select / env-dependent CLI list to completion is a
+// separate, flakier concern. `#[serial]` + tmux-availability-gated + socket-
+// isolated, per the harness contract.
+// ---------------------------------------------------------------------------
+
+fn git(repo: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .status()
+        .expect("git");
+    assert!(status.success(), "git {args:?} failed");
+}
+
+/// start with NO selection flags in a TTY: the branch picker is SHOWN.
+#[test]
+#[serial]
+fn start_no_flags_shows_branch_picker() {
+    if !pty::tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tmux_env = TmuxTestEnv::new();
+    let _proc = tmux_env.apply_to_process();
+
+    let tr = setup_test_repo();
+    write_echo_config(tr.path(), None);
+    git(tr.path(), &["branch", "feat/a"]);
+    git(tr.path(), &["branch", "feat/b"]);
+
+    let session = pty::unique_session_name("paw-matrix-branchpicker");
+    pty::create_detached_session(&session);
+    let bin = env!("CARGO_BIN_EXE_git-paw");
+    let cmd = format!("cd '{}' && '{bin}' start --dry-run", tr.path().display());
+    pty::send_keys(&session, &[&cmd, "Enter"]);
+
+    // No --branches → the branch picker renders.
+    pty::wait_for_pane(&session, "Select branches", Duration::from_secs(10));
+    pty::kill_session(&session);
+}
+
+/// start `--branches` but NO `--cli` in a TTY: the branch picker is BYPASSED,
+/// and the CLI-assignment mode picker is SHOWN (because `--cli` is absent).
+#[test]
+#[serial]
+fn start_branches_without_cli_shows_mode_picker() {
+    if !pty::tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tmux_env = TmuxTestEnv::new();
+    let _proc = tmux_env.apply_to_process();
+
+    let tr = setup_test_repo();
+    write_echo_config(tr.path(), None);
+
+    let session = pty::unique_session_name("paw-matrix-modepicker");
+    pty::create_detached_session(&session);
+    let bin = env!("CARGO_BIN_EXE_git-paw");
+    let cmd = format!(
+        "cd '{}' && '{bin}' start --branches feat/a,feat/b --dry-run",
+        tr.path().display()
+    );
+    pty::send_keys(&session, &[&cmd, "Enter"]);
+
+    // --branches bypasses the branch picker; --cli absent → the mode picker renders.
+    pty::wait_for_pane(&session, "CLI assignment mode", Duration::from_secs(10));
+    pty::kill_session(&session);
 }
