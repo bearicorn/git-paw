@@ -45,10 +45,15 @@ its covering test.
 - [x] boot-block-format + template-substitution + shared-helper → `boot-block`
 - [x] supervisor-injection + manual-injection + from-specs-launch → `boot-block-injection` — reconciled the `--from-specs` alias (canonical `--from-all-specs`; deprecated, removal v1.0.0) as a Purpose note; moved requirements keep `--from-specs` verbatim
 
-## 5. Careful reconciliation merges (do last, review closely)
-- [ ] automatic-approval + broker-mediated-approvals + auto-approve-file-edits → `auto-approval` — reconcile the dual send-gate into one non-contradictory set; keep every scenario
-- [ ] learnings-mode + qualitative-learnings + agent-learning-variant → `learnings` — apply the §1 negative removal first; reframe the qualitative "no confidence field" as a positive schema statement
-- [ ] broker-messages + message-delivery (+ introspection + advanced-main) → `broker-protocol` — split if it exceeds ~700 lines (fall back to 2→1 + fold introspection/advanced-main into broker-watcher-and-state)
+## 5. Careful reconciliation merges — Wave 5 DONE (97→46 caps reached; total 730→729 via C4)
+- [x] automatic-approval + broker-mediated-approvals + auto-approve-file-edits → `auto-approval` (15 reqs, verbatim). **REAL contradiction surfaced by the merge (see §5b) — the two capabilities specced conflicting live-prompt capture windows; both kept verbatim + flagged, resolve against code next**
+- [x] learnings-mode + qualitative-learnings + agent-learning-variant → `learnings` (28 reqs) — reframed "No confidence field in payload" → positive "Qualitative payload schema"; re-added the forward-design note as positive prose
+- [x] broker-messages + message-delivery → `broker-protocol` (44 reqs) — **wove in C4** (roster upserts scoped to Status/Artifact/Blocked/Intent; the −1 that makes the total 729). Over-700-line fallback applied: `supervisor-introspection` + `advanced-main-event` folded into `broker-watcher-and-state` (11→25) instead of broker-protocol
+
+## 5b. Post-merge reconciliation + normalization (do before finishing)
+- [ ] **auto-approval live-prompt window contradiction (freeze blocker):** `Approval keystrokes require a re-confirmed live prompt` says the marker must be "within the last 4 non-blank lines"; the live-prompt/keystroke-gate reqs say the window must span a full multi-option block, "not a fixed ~4-line tail." Determine the shipped behavior (auto_approve.rs / poll.rs live-prompt gate) and amend the stale scenario to match (reconcile spec→tested code)
+- [ ] Disambiguate duplicate requirement NAMES kept verbatim to hold the count: `supervisor-skill-discipline` 3×"Stack-agnostic phrasing"; `broker-watcher-and-state` 2×"Stack-agnostic phrasing"; `spec-backends` 2×"Extract paw_cli from frontmatter" + 2×"Boot-prompt assembly"; `session-logging` 2×"List available log sessions" (scope-suffix the headings; no scenario content change)
+- [ ] Fix `[[...]]` cross-reference tokens in moved content that now point at former source-dir names (e.g. `[[agent-learning-variant]]`/`[[qualitative-learnings]]`→`learnings`, `[[supervisor-introspection]]`→`broker-watcher-and-state`, `[[mcp-server]]`→`mcp`)
 
 ## 6. Docs restructure (docs/src/) — first-class deliverable
 - [ ] Rewrite `docs/src/specifications/README.md`: domain-grouped sections aligned 1:1 with the ~46 consolidated capabilities (drop the flat A–Z list + the "foundational 8" split)

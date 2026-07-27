@@ -1,7 +1,14 @@
-# automatic-approval Specification
+# auto-approval Specification
 
 ## Purpose
-Defines how the supervisor dispatches approval keystrokes for safe-classified permission prompts: firing only from stall detection, only when a live-prompt marker is present and re-confirmed immediately before send, never into the supervisor's own pane 0, and never taking a permanent broad grant for arbitrary-code runners. Unknown prompts escalate to the human as an `agent.question`, and every auto-approval is logged to the broker for audit.
+git-paw clears an unattended agent's safe permission prompts through three complementary layers that together approve routine prompts without ever landing a stray keystroke or granting more than intended.
+
+1. **Keystroke approval gate.** Stall detection classifies a detected prompt; when it is safe AND live, the supervisor dispatches the agent CLI's "approve and remember" keystrokes via `tmux send-keys`, selecting the correct option index by prompt shape, restricting the permanent broad grant to allowlisted non-arbitrary-code verbs, pre-approving worktree-confined `git add`/`git commit`, escalating unknown prompts to the human as an `agent.question`, and logging every action to the broker. It never types into the supervisor's own pane 0.
+2. **Broker-mediated send-gate re-confirm.** A single approval-send gate that every approver passes through re-captures the target pane immediately before send, dispatches keystrokes only when a live-prompt marker is still present, refuses pane 0, keys approval dedup on command/agent identity rather than shared footer text, and reuses the existing `BrokerMessage` variants for its trigger and escalation signals rather than introducing a new variant or per-CLI hook.
+3. **File-edit auto-approval.** The classifier recognises Claude's write/edit/create/delete filesystem-prompt patterns and treats them as safe when the canonicalized target path resolves inside the agent's own worktree (guarding against symlink escape), gated by `approve_worktree_writes` (default true) and purely additive to the shell-command auto-approval.
+
+These layers form one set: the keystroke gate decides WHETHER a prompt is safe to approve, the send-gate re-confirm decides whether it is STILL LIVE to dispatch at the last instant, and file-edit auto-approval extends the safe-classification set to worktree-confined filesystem operations.
+
 ## Requirements
 ### Requirement: Auto-approval keystroke sequence
 
@@ -213,4 +220,161 @@ The bundled `sweep.sh approve` helper SHALL follow the same option-index selecti
 - **GIVEN** a live 3-option prompt for an arbitrary-code runner (e.g. `bash -c "..."`)
 - **WHEN** the operator runs `sweep.sh approve <pane>`
 - **THEN** the helper SHALL select option 1 (one-time Yes), agreeing with the in-tool auto-approver's option resolution
+
+### Requirement: Approval keystrokes require a re-confirmed live prompt
+
+Any approver that clears an agent CLI permission prompt by sending keystrokes via `tmux send-keys` SHALL pass through a single approval-send gate. Immediately before dispatching the approval keystrokes, the gate SHALL capture the target pane (e.g. `tmux capture-pane -p -t <session>:<pane>`) and SHALL confirm that a live permission-prompt marker is present within the last 4 non-blank lines of the capture. Only when a live prompt is re-confirmed SHALL the gate dispatch the keystrokes.
+
+If the re-confirm capture does NOT contain a live permission-prompt marker in the last 4 non-blank lines, the gate SHALL dispatch NO keystrokes to the pane. The capture used at the detection/decision stage SHALL NOT substitute for this re-confirm capture; the re-confirm capture SHALL be taken immediately before the send, with no classification work or broker round-trip between the re-confirm and the send.
+
+A permission-prompt marker matched anywhere outside the last 4 non-blank lines (i.e. only in scrollback above the tail) SHALL NOT count as a live prompt.
+
+#### Scenario: Approval keys sent only when a live prompt is re-confirmed
+
+- **GIVEN** an approval decision has been made for a pane and approval keystrokes are about to be sent
+- **WHEN** the gate's immediate-before-send capture of the pane shows a permission-prompt marker within the last 4 non-blank lines
+- **THEN** the gate SHALL dispatch the approval keystrokes to that pane via `tmux send-keys`
+
+#### Scenario: Cleared prompt receives no stray keys
+
+- **GIVEN** an approval decision was made for a pane while it showed a permission prompt
+- **WHEN** the gate's immediate-before-send capture of the pane no longer shows a permission-prompt marker in the last 4 non-blank lines (the prompt has cleared)
+- **THEN** the gate SHALL dispatch NO keystrokes to that pane
+- **AND** the agent's CLI input SHALL receive no stray text
+
+#### Scenario: A stale marker only in scrollback is not treated as live
+
+- **GIVEN** a pane whose capture contains a permission-prompt marker only in lines above the last 4 non-blank lines (a prompt the agent already answered, scrolled up into history)
+- **WHEN** the gate evaluates the re-confirm capture
+- **THEN** the gate SHALL treat the prompt as cleared
+- **AND** SHALL dispatch NO keystrokes
+
+### Requirement: Blind send-keys excludes the supervisor pane 0
+
+The approval-send gate SHALL refuse to dispatch approval keystrokes to pane index 0 (the supervisor's own pane). When the resolved target pane index is 0, the gate SHALL send no keystrokes and SHALL report that pane 0 is excluded from blind send-keys.
+
+Clearing the supervisor pane's own prompt is a distinct action handled by a non-blind path (the unattended drive loop) and is outside this gate; the blind send-keys gate SHALL NOT type into pane 0 under any classification.
+
+#### Scenario: Pane 0 is never sent blind keystrokes
+
+- **GIVEN** an approval target whose resolved pane index is 0
+- **WHEN** the approval-send gate runs, even with a live prompt re-confirmed in pane 0
+- **THEN** the gate SHALL dispatch NO keystrokes to pane 0
+- **AND** SHALL report that pane 0 is excluded from blind send-keys
+
+#### Scenario: Coding agent panes are still approvable
+
+- **GIVEN** an approval target whose resolved pane index is 2 (a coding-agent pane) with a live prompt re-confirmed
+- **WHEN** the approval-send gate runs
+- **THEN** the gate SHALL dispatch the approval keystrokes to pane 2
+
+### Requirement: Approval dedup keys on command or agent identity, not prompt text
+
+When the system deduplicates pending or repeated approvals so a single awaiting prompt is not acted on multiple times, it SHALL key the dedup on the command identity (the command text the modal is asking about) and/or the agent/pane identity, or SHALL rely on wait-for-clear (the prompt's disappearance after it is answered). The system SHALL NOT compute the dedup key from the captured prompt's boilerplate/footer text (e.g. the shared "Do you want to proceed?" footer).
+
+#### Scenario: Distinct commands are not collapsed by shared footer
+
+- **GIVEN** two successive permission prompts on the same agent — one for `cargo test` and one for `git push` — that share the identical permission-prompt footer text
+- **WHEN** the dedup logic evaluates them
+- **THEN** the two prompts SHALL be treated as distinct approval events (keyed on their differing command identity)
+- **AND** the second prompt SHALL NOT be suppressed as a duplicate of the first
+
+#### Scenario: Repeated capture of the same unanswered prompt is deduped
+
+- **GIVEN** the same agent remains on the same unanswered permission prompt across consecutive sweep iterations
+- **WHEN** the dedup logic evaluates the repeated detection
+- **THEN** the repeated detection SHALL be treated as the same approval event (keyed on command/agent identity, or recognised as not-yet-cleared)
+- **AND** the system SHALL NOT generate a duplicate approval action for the unchanged prompt
+
+### Requirement: Approval gate reuses existing broker variants
+
+The approval-send gate's approval-trigger signal and its escalation channel SHALL reuse the existing `BrokerMessage` variants defined in `broker-messages`. The trigger that a pane is awaiting approval SHALL be the synthetic `agent.status` with `phase: "stuck-on-prompt"` (per `stuck-prompt-detection`); escalation of an unsafe or unclassifiable prompt SHALL reuse `agent.question` (per `automatic-approval`); supervisor→agent replies SHALL reuse `agent.feedback` or the supervisor `/tell` path. This change SHALL NOT introduce a new `BrokerMessage` variant or a per-CLI permission hook.
+
+#### Scenario: No new broker message variant is introduced
+
+- **WHEN** the broker message envelope is inspected after this change
+- **THEN** the set of `BrokerMessage` variants SHALL be unchanged (the seven variants `Status`, `Artifact`, `Blocked`, `Verified`, `Feedback`, `Question`, `Intent`)
+- **AND** the approval-trigger and escalation signals SHALL be expressed using those existing variants
+
+#### Scenario: Escalation of an unsafe prompt reuses agent.question
+
+- **GIVEN** a re-confirmed live prompt that the classifier deems unsafe or unknown
+- **WHEN** the gate escalates the prompt for human review
+- **THEN** the escalation SHALL be published as an `agent.question` whose `agent_id` is the originating agent's slug
+- **AND** no new message type SHALL be sent
+
+### Requirement: Worktree-confined file operations classify as safe
+
+The auto-approve classifier SHALL recognise Claude's
+filesystem-prompt patterns (write / edit / create / delete)
+and SHALL classify them as safe-by-pattern when the resolved
+target path is inside the agent's worktree root. The
+classifier SHALL canonicalize paths before the
+`starts_with(worktree_root)` check to prevent symlink-escape.
+
+#### Scenario: In-worktree file create is auto-approved
+
+- **GIVEN** an agent on `feat/cold-start-ci-parity` whose
+  worktree root is `/path/to/git-paw-feat-cold-start-ci-parity/`
+- **WHEN** Claude prompts "Do you want to allow this write
+  to Containerfile?" (resolving to the worktree root)
+- **THEN** the classifier SHALL return safe-by-pattern, and
+  the auto-approve sweep SHALL dispatch the approval
+  keystrokes
+
+#### Scenario: Out-of-worktree file create requires manual approval
+
+- **GIVEN** the same agent
+- **WHEN** Claude prompts a write to `/etc/hosts` (or any
+  path resolving outside the worktree)
+- **THEN** the classifier SHALL NOT return safe-by-pattern,
+  and the existing manual-prompt flow SHALL run
+
+#### Scenario: Symlink-escape attempt does not bypass the boundary
+
+- **GIVEN** a malicious prompt whose path contains `..`
+  resolving outside the worktree
+- **WHEN** the classifier canonicalizes the path
+- **THEN** the resolved path SHALL be checked against the
+  worktree root via `starts_with`, and the symlink-escape
+  attempt SHALL fail the safety check
+
+### Requirement: approve_worktree_writes config field
+
+The system SHALL accept
+`[supervisor.auto_approve].approve_worktree_writes` as a
+boolean config field defaulting to `true`. When `false`, the
+classifier SHALL NOT recognise file-operation prompts as
+safe-by-pattern even when the target is inside the worktree;
+manual prompts SHALL run as before this change.
+
+#### Scenario: Default true auto-approves
+
+- **GIVEN** no `[supervisor.auto_approve]` section in
+  config (or `approve_worktree_writes` unset)
+- **WHEN** a worktree-confined file prompt fires
+- **THEN** the classifier SHALL auto-approve
+
+#### Scenario: Explicit false reverts to manual
+
+- **GIVEN** `[supervisor.auto_approve].approve_worktree_writes
+  = false`
+- **WHEN** a worktree-confined file prompt fires
+- **THEN** the classifier SHALL NOT auto-approve; the user
+  SHALL see the manual prompt
+
+### Requirement: Backwards compatibility with shell auto-approve
+
+The file-operation category SHALL be additive — existing
+shell-command auto-approval (cargo / npm / pytest / pip /
+mvn / make / gradle / docker / git / curl) SHALL continue to
+work exactly as in v0.5.0.
+
+#### Scenario: Shell auto-approve still fires
+
+- **GIVEN** a Claude prompt for `cargo build`
+- **WHEN** the classifier runs
+- **THEN** the shell auto-approve SHALL fire (unchanged
+  from v0.5.0); the new file-operation category SHALL NOT
+  interfere
 
