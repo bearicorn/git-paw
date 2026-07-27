@@ -1,9 +1,11 @@
-# boot-block-format Specification
+# boot-block Specification
 
 ## Purpose
-Defines the standardized boot-instruction block injected into each agent, covering exactly four runtime events — register, done, blocked, question — expressed as `broker.sh` helper invocations rather than raw curl. It establishes commit-first task completion (the post-commit hook auto-publishes the artifact) with a manual done fallback scoped to code-less tasks, and includes paste-handling instructions for paste-collapsing CLIs.
+
+This capability defines the standardized boot-instruction block injected into each agent and the shared machinery that renders it. It covers the block's format and content (exactly four runtime events — register, done, blocked, question — expressed as `broker.sh` helper invocations, commit-first task completion with a code-less manual-done fallback, and paste-handling guidance), `{{VARIABLE_NAME}}` template substitution with branch-ID slugification and full pre-expansion at render time, and the shared pure `build_boot_block(branch_id, broker_url) -> String` helper in `src/skills.rs` that every launch path uses to assemble the identical block.
 
 ## Requirements
+
 ### Requirement: Standard boot block format
 
 The system SHALL provide a standardized boot instruction block that contains exactly four essential runtime events: register, done, blocked, and question. The boot block SHALL use a consistent format with clear section headers and pre-expanded curl commands.
@@ -116,3 +118,115 @@ The boot block SHALL include specific instructions for handling paste operations
 - **THEN** it SHALL explain that Claude collapses pasted text into `[Pasted text #N]`
 - **AND** it SHALL instruct agents to send an additional Enter after paste operations
 
+### Requirement: Template variable substitution
+
+The system SHALL support template variable substitution in boot blocks using the syntax `{{VARIABLE_NAME}}`. The system SHALL replace these variables with actual values at render time.
+
+#### Scenario: Branch ID substitution
+
+- **GIVEN** boot block template containing `{{BRANCH_ID}}`
+- **WHEN** `build_boot_block("feat/errors", "http://localhost:9119")` is called
+- **THEN** all occurrences of `{{BRANCH_ID}}` SHALL be replaced with `"feat-errors"`
+
+#### Scenario: Broker URL substitution
+
+- **GIVEN** boot block template containing `{{GIT_PAW_BROKER_URL}}`
+- **WHEN** `build_boot_block("feat/errors", "http://localhost:9119")` is called
+- **THEN** all occurrences of `{{GIT_PAW_BROKER_URL}}` SHALL be replaced with `"http://localhost:9119"`
+
+### Requirement: Branch ID slugification
+
+The system SHALL apply slugification to branch IDs during substitution to ensure valid agent IDs. Slugification SHALL replace `/` with `-` and remove any special characters.
+
+#### Scenario: Branch slugification
+
+- **GIVEN** branch name `"feat/errors"`
+- **WHEN** substituted into boot block
+- **THEN** it SHALL become `"feat-errors"`
+
+#### Scenario: Complex branch name slugification
+
+- **GIVEN** branch name `"fix/topological-cycle-fallback"`
+- **WHEN** substituted into boot block
+- **THEN** it SHALL become `"fix-topological-cycle-fallback"`
+
+### Requirement: Pre-expansion at render time
+
+The system SHALL expand all template variables before the boot block is injected into agent panes. This SHALL prevent shell expansion permission prompts in agent CLIs.
+
+#### Scenario: All templates expanded before injection
+
+- **GIVEN** boot block template with multiple `{{VARIABLE}}` placeholders
+- **WHEN** `build_boot_block()` returns
+- **THEN** the returned string SHALL contain no `{{` or `}}` characters
+- **AND** all variables SHALL be replaced with actual values
+
+#### Scenario: Invalid template variables handled gracefully
+
+- **GIVEN** boot block template with unknown variable `{{UNKNOWN_VAR}}`
+- **WHEN** `build_boot_block()` is called
+- **THEN** the unknown variable SHALL be left as-is (no crash)
+- **AND** a warning SHALL be logged
+
+### Requirement: Shared boot block helper function
+
+The system SHALL provide a shared `build_boot_block()` function in `src/skills.rs` that can be called from both supervisor and manual mode code paths.
+
+#### Scenario: Function is accessible from multiple modules
+
+- **GIVEN** `build_boot_block()` defined in `src/skills.rs`
+- **WHEN** called from `src/main.rs` (supervisor mode)
+- **THEN** it SHALL return the boot block string
+
+#### Scenario: Same function used in manual mode
+
+- **GIVEN** `build_boot_block()` defined in `src/skills.rs`
+- **WHEN** called from `src/tmux.rs` (manual mode)
+- **THEN** it SHALL return the same boot block string
+
+### Requirement: Helper function signature
+
+The `build_boot_block()` function SHALL have the following signature:
+```rust
+pub fn build_boot_block(branch_id: &str, broker_url: &str) -> String
+```
+
+#### Scenario: Function accepts required parameters
+
+- **WHEN** `build_boot_block("feat/errors", "http://localhost:9119")` is called
+- **THEN** it SHALL accept both parameters without error
+
+#### Scenario: Function returns boot block string
+
+- **WHEN** `build_boot_block("feat/errors", "http://localhost:9119")` is called
+- **THEN** it SHALL return a `String` containing the boot instructions
+
+### Requirement: Helper function reusability
+
+The `build_boot_block()` function SHALL be designed for maximum reusability with no dependencies on calling context or global state.
+
+#### Scenario: Function is pure (no side effects)
+
+- **GIVEN** same input parameters
+- **WHEN** `build_boot_block()` is called multiple times
+- **THEN** it SHALL return identical output each time
+
+#### Scenario: Function requires no external state
+
+- **WHEN** `build_boot_block()` is called
+- **THEN** it SHALL not access any global variables, configuration, or external services
+- **AND** it SHALL only use its input parameters
+
+### Requirement: Helper function testing
+
+The `build_boot_block()` function SHALL be fully testable with comprehensive unit test coverage.
+
+#### Scenario: Function can be tested in isolation
+
+- **WHEN** unit tests call `build_boot_block()` with various inputs
+- **THEN** the function SHALL produce expected output without requiring tmux or broker
+
+#### Scenario: Edge cases are testable
+
+- **WHEN** tests provide edge case inputs (empty strings, special characters)
+- **THEN** the function SHALL handle them gracefully

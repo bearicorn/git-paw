@@ -37,13 +37,13 @@ its covering test.
 
 **Normalization follow-up (accumulating; do in §6 or a normalization pass):** duplicate requirement NAMES within a merged spec, kept verbatim to preserve the 730 count — `supervisor-skill-discipline` now has 3 × `### Requirement: Stack-agnostic phrasing`; `session-logging` has 2 × `List available log sessions` (from §2). Disambiguate the headings (scope suffix) without changing scenario content.
 
-## 4. Facet merges
-- [ ] broker-server + broker-endpoints + broker-lifecycle → `broker-runtime`
-- [ ] broker-roster-hygiene + filesystem-watcher + status-republish-on-write + terminal-status-protection → `broker-watcher-and-state`
-- [ ] spec-scanning + openspec/markdown/spec-kit/superpowers-integration → `spec-backends`
-- [ ] curl-allowlist + custom-cli-curl-seeding + dev-command-allowlist → `command-allowlist-seeding` (harmonise the idempotent/non-fatal wording, don't weaken)
-- [ ] boot-block-format + template-substitution + shared-helper → `boot-block`
-- [ ] supervisor-injection + manual-injection + from-specs-launch → `boot-block-injection`
+## 4. Facet merges — Wave 4 DONE (6 merges; 730 reqs preserved; 68→53 dirs; mdbook green)
+- [x] broker-server + broker-endpoints + broker-lifecycle → `broker-runtime` — **wove in C5** (GET /messages hold-cursor-at-`since`)
+- [x] broker-roster-hygiene + filesystem-watcher + status-republish-on-write + terminal-status-protection → `broker-watcher-and-state`
+- [x] spec-scanning + openspec/markdown/spec-kit/superpowers-integration → `spec-backends` (dup requirement names kept verbatim: "Extract paw_cli from frontmatter" ×2, "Boot-prompt assembly" ×2 — normalization follow-up)
+- [x] curl-allowlist + custom-cli-curl-seeding + dev-command-allowlist → `command-allowlist-seeding` (kept verbatim; idempotent/non-fatal harmonization deferred to the normalization pass, not weakened)
+- [x] boot-block-format + template-substitution + shared-helper → `boot-block`
+- [x] supervisor-injection + manual-injection + from-specs-launch → `boot-block-injection` — reconciled the `--from-specs` alias (canonical `--from-all-specs`; deprecated, removal v1.0.0) as a Purpose note; moved requirements keep `--from-specs` verbatim
 
 ## 5. Careful reconciliation merges (do last, review closely)
 - [ ] automatic-approval + broker-mediated-approvals + auto-approve-file-edits → `auto-approval` — reconcile the dual send-gate into one non-contradictory set; keep every scenario
