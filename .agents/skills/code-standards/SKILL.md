@@ -112,6 +112,13 @@ Follow the CLI guidelines — full reference in
 - **A behavior change (bug fix) is NOT a refactor** — it ships as its own spec+test-gated change
   with a reproducing test, never folded into a refactor wave.
 
+## Related review skills
+
+For the full change-completeness picture, see the `definition-of-done` skill — a change is done only
+when spec, code, tests, **docs** (`doc-completeness`), **security** (`security-review` — external bad
+actors), **safety** (`safety-review` — the blast radius of a rogue agent git-paw runs), and
+**export-agnosticism** (when it touches an export) are all satisfied.
+
 ## Review-gate checklist (supervisor)
 
 - [ ] No new `unwrap`/`expect` in non-test code; errors via `PawError` + `?`.
