@@ -1773,7 +1773,7 @@ Do you want to proceed?";
         let home = TempDir::new().unwrap();
         let set = protected_from(&[], None, home.path(), None);
         assert!(set.contains_dir(&home.path().join(".claude")));
-        for product_dir in [".claude-oss", ".codex", ".gemini", ".aider"] {
+        for product_dir in [".claude-oss", ".codex", ".gemini", ".agents", ".aider"] {
             assert!(
                 !set.contains_dir(&home.path().join(product_dir)),
                 "{product_dir} must not be built in — entries trace to config/env only"

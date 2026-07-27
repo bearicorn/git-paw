@@ -39,4 +39,4 @@ Test: `detect::tests::detects_subset_of_known_clis`
 - **THEN** the result SHALL include a `CliInfo` with `binary_name = "agy"` and `source = Detected`
 - **AND** the result SHALL NOT include a CLI with `binary_name = "gemini"` unless `gemini` is supplied as a custom `[clis.*]` entry
 
-Test: `detect::tests::detects_subset_of_known_clis`
+Test: `detect::tests::agy_detected_and_gemini_not_known`

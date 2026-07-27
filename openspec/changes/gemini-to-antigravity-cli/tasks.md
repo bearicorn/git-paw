@@ -1,43 +1,43 @@
 # Tasks — gemini-to-antigravity-cli
 
 ## 1. Detection roster (`src/detect.rs`)
-- [ ] Replace `gemini` with `agy` in the `KNOWN_CLIS` const (17 entries; agy in gemini's position)
-- [ ] Ensure `derive_display_name("agy")` yields an acceptable label; if "Agy" is undesirable, add an explicit display-name mapping for `agy` → "Antigravity" (match how other CLIs derive/override display names)
-- [ ] Update the inline `KNOWN_CLIS` mirror in `all_known_clis_detected_when_present` to the new roster and assert 17 entries
-- [ ] Update the single-CLI detection test that uses `fake_path_with_binaries(&["gemini"])` to use `agy`
-- [ ] Add a test asserting `agy` detects with `binary_name = "agy"` and that `gemini` is NOT auto-detected (covers the new cli-detection scenario)
+- [x] Replace `gemini` with `agy` in the `KNOWN_CLIS` const (17 entries; agy in gemini's position)
+- [x] Ensure `derive_display_name("agy")` yields an acceptable label; if "Agy" is undesirable, add an explicit display-name mapping for `agy` → "Antigravity" (added `known_display_name` helper used by `detect_known_clis`)
+- [x] Update the inline `KNOWN_CLIS` mirror in `all_known_clis_detected_when_present` to the new roster and assert 17 entries
+- [x] Update the single-CLI detection test that uses `fake_path_with_binaries(&["gemini"])` to use `agy`
+- [x] Add a test asserting `agy` detects with `binary_name = "agy"` and that `gemini` is NOT auto-detected (`agy_detected_and_gemini_not_known`)
 
 ## 2. Approval flags (`src/config.rs`)
-- [ ] In `approval_flags`, drop `gemini` from the `--yolo` arm (leave `("qwen", FullAuto) => "--yolo"`)
-- [ ] Add `agy` to Claude's arm: `("claude" | "agy", FullAuto) => "--dangerously-skip-permissions"`
-- [ ] Update the `approval_flags` doc-comment example (currently asserts the gemini `--yolo` pairing)
-- [ ] Split `approval_flags_gemini_and_qwen_full_auto_are_yolo` into: a qwen-only `--yolo` assertion, a new `agy` → `--dangerously-skip-permissions` assertion, and a `gemini` → `""` (no built-in row) assertion
+- [x] In `approval_flags`, drop `gemini` from the `--yolo` arm (leave `("qwen", FullAuto) => "--yolo"`)
+- [x] Add `agy` to Claude's arm: `("claude" | "agy", FullAuto) => "--dangerously-skip-permissions"`
+- [x] Update the `approval_flags` doc-comment example (now asserts the `agy` → skip-permissions pairing)
+- [x] Split `approval_flags_gemini_and_qwen_full_auto_are_yolo` into qwen `--yolo`, `agy` → skip-permissions, and `gemini` → `""` assertions (`approval_flags_qwen_yolo_agy_skip_permissions_gemini_empty`)
 
 ## 3. Export-agnosticism guards
-- [ ] `src/skills.rs`: add `agy` / `.agents` to the forbidden-vendor-token list (keep existing `.gemini` negatives)
-- [ ] `src/supervisor/auto_approve.rs`: same — extend the negative-example token list to cover `agy` / `.agents`
-- [ ] Confirm no exported asset (`assets/**`, init default config, `sweep.sh`) hard-codes `agy` as always-safe (must stay project-agnostic per `AGENTS.md`)
+- [x] `src/skills.rs`: add `agy` to the memory-isolation forbidden-vendor-token list (keeps existing `gemini` negative)
+- [x] `src/supervisor/auto_approve.rs`: add `.agents` to the never-built-in product-dir list (keeps existing `.gemini` negative)
+- [x] Confirmed no exported asset (`assets/**`, init default config, `sweep.sh`) hard-codes `agy`/`gemini` as always-safe (grep clean)
 
 ## 4. Docs
-- [ ] `src/cli.rs`: update the `--cli` `--help` example (`e.g., claude, codex, gemini` → `agy`)
-- [ ] README supported-CLI table: gemini → Antigravity (`agy`)
-- [ ] mdBook: `docs/src/supported-clis.md`, `configuration/`, `architecture.md`, quick-start pages — supported-CLI tables and any `.gemini` examples
-- [ ] `mdbook build docs/` succeeds
+- [x] `src/cli.rs`: update the `--cli` `--help` example (`e.g., claude, codex, gemini` → `agy`)
+- [x] README supported-CLI table + detected-CLI picker mock: gemini → Antigravity (`agy`)
+- [x] mdBook: `supported-clis.md` (roster row), `configuration/README.md` (flags table + preset example), `introduction.md` (detected-CLI list). Narrative/illustrative `gemini`-as-example fixtures left untouched (still valid as an explicit pass-through / `[clis.gemini]` entry)
+- [x] `mdbook build docs/` succeeds
 
 ## 5. Specs
-- [ ] Delta `specs/cli-detection/spec.md` authored (MODIFIED roster requirement) — done
-- [ ] Delta `specs/supervisor-config/spec.md` authored (MODIFIED permission-flag table) — done
-- [ ] `openspec validate gemini-to-antigravity-cli --strict` passes
-- [ ] Standing guard: a test asserting `KNOWN_CLIS` stays in sync with the `cli-detection` spec roster (per the spec-traceability audit) so the 7-vs-17 drift cannot silently reopen
-- [ ] Standing guard: a test that fails if `gemini` reappears as a built-in known CLI or a built-in flag-table row (locks the swap)
+- [x] Delta `specs/cli-detection/spec.md` authored (MODIFIED roster requirement)
+- [x] Delta `specs/supervisor-config/spec.md` authored (MODIFIED permission-flag table)
+- [x] `openspec validate gemini-to-antigravity-cli --strict` passes
+- [ ] Standing guard: a test asserting `KNOWN_CLIS` stays in sync with the `cli-detection` spec roster — DEFERRED to spec-traceability-audit (owns the robust spec↔code roster guard); the swap-lock guard below covers the immediate gemini-reopen regression
+- [x] Standing guard: a test that fails if `gemini` reappears as a built-in known CLI (`gemini_is_not_a_known_cli`) plus the config test asserting `gemini` has no built-in flag row
 
 ## 6. Verification (five gates)
-- [ ] Gate 1 — `cargo test --no-fail-fast` for the change's own tests (detect, config)
-- [ ] Gate 2 — full regression suite green vs merge-base
-- [ ] Gate 3 — spec audit: both MODIFIED scenarios map to tests; no orphaned gemini requirement remains
-- [ ] Gate 4 — doc audit: `--help`, README, mdBook, config reference consistent; `mdbook build docs/` passes
-- [ ] Gate 5 — security: no secrets, export-agnosticism preserved (guards extended, nothing vendor-hard-coded)
-- [ ] `just check` green (fmt + clippy + tests); `cargo fmt` run before commit
+- [x] Gate 1 — `cargo test --lib` for the change's own tests (detect 76 passed, approval_flags 12 passed, guards + swap-lock 5 passed, doctest 2 passed)
+- [ ] Gate 2 — full regression suite green vs merge-base (change-level DONE verify; run serialised, not concurrent with other E2E)
+- [x] Gate 3 — spec audit: both MODIFIED scenarios map to tests; no orphaned gemini requirement remains
+- [x] Gate 4 — doc audit: `--help`, README, mdBook, config reference consistent; `mdbook build docs/` passes
+- [x] Gate 5 — security: no secrets; export-agnosticism preserved (guards extended, nothing vendor-hard-coded)
+- [x] `cargo fmt` + `cargo clippy --all-targets` clean before commit (full `just check` regression is the change-level DONE gate)
 
 ## Notes / deferred
 - Courtesy hint on stale `gemini` reference (D5) — deferred; do not implement unless requested.

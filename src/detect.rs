@@ -29,8 +29,8 @@ use std::path::{Path, PathBuf};
 
 /// Known AI CLI binary names to scan for on PATH.
 const KNOWN_CLIS: &[&str] = &[
-    "claude", "codex", "gemini", "aider", "vibe", "qwen", "amp", "opencode", "cline", "droid",
-    "pi", "junie", "cursor", "copilot", "cn", "kilo", "kimi",
+    "claude", "codex", "agy", "aider", "vibe", "qwen", "amp", "opencode", "cline", "droid", "pi",
+    "junie", "cursor", "copilot", "cn", "kilo", "kimi",
 ];
 
 /// How a CLI was discovered.
@@ -84,6 +84,16 @@ fn derive_display_name(binary_name: &str) -> String {
     match chars.next() {
         Some(c) => c.to_uppercase().to_string() + chars.as_str(),
         None => String::new(),
+    }
+}
+
+/// Display name for a **known** CLI. Most capitalise the binary name; a few
+/// have a canonical product name that differs from their command (e.g. the
+/// Antigravity CLI's command is `agy`).
+fn known_display_name(binary_name: &str) -> String {
+    match binary_name {
+        "agy" => "Antigravity".to_string(),
+        other => derive_display_name(other),
     }
 }
 
@@ -151,7 +161,7 @@ fn detect_known_clis_in(path: Option<&std::ffi::OsString>) -> Vec<CliInfo> {
         .iter()
         .filter_map(|&name| {
             resolve_command_in(name, path).map(|path| CliInfo {
-                display_name: derive_display_name(name),
+                display_name: known_display_name(name),
                 binary_name: name.to_string(),
                 path,
                 source: CliSource::Detected,
@@ -254,8 +264,8 @@ mod tests {
     #[test]
     fn all_known_clis_detected_when_present() {
         let all_names = [
-            "claude", "codex", "gemini", "aider", "vibe", "qwen", "amp", "opencode", "cline",
-            "droid", "pi", "junie", "cursor", "copilot", "cn", "kilo", "kimi",
+            "claude", "codex", "agy", "aider", "vibe", "qwen", "amp", "opencode", "cline", "droid",
+            "pi", "junie", "cursor", "copilot", "cn", "kilo", "kimi",
         ];
         let (_dir, path) = fake_path_with_binaries(&all_names);
 
@@ -364,16 +374,47 @@ mod tests {
 
     #[test]
     fn detected_cli_has_all_fields() {
-        let (_dir, path) = fake_path_with_binaries(&["gemini"]);
+        let (_dir, path) = fake_path_with_binaries(&["agy"]);
 
         let result = detect_known_clis_in(Some(&path.as_os_str().to_os_string()));
 
         assert_eq!(result.len(), 1);
         let cli = &result[0];
-        assert_eq!(cli.binary_name, "gemini");
-        assert_eq!(cli.display_name, "Gemini");
+        assert_eq!(cli.binary_name, "agy");
+        assert_eq!(cli.display_name, "Antigravity");
         assert!(cli.path.exists());
         assert_eq!(cli.source, CliSource::Detected);
+    }
+
+    #[test]
+    fn agy_detected_and_gemini_not_known() {
+        // Antigravity CLI (agy) auto-detects with its product display name…
+        let (_dir, path) = fake_path_with_binaries(&["agy"]);
+        let result = detect_known_clis_in(Some(&path.as_os_str().to_os_string()));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].binary_name, "agy");
+        assert_eq!(result[0].display_name, "Antigravity");
+
+        // …and the retired gemini CLI is no longer auto-detected.
+        let (_dir2, path2) = fake_path_with_binaries(&["gemini"]);
+        let result2 = detect_known_clis_in(Some(&path2.as_os_str().to_os_string()));
+        assert!(
+            result2.is_empty(),
+            "gemini must not auto-detect after the agy swap (re-add via [clis.gemini] only)"
+        );
+    }
+
+    #[test]
+    fn gemini_is_not_a_known_cli() {
+        // Locks the swap: gemini retired from the built-in roster, agy present.
+        assert!(
+            !KNOWN_CLIS.contains(&"gemini"),
+            "gemini is retired; it must not be in KNOWN_CLIS"
+        );
+        assert!(
+            KNOWN_CLIS.contains(&"agy"),
+            "agy (Antigravity) must be a known CLI"
+        );
     }
 
     #[test]

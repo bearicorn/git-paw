@@ -6,7 +6,7 @@ git-paw auto-detects these AI coding CLIs on your PATH:
 |-----|--------|-------------|---------|
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude` | Anthropic's AI coding assistant | `npm i -g @anthropic-ai/claude-code` |
 | [Codex](https://github.com/openai/codex) | `codex` | OpenAI's coding agent | `npm i -g @openai/codex` |
-| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `gemini` | Google's Gemini in the terminal | `npm i -g @anthropic-ai/gemini-cli` |
+| Antigravity CLI | `agy` | Google's agentic coding CLI (replaces the retired Gemini CLI) | See project docs |
 | [Aider](https://aider.chat) | `aider` | AI pair programming in the terminal | `pip install aider-chat` |
 | [Vibe](https://docs.mistral.ai/capabilities/vibe/) | `vibe` | Mistral AI's coding CLI | See project docs |
 | [Qwen](https://github.com/QwenLM) | `qwen` | Alibaba's Qwen coding CLI | See project docs |

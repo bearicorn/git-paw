@@ -279,7 +279,7 @@ cli = "claude"
 
 [presets.full-stack]
 branches = ["feature/api", "feature/ui", "feature/styles"]
-cli = "gemini"
+cli = "agy"
 ```
 
 ### Using presets
@@ -438,7 +438,7 @@ panes always resolve at `agent_approval`.
 |-----|-------------|--------|
 | `claude` | `--dangerously-skip-permissions` | (none) |
 | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `--sandbox workspace-write` |
-| `gemini` | `--yolo` | (none) |
+| `agy` | `--dangerously-skip-permissions` | (none) |
 | `qwen` | `--yolo` | (none) |
 
 Any other CLI (or `manual` anywhere) resolves to no flags — use
