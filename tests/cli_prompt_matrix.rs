@@ -15,6 +15,9 @@
 
 use assert_cmd::Command;
 
+mod helpers;
+use helpers::setup_test_repo;
+
 /// init, non-TTY: the supervisor `Confirm` and the spec-system `Select` are
 /// bypassed. The written config has no *active* `[specs]` section (the base
 /// template's commented example only), and supervisor is not enabled.
@@ -76,5 +79,101 @@ fn init_non_tty_is_idempotent() {
     assert!(
         config_path.is_file(),
         "config should exist after idempotent non-TTY init"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// start family — BYPASS rows (deterministic via `--dry-run`, which resolves
+// selection and prints the plan without launching tmux). The TTY "shown"
+// picker rows are driven via the PTY harness in a later slice.
+// ---------------------------------------------------------------------------
+
+/// Writes a minimal `.git-paw/config.toml` with a fake `echo` CLI so detection
+/// succeeds. When `supervisor` is `Some`, seeds a `[supervisor]` section with
+/// that `enabled` value plus an `echo` CLI and a trivial test command.
+fn write_echo_config(repo: &std::path::Path, supervisor: Option<bool>) {
+    let paw = repo.join(".git-paw");
+    std::fs::create_dir_all(&paw).expect("create .git-paw");
+    let mut cfg = String::from(
+        "default_cli = \"echo\"\n\n[clis.echo]\ncommand = \"echo\"\ndisplay_name = \"Echo\"\n",
+    );
+    if let Some(enabled) = supervisor {
+        cfg.push_str(&format!(
+            "\n[supervisor]\nenabled = {enabled}\ncli = \"echo\"\ntest_command = \"true\"\nagent_approval = \"manual\"\n"
+        ));
+    }
+    std::fs::write(paw.join("config.toml"), cfg).expect("write config");
+}
+
+/// start with all selection flags given: the branch picker, mode picker, and
+/// CLI picker are all BYPASSED. `--dry-run` prints the plan (both branches
+/// present, no prompt, no launch).
+#[test]
+fn start_all_flags_bypass_all_pickers() {
+    let tr = setup_test_repo();
+    write_echo_config(tr.path(), None);
+
+    let out = Command::cargo_bin("git-paw")
+        .expect("binary")
+        .current_dir(tr.path())
+        .args([
+            "start",
+            "--branches",
+            "feat/a,feat/b",
+            "--cli",
+            "echo",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run start --dry-run");
+
+    assert!(
+        out.status.success(),
+        "dry-run should succeed; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Dry run"),
+        "expected a dry-run plan; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("feat/a") && stdout.contains("feat/b"),
+        "both --branches must appear in the plan (branch picker bypassed); got:\n{stdout}"
+    );
+}
+
+/// start `--supervisor`: supervisor mode is entered because the explicit flag
+/// short-circuits the resolution chain (no "Start in supervisor mode?" Confirm),
+/// even though the config's `[supervisor] enabled = false` would not route there.
+#[test]
+fn start_supervisor_flag_enters_supervisor_mode() {
+    let tr = setup_test_repo();
+    write_echo_config(tr.path(), Some(false));
+
+    let out = Command::cargo_bin("git-paw")
+        .expect("binary")
+        .current_dir(tr.path())
+        .args([
+            "start",
+            "--branches",
+            "feat/a",
+            "--cli",
+            "echo",
+            "--supervisor",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run start --supervisor --dry-run");
+
+    assert!(
+        out.status.success(),
+        "dry-run should succeed; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Supervisor:"),
+        "--supervisor must enter supervisor mode (flag short-circuits the confirm); got:\n{stdout}"
     );
 }
