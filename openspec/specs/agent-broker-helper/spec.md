@@ -259,7 +259,7 @@ advanced for more than 30 seconds.
 
 The bundled `sweep.sh` SHALL publish a synthetic
 `agent.status` broker message with `phase: "stuck-on-prompt"`
-(per [[supervisor-introspection]] phase enum) for each
+(per [[broker-watcher-and-state]] phase enum) for each
 detected stuck-on-prompt agent. The published message SHALL
 carry a `detail.captured_prompt` field containing the first
 ~200 characters of the pane capture so dashboard + MCP

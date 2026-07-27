@@ -240,7 +240,7 @@ The `OpenSpecBackend` SHALL append content from `specs/` subdirectory to the pro
 - **WHEN** a change has `specs/auth/spec.md` and `specs/session/spec.md`
 - **THEN** both spec files SHALL be appended to the prompt with their capability names as headings
 
-### Requirement: Extract paw_cli from frontmatter
+### Requirement: Extract paw_cli from frontmatter (OpenSpec)
 
 The `OpenSpecBackend` SHALL extract an optional `paw_cli` field from YAML frontmatter in `tasks.md`.
 
@@ -388,7 +388,7 @@ The `MarkdownBackend` SHALL use `paw_branch` frontmatter for the spec id, fallin
 - **WHEN** a pending file named `fix-session.md` has no `paw_branch` in frontmatter
 - **THEN** `SpecEntry.id` SHALL be `"fix-session"` (filename stem)
 
-### Requirement: Extract paw_cli from frontmatter
+### Requirement: Extract paw_cli from frontmatter (Markdown)
 
 The `MarkdownBackend` SHALL extract an optional `paw_cli` field for per-spec CLI override.
 
@@ -603,7 +603,7 @@ A phase containing only `[P]` tasks SHALL produce N `SpecEntry` values and no co
 - **WHEN** any `SpecEntry` is produced by the SpecKit backend
 - **THEN** `owned_files` is `None`
 
-### Requirement: Boot-prompt assembly
+### Requirement: Boot-prompt assembly (Spec Kit)
 
 The system SHALL assemble each `SpecEntry.prompt` from the following sections in this order, separated by `\n\n---\n\n`:
 
@@ -805,7 +805,7 @@ For each in-scope plan the system SHALL produce exactly **one** `SpecEntry`. A s
 - **THEN** the `SpecEntry.id` is `2026-07-20-add-auth`
 - **AND** `owned_files` is `None`
 
-### Requirement: Boot-prompt assembly
+### Requirement: Boot-prompt assembly (Superpowers)
 
 The system SHALL assemble the `SpecEntry.prompt` from the following sections, separated by `\n\n---\n\n`:
 

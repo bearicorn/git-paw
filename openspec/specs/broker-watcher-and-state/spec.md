@@ -454,7 +454,7 @@ present on their status.
 
 ### Requirement: MCP get_session_status includes introspection
 
-The MCP `get_session_status()` tool from [[mcp-server]] SHALL
+The MCP `get_session_status()` tool from [[mcp]] SHALL
 populate `phase` and `detail` for the supervisor sub-record
 from the latest supervisor `agent.status` message. The fields
 SHALL be omitted (or null) when the supervisor has not
@@ -479,7 +479,7 @@ emitted them in the current session.
 ### Requirement: checkpoint phase shared with stream-timeout-recovery
 
 The system SHALL reuse the `phase` field for the checkpoint
-emission defined by [[supervisor-stream-timeout-recovery]].
+emission defined by [[supervisor-skill-discipline]].
 That emission SHALL use `phase = "checkpoint"` with detail
 fields documented by that change. The introspection skill
 prose SHALL acknowledge `checkpoint` as a valid phase value.
@@ -487,12 +487,12 @@ prose SHALL acknowledge `checkpoint` as a valid phase value.
 #### Scenario: Checkpoint emission uses phase = checkpoint
 
 - **WHEN** the supervisor performs a stream-timeout-recovery
-  pre-action checkpoint per [[supervisor-stream-timeout-recovery]]
+  pre-action checkpoint per [[supervisor-skill-discipline]]
 - **THEN** the emitted `agent.status` SHALL set `phase =
   "checkpoint"` and SHALL include the checkpoint's documented
   detail fields
 
-### Requirement: Stack-agnostic phrasing
+### Requirement: Stack-agnostic phrasing (introspection)
 
 The new supervisor-skill section SHALL pass the no-language-
 leak audit from [[lang-agnostic-assets]]. The section SHALL
@@ -540,7 +540,7 @@ existence or shape beyond its presence as a string.
 
 The system SHALL produce a deterministic `id` for each
 `agent.advanced-main` record using the same hashing pattern as
-`agent.learning` from [[agent-learning-variant]]. The canonical
+`agent.learning` from [[learnings]]. The canonical
 input SHALL include `merged_branch`, `new_main_sha`, `base`,
 and the UTC hour bucket. Re-publishing the same merge within
 the same hour SHALL produce an identical id.
@@ -601,7 +601,7 @@ advances" subsection teaching coding agents:
 
 ### Requirement: Variant flows through dashboard automatically
 
-The dashboard's [[dashboard-broker-log]] panel SHALL render
+The dashboard's [[dashboard]] panel SHALL render
 `agent.advanced-main` events without any code change to the
 log panel — the existing watcher feed delivers the variant to
 the ring buffer like any other message type. The filter-chip
@@ -619,7 +619,7 @@ users can isolate the event stream.
 ### Requirement: Cross-reference with supervisor introspection
 
 The publish trigger SHALL coordinate with
-[[supervisor-introspection]] such that the `phase = "merge"`
+[[broker-watcher-and-state]] such that the `phase = "merge"`
 status emitted before the merge and the `agent.advanced-main`
 event emitted after a successful merge SHARE the
 `merged_branch` value. This lets consumers correlate the two
@@ -634,7 +634,7 @@ events.
   resulting `agent.advanced-main` event SHALL have
   `merged_branch == "feat/x"`
 
-### Requirement: Stack-agnostic phrasing
+### Requirement: Stack-agnostic phrasing (advanced-main event)
 
 The new supervisor and coordination skill content SHALL pass
 the no-language-leak audit from [[lang-agnostic-assets]]. The

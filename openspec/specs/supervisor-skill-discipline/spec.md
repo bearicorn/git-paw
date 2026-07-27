@@ -89,7 +89,7 @@ to self-verify or self-archive.
 - **THEN** it SHALL state that the supervisor runs `/opsx:verify` and `/opsx:archive` after an agent's final commit, not the agent
 - **AND** it SHALL cross-reference the agent-side stand-by-after-commit protocol in `coordination.md`
 
-### Requirement: Stack-agnostic phrasing
+### Requirement: Stack-agnostic phrasing (skill-discipline)
 
 The new/edited sections SHALL pass the no-language-leak audit
 from [[lang-agnostic-assets]].
@@ -238,7 +238,7 @@ identified by its `phase` value rather than a `status` label — consumers route
 it by reading `phase`, consistent with the introspection phase taxonomy. This
 supersedes the earlier requirement that the documented shape carry
 `status: "checkpoint"`: routing every supervisor `agent.status` through the
-bundled helper ([[agent-broker-helper]], [[supervisor-introspection]]) is the
+bundled helper ([[agent-broker-helper]], [[broker-watcher-and-state]]) is the
 governing constraint, and the helper does not emit a `checkpoint` status label.
 
 #### Scenario: Checkpoint shape is documented
@@ -309,7 +309,7 @@ qualitative-learnings output.
   `agent.learning` record with a structured body covering
   checkpoint id and target lists
 
-### Requirement: Stack-agnostic phrasing
+### Requirement: Stack-agnostic phrasing (stream-timeout recovery)
 
 The new section SHALL pass the no-language-leak audit from
 [[lang-agnostic-assets]]. The section SHALL NOT use
@@ -419,7 +419,7 @@ since gate sweeps run per-branch in isolated worktrees.
   run concurrently and that verifying agent A does not block
   verifying agent B
 
-### Requirement: Stack-agnostic phrasing
+### Requirement: Stack-agnostic phrasing (per-commit verification)
 
 The new subsection SHALL pass the no-language-leak audit from
 [[lang-agnostic-assets]].
