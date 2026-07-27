@@ -52,7 +52,8 @@ trait-logic capabilities keep their own scenarios.
 - **start**: branch picker (¬`--branches`); mode picker (¬`--cli`); uniform CLI picker;
   per-branch CLI picker (×N); supervisor confirm (chain→prompt vs
   `--supervisor`/`--no-supervisor`/`--unattended`/non-TTY).
-- **start --from-specs**: spec picker (from-specs+TTY); CLI picker
+- **start spec-launch** (`--from-all-specs` / bare `--specs`; the deprecated `--from-specs` alias is
+  omitted — removal at v1.0.0): spec picker (bare `--specs`+TTY); CLI picker
   (`--cli`/`paw_cli`/`default_spec_cli` short-circuit vs fallthrough); spec-format error when
   neither `--specs-format` nor `[specs]` configured.
 - **destructive**: stop confirm (¬`--force`); purge confirm (¬`--force`). (remove is guarded
@@ -61,7 +62,7 @@ trait-logic capabilities keep their own scenarios.
 ## Non-goals
 
 - Not pixel/layout testing; not re-testing prompt logic (D5).
-- The exact non-TTY behaviour of the `--from-specs` spec picker is confirmed during
+- The exact non-TTY behaviour of the bare `--specs` spec picker is confirmed during
   implementation (noted open in the roadmap).
 
 ## Risks

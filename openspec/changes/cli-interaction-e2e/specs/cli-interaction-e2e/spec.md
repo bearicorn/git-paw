@@ -97,20 +97,28 @@ provided (via `interactive::run_selection` + the supervisor-mode chain).
 - **THEN** the "Start in supervisor mode?" `Confirm` SHALL be shown
 - **AND** WHEN `--supervisor`, `--no-supervisor`, `--unattended`, or a non-TTY invocation short-circuits the chain, it SHALL be bypassed
 
-### Requirement: `git paw start --from-specs` prompt gating
+### Requirement: `git paw start` spec-launch prompt gating
 
-For `git paw start --from-specs`, prompts and errors SHALL follow the spec picker and the
-CLI-resolution chain (via `interactive::resolve_cli_for_specs` + `select_specs`).
+Spec-launched `git paw start` SHALL show or bypass its prompts per the spec picker and the
+CLI-resolution chain (`interactive::resolve_cli_for_specs` + `select_specs`) — for `--from-all-specs`
+(every discovered spec) and bare `--specs` (the multi-select picker). The deprecated `--from-specs`
+alias (scheduled for removal in v1.0.0) is deliberately NOT exercised by this matrix.
 
-#### Scenario: Spec picker shown with a TTY
+#### Scenario: Spec picker shown for bare `--specs` on a TTY
 
-- **GIVEN** `--from-specs` and a TTY
+- **GIVEN** bare `--specs` (no values) and a TTY
 - **WHEN** `git paw start` runs
 - **THEN** the spec picker (`select_specs`) SHALL be shown
 
+#### Scenario: `--from-all-specs` launches every spec without a picker
+
+- **GIVEN** `--from-all-specs`
+- **WHEN** `git paw start` runs
+- **THEN** the spec picker SHALL be bypassed and every discovered spec SHALL be launched
+
 #### Scenario: CLI picker short-circuits through the resolution chain
 
-- **GIVEN** `--from-specs`
+- **GIVEN** a spec launch (`--from-all-specs`)
 - **WHEN** a CLI is resolvable via `--cli`, a spec's `paw_cli`, or `default_spec_cli`
 - **THEN** the CLI picker SHALL be bypassed (short-circuited)
 - **AND** WHEN the chain falls through with none of these, the CLI picker SHALL be shown
@@ -118,7 +126,7 @@ CLI-resolution chain (via `interactive::resolve_cli_for_specs` + `select_specs`)
 #### Scenario: Spec-format resolution error when unconfigured
 
 - **GIVEN** neither `--specs-format` nor `[specs]` is configured
-- **WHEN** `git paw start --from-specs` runs
+- **WHEN** `git paw start --from-all-specs` runs
 - **THEN** it SHALL error with the explicit-only guidance (per the v0.12.0 rule), not silently auto-detect
 
 ### Requirement: Destructive-confirmation gating

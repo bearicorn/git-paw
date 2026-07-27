@@ -10,6 +10,7 @@ specs→tests→code order; the requirement→test map is `spec-consolidation`'s
 - [ ] `message-delivery` — amend the 3 roster-upsert requirements to match the W15-16 fix (Verified/Feedback/Question do NOT upsert the sender roster record)
 - [ ] `broker-endpoints` + `message-delivery` — reconcile the empty-poll cursor (both specs → the monotonic cursor held at `since`, not `last_seq=0`)
 - [ ] `cli-parsing`/`mcp-server` — scrub the removed `.specify/` filesystem-auto-detection references from `--specs-format` help + `mcp/query/specs.rs::resolve_dir`; add `superpowers` to the `--specs-format` value list
+- [ ] `--from-specs` deprecated alias: any spec / `--help` text that presents `--from-specs` as a current flag SHALL be reconciled to `--from-all-specs` (canonical) and note the alias is deprecated (removal at v1.0.0) — covers the `from-specs-launch` capability + `cli-parsing` and any spec referencing the alias
 - [ ] Verify (don't duplicate) the sibling-owned fixes are closed: `cli-detection` roster (gemini change), phantom `git paw resume` + `learnings-mode` negative (spec-consolidation)
 
 ## 2. Fill genuine scenario→test gaps

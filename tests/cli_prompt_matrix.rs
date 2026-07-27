@@ -8,9 +8,10 @@
 //! no flake).
 //!
 //! This slice covers the `git paw init` family's non-TTY bypass rows. Later
-//! slices add the `start` / `start --from-specs` / destructive-confirmation
-//! rows; keep the matrix `#[serial]`-friendly and poll-based per the PTY
-//! harness contract.
+//! slices add the `start` / `--from-all-specs` (+ bare `--specs`) /
+//! destructive-confirmation rows; keep the matrix `#[serial]`-friendly and
+//! poll-based per the PTY harness contract. The deprecated `--from-specs` alias
+//! (removal at v1.0.0) is deliberately NOT exercised.
 
 use assert_cmd::Command;
 
