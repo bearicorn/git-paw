@@ -18,8 +18,8 @@
 - [ ] spec-launch: spec picker shown for bare `--specs` (+TTY); `--from-all-specs` launches all specs without a picker (deprecated `--from-specs` alias omitted — removal at v1.0.0)
 - [ ] spec-launch: CLI picker short-circuits (`--cli` / `paw_cli` / `default_spec_cli`) vs shown on fallthrough
 - [ ] spec-launch: spec-format resolution error when neither `--specs-format` nor `[specs]` configured (via `--from-all-specs`)
-- [ ] destructive: stop confirm shown (¬`--force`) / bypassed (`--force`)
-- [ ] destructive: purge confirm shown (¬`--force`) / bypassed (`--force`)
+- [x] destructive: stop renders NO confirm (cmd_stop is non-destructive — reconciled with cli-parsing); covered by `stop_does_not_prompt`
+- [x] destructive: purge confirm bypassed by `--force` (`purge_force_bypasses_confirmation`); the shown (¬`--force`, TTY) row remains for a later PTY slice
 
 ## 3. Outcome assertions + flake resistance
 - [x] Assert written config / `session.json` / tmux panes for each completed flow (not pane pixels) — init slice asserts the written config; extend to session.json/panes as start/from-specs rows land

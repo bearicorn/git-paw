@@ -252,3 +252,37 @@ fn start_branches_without_cli_shows_mode_picker() {
     pty::wait_for_pane(&session, "CLI assignment mode", Duration::from_secs(10));
     pty::kill_session(&session);
 }
+
+// ---------------------------------------------------------------------------
+// destructive-confirmation gating (deterministic assert_cmd, non-TTY).
+// ---------------------------------------------------------------------------
+
+/// stop is non-destructive and renders NO confirmation prompt (the `cli-parsing`
+/// spec was reconciled to match `cmd_stop` — see spec-traceability-audit). With
+/// no active session it reports so and exits 0, without prompting.
+#[test]
+fn stop_does_not_prompt() {
+    let repo = tempfile::TempDir::new().expect("tempdir");
+    git(repo.path(), &["init", "-q"]);
+
+    Command::cargo_bin("git-paw")
+        .expect("binary")
+        .arg("stop")
+        .current_dir(repo.path())
+        .assert()
+        .success();
+}
+
+/// purge `--force`: the confirmation is BYPASSED; it exits 0 without prompting.
+#[test]
+fn purge_force_bypasses_confirmation() {
+    let repo = tempfile::TempDir::new().expect("tempdir");
+    git(repo.path(), &["init", "-q"]);
+
+    Command::cargo_bin("git-paw")
+        .expect("binary")
+        .args(["purge", "--force"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+}
