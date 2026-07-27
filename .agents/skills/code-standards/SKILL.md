@@ -46,7 +46,9 @@ never silently**. Full set, conflict table, and the review-gate test:
   interpolate a raw untrusted string. (Kills the session-name / path-quoting bug class.)
 - **Hidden-subcommand IPC seam** (`__dashboard`, `__classify`). When a shell helper needs Rust
   logic, expose `git paw __<verb>` and let the shell shell out — never re-implement the logic
-  in bash. One source of truth; the export stays a thin client.
+  in bash. One source of truth; the export stays a thin client. When a change touches **any
+  exported asset**, follow the `export-agnosticism` skill (`.agents/skills/export-agnosticism/SKILL.md`)
+  — it covers every export surface (skills, scripts, config, presets, injected artifacts, templates).
 - **Command-handler modules + thin dispatch** — one file per command family under `commands/`;
   `main`/`run` only dispatch.
 
