@@ -81,8 +81,8 @@ Every capability spec in the repository (links go to the canonical
 `openspec/specs/` source on GitHub).
 
 A few entries are **internal process specs** — they govern the test suite,
-CI, or the verification workflow itself (e.g. `test-coverage-v0-5-0`,
-`test-isolation`, `cold-start-ci-parity`, `no-fail-fast-verification`)
+CI, or the verification workflow itself (e.g. `test-isolation`,
+`cold-start-ci-parity`, `no-fail-fast-verification`)
 rather than a user-facing feature. These intentionally have no user-guide
 chapter: the spec itself is their documentation.
 
@@ -173,10 +173,6 @@ chapter: the spec itself is their documentation.
 - [`supervisor-tell`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-tell/spec.md)
 - [`template-substitution`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/template-substitution/spec.md)
 - [`terminal-status-protection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/terminal-status-protection/spec.md)
-- [`test-coverage-v0-5-0`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/test-coverage-v0-5-0/spec.md)
-  — meta-spec: records the scenario-to-test mapping that backfilled coverage
-  for the v0.5.0 archived changes; a bookkeeping spec, not a runtime
-  capability
 - [`test-isolation`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/test-isolation/spec.md)
 - [`tmux-orchestration`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/tmux-orchestration/spec.md)
 - [`unattended-operation`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/unattended-operation/spec.md)

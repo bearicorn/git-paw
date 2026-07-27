@@ -205,24 +205,6 @@ The system SHALL expose `[supervisor.learnings] flush_interval_seconds` (positiv
 - **WHEN** the aggregator starts
 - **THEN** the flush interval SHALL be 30 seconds
 
-### Requirement: No agent.learning broker variant in v0.5.0
-
-The system SHALL NOT introduce an `agent.learning` `BrokerMessage` variant in v0.5.0. The aggregator's only output sink is the markdown file. The structured/programmatic surface for learnings is deferred to v0.6.0 alongside the MCP server, which will define the wire format with its consumer in mind.
-
-The aggregator's internal data model (per-signal records with structured fields) SHALL be designed so that v0.6.0 can serialise it to a broker variant without re-deriving from messages.
-
-#### Scenario: No agent.learning variant exists in BrokerMessage in v0.5.0
-
-- **WHEN** the v0.5.0 `BrokerMessage` enum is inspected
-- **THEN** there SHALL NOT be a `Learning` variant or any variant with serde tag `agent.learning`
-
-#### Scenario: Aggregator does not publish to the broker
-
-- **GIVEN** a running aggregator with at least one observed event
-- **WHEN** the aggregator flushes
-- **THEN** no message of any new variant SHALL be published to the broker
-- **AND** the only side effect of the flush SHALL be appended content in `.git-paw/session-learnings.md`
-
 ### Requirement: No-telemetry privacy guarantee
 
 Learnings mode SHALL perform no telemetry. The learnings aggregator SHALL write only to the local `.git-paw/session-learnings.md` file and SHALL NOT transmit learnings content to any network destination outside the operator's own machine. git-paw SHALL NOT collect, upload, or phone home learnings data under any configuration.
