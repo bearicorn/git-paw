@@ -599,3 +599,60 @@ wins) and SHALL survive round-trip serialization.
 - **WHEN** the config is serialized to TOML and re-parsed
 - **THEN** the re-parsed `dashboard.broker_log.height_lines` SHALL be `30`
 
+### Requirement: Configuration reference documents the specs type value
+
+`docs/src/configuration/README.md`'s commented `[specs]` example SHALL document `type` as accepting `"openspec"`, `"markdown"`, AND `"speckit"`. The v0.4-era example listing only `"openspec"` and `"markdown"` SHALL be updated to add `"speckit"`.
+
+#### Scenario: Configuration reference lists all three specs.type values
+
+- **WHEN** the `[specs]` example in `docs/src/configuration/README.md` is inspected
+- **THEN** it documents `"speckit"` as a valid value alongside `"openspec"` and `"markdown"`
+
+### Requirement: Configuration reference has no dangling internal links
+
+`docs/src/configuration/README.md` SHALL NOT contain Markdown
+links pointing at anchors that do not exist in their target
+files. Specifically the link previously pointing at
+`coordination.md#automatic-conflict-detection-v050` SHALL either
+target a real anchor that exists in `coordination.md` post-refresh
+or be removed.
+
+#### Scenario: Configuration reference has no broken conflict-detection anchor
+
+- **WHEN** `docs/src/configuration/README.md` is inspected
+- **THEN** any `[...]( ... )` link targeting `coordination.md`
+  points at an anchor that exists in `coordination.md` (verified
+  by the anchor heading being present in the target file's
+  rendered TOC)
+
+### Requirement: Configuration reference documents the configuration tables
+
+`docs/src/configuration/README.md` SHALL include subsections
+documenting `[supervisor.conflict]`,
+`[supervisor.auto_approve]`, `[supervisor.learnings_config]`, and
+`[governance]`. Each subsection SHALL list every field, its type,
+its default value (where applicable), and a one-line description.
+
+#### Scenario: Configuration reference documents supervisor.conflict
+
+- **WHEN** `docs/src/configuration/README.md` is inspected
+- **THEN** it contains a subsection or table for `[supervisor.conflict]`
+- **AND** the subsection mentions `window_seconds`, `warn_on_intent_overlap`, and `escalate_on_violation`
+
+#### Scenario: Configuration reference documents supervisor.auto_approve
+
+- **WHEN** `docs/src/configuration/README.md` is inspected
+- **THEN** it contains a subsection or table for `[supervisor.auto_approve]`
+- **AND** the subsection mentions `approval_level` and `safe_commands`
+
+#### Scenario: Configuration reference documents supervisor.learnings_config
+
+- **WHEN** `docs/src/configuration/README.md` is inspected
+- **THEN** it contains a subsection or table for `[supervisor.learnings_config]`
+- **AND** the subsection mentions `flush_interval_seconds`
+
+#### Scenario: Configuration reference documents governance
+
+- **WHEN** `docs/src/configuration/README.md` is inspected
+- **THEN** it contains a subsection or table for `[governance]`
+- **AND** the subsection lists all five fields: `adr`, `test_strategy`, `security`, `dod`, `constitution`

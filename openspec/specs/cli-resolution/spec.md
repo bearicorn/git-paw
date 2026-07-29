@@ -338,3 +338,18 @@ CLI), and SHALL retry the launch once if the first attempt did not take.
   (the shell prompt is still present after the bounded window)
 - **THEN** git-paw SHALL send the launch command once more before giving up,
   so a single swallowed attempt does not permanently strand the pane
+
+### Requirement: README Supported AI CLIs table matches `src/detect.rs`
+
+The README's Supported AI CLIs table SHALL list every CLI defined
+in `src/detect.rs`. Currently that count is 10 entries; the v0.4
+table of 7 entries SHALL be expanded to include `opencode`,
+`cline`, and `droid` (plus any further additions present in
+`src/detect.rs` at archive time).
+
+#### Scenario: README CLI table mentions opencode, cline, and droid
+
+- **WHEN** the README's Supported AI CLIs table is inspected
+- **THEN** it contains the substring `opencode`
+- **AND** it contains the substring `cline`
+- **AND** it contains the substring `droid`

@@ -720,3 +720,48 @@ unchanged from v0.5.0.
   file byte-equivalent to what v0.5.0 would produce for the
   same input events
 
+### Requirement: User guide includes a Learnings Mode chapter
+
+The mdBook user guide SHALL include a chapter at
+`docs/src/user-guide/learnings.md` documenting learnings mode.
+The chapter SHALL cover the opt-in `[supervisor] learnings = true`
+flag, the location and append-only shape of
+`.git-paw/session-learnings.md`, and the five deterministic
+categories tracked (stuck duration, recovery-cycle
+count, forward conflicts, in-flight conflicts, ownership
+violations). The chapter SHALL state that the broker
+`agent.learning` wire variant is deferred to v0.6.0 and that
+the tool ships file-only output.
+
+The chapter SHALL be linked from `docs/src/SUMMARY.md` under the
+User Guide group.
+
+#### Scenario: Learnings chapter exists and is linked
+
+- **WHEN** `docs/src/SUMMARY.md` is inspected
+- **THEN** it contains a link to `user-guide/learnings.md` under the User Guide section
+
+#### Scenario: Learnings chapter documents the opt-in flag
+
+- **WHEN** `docs/src/user-guide/learnings.md` is inspected
+- **THEN** it contains the substring `[supervisor]` and references the `learnings` flag
+- **AND** it states the default value is `false` (or equivalent — "opt-in")
+
+#### Scenario: Learnings chapter names the output file
+
+- **WHEN** `docs/src/user-guide/learnings.md` is inspected
+- **THEN** it contains the substring `.git-paw/session-learnings.md`
+
+#### Scenario: Learnings chapter enumerates the deterministic categories
+
+- **WHEN** `docs/src/user-guide/learnings.md` is inspected
+- **THEN** it mentions stuck duration (or "where agents got stuck")
+- **AND** it mentions recovery-cycle count (or "recovery cycles")
+- **AND** it mentions forward conflicts
+- **AND** it mentions in-flight conflicts
+- **AND** it mentions ownership violations
+
+#### Scenario: Learnings chapter defers `agent.learning` to v0.6.0
+
+- **WHEN** `docs/src/user-guide/learnings.md` is inspected
+- **THEN** it states that the `agent.learning` broker variant (or programmatic access) is deferred to v0.6.0

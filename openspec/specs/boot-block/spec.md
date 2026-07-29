@@ -457,3 +457,20 @@ This requirement does NOT cover spec-content / task-prompt injection. The full p
 - **WHEN** the launch flow injects boot blocks
 - **THEN** the first spec's boot block SHALL target pane index `1` (dashboard is at index `0`)
 - **AND** the Nth spec's boot block SHALL target pane index `N`
+
+### Requirement: AGENTS.md user-guide chapter reflects boot-prompt-full-body
+
+`docs/src/user-guide/agents-md.md` SHALL describe AGENTS.md as
+the source of truth for the spec body and SHALL state that the
+supervisor-mode boot prompt points the agent at AGENTS.md plus
+`openspec/changes/<id>/` rather than embedding the spec body in
+the boot prompt. The chapter SHALL NOT describe AGENTS.md as
+containing only "Branch + CLI + Spec content + Owned files"
+(the v0.4 framing); it SHALL describe AGENTS.md as the full spec
+artifact target.
+
+#### Scenario: agents-md chapter describes the boot-prompt-full-body model
+
+- **WHEN** `docs/src/user-guide/agents-md.md` is inspected
+- **THEN** it states that AGENTS.md is the source of truth for the spec body
+- **AND** it states that the supervisor-mode boot prompt points at AGENTS.md and `openspec/changes/<id>/`

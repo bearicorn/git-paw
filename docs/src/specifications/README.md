@@ -154,6 +154,10 @@ user-guide chapter: the spec itself is their documentation.
 
 - [`learnings`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/learnings/spec.md) — an opt-in, broker-internal aggregator that derives deterministic and qualitative learning signals into `.git-paw/session-learnings.md` (and the `agent.learning` broker variant), performing no telemetry.
 
+### Project & conventions
+
+- [`core-project-conventions`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/core-project-conventions/spec.md) — repo-wide contributor conventions and their doc accuracy: the AGENTS.md dependency table in sync with `Cargo.toml`, the commit-scope list, the mdBook architecture module list and changelog include, and the README's enumeration of the current user-facing surface.
+
 ### Diagnostics & CI
 
 - [`selftest`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/selftest/spec.md) — `git paw selftest` runs an isolated end-to-end session lifecycle against a throwaway repo with a dummy CLI and reports a single pass/fail verdict.

@@ -744,3 +744,141 @@ tmux session regardless of supervisor mode. The
 - **THEN** all the documented affordances SHALL be applied
   to the non-supervisor session's panes
 
+### Requirement: README Supervisor Mode quick start documents the flags
+
+The README's "Quick Start: Supervisor Mode" section SHALL
+document the `--no-supervisor` opt-out flag and the
+`start --force` flag for bypassing the uncommitted-spec validation
+warning. Each flag SHALL appear at least once in a command-line
+example within the section.
+
+#### Scenario: Quick start supervisor mentions --no-supervisor
+
+- **WHEN** the README's Quick Start: Supervisor Mode section is inspected
+- **THEN** it contains the substring `--no-supervisor`
+
+#### Scenario: Quick start supervisor mentions --force
+
+- **WHEN** the README's Quick Start: Supervisor Mode section is inspected
+- **THEN** it contains the substring `--force` (in the context of `start --force`)
+
+### Requirement: Architecture chapter pins the supervisor-as-pane layout
+
+`docs/src/architecture.md` SHALL describe the supervisor-mode
+tmux layout established by the `supervisor-as-pane` archive:
+pane 0 is the supervisor, pane 1 is the dashboard, and the agent
+panes occupy indices 2 onwards in a row-major grid below the top
+row. The chapter SHALL NOT describe the v0.4 layout (dashboard
+at pane 0) as the current layout.
+
+#### Scenario: Architecture chapter places supervisor at pane 0
+
+- **WHEN** the supervisor-mode layout description in `architecture.md` is inspected
+- **THEN** it states that the supervisor is at pane 0
+- **AND** it states that the dashboard is at pane 1
+- **AND** it does NOT state that the dashboard is at pane 0 as the default
+
+### Requirement: Quick Start Supervisor chapter is internally consistent
+
+`docs/src/quick-start-supervisor.md` SHALL describe a single,
+consistent pane layout throughout. The chapter SHALL NOT contain
+contradictory statements about which pane is the supervisor and
+which is the dashboard. The canonical layout is:
+supervisor at pane 0, dashboard at pane 1, agent panes at
+indices 2 onwards.
+
+#### Scenario: Quick start supervisor chapter is internally consistent on pane indices
+
+- **WHEN** `docs/src/quick-start-supervisor.md` is inspected
+- **THEN** every reference to the supervisor pane resolves to pane index 0
+- **AND** every reference to the dashboard pane resolves to pane index 1
+- **AND** the chapter does NOT contain any sentence stating that the dashboard is at pane 0 in supervisor mode
+
+### Requirement: Quick Start Supervisor chapter does not reference nonexistent broker messages
+
+`docs/src/quick-start-supervisor.md` SHALL NOT reference broker
+message types that do not exist in `src/broker/messages.rs`.
+Specifically the chapter SHALL NOT contain the substrings
+`agent.register` or `agent.done` as broker message variants.
+
+#### Scenario: Quick start supervisor chapter does not mention agent.register
+
+- **WHEN** `docs/src/quick-start-supervisor.md` is inspected
+- **THEN** it does NOT contain the substring `agent.register`
+
+#### Scenario: Quick start supervisor chapter does not mention agent.done
+
+- **WHEN** `docs/src/quick-start-supervisor.md` is inspected
+- **THEN** it does NOT contain the substring `agent.done`
+
+### Requirement: Quick Start Supervisor chapter reflects shipped features
+
+`docs/src/quick-start-supervisor.md` SHALL NOT advertise as
+"not yet supported" any feature that has shipped. The
+v0.4-era "What's NOT Yet Supported in v0.4.0" section listing
+conflict detection and learnings mode as deferred SHALL be
+removed or rewritten so that readers see those features as
+shipped.
+
+#### Scenario: Quick start supervisor chapter does not mark conflict detection as deferred
+
+- **WHEN** the chapter is inspected
+- **THEN** the substrings `conflict detection` and `learnings`
+  do not appear inside a section that describes them as not yet
+  supported
+
+### Requirement: `docs/src/user-guide/supervisor.md` SHALL consolidate the supervisor surfaces
+
+The user-guide supervisor chapter SHALL include the following subsections (or equivalent headings):
+
+1. **Spec audit governance sub-step** — references `docs/src/user-guide/governance.md` and the five doc-checklist examples (DoD, ADR, security, test-strategy, constitution).
+2. **Common dev-command allowlist** — describes the preset, opt-out via `[supervisor.common_dev_allowlist].enabled = false`, and the `extra` field; cross-links to `docs/src/configuration/README.md`.
+3. **Repo-configurable gate commands** — names the six `[supervisor]` gate-command keys (`test_command`, `lint_command`, `build_command`, `doc_build_command`, `spec_validate_command`, `fmt_check_command`, `security_audit_command`) and the `(not configured)` graceful-skip behaviour; cross-links to `docs/src/configuration/README.md`.
+4. **Broker-side conflict detector** — names the three failure shapes (forward, in-flight, ownership) and the `[conflict-detector]` token; cross-links to `docs/src/user-guide/conflict-detection.md`.
+5. **Learnings aggregator** — at minimum a one-line cross-link to `docs/src/user-guide/learnings.md`.
+6. **When the user types in your pane** — mirrors the bundled-skill section of the same name, covering status questions, directives, and judgement-call asks.
+7. **Merge orchestration** — mirrors the bundled-skill section, covering the topological order from `agent.blocked` events, per-branch `git merge --ff-only` + test loop, cycle handling.
+
+#### Scenario: Supervisor user-guide names governance sub-step + cross-link
+
+- **WHEN** `docs/src/user-guide/supervisor.md` is inspected
+- **THEN** the content SHALL contain a heading or paragraph naming the governance sub-step inside spec audit
+- **AND** SHALL link to `docs/src/user-guide/governance.md`
+
+#### Scenario: Supervisor user-guide names the common dev-command allowlist
+
+- **WHEN** the file is inspected
+- **THEN** it SHALL contain a section with a heading approximately "Common dev-command allowlist" or equivalent
+- **AND** SHALL mention `[supervisor.common_dev_allowlist]` and the `extra` field
+
+#### Scenario: Supervisor user-guide names the gate-command templating
+
+- **WHEN** the file is inspected
+- **THEN** it SHALL contain prose stating that supervisor skill gate commands are repo-configurable
+- **AND** SHALL name at least three of the six new `[supervisor]` gate-command keys
+- **AND** SHALL mention the `(not configured)` graceful-skip behaviour
+
+#### Scenario: Supervisor user-guide names the broker-side conflict detector
+
+- **WHEN** the file is inspected
+- **THEN** it SHALL contain a section describing the broker-side conflict detector
+- **AND** SHALL name the three failure shapes (forward, in-flight, ownership)
+- **AND** SHALL link to `docs/src/user-guide/conflict-detection.md`
+
+#### Scenario: Supervisor user-guide cross-links the learnings aggregator chapter
+
+- **WHEN** the file is inspected
+- **THEN** the content SHALL include a link to `docs/src/user-guide/learnings.md`
+
+#### Scenario: Supervisor user-guide mirrors "When the user types in your pane"
+
+- **WHEN** the file is inspected
+- **THEN** the content SHALL include a section approximately named "When the user types in your pane" (or substantively equivalent)
+- **AND** SHALL describe at least the three categories of user input (status question, directive, judgment-call ask)
+
+#### Scenario: Supervisor user-guide mirrors "Merge orchestration"
+
+- **WHEN** the file is inspected
+- **THEN** the content SHALL include a section describing supervisor-driven merge orchestration
+- **AND** SHALL mention the topological order derived from `agent.blocked` events
+- **AND** SHALL mention `git merge --ff-only` as the per-branch merge command

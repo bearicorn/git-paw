@@ -474,3 +474,39 @@ warnings v0.5.0 would for the same string-only inputs.
   detector evaluates it
 - **THEN** the routed message and the detector's behaviour
   SHALL match v0.5.0 byte-for-byte for the same inputs
+
+### Requirement: User guide includes a Conflict Detection chapter
+
+The mdBook user guide SHALL include a chapter at
+`docs/src/user-guide/conflict-detection.md` documenting the
+broker's automatic conflict detection. The chapter SHALL cover
+the three failure shapes (forward, in-flight, ownership), the
+`[conflict-detector]` tag prefix on auto-emitted feedback, the
+supervisor inbox routing for `agent.question` escalations, and
+how detection interacts with the filesystem watcher's
+auto-published `modified_files`.
+
+The chapter SHALL be linked from `docs/src/SUMMARY.md` under the
+User Guide group.
+
+#### Scenario: Conflict detection chapter exists and is linked
+
+- **WHEN** `docs/src/SUMMARY.md` is inspected
+- **THEN** it contains a link to `user-guide/conflict-detection.md` under the User Guide section
+
+#### Scenario: Conflict detection chapter describes the three failure shapes
+
+- **WHEN** `docs/src/user-guide/conflict-detection.md` is inspected
+- **THEN** it explains forward conflicts (overlapping `agent.intent`)
+- **AND** it explains in-flight conflicts (overlapping `agent.status.modified_files`)
+- **AND** it explains ownership violations
+
+#### Scenario: Conflict detection chapter mentions the tag prefix
+
+- **WHEN** `docs/src/user-guide/conflict-detection.md` is inspected
+- **THEN** it contains the substring `[conflict-detector]`
+
+#### Scenario: Conflict detection chapter documents supervisor inbox routing
+
+- **WHEN** `docs/src/user-guide/conflict-detection.md` is inspected
+- **THEN** it states that `agent.question` escalations are routed to the supervisor inbox
