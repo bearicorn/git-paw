@@ -63,6 +63,12 @@ its covering test.
 - [x] Hand-authored + **anti-drift guard** `tests/specifications_page_lists_every_capability.rs` (asserts every `openspec/specs/` dir appears on the page)
 - [x] `SUMMARY.md` unchanged — the Specifications page is a single entry (no per-cap anchors)
 
+## 7. Namespaced taxonomy (post-consolidation refinement — user-directed 2026-07-29)
+Reorganize into ~14 concern-namespaces (core/cli/git/tmux/session/boot/broker/supervisor/approval/spec/mcp/governance/skill/quality); `core-` gathers cross-cutting foundations (configuration, error-handling, lang-agnostic, ci-hygiene, memory-isolation, project-conventions); distribute the cross-cutting `user-documentation` into its domains. 3 verified passes; 729 reqs held; target ~40 caps.
+- [x] Pass 1 — 6 within-domain collapses (boot-block-injection→boot-block, cli-launch→cli-resolution, command-allowlist-seeding→command-classification, session-summary→session-state, supervisor-directives→supervisor-skill-discipline, worktree-embedded-placement→add-remove-branch). 46→40 dirs; 729 held; mdbook + anti-drift green
+- [ ] Pass 2 — distribute `user-documentation`'s 30 reqs into their domains + repo-meta remainder → new `core-project-conventions`; reframe `v0.5.0`/`v0.5` dating to present-tense (nothing retired; 729 held)
+- [ ] Pass 3 — rename caps to `<namespace>-<sub>` (git mv); fix the 3 renamed `{{#include}}`s (configuration→core-configuration, interactive-selection→cli-interactive-selection, error-handling→core-error-handling), hardcoded test refs, `[[...]]` cross-refs, and rewrite the docs Specifications page by namespace; re-verify 729 + mdbook + anti-drift + no-dup-names + validate + compile
+
 ## 7. Verification (five gates, at every wave)
 - [ ] Gate 3 (spec audit): traceability map run before AND after each wave — every WHEN/THEN still maps to ≥1 test; `openspec validate --strict` passes for the touched specs
 - [ ] Gate 4 (doc audit): `mdbook build docs/` succeeds; Specifications page renders every capability; no dead `{{#include}}`/links; `git paw resume` appears nowhere as a real command
