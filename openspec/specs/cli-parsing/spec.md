@@ -976,3 +976,67 @@ SHALL NOT introduce new backend-specific code paths.
 - **THEN** the launch SHALL create exactly one worktree for
   that feature
 
+### Requirement: Spec-driven launch chapter uses the canonical flag name
+
+`docs/src/user-guide/spec-driven-launch.md` SHALL use
+`--from-all-specs` as the canonical flag name in every example.
+The hidden v0.4 alias `--from-specs` SHALL NOT appear in
+example command lines in the chapter (per the
+`cross-format-spec-selection` archive's documentation policy,
+the alias is intentionally undocumented to nudge
+migration).
+
+#### Scenario: Spec-driven launch chapter uses --from-all-specs
+
+- **WHEN** `docs/src/user-guide/spec-driven-launch.md` is inspected
+- **THEN** every example command launching all discovered specs
+  uses `--from-all-specs`
+- **AND** no example command line uses `--from-specs`
+
+### Requirement: CLI reference lists every top-level subcommand
+
+`docs/src/cli-reference.md`'s top-level commands list SHALL
+include every public subcommand. Currently the list SHALL
+include (at minimum) `start`, `stop`, `purge`, `status`,
+`list-clis`, `add-cli`, `remove-cli`, `init`, and `replay`. The
+v0.4 omission of `init` and `replay` SHALL be repaired.
+
+#### Scenario: CLI reference lists init
+
+- **WHEN** the top-level commands section of `docs/src/cli-reference.md` is inspected
+- **THEN** it contains the substring `init`
+
+#### Scenario: CLI reference lists replay
+
+- **WHEN** the top-level commands section of `docs/src/cli-reference.md` is inspected
+- **THEN** it contains the substring `replay`
+
+### Requirement: CLI reference start-flag table lists every flag
+
+`docs/src/cli-reference.md`'s start-flag table SHALL include
+every flag defined in `src/cli.rs::StartArgs`. Currently the
+table SHALL include (at minimum) `--cli`, `--branches`,
+`--dry-run`, `--preset`, `--from-all-specs`, `--specs`,
+`--specs-format`, `--supervisor`, `--no-supervisor`, and
+`--force`.
+
+#### Scenario: CLI reference includes --specs-format
+
+- **WHEN** the start-flag table in `docs/src/cli-reference.md` is inspected
+- **THEN** it contains the substring `--specs-format`
+
+#### Scenario: CLI reference includes --no-supervisor
+
+- **WHEN** the start-flag table in `docs/src/cli-reference.md` is inspected
+- **THEN** it contains the substring `--no-supervisor`
+
+#### Scenario: CLI reference includes --from-all-specs and --specs
+
+- **WHEN** the start-flag table in `docs/src/cli-reference.md` is inspected
+- **THEN** it contains the substring `--from-all-specs`
+- **AND** it contains the substring `--specs` (as a distinct flag, not as a prefix of `--specs-format`)
+
+#### Scenario: CLI reference includes --force
+
+- **WHEN** the start-flag table in `docs/src/cli-reference.md` is inspected
+- **THEN** it contains the substring `--force`

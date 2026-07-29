@@ -1148,3 +1148,58 @@ Suppression SHALL be scoped to identical `(agent_id, question)` pairs; a questio
 - **WHEN** agent `"feat-y"` publishes an `agent.question` with the identical text `"Which error type?"`
 - **THEN** the supervisor inbox holds both copies (one per agent)
 
+### Requirement: Coordination chapter uses the wire envelope shape
+
+`docs/src/user-guide/coordination.md` SHALL document the broker
+wire format using the canonical envelope
+`{"type": "agent.<variant>", "agent_id": "<slug>", "payload": {...}}`
+as defined in `src/broker/messages.rs`. The chapter SHALL NOT
+document the legacy v0.2 shape `{"agent_id": ..., "kind": ...,
+"body": ...}`. Every `agent_id` in an example SHALL be slug-valid
+(no slashes, no whitespace, lowercase alphanumeric + hyphen).
+
+#### Scenario: Coordination chapter uses the canonical envelope
+
+- **WHEN** `docs/src/user-guide/coordination.md` is inspected
+- **THEN** it contains the substring `"type": "agent.`
+- **AND** it contains the substring `"payload":`
+
+#### Scenario: Coordination chapter does not use the legacy kind/body shape
+
+- **WHEN** `docs/src/user-guide/coordination.md` is inspected
+- **THEN** it does NOT contain a JSON example using the
+  `"kind":` field as the variant discriminator
+- **AND** it does NOT contain a JSON example using the `"body":`
+  field as the payload carrier
+
+#### Scenario: Coordination chapter uses slug-valid agent IDs in examples
+
+- **WHEN** `docs/src/user-guide/coordination.md` is inspected
+- **THEN** every example `agent_id` value contains only
+  lowercase alphanumeric characters, digits, and hyphens
+- **AND** no example `agent_id` contains a `/` character
+
+### Requirement: Coordination chapter documents every message variant
+
+`docs/src/user-guide/coordination.md` SHALL provide a wire-form
+example for each of the seven shipped broker message variants
+(`agent.status`, `agent.artifact`, `agent.blocked`, `agent.intent`,
+`agent.question`, `agent.feedback`, `agent.verified`). The
+chapter SHALL note explicitly that `agent.status` and
+`agent.artifact` are published automatically (by the filesystem
+watcher and the post-commit git hook respectively) and that
+manual `curl` invocations for those variants are escape hatches.
+
+#### Scenario: Coordination chapter has examples for forward-coordination variants
+
+- **WHEN** the chapter is inspected
+- **THEN** it contains a wire-form example for `agent.intent`
+- **AND** it contains a wire-form example for `agent.question`
+- **AND** it contains a wire-form example for `agent.feedback`
+- **AND** it contains a wire-form example for `agent.verified`
+
+#### Scenario: Coordination chapter notes automatic publishing for status and artifact
+
+- **WHEN** the chapter is inspected
+- **THEN** it states that `agent.status` is published automatically by the filesystem watcher
+- **AND** it states that `agent.artifact` is published automatically by the post-commit git hook

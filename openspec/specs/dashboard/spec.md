@@ -672,3 +672,24 @@ when they arrive.
 - **THEN** the panel SHALL still show the N historical
   messages and SHALL continue to display new messages as they
   arrive after the watcher restart
+
+### Requirement: Dashboard chapter reflects the supervisor-as-pane state
+
+`docs/src/user-guide/dashboard.md` SHALL describe the dashboard
+in its current state: it lives in pane 1 of supervisor sessions,
+shows the agents status table, and does NOT include an
+interactive prompt inbox panel. The chapter SHALL NOT contain
+forward-looking statements claiming that v0.4 (or later) will add
+features that have since either shipped and been removed
+(prompt inbox) or shipped already (conflict detection,
+learnings mode).
+
+#### Scenario: Dashboard chapter does not promise v0.4 prompt inbox
+
+- **WHEN** `docs/src/user-guide/dashboard.md` is inspected
+- **THEN** it does NOT contain forward-looking text claiming v0.4 will add an interactive prompt inbox panel
+
+#### Scenario: Dashboard chapter places the dashboard at pane 1 in supervisor mode
+
+- **WHEN** `docs/src/user-guide/dashboard.md` is inspected
+- **THEN** any reference to the dashboard's pane location in supervisor mode states that it is at pane 1

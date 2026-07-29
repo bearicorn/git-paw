@@ -1430,3 +1430,16 @@ consistent with the existing commit-before-compact discipline.
   context bloat past the threshold and SHALL tie the agent's
   response back to the commit-before-compact discipline
 
+### Requirement: `docs/src/user-guide/coordination.md` SHALL mirror the skill's editing-phase structure
+
+The user-guide coordination chapter SHALL include a section that mirrors the bundled `assets/agent-skills/coordination.md`'s "Before you start editing" and "While you're editing" phased structure. The mirrored section SHALL include:
+
+- **Before you start editing**: read the spec, publish `agent.intent` listing files + summary + TTL, poll once for warnings, decide between wait/split/escalate on overlap.
+- **While you're editing**: re-publish intent if scope grows; on a peer's intent for a same-module file, send `agent.question` rather than racing; MUST NOT pairwise check-ins, MUST NOT wait for explicit go-ahead, MUST NOT block on broker silence.
+
+#### Scenario: Coordination user-guide mirrors the editing phases
+
+- **WHEN** `docs/src/user-guide/coordination.md` is inspected
+- **THEN** the content SHALL contain a heading approximately "Workflow phases" or "Before you start editing" or substantively equivalent
+- **AND** the section SHALL describe `agent.intent` publishing as the pre-edit step
+- **AND** SHALL describe re-publishing on scope growth as the mid-edit rule

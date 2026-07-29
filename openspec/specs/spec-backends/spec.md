@@ -851,3 +851,48 @@ The system SHALL skip plan files that cannot produce a `SpecEntry` — a fully-`
 - **THEN** the no-task file produces no `SpecEntry`
 - **AND** the other two plan files still produce their entries
 - **AND** the scan does not return an error
+
+### Requirement: README documents `[specs] type` accepts all three backends
+
+The README's configuration excerpt for the `[specs]` section SHALL
+document `type` as accepting `"openspec"`, `"markdown"`, AND
+`"speckit"`. The previous v0.4 listing of only `"openspec"` and
+`"markdown"` SHALL be replaced.
+
+#### Scenario: README specs example lists all three backends
+
+- **WHEN** the README's `[specs]` configuration excerpt is inspected
+- **THEN** it contains the substrings `"openspec"`, `"markdown"`, AND `"speckit"` as documented values of `type`
+
+### Requirement: Spec-driven launch chapter documents the Spec Kit backend
+
+`docs/src/user-guide/spec-driven-launch.md` SHALL include a
+section documenting the Spec Kit backend. The section SHALL
+cover:
+
+1. The `[specs] type = "speckit"` configuration value.
+2. The auto-detection rule: when `.specify/` exists at the
+   repository root and no `[specs]` configuration is set, the
+   system defaults to `type = "speckit"` and
+   `dir = ".specify/specs"`.
+3. A minimal worked example showing how `[P]` markers in
+   `tasks.md` decompose into per-task worktrees and how
+   non-`[P]` tasks consolidate into a single `phase/...`
+   worktree.
+4. A reference to the constitution auto-wiring into
+   `[governance]` (one sentence; the detail lives in
+   `configuration/README.md#governance` or similar).
+
+#### Scenario: Spec-driven launch chapter describes Spec Kit auto-detection
+
+- **WHEN** the Spec Kit section is inspected
+- **THEN** it contains the substring `.specify/` (the directory git-paw probes)
+- **AND** it documents the auto-detection behaviour
+
+#### Scenario: Spec-driven launch chapter explains [P] decomposition
+
+- **WHEN** the Spec Kit section is inspected
+- **THEN** it explains that `[P]` markers in `tasks.md`
+  decompose into per-task worktrees
+- **AND** it explains that non-`[P]` tasks consolidate into a
+  single `phase/...` worktree
