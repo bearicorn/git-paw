@@ -9,9 +9,16 @@ each wave's gate run the requirement→test map and `just coverage` and confirm 
 baseline with no scenario at zero tests before the wave's PR merges. Waves land in order;
 Wave 5 MUST NOT start until W1 (`cli-interaction-e2e`) is merged and green.
 
-## 0. Baseline
-- [ ] Record the pre-consolidation `just coverage` line-coverage number as the baseline for every subsequent gate
-- [ ] Snapshot the requirement→test map (scenario → covering test(s)) as the before-image for the traceability diff
+## 0. Baseline + net-first behavioral guards (trophy-style: cap before collapse)
+- [x] Baseline: `cargo llvm-cov --summary-only` line coverage = **59.21%** (raw, incl. TUI/dispatch coverage-exempt paths). Gate: no wave drops below this.
+- [x] Requirement→test map = the per-domain e2e-coverage assessment (STRONG/PARTIAL/GAP across the 12 namespaces) as the before-image.
+- [x] **Net guards built + committed (Priority-1/2 — the collapse-blockers):**
+  - `tests/superpowers_integration.rs` (6) — closes the spec- Superpowers **GAP**
+  - `tests/memory_isolation_integration.rs` (4) — closes the core-memory-isolation **GAP** + approval- out-of-worktree/scratch
+  - `tests/cli_resolution_integration.rs` (4) — CLI resolution chain (priorities 1–3 + custom-over-detected)
+  - `tests/session_logging_capture_integration.rs` (5) — logging capture on launch (pipe-pane + per-branch log)
+- [x] **Defect surfaced by net-first (routed, NOT fixed here — test-only change):** `[logging] enabled` wires capture only on the `--from-specs` path; bare `start` + supervisor produce no logs vs the unconditional `session-logging` spec. Decide wire-everywhere vs narrow-spec on the bug-fix track (memory: `project_session_logging_only_on_from_specs`).
+- [ ] Priority-3 guards (batch later): broker `/log`+`/watch`, core-error-handling stderr+exit2, core-governance-config `[governance]` load, cli-interactive-selection filter→mapping, boot supervisor-prepend, skill-standardized malformed-error.
 
 ## 1. Safe first wave (~120–135, risk none/low, zero sole-guard risk, zero W1 overlap)
 - [ ] `src/broker/messages.rs`: getter table (`agent_id_*` + `status_label_*`) + slugify table (drop `_deterministic` tautology) + advanced_main missing/blank + StatusPayload → table-driven (−33). **Grep the `BrokerMessage` variant set first** (cluster grew 14→16; ensure the table covers every variant)
