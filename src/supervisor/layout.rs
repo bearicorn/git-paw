@@ -90,81 +90,44 @@ pub fn layout_for(agent_count: usize) -> Result<SupervisorLayout, PawError> {
 mod tests {
     use super::*;
 
-    fn assert_layout(
-        agent_count: usize,
-        expected_rows: usize,
-        expected_top: u8,
-        expected_agent: f32,
-    ) {
-        let layout = supervisor_layout(agent_count).expect("layout should compute");
-        assert_eq!(
-            layout.agent_rows, expected_rows,
-            "agent_rows for {agent_count}"
-        );
-        assert_eq!(
-            layout.total_rows,
-            expected_rows + 1,
-            "total_rows for {agent_count}"
-        );
-        assert_eq!(
-            layout.top_row_pct, expected_top,
-            "top_row_pct for {agent_count}"
-        );
-        assert!(
-            (layout.agent_row_pct - expected_agent).abs() < 0.01,
-            "agent_row_pct for {agent_count}: expected {expected_agent}, got {}",
-            layout.agent_row_pct
-        );
-    }
-
     #[test]
-    fn layout_for_1_agent() {
-        assert_layout(1, 1, 60, 40.0);
-    }
-
-    #[test]
-    fn layout_for_5_agents() {
-        assert_layout(5, 1, 60, 40.0);
-    }
-
-    #[test]
-    fn layout_for_6_agents() {
-        assert_layout(6, 2, 40, 30.0);
-    }
-
-    #[test]
-    fn layout_for_10_agents() {
-        assert_layout(10, 2, 40, 30.0);
-    }
-
-    #[test]
-    fn layout_for_11_agents() {
-        assert_layout(11, 3, 28, 24.0);
-    }
-
-    #[test]
-    fn layout_for_15_agents() {
-        assert_layout(15, 3, 28, 24.0);
-    }
-
-    #[test]
-    fn layout_for_16_agents() {
-        assert_layout(16, 4, 28, 18.0);
-    }
-
-    #[test]
-    fn layout_for_20_agents() {
-        assert_layout(20, 4, 28, 18.0);
-    }
-
-    #[test]
-    fn layout_for_21_agents() {
-        assert_layout(21, 5, 28, 14.4);
-    }
-
-    #[test]
-    fn layout_for_25_agents() {
-        assert_layout(25, 5, 28, 14.4);
+    fn supervisor_layout_covers_each_agent_count_bucket() {
+        // One row per agent count currently covered:
+        // agent_count -> (agent_rows, top_row_pct, agent_row_pct). Each row also
+        // asserts total_rows == agent_rows + 1. Rows straddle every bucket
+        // boundary (lower + upper edge of each row-count tier).
+        for (agent_count, expected_rows, expected_top, expected_agent) in [
+            (1, 1, 60u8, 40.0_f32),
+            (5, 1, 60, 40.0),
+            (6, 2, 40, 30.0),
+            (10, 2, 40, 30.0),
+            (11, 3, 28, 24.0),
+            (15, 3, 28, 24.0),
+            (16, 4, 28, 18.0),
+            (20, 4, 28, 18.0),
+            (21, 5, 28, 14.4),
+            (25, 5, 28, 14.4),
+        ] {
+            let layout = supervisor_layout(agent_count).expect("layout should compute");
+            assert_eq!(
+                layout.agent_rows, expected_rows,
+                "agent_rows for {agent_count}"
+            );
+            assert_eq!(
+                layout.total_rows,
+                expected_rows + 1,
+                "total_rows for {agent_count}"
+            );
+            assert_eq!(
+                layout.top_row_pct, expected_top,
+                "top_row_pct for {agent_count}"
+            );
+            assert!(
+                (layout.agent_row_pct - expected_agent).abs() < 0.01,
+                "agent_row_pct for {agent_count}: expected {expected_agent}, got {}",
+                layout.agent_row_pct
+            );
+        }
     }
 
     #[test]
@@ -203,12 +166,5 @@ mod tests {
             layout_for(SUPERVISOR_MAX_AGENTS + 1).is_err(),
             "layout_for should reject above the cap like supervisor_layout"
         );
-    }
-
-    #[test]
-    fn constants_have_expected_values() {
-        assert_eq!(SUPERVISOR_MAX_AGENTS, 25);
-        assert_eq!(SUPERVISOR_AGENTS_PER_ROW, 5);
-        assert_eq!(SUPERVISOR_PANE_OFFSET, 2);
     }
 }

@@ -785,38 +785,20 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn status_symbol_working() {
-        assert_eq!(status_symbol("working"), "🔵");
-    }
-
-    #[test]
-    fn status_symbol_done() {
-        assert_eq!(status_symbol("done"), "🟢");
-    }
-
-    #[test]
-    fn status_symbol_verified() {
-        assert_eq!(status_symbol("verified"), "🟢");
-    }
-
-    #[test]
-    fn status_symbol_blocked() {
-        assert_eq!(status_symbol("blocked"), "🟡");
-    }
-
-    #[test]
-    fn status_symbol_committed() {
-        assert_eq!(status_symbol("committed"), "🟣");
-    }
-
-    #[test]
-    fn status_symbol_idle() {
-        assert_eq!(status_symbol("idle"), "⚪");
-    }
-
-    #[test]
-    fn status_symbol_unknown() {
-        assert_eq!(status_symbol("something-unexpected"), "⚪");
+    fn status_symbol_maps_each_label_to_its_symbol() {
+        // One row per status label -> symbol; the final row is the wildcard
+        // (any unrecognised label) case.
+        for (label, expected) in [
+            ("working", "🔵"),
+            ("done", "🟢"),
+            ("verified", "🟢"),
+            ("committed", "🟣"),
+            ("blocked", "🟡"),
+            ("idle", "⚪"),
+            ("something-unexpected", "⚪"),
+        ] {
+            assert_eq!(status_symbol(label), expected, "label: {label}");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -824,28 +806,18 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn format_age_zero_seconds() {
-        assert_eq!(format_age(Duration::from_secs(0)), "0s ago");
-    }
-
-    #[test]
-    fn format_age_thirty_seconds() {
-        assert_eq!(format_age(Duration::from_secs(30)), "30s ago");
-    }
-
-    #[test]
-    fn format_age_three_minutes() {
-        assert_eq!(format_age(Duration::from_mins(3)), "3m ago");
-    }
-
-    #[test]
-    fn format_age_one_hour_exact() {
-        assert_eq!(format_age(Duration::from_hours(1)), "1h 0m ago");
-    }
-
-    #[test]
-    fn format_age_one_hour_fifteen_minutes() {
-        assert_eq!(format_age(Duration::from_mins(75)), "1h 15m ago");
+    fn format_age_formats_each_duration_bucket() {
+        // One row per elapsed-duration bucket: sub-minute (seconds), minutes,
+        // and the hours+minutes composite (including the exact-hour edge).
+        for (elapsed, expected) in [
+            (Duration::from_secs(0), "0s ago"),
+            (Duration::from_secs(30), "30s ago"),
+            (Duration::from_mins(3), "3m ago"),
+            (Duration::from_hours(1), "1h 0m ago"),
+            (Duration::from_mins(75), "1h 15m ago"),
+        ] {
+            assert_eq!(format_age(elapsed), expected, "elapsed: {elapsed:?}");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1446,35 +1418,49 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn format_status_line_mixed() {
-        assert_eq!(
-            format_status_line(4, 2, 1, 1, 0),
-            "4 agents: 2 working, 1 done, 1 blocked, 0 committed"
-        );
-    }
-
-    #[test]
-    fn format_status_line_all_done() {
-        assert_eq!(
-            format_status_line(3, 0, 3, 0, 0),
-            "3 agents: 0 working, 3 done, 0 blocked, 0 committed"
-        );
-    }
-
-    #[test]
-    fn format_status_line_zero_agents() {
-        assert_eq!(
-            format_status_line(0, 0, 0, 0, 0),
-            "0 agents: 0 working, 0 done, 0 blocked, 0 committed"
-        );
-    }
-
-    #[test]
-    fn format_status_line_with_committed() {
-        assert_eq!(
-            format_status_line(5, 2, 1, 1, 1),
-            "5 agents: 2 working, 1 done, 1 blocked, 1 committed"
-        );
+    fn format_status_line_formats_each_count_mix() {
+        // One row per count mix: mixed, all-done, zero-agents, and with a
+        // non-zero committed tally.
+        for (total, working, done, blocked, committed, expected) in [
+            (
+                4,
+                2,
+                1,
+                1,
+                0,
+                "4 agents: 2 working, 1 done, 1 blocked, 0 committed",
+            ),
+            (
+                3,
+                0,
+                3,
+                0,
+                0,
+                "3 agents: 0 working, 3 done, 0 blocked, 0 committed",
+            ),
+            (
+                0,
+                0,
+                0,
+                0,
+                0,
+                "0 agents: 0 working, 0 done, 0 blocked, 0 committed",
+            ),
+            (
+                5,
+                2,
+                1,
+                1,
+                1,
+                "5 agents: 2 working, 1 done, 1 blocked, 1 committed",
+            ),
+        ] {
+            assert_eq!(
+                format_status_line(total, working, done, blocked, committed),
+                expected,
+                "input: total={total} working={working} done={done} blocked={blocked} committed={committed}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

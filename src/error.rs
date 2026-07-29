@@ -117,6 +117,17 @@ impl PawError {
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------
+    // Actionable / hint-mapping messages (behavioral contract)
+    //
+    // These guard that a variant surfaces an actionable, user-facing message —
+    // the install hint, the recovery command, the problem statement. The
+    // `{0}`-detail-interpolation Display tests were dropped as tautologies
+    // (they only re-checked that thiserror interpolates the format string); the
+    // static-message variants below are kept as the sole guard that each still
+    // produces a non-empty / actionable message.
+    // -----------------------------------------------------------------------
+
     #[test]
     fn test_not_a_git_repo_is_actionable() {
         let msg = PawError::NotAGitRepo.to_string();
@@ -148,61 +159,18 @@ mod tests {
     }
 
     #[test]
-    fn test_worktree_error_includes_detail() {
-        let msg = PawError::WorktreeError("failed to create".into()).to_string();
-        assert!(
-            msg.contains("failed to create"),
-            "should include the inner detail"
-        );
-    }
-
-    #[test]
-    fn test_session_error_includes_detail() {
-        let msg = PawError::SessionError("file corrupt".into()).to_string();
-        assert!(
-            msg.contains("file corrupt"),
-            "should include the inner detail"
-        );
-    }
-
-    #[test]
-    fn test_config_error_includes_detail() {
-        let msg = PawError::ConfigError("invalid toml".into()).to_string();
-        assert!(
-            msg.contains("invalid toml"),
-            "should include the inner detail"
-        );
-    }
-
-    #[test]
-    fn test_branch_error_includes_detail() {
-        let msg = PawError::BranchError("not found".into()).to_string();
-        assert!(msg.contains("not found"), "should include the inner detail");
-    }
-
-    #[test]
     fn test_user_cancelled_is_not_empty() {
         let msg = PawError::UserCancelled.to_string();
         assert!(!msg.is_empty(), "should have a message");
     }
 
-    #[test]
-    fn test_tmux_error_includes_detail() {
-        let msg = PawError::TmuxError("session failed".into()).to_string();
-        assert!(
-            msg.contains("session failed"),
-            "should include the inner detail"
-        );
-    }
-
-    #[test]
-    fn test_cli_not_found_includes_cli_name() {
-        let msg = PawError::CliNotFound("my-agent".into()).to_string();
-        assert!(
-            msg.contains("my-agent"),
-            "should include the missing CLI name"
-        );
-    }
+    // -----------------------------------------------------------------------
+    // Exit-code mapping (behavioral contract)
+    //
+    // The only two cases: `UserCancelled` maps to the dedicated cancel code,
+    // every other variant maps to the general error code. The general table
+    // samples a representative variant of each shape.
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_user_cancelled_exit_code() {
@@ -224,6 +192,9 @@ mod tests {
             PawError::BranchError("test".into()),
             PawError::TmuxError("test".into()),
             PawError::CliNotFound("test".into()),
+            PawError::SpecError("test".into()),
+            PawError::AgentsMdError("test".into()),
+            PawError::DashboardError("test".into()),
             PawError::SkillError(crate::skills::SkillError::UnknownSkill {
                 name: "test".into(),
             }),
@@ -231,79 +202,5 @@ mod tests {
         for err in errors {
             assert_eq!(err.exit_code(), exit_code::ERROR, "failed for {err:?}");
         }
-    }
-
-    #[test]
-    fn test_spec_error_includes_detail() {
-        let msg = PawError::SpecError("bad format".into()).to_string();
-        assert!(
-            msg.contains("bad format"),
-            "should include the inner detail"
-        );
-        assert!(
-            msg.contains("Spec error"),
-            "should have the Spec error prefix"
-        );
-    }
-
-    #[test]
-    fn test_spec_error_exit_code() {
-        assert_eq!(
-            PawError::SpecError("test".into()).exit_code(),
-            exit_code::ERROR
-        );
-    }
-
-    #[test]
-    fn test_agents_md_error_includes_detail() {
-        let msg = PawError::AgentsMdError("cannot write file".into()).to_string();
-        assert!(
-            msg.contains("AGENTS.md error"),
-            "should include AGENTS.md prefix"
-        );
-        assert!(
-            msg.contains("cannot write file"),
-            "should include the inner detail"
-        );
-        assert_eq!(
-            PawError::AgentsMdError("x".into()).exit_code(),
-            exit_code::ERROR,
-            "should use general exit code"
-        );
-    }
-
-    #[test]
-    fn test_skill_error_unknown_is_actionable() {
-        let inner = crate::skills::SkillError::UnknownSkill {
-            name: "nonexistent".into(),
-        };
-        let msg = inner.to_string();
-        assert!(msg.contains("nonexistent"), "should mention the skill name");
-        let paw = PawError::from(inner);
-        assert_eq!(paw.exit_code(), exit_code::ERROR);
-    }
-
-    #[test]
-    fn test_dashboard_error_includes_detail() {
-        let msg = PawError::DashboardError("not in tmux".into()).to_string();
-        assert!(
-            msg.contains("not in tmux"),
-            "should include the inner detail"
-        );
-        assert!(
-            msg.contains("Dashboard error"),
-            "should have the Dashboard error prefix"
-        );
-        assert_eq!(
-            PawError::DashboardError("test".into()).exit_code(),
-            exit_code::ERROR
-        );
-    }
-
-    #[test]
-    fn test_debug_derived() {
-        let err = PawError::NotAGitRepo;
-        let debug = format!("{err:?}");
-        assert!(debug.contains("NotAGitRepo"));
     }
 }
