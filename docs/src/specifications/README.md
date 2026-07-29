@@ -95,6 +95,9 @@ have no user-guide chapter: the spec itself is their documentation.
 - [`core-ci-hygiene`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/core-ci-hygiene/spec.md) — isolates the test suite from the live environment and closes the local-vs-CI gap via cold-start smoke recipes and convention-enforcement tests.
 - [`core-memory-isolation`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/core-memory-isolation/spec.md) — keeps coding agents from writing outside their worktree into the operator's config and memory territory via a config-driven protected-path set.
 - [`core-project-conventions`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/core-project-conventions/spec.md) — repo-wide contributor conventions and their doc accuracy: the AGENTS.md dependency table in sync with `Cargo.toml`, the commit-scope list, the mdBook architecture module list and changelog include, and the README's enumeration of the current user-facing surface.
+- [`core-governance-config`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/core-governance-config/spec.md) — `PawConfig.governance`: optional root-relative pointers to a project's governance/doc artifacts, paths-only with no gating semantics.
+- [`core-opsx-role-gating`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/core-opsx-role-gating/spec.md) — enforces the supervisor-only boundary on `/opsx:verify` and `/opsx:archive`, with a post-commit guard detecting archive activity by coding agents.
+- [`core-selftest`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/core-selftest/spec.md) — `git paw selftest` runs an isolated end-to-end session lifecycle against a throwaway repo with a dummy CLI and reports a single pass/fail verdict.
 
 ### cli-
 
@@ -137,6 +140,7 @@ have no user-guide chapter: the spec itself is their documentation.
 - [`supervisor-config`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-config/spec.md) — defines the `[supervisor]` config schema: approval level, nested sub-tables, gate-command templates, and `[supervisor.auto_approve]`.
 - [`supervisor-skill-discipline`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-skill-discipline/spec.md) — encodes the disciplines the bundled supervisor skill teaches: sweep-driven pane work, isolated verification worktrees, stream-timeout recovery, per-event verification, and the no-fail-fast testing gate.
 - [`supervisor-unattended-operation`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-unattended-operation/spec.md) — the in-process drive loop under `--unattended` that keeps a wave moving with no human: polling, auto-approving safe prompts, detecting completion, and exiting with a summary.
+- [`supervisor-learnings`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-learnings/spec.md) — an opt-in, broker-internal aggregator that derives deterministic and qualitative learning signals into `.git-paw/session-learnings.md` (and the `agent.learning` broker variant), performing no telemetry.
 
 ### approval-
 
@@ -146,24 +150,14 @@ have no user-guide chapter: the spec itself is their documentation.
 
 ### spec-
 
-- [`spec-backends`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/spec-backends/spec.md) — discovers pending specs and represents them as launchable `SpecEntry` values through a pluggable backend system (OpenSpec, Markdown, Spec Kit, superpowers plans).
+- [`spec-providers`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/spec-providers/spec.md) — discovers pending specs and represents them as launchable `SpecEntry` values through a pluggable backend system (OpenSpec, Markdown, Spec Kit, superpowers plans).
 
 ### mcp-
 
-- [`mcp`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/mcp/spec.md) — `git paw mcp` runs a stdio JSON-RPC MCP server exposing read-only, deterministically-sourced tools over a resolved repo/worktree root.
+- [`mcp-server`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/mcp-server/spec.md) — `git paw mcp` runs a stdio JSON-RPC MCP server exposing read-only, deterministically-sourced tools over a resolved repo/worktree root.
 - [`mcp-agent-docs`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/mcp-agent-docs/spec.md) — makes the docs site machine-consumable (`llms.txt`, sitemap, robots, per-page metadata) and bundles a path-allowlisted `docs-fetch` helper and skill.
-
-### governance-
-
-- [`governance-config`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/governance-config/spec.md) — `PawConfig.governance`: optional root-relative pointers to a project's governance/doc artifacts, paths-only with no gating semantics.
-- [`governance-opsx-role-gating`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/governance-opsx-role-gating/spec.md) — enforces the supervisor-only boundary on `/opsx:verify` and `/opsx:archive`, with a post-commit guard detecting archive activity by coding agents.
 
 ### skill-
 
 - [`skill-agent`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/skill-agent/spec.md) — defines the embedded coordination and supervisor skill templates git-paw injects, their resolution order (user override then embedded default), and the placeholder-rendering contract.
 - [`skill-standardized`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/skill-standardized/spec.md) — supports the agentskills.io standardized skill format (a `SKILL.md` directory): auto-detecting, loading, and schema-validating it with actionable errors.
-
-### quality-
-
-- [`quality-learnings`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/quality-learnings/spec.md) — an opt-in, broker-internal aggregator that derives deterministic and qualitative learning signals into `.git-paw/session-learnings.md` (and the `agent.learning` broker variant), performing no telemetry.
-- [`quality-selftest`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/quality-selftest/spec.md) — `git paw selftest` runs an isolated end-to-end session lifecycle against a throwaway repo with a dummy CLI and reports a single pass/fail verdict.

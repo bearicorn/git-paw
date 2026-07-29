@@ -1,4 +1,4 @@
-# quality-learnings Specification
+# supervisor-learnings Specification
 
 ## Purpose
 An opt-in, broker-internal aggregator (active only under supervisor mode with `learnings = true`) that observes broker messages to derive both deterministic signals — stuck-duration, recovery-cycle, conflict-event, and permission-pattern — and qualitative, judgment-based signals the supervisor publishes through the `sweep.sh learn` helper (recurring_failure_shape, doc_gap, adr_drift, scope_mistake, tooling_friction). It appends them under per-session, per-category headings in a local `.git-paw/session-learnings.md`, flushing periodically and on shutdown, performing no telemetry, and printing a privacy disclosure at session start.
@@ -254,7 +254,7 @@ The system SHALL recognise four new `agent.learning` category
 values: `recurring_failure_shape`, `doc_gap`, `adr_drift`, and
 `scope_mistake`. These values SHALL be carried on the existing
 `agent.learning` broker variant without any wire-format change;
-[[quality-learnings]]'s open-enum contract makes the
+[[supervisor-learnings]]'s open-enum contract makes the
 additions transparent to the broker.
 
 #### Scenario: Broker routes a recurring_failure_shape record
@@ -333,7 +333,7 @@ primary identifier (`shape`, `convention`, `decision_area`, or
 
 - **GIVEN** an exact-duplicate publish within an hour
 - **WHEN** the broker accepts the duplicate
-- **THEN** the deterministic `id` from [[quality-learnings]]
+- **THEN** the deterministic `id` from [[supervisor-learnings]]
   SHALL produce identical ids so broker consumers can dedupe at
   their boundary, even when the skill-level dedup misses
 
@@ -448,7 +448,7 @@ caller (the skill documents the per-category body).
 
 The system SHALL recognise a fifth `agent.learning` category value
 `tooling_friction`, carried on the existing `agent.learning` broker variant
-with no wire-format change ([[quality-learnings]]'s open-enum contract
+with no wire-format change ([[supervisor-learnings]]'s open-enum contract
 makes the addition transparent). The category SHALL capture friction the
 supervisor absorbs about git-paw *itself* — a tool behaviour that made the
 supervisor repeat work or work around the tool — as distinct from the four
@@ -583,7 +583,7 @@ structured object), and `timestamp` (ISO 8601 UTC).
 
 #### Scenario: Broker accepts a category from a descendant change
 
-- **GIVEN** a descendant change ([[quality-learnings]]) adds
+- **GIVEN** a descendant change ([[supervisor-learnings]]) adds
   a new category value
 - **WHEN** the aggregator publishes a record with the new
   category
@@ -678,7 +678,7 @@ The MCP get_learnings tool SHALL prefer broker records when the
 broker is running and SHALL fall back to parsing the learnings
 file when the broker is off. The tool's response SHALL include a
 `source` field indicating which path produced the records. This
-applies to the `get_learnings()` tool defined in [[mcp]]'s
+applies to the `get_learnings()` tool defined in [[mcp-server]]'s
 `mcp-read-tools` capability.
 
 #### Scenario: Broker-running mode returns broker records

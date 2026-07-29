@@ -454,7 +454,7 @@ present on their status.
 
 ### Requirement: MCP get_session_status includes introspection
 
-The MCP `get_session_status()` tool from [[mcp]] SHALL
+The MCP `get_session_status()` tool from [[mcp-server]] SHALL
 populate `phase` and `detail` for the supervisor sub-record
 from the latest supervisor `agent.status` message. The fields
 SHALL be omitted (or null) when the supervisor has not
@@ -540,7 +540,7 @@ existence or shape beyond its presence as a string.
 
 The system SHALL produce a deterministic `id` for each
 `agent.advanced-main` record using the same hashing pattern as
-`agent.learning` from [[quality-learnings]]. The canonical
+`agent.learning` from [[supervisor-learnings]]. The canonical
 input SHALL include `merged_branch`, `new_main_sha`, `base`,
 and the UTC hour bucket. Re-publishing the same merge within
 the same hour SHALL produce an identical id.
