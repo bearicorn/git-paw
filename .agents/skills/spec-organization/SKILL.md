@@ -1,6 +1,6 @@
 ---
 name: spec-organization
-description: Keep the OpenSpec capability set lean, domain-grouped, traceable, and readable as documentation — the Gate-3 spec audit. Use when authoring a new capability, archiving a change, consolidating or auditing specs, or preparing the contract for a release freeze. Covers capability granularity, contract-preserving verbatim reorganization, RFC-2119 and GIVEN/WHEN/THEN authoring, the requirement-to-test traceability doctrine, the docs include-coupling, and the errors a pre-freeze audit must catch.
+description: Keep the OpenSpec capability set lean, namespaced by concern, traceable, and readable as documentation — the Gate-3 spec audit. Use when authoring a new capability, archiving a change, consolidating or auditing specs, or preparing the contract for a release freeze. Covers capability granularity and the `<namespace>-<sub>` naming convention, the per-feature-distributes / cross-cutting-centralizes-in-core discipline, contract-preserving verbatim reorganization, RFC-2119 and GIVEN/WHEN/THEN authoring, the requirement-to-test traceability doctrine, the docs include-coupling, and the errors a pre-freeze audit must catch.
 license: MIT
 compatibility: git-paw
 ---
@@ -12,15 +12,39 @@ release freeze. The specs under `openspec/specs/` ARE the contract v1.0.0 freeze
 the Specifications docs, so they must stay lean, coherent, traceable, and error-free. This skill is
 **Gate-3 (spec audit)** of the five-gate framework.
 
-## 1. Capability granularity — group by how a consumer reads
+## 1. Capability granularity and namespacing — group by concern
 
 - **One change ≠ one permanent capability.** Don't leave single-requirement residue behind each
   archived change. The capability set should read like a domain map, not a changelog.
 - **Merge when:** a capability is single-requirement residue, or a tight cluster is split finer than
-  any consumer reads it (e.g. broker, supervisor, approval/allowlist, spec backends, boot-block).
+  any consumer reads it.
 - **Keep separate when:** the capability is a load-bearing design principle with its own CI audit
-  (e.g. `lang-agnostic-skills`), or a genuinely distinct domain a reader would look up on its own.
-- **Name for the domain**, not the change that birthed it. Target a set a newcomer can navigate.
+  (e.g. `core-lang-agnostic`), or a genuinely distinct domain a reader would look up on its own.
+- **Name every capability `<namespace>-<sub>`** by concern (git-paw's namespaces: `core- cli- git-
+  tmux- session- boot- broker- supervisor- approval- spec- mcp- skill-`). The set then reads as
+  "N namespaces × a few caps," not a flat list. Two rules:
+  - **No cap name may equal its namespace** — a bare `mcp` in the `mcp-` namespace becomes
+    `mcp-server`; every cap carries a distinguishing sub-word.
+  - **Put a capability in the namespace of the subsystem it belongs to**, not the one that happens to
+    launch it (e.g. `broker-conflict-detection` + `broker-dashboard` run on / view broker state, even
+    though the supervisor drives them).
+
+### The distribution vs centralization discipline (what belongs in `core-`)
+
+The hardest calls are *cross-cutting* concerns. The rule:
+
+- **Per-feature CONTENT distributes** into the feature's own domain. Documentation is the archetype —
+  there is no `docs-` domain; each capability's doc requirements live *with that capability*. If a
+  "capability" is really a grab-bag of per-feature assertions (git-paw's old `user-documentation`),
+  dissolve it and distribute the requirements to the domains they describe.
+- **Cross-cutting MECHANISMS, INVARIANTS, and POLICY centralize** in `core-` — the shared plumbing
+  every domain depends on: configuration, error types, the export-agnosticism principle, test/CI
+  hygiene, memory isolation, repo conventions, governance/role-gating. Stated once, not scattered.
+- **A runtime FEATURE is never `core-`.** If git-paw *does* it — produces output, exposes a
+  tool/command a user invokes — it's a feature domain even when it feels foundational (e.g. `learnings`
+  is observability the supervisor runs → `supervisor-learnings`, not `core-`).
+- **Litmus:** *would a reader look this up as a feature, or is it plumbing/convention/policy that's
+  true everywhere?* Feature → its own domain. Plumbing/convention/policy → `core-`.
 
 ## 2. Contract-preserving reorganization
 
@@ -50,9 +74,11 @@ the Specifications docs, so they must stay lean, coherent, traceable, and error-
 
 - The docs Specifications page `{{#include}}`s spec files **by path** — any rename or merge breaks
   `mdbook build`. Fix the includes in the same wave as the merge; keep the build green at every commit.
-- Prefer a **domain-grouped, Purpose-led index** aligned 1:1 with the capabilities over a flat A–Z
-  link list or a version-era "foundational N" split. Prefer a generated index over a hand-maintained
-  one (hand-maintained drifts; add an anti-drift convention test if you must hand-author it).
+- Prefer a **namespace-grouped, Purpose-led index** — one section per namespace, aligned 1:1 with the
+  capabilities — over a flat A–Z link list or a version-era "foundational N" split. Prefer a generated
+  index over a hand-maintained one (hand-maintained drifts; if you hand-author it, add an anti-drift
+  convention test asserting every `openspec/specs/` dir appears on the page, per
+  `tests/specifications_page_lists_every_capability.rs`).
 - Keep specs (the contract) distinct from `user-guide/` (how-to); cross-link the two.
 
 ## 5. Errors a pre-freeze audit must catch (Gate-3)
