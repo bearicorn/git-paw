@@ -488,7 +488,7 @@ The system SHALL validate `Question` messages via the existing `from_json` valid
 - `agent_id` violates the existing slug rules (empty, whitespace-only, contains characters outside the slug character set).
 - `payload.question` is empty or contains only whitespace after trimming.
 
-`payload.question` length is unbounded in v0.5.0; long questions are accepted as-is (matching the shipped `MessageError::EmptyQuestionField` validation behaviour).
+`payload.question` length is unbounded; long questions are accepted as-is (matching the shipped `MessageError::EmptyQuestionField` validation behaviour).
 
 #### Scenario: Empty question is rejected
 

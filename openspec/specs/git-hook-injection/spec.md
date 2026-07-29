@@ -141,7 +141,7 @@ wrong branch's ref when it commits.
 
 The post-commit hook SHALL emit an `agent.learning` record
 with category `permission_pattern` (per
-[[learnings]]) whenever a branch mismatch is
+[[quality-learnings]]) whenever a branch mismatch is
 detected. The body SHALL include the expected branch, the
 actually-advanced branch, the commit SHA, and a one-line
 description. This pre-figures the qualitative-learning

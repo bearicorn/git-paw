@@ -22,7 +22,7 @@ The system SHALL implement `cmd_supervisor()` in `src/main.rs` that orchestrates
 13. **Self-register the supervisor in the broker** via an HTTP POST publishing `agent.status` with `agent_id = "supervisor"`, `status = "working"`, `message = "Supervisor booting"`.
 14. Save session state.
 15. **Branch on `--unattended`:**
-    - When `--unattended` is **absent**: **print an attach-hint and return `Ok(())`**: `cmd_supervisor()` does NOT block on a foreground supervisor CLI. The user runs `tmux attach -t paw-<project>` to interact with the supervisor pane. (v0.5.0 behaviour, unchanged.)
+    - When `--unattended` is **absent**: **print an attach-hint and return `Ok(())`**: `cmd_supervisor()` does NOT block on a foreground supervisor CLI. The user runs `tmux attach -t paw-<project>` to interact with the supervisor pane. (existing behaviour, unchanged.)
     - When `--unattended` is **present**: instead of returning immediately, `cmd_supervisor()` SHALL run the in-process unattended drive loop (per the `unattended-operation` capability) which blocks until a completion, escalation-summary, stuck, or heartbeat exit condition is reached, then prints the exit summary and returns. The drive loop SHALL NOT require an attached interactive terminal. The unattended path SHALL NOT replace the foreground terminal with an interactive supervisor CLI.
 
 The Rust merge loop SHALL NOT be invoked from `cmd_supervisor`. Merge orchestration is supervisor-skill territory (see the `agent-skills` capability and the "Merge orchestration" requirement on the supervisor skill).
@@ -328,7 +328,7 @@ The supervisor pane and dashboard pane SHALL continue to spawn in the repo root 
 
 #### Scenario: Supervisor-mode recovery places each agent pane in its worktree
 
-- **GIVEN** a stopped supervisor-mode session with the v0.5 layout (supervisor / dashboard / agent grid)
+- **GIVEN** a stopped supervisor-mode session with the standard layout (supervisor / dashboard / agent grid)
 - **AND** two coding agents in worktrees `/path/to/repo-feat-a` and `/path/to/repo-feat-b`
 - **WHEN** `git paw start` resumes the session
 - **THEN** the supervisor pane (`0.0`) and dashboard pane (`0.1`) have `pane_current_path = /path/to/repo` (the repo root)
