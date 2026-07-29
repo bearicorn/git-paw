@@ -1,4 +1,4 @@
-# governance-opsx-role-gating Specification
+# core-opsx-role-gating Specification
 
 ## Purpose
 Enforces the supervisor-only boundary on `/opsx:verify` and `/opsx:archive` under the OpenSpec engine: bundled skills name these forbidden commands, and a post-commit guard detects archive-activity commits by coding agents (via message or diff shape) to warn, learn, or request a supervisor revert per the configured mode.

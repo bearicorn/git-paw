@@ -1,4 +1,4 @@
-# spec-backends Specification
+# spec-providers Specification
 
 ## Purpose
 

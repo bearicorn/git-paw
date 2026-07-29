@@ -1,4 +1,4 @@
-# mcp Specification
+# mcp-server Specification
 
 ## Purpose
 A `git paw mcp` subcommand that runs a stdio JSON-RPC MCP server exposing read-only, deterministically-sourced tools (never invoking an agent CLI as an inference backend) over a resolved repository/worktree root — advertising a schema-carrying tool registry and git-paw server identity, keeping stdout reserved for protocol frames with logging on stderr, and distinguishing graceful empty/null degradation from hard errors on malformed configuration — together with the read-only tool set it advertises: coordination (intents/conflicts), governance docs, project knowledge (specs/tasks/skills), session state, git context, documentation, and source/file tools, each with a JSON Schema and deterministic, path-confined reads that degrade gracefully to empty arrays or null when their data source is absent and refuse path traversal or gitignored reads outside the repository/docs roots.
@@ -451,7 +451,7 @@ recent session's state. The category SHALL include
 `get_session_status`, `get_session_summary`, and `get_learnings`.
 The tools SHALL read from `.git-paw/sessions/*.json` and
 `.git-paw/session-learnings.md` (the file produced by
-[[quality-learnings]] in v0.5.0).
+[[supervisor-learnings]] in v0.5.0).
 
 #### Scenario: get_session_status returns the active session summary
 
