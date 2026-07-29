@@ -238,7 +238,7 @@ identified by its `phase` value rather than a `status` label — consumers route
 it by reading `phase`, consistent with the introspection phase taxonomy. This
 supersedes the earlier requirement that the documented shape carry
 `status: "checkpoint"`: routing every supervisor `agent.status` through the
-bundled helper ([[agent-broker-helper]], [[broker-watcher-and-state]]) is the
+bundled helper ([[broker-agent-helper]], [[broker-watcher-and-state]]) is the
 governing constraint, and the helper does not emit a `checkpoint` status label.
 
 #### Scenario: Checkpoint shape is documented

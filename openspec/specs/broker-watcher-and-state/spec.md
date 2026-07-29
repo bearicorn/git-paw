@@ -540,7 +540,7 @@ existence or shape beyond its presence as a string.
 
 The system SHALL produce a deterministic `id` for each
 `agent.advanced-main` record using the same hashing pattern as
-`agent.learning` from [[learnings]]. The canonical
+`agent.learning` from [[quality-learnings]]. The canonical
 input SHALL include `merged_branch`, `new_main_sha`, `base`,
 and the UTC hour bucket. Re-publishing the same merge within
 the same hour SHALL produce an identical id.
@@ -601,7 +601,7 @@ advances" subsection teaching coding agents:
 
 ### Requirement: Variant flows through dashboard automatically
 
-The dashboard's [[dashboard]] panel SHALL render
+The dashboard's [[broker-dashboard]] panel SHALL render
 `agent.advanced-main` events without any code change to the
 log panel — the existing watcher feed delivers the variant to
 the ring buffer like any other message type. The filter-chip

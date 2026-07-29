@@ -451,7 +451,7 @@ recent session's state. The category SHALL include
 `get_session_status`, `get_session_summary`, and `get_learnings`.
 The tools SHALL read from `.git-paw/sessions/*.json` and
 `.git-paw/session-learnings.md` (the file produced by
-[[learnings]] in v0.5.0).
+[[quality-learnings]] in v0.5.0).
 
 #### Scenario: get_session_status returns the active session summary
 
