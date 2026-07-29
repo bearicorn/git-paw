@@ -1,6 +1,6 @@
 ---
 name: test-strategy
-description: Decide the right test type for a git-paw behavior and write it so it survives refactors. Use when adding, reviewing, or consolidating tests — it maps each OpenSpec scenario or behavior to the correct layer (unit table / integration / e2e-PTY / asset-parity), enforces behavioral-only assertions, and lists the anti-patterns (source-grep, per-field batteries, brittle prose pins, fixed sleeps) to avoid.
+description: Decide the right test type for a git-paw behavior and write it so it survives refactors. Use when adding, reviewing, or consolidating tests — it maps each OpenSpec scenario or behavior to the correct layer (unit table / integration / e2e-PTY / asset-parity), enforces behavioral-only assertions, lists the anti-patterns (source-grep, per-field batteries, brittle prose pins, fixed sleeps) to avoid, and — when consolidating a suite — applies the net-first discipline (establish each domain's behavioral guard before collapsing units into it).
 license: MIT
 compatibility: git-paw (Rust, cargo, tmux, OpenSpec)
 ---
@@ -35,8 +35,12 @@ Ask: **what is the smallest layer at which this behavior is observable?** Test t
 
 Prefer the **lowest** layer that still observes the behavior: it is faster and less flaky.
 Do **not** push pure logic up into e2e "to be realistic" — that just makes the suite slow
-and brittle. The pyramid stays wide at the bottom (fast unit tables) with a thin behavioral
-cap (integration + e2e).
+and brittle. Keep the base wide with fast unit tables. But because git-paw is an
+**orchestration tool**, most real behavior (tmux, broker, subprocess, git hooks) only manifests
+at the integration/e2e layer — so the behavioral cap there is not a thin formality; it carries
+the real confidence (a "trophy" shape fattened at integration, not a tall thin pyramid). The
+rule is: **match the layer to the thing** — pure logic → the unit base; system behavior → the
+integration/e2e cap.
 
 ## Step 2 — Write it robustly
 
@@ -69,9 +73,33 @@ marker) or keyword-sets — never a full exact substring of a bundled asset, whi
 any wording edit. `sweep_sh_*` guards the *shipped bash artifact*, a different artifact from
 the Rust classifier — it is a sole guard, not a duplicate.
 
-## Step 3 — Classifying an EXISTING test (consolidation)
+## Step 3 — Consolidating a suite (net-first)
 
-When restructuring the suite, route every test to exactly one outcome:
+You are refactoring the *tests*, so the suite cannot be its own safety net — deleting the sole
+guard of a branch fails silently. Before you collapse anything in a domain, **establish or verify
+that domain's behavioral guard first**: the integration/e2e cap at the domain seam (bounded
+context) that pins the observable contract. This is characterization-testing discipline — net
+first, then refactor beneath it.
+
+**Triage each domain before cutting:**
+- **STRONG** — a solid integration/e2e guard already exercises the domain's key flows → collapse
+  the redundant units into it now.
+- **PARTIAL / GAP** — no trustworthy behavioral guard for a flow → **build that guard first**, then
+  collapse. Never collapse beneath a gap.
+- **Exception:** behavior-neutral **table-ifications** (pure-logic units → one table, every case a
+  row) preserve every assertion, so they need no new net — gate them on coverage alone.
+
+**Why the domain seam:** one integration test at a module/bounded-context boundary exercises many
+internal paths at once, so it is the highest-confidence-per-test guard and the natural home for
+the cap (git-paw's namespaces are those seams).
+
+**The gate.** Coverage ≥ the pre-consolidation baseline is a regression **floor, not a target** (a
+target invites gaming — Goodhart's law); it catches a cut that silently drops a real branch.
+Coverage only proves a line *ran*, not that a test would *catch* a bug in it — so on risky cuts
+(broker routing/messages) add a `cargo-mutants` spot-check: the retained tests must still kill the
+mutants the deleted ones killed.
+
+Then route every remaining test to exactly one outcome:
 
 - **delete** — tautologies (`derive` works, a getter round-trips, `assert!(file_I_wrote.exists())`).
 - **table-ify** — one-test-per-{variant, field, flag} batteries → a single table test.
@@ -84,8 +112,7 @@ When restructuring the suite, route every test to exactly one outcome:
   test, or a prose-only scenario. Rewrite to stable anchors if brittle; **never delete**.
 
 Rule: a removal that drops coverage on a real branch means a sole guard was cut — restore it
-(as a table row if needed). Gate consolidation on coverage ≥ baseline and, for risky broker
-cuts, a `cargo-mutants` spot-check.
+(as a table row if needed).
 
 ## Anti-patterns — never write these
 
