@@ -59,7 +59,7 @@ fn cmd_iso(fake_home: &Path, tmux_env: &TmuxTestEnv) -> Command {
     c
 }
 
-/// Writes a `.git-paw/config.toml` enabling session logging, the OpenSpec
+/// Writes a `.git-paw/config.toml` enabling session logging, the `OpenSpec`
 /// backend, and an `echo` fake CLI. Broker + supervisor omitted so the launch
 /// dispatches to the bare from-specs path (no dashboard pane, pane offset 0).
 fn write_logging_specs_config(repo: &Path) {
@@ -80,7 +80,7 @@ display_name = "Echo"
     std::fs::write(paw_dir.join("config.toml"), config).expect("write config");
 }
 
-/// Creates a pending OpenSpec change at `<repo>/openspec/changes/<id>/tasks.md`.
+/// Creates a pending `OpenSpec` change at `<repo>/openspec/changes/<id>/tasks.md`.
 fn write_spec(repo: &Path, id: &str) {
     let change_dir = repo.join("openspec/changes").join(id);
     std::fs::create_dir_all(&change_dir).expect("create change dir");
@@ -114,8 +114,8 @@ fn parse_session_name(stdout: &str) -> String {
             line.strip_prefix("Session '")
                 .and_then(|rest| rest.split('\'').next())
         })
-        .map(str::to_string)
         .unwrap_or_else(|| panic!("could not parse session name from launch stdout:\n{stdout}"))
+        .to_string()
 }
 
 /// Polls the filesystem until `path` exists or the timeout elapses. The gate
