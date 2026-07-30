@@ -703,118 +703,164 @@ mod tests {
         assert!(errors_msgs.is_empty());
     }
 
+    // Broadcast routing (artifact / verified / intent): a broadcast reaches
+    // every *other* registered peer, skips its sender, and never mints an inbox
+    // for an unregistered agent. One row per (kind, scenario); each row asserts
+    // the same `poll_messages` recipient outcome its former standalone test
+    // asserted. `Verified` carries its sender in `payload.verified_by`,
+    // `Artifact`/`Intent` in the top-level agent_id — the builder hides that so
+    // the driver treats every kind by "who is the sender".
     #[test]
-    fn artifact_broadcast_to_all_peers() {
-        let state = fresh_state();
-        publish_message(&state, &make_status("feat-errors", "working"));
-        publish_message(&state, &make_status("feat-detect", "working"));
-        publish_message(&state, &make_status("feat-config", "working"));
+    fn broadcast_routing_reaches_peers_skips_sender_and_unregistered() {
+        enum Scenario {
+            ReachesAllPeers,
+            SkipsSender,
+            SkipsUnregistered,
+        }
+        use Scenario::{ReachesAllPeers, SkipsSender, SkipsUnregistered};
 
-        publish_message(&state, &make_artifact("feat-errors", "done", &[]));
+        type Build = fn(&str) -> BrokerMessage;
+        let artifact: Build = |sender| make_artifact(sender, "done", &[]);
+        let verified: Build = |sender| make_verified("feat-target", sender, None);
+        let intent: Build = |sender| make_intent(sender, &["src/a.rs"], "wire it", 600);
 
-        let (detect_msgs, _) = poll_messages(&state, "feat-detect", 0);
-        let (config_msgs, _) = poll_messages(&state, "feat-config", 0);
-        assert_eq!(detect_msgs.len(), 1);
-        assert_eq!(config_msgs.len(), 1);
+        // (kind, scenario, message-builder). Preserves every original
+        // (kind, scenario) pair; `verified` has no unregistered-agent case in
+        // the original suite, so it has no such row.
+        let cases: &[(&str, Scenario, Build)] = &[
+            ("artifact", ReachesAllPeers, artifact),
+            ("artifact", SkipsSender, artifact),
+            ("artifact", SkipsUnregistered, artifact),
+            ("verified", ReachesAllPeers, verified),
+            ("verified", SkipsSender, verified),
+            ("intent", ReachesAllPeers, intent),
+            ("intent", SkipsSender, intent),
+            ("intent", SkipsUnregistered, intent),
+        ];
+
+        let sender = "feat-sender";
+        for (kind, scenario, build) in cases {
+            match scenario {
+                ReachesAllPeers => {
+                    let state = fresh_state();
+                    for a in [sender, "feat-p1", "feat-p2"] {
+                        publish_message(&state, &make_status(a, "working"));
+                    }
+                    publish_message(&state, &build(sender));
+                    for peer in ["feat-p1", "feat-p2"] {
+                        let (msgs, _) = poll_messages(&state, peer, 0);
+                        assert_eq!(
+                            msgs.len(),
+                            1,
+                            "{kind}/reaches-all-peers: {peer} receives the broadcast"
+                        );
+                    }
+                }
+                SkipsSender => {
+                    let state = fresh_state();
+                    for a in [sender, "feat-p1"] {
+                        publish_message(&state, &make_status(a, "working"));
+                    }
+                    publish_message(&state, &build(sender));
+                    let (own, _) = poll_messages(&state, sender, 0);
+                    assert!(
+                        own.is_empty(),
+                        "{kind}/skips-sender: the sender's own inbox stays empty"
+                    );
+                }
+                SkipsUnregistered => {
+                    let state = fresh_state();
+                    publish_message(&state, &make_status(sender, "working"));
+                    publish_message(&state, &build(sender));
+                    let inner = state.read();
+                    assert!(
+                        !inner.queues.contains_key("feat-unregistered"),
+                        "{kind}/skips-unregistered: no inbox is minted for an unregistered agent"
+                    );
+                }
+            }
+        }
     }
 
+    // Targeted routing (blocked / feedback / answer): the message lands only in
+    // its target's inbox, never in a bystander's, and is silently dropped when
+    // the target is unregistered (only `blocked` has the unregistered case in
+    // the original suite). `Blocked` routes to `payload.from`; `Feedback` /
+    // `Answer` to the envelope agent_id — the builder hides that so the driver
+    // treats every kind by "who is the target". One row per (kind, scenario);
+    // each asserts the same `poll_messages` outcome its former standalone test
+    // asserted.
     #[test]
-    fn artifact_broadcast_skips_sender() {
-        let state = fresh_state();
-        publish_message(&state, &make_status("feat-errors", "working"));
-        publish_message(&state, &make_status("feat-detect", "working"));
+    fn targeted_routing_delivers_to_target_only() {
+        enum Scenario {
+            DeliveredToTarget,
+            NotToOthers,
+            UnregisteredDropped,
+        }
+        use Scenario::{DeliveredToTarget, NotToOthers, UnregisteredDropped};
 
-        publish_message(&state, &make_artifact("feat-errors", "done", &[]));
+        type Build = fn(&str) -> BrokerMessage;
+        let blocked: Build = |target| make_blocked("feat-src", "error types", target);
+        let feedback: Build = |target| make_feedback(target, "supervisor", &["test failed"]);
+        let answer: Build = |target| make_answer(target, "supervisor", "use rs256");
 
-        let (errors_msgs, _) = poll_messages(&state, "feat-errors", 0);
-        assert!(errors_msgs.is_empty());
-    }
+        let cases: &[(&str, Scenario, Build)] = &[
+            ("blocked", DeliveredToTarget, blocked),
+            ("blocked", NotToOthers, blocked),
+            ("blocked", UnregisteredDropped, blocked),
+            ("feedback", DeliveredToTarget, feedback),
+            ("feedback", NotToOthers, feedback),
+            ("answer", DeliveredToTarget, answer),
+            ("answer", NotToOthers, answer),
+        ];
 
-    #[test]
-    fn artifact_broadcast_skips_unregistered_agents() {
-        let state = fresh_state();
-        publish_message(&state, &make_status("feat-errors", "working"));
-
-        publish_message(&state, &make_artifact("feat-errors", "done", &[]));
-
-        let inner = state.read();
-        assert!(!inner.queues.contains_key("feat-detect"));
-    }
-
-    #[test]
-    fn blocked_delivered_to_target() {
-        let state = fresh_state();
-        publish_message(&state, &make_status("feat-config", "working"));
-        publish_message(&state, &make_status("feat-errors", "working"));
-
-        publish_message(
-            &state,
-            &make_blocked("feat-config", "error types", "feat-errors"),
-        );
-
-        let (errors_msgs, _) = poll_messages(&state, "feat-errors", 0);
-        assert_eq!(errors_msgs.len(), 1);
-        assert_eq!(errors_msgs[0].agent_id(), "feat-config");
-    }
-
-    #[test]
-    fn blocked_not_delivered_to_other_agents() {
-        let state = fresh_state();
-        publish_message(&state, &make_status("feat-config", "working"));
-        publish_message(&state, &make_status("feat-errors", "working"));
-        publish_message(&state, &make_status("feat-detect", "working"));
-
-        publish_message(
-            &state,
-            &make_blocked("feat-config", "error types", "feat-errors"),
-        );
-
-        let (detect_msgs, _) = poll_messages(&state, "feat-detect", 0);
-        assert!(detect_msgs.is_empty());
-    }
-
-    #[test]
-    fn blocked_to_unregistered_target_silently_dropped() {
-        let state = fresh_state();
-        publish_message(&state, &make_status("feat-config", "working"));
-
-        publish_message(
-            &state,
-            &make_blocked("feat-config", "error types", "feat-errors"),
-        );
-
-        let inner = state.read();
-        assert!(!inner.queues.contains_key("feat-errors"));
+        let target = "feat-target";
+        for (kind, scenario, build) in cases {
+            match scenario {
+                DeliveredToTarget => {
+                    let state = fresh_state();
+                    publish_message(&state, &make_status(target, "working"));
+                    publish_message(&state, &make_status("supervisor", "working"));
+                    publish_message(&state, &build(target));
+                    let (msgs, _) = poll_messages(&state, target, 0);
+                    assert_eq!(
+                        msgs.len(),
+                        1,
+                        "{kind}/delivered-to-target: target receives exactly one"
+                    );
+                    assert_eq!(
+                        msgs[0].status_label(),
+                        *kind,
+                        "{kind}/delivered-to-target: the delivered message is of the right kind"
+                    );
+                }
+                NotToOthers => {
+                    let state = fresh_state();
+                    for a in [target, "feat-other", "supervisor"] {
+                        publish_message(&state, &make_status(a, "working"));
+                    }
+                    publish_message(&state, &build(target));
+                    let (other, _) = poll_messages(&state, "feat-other", 0);
+                    assert!(
+                        other.is_empty(),
+                        "{kind}/not-to-others: a bystander receives nothing"
+                    );
+                }
+                UnregisteredDropped => {
+                    let state = fresh_state();
+                    // target is NOT registered
+                    publish_message(&state, &build(target));
+                    let inner = state.read();
+                    assert!(
+                        !inner.queues.contains_key(target),
+                        "{kind}/unregistered-dropped: an unregistered target gets no inbox"
+                    );
+                }
+            }
+        }
     }
 
     // === Supervisor messages: verified and feedback ===
-
-    #[test]
-    fn verified_broadcast_reaches_all_peers() {
-        let state = fresh_state();
-        publish_message(&state, &make_status("feat-errors", "working"));
-        publish_message(&state, &make_status("feat-detect", "working"));
-        publish_message(&state, &make_status("supervisor", "working"));
-
-        publish_message(&state, &make_verified("feat-errors", "supervisor", None));
-
-        let (errors_msgs, _) = poll_messages(&state, "feat-errors", 0);
-        let (detect_msgs, _) = poll_messages(&state, "feat-detect", 0);
-        assert_eq!(errors_msgs.len(), 1);
-        assert_eq!(detect_msgs.len(), 1);
-    }
-
-    #[test]
-    fn verified_broadcast_skips_sender() {
-        let state = fresh_state();
-        publish_message(&state, &make_status("feat-errors", "working"));
-        publish_message(&state, &make_status("supervisor", "working"));
-
-        publish_message(&state, &make_verified("feat-errors", "supervisor", None));
-
-        let (sup_msgs, _) = poll_messages(&state, "supervisor", 0);
-        assert!(sup_msgs.is_empty());
-    }
 
     #[test]
     fn verified_does_not_mutate_verifier_record() {
@@ -837,38 +883,6 @@ mod tests {
             record.status, "working",
             "a Verified message must not mutate the verifier's roster row",
         );
-    }
-
-    #[test]
-    fn feedback_delivered_to_target_agent() {
-        let state = fresh_state();
-        publish_message(&state, &make_status("feat-errors", "working"));
-        publish_message(&state, &make_status("supervisor", "working"));
-
-        publish_message(
-            &state,
-            &make_feedback("feat-errors", "supervisor", &["test failed"]),
-        );
-
-        let (errors_msgs, _) = poll_messages(&state, "feat-errors", 0);
-        assert_eq!(errors_msgs.len(), 1);
-        assert_eq!(errors_msgs[0].status_label(), "feedback");
-    }
-
-    #[test]
-    fn feedback_not_delivered_to_other_agents() {
-        let state = fresh_state();
-        publish_message(&state, &make_status("feat-errors", "working"));
-        publish_message(&state, &make_status("feat-detect", "working"));
-        publish_message(&state, &make_status("supervisor", "working"));
-
-        publish_message(
-            &state,
-            &make_feedback("feat-errors", "supervisor", &["test failed"]),
-        );
-
-        let (detect_msgs, _) = poll_messages(&state, "feat-detect", 0);
-        assert!(detect_msgs.is_empty());
     }
 
     #[test]
@@ -974,34 +988,6 @@ mod tests {
     // === Answer routing (agent-answer-variant) ===
 
     #[test]
-    fn answer_delivered_to_target_agent() {
-        // Spec scenario: answer lands in the target agent's inbox.
-        let state = fresh_state();
-        publish_message(&state, &make_status("feat-x", "working"));
-        publish_message(&state, &make_status("supervisor", "working"));
-
-        publish_message(&state, &make_answer("feat-x", "supervisor", "use rs256"));
-
-        let (msgs, _) = poll_messages(&state, "feat-x", 0);
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].status_label(), "answer");
-    }
-
-    #[test]
-    fn answer_not_delivered_to_other_agents() {
-        // Spec scenario: other agents' inboxes do not receive the answer.
-        let state = fresh_state();
-        publish_message(&state, &make_status("feat-x", "working"));
-        publish_message(&state, &make_status("feat-y", "working"));
-        publish_message(&state, &make_status("supervisor", "working"));
-
-        publish_message(&state, &make_answer("feat-x", "supervisor", "use rs256"));
-
-        let (other_msgs, _) = poll_messages(&state, "feat-y", 0);
-        assert!(other_msgs.is_empty());
-    }
-
-    #[test]
     fn answer_publish_does_not_distort_roster() {
         // Spec scenario: the publish is attributed to the `from` sender, so
         // it neither mints a roster row for the target nor mutates the
@@ -1093,65 +1079,6 @@ mod tests {
     }
 
     // === Intent broadcast (forward-coordination) ===
-
-    #[test]
-    fn intent_broadcast_reaches_all_peers() {
-        let state = fresh_state();
-        publish_message(&state, &make_status("feat-auth", "working"));
-        publish_message(&state, &make_status("feat-detect", "working"));
-        publish_message(&state, &make_status("supervisor", "working"));
-
-        publish_message(
-            &state,
-            &make_intent("feat-auth", &["src/a.rs"], "wire AuthClient", 600),
-        );
-
-        let (detect_msgs, _) = poll_messages(&state, "feat-detect", 0);
-        let (sup_msgs, _) = poll_messages(&state, "supervisor", 0);
-        assert!(
-            detect_msgs
-                .iter()
-                .any(|m| matches!(m, BrokerMessage::Intent { .. }))
-        );
-        assert!(
-            sup_msgs
-                .iter()
-                .any(|m| matches!(m, BrokerMessage::Intent { .. }))
-        );
-    }
-
-    #[test]
-    fn intent_broadcast_skips_sender() {
-        let state = fresh_state();
-        publish_message(&state, &make_status("feat-auth", "working"));
-        publish_message(&state, &make_status("feat-detect", "working"));
-
-        publish_message(
-            &state,
-            &make_intent("feat-auth", &["src/a.rs"], "wire AuthClient", 600),
-        );
-
-        let (own_msgs, _) = poll_messages(&state, "feat-auth", 0);
-        assert!(
-            !own_msgs
-                .iter()
-                .any(|m| matches!(m, BrokerMessage::Intent { .. }))
-        );
-    }
-
-    #[test]
-    fn intent_broadcast_skips_unregistered_agents() {
-        let state = fresh_state();
-        publish_message(&state, &make_status("feat-auth", "working"));
-
-        publish_message(
-            &state,
-            &make_intent("feat-auth", &["src/a.rs"], "wire AuthClient", 600),
-        );
-
-        let inner = state.read();
-        assert!(!inner.queues.contains_key("feat-detect"));
-    }
 
     #[test]
     fn intent_updates_sender_record_status_to_intent() {
