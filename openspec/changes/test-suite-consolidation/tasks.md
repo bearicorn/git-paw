@@ -20,6 +20,15 @@ Wave 5 MUST NOT start until W1 (`cli-interaction-e2e`) is merged and green.
 - [x] **Defect surfaced by net-first (routed, NOT fixed here — test-only change):** `[logging] enabled` wires capture only on the `--from-specs` path; bare `start` + supervisor produce no logs vs the unconditional `session-logging` spec. Decide wire-everywhere vs narrow-spec on the bug-fix track (memory: `project_session_logging_only_on_from_specs`).
 - [ ] Priority-3 guards (batch later): broker `/log`+`/watch`, core-error-handling stderr+exit2, core-governance-config `[governance]` load, cli-interactive-selection filter→mapping, boot supervisor-prepend, skill-standardized malformed-error.
 
+## 1. Safe first wave (behavior-neutral table-ifications) — DONE + coverage-verified
+- [x] error.rs / layout.rs / dashboard.rs → tables (−35) [fd711cd]
+- [x] broker/messages.rs getter/slugify/StatusPayload → tables (−33); all 11 BrokerMessage variants covered; wire-string pins kept [dcf046d]
+- [x] cli.rs arg-parse + permission_prompt.rs/manual_approvals.rs classifier → tables (−61) [efe56cd]
+- [x] **Total −129 #[test] fns.** Every case preserved as a row; only tautologies/pure-dups deleted; sole guards + wire-contract pins kept. Each batch green on `cargo test --lib` + `clippy --all-targets`.
+- [x] **Coverage gate PASSED (rigorously).** Whole-suite `llvm-cov` is unreliable here (e2e subprocess profraw corruption under the live session — see memory). Verified via `--lib` scope, clean-vs-clean in isolated worktrees (pre-wave 529877c vs HEAD): **missed lines/regions IDENTICAL for every touched product file except cli.rs which IMPROVED** (57→25 missed lines). Whole-crate --lib line cov 90.57%→90.60%. No product branch lost. The transient "59%" was a contaminated-profraw artifact, not a regression.
+
+Config backward-compat consolidation + the unit→integration collapses + prose-pin rewrites remain as the higher-risk waves (need cargo-mutants spot-checks; §2–§5 in the re-audit).
+
 ## 1. Safe first wave (~120–135, risk none/low, zero sole-guard risk, zero W1 overlap)
 - [ ] `src/broker/messages.rs`: getter table (`agent_id_*` + `status_label_*`) + slugify table (drop `_deterministic` tautology) + advanced_main missing/blank + StatusPayload → table-driven (−33). **Grep the `BrokerMessage` variant set first** (cluster grew 14→16; ensure the table covers every variant)
 - [ ] `src/error.rs`: delete the 18 Display-substring tests; **keep** the exit-code + hint-mapping assertions (−14)
