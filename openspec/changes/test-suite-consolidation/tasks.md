@@ -30,7 +30,19 @@ Wave 5 MUST NOT start until W1 (`cli-interaction-e2e`) is merged and green.
 - [x] config.rs default/section-absent/enum-parse table subset (−23) [393bf64]; backward-compat legacy fixtures + `governance_config_rejects_gates_field` LEFT untouched (verified). Wave-close `--lib` gate (fresh worktree 529877c vs 393bf64): product missed-lines identical/improved for all 8 touched files; config.rs's +4 "missed" are test-module items (the 3 new table tests + a closure — verified running/passing), an llvm-cov mangling artifact, NOT product code.
 - [x] **Safe wave TOTAL: −152 #[test] fns, product coverage preserved (rigorously verified via fresh-worktree `--lib`).**
 
-Remaining higher-risk waves (need cargo-mutants spot-checks — profraw-immune; §2–§5 in the re-audit): conflict.rs regions table (behavior-neutral, next), config backward-compat legacy-fixture consolidation, unit→integration collapses (terminal_status fold, broker.rs raw-TCP trim, dev_allowlist, delivery.rs routing/private-state), prose-pin rewrites, post-W1 subsumed prompt tests.
+### conflict.rs regions_intersect cluster — DECISION: KEEP (do not collapse)
+Evaluated the 15 `regions_intersect_*` tests. The 7 normalization tests are heterogeneous and
+self-documenting: positive equivalence (case/separators/trim/parens/leading-keyword/spelling), a
+Class-kind sub-case, two `cross == false` assertions, and the NEGATIVE `distinct_symbols_stay_distinct`
+guard whose comments encode WHY normalization is bounded (`foo_bar` ≠ `foobar`; `classify` ≠ `class ify`).
+The re-audit (§5.1) explicitly warns against over-collapsing these. Folding saves ~4–6 tests but flattens
+documented per-rule reasoning before the freeze — net-negative. Kept as fast, clear unit tests (test-strategy
+"keep as unit" routing). No change.
+
+Remaining higher-risk waves (need cargo-mutants spot-checks — profraw-immune; §2–§5 in the re-audit):
+config backward-compat legacy-fixture consolidation (coverage-check), unit→integration collapses
+(session_integration dup delete, terminal_status fold, broker.rs raw-TCP trim, dev_allowlist,
+delivery.rs routing/private-state — mutants-gated), prose-pin rewrites, post-W1 subsumed prompt tests.
 
 ## 1. Safe first wave (~120–135, risk none/low, zero sole-guard risk, zero W1 overlap)
 - [ ] `src/broker/messages.rs`: getter table (`agent_id_*` + `status_label_*`) + slugify table (drop `_deterministic` tautology) + advanced_main missing/blank + StatusPayload → table-driven (−33). **Grep the `BrokerMessage` variant set first** (cluster grew 14→16; ensure the table covers every variant)
