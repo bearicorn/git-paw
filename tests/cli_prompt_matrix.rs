@@ -288,3 +288,85 @@ fn purge_force_bypasses_confirmation() {
         .assert()
         .success();
 }
+
+// ---------------------------------------------------------------------------
+// spec-launch prompt gating — BYPASS / dispatch rows (deterministic via
+// `--dry-run`; the shown side for bare `--specs` is a PTY row, see the note at
+// the CLI-picker section). The deprecated `--from-specs` alias (removal at
+// v1.0.0) is deliberately NOT exercised.
+// ---------------------------------------------------------------------------
+
+/// Writes an `OpenSpec` `[specs]` config (+ echo CLI) and commits one
+/// `specs/<id>/tasks.md` per id so `--from-all-specs` discovers them.
+fn write_openspec_specs_repo(repo: &std::path::Path, ids: &[&str]) {
+    let paw = repo.join(".git-paw");
+    std::fs::create_dir_all(&paw).expect("create .git-paw");
+    std::fs::write(
+        paw.join("config.toml"),
+        "default_cli = \"echo\"\n\n[clis.echo]\ncommand = \"echo\"\ndisplay_name = \"Echo\"\n\n[specs]\ntype = \"openspec\"\ndir = \"specs\"\n",
+    )
+    .expect("write config");
+    for id in ids {
+        let d = repo.join("specs").join(id);
+        std::fs::create_dir_all(&d).expect("spec dir");
+        std::fs::write(d.join("tasks.md"), format!("Implement {id}.\n")).expect("tasks.md");
+    }
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-m", "specs"]);
+}
+
+/// `--from-all-specs` bypasses the spec picker and dispatches EVERY discovered
+/// spec: the `--dry-run` plan lists both spec branches, with no prompt (a
+/// non-TTY run would hang on a picker if one were shown). `--cli echo` keeps
+/// CLI resolution non-interactive so the run isolates the spec-picker bypass.
+#[test]
+fn from_all_specs_launches_every_spec_without_picker() {
+    let tr = setup_test_repo();
+    write_openspec_specs_repo(tr.path(), &["auth", "api"]);
+
+    let out = Command::cargo_bin("git-paw")
+        .expect("binary")
+        .current_dir(tr.path())
+        .args(["start", "--from-all-specs", "--cli", "echo", "--dry-run"])
+        .output()
+        .expect("run start --from-all-specs --dry-run");
+
+    assert!(
+        out.status.success(),
+        "dry-run should succeed without prompting; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("spec/auth") && stdout.contains("spec/api"),
+        "both discovered specs must be dispatched (picker bypassed); got:\n{stdout}"
+    );
+}
+
+/// `--from-all-specs` with NEITHER `--specs-format` NOR a `[specs]` section
+/// SHALL error with explicit-only guidance, never silently auto-detect (the
+/// v0.12.0 no-filesystem-detection rule).
+#[test]
+fn from_all_specs_unconfigured_spec_format_errors() {
+    let tr = setup_test_repo();
+    // echo CLI configured, but NO [specs] section and no --specs-format flag.
+    write_echo_config(tr.path(), None);
+
+    let out = Command::cargo_bin("git-paw")
+        .expect("binary")
+        .current_dir(tr.path())
+        .args(["start", "--from-all-specs", "--dry-run"])
+        .output()
+        .expect("run start --from-all-specs with no specs config");
+
+    assert!(
+        !out.status.success(),
+        "unconfigured spec-format must error, not silently succeed; stdout:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
+    assert!(
+        stderr.contains("specs") || stderr.contains("specs-format"),
+        "error must give explicit-only spec-config guidance; got stderr:\n{stderr}"
+    );
+}
