@@ -27,7 +27,7 @@ use git_paw::specs::{SpecBackendKind, scan_specs, scan_specs_with_override};
 /// `.specify/specs`).
 const PLANS_DIR: &str = "docs/superpowers/plans";
 
-const ADD_AUTH_PLAN: &str = r#"# Add auth Implementation Plan
+const ADD_AUTH_PLAN: &str = r"# Add auth Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement.
 
@@ -54,9 +54,9 @@ assert!(false);
 Run: `cargo test auth`
 
 - [x] **Step 2: Scaffold module**
-"#;
+";
 
-const EXPORT_CSV_PLAN: &str = r#"# Export CSV Implementation Plan
+const EXPORT_CSV_PLAN: &str = r"# Export CSV Implementation Plan
 
 **Goal:** Export data as CSV
 
@@ -69,7 +69,7 @@ const EXPORT_CSV_PLAN: &str = r#"# Export CSV Implementation Plan
 
 - [x] step b1
 - [ ] step b2
-"#;
+";
 
 const DONE_PLAN: &str = "### Task 1: X\n- [x] a\n- [X] b\n";
 

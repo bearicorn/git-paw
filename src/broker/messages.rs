@@ -970,71 +970,120 @@ mod tests {
     }
 
     #[test]
-    fn slugify_branch_replaces_slashes() {
-        assert_eq!(slugify_branch("feat/errors"), "feat-errors");
-        assert_eq!(slugify_branch("main"), "main");
-        assert_eq!(slugify_branch("a/b/c"), "a-b-c");
+    fn slugify_branch_normalises_each_case() {
+        // One row per behavioural case: slugify lowercases, maps every run of
+        // non-alphanumeric/underscore chars to a single dash, trims leading and
+        // trailing dashes, and falls back to `agent` when nothing survives.
+        for (input, expected) in [
+            ("feat/errors", "feat-errors"),         // slash -> dash
+            ("main", "main"),                       // already clean, unchanged
+            ("a/b/c", "a-b-c"),                     // multiple slashes
+            ("FEAT/X", "feat-x"),                   // lowercased
+            ("", "agent"),                          // empty -> fallback
+            ("---", "agent"),                       // only dashes -> fallback
+            ("feat//x", "feat-x"),                  // consecutive dashes collapse
+            ("/feat/x/", "feat-x"),                 // leading/trailing dashes trimmed
+            ("feat/my_feature", "feat-my_feature"), // underscores preserved
+            ("feat/日本語", "feat"),                // non-ascii dropped
+        ] {
+            assert_eq!(slugify_branch(input), expected, "slugify_branch({input:?})");
+        }
+    }
+
+    /// Every `BrokerMessage` variant paired with its expected `agent_id()` and
+    /// `status_label()`. One row per variant -- adding a variant adds a row, so
+    /// the two getter tables below stay exhaustive.
+    fn variant_getter_rows() -> Vec<(BrokerMessage, &'static str, &'static str)> {
+        vec![
+            (make_status("feat-x", "working"), "feat-x", "working"),
+            (make_artifact("feat-y", "done", &["auth"]), "feat-y", "done"),
+            (
+                make_blocked("feat-config", "error types", "feat-errors"),
+                "feat-config",
+                "blocked",
+            ),
+            (
+                make_verified("feat-x", "supervisor", None),
+                "feat-x",
+                "verified",
+            ),
+            (
+                make_feedback("feat-x", "supervisor", &["e"]),
+                "feat-x",
+                "feedback",
+            ),
+            (
+                make_answer("feat-x", "supervisor", "yes", None),
+                "feat-x",
+                "answer",
+            ),
+            (
+                make_question("feat-config", "anything?"),
+                "feat-config",
+                "question",
+            ),
+            (
+                make_intent("feat-auth", &["a"], "s", 60),
+                "feat-auth",
+                "intent",
+            ),
+            (
+                // `AdvancedMain` surfaces the payload's `from` as its agent_id.
+                BrokerMessage::AdvancedMain {
+                    payload: AdvancedMainPayload {
+                        from: "supervisor".to_string(),
+                        merged_branch: "feat/auth".to_string(),
+                        new_main_sha: "a1b2c3d4e5f6".to_string(),
+                        base: "main".to_string(),
+                        merged_at: DateTime::parse_from_rfc3339("2026-06-04T13:30:00Z")
+                            .unwrap()
+                            .with_timezone(&Utc),
+                        summary: None,
+                    },
+                },
+                "supervisor",
+                "advanced-main",
+            ),
+            (
+                // `Learning` carries its sender in the payload.
+                make_learning(
+                    "abc123def456abcd",
+                    "supervisor",
+                    Some("feat/x"),
+                    "stuck_duration",
+                    "t",
+                    serde_json::json!({}),
+                ),
+                "supervisor",
+                "learning",
+            ),
+            (
+                // `VerifyNow` has no publishing agent; its branch is the id.
+                BrokerMessage::VerifyNow {
+                    branch_id: "feat-bar".to_string(),
+                },
+                "feat-bar",
+                "verify-now",
+            ),
+        ]
     }
 
     #[test]
-    fn slugify_branch_lowercases() {
-        assert_eq!(slugify_branch("FEAT/X"), "feat-x");
+    fn agent_id_returns_sender_for_every_variant() {
+        for (msg, expected_agent_id, _) in variant_getter_rows() {
+            assert_eq!(msg.agent_id(), expected_agent_id, "agent_id() for {msg:?}");
+        }
     }
 
     #[test]
-    fn slugify_branch_empty_returns_agent() {
-        assert_eq!(slugify_branch(""), "agent");
-    }
-
-    #[test]
-    fn slugify_branch_only_dashes_returns_agent() {
-        assert_eq!(slugify_branch("---"), "agent");
-    }
-
-    #[test]
-    fn slugify_branch_collapses_consecutive_dashes() {
-        assert_eq!(slugify_branch("feat//x"), "feat-x");
-    }
-
-    #[test]
-    fn slugify_branch_trims_leading_trailing_dashes() {
-        assert_eq!(slugify_branch("/feat/x/"), "feat-x");
-    }
-
-    #[test]
-    fn agent_id_status() {
-        let msg = make_status("feat-x", "working");
-        assert_eq!(msg.agent_id(), "feat-x");
-    }
-
-    #[test]
-    fn agent_id_artifact() {
-        let msg = make_artifact("feat-y", "done", &["auth"]);
-        assert_eq!(msg.agent_id(), "feat-y");
-    }
-
-    #[test]
-    fn agent_id_blocked() {
-        let msg = make_blocked("feat-config", "error types", "feat-errors");
-        assert_eq!(msg.agent_id(), "feat-config");
-    }
-
-    #[test]
-    fn status_label_status_variant() {
-        let msg = make_status("feat-x", "working");
-        assert_eq!(msg.status_label(), "working");
-    }
-
-    #[test]
-    fn status_label_artifact_variant() {
-        let msg = make_artifact("feat-x", "done", &[]);
-        assert_eq!(msg.status_label(), "done");
-    }
-
-    #[test]
-    fn status_label_blocked_variant() {
-        let msg = make_blocked("feat-config", "error types", "feat-errors");
-        assert_eq!(msg.status_label(), "blocked");
+    fn status_label_returns_label_for_every_variant() {
+        for (msg, _, expected_label) in variant_getter_rows() {
+            assert_eq!(
+                msg.status_label(),
+                expected_label,
+                "status_label() for {msg:?}"
+            );
+        }
     }
 
     #[test]
@@ -1159,67 +1208,98 @@ mod tests {
     // --- StatusPayload cli/phase fields (tasks 1.3-1.6) ---
 
     #[test]
-    fn status_payload_roundtrip_with_cli_and_phase() {
-        let payload = StatusPayload {
-            status: "working".to_string(),
-            modified_files: vec!["src/a.rs".to_string()],
-            message: Some("refactoring".to_string()),
-            cli: Some("claude".to_string()),
-            phase: Some("watching".to_string()),
-            detail: None,
-        };
-        let json = serde_json::to_string(&payload).unwrap();
-        assert!(json.contains("\"cli\":\"claude\""));
-        assert!(json.contains("\"phase\":\"watching\""));
-        let back: StatusPayload = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, payload);
+    fn status_payload_optional_cli_phase_deserialise_matrix() {
+        // `cli` and `phase` are optional: present values parse through, absent
+        // values default to None. One row per presence shape (the legacy row
+        // has neither, standing in for a v0.5.0 payload).
+        for (label, json, expected_cli, expected_phase) in [
+            (
+                "both absent (legacy)",
+                r#"{"status":"working","modified_files":[],"message":"Supervisor booting"}"#,
+                None,
+                None,
+            ),
+            (
+                "only cli",
+                r#"{"status":"working","modified_files":[],"message":null,"cli":"claude"}"#,
+                Some("claude"),
+                None,
+            ),
+            (
+                "only phase",
+                r#"{"status":"feedback","modified_files":[],"message":null,"phase":"merging"}"#,
+                None,
+                Some("merging"),
+            ),
+        ] {
+            let payload: StatusPayload = serde_json::from_str(json).unwrap();
+            assert_eq!(payload.cli.as_deref(), expected_cli, "cli for {label}");
+            assert_eq!(
+                payload.phase.as_deref(),
+                expected_phase,
+                "phase for {label}"
+            );
+        }
     }
 
     #[test]
-    fn status_payload_deserialises_legacy_json_without_cli_or_phase() {
-        let json = r#"{"status":"working","modified_files":[],"message":"Supervisor booting"}"#;
-        let payload: StatusPayload = serde_json::from_str(json).unwrap();
-        assert_eq!(payload.cli, None);
-        assert_eq!(payload.phase, None);
-        assert_eq!(payload.status, "working");
-        assert_eq!(payload.message.as_deref(), Some("Supervisor booting"));
-    }
-
-    #[test]
-    fn status_payload_serialises_none_cli_and_phase_with_no_keys() {
-        let payload = StatusPayload {
-            status: "idle".to_string(),
-            modified_files: vec![],
-            message: None,
-            cli: None,
-            phase: None,
-            detail: None,
-        };
-        let json = serde_json::to_string(&payload).unwrap();
-        assert!(
-            !json.contains("\"cli\""),
-            "cli key must be omitted when None; got {json}"
-        );
-        assert!(
-            !json.contains("\"phase\""),
-            "phase key must be omitted when None; got {json}"
-        );
-    }
-
-    #[test]
-    fn status_payload_deserialises_with_only_cli_populated() {
-        let json = r#"{"status":"working","modified_files":[],"message":null,"cli":"claude"}"#;
-        let payload: StatusPayload = serde_json::from_str(json).unwrap();
-        assert_eq!(payload.cli.as_deref(), Some("claude"));
-        assert_eq!(payload.phase, None);
-    }
-
-    #[test]
-    fn status_payload_deserialises_with_only_phase_populated() {
-        let json = r#"{"status":"feedback","modified_files":[],"message":null,"phase":"merging"}"#;
-        let payload: StatusPayload = serde_json::from_str(json).unwrap();
-        assert_eq!(payload.phase.as_deref(), Some("merging"));
-        assert_eq!(payload.cli, None);
+    fn status_payload_optional_cli_phase_serialise_matrix() {
+        // None fields are omitted from the wire; Some fields serialise with
+        // their key/value; every shape round-trips losslessly. `expected_*` is
+        // Some(value) when the key must appear, None when it must be omitted.
+        let cases: [(&str, StatusPayload, Option<&str>, Option<&str>); 2] = [
+            (
+                "both None omit keys",
+                StatusPayload {
+                    status: "idle".to_string(),
+                    modified_files: vec![],
+                    message: None,
+                    cli: None,
+                    phase: None,
+                    detail: None,
+                },
+                None,
+                None,
+            ),
+            (
+                "both Some emit keys",
+                StatusPayload {
+                    status: "working".to_string(),
+                    modified_files: vec!["src/a.rs".to_string()],
+                    message: Some("refactoring".to_string()),
+                    cli: Some("claude".to_string()),
+                    phase: Some("watching".to_string()),
+                    detail: None,
+                },
+                Some("claude"),
+                Some("watching"),
+            ),
+        ];
+        for (label, payload, expected_cli, expected_phase) in cases {
+            let json = serde_json::to_string(&payload).unwrap();
+            match expected_cli {
+                Some(v) => assert!(
+                    json.contains(&format!("\"cli\":\"{v}\"")),
+                    "{label}: cli must serialise as {v}; got {json}"
+                ),
+                None => assert!(
+                    !json.contains("\"cli\""),
+                    "{label}: cli key must be omitted; got {json}"
+                ),
+            }
+            match expected_phase {
+                Some(v) => assert!(
+                    json.contains(&format!("\"phase\":\"{v}\"")),
+                    "{label}: phase must serialise as {v}; got {json}"
+                ),
+                None => assert!(
+                    !json.contains("\"phase\""),
+                    "{label}: phase key must be omitted; got {json}"
+                ),
+            }
+            let back: StatusPayload = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, payload, "{label}: round-trip must preserve payload");
+        }
     }
 
     // --- supervisor-introspection: phase + detail fields (tasks 1.2-1.4) ---
@@ -1306,18 +1386,6 @@ mod tests {
     fn from_json_whitespace_agent_id_rejected() {
         let json = r#"{"type":"agent.status","agent_id":"   ","payload":{"status":"working","modified_files":[],"message":null}}"#;
         assert!(BrokerMessage::from_json(json).is_err());
-    }
-
-    #[test]
-    fn slugify_branch_preserves_underscores() {
-        assert_eq!(slugify_branch("feat/my_feature"), "feat-my_feature");
-    }
-
-    #[test]
-    fn slugify_branch_replaces_non_ascii() {
-        let result = slugify_branch("feat/日本語");
-        assert!(result.is_ascii());
-        assert_eq!(result, "feat");
     }
 
     fn make_verified(agent_id: &str, verified_by: &str, message: Option<&str>) -> BrokerMessage {
@@ -1416,30 +1484,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn status_label_verified() {
-        let msg = make_verified("feat-x", "supervisor", None);
-        assert_eq!(msg.status_label(), "verified");
-    }
-
-    #[test]
-    fn status_label_feedback() {
-        let msg = make_feedback("feat-x", "supervisor", &["e"]);
-        assert_eq!(msg.status_label(), "feedback");
-    }
-
-    #[test]
-    fn agent_id_verified() {
-        let msg = make_verified("feat-x", "supervisor", None);
-        assert_eq!(msg.agent_id(), "feat-x");
-    }
-
-    #[test]
-    fn agent_id_feedback() {
-        let msg = make_feedback("feat-x", "supervisor", &["e"]);
-        assert_eq!(msg.agent_id(), "feat-x");
-    }
-
     fn make_answer(agent_id: &str, from: &str, answer: &str, re: Option<&str>) -> BrokerMessage {
         BrokerMessage::Answer {
             agent_id: agent_id.to_string(),
@@ -1531,18 +1575,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn status_label_answer() {
-        let msg = make_answer("feat-x", "supervisor", "yes", None);
-        assert_eq!(msg.status_label(), "answer");
-    }
-
-    #[test]
-    fn agent_id_answer_is_the_target() {
-        let msg = make_answer("feat-x", "supervisor", "yes", None);
-        assert_eq!(msg.agent_id(), "feat-x");
-    }
-
     fn make_question(agent_id: &str, question: &str) -> BrokerMessage {
         BrokerMessage::Question {
             agent_id: agent_id.to_string(),
@@ -1576,18 +1608,6 @@ mod tests {
         let s = msg.to_string();
         assert_eq!(s, "[feat-config] question: Should I add a config field?");
         assert!(!s.contains('\n'));
-    }
-
-    #[test]
-    fn status_label_question() {
-        let msg = make_question("feat-config", "anything?");
-        assert_eq!(msg.status_label(), "question");
-    }
-
-    #[test]
-    fn agent_id_question() {
-        let msg = make_question("feat-config", "anything?");
-        assert_eq!(msg.agent_id(), "feat-config");
     }
 
     #[test]
@@ -1651,13 +1671,6 @@ mod tests {
     fn from_json_unknown_type_rejected() {
         let json = r#"{"type":"agent.unknown","agent_id":"x","payload":{}}"#;
         assert!(BrokerMessage::from_json(json).is_err());
-    }
-
-    #[test]
-    fn slugify_branch_deterministic() {
-        let a = slugify_branch("feat/http-broker");
-        let b = slugify_branch("feat/http-broker");
-        assert_eq!(a, b);
     }
 
     // --- Intent variant ---
@@ -1778,18 +1791,6 @@ mod tests {
             msg.to_string(),
             "[feat-x] intent: 1 files for 300s \u{2014} doc fix"
         );
-    }
-
-    #[test]
-    fn status_label_intent() {
-        let msg = make_intent("feat-x", &["a"], "s", 60);
-        assert_eq!(msg.status_label(), "intent");
-    }
-
-    #[test]
-    fn agent_id_intent() {
-        let msg = make_intent("feat-auth", &["a"], "s", 60);
-        assert_eq!(msg.agent_id(), "feat-auth");
     }
 
     // Maps to scenario `Intent Display empty path edge` from
@@ -2170,15 +2171,6 @@ mod tests {
     }
 
     #[test]
-    fn verify_now_exposes_branch_as_agent_id_and_label() {
-        let msg = BrokerMessage::VerifyNow {
-            branch_id: "feat-bar".to_string(),
-        };
-        assert_eq!(msg.agent_id(), "feat-bar");
-        assert_eq!(msg.status_label(), "verify-now");
-    }
-
-    #[test]
     fn verify_now_rejects_blank_branch_id() {
         let json = r#"{"type":"supervisor.verify-now","branch_id":"   "}"#;
         assert!(
@@ -2280,65 +2272,73 @@ mod tests {
     }
 
     #[test]
-    fn advanced_main_missing_merged_branch_rejected() {
-        // serde reports the absent required field by name -> 400-class.
-        let json = r#"{"type":"agent.advanced-main","from":"supervisor","new_main_sha":"abc123abc123","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#;
-        let err = BrokerMessage::from_json(json).unwrap_err();
-        let text = err.to_string();
-        assert!(
-            matches!(err, MessageError::Deserialize(_)) && text.contains("merged_branch"),
-            "missing merged_branch must be rejected and named; got {text}"
-        );
+    fn advanced_main_missing_required_field_rejected() {
+        // A missing required field is a serde deserialize error (400-class)
+        // that names the absent field. One row per required field.
+        for (field, json) in [
+            (
+                "merged_branch",
+                r#"{"type":"agent.advanced-main","from":"supervisor","new_main_sha":"abc123abc123","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#,
+            ),
+            (
+                "new_main_sha",
+                r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/x","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#,
+            ),
+            (
+                "base",
+                r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/x","new_main_sha":"abc123abc123","merged_at":"2026-06-04T13:30:00Z"}"#,
+            ),
+            (
+                "merged_at",
+                r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/x","new_main_sha":"abc123abc123","base":"main"}"#,
+            ),
+        ] {
+            let err = BrokerMessage::from_json(json).unwrap_err();
+            assert!(
+                matches!(err, MessageError::Deserialize(_)),
+                "missing {field} must be a deserialize error; got {err:?}"
+            );
+            assert!(
+                err.to_string().contains(field),
+                "error for missing {field} must name it; got {err}"
+            );
+        }
     }
 
     #[test]
-    fn advanced_main_missing_new_main_sha_rejected() {
-        let json = r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/x","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#;
-        let err = BrokerMessage::from_json(json).unwrap_err();
-        assert!(err.to_string().contains("new_main_sha"));
-    }
-
-    #[test]
-    fn advanced_main_missing_base_rejected() {
-        let json = r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/x","new_main_sha":"abc123abc123","merged_at":"2026-06-04T13:30:00Z"}"#;
-        let err = BrokerMessage::from_json(json).unwrap_err();
-        assert!(err.to_string().contains("base"));
-    }
-
-    #[test]
-    fn advanced_main_missing_merged_at_rejected() {
-        let json = r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/x","new_main_sha":"abc123abc123","base":"main"}"#;
-        let err = BrokerMessage::from_json(json).unwrap_err();
-        assert!(err.to_string().contains("merged_at"));
-    }
-
-    #[test]
-    fn advanced_main_blank_merged_branch_rejected() {
-        let json = r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"   ","new_main_sha":"abc123abc123","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#;
-        let err = BrokerMessage::from_json(json).unwrap_err();
-        assert!(matches!(err, MessageError::EmptyMergedBranch));
-    }
-
-    #[test]
-    fn advanced_main_blank_new_main_sha_rejected() {
-        let json = r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/x","new_main_sha":"","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#;
-        let err = BrokerMessage::from_json(json).unwrap_err();
-        assert!(matches!(err, MessageError::EmptyNewMainSha));
-    }
-
-    #[test]
-    fn advanced_main_blank_base_rejected() {
-        let json = r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/x","new_main_sha":"abc123abc123","base":"  ","merged_at":"2026-06-04T13:30:00Z"}"#;
-        let err = BrokerMessage::from_json(json).unwrap_err();
-        assert!(matches!(err, MessageError::EmptyBase));
-    }
-
-    #[test]
-    fn advanced_main_blank_from_rejected() {
-        // `from` is the message's agent_id() -> caught by the empty-id guard.
-        let json = r#"{"type":"agent.advanced-main","from":"   ","merged_branch":"feat/x","new_main_sha":"abc123abc123","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#;
-        let err = BrokerMessage::from_json(json).unwrap_err();
-        assert!(matches!(err, MessageError::EmptyAgentId));
+    fn advanced_main_blank_required_field_rejected() {
+        // Each blank required field trips its own typed error; a blank `from`
+        // is the message's agent_id() and trips the shared empty-id guard.
+        type Check = fn(&MessageError) -> bool;
+        let cases: [(&str, &str, Check); 4] = [
+            (
+                "merged_branch",
+                r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"   ","new_main_sha":"abc123abc123","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#,
+                |e| matches!(e, MessageError::EmptyMergedBranch),
+            ),
+            (
+                "new_main_sha",
+                r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/x","new_main_sha":"","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#,
+                |e| matches!(e, MessageError::EmptyNewMainSha),
+            ),
+            (
+                "base",
+                r#"{"type":"agent.advanced-main","from":"supervisor","merged_branch":"feat/x","new_main_sha":"abc123abc123","base":"  ","merged_at":"2026-06-04T13:30:00Z"}"#,
+                |e| matches!(e, MessageError::EmptyBase),
+            ),
+            (
+                "from",
+                r#"{"type":"agent.advanced-main","from":"   ","merged_branch":"feat/x","new_main_sha":"abc123abc123","base":"main","merged_at":"2026-06-04T13:30:00Z"}"#,
+                |e| matches!(e, MessageError::EmptyAgentId),
+            ),
+        ];
+        for (field, json, is_expected) in cases {
+            let err = BrokerMessage::from_json(json).unwrap_err();
+            assert!(
+                is_expected(&err),
+                "blank {field} must be rejected with its typed error; got {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -2459,13 +2459,6 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let err = BrokerMessage::from_json(&json).unwrap_err();
         assert!(matches!(err, MessageError::EmptyAgentId));
-    }
-
-    #[test]
-    fn advanced_main_agent_id_is_from_field() {
-        let msg = BrokerMessage::from_json(sample_advanced_main_json()).unwrap();
-        assert_eq!(msg.agent_id(), "supervisor");
-        assert_eq!(msg.status_label(), "advanced-main");
     }
 
     #[test]
