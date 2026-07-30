@@ -2678,15 +2678,80 @@ enabled = true
         );
     }
 
-    // --- BrokerConfig ---
+    // --- Struct Default impls (one assertion block per sub-struct) ---
 
     #[test]
-    fn broker_config_defaults() {
-        let config = BrokerConfig::default();
-        assert!(!config.enabled);
-        assert_eq!(config.port, 9119);
-        assert_eq!(config.bind, "127.0.0.1");
+    fn struct_defaults_match_spec() {
+        // BrokerConfig: disabled, loopback host, canonical port.
+        let broker = BrokerConfig::default();
+        assert!(!broker.enabled, "broker disabled by default");
+        assert_eq!(broker.port, 9119, "broker default port");
+        assert_eq!(broker.bind, "127.0.0.1", "broker default bind");
+
+        // ConflictConfig: 120s window, both reactions on.
+        let conflict = ConflictConfig::default();
+        assert_eq!(conflict.window_seconds, 120, "conflict window");
+        assert!(conflict.warn_on_intent_overlap, "conflict warn default");
+        assert!(conflict.escalate_on_violation, "conflict escalate default");
+
+        // AutoApproveConfig: enabled, no extra safe commands, 30s stall, Safe preset.
+        let auto_approve = AutoApproveConfig::default();
+        assert!(
+            auto_approve.enabled,
+            "auto_approve enabled defaults to true"
+        );
+        assert!(
+            auto_approve.safe_commands.is_empty(),
+            "auto_approve safe_commands defaults to empty"
+        );
+        assert_eq!(
+            auto_approve.stall_threshold_seconds, 30,
+            "auto_approve stall threshold"
+        );
+        assert_eq!(
+            auto_approve.approval_level,
+            ApprovalLevelPreset::Safe,
+            "auto_approve approval level"
+        );
+
+        // DashboardConfig: message log hidden; broker_log carries BrokerLogConfig defaults.
+        let dashboard = DashboardConfig::default();
+        assert!(!dashboard.show_message_log, "dashboard message log hidden");
+        assert_eq!(
+            dashboard.broker_log.max_messages, 500,
+            "dashboard broker_log max_messages default"
+        );
+        assert!(
+            dashboard.broker_log.default_visible,
+            "dashboard broker_log visible default"
+        );
+        assert!(
+            dashboard.broker_log.height_lines > 12,
+            "dashboard broker_log height_lines must exceed the v0.6.0 fixed 12"
+        );
+
+        // BrokerLogConfig: cap 500, visible, height strictly greater than the v0.6.0 fixed 12.
+        let broker_log = BrokerLogConfig::default();
+        assert_eq!(
+            broker_log.max_messages, 500,
+            "broker_log max_messages default"
+        );
+        assert!(broker_log.default_visible, "broker_log visible default");
+        assert!(
+            broker_log.height_lines > 12,
+            "default height_lines must be strictly greater than the v0.6.0 fixed 12, got {}",
+            broker_log.height_lines,
+        );
+
+        // LearningsConfig: 60s flush interval.
+        assert_eq!(
+            LearningsConfig::default().flush_interval_seconds,
+            60,
+            "learnings flush interval default"
+        );
     }
+
+    // --- BrokerConfig ---
 
     #[test]
     fn broker_config_url() {
@@ -2741,17 +2806,64 @@ enabled = true
         assert_eq!(config.broker.bind, "127.0.0.1");
     }
 
-    // --- SupervisorConfig ---
+    // --- Section-absent defaults (one row per optional section) ---
 
     #[test]
-    fn supervisor_is_none_when_section_absent() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.toml");
-        write_file(&path, "default_cli = \"claude\"\n");
-
-        let config = load_config_file(&path).unwrap().unwrap();
-        assert!(config.supervisor.is_none());
+    fn absent_section_resolves_to_none_or_default() {
+        // Each row: a TOML document that omits the named section, plus a check
+        // that the corresponding field resolves to its None/default state.
+        type Check = fn(&PawConfig) -> bool;
+        for (section, fixture, check) in [
+            (
+                "supervisor",
+                "default_cli = \"claude\"\n",
+                (|c: &PawConfig| c.supervisor.is_none()) as Check,
+            ),
+            (
+                "dashboard",
+                "default_cli = \"claude\"\n",
+                |c: &PawConfig| c.dashboard.is_none(),
+            ),
+            ("mcp", "default_cli = \"claude\"\n", |c: &PawConfig| {
+                c.mcp == McpConfig::default()
+                    && c.mcp.name.is_none()
+                    && c.mcp_server_name() == "git-paw"
+            }),
+            (
+                "governance",
+                "default_cli = \"claude\"\n",
+                |c: &PawConfig| {
+                    let g = &c.governance;
+                    g.adr.is_none()
+                        && g.test_strategy.is_none()
+                        && g.security.is_none()
+                        && g.dod.is_none()
+                        && g.constitution.is_none()
+                },
+            ),
+            ("opsx", "default_cli = \"claude\"\n", |c: &PawConfig| {
+                c.opsx.is_none() && c.role_gating_mode() == RoleGatingMode::Warn
+            }),
+            (
+                "supervisor.auto_approve",
+                "[supervisor]\nenabled = true\n",
+                |c: &PawConfig| {
+                    c.supervisor
+                        .as_ref()
+                        .is_some_and(|s| s.auto_approve.is_none())
+                },
+            ),
+        ] {
+            let config: PawConfig = toml::from_str(fixture)
+                .unwrap_or_else(|e| panic!("[{section}] fixture must parse: {e}"));
+            assert!(
+                check(&config),
+                "with [{section}] absent, its field must resolve to None/default"
+            );
+        }
     }
+
+    // --- SupervisorConfig ---
 
     #[test]
     fn parses_full_supervisor_section() {
@@ -3477,13 +3589,6 @@ enabled = true
     }
 
     #[test]
-    fn learnings_config_defaults_when_table_absent() {
-        // [supervisor.learnings_config] omitted → flush_interval_seconds = 60
-        let cfg = LearningsConfig::default();
-        assert_eq!(cfg.flush_interval_seconds, 60);
-    }
-
-    #[test]
     fn pre_v050_config_loads_with_learnings_false() {
         // A config produced before v0.5.0 (no `learnings` field, no
         // `[supervisor.learnings_config]` table) parses cleanly and yields
@@ -3566,12 +3671,6 @@ enabled = true
     // --- DashboardConfig ---
 
     #[test]
-    fn dashboard_config_defaults_to_disabled() {
-        let config = DashboardConfig::default();
-        assert!(!config.show_message_log);
-    }
-
-    #[test]
     fn parses_dashboard_section_with_show_message_log() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
@@ -3580,16 +3679,6 @@ enabled = true
         let config = load_config_file(&path).unwrap().unwrap();
         let dashboard = config.dashboard.unwrap();
         assert!(dashboard.show_message_log);
-    }
-
-    #[test]
-    fn dashboard_is_none_when_section_absent() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.toml");
-        write_file(&path, "default_cli = \"claude\"\n");
-
-        let config = load_config_file(&path).unwrap().unwrap();
-        assert!(config.dashboard.is_none());
     }
 
     #[test]
@@ -3630,30 +3719,6 @@ enabled = true
     }
 
     // --- BrokerLogConfig (dashboard-broker-log task 1.3) ---
-
-    #[test]
-    fn broker_log_config_defaults() {
-        // Task 1.3: default load — cap 500, visible on, height > 12.
-        let cfg = BrokerLogConfig::default();
-        assert_eq!(cfg.max_messages, 500);
-        assert!(cfg.default_visible);
-        assert!(
-            cfg.height_lines > 12,
-            "default height_lines must be strictly greater than the v0.6.0 fixed 12, got {}",
-            cfg.height_lines,
-        );
-    }
-
-    #[test]
-    fn dashboard_config_default_includes_broker_log_defaults() {
-        // An entirely default DashboardConfig carries the documented
-        // broker-log defaults so a bare `[dashboard]` section behaves
-        // predictably.
-        let cfg = DashboardConfig::default();
-        assert_eq!(cfg.broker_log.max_messages, 500);
-        assert!(cfg.broker_log.default_visible);
-        assert!(cfg.broker_log.height_lines > 12);
-    }
 
     #[test]
     fn parses_broker_log_section_with_explicit_overrides() {
@@ -3786,56 +3851,40 @@ enabled = true
     // --- approval_flags mapping ---
 
     #[test]
-    fn approval_flags_claude_full_auto() {
-        assert_eq!(
-            approval_flags("claude", &ApprovalLevel::FullAuto),
-            "--dangerously-skip-permissions"
-        );
-    }
-
-    #[test]
-    fn approval_flags_codex_auto() {
-        assert_eq!(
-            approval_flags("codex", &ApprovalLevel::Auto),
-            "--sandbox workspace-write"
-        );
-    }
-
-    #[test]
-    fn approval_flags_codex_full_auto() {
-        assert_eq!(
-            approval_flags("codex", &ApprovalLevel::FullAuto),
-            "--dangerously-bypass-approvals-and-sandbox"
-        );
-    }
-
-    #[test]
-    fn approval_flags_qwen_yolo_agy_skip_permissions_gemini_empty() {
-        // qwen keeps --yolo; agy (Antigravity) shares Claude's flag; retired gemini has no built-in row.
-        assert_eq!(approval_flags("qwen", &ApprovalLevel::FullAuto), "--yolo");
-        assert_eq!(
-            approval_flags("agy", &ApprovalLevel::FullAuto),
-            "--dangerously-skip-permissions"
-        );
-        assert_eq!(approval_flags("gemini", &ApprovalLevel::FullAuto), "");
-    }
-
-    #[test]
-    fn approval_flags_unknown_cli_is_empty() {
-        assert_eq!(approval_flags("some-agent", &ApprovalLevel::FullAuto), "");
-    }
-
-    #[test]
-    fn approval_flags_manual_is_empty() {
-        assert_eq!(approval_flags("claude", &ApprovalLevel::Manual), "");
-        assert_eq!(approval_flags("codex", &ApprovalLevel::Manual), "");
-    }
-
-    #[test]
-    fn approval_flags_is_deterministic() {
-        let first = approval_flags("claude", &ApprovalLevel::FullAuto);
-        let second = approval_flags("claude", &ApprovalLevel::FullAuto);
-        assert_eq!(first, second);
+    fn approval_flags_maps_each_cli_and_level() {
+        // One row per built-in (cli, level) -> native-flag mapping. `Manual`
+        // and unrecognised CLIs resolve to the empty string; `agy`
+        // (Antigravity) shares Claude's flag; the retired `gemini` has no
+        // built-in row; `qwen` keeps `--yolo`.
+        for (cli, level, expected) in [
+            (
+                "claude",
+                ApprovalLevel::FullAuto,
+                "--dangerously-skip-permissions",
+            ),
+            ("codex", ApprovalLevel::Auto, "--sandbox workspace-write"),
+            (
+                "codex",
+                ApprovalLevel::FullAuto,
+                "--dangerously-bypass-approvals-and-sandbox",
+            ),
+            ("qwen", ApprovalLevel::FullAuto, "--yolo"),
+            (
+                "agy",
+                ApprovalLevel::FullAuto,
+                "--dangerously-skip-permissions",
+            ),
+            ("gemini", ApprovalLevel::FullAuto, ""),
+            ("some-agent", ApprovalLevel::FullAuto, ""),
+            ("claude", ApprovalLevel::Manual, ""),
+            ("codex", ApprovalLevel::Manual, ""),
+        ] {
+            assert_eq!(
+                approval_flags(cli, &level),
+                expected,
+                "approval_flags({cli:?}, {level:?})"
+            );
+        }
     }
 
     // --- resolve_approval_flags (override → built-in table → "") ---
@@ -3906,17 +3955,6 @@ enabled = true
     }
 
     #[test]
-    fn resolve_approval_flags_is_deterministic() {
-        let clis = HashMap::from([(
-            "claude".to_string(),
-            cli_with_approval_args("claude", &[("full-auto", "--my-custom-flag")]),
-        )]);
-        let first = resolve_approval_flags("claude", &ApprovalLevel::FullAuto, &clis);
-        let second = resolve_approval_flags("claude", &ApprovalLevel::FullAuto, &clis);
-        assert_eq!(first, second);
-    }
-
-    #[test]
     fn supervisor_merge_repo_wins() {
         let tmp = TempDir::new().unwrap();
         let global_path = tmp.path().join("global").join("config.toml");
@@ -3961,28 +3999,6 @@ enabled = true
     }
 
     // --- AutoApproveConfig (auto-approve-patterns / approval-configuration) ---
-
-    #[test]
-    fn auto_approve_defaults_match_spec() {
-        let cfg = AutoApproveConfig::default();
-        assert!(cfg.enabled, "enabled defaults to true");
-        assert!(
-            cfg.safe_commands.is_empty(),
-            "safe_commands defaults to empty"
-        );
-        assert_eq!(cfg.stall_threshold_seconds, 30);
-        assert_eq!(cfg.approval_level, ApprovalLevelPreset::Safe);
-    }
-
-    #[test]
-    fn auto_approve_section_absent_keeps_supervisor_simple() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.toml");
-        write_file(&path, "[supervisor]\nenabled = true\n");
-        let config = load_config_file(&path).unwrap().unwrap();
-        let supervisor = config.supervisor.unwrap();
-        assert!(supervisor.auto_approve.is_none());
-    }
 
     #[test]
     fn auto_approve_section_parses_full_body() {
@@ -4325,14 +4341,6 @@ enabled = true
     // --- ConflictConfig (supervisor.conflict sub-table) ---
 
     #[test]
-    fn conflict_config_defaults_match_spec() {
-        let cfg = ConflictConfig::default();
-        assert_eq!(cfg.window_seconds, 120);
-        assert!(cfg.warn_on_intent_overlap);
-        assert!(cfg.escalate_on_violation);
-    }
-
-    #[test]
     fn supervisor_with_no_conflict_section_loads_defaults() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
@@ -4456,21 +4464,6 @@ enabled = true
 
     fn missing_global(tmp: &TempDir) -> PathBuf {
         tmp.path().join("nonexistent-global").join("config.toml")
-    }
-
-    // 3.1 No [governance] section → all paths None.
-    #[test]
-    fn governance_defaults_to_all_none_when_section_absent() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.toml");
-        write_file(&path, "default_cli = \"claude\"\n");
-
-        let config = load_config_file(&path).unwrap().unwrap();
-        assert!(config.governance.adr.is_none());
-        assert!(config.governance.test_strategy.is_none());
-        assert!(config.governance.security.is_none());
-        assert!(config.governance.dod.is_none());
-        assert!(config.governance.constitution.is_none());
     }
 
     // 3.2 All paths populated.
@@ -5056,37 +5049,27 @@ enabled = true
     // --- opsx role-gating config (opsx-role-gating 1.4) ---
 
     #[test]
-    fn role_gating_defaults_to_warn_when_section_absent() {
-        // A v0.5.0-shaped config with no `[opsx]` section still parses and
-        // resolves to the default Warn mode.
-        let config: PawConfig = toml::from_str("default_cli = \"claude\"\n").expect("parses");
-        assert!(config.opsx.is_none());
-        assert_eq!(config.role_gating_mode(), RoleGatingMode::Warn);
-    }
-
-    #[test]
     fn role_gating_section_present_but_field_absent_resolves_warn() {
         let config: PawConfig = toml::from_str("[opsx]\n").expect("parses");
         assert_eq!(config.role_gating_mode(), RoleGatingMode::Warn);
     }
 
     #[test]
-    fn role_gating_explicit_warn() {
-        let config: PawConfig = toml::from_str("[opsx]\nrole_gating = \"warn\"\n").expect("parses");
-        assert_eq!(config.role_gating_mode(), RoleGatingMode::Warn);
-    }
-
-    #[test]
-    fn role_gating_explicit_block() {
-        let config: PawConfig =
-            toml::from_str("[opsx]\nrole_gating = \"block\"\n").expect("parses");
-        assert_eq!(config.role_gating_mode(), RoleGatingMode::Block);
-    }
-
-    #[test]
-    fn role_gating_explicit_off() {
-        let config: PawConfig = toml::from_str("[opsx]\nrole_gating = \"off\"\n").expect("parses");
-        assert_eq!(config.role_gating_mode(), RoleGatingMode::Off);
+    fn role_gating_parses_each_variant() {
+        // One row per RoleGatingMode wire value -> resolved mode.
+        for (value, expected) in [
+            ("warn", RoleGatingMode::Warn),
+            ("block", RoleGatingMode::Block),
+            ("off", RoleGatingMode::Off),
+        ] {
+            let config: PawConfig = toml::from_str(&format!("[opsx]\nrole_gating = \"{value}\"\n"))
+                .unwrap_or_else(|e| panic!("role_gating = {value:?} must parse: {e}"));
+            assert_eq!(
+                config.role_gating_mode(),
+                expected,
+                "role_gating = {value:?}"
+            );
+        }
     }
 
     #[test]
@@ -5163,27 +5146,39 @@ enabled = true
     }
 
     #[test]
-    fn tell_config_explicit_feedback_loads() {
-        let config: PawConfig = toml::from_str(
-            "[supervisor]\nenabled = true\n[supervisor.tell]\nmode = \"feedback\"\n",
-        )
-        .expect("parses");
-        let sup = config.supervisor.expect("supervisor present");
-        assert_eq!(sup.tell.mode, TellMode::Feedback);
-        // mode set explicitly to the default still resolves to default values.
-        assert_eq!(sup.tell.inventory_max_age_seconds, 60);
-    }
-
-    #[test]
-    fn tell_config_explicit_send_keys_loads() {
-        let config: PawConfig = toml::from_str(
-            "[supervisor]\nenabled = true\n[supervisor.tell]\nmode = \"send-keys\"\ninventory_max_age_seconds = 15\n",
-        )
-        .expect("parses");
-        let sup = config.supervisor.expect("supervisor present");
-        assert_eq!(sup.tell.mode, TellMode::SendKeys);
-        assert_eq!(sup.tell.inventory_max_age_seconds, 15);
-        assert!(!sup.tell.is_default());
+    fn tell_config_parses_each_mode() {
+        // One row per TellMode wire value -> (mode, inventory max age,
+        // is_default). An explicit `feedback` with no other keys still resolves
+        // the default values; `send-keys` with a custom age is a non-default
+        // table.
+        for (fixture, expected_mode, expected_max_age, expected_is_default) in [
+            (
+                "[supervisor]\nenabled = true\n[supervisor.tell]\nmode = \"feedback\"\n",
+                TellMode::Feedback,
+                60,
+                true,
+            ),
+            (
+                "[supervisor]\nenabled = true\n[supervisor.tell]\nmode = \"send-keys\"\ninventory_max_age_seconds = 15\n",
+                TellMode::SendKeys,
+                15,
+                false,
+            ),
+        ] {
+            let config: PawConfig =
+                toml::from_str(fixture).unwrap_or_else(|e| panic!("{fixture:?} must parse: {e}"));
+            let tell = config.supervisor.expect("supervisor present").tell;
+            assert_eq!(tell.mode, expected_mode, "mode for {fixture:?}");
+            assert_eq!(
+                tell.inventory_max_age_seconds, expected_max_age,
+                "inventory_max_age_seconds for {fixture:?}"
+            );
+            assert_eq!(
+                tell.is_default(),
+                expected_is_default,
+                "is_default for {fixture:?}"
+            );
+        }
     }
 
     #[test]
@@ -5227,16 +5222,6 @@ enabled = true
         let config: PawConfig = toml::from_str("[mcp]\nname = \"my-project\"\n").expect("parses");
         assert_eq!(config.mcp.name, Some("my-project".to_string()));
         assert_eq!(config.mcp_server_name(), "my-project");
-    }
-
-    // configuration delta — Scenario: Config without [mcp] section loads with
-    // defaults (name = None) and does not error.
-    #[test]
-    fn mcp_section_absent_defaults_to_none() {
-        let config: PawConfig = toml::from_str("default_cli = \"claude\"\n").expect("parses");
-        assert_eq!(config.mcp, McpConfig::default());
-        assert!(config.mcp.name.is_none());
-        assert_eq!(config.mcp_server_name(), "git-paw");
     }
 
     // Backward compatibility: a representative pre-v0.7.0 config (no [mcp]
@@ -5298,26 +5283,38 @@ enabled = true
     // --- worktree_placement (worktree-embedded-placement) ---
 
     #[test]
-    fn worktree_placement_parses_child() {
-        let cfg: PawConfig =
-            toml::from_str("worktree_placement = \"child\"\n").expect("parse child");
-        assert_eq!(cfg.worktree_placement, Some(WorktreePlacement::Child));
-        assert_eq!(cfg.worktree_placement(), WorktreePlacement::Child);
-    }
-
-    #[test]
-    fn worktree_placement_parses_sibling() {
-        let cfg: PawConfig =
-            toml::from_str("worktree_placement = \"sibling\"\n").expect("parse sibling");
-        assert_eq!(cfg.worktree_placement, Some(WorktreePlacement::Sibling));
-        assert_eq!(cfg.worktree_placement(), WorktreePlacement::Sibling);
-    }
-
-    #[test]
-    fn worktree_placement_absent_defaults_to_sibling() {
-        let cfg: PawConfig = toml::from_str("default_cli = \"claude\"\n").expect("parse");
-        assert_eq!(cfg.worktree_placement, None);
-        assert_eq!(cfg.worktree_placement(), WorktreePlacement::Sibling);
+    fn worktree_placement_parses_and_resolves() {
+        // One row per wire value plus the absent case: the parsed
+        // `Option<WorktreePlacement>` field and the resolved placement.
+        for (fixture, expected_field, expected_resolved) in [
+            (
+                "worktree_placement = \"child\"\n",
+                Some(WorktreePlacement::Child),
+                WorktreePlacement::Child,
+            ),
+            (
+                "worktree_placement = \"sibling\"\n",
+                Some(WorktreePlacement::Sibling),
+                WorktreePlacement::Sibling,
+            ),
+            (
+                "default_cli = \"claude\"\n",
+                None,
+                WorktreePlacement::Sibling,
+            ),
+        ] {
+            let cfg: PawConfig =
+                toml::from_str(fixture).unwrap_or_else(|e| panic!("{fixture:?} must parse: {e}"));
+            assert_eq!(
+                cfg.worktree_placement, expected_field,
+                "field for {fixture:?}"
+            );
+            assert_eq!(
+                cfg.worktree_placement(),
+                expected_resolved,
+                "resolved for {fixture:?}"
+            );
+        }
     }
 
     #[test]
