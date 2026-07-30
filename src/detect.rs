@@ -97,21 +97,12 @@ fn known_display_name(binary_name: &str) -> String {
     }
 }
 
-/// Resolves a command string to an absolute path.
+/// Resolves a command string to an absolute path within a given `PATH`.
 ///
 /// If the command is an absolute path and the file exists, returns it directly.
-/// Otherwise attempts a PATH lookup via `which`.
-///
-/// # Architecture Note
-/// This function uses `resolve_command_in` which executes the `which` command
-/// with a custom PATH environment variable set only for that process execution.
-/// This approach is thread-safe and avoids global environment mutation, making
-/// it suitable for parallel test execution without race conditions.
-#[allow(dead_code)]
-fn resolve_command(command: &str) -> Option<PathBuf> {
-    resolve_command_in(command, std::env::var_os("PATH").as_ref())
-}
-
+/// Otherwise attempts a lookup via `which`, executing it with the supplied
+/// `PATH` set only for that process execution — thread-safe, avoiding global
+/// environment mutation, so it is safe under parallel test execution.
 fn resolve_command_in(command: &str, path: Option<&std::ffi::OsString>) -> Option<PathBuf> {
     let path_obj = Path::new(command);
     if path_obj.is_absolute() && path_obj.exists() {

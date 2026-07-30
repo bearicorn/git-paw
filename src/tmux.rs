@@ -49,7 +49,6 @@ impl TmuxCommand {
     /// Return a human-readable command string (e.g. `tmux new-session -d -s paw-proj`).
     // Not called by production code — used by `TmuxSession::command_strings()` for
     // dry-run contract tests that verify the commands shown to users via `--dry-run`.
-    #[allow(dead_code)]
     pub fn as_command_string(&self) -> String {
         format!("tmux {}", self.args.join(" "))
     }
@@ -215,7 +214,6 @@ impl TmuxSession {
     /// Return all commands as human-readable strings (for dry-run / testing).
     // Not called by production code — used by unit tests as the dry-run contract
     // surface to verify the tmux commands shown to users via `--dry-run`.
-    #[allow(dead_code)]
     pub fn command_strings(&self) -> Vec<String> {
         self.commands
             .iter()

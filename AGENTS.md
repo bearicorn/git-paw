@@ -181,7 +181,6 @@ Only add dependencies listed in the approved set:
 | `console` | Terminal colors/styling |
 | `which` | PATH binary detection |
 | `thiserror` | Error derive macros |
-| `anyhow` | Application error handling |
 | `serde` + `serde_json` | Session state serialization |
 | `toml` + `serde` | Config file parsing |
 | `tokio` | Async runtime (broker HTTP server) |
