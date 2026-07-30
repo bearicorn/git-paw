@@ -12,8 +12,13 @@ failure).
 - [ ] Split the combined findings into **refactor (behavior-preserving, this change)** vs **bugfix (behavior-changing → `path-injection-hardening` / `broker-runtime-hardening`)**
 - [ ] Gate: baseline recorded; suite green cold; triage done
 
+## R0 — Baseline & triage — DONE
+- [x] Suite green cold-start confirmed (fresh-worktree full run: 2360 passed, the 1 fail is a known sweep.sh time-window flake, passes isolated — not a regression). Coverage baseline established during test-suite-consolidation. Refactor-vs-bugfix triage done (bugfixes routed to path-injection/broker-runtime; NOT folded here).
+
 ## R1 — Low-risk extractions behind the existing (non-PTY) net _(independent — start now)_
-- [ ] `config.rs → config/{mod,supervisor,broker,dashboard,specs,cli,layout}.rs` — pure move + re-export; all `#[serde]` attrs / `Default` / `merged_with` **verbatim** (§ do-not-touch)
+- [x] **Idiom/hygiene (D7) subset DONE** (each finding re-verified vs current code): dropped unused `anyhow` (+AGENTS.md row); deleted dead `detect.rs::resolve_command` (note preserved on `resolve_command_in`); removed the 2 vestigial `#[allow(dead_code)]` on tmux.rs; added the missing `///` on `agents.rs::inject_section_into_file`. **DEFERRED within R1:** the 6 logic-invariant `expect()→?` conversions (behavior-adjacent; dedicated per-site pass). [committed]
+- [ ] `config.rs → config/{mod,supervisor,broker,dashboard,specs,cli,layout}.rs` — pure move + re-export; all `#[serde]` attrs / `Default` / `merged_with` **verbatim** (§ do-not-touch) — NEXT
+- [ ] **GATING NOTE:** R2 (`main.rs` split — the headline conflict-hotspot win) is BLOCKED on `cli-interaction-e2e` (#2) finishing + the source-grep test removal; R3 (tmux runtime) also needs the dashboard CPU-leak fix. So #2 is the true unblocker for #6's high-value waves.
 - [ ] `tmux.rs` builder (`command_strings` + argv builders) → `tmux/command.rs`; runtime path untouched
 - [ ] `interactive.rs` resolver logic → module; live `dialoguer` impls untouched
 - [ ] `dashboard.rs` draw/format helpers → module; event loop + SIGHUP untouched
