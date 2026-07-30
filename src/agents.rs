@@ -773,6 +773,8 @@ pub fn install_git_hooks(
     Ok(())
 }
 
+/// Injects (or replaces) the marker-delimited git-paw section in the file at
+/// `path`, preserving any pre-existing user content outside the markers.
 pub fn inject_section_into_file(path: &Path, section: &str) -> Result<(), PawError> {
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
