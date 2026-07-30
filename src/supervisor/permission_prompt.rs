@@ -122,64 +122,48 @@ pub fn detect_permission_prompt(session: &str, pane_index: usize) -> Option<Perm
 mod tests {
     use super::*;
 
+    /// One row per classifier rule: a captured pane carrying a known approval
+    /// marker routes to its command class (`Curl` / `Cargo` / `Git`), falls
+    /// through to `Unknown` for an unrecognised command, and classifies to
+    /// `None` when no marker is present at all.
     #[test]
-    fn captures_with_no_marker_classify_to_none() {
-        let captured = "lorem ipsum dolor sit amet\n$ ls\n";
-        assert_eq!(classify_capture(captured), None);
-    }
-
-    #[test]
-    fn curl_prompt_classifies_curl() {
-        let captured = "curl http://127.0.0.1:9119/publish\nrequires approval\n";
-        assert_eq!(classify_capture(captured), Some(PermissionType::Curl));
-    }
-
-    #[test]
-    fn cargo_test_prompt_classifies_cargo() {
-        let captured = "do you want to proceed\nRunning cargo test --workspace";
-        assert_eq!(classify_capture(captured), Some(PermissionType::Cargo));
-    }
-
-    #[test]
-    fn cargo_fmt_prompt_classifies_cargo() {
-        let captured = "[y/N] cargo fmt --all";
-        assert_eq!(classify_capture(captured), Some(PermissionType::Cargo));
-    }
-
-    #[test]
-    fn cargo_clippy_prompt_classifies_cargo() {
-        let captured = "Allow this command: cargo clippy";
-        assert_eq!(classify_capture(captured), Some(PermissionType::Cargo));
-    }
-
-    #[test]
-    fn cargo_build_prompt_classifies_cargo() {
-        let captured = "(y/n) cargo build --release";
-        assert_eq!(classify_capture(captured), Some(PermissionType::Cargo));
-    }
-
-    #[test]
-    fn git_commit_prompt_classifies_git() {
-        let captured = "git commit -m hi\nrequires approval";
-        assert_eq!(classify_capture(captured), Some(PermissionType::Git));
-    }
-
-    #[test]
-    fn git_push_prompt_classifies_git() {
-        let captured = "git push origin main\nrequires approval";
-        assert_eq!(classify_capture(captured), Some(PermissionType::Git));
-    }
-
-    #[test]
-    fn unrecognized_command_classifies_unknown() {
-        let captured = "rm -rf /tmp/foo\nrequires approval";
-        assert_eq!(classify_capture(captured), Some(PermissionType::Unknown));
-    }
-
-    #[test]
-    fn marker_alone_without_command_is_unknown() {
-        let captured = "requires approval";
-        assert_eq!(classify_capture(captured), Some(PermissionType::Unknown));
+    fn classify_capture_covers_each_command_class() {
+        for (captured, expected) in [
+            ("lorem ipsum dolor sit amet\n$ ls\n", None),
+            (
+                "curl http://127.0.0.1:9119/publish\nrequires approval\n",
+                Some(PermissionType::Curl),
+            ),
+            (
+                "do you want to proceed\nRunning cargo test --workspace",
+                Some(PermissionType::Cargo),
+            ),
+            ("[y/N] cargo fmt --all", Some(PermissionType::Cargo)),
+            (
+                "Allow this command: cargo clippy",
+                Some(PermissionType::Cargo),
+            ),
+            ("(y/n) cargo build --release", Some(PermissionType::Cargo)),
+            (
+                "git commit -m hi\nrequires approval",
+                Some(PermissionType::Git),
+            ),
+            (
+                "git push origin main\nrequires approval",
+                Some(PermissionType::Git),
+            ),
+            (
+                "rm -rf /tmp/foo\nrequires approval",
+                Some(PermissionType::Unknown),
+            ),
+            ("requires approval", Some(PermissionType::Unknown)),
+        ] {
+            assert_eq!(
+                classify_capture(captured),
+                expected,
+                "captured: {captured:?}"
+            );
+        }
     }
 
     #[test]

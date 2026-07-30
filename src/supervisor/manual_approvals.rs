@@ -591,63 +591,65 @@ mod tests {
 
     // --- heuristic (§4.3 / §4.4) ---
 
+    /// One row per promotion-heuristic signal: any project-specific signal (a
+    /// `./` token, a project-name / branch-name / worktree-root substring, or a
+    /// tie of several) resolves to the project allowlist; an otherwise-general
+    /// command falls through to the bundled-preset candidate. Empty
+    /// project/branch signals must not false-match every pattern.
     #[test]
-    fn dot_slash_path_suggests_project() {
-        assert_eq!(
-            suggest_target("./scripts/deploy-staging.sh", "", "", None),
-            Suggestion::ProjectAllowlist
-        );
-    }
-
-    #[test]
-    fn generic_command_suggests_bundled_preset() {
-        assert_eq!(
-            suggest_target("make integration-test", "myproj", "feat/auth", None),
-            Suggestion::BundledPresetCandidate
-        );
-    }
-
-    #[test]
-    fn project_name_substring_suggests_project() {
-        assert_eq!(
-            suggest_target("myproj-cli --build", "myproj", "", None),
-            Suggestion::ProjectAllowlist
-        );
-    }
-
-    #[test]
-    fn branch_name_substring_suggests_project() {
-        assert_eq!(
-            suggest_target("deploy feat/auth", "", "feat/auth", None),
-            Suggestion::ProjectAllowlist
-        );
-    }
-
-    #[test]
-    fn worktree_root_substring_suggests_project() {
-        let root = Path::new("/home/me/wt/feature");
-        assert_eq!(
-            suggest_target("cat /home/me/wt/feature/notes", "", "", Some(root)),
-            Suggestion::ProjectAllowlist
-        );
-    }
-
-    #[test]
-    fn multiple_project_signals_tie_still_project() {
-        // A `./` token AND a project-name match — both fire; result is stable.
-        assert_eq!(
-            suggest_target("./run.sh myproj", "myproj", "feat/x", None),
-            Suggestion::ProjectAllowlist
-        );
-    }
-
-    #[test]
-    fn empty_project_and_branch_do_not_false_match() {
-        // Empty signals must not match an empty substring of every pattern.
-        assert_eq!(
-            suggest_target("npm test", "", "", None),
-            Suggestion::BundledPresetCandidate
-        );
+    fn suggest_target_classifies_each_signal() {
+        let wt = Path::new("/home/me/wt/feature");
+        for (pattern, project, branch, root, expected) in [
+            (
+                "./scripts/deploy-staging.sh",
+                "",
+                "",
+                None,
+                Suggestion::ProjectAllowlist,
+            ),
+            (
+                "make integration-test",
+                "myproj",
+                "feat/auth",
+                None,
+                Suggestion::BundledPresetCandidate,
+            ),
+            (
+                "myproj-cli --build",
+                "myproj",
+                "",
+                None,
+                Suggestion::ProjectAllowlist,
+            ),
+            (
+                "deploy feat/auth",
+                "",
+                "feat/auth",
+                None,
+                Suggestion::ProjectAllowlist,
+            ),
+            (
+                "cat /home/me/wt/feature/notes",
+                "",
+                "",
+                Some(wt),
+                Suggestion::ProjectAllowlist,
+            ),
+            (
+                "./run.sh myproj",
+                "myproj",
+                "feat/x",
+                None,
+                Suggestion::ProjectAllowlist,
+            ),
+            ("npm test", "", "", None, Suggestion::BundledPresetCandidate),
+        ] {
+            assert_eq!(
+                suggest_target(pattern, project, branch, root),
+                expected,
+                "suggest_target({pattern:?}, {project:?}, {branch:?}, {root:?})"
+            );
+        }
     }
 
     // --- aggregate (§4.1) ---

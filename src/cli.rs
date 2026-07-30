@@ -613,10 +613,30 @@ mod tests {
 
     // -- Start subcommand --
 
-    #[test]
-    fn start_with_no_flags() {
-        let cli = parse(&["start"]);
-        match cli.command.unwrap() {
+    /// Parsed `Command::Start` fields, mirrored so a single table can assert
+    /// the full flag surface per row. `Default` is the no-flag baseline; each
+    /// row overrides only the fields its args set, so the full-struct compare
+    /// also pins every unset flag at its default (the "flag X defaults to
+    /// false/None" cases).
+    #[derive(Debug, Default, PartialEq)]
+    #[allow(clippy::struct_excessive_bools)]
+    struct StartFields {
+        cli: Option<String>,
+        branches: Option<Vec<String>>,
+        from_all_specs: bool,
+        specs: Option<Vec<String>>,
+        specs_format: Option<SpecsFormat>,
+        dry_run: bool,
+        preset: Option<String>,
+        supervisor: bool,
+        no_supervisor: bool,
+        force: bool,
+        no_rebase: bool,
+        unattended: bool,
+    }
+
+    fn start_fields(args: &[&str]) -> StartFields {
+        match parse(args).command.unwrap() {
             Command::Start {
                 cli,
                 branches,
@@ -630,61 +650,241 @@ mod tests {
                 force,
                 no_rebase,
                 unattended,
-            } => {
-                assert!(cli.is_none());
-                assert!(branches.is_none());
-                assert!(!from_all_specs);
-                assert!(specs.is_none());
-                assert!(specs_format.is_none());
-                assert!(!dry_run);
-                assert!(preset.is_none());
-                assert!(!supervisor);
-                assert!(!no_supervisor);
-                assert!(!force);
-                assert!(!no_rebase);
-                assert!(!unattended);
-            }
+            } => StartFields {
+                cli,
+                branches,
+                from_all_specs,
+                specs,
+                specs_format,
+                dry_run,
+                preset,
+                supervisor,
+                no_supervisor,
+                force,
+                no_rebase,
+                unattended,
+            },
             other => panic!("expected Start, got {other:?}"),
         }
     }
 
+    fn strs(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// One row per `git paw start` flag / flag-combo -> the fully-parsed
+    /// `Command::Start` field set. Because the compare is full-struct, an unset
+    /// flag is asserted at its default on every row that omits it.
     #[test]
-    fn start_with_cli_flag() {
-        let cli = parse(&["start", "--cli", "claude"]);
-        match cli.command.unwrap() {
-            Command::Start { cli, .. } => assert_eq!(cli.as_deref(), Some("claude")),
-            other => panic!("expected Start, got {other:?}"),
+    #[allow(clippy::too_many_lines)]
+    fn start_flag_combinations_parse_to_expected_fields() {
+        for (args, expected) in [
+            (vec!["start"], StartFields::default()),
+            (
+                vec!["start", "--cli", "claude"],
+                StartFields {
+                    cli: Some("claude".to_string()),
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--unattended"],
+                StartFields {
+                    unattended: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--unattended", "--from-specs", "--cli", "claude"],
+                StartFields {
+                    unattended: true,
+                    from_all_specs: true,
+                    cli: Some("claude".to_string()),
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--from-all-specs"],
+                StartFields {
+                    from_all_specs: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--specs"],
+                StartFields {
+                    specs: Some(vec![]),
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--specs", "add-auth"],
+                StartFields {
+                    specs: Some(strs(&["add-auth"])),
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--specs", "add-auth,fix-session"],
+                StartFields {
+                    specs: Some(strs(&["add-auth", "fix-session"])),
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--specs", "add-auth,fix-session,add-logging"],
+                StartFields {
+                    specs: Some(strs(&["add-auth", "fix-session", "add-logging"])),
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--from-all-specs", "--supervisor"],
+                StartFields {
+                    from_all_specs: true,
+                    supervisor: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--supervisor"],
+                StartFields {
+                    supervisor: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--branches", "feat/a,feat/b,fix/c"],
+                StartFields {
+                    branches: Some(strs(&["feat/a", "feat/b", "fix/c"])),
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--dry-run"],
+                StartFields {
+                    dry_run: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--preset", "backend"],
+                StartFields {
+                    preset: Some("backend".to_string()),
+                    ..Default::default()
+                },
+            ),
+            (
+                vec![
+                    "start",
+                    "--supervisor",
+                    "--cli",
+                    "claude",
+                    "--branches",
+                    "feat/a,feat/b",
+                ],
+                StartFields {
+                    supervisor: true,
+                    cli: Some("claude".to_string()),
+                    branches: Some(strs(&["feat/a", "feat/b"])),
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--from-specs", "--specs-format", "speckit"],
+                StartFields {
+                    from_all_specs: true,
+                    specs_format: Some(SpecsFormat::Speckit),
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--from-specs", "--specs-format", "superpowers"],
+                StartFields {
+                    from_all_specs: true,
+                    specs_format: Some(SpecsFormat::Superpowers),
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--from-specs", "--specs-format", "openspec"],
+                StartFields {
+                    from_all_specs: true,
+                    specs_format: Some(SpecsFormat::Openspec),
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--from-specs", "--specs-format", "markdown"],
+                StartFields {
+                    from_all_specs: true,
+                    specs_format: Some(SpecsFormat::Markdown),
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--no-supervisor"],
+                StartFields {
+                    no_supervisor: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                vec![
+                    "start",
+                    "--no-supervisor",
+                    "--cli",
+                    "claude",
+                    "--branches",
+                    "feat/a,feat/b",
+                ],
+                StartFields {
+                    no_supervisor: true,
+                    cli: Some("claude".to_string()),
+                    branches: Some(strs(&["feat/a", "feat/b"])),
+                    ..Default::default()
+                },
+            ),
+            (
+                vec![
+                    "start",
+                    "--cli",
+                    "gemini",
+                    "--branches",
+                    "a,b",
+                    "--dry-run",
+                    "--preset",
+                    "dev",
+                ],
+                StartFields {
+                    cli: Some("gemini".to_string()),
+                    branches: Some(strs(&["a", "b"])),
+                    dry_run: true,
+                    preset: Some("dev".to_string()),
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--no-rebase"],
+                StartFields {
+                    no_rebase: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                vec!["start", "--no-rebase", "--supervisor"],
+                StartFields {
+                    no_rebase: true,
+                    supervisor: true,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            assert_eq!(start_fields(&args), expected, "args: {args:?}");
         }
     }
 
     // -- Task 1.3 / cli-parsing: --unattended flag --
-
-    #[test]
-    fn start_unattended_sets_flag() {
-        let cli = parse(&["start", "--unattended"]);
-        match cli.command.unwrap() {
-            Command::Start { unattended, .. } => assert!(unattended),
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn start_unattended_combines_with_from_specs_and_cli() {
-        let cli = parse(&["start", "--unattended", "--from-specs", "--cli", "claude"]);
-        match cli.command.unwrap() {
-            Command::Start {
-                unattended,
-                from_all_specs,
-                cli,
-                ..
-            } => {
-                assert!(unattended);
-                assert!(from_all_specs, "--from-specs sets the launch-all state");
-                assert_eq!(cli.as_deref(), Some("claude"));
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
 
     #[test]
     fn start_unattended_with_no_supervisor_is_rejected() {
@@ -698,22 +898,6 @@ mod tests {
             msg.contains("--unattended") && msg.contains("--no-supervisor"),
             "the parse error should name both conflicting flags; got: {msg}"
         );
-    }
-
-    #[test]
-    fn start_with_from_all_specs_sets_flag_and_leaves_specs_unset() {
-        let cli = parse(&["start", "--from-all-specs"]);
-        match cli.command.unwrap() {
-            Command::Start {
-                from_all_specs,
-                specs,
-                ..
-            } => {
-                assert!(from_all_specs);
-                assert!(specs.is_none());
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
     }
 
     #[test]
@@ -745,65 +929,6 @@ mod tests {
     }
 
     #[test]
-    fn start_with_bare_specs_yields_empty_vec_picker_mode() {
-        let cli = parse(&["start", "--specs"]);
-        match cli.command.unwrap() {
-            Command::Start {
-                from_all_specs,
-                specs,
-                ..
-            } => {
-                assert!(!from_all_specs);
-                assert_eq!(specs, Some(Vec::<String>::new()));
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn start_with_specs_single_name() {
-        let cli = parse(&["start", "--specs", "add-auth"]);
-        match cli.command.unwrap() {
-            Command::Start { specs, .. } => {
-                assert_eq!(specs, Some(vec!["add-auth".to_string()]));
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn start_with_specs_two_comma_separated_names() {
-        let cli = parse(&["start", "--specs", "add-auth,fix-session"]);
-        match cli.command.unwrap() {
-            Command::Start { specs, .. } => {
-                assert_eq!(
-                    specs,
-                    Some(vec!["add-auth".to_string(), "fix-session".to_string()])
-                );
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn start_with_specs_three_comma_separated_names() {
-        let cli = parse(&["start", "--specs", "add-auth,fix-session,add-logging"]);
-        match cli.command.unwrap() {
-            Command::Start { specs, .. } => {
-                assert_eq!(
-                    specs,
-                    Some(vec![
-                        "add-auth".to_string(),
-                        "fix-session".to_string(),
-                        "add-logging".to_string(),
-                    ])
-                );
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn start_with_from_all_specs_and_specs_is_rejected() {
         let result = Cli::try_parse_from([
             "git-paw",
@@ -826,42 +951,6 @@ mod tests {
     }
 
     #[test]
-    fn start_with_from_all_specs_and_supervisor_sets_both_flags() {
-        let cli = parse(&["start", "--from-all-specs", "--supervisor"]);
-        match cli.command.unwrap() {
-            Command::Start {
-                from_all_specs,
-                specs,
-                supervisor,
-                ..
-            } => {
-                assert!(from_all_specs);
-                assert!(supervisor);
-                assert!(specs.is_none());
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn start_with_supervisor_only_leaves_spec_mode_unset() {
-        let cli = parse(&["start", "--supervisor"]);
-        match cli.command.unwrap() {
-            Command::Start {
-                from_all_specs,
-                specs,
-                supervisor,
-                ..
-            } => {
-                assert!(!from_all_specs);
-                assert!(specs.is_none());
-                assert!(supervisor);
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn start_help_contains_from_all_specs_and_specs_but_not_alias() {
         let result = Cli::try_parse_from(["git-paw", "start", "--help"]);
         let err = result.unwrap_err();
@@ -881,102 +970,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn start_with_branches_flag_comma_separated() {
-        let cli = parse(&["start", "--branches", "feat/a,feat/b,fix/c"]);
-        match cli.command.unwrap() {
-            Command::Start { branches, .. } => {
-                let b = branches.expect("branches should be set");
-                assert_eq!(b, vec!["feat/a", "feat/b", "fix/c"]);
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn start_with_dry_run() {
-        let cli = parse(&["start", "--dry-run"]);
-        match cli.command.unwrap() {
-            Command::Start { dry_run, .. } => assert!(dry_run),
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn start_with_preset() {
-        let cli = parse(&["start", "--preset", "backend"]);
-        match cli.command.unwrap() {
-            Command::Start { preset, .. } => assert_eq!(preset.as_deref(), Some("backend")),
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn start_with_supervisor_flag() {
-        let cli = parse(&["start", "--supervisor"]);
-        match cli.command.unwrap() {
-            Command::Start { supervisor, .. } => assert!(supervisor),
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn start_without_supervisor_defaults_false() {
-        let cli = parse(&["start", "--cli", "claude"]);
-        match cli.command.unwrap() {
-            Command::Start { supervisor, .. } => assert!(!supervisor),
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn start_with_supervisor_and_other_flags() {
-        let cli = parse(&[
-            "start",
-            "--supervisor",
-            "--cli",
-            "claude",
-            "--branches",
-            "feat/a,feat/b",
-        ]);
-        match cli.command.unwrap() {
-            Command::Start {
-                supervisor,
-                cli,
-                branches,
-                ..
-            } => {
-                assert!(supervisor);
-                assert_eq!(cli.as_deref(), Some("claude"));
-                assert_eq!(branches.unwrap(), vec!["feat/a", "feat/b"]);
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
     // -- --specs-format flag --
-
-    #[test]
-    fn start_with_specs_format_speckit() {
-        let cli = parse(&["start", "--from-specs", "--specs-format", "speckit"]);
-        match cli.command.unwrap() {
-            Command::Start { specs_format, .. } => {
-                assert_eq!(specs_format, Some(SpecsFormat::Speckit));
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn start_with_specs_format_superpowers() {
-        let cli = parse(&["start", "--from-specs", "--specs-format", "superpowers"]);
-        match cli.command.unwrap() {
-            Command::Start { specs_format, .. } => {
-                assert_eq!(specs_format, Some(SpecsFormat::Superpowers));
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
 
     #[test]
     fn specs_format_superpowers_maps_to_backend_string() {
@@ -1016,28 +1010,6 @@ mod tests {
     }
 
     #[test]
-    fn start_with_specs_format_openspec() {
-        let cli = parse(&["start", "--from-specs", "--specs-format", "openspec"]);
-        match cli.command.unwrap() {
-            Command::Start { specs_format, .. } => {
-                assert_eq!(specs_format, Some(SpecsFormat::Openspec));
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn start_with_specs_format_markdown() {
-        let cli = parse(&["start", "--from-specs", "--specs-format", "markdown"]);
-        match cli.command.unwrap() {
-            Command::Start { specs_format, .. } => {
-                assert_eq!(specs_format, Some(SpecsFormat::Markdown));
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn start_rejects_unknown_specs_format() {
         let result = Cli::try_parse_from([
             "git-paw",
@@ -1061,65 +1033,7 @@ mod tests {
         assert_eq!(SpecsFormat::Speckit.as_str(), "speckit");
     }
 
-    #[test]
-    fn start_help_shows_specs_format_flag() {
-        let result = Cli::try_parse_from(["git-paw", "start", "--help"]);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
-        let help = err.to_string();
-        assert!(
-            help.contains("--specs-format"),
-            "start --help should contain --specs-format"
-        );
-    }
-
-    #[test]
-    fn start_help_shows_supervisor_flag() {
-        let result = Cli::try_parse_from(["git-paw", "start", "--help"]);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
-        let help = err.to_string();
-        assert!(
-            help.contains("--supervisor"),
-            "start --help should contain --supervisor"
-        );
-    }
-
     // -- --no-supervisor flag --
-
-    #[test]
-    fn start_with_no_supervisor_flag() {
-        let cli = parse(&["start", "--no-supervisor"]);
-        match cli.command.unwrap() {
-            Command::Start {
-                supervisor,
-                no_supervisor,
-                ..
-            } => {
-                assert!(no_supervisor);
-                assert!(!supervisor);
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn start_without_flags_leaves_no_supervisor_false() {
-        let cli = parse(&["start"]);
-        match cli.command.unwrap() {
-            Command::Start {
-                supervisor,
-                no_supervisor,
-                ..
-            } => {
-                assert!(!no_supervisor);
-                assert!(!supervisor);
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
 
     #[test]
     fn start_with_supervisor_and_no_supervisor_is_rejected() {
@@ -1141,73 +1055,6 @@ mod tests {
         // clap's conflicts_with is bidirectional; order of flags shouldn't matter.
         let result = Cli::try_parse_from(["git-paw", "start", "--no-supervisor", "--supervisor"]);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn start_no_supervisor_combines_with_other_flags() {
-        let cli = parse(&[
-            "start",
-            "--no-supervisor",
-            "--cli",
-            "claude",
-            "--branches",
-            "feat/a,feat/b",
-        ]);
-        match cli.command.unwrap() {
-            Command::Start {
-                no_supervisor,
-                cli,
-                branches,
-                ..
-            } => {
-                assert!(no_supervisor);
-                assert_eq!(cli.as_deref(), Some("claude"));
-                assert_eq!(branches.unwrap(), vec!["feat/a", "feat/b"]);
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn start_help_shows_no_supervisor_flag() {
-        let result = Cli::try_parse_from(["git-paw", "start", "--help"]);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
-        let help = err.to_string();
-        assert!(
-            help.contains("--no-supervisor"),
-            "start --help should contain --no-supervisor, got: {help}"
-        );
-    }
-
-    #[test]
-    fn start_with_all_flags() {
-        let cli = parse(&[
-            "start",
-            "--cli",
-            "gemini",
-            "--branches",
-            "a,b",
-            "--dry-run",
-            "--preset",
-            "dev",
-        ]);
-        match cli.command.unwrap() {
-            Command::Start {
-                cli,
-                branches,
-                dry_run,
-                preset,
-                ..
-            } => {
-                assert_eq!(cli.as_deref(), Some("gemini"));
-                assert_eq!(branches.unwrap(), vec!["a", "b"]);
-                assert!(dry_run);
-                assert_eq!(preset.as_deref(), Some("dev"));
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
     }
 
     // -- Add subcommand --
@@ -1273,20 +1120,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn add_help_lists_flags_and_examples() {
-        let result = Cli::try_parse_from(["git-paw", "add", "--help"]);
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
-        let help = err.to_string();
-        assert!(help.contains("--cli"), "got: {help}");
-        assert!(help.contains("--from-spec"), "got: {help}");
-        assert!(
-            help.contains("git paw add feat/api --cli codex"),
-            "add --help should include copy-pasteable examples; got: {help}"
-        );
-    }
-
     // -- Remove subcommand --
 
     #[test]
@@ -1328,34 +1161,6 @@ mod tests {
         assert!(result.is_err(), "remove requires a branch");
     }
 
-    #[test]
-    fn remove_help_lists_flags_and_examples() {
-        let result = Cli::try_parse_from(["git-paw", "remove", "--help"]);
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
-        let help = err.to_string();
-        assert!(help.contains("--keep-worktree"), "got: {help}");
-        assert!(help.contains("--force"), "got: {help}");
-        assert!(
-            help.contains("git paw remove feat/wip --force"),
-            "remove --help should include copy-pasteable examples; got: {help}"
-        );
-    }
-
-    #[test]
-    fn root_help_lists_add_and_remove() {
-        let result = Cli::try_parse_from(["git-paw", "--help"]);
-        let help = result.unwrap_err().to_string();
-        assert!(
-            help.contains("add"),
-            "root help should list add; got: {help}"
-        );
-        assert!(
-            help.contains("remove"),
-            "root help should list remove; got: {help}"
-        );
-    }
-
     // -- Pause subcommand --
 
     #[test]
@@ -1387,141 +1192,51 @@ mod tests {
         assert!(result.is_err(), "pause should reject unknown flags");
     }
 
-    #[test]
-    fn root_help_lists_pause() {
-        let result = Cli::try_parse_from(["git-paw", "--help"]);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
-        let help = err.to_string();
-        assert!(
-            help.contains("pause"),
-            "root --help should list pause subcommand, got: {help}"
-        );
-        // Quick-start block should also reference pause.
-        assert!(
-            help.contains("git paw pause"),
-            "after_help quick-start should mention `git paw pause`"
-        );
-    }
-
     // -- Stop subcommand --
 
+    /// One row per `git paw stop` invocation -> the parsed `force` flag.
     #[test]
-    fn stop_parses() {
-        let cli = parse(&["stop"]);
-        assert!(matches!(
-            cli.command.unwrap(),
-            Command::Stop { force: false }
-        ));
-    }
-
-    #[test]
-    fn stop_without_force() {
-        let cli = parse(&["stop"]);
-        match cli.command.unwrap() {
-            Command::Stop { force } => assert!(!force),
-            other => panic!("expected Stop, got {other:?}"),
+    fn stop_force_flag_parses() {
+        for (args, expected_force) in [(vec!["stop"], false), (vec!["stop", "--force"], true)] {
+            match parse(&args).command.unwrap() {
+                Command::Stop { force } => assert_eq!(force, expected_force, "args: {args:?}"),
+                other => panic!("expected Stop, got {other:?}"),
+            }
         }
-    }
-
-    #[test]
-    fn stop_with_force() {
-        let cli = parse(&["stop", "--force"]);
-        match cli.command.unwrap() {
-            Command::Stop { force } => assert!(force),
-            other => panic!("expected Stop, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn stop_help_mentions_pause_and_purge() {
-        let result = Cli::try_parse_from(["git-paw", "stop", "--help"]);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
-        let help = err.to_string();
-        assert!(
-            help.contains("pause"),
-            "stop --help should reference pause, got: {help}"
-        );
-        assert!(
-            help.contains("purge"),
-            "stop --help should reference purge, got: {help}"
-        );
-        assert!(
-            help.contains("--force"),
-            "stop --help should list --force, got: {help}"
-        );
     }
 
     // -- Purge subcommand --
 
+    /// One row per `git paw purge` flag-combo -> the parsed `force` / `stale`
+    /// flags (each of the four combinations).
     #[test]
-    fn purge_without_force() {
-        let cli = parse(&["purge"]);
-        match cli.command.unwrap() {
-            Command::Purge { force, stale } => {
-                assert!(!force);
-                assert!(!stale);
+    fn purge_flag_combinations_parse() {
+        for (args, expected_force, expected_stale) in [
+            (vec!["purge"], false, false),
+            (vec!["purge", "--force"], true, false),
+            (vec!["purge", "--stale"], false, true),
+            (vec!["purge", "--stale", "--force"], true, true),
+        ] {
+            match parse(&args).command.unwrap() {
+                Command::Purge { force, stale } => {
+                    assert_eq!(force, expected_force, "force for {args:?}");
+                    assert_eq!(stale, expected_stale, "stale for {args:?}");
+                }
+                other => panic!("expected Purge, got {other:?}"),
             }
-            other => panic!("expected Purge, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn purge_with_force() {
-        let cli = parse(&["purge", "--force"]);
-        match cli.command.unwrap() {
-            Command::Purge { force, stale } => {
-                assert!(force);
-                assert!(!stale);
-            }
-            other => panic!("expected Purge, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn purge_with_stale() {
-        let cli = parse(&["purge", "--stale"]);
-        match cli.command.unwrap() {
-            Command::Purge { force, stale } => {
-                assert!(!force);
-                assert!(stale);
-            }
-            other => panic!("expected Purge, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn purge_with_stale_and_force() {
-        let cli = parse(&["purge", "--stale", "--force"]);
-        match cli.command.unwrap() {
-            Command::Purge { force, stale } => {
-                assert!(force);
-                assert!(stale);
-            }
-            other => panic!("expected Purge, got {other:?}"),
         }
     }
 
     // -- Status subcommand --
 
+    /// One row per `git paw status` invocation -> the parsed `json` flag.
     #[test]
-    fn status_parses() {
-        let cli = parse(&["status"]);
-        match cli.command.unwrap() {
-            Command::Status { json } => assert!(!json),
-            other => panic!("expected Status, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn status_with_json() {
-        let cli = parse(&["status", "--json"]);
-        match cli.command.unwrap() {
-            Command::Status { json } => assert!(json),
-            other => panic!("expected Status, got {other:?}"),
+    fn status_json_flag_parses() {
+        for (args, expected_json) in [(vec!["status"], false), (vec!["status", "--json"], true)] {
+            match parse(&args).command.unwrap() {
+                Command::Status { json } => assert_eq!(json, expected_json, "args: {args:?}"),
+                other => panic!("expected Status, got {other:?}"),
+            }
         }
     }
 
@@ -1587,6 +1302,100 @@ mod tests {
     }
 
     // -- Help text quality --
+
+    /// One row per subcommand: `<sub> --help` renders help (`DisplayHelp`) and
+    /// surfaces every listed flag / copy-pasteable example anchor. Merges the
+    /// per-flag `*_help_shows_*` and `*_help_lists_flags_and_examples` greps
+    /// into a single table.
+    #[test]
+    fn subcommand_help_surfaces_expected_anchors() {
+        let cases: &[(&[&str], &[&str])] = &[
+            (
+                &["start", "--help"],
+                &[
+                    "--specs-format",
+                    "--supervisor",
+                    "--no-supervisor",
+                    "--no-rebase",
+                ],
+            ),
+            (
+                &["add", "--help"],
+                &["--cli", "--from-spec", "git paw add feat/api --cli codex"],
+            ),
+            (
+                &["remove", "--help"],
+                &[
+                    "--keep-worktree",
+                    "--force",
+                    "git paw remove feat/wip --force",
+                ],
+            ),
+            (&["stop", "--help"], &["pause", "purge", "--force"]),
+            (
+                &["approvals", "--help"],
+                &["--session", "--limit", "--json", "git paw approvals --json"],
+            ),
+            (&["replay", "--help"], &["--list", "--color", "--session"]),
+        ];
+        for &(args, anchors) in cases {
+            let mut full = vec!["git-paw"];
+            full.extend_from_slice(args);
+            let err = Cli::try_parse_from(full).expect_err("--help should display help");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::DisplayHelp,
+                "kind for {args:?}"
+            );
+            let help = err.to_string();
+            for &anchor in anchors {
+                assert!(
+                    help.contains(anchor),
+                    "{args:?} --help should surface {anchor:?}; got: {help}"
+                );
+            }
+        }
+    }
+
+    /// The root `--help` lists every public subcommand plus the quick-start
+    /// reference. Merges the individual `help_shows_*` / `root_help_lists_*`
+    /// greps.
+    #[test]
+    fn root_help_lists_public_subcommands() {
+        let err = Cli::try_parse_from(["git-paw", "--help"]).expect_err("--help displays help");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        for anchor in [
+            "add",
+            "remove",
+            "pause",
+            "git paw pause",
+            "replay",
+            "approvals",
+            "mcp",
+        ] {
+            assert!(
+                help.contains(anchor),
+                "root --help should surface {anchor:?}; got: {help}"
+            );
+        }
+    }
+
+    /// Hidden / internal subcommands never appear in root `--help`. Merges the
+    /// `dashboard_does_not_appear_in_help` and `selftest_is_hidden_from_help`
+    /// guards.
+    #[test]
+    fn root_help_hides_internal_subcommands() {
+        let help = Cli::try_parse_from(["git-paw", "--help"])
+            .unwrap_err()
+            .to_string();
+        for hidden in ["__dashboard", "selftest"] {
+            assert!(
+                !help.contains(hidden),
+                "root --help must not surface internal subcommand {hidden:?}; got: {help}"
+            );
+        }
+    }
 
     #[test]
     fn version_flag_is_accepted() {
@@ -1694,84 +1503,12 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn replay_help_text() {
-        let result = Cli::try_parse_from(["git-paw", "replay", "--help"]);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
-        let help = err.to_string();
-        assert!(help.contains("--list"));
-        assert!(help.contains("--color"));
-        assert!(help.contains("--session"));
-    }
-
-    #[test]
-    fn help_shows_replay_subcommand() {
-        let result = Cli::try_parse_from(["git-paw", "--help"]);
-        let err = result.unwrap_err();
-        let help = err.to_string();
-        assert!(
-            help.contains("replay"),
-            "help should list the replay subcommand"
-        );
-    }
-
     // -- __dashboard subcommand --
 
     #[test]
     fn dashboard_parses() {
         let cli = parse(&["__dashboard"]);
         assert!(matches!(cli.command.unwrap(), Command::Dashboard));
-    }
-
-    // -- --no-rebase flag --
-
-    #[test]
-    fn start_with_no_rebase_flag_sets_no_rebase_true() {
-        let cli = parse(&["start", "--no-rebase"]);
-        match cli.command.unwrap() {
-            Command::Start { no_rebase, .. } => assert!(no_rebase),
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn start_without_no_rebase_defaults_to_false() {
-        let cli = parse(&["start"]);
-        match cli.command.unwrap() {
-            Command::Start { no_rebase, .. } => assert!(!no_rebase),
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn start_no_rebase_combines_with_supervisor() {
-        let cli = parse(&["start", "--no-rebase", "--supervisor"]);
-        match cli.command.unwrap() {
-            Command::Start {
-                no_rebase,
-                supervisor,
-                ..
-            } => {
-                assert!(no_rebase);
-                assert!(supervisor);
-            }
-            other => panic!("expected Start, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn start_help_shows_no_rebase_flag() {
-        let result = Cli::try_parse_from(["git-paw", "start", "--help"]);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
-        let help = err.to_string();
-        assert!(
-            help.contains("--no-rebase"),
-            "start --help should contain --no-rebase, got: {help}"
-        );
     }
 
     // -- Approvals subcommand --
@@ -1821,33 +1558,6 @@ mod tests {
     fn approvals_rejects_non_numeric_limit() {
         let result = Cli::try_parse_from(["git-paw", "approvals", "--limit", "lots"]);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn approvals_help_lists_flags_and_examples() {
-        let result = Cli::try_parse_from(["git-paw", "approvals", "--help"]);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
-        let help = err.to_string();
-        assert!(help.contains("--session"), "got: {help}");
-        assert!(help.contains("--limit"), "got: {help}");
-        assert!(help.contains("--json"), "got: {help}");
-        assert!(
-            help.contains("git paw approvals --json"),
-            "help should include examples, got: {help}"
-        );
-    }
-
-    #[test]
-    fn help_shows_approvals_subcommand() {
-        let result = Cli::try_parse_from(["git-paw", "--help"]);
-        let err = result.unwrap_err();
-        let help = err.to_string();
-        assert!(
-            help.contains("approvals"),
-            "root help should list approvals subcommand, got: {help}"
-        );
     }
 
     // -- Mcp subcommand --
@@ -1937,28 +1647,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn help_shows_mcp_subcommand() {
-        let result = Cli::try_parse_from(["git-paw", "--help"]);
-        let err = result.unwrap_err();
-        let help = err.to_string();
-        assert!(
-            help.contains("mcp"),
-            "root help should list the mcp subcommand, got: {help}"
-        );
-    }
-
-    #[test]
-    fn dashboard_does_not_appear_in_help() {
-        let result = Cli::try_parse_from(["git-paw", "--help"]);
-        let err = result.unwrap_err();
-        let help = err.to_string();
-        assert!(
-            !help.contains("__dashboard"),
-            "hidden __dashboard subcommand should not appear in help output"
-        );
-    }
-
     // -- Selftest subcommand --
 
     #[test]
@@ -1993,17 +1681,6 @@ mod tests {
         assert!(
             help.contains("git paw selftest"),
             "selftest --help should include a usage example; got: {help}"
-        );
-    }
-
-    #[test]
-    fn selftest_is_hidden_from_help() {
-        let result = Cli::try_parse_from(["git-paw", "--help"]);
-        let err = result.unwrap_err();
-        let help = err.to_string();
-        assert!(
-            !help.contains("selftest"),
-            "selftest is an internal diagnostic (the live arm of `git paw doctor`) and must be hidden from root help, got: {help}"
         );
     }
 }
