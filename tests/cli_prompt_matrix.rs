@@ -370,3 +370,42 @@ fn from_all_specs_unconfigured_spec_format_errors() {
         "error must give explicit-only spec-config guidance; got stderr:\n{stderr}"
     );
 }
+
+/// bare `--specs` (no values) on a TTY SHOWS the spec multi-select picker. The
+/// behavioral replacement for the source-grep `cli_specs_tty_proceeds_to_picker`
+/// test — driven via the PTY harness: assert the picker RENDERS, then tear down
+/// (driving the fuzzy multi-select to completion is a separate, flakier concern).
+#[test]
+#[serial]
+fn bare_specs_on_tty_shows_spec_picker() {
+    if !pty::tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tmux_env = TmuxTestEnv::new();
+    let _proc = tmux_env.apply_to_process();
+
+    let tr = setup_test_repo();
+    write_openspec_specs_repo(tr.path(), &["auth", "api"]);
+
+    let session = pty::unique_session_name("paw-matrix-specpicker");
+    pty::create_detached_session(&session);
+    let bin = env!("CARGO_BIN_EXE_git-paw");
+    let cmd = format!(
+        "cd '{}' && '{bin}' start --specs --dry-run",
+        tr.path().display()
+    );
+    pty::send_keys(&session, &[&cmd, "Enter"]);
+
+    // bare --specs → the spec picker renders (it runs during resolution, before
+    // --dry-run's plan short-circuits execution).
+    pty::wait_for_pane(&session, "Select specs", Duration::from_secs(10));
+    pty::kill_session(&session);
+}
+
+// NOTE — the uniform / per-branch CLI-picker SHOWN rows are deliberately NOT
+// driven here: reaching the CLI picker requires first passing the mode picker
+// (a fuzzy drive-to-completion = flaky). They are covered instead by: the
+// bypass side (`start_all_flags_bypass_all_pickers`), the resolution-chain
+// short-circuit (`tests/cli_resolution_integration.rs`), and the mode-picker
+// render precursor (`start_branches_without_cli_shows_mode_picker`).
