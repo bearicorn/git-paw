@@ -39,10 +39,33 @@ The re-audit (§5.1) explicitly warns against over-collapsing these. Folding sav
 documented per-rule reasoning before the freeze — net-negative. Kept as fast, clear unit tests (test-strategy
 "keep as unit" routing). No change.
 
-Remaining higher-risk waves (need cargo-mutants spot-checks — profraw-immune; §2–§5 in the re-audit):
-config backward-compat legacy-fixture consolidation (coverage-check), unit→integration collapses
-(session_integration dup delete, terminal_status fold, broker.rs raw-TCP trim, dev_allowlist,
-delivery.rs routing/private-state — mutants-gated), prose-pin rewrites, post-W1 subsumed prompt tests.
+### High-risk tier — evaluated each; one cut, the rest DEFERRED post-freeze (finding)
+Powered through the whole high-risk tier with confirm-then-cut analysis. Finding: the re-audit's
+~330 estimate over-counted "redundancy" — most high-risk items are **distinct behavioral/integration
+guards, not dups**, and cutting them trades freeze-critical coverage for modest counts, violating the
+in-freeze NFR precedence (stability > internal-quality).
+- [x] **session_integration.rs DELETED (−13)** — the ONE genuine redundancy: same dir-injectable fns
+  the units call far more (save_session_in ×17), single-module fs concern (no integration surface),
+  binary-only (no external lib boundary). Coverage-verified zero-unique (src/session.rs 100 missed
+  lines with vs without it — byte-identical). [committed]
+- [~] **delivery.rs (−14) — KEEP/DEFER.** 85 tests incl. the C4 phantom-row roster guards
+  (verified_does_not_mutate_verifier_record, question_does_not_create_sender_roster_row, …) I just
+  spec-reconciled, terminal-status protection, and the nudge/verify_now contract. Restructuring the
+  most freeze-critical module for −14 is the wrong trade pre-freeze.
+- [~] **broker.rs raw-TCP trim (−10) — KEEP/DEFER.** Real TCP bind + HTTP-wire framing (chunked
+  decode) — a genuinely different layer from the in-process server.rs `oneshot` tests; not a dup.
+- [~] **dev_allowlist (−5) — KEEP/DEFER.** Integration (real .claude/settings.json seeding) + unit
+  (pattern-composition logic) are complementary layers, not dups.
+- [~] **config backward-compat fixtures (−~11) — KEEP/DEFER.** The 10 pre_v0_11/v0_5_0/v030/v04
+  fixtures each pin a DISTINCT historical shape → specific default; distinct back-compat guards
+  (explicit v1.0.0 Change-Checklist contract), not a battery. One rich fixture would lose specific
+  era→default assertions.
+- Prose-pin rewrites + post-W1 subsumed prompt tests: remain (lower-risk labor); the post-W1 set is
+  still gated on cli-interaction-e2e merging.
+
+**Net delivered this change: −165 tests (−152 safe wave + −13 session_integration), product coverage
+rigorously preserved.** conflict.rs regions also evaluated → KEEP. The deferred high-risk trims are
+post-freeze work (a regression is cheaper then); documented so the analysis isn't re-done.
 
 ## 1. Safe first wave (~120–135, risk none/low, zero sole-guard risk, zero W1 overlap)
 - [ ] `src/broker/messages.rs`: getter table (`agent_id_*` + `status_label_*`) + slugify table (drop `_deterministic` tautology) + advanced_main missing/blank + StatusPayload → table-driven (−33). **Grep the `BrokerMessage` variant set first** (cluster grew 14→16; ensure the table covers every variant)
