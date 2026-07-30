@@ -48,24 +48,30 @@ in-freeze NFR precedence (stability > internal-quality).
   the units call far more (save_session_in ×17), single-module fs concern (no integration surface),
   binary-only (no external lib boundary). Coverage-verified zero-unique (src/session.rs 100 missed
   lines with vs without it — byte-identical). [committed]
-- [~] **delivery.rs (−14) — KEEP/DEFER.** 85 tests incl. the C4 phantom-row roster guards
-  (verified_does_not_mutate_verifier_record, question_does_not_create_sender_roster_row, …) I just
-  spec-reconciled, terminal-status protection, and the nudge/verify_now contract. Restructuring the
-  most freeze-critical module for −14 is the wrong trade pre-freeze.
-- [~] **broker.rs raw-TCP trim (−10) — KEEP/DEFER.** Real TCP bind + HTTP-wire framing (chunked
-  decode) — a genuinely different layer from the in-process server.rs `oneshot` tests; not a dup.
-- [~] **dev_allowlist (−5) — KEEP/DEFER.** Integration (real .claude/settings.json seeding) + unit
-  (pattern-composition logic) are complementary layers, not dups.
-- [~] **config backward-compat fixtures (−~11) — KEEP/DEFER.** The 10 pre_v0_11/v0_5_0/v030/v04
-  fixtures each pin a DISTINCT historical shape → specific default; distinct back-compat guards
-  (explicit v1.0.0 Change-Checklist contract), not a battery. One rich fixture would lose specific
-  era→default assertions.
-- Prose-pin rewrites + post-W1 subsumed prompt tests: remain (lower-risk labor); the post-W1 set is
-  still gated on cli-interaction-e2e merging.
+- [x] **delivery.rs routing table-ify (−13, 85→72) — DONE (revisited).** Folded the 15 broadcast/
+  targeted ROUTING tests into 2 semantics tables (every kind×scenario a row, identical poll_messages
+  outcome). The C4 phantom-row roster guards, terminal-status, nudge/verify_now, poll/cursor, snapshot,
+  and flush tests are UNTOUCHED (grep-verified). **Mutation-gated: `cargo-mutants` on route_message
+  (--lib) = 6/6 caught** — the table still kills routing-dispatch mutations. [committed]
+- [x] **broker.rs raw-TCP per-code trim (−11, 18→7) — DONE (revisited).** server.rs oneshot
+  demonstrably covers every status code, so the per-code raw-TCP tests are handler-logic dups; kept ONE
+  wire-path smoke (publish_and_poll_roundtrip + chunked-decode helper) + concurrency/lifecycle/since/
+  advanced_main round-trips. Each deletion mapped to its covering oneshot test. [committed]
+- [x] **config backward-compat fixtures (−8) — DONE (revisited).** On inspection these are "optional
+  section absent → default" = PERMANENT behavior in dated clothes (not legacy-only leniency), so they
+  fold behavior-neutrally into one section-absent table (every assertion a row); de-versioned the names.
+  #10 (custom_cli approval_args, a [clis.*] concern) left as-is. [393bf64+] Not a 1.0.0-breaking dep.
+- [~] **dev_allowlist (−5) — KEEP.** Genuinely complementary layers (real settings.json seeding vs
+  pattern-composition logic), not dups. Marginal; left.
+- Prose-pin rewrites + post-W1 subsumed prompt tests: remain (lower-risk labor); post-W1 gated on
+  cli-interaction-e2e merging.
 
-**Net delivered this change: −165 tests (−152 safe wave + −13 session_integration), product coverage
-rigorously preserved.** conflict.rs regions also evaluated → KEEP. The deferred high-risk trims are
-post-freeze work (a regression is cheaper then); documented so the analysis isn't re-done.
+**Net delivered this change: −197 #[test] fns** (−152 safe wave, −13 session_integration, −8 config
+fold, −13 delivery routing, −11 broker.rs), **product coverage rigorously preserved** (fresh-worktree
+`--lib` per-file missed-lines; delivery routing additionally mutation-verified 6/6). conflict.rs +
+dev_allowlist evaluated → KEEP (complementary/self-documenting, not dups). The "breaking at 1.0.0"
+lever only obsoletes a test if 1.0.0 actually removes the guarded behavior — nothing here needs
+pre-queuing to 1.0.0.
 
 ## 1. Safe first wave (~120–135, risk none/low, zero sole-guard risk, zero W1 overlap)
 - [ ] `src/broker/messages.rs`: getter table (`agent_id_*` + `status_label_*`) + slugify table (drop `_deterministic` tautology) + advanced_main missing/blank + StatusPayload → table-driven (−33). **Grep the `BrokerMessage` variant set first** (cluster grew 14→16; ensure the table covers every variant)
