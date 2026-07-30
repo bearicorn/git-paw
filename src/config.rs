@@ -1966,6 +1966,138 @@ mod tests {
         fs::write(path, content).unwrap();
     }
 
+    #[test]
+    #[allow(clippy::too_many_lines)] // one row per folded backward-compat fixture
+    fn absent_optional_config_resolves_to_defaults() {
+        // Backward-compat contract: a config that omits an optional section or
+        // field loads without error and the missing piece resolves to its
+        // documented default / None. One row per (formerly per-era) fixture;
+        // each closure asserts exactly what its original fixture asserted. A
+        // new optional section adds a row, not a fixture.
+        type Check = fn(&PawConfig);
+        let cases: &[(&str, &str, Check)] = &[
+            (
+                "no [supervisor] section (with [broker] + [logging]) → supervisor None; default_cli + broker.enabled parse",
+                "default_cli = \"claude\"\n\
+                 mouse = true\n\
+                 [broker]\n\
+                 enabled = true\n\
+                 [logging]\n\
+                 enabled = false\n",
+                |c| {
+                    assert_eq!(c.default_cli.as_deref(), Some("claude"));
+                    assert!(c.broker.enabled);
+                    assert!(c.supervisor.is_none());
+                },
+            ),
+            (
+                "no [supervisor] / [supervisor.auto_approve] (with [broker]) → supervisor None; broker.enabled",
+                "default_cli = \"claude\"\nmouse = true\n[broker]\nenabled = true\n",
+                |c| {
+                    assert!(c.supervisor.is_none());
+                    assert!(c.broker.enabled);
+                },
+            ),
+            (
+                "[supervisor] without approval key → supervisor.approval None",
+                "[supervisor]\n\
+                 enabled = true\n\
+                 cli = \"claude\"\n\
+                 test_command = \"just check\"\n\
+                 agent_approval = \"full-auto\"\n",
+                |c| {
+                    let supervisor = c.supervisor.as_ref().unwrap();
+                    assert_eq!(supervisor.approval, None);
+                },
+            ),
+            (
+                "[supervisor] without learnings field → learnings false; learnings_config.flush_interval_seconds default 60",
+                "default_cli = \"claude\"\n\
+                 [supervisor]\n\
+                 enabled = true\n\
+                 agent_approval = \"auto\"\n",
+                |c| {
+                    let supervisor = c.supervisor.as_ref().unwrap();
+                    assert!(!supervisor.learnings);
+                    assert_eq!(supervisor.learnings_config.flush_interval_seconds, 60);
+                },
+            ),
+            (
+                "[supervisor] without [supervisor.common_dev_allowlist] → allowlist enabled default true, extra empty",
+                "[supervisor]\n\
+                 enabled = true\n\
+                 cli = \"claude\"\n\
+                 test_command = \"just check\"\n\
+                 agent_approval = \"auto\"\n\
+                 [supervisor.conflict]\n\
+                 window_seconds = 60\n",
+                |c| {
+                    let supervisor = c.supervisor.as_ref().unwrap();
+                    assert!(supervisor.common_dev_allowlist.enabled);
+                    assert!(supervisor.common_dev_allowlist.extra.is_empty());
+                },
+            ),
+            (
+                "no [governance] section → governance == default; all path fields None",
+                "default_cli = \"claude\"\n\
+                 mouse = true\n\
+                 [broker]\n\
+                 enabled = true\n\
+                 [supervisor]\n\
+                 enabled = true\n\
+                 [specs]\n\
+                 dir = \"specs\"\n\
+                 type = \"openspec\"\n\
+                 [clis.foo]\n\
+                 command = \"/bin/foo\"\n",
+                |c| {
+                    assert_eq!(c.governance, GovernanceConfig::default());
+                    assert!(c.governance.adr.is_none());
+                    assert!(c.governance.test_strategy.is_none());
+                    assert!(c.governance.security.is_none());
+                    assert!(c.governance.dod.is_none());
+                    assert!(c.governance.constitution.is_none());
+                    assert!(c.governance.readme.is_none());
+                    assert!(c.governance.docs.is_none());
+                },
+            ),
+            (
+                "[dashboard] without broker_log table → show_message_log true, broker_log == default",
+                "[dashboard]\nshow_message_log = true\n",
+                |c| {
+                    let dashboard = c.dashboard.as_ref().unwrap();
+                    assert!(dashboard.show_message_log);
+                    assert_eq!(dashboard.broker_log, BrokerLogConfig::default());
+                },
+            ),
+            (
+                "no [layout] section → layout None; border affordances enabled",
+                "default_cli = \"claude\"\nmouse = true\n\n[broker]\nenabled = true\nport = 9119\n\n[supervisor]\nenabled = true\n",
+                |c| {
+                    assert!(c.layout.is_none());
+                    assert!(c.border_affordances_enabled());
+                },
+            ),
+            (
+                "no worktree_placement field → resolves to Sibling",
+                "default_cli = \"claude\"\nmouse = true\n[broker]\nenabled = true\n",
+                |c| {
+                    assert_eq!(c.worktree_placement(), WorktreePlacement::Sibling);
+                },
+            ),
+        ];
+
+        for (label, toml, check) in cases {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("config.toml");
+            write_file(&path, toml);
+            let config = load_config_file(&path)
+                .unwrap_or_else(|e| panic!("{label}: load failed: {e}"))
+                .unwrap_or_else(|| panic!("{label}: config was None"));
+            check(&config);
+        }
+    }
+
     // --- Parsing behavior ---
 
     #[test]
@@ -3004,26 +3136,6 @@ enabled = true
     }
 
     #[test]
-    fn pre_v0_11_supervisor_config_loads_with_approval_none() {
-        // A [supervisor] section exactly as v0.10.0 wrote it — no `approval`
-        // key — must load without error and leave the field unset.
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.toml");
-        write_file(
-            &path,
-            "[supervisor]\n\
-             enabled = true\n\
-             cli = \"claude\"\n\
-             test_command = \"just check\"\n\
-             agent_approval = \"full-auto\"\n",
-        );
-
-        let config = load_config_file(&path).unwrap().unwrap();
-        let supervisor = config.supervisor.unwrap();
-        assert_eq!(supervisor.approval, None);
-    }
-
-    #[test]
     fn unset_supervisor_approval_omitted_on_round_trip() {
         let supervisor = SupervisorConfig {
             enabled: true,
@@ -3498,29 +3610,6 @@ enabled = true
     }
 
     #[test]
-    fn existing_pre_v05_config_loads_with_default_common_dev_allowlist() {
-        // A pre-v0.5 supervisor config that omits the new sub-table must
-        // still load and yield the documented defaults.
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.toml");
-        write_file(
-            &path,
-            "[supervisor]\n\
-             enabled = true\n\
-             cli = \"claude\"\n\
-             test_command = \"just check\"\n\
-             agent_approval = \"auto\"\n\
-             [supervisor.conflict]\n\
-             window_seconds = 60\n",
-        );
-
-        let config = load_config_file(&path).unwrap().unwrap();
-        let supervisor = config.supervisor.unwrap();
-        assert!(supervisor.common_dev_allowlist.enabled);
-        assert!(supervisor.common_dev_allowlist.extra.is_empty());
-    }
-
-    #[test]
     fn generated_default_config_template_contains_common_dev_allowlist_section() {
         let template = generate_default_config();
         assert!(
@@ -3589,27 +3678,6 @@ enabled = true
     }
 
     #[test]
-    fn pre_v050_config_loads_with_learnings_false() {
-        // A config produced before v0.5.0 (no `learnings` field, no
-        // `[supervisor.learnings_config]` table) parses cleanly and yields
-        // `learnings = false`.
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.toml");
-        write_file(
-            &path,
-            "default_cli = \"claude\"\n\
-             [supervisor]\n\
-             enabled = true\n\
-             agent_approval = \"auto\"\n",
-        );
-
-        let config = load_config_file(&path).unwrap().unwrap();
-        let supervisor = config.supervisor.unwrap();
-        assert!(!supervisor.learnings);
-        assert_eq!(supervisor.learnings_config.flush_interval_seconds, 60);
-    }
-
-    #[test]
     fn learnings_round_trips_through_save_and_load() {
         let tmp = TempDir::new().unwrap();
         let config_path = tmp.path().join("config.toml");
@@ -3633,26 +3701,6 @@ enabled = true
         let supervisor = loaded.supervisor.unwrap();
         assert!(supervisor.learnings);
         assert_eq!(supervisor.learnings_config.flush_interval_seconds, 90);
-    }
-
-    #[test]
-    fn existing_v030_config_loads_without_supervisor() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.toml");
-        write_file(
-            &path,
-            "default_cli = \"claude\"\n\
-             mouse = true\n\
-             [broker]\n\
-             enabled = true\n\
-             [logging]\n\
-             enabled = false\n",
-        );
-
-        let config = load_config_file(&path).unwrap().unwrap();
-        assert_eq!(config.default_cli.as_deref(), Some("claude"));
-        assert!(config.broker.enabled);
-        assert!(config.supervisor.is_none());
     }
 
     #[test]
@@ -3788,20 +3836,6 @@ enabled = true
             BrokerLogConfig::default_height_lines()
         );
         assert!(broker_log.height_lines > 12);
-    }
-
-    #[test]
-    fn v050_dashboard_section_without_broker_log_still_parses() {
-        // Task 1.3: a v0.5.0 config that predates the broker_log table must
-        // load unchanged, with the new section materialising at its default.
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.toml");
-        write_file(&path, "[dashboard]\nshow_message_log = true\n");
-
-        let config = load_config_file(&path).unwrap().unwrap();
-        let dashboard = config.dashboard.unwrap();
-        assert!(dashboard.show_message_log);
-        assert_eq!(dashboard.broker_log, BrokerLogConfig::default());
     }
 
     #[test]
@@ -4438,21 +4472,6 @@ enabled = true
         assert_eq!(loaded.supervisor, original.supervisor);
     }
 
-    #[test]
-    fn v030_config_loads_without_auto_approve() {
-        // Backward-compat: an existing v0.3.0 config that has neither
-        // [supervisor] nor [supervisor.auto_approve] must parse cleanly.
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.toml");
-        write_file(
-            &path,
-            "default_cli = \"claude\"\nmouse = true\n[broker]\nenabled = true\n",
-        );
-        let config = load_config_file(&path).unwrap().unwrap();
-        assert!(config.supervisor.is_none());
-        assert!(config.broker.enabled);
-    }
-
     // --- GovernanceConfig (governance-config v0.5.0) ---
 
     /// Helper: lays out a repo with `.git-paw/config.toml` and an optional
@@ -4580,37 +4599,6 @@ enabled = true
         save_config_to(&config_path, &original).unwrap();
         let loaded = load_config_file(&config_path).unwrap().unwrap();
         assert_eq!(loaded.governance, original.governance);
-    }
-
-    // 3.7 v0.4 fixture (no [governance]) loads with defaults.
-    #[test]
-    fn governance_v04_config_without_section_loads_with_defaults() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.toml");
-        write_file(
-            &path,
-            "default_cli = \"claude\"\n\
-             mouse = true\n\
-             [broker]\n\
-             enabled = true\n\
-             [supervisor]\n\
-             enabled = true\n\
-             [specs]\n\
-             dir = \"specs\"\n\
-             type = \"openspec\"\n\
-             [clis.foo]\n\
-             command = \"/bin/foo\"\n",
-        );
-
-        let config = load_config_file(&path).unwrap().unwrap();
-        assert_eq!(config.governance, GovernanceConfig::default());
-        assert!(config.governance.adr.is_none());
-        assert!(config.governance.test_strategy.is_none());
-        assert!(config.governance.security.is_none());
-        assert!(config.governance.dod.is_none());
-        assert!(config.governance.constitution.is_none());
-        assert!(config.governance.readme.is_none());
-        assert!(config.governance.docs.is_none());
     }
 
     // 3.8 GovernanceConfig::default() exposes only the documented path fields
@@ -5009,16 +4997,6 @@ enabled = true
         assert!(cfg.border_affordances_enabled());
     }
 
-    /// Backward compatibility: a representative v0.5.0 config (no `[layout]`
-    /// section at all) still parses and defaults affordances on.
-    #[test]
-    fn v0_5_0_config_without_layout_parses() {
-        let v0_5_0 = "default_cli = \"claude\"\nmouse = true\n\n[broker]\nenabled = true\nport = 9119\n\n[supervisor]\nenabled = true\n";
-        let cfg: PawConfig = toml::from_str(v0_5_0).expect("v0.5.0 config must still parse");
-        assert!(cfg.layout.is_none());
-        assert!(cfg.border_affordances_enabled());
-    }
-
     /// `merged_with`: an overlay `[layout]` wins over the base layout.
     #[test]
     fn layout_overlay_wins_in_merge() {
@@ -5355,14 +5333,5 @@ enabled = true
             !serialized.contains("worktree_placement"),
             "absent placement must not be serialized; got:\n{serialized}"
         );
-    }
-
-    #[test]
-    fn preexisting_config_without_placement_loads_without_error() {
-        // A v0.7.0 config (no worktree_placement field) must load and resolve
-        // to sibling.
-        let prior = "default_cli = \"claude\"\nmouse = true\n[broker]\nenabled = true\n";
-        let cfg: PawConfig = toml::from_str(prior).expect("v0.7.0 config must load");
-        assert_eq!(cfg.worktree_placement(), WorktreePlacement::Sibling);
     }
 }
