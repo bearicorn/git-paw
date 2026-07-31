@@ -27,9 +27,12 @@ failure).
 - [ ] Idiom/hygiene (D7): drop unused `anyhow` + its `AGENTS.md` row (F1); delete dead `detect.rs::resolve_command` + allow (F3); remove the two vestigial `#[allow(dead_code)]` on `tmux.rs` public helpers; convert the 6 logic-invariant `expect()` → `?`/restructure (F2a); add the missing `///` on `agents.rs::inject_section_into_file`
 - [ ] Gate: `just verify` green cold + `just deny`; coverage ≥ baseline per touched module; reviewer confirms the diff is pure move/re-export (no line traces to a behavior change)
 
-## R2 — Unblock + split `main.rs` _(GATED: PTY net + source-grep removal)_
-- [ ] **Precondition — W1 PTY net:** `cli-interaction-e2e` matrix covers the interactive / `--from-specs` / destructive-confirm dispatch and pane/prompt outcomes
-- [ ] **Precondition — source-grep removal:** `test-suite-consolidation` has removed/replaced `tests/source_audit.rs`, `tests/cli_specs_tty_proceeds_to_picker.rs`, `tests/cli_from_specs_boot_block_failure.rs`, and the inline `main.rs` `include_str!` brace-walks — each confirmed to have a behavioral counterpart before deletion
+## R2 — Unblock + split `main.rs` _(GATED: PTY net ✅ + source-grep handling)_
+- [x] **Precondition — W1 PTY net:** `cli-interaction-e2e` matrix now covers the interactive / `--from-specs` / destructive-confirm dispatch + pane/prompt outcomes (spec-launch dispatch rows + bare-`--specs` shown-gate added; scenario→test map recorded). MET.
+- [~] **Precondition — source-grep handling (refined; not a blanket prior deletion):**
+  - `cli_specs_tty_proceeds_to_picker.rs` — DELETED (behaviorally replaced by `bare_specs_on_tty_shows_spec_picker`). ✅
+  - `cli_from_specs_boot_block_failure.rs` — **R2-coupled**: its own doc says a behavioral test needs a tmux-fail shim that doesn't ship — exactly what the `CommandRunner` seam enables. DELETE IN R2 as the seam-based "send-keys failure is non-fatal" `CommandRunner`-mock test replaces it (do NOT orphan it earlier).
+  - `source_audit.rs` — **do NOT delete** (it's the standing-guard model both skills cite): 3 real negative-invariant guards (`cmd_supervisor` has no `run_merge_loop` / no `spawn_auto_approve_thread` / no launcher self-publish) + 1 behavioral (empty-snapshot dashboard). When R2 moves `cmd_supervisor` out of `main.rs`, **REPOINT** its `include_str!`/`function_body` to the new `src/commands/supervisor.rs` location so the guards survive the split. The `main_rs_source_is_non_empty` tautology may be dropped.
 - [ ] Split `main.rs → src/commands/*.rs` + thin `main`/`run` dispatch — leaf helpers first, then the tmux-orchestration `cmd_*` (`cmd_start`, `launch_spec_session`, `recover_*`, `restart_from_pause`, `attach_agent`) through the `CommandRunner` seam
 - [ ] Add `CommandRunner`-mocked unit tests asserting the tmux/git **argv** of the `cmd_*` handlers without spawning real processes
 - [ ] Enum-ripple guard: grep `BrokerMessage` / `SpecBackendKind` across `src/` — exhaustive matches stay co-located and compiler-caught
