@@ -97,15 +97,19 @@ smoke-container:
         echo "Building git-paw-ci image via $ENGINE (one-time, ~3-5 min)..." >&2
         $ENGINE build -t git-paw-ci -f Containerfile .
     fi
-    echo "Running cold-start smoke in $ENGINE container..." >&2
-    $ENGINE run --rm \
+    echo "Running cold-start smoke in $ENGINE container (non-root ci user)..." >&2
+    # --init gives a real PID-1 reaper (orphan-detection tests expect a normal
+    # process tree). The image runs as the non-root `ci` user to mirror the CI
+    # runner; --locked because that user cannot rewrite the host-owned Cargo.lock.
+    $ENGINE run --rm --init \
         -v "$PWD:/src:Z" \
-        -v paw-cargo-cache:/root/.cargo:Z \
+        -v paw-cargo-cache:/home/ci/.cargo:Z \
         -v paw-target-cache:/src/target:Z \
         -w /src \
         -e CARGO_TERM_COLOR=always \
+        -e CARGO_PROFILE_TEST_DEBUG=0 \
         git-paw-ci \
-        bash -c "cargo test --tests"
+        bash -c "cargo test --tests --locked"
 
 # Run all smoke layers: host on Linux, host + container on macOS
 smoke-all: smoke
