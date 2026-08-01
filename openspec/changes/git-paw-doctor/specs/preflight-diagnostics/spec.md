@@ -138,7 +138,11 @@ system is configured, it SHALL report ⚠ with the actionable "add `[specs]` or 
 The command SHALL verify that the bundled helper scripts (`sweep.sh`, `broker.sh`,
 `docs-fetch.sh`) exist under `.git-paw/scripts/`, are executable, and match the running
 binary's embedded version. A missing or stale script SHALL be reported with a remedy to run
-`git paw init`.
+`git paw init`. The command SHALL also verify that a Python 3 interpreter is available on
+PATH (`python3`, or `python` reporting major version 3), since every bundled helper script
+requires one to run; when none is found it SHALL report ⚠ with a remedy to install Python 3.
+Because core git-paw orchestration (start/add/remove) does not require Python, a missing
+interpreter SHALL be ⚠ and SHALL NOT be ✗.
 
 #### Scenario: A bundled script is missing
 
@@ -151,6 +155,12 @@ binary's embedded version. A missing or stale script SHALL be reported with a re
 - **GIVEN** a bundled script exists but its content differs from the running binary's embedded version
 - **WHEN** `git paw doctor` is run
 - **THEN** the Bundled-scripts group SHALL report a non-✓ status with a remedy to run `git paw init`
+
+#### Scenario: No Python 3 interpreter on PATH
+
+- **GIVEN** neither `python3` nor a version-3 `python` is on PATH
+- **WHEN** `git paw doctor` is run
+- **THEN** the Bundled-scripts group SHALL report ⚠ for the Python 3 interpreter with a remedy to install Python 3 (the bundled helper scripts require it)
 
 ### Requirement: Broker check
 
