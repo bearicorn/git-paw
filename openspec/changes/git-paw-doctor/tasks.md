@@ -21,6 +21,7 @@
 - [ ] Config check (present + parses; report `worktree_placement`; unknown/deprecated fields → ⚠; unparseable → ✗)
 - [ ] Spec-system check (explicit `--specs-format`/`[specs]` resolution + scanned count; unconfigured → ⚠ with add-`[specs]` guidance)
 - [ ] Bundled-scripts check (`sweep`/`broker`/`docs-fetch`.sh present + executable + match embedded version; missing/stale → run `git paw init`)
+- [ ] Bundled-scripts: also probe a Python 3 interpreter on PATH (`python3`, or `python` reporting v3) that every bundled script requires; absent → ⚠ with remedy to install Python 3 (NOT ✗ — core start/add/remove needs no Python)
 - [ ] Broker check (enabled → bind/port free/reachable; disabled → informational ✓)
 - [ ] Supervisor check (enabled → gate-command binaries on PATH sourced from resolved stack preset + `sweep.sh` installed; disabled → informational ✓)
 - [ ] Hygiene check (required `.gitignore` entries incl. `.git-paw/worktrees/` under child placement; stale session / orphaned worktree → ⚠ suggest `git paw purge --stale`)
@@ -32,7 +33,7 @@
 - [ ] Assert doctor writes nothing (read-only)
 
 ## 4. Tests
-- [ ] Unit test each check function's ✓/⚠/✗ decision over injected state (tmux missing, not-a-repo, no CLIs, unparseable config, unconfigured spec system, missing/stale script, port busy, gate-binary missing, stale session, missing gitignore entry)
+- [ ] Unit test each check function's ✓/⚠/✗ decision over injected state (tmux missing, not-a-repo, no CLIs, unparseable config, unconfigured spec system, missing/stale script, no Python 3 interpreter, port busy, gate-binary missing, stale session, missing gitignore entry)
 - [ ] Exit-code unit tests (all-✓ → 0; a ✗ → non-zero; ⚠-only → 0)
 - [ ] `assert_cmd` integration test: `git paw doctor` and `git paw doctor --json` in a tempfile repo — assert exit code + JSON parses with required fields
 - [ ] Guard test: `--help` does NOT advertise `--fix`
