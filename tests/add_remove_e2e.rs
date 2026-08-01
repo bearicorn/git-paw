@@ -552,6 +552,14 @@ fn add_to_paused_session_holds_prompt_for_resume() {
 }
 
 /// Collect `(pane_index, pane_current_path)` for every pane on the test socket.
+///
+/// The index/path pair is space-delimited, NOT tab-delimited: a literal tab in
+/// a tmux `-F` format string does not survive to the output on every tmux build
+/// (Ubuntu noble's tmux 3.4 emits a space where macOS's tmux emits the tab), so
+/// a `split_once('\t')` silently drops every line and the caller sees an empty
+/// list even though the panes are healthy. A space is safe to split on because
+/// `#{pane_index}` is always a bare integer, so the first space is unambiguously
+/// the boundary — even if `#{pane_current_path}` itself contains spaces.
 fn pane_paths(tmux_env: &TmuxTestEnv, session: &str) -> Vec<(String, String)> {
     let mut c = StdCommand::new("tmux");
     tmux_env.apply(&mut c);
@@ -561,14 +569,14 @@ fn pane_paths(tmux_env: &TmuxTestEnv, session: &str) -> Vec<(String, String)> {
             "-t",
             session,
             "-F",
-            "#{pane_index}\t#{pane_current_path}",
+            "#{pane_index} #{pane_current_path}",
         ])
         .output()
         .expect("tmux list-panes paths");
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|l| {
-            let (i, p) = l.split_once('\t')?;
+            let (i, p) = l.split_once(' ')?;
             Some((i.to_string(), p.to_string()))
         })
         .collect()
