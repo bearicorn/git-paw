@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         tmux \
         jq \
+        python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user matching the CI runner. Rust is installed as this user so the
