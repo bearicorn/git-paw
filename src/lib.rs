@@ -18,6 +18,7 @@ pub const DEFAULT_SUBMIT_DELAY_MS: u64 = 1500;
 pub mod agents;
 pub mod broker;
 pub mod cli;
+pub mod command_runner;
 pub mod config;
 pub mod coordination;
 pub mod dashboard;

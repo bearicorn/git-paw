@@ -22,7 +22,7 @@ failure).
 - [x] `tmux.rs` builder (`command_strings` + argv builders) → `tmux/command.rs`; runtime path untouched [committed 49f74e0]
 - [ ] `interactive.rs` resolver logic → module; live `dialoguer` impls untouched
 - [ ] `dashboard.rs` draw/format helpers → module; event loop + SIGHUP untouched
-- [ ] Introduce the `CommandRunner` trait + real runner (behavior-identical) as the seam type; wire the already-covered builder call sites through it
+- [x] Introduce the `CommandRunner` trait + real runner (behavior-identical) as the seam type; wire the already-covered builder call sites through it — `src/command_runner.rs` (trait + `RealCommandRunner` + `#[cfg(test)]` `FakeCommandRunner`); wired at `TmuxCommand::execute` (the already-covered builder execute site, `TmuxSession::execute` signature unchanged so main.rs callers untouched); argv + success/failure-handling asserted via the fake. Blind runtime (tmux `session.rs`/`git.rs`) + `cmd_*` deferred to R3/R2 per D2.
 - [ ] Introduce `SessionName`/`BranchSlug`/`WorktreePath` newtypes at construction points — output **byte-identical** to current inline formatting (NO new sanitization)
 - [ ] Idiom/hygiene (D7): drop unused `anyhow` + its `AGENTS.md` row (F1); delete dead `detect.rs::resolve_command` + allow (F3); remove the two vestigial `#[allow(dead_code)]` on `tmux.rs` public helpers; convert the 6 logic-invariant `expect()` → `?`/restructure (F2a); add the missing `///` on `agents.rs::inject_section_into_file`
 - [ ] Gate: `just verify` green cold + `just deny`; coverage ≥ baseline per touched module; reviewer confirms the diff is pure move/re-export (no line traces to a behavior change)

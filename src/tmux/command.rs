@@ -5,8 +5,7 @@
 //! surface: pure argv assembly plus the `execute`/`command_strings` methods on
 //! a built session.
 
-use std::process::Command;
-
+use crate::command_runner::{CommandRunner, RealCommandRunner};
 use crate::error::PawError;
 
 /// A single tmux CLI invocation, stored as its argument list.
@@ -49,14 +48,21 @@ impl TmuxCommand {
         format!("tmux {}", self.args.join(" "))
     }
 
-    /// Execute the command against the live tmux server.
-    fn execute(&self) -> Result<String, PawError> {
-        let output = Command::new("tmux")
-            .args(&self.args)
-            .output()
+    /// Execute the command against the live tmux server through `runner`.
+    ///
+    /// Behaviour is unchanged from the previous inline
+    /// `Command::new("tmux")…output()`: on success the captured stdout is
+    /// returned as UTF-8; on a non-zero exit the trimmed stderr becomes a
+    /// [`PawError::TmuxError`]. Routing through the [`CommandRunner`] seam lets
+    /// tests assert the exact argv and script success/failure without a live
+    /// tmux server.
+    fn execute(&self, runner: &dyn CommandRunner) -> Result<String, PawError> {
+        let args: Vec<&str> = self.args.iter().map(String::as_str).collect();
+        let output = runner
+            .run("tmux", &args)
             .map_err(|e| PawError::TmuxError(format!("failed to run tmux: {e}")))?;
 
-        if output.status.success() {
+        if output.success {
             String::from_utf8(output.stdout)
                 .map_err(|e| PawError::TmuxError(format!("invalid utf-8 in tmux output: {e}")))
         } else {
@@ -180,7 +186,8 @@ impl TmuxSession {
     /// warning naming the failed invocation and do not abort the build; any
     /// other command failure propagates as an error.
     pub fn execute(&self) -> Result<(), PawError> {
-        self.execute_with(|cmd| cmd.execute().map(|_| ()), |w| eprintln!("{w}"))
+        let runner = RealCommandRunner;
+        self.execute_with(|cmd| cmd.execute(&runner).map(|_| ()), |w| eprintln!("{w}"))
     }
 
     /// Run every queued command via `run`, routing non-fatal warnings to
@@ -1109,4 +1116,66 @@ pub fn build_supervisor_submit_argv_pair(
         "Enter".to_string(),
     ];
     (first, second)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command_runner::test_support::FakeCommandRunner;
+
+    #[test]
+    fn tmux_command_execute_sends_tmux_argv_and_returns_stdout() {
+        let cmd = TmuxCommand::new(&["list-panes", "-t", "paw-x"]);
+        let fake = FakeCommandRunner::succeeding("0\n1\n");
+        let out = cmd.execute(&fake).expect("success returns stdout");
+        assert_eq!(out, "0\n1\n");
+        assert_eq!(
+            fake.calls(),
+            vec![(
+                "tmux".to_string(),
+                vec![
+                    "list-panes".to_string(),
+                    "-t".to_string(),
+                    "paw-x".to_string()
+                ]
+            )],
+            "execute must invoke `tmux` with the command's exact argv"
+        );
+    }
+
+    #[test]
+    fn tmux_command_execute_maps_failure_to_trimmed_stderr_error() {
+        let cmd = TmuxCommand::new(&["has-session", "-t", "nope"]);
+        let fake = FakeCommandRunner::failing("  no server running  ");
+        match cmd.execute(&fake) {
+            Err(PawError::TmuxError(msg)) => assert_eq!(msg, "no server running"),
+            other => panic!("expected a trimmed TmuxError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tmux_session_execute_drives_each_command_through_the_runner_verbatim() {
+        // The execute path must send exactly the argv that `command_strings`
+        // (the dry-run surface) reports — the seam proves render == send.
+        let session = TmuxSessionBuilder::new("proj")
+            .border_affordances(false)
+            .mouse_mode(false)
+            .add_pane(PaneSpec {
+                branch: "feat/x".into(),
+                worktree: "/tmp/proj-feat-x".into(),
+                cli_command: "claude".into(),
+            })
+            .build()
+            .expect("build session");
+        let fake = FakeCommandRunner::succeeding("");
+        session
+            .execute_with(|cmd| cmd.execute(&fake).map(|_| ()), |_| {})
+            .expect("execute session");
+        let sent: Vec<String> = fake
+            .calls()
+            .into_iter()
+            .map(|(prog, args)| format!("{prog} {}", args.join(" ")))
+            .collect();
+        assert_eq!(sent, session.command_strings());
+    }
 }
