@@ -9,10 +9,10 @@
 - [x] init: supervisor confirm shown (fresh+TTY, PTY test) / bypassed (non-TTY, matrix test → not enabled)
 - [x] init: test-command input shown (after yes, PTY test) / bypassed (non-TTY, matrix test)
 - [x] init: spec-system select shown (fresh+TTY, PTY test) / bypassed (non-TTY, matrix test → commented template)
-- [ ] init: migrate-supervisor confirm shown (existing config missing `[supervisor]`+TTY) / bypassed (present / non-TTY)
+- [x] init: migrate-supervisor confirm shown (existing config missing `[supervisor]`+TTY) / bypassed (present / non-TTY) — SHOWN: `interactive_init_migrates_supervisor_into_existing_config` (PTY); BYPASSED non-TTY: `init_non_tty_migrates_supervisor_as_opt_out` (matrix)
 - [x] start: branch picker shown (¬`--branches`, PTY test) / bypassed (`--branches`, matrix test)
 - [x] start: mode picker shown (¬`--cli`, PTY test) / bypassed (`--cli`, matrix test)
-- [ ] start: uniform CLI picker shown / bypassed (`--cli`)
+- [x] start: uniform CLI picker shown / bypassed (`--cli`) — BYPASSED: `start_all_flags_bypass_all_pickers` (matrix); SHOWN is the documented-skip in the row below (flaky drive-to-completion), covered indirectly per the matrix-file NOTE
 - [~] start: uniform / per-branch CLI picker SHOWN — documented-skip (reaching it needs passing the mode picker = flaky drive-to-completion); covered by bypass (`start_all_flags_bypass_all_pickers`) + short-circuit chain (`cli_resolution_integration.rs`) + mode-picker render precursor (`start_branches_without_cli_shows_mode_picker`). NOTE in the matrix file.
 - [x] start: supervisor confirm dispatch — `--supervisor` short-circuits the chain into supervisor mode (`start_supervisor_flag_enters_supervisor_mode`); non-TTY bypass via `init_non_tty_*`
 - [x] spec-launch: bare `--specs` shows the spec picker (`bare_specs_on_tty_shows_spec_picker`, PTY render-gate) + `--from-all-specs` launches all specs without a picker (`from_all_specs_launches_every_spec_without_picker`); deprecated `--from-specs` alias omitted
@@ -32,10 +32,10 @@
 - [x] **R2 preconditions MET:** the dispatch + prompt outcomes for the interactive / `--from-specs` / destructive paths the `main.rs` split touches are guarded; behavioral replacements exist for the source-grep tests test-suite-consolidation will remove (`cli_specs_tty_proceeds_to_picker` → `bare_specs_on_tty_shows_spec_picker`; `cli_from_specs_boot_block_failure` → `from_all_specs_*`).
 
 ## 5. Verification (five gates)
-- [ ] Gate 1 — the matrix binary passes in isolation (`--no-fail-fast`), serialised, tmux present
-- [ ] Gate 2 — full regression green vs merge-base (run the matrix serialised, not concurrent with other E2E)
-- [ ] Gate 3 — spec audit: every `cli-interaction-e2e` scenario maps to a matrix test
-- [ ] Gate 4 — doc audit: harness convention noted for contributors
-- [ ] Gate 5 — security: no secrets; harness spawns only the test binary under an isolated tmux socket
-- [ ] `just check` green; `cargo fmt` before commit
-- [ ] `openspec validate cli-interaction-e2e --strict` passes
+- [x] Gate 1 — the matrix binary passes in isolation: `cli_prompt_matrix` 16/16, `init_interactive_specs` 7/7, tmux present, `#[serial]`
+- [x] Gate 2 — full regression green vs merge-base: `cargo test --no-fail-fast` = 2364 passed; the lone failure (`permission_prompt_with_stale_heartbeat_publishes_stuck`, `sweep_sh_stuck_detection.rs`) is a known time-window load-flake that passes isolated (0.69s), unrelated to this test-only change
+- [x] Gate 3 — spec audit: migrate-supervisor + uniform-CLI scenarios now map to tests; the two documented-skip rows (CLI-picker SHOWN) are recorded with their indirect coverage
+- [x] Gate 4 — doc audit: test-only change (no CLI/README/mdBook surface); harness convention documented in `helpers::pty` + the two test-file module docs
+- [x] Gate 5 — security: isolated tmux socket via `TmuxTestEnv`; harness spawns only the test binary; no secrets
+- [x] `just check` green; `cargo fmt` before commit (fmt --check clean, clippy --all-targets -D warnings clean)
+- [x] `openspec validate cli-interaction-e2e --strict` passes

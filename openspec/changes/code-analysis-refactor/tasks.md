@@ -17,9 +17,9 @@ failure).
 
 ## R1 — Low-risk extractions behind the existing (non-PTY) net _(independent — start now)_
 - [x] **Idiom/hygiene (D7) subset DONE** (each finding re-verified vs current code): dropped unused `anyhow` (+AGENTS.md row); deleted dead `detect.rs::resolve_command` (note preserved on `resolve_command_in`); removed the 2 vestigial `#[allow(dead_code)]` on tmux.rs; added the missing `///` on `agents.rs::inject_section_into_file`. **DEFERRED within R1:** the 6 logic-invariant `expect()→?` conversions (behavior-adjacent; dedicated per-site pass). [committed]
-- [ ] `config.rs → config/{mod,supervisor,broker,dashboard,specs,cli,layout}.rs` — pure move + re-export; all `#[serde]` attrs / `Default` / `merged_with` **verbatim** (§ do-not-touch) — NEXT
+- [x] `config.rs → config/{mod,supervisor,broker,dashboard,specs,cli,layout}.rs` — pure move + re-export; all `#[serde]` attrs / `Default` / `merged_with` **verbatim** (§ do-not-touch) [committed 19b419a]
 - [ ] **GATING NOTE:** R2 (`main.rs` split — the headline conflict-hotspot win) is BLOCKED on `cli-interaction-e2e` (#2) finishing + the source-grep test removal; R3 (tmux runtime) also needs the dashboard CPU-leak fix. So #2 is the true unblocker for #6's high-value waves.
-- [ ] `tmux.rs` builder (`command_strings` + argv builders) → `tmux/command.rs`; runtime path untouched
+- [x] `tmux.rs` builder (`command_strings` + argv builders) → `tmux/command.rs`; runtime path untouched [committed 49f74e0]
 - [ ] `interactive.rs` resolver logic → module; live `dialoguer` impls untouched
 - [ ] `dashboard.rs` draw/format helpers → module; event loop + SIGHUP untouched
 - [ ] Introduce the `CommandRunner` trait + real runner (behavior-identical) as the seam type; wire the already-covered builder call sites through it
