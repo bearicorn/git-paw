@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::WorktreePlacement;
+use crate::domain::WorktreePath;
 use crate::error::PawError;
 use crate::specs::SpecEntry;
 
@@ -101,14 +102,7 @@ pub fn worktree_dir_name(project: &str, branch: &str) -> String {
 /// and `fix/issue#42` → `fix-issue42`.
 #[must_use]
 pub fn branch_slug(branch: &str) -> String {
-    branch
-        .chars()
-        .filter_map(|c| match c {
-            '/' => Some('-'),
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '-' => Some(c),
-            _ => None,
-        })
-        .collect()
+    crate::domain::BranchSlug::for_branch(branch).into_string()
 }
 
 /// Returns the name of the default branch (usually "main" or "master").
@@ -287,7 +281,7 @@ fn resolve_worktree_path(
     repo_root: &Path,
     branch: &str,
     placement: WorktreePlacement,
-) -> Result<PathBuf, PawError> {
+) -> Result<WorktreePath, PawError> {
     match placement {
         WorktreePlacement::Child => {
             let worktrees_dir = repo_root.join(".git-paw").join("worktrees");
@@ -297,7 +291,7 @@ fn resolve_worktree_path(
                     worktrees_dir.display()
                 ))
             })?;
-            Ok(worktrees_dir.join(branch_slug(branch)))
+            Ok(WorktreePath::new(worktrees_dir.join(branch_slug(branch))))
         }
         WorktreePlacement::Sibling => {
             let project = project_name(repo_root);
@@ -305,7 +299,7 @@ fn resolve_worktree_path(
             let parent = repo_root.parent().ok_or_else(|| {
                 PawError::WorktreeError("cannot determine parent directory of repo".to_string())
             })?;
-            Ok(parent.join(&dir_name))
+            Ok(WorktreePath::new(parent.join(&dir_name)))
         }
     }
 }
@@ -339,7 +333,7 @@ pub fn create_worktree(
     rebase_onto_main: bool,
     placement: WorktreePlacement,
 ) -> Result<WorktreeCreation, PawError> {
-    let worktree_path = resolve_worktree_path(repo_root, branch, placement)?;
+    let worktree_path = resolve_worktree_path(repo_root, branch, placement)?.into_path_buf();
 
     // Rebase agent branch onto the repo's default branch BEFORE the
     // idempotency check. Resolves MILESTONE.md drift item 48: the supervisor
