@@ -105,3 +105,22 @@ pub fn wait_for_file(path: &Path, timeout: Duration) {
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+/// Polls until `path` exists AND its contents contain `needle`, or panics after
+/// `timeout`. Use when the file already exists on disk and the outcome under
+/// test is a later write adding `needle` (e.g. a config migration appending a
+/// section), where [`wait_for_file`]'s existence check would return early.
+pub fn wait_for_file_contains(path: &Path, needle: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if std::fs::read_to_string(path).is_ok_and(|c| c.contains(needle)) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {} to contain {needle:?}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}

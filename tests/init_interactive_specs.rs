@@ -18,7 +18,7 @@ use serial_test::serial;
 mod helpers;
 use helpers::pty::{
     create_detached_session, kill_session, send_keys, tmux_available, unique_session_name,
-    wait_for_file, wait_for_pane,
+    wait_for_file, wait_for_file_contains, wait_for_pane,
 };
 
 #[test]
@@ -141,5 +141,65 @@ fn interactive_init_records_supervisor_choice_in_config() {
         supervisor.test_command.as_deref(),
         Some("just check"),
         "the typed test command must be recorded"
+    );
+}
+
+#[test]
+#[serial]
+fn interactive_init_migrates_supervisor_into_existing_config() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tmux_env = helpers::TmuxTestEnv::new();
+    let _proc_env = tmux_env.apply_to_process();
+
+    let repo = tempfile::TempDir::new().expect("tempdir");
+    let status = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo.path())
+        .status()
+        .expect("git init");
+    assert!(status.success(), "git init failed");
+
+    // Seed a pre-existing config WITHOUT a `[supervisor]` section so `init`
+    // takes the migrate path: it prompts to add supervisor (the
+    // migrate-supervisor Confirm) rather than the fresh-config flow, and shows
+    // no spec-system Select.
+    let paw = repo.path().join(".git-paw");
+    std::fs::create_dir_all(&paw).expect("create .git-paw");
+    let config_path = paw.join("config.toml");
+    std::fs::write(&config_path, "default_cli = \"claude\"\n").expect("seed config");
+
+    let session = unique_session_name("paw-init-migrate");
+    create_detached_session(&session);
+
+    let bin = env!("CARGO_BIN_EXE_git-paw");
+    let cmd = format!("cd '{}' && '{bin}' init", repo.path().display());
+    send_keys(&session, &[&cmd, "Enter"]);
+
+    // The migrate-supervisor Confirm is SHOWN (existing config missing the
+    // section + a TTY). Accept the default (No) with Enter.
+    wait_for_pane(&session, "Enable supervisor", Duration::from_secs(10));
+    send_keys(&session, &["Enter"]);
+
+    // Outcome: migration appended a `[supervisor]` section (opted out) while
+    // preserving the pre-existing `default_cli` line.
+    wait_for_file_contains(&config_path, "[supervisor]", Duration::from_secs(10));
+    let content = std::fs::read_to_string(&config_path).expect("read config");
+    kill_session(&session);
+
+    assert!(
+        content.contains("default_cli = \"claude\""),
+        "migration must preserve the pre-existing config, got:\n{content}"
+    );
+    let cfg: git_paw::config::PawConfig =
+        toml::from_str(&content).unwrap_or_else(|e| panic!("parse config: {e}\n{content}"));
+    let supervisor = cfg
+        .supervisor
+        .unwrap_or_else(|| panic!("migrate path must append a [supervisor] section:\n{content}"));
+    assert!(
+        !supervisor.enabled,
+        "accepting the default (No) must record enabled = false, got:\n{content}"
     );
 }

@@ -85,6 +85,47 @@ fn init_non_tty_is_idempotent() {
     );
 }
 
+/// init on an existing config MISSING `[supervisor]`, non-TTY: the
+/// migrate-supervisor `Confirm` is bypassed and the migration appends an
+/// explicit opt-out (`enabled = false`) so future runs don't re-prompt. The
+/// TTY "shown" side of this row lives in `init_interactive_specs.rs`.
+#[test]
+fn init_non_tty_migrates_supervisor_as_opt_out() {
+    let repo = tempfile::TempDir::new().expect("tempdir");
+    let _ = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo.path())
+        .status();
+
+    // Seed an existing config with no [supervisor] section → the migrate path.
+    let paw = repo.path().join(".git-paw");
+    std::fs::create_dir_all(&paw).expect("create .git-paw");
+    std::fs::write(paw.join("config.toml"), "default_cli = \"echo\"\n").expect("seed config");
+
+    // assert_cmd pipes stdin by default → the child sees a non-TTY.
+    Command::cargo_bin("git-paw")
+        .expect("binary")
+        .arg("init")
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let content = std::fs::read_to_string(paw.join("config.toml")).expect("read config");
+    assert!(
+        content.contains("default_cli = \"echo\""),
+        "migration must preserve the pre-existing config:\n{content}"
+    );
+    let cfg: git_paw::config::PawConfig =
+        toml::from_str(&content).unwrap_or_else(|e| panic!("parse config: {e}\n{content}"));
+    let supervisor = cfg.supervisor.unwrap_or_else(|| {
+        panic!("non-TTY migrate must append a [supervisor] opt-out section:\n{content}")
+    });
+    assert!(
+        !supervisor.enabled,
+        "non-TTY migrate must bypass the Confirm and record enabled = false:\n{content}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // start family — BYPASS rows (deterministic via `--dry-run`, which resolves
 // selection and prints the plan without launching tmux). The TTY "shown"
