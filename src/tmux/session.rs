@@ -86,16 +86,16 @@ pub fn session_liveness(name: &str) -> SessionLiveness {
 /// Starts with `paw-<project_name>` and appends `-2`, `-3`, etc. if the name
 /// is already taken by another session.
 pub fn resolve_session_name(project_name: &str) -> Result<String, PawError> {
-    let base = format!("paw-{project_name}");
+    let base = crate::domain::SessionName::for_project(project_name);
 
-    if !is_session_alive(&base)? {
-        return Ok(base);
+    if !is_session_alive(base.as_str())? {
+        return Ok(base.into_string());
     }
 
     for suffix in 2..=MAX_COLLISION_RETRIES + 1 {
-        let candidate = format!("{base}-{suffix}");
-        if !is_session_alive(&candidate)? {
-            return Ok(candidate);
+        let candidate = base.with_collision_suffix(suffix);
+        if !is_session_alive(candidate.as_str())? {
+            return Ok(candidate.into_string());
         }
     }
 
