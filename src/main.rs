@@ -26,6 +26,12 @@ use git_paw::interactive;
 use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry};
 use git_paw::tmux;
 
+mod commands;
+use commands::helpers::{
+    config_to_custom_defs, configured_settings_paths, session_cli_settings_paths,
+    to_interactive_cli,
+};
+
 fn main() {
     let args = Cli::parse();
 
@@ -128,17 +134,17 @@ fn run(command: Command) -> Result<(), PawError> {
             keep_worktree,
             force,
         } => cmd_remove(&branch, keep_worktree, force),
-        Command::Pause => cmd_pause(),
-        Command::Stop { force } => cmd_stop(force),
+        Command::Pause => commands::pause::cmd_pause(),
+        Command::Stop { force } => commands::stop::cmd_stop(force),
         Command::Purge { force, stale } => cmd_purge(force, stale),
-        Command::Status { json } => cmd_status(json),
-        Command::ListClis => cmd_list_clis(),
+        Command::Status { json } => commands::status::cmd_status(json),
+        Command::ListClis => commands::clis::cmd_list_clis(),
         Command::AddCli {
             name,
             command,
             display_name,
-        } => cmd_add_cli(&name, &command, display_name.as_deref()),
-        Command::RemoveCli { name } => cmd_remove_cli(&name),
+        } => commands::clis::cmd_add_cli(&name, &command, display_name.as_deref()),
+        Command::RemoveCli { name } => commands::clis::cmd_remove_cli(&name),
         Command::Dashboard => cmd_dashboard(),
         Command::Init => git_paw::init::run_init(),
         Command::Replay {
@@ -146,12 +152,12 @@ fn run(command: Command) -> Result<(), PawError> {
             list,
             color,
             session,
-        } => cmd_replay(branch, list, color, session.as_deref()),
+        } => commands::replay::cmd_replay(branch, list, color, session.as_deref()),
         Command::Approvals {
             session,
             limit,
             json,
-        } => cmd_approvals(session.as_deref(), limit, json),
+        } => commands::approvals::cmd_approvals(session.as_deref(), limit, json),
         Command::Mcp { repo, log_file } => {
             git_paw::mcp::cmd_mcp(repo.as_deref(), log_file.as_deref())
         }
@@ -450,31 +456,6 @@ fn resolve_supervisor_mode(
     }
     // Step 4: no section → prompt.
     prompt.ask()
-}
-
-// ---------------------------------------------------------------------------
-// Type bridging helpers
-// ---------------------------------------------------------------------------
-
-/// Converts custom CLIs from config into the format expected by the detect module.
-fn config_to_custom_defs(config: &PawConfig) -> Vec<detect::CustomCliDef> {
-    config
-        .clis
-        .iter()
-        .map(|(name, cli)| detect::CustomCliDef {
-            name: name.clone(),
-            command: cli.command.clone(),
-            display_name: cli.display_name.clone(),
-        })
-        .collect()
-}
-
-/// Converts a detected CLI info into the format expected by the interactive module.
-fn to_interactive_cli(cli: &detect::CliInfo) -> interactive::CliInfo {
-    interactive::CliInfo {
-        display_name: cli.display_name.clone(),
-        binary_name: cli.binary_name.clone(),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1722,74 +1703,6 @@ fn resolve_submit_delay_ms(cli: &str, config: &git_paw::config::PawConfig) -> u6
         .get(base)
         .and_then(|c| c.submit_delay_ms)
         .unwrap_or(git_paw::DEFAULT_SUBMIT_DELAY_MS)
-}
-
-/// Distinct config-declared `settings_path` files for the session's CLIs
-/// (supervisor + agents), expanded and filtered to those whose parent
-/// directory already exists.
-///
-/// CLI-agnostic: only a CLI with `[clis.<name>].settings_path` set
-/// contributes a path; built-in CLIs (no custom entry) contribute nothing
-/// here — the repo-local `.claude/settings.json` is seeded separately. The
-/// parent-exists gate means git-paw never creates a CLI's config dir
-/// (matching the dev-allowlist seeder's caution).
-fn session_cli_settings_paths(
-    config: &git_paw::config::PawConfig,
-    supervisor_cli: &str,
-    agent_cli: &str,
-) -> Vec<std::path::PathBuf> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for cli in [supervisor_cli, agent_cli] {
-        let base = cli.split_whitespace().next().unwrap_or(cli);
-        if let Some(raw) = config
-            .clis
-            .get(base)
-            .and_then(|c| c.settings_path.as_deref())
-        {
-            let expanded = expand_tilde(raw);
-            let parent_exists = expanded.parent().is_some_and(std::path::Path::is_dir);
-            if parent_exists && seen.insert(expanded.clone()) {
-                out.push(expanded);
-            }
-        }
-    }
-    out
-}
-
-/// Every configured `[clis.<name>].settings_path` (tilde-expanded) whose
-/// parent directory already exists, deduplicated.
-///
-/// Used to seed the dev-command allowlist into each registered CLI's
-/// alternate settings file in a CLI-agnostic way — there is no hardcoded
-/// path. The parent-exists filter preserves the "never create the directory"
-/// guarantee: a configured target whose parent is absent is skipped rather
-/// than created.
-fn configured_settings_paths(config: &git_paw::config::PawConfig) -> Vec<std::path::PathBuf> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for custom in config.clis.values() {
-        if let Some(raw) = custom.settings_path.as_deref() {
-            let expanded = expand_tilde(raw);
-            let parent_exists = expanded.parent().is_some_and(std::path::Path::is_dir);
-            if parent_exists && seen.insert(expanded.clone()) {
-                out.push(expanded);
-            }
-        }
-    }
-    out
-}
-
-/// Expand a leading `~` / `~/` in `path` to the home directory.
-fn expand_tilde(path: &str) -> std::path::PathBuf {
-    match git_paw::dirs::home_dir() {
-        Some(home) if path == "~" => home,
-        Some(home) => match path.strip_prefix("~/") {
-            Some(rest) => home.join(rest),
-            None => std::path::PathBuf::from(path),
-        },
-        None => std::path::PathBuf::from(path),
-    }
 }
 
 /// Inject and submit an initial prompt into a tmux pane.
@@ -3272,103 +3185,6 @@ fn cmd_dashboard() -> Result<(), PawError> {
 }
 
 // ---------------------------------------------------------------------------
-// Command: pause
-// ---------------------------------------------------------------------------
-
-/// Pauses the session: detaches the user's tmux client, stops the broker
-/// (by killing the dashboard pane only), and updates session status to
-/// `Paused`. CLI panes keep running and retain their in-memory state.
-///
-/// Idempotent: pausing an already-paused or already-stopped session is
-/// a no-op with a friendly message.
-fn cmd_pause() -> Result<(), PawError> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
-    let repo_root = git::validate_repo(&cwd)?;
-
-    let Some(existing) = session::find_session_for_repo(&repo_root)? else {
-        println!("No active session for this repo.");
-        return Ok(());
-    };
-
-    // Idempotency: already paused.
-    if existing.status == SessionStatus::Paused {
-        println!("Session '{}' is already paused.", existing.session_name);
-        return Ok(());
-    }
-
-    // Effective status check: stopped sessions can't be paused.
-    let effective = existing.effective_status(|name| tmux::is_session_alive(name).unwrap_or(false));
-    if effective == SessionStatus::Stopped {
-        println!(
-            "Session '{}' is already stopped; pause has no effect.",
-            existing.session_name
-        );
-        return Ok(());
-    }
-
-    // Detach the user's tmux client. Idempotent in detach_client.
-    tmux::detach_client(&existing.session_name)?;
-
-    // Kill the dashboard pane only (which hosts the broker subprocess);
-    // the BrokerHandle drop runs and broker shuts down gracefully. Only
-    // applies when broker was enabled — without a broker there's no
-    // dashboard pane to kill.
-    if existing.broker_port.is_some() {
-        let pane_idx = existing.dashboard_pane.unwrap_or(0);
-        tmux::kill_pane(&existing.session_name, pane_idx)?;
-    }
-
-    let cli_pane_count = existing.worktrees.len();
-    let session_name = existing.session_name.clone();
-
-    let mut updated = existing;
-    updated.status = SessionStatus::Paused;
-    session::save_session(&updated)?;
-
-    println!(
-        "Session '{session_name}' paused. {cli_pane_count} CLI pane(s) still running. \
-         Run 'git paw start' to resume."
-    );
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Command: stop
-// ---------------------------------------------------------------------------
-
-/// Stops the session: kills tmux but preserves worktrees and state.
-fn cmd_stop(_force: bool) -> Result<(), PawError> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
-    let repo_root = git::validate_repo(&cwd)?;
-
-    let Some(existing) = session::find_session_for_repo(&repo_root)? else {
-        println!("No active session for this repo.");
-        return Ok(());
-    };
-
-    if tmux::is_session_alive(&existing.session_name)? {
-        tmux::kill_session(&existing.session_name)?;
-    }
-
-    // Bug E (v0-5-0-audit-cleanup §9c) — strip the supervisor-pane boot
-    // block from AGENTS.md so it does not accumulate across sessions.
-    // Idempotent: missing block / missing AGENTS.md is a no-op.
-    if let Err(e) = agents::remove_session_boot_block(&repo_root) {
-        eprintln!("warning: failed to clean session boot block from AGENTS.md: {e}");
-    }
-
-    let mut updated = existing;
-    updated.status = SessionStatus::Stopped;
-    session::save_session(&updated)?;
-
-    println!("Session stopped. Worktrees and state preserved.");
-    println!("Run `git paw start` to recover.");
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Command: purge
 // ---------------------------------------------------------------------------
 
@@ -3716,324 +3532,6 @@ fn collect_unmerged_branches(
 }
 
 // ---------------------------------------------------------------------------
-// Command: status
-// ---------------------------------------------------------------------------
-
-/// Shows session state for the current repo.
-fn cmd_status(json: bool) -> Result<(), PawError> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
-    let repo_root = git::validate_repo(&cwd)?;
-
-    let Some(existing) = session::find_session_for_repo(&repo_root)? else {
-        if json {
-            println!("{}", serde_json::json!({ "session": null }));
-        } else {
-            println!("No session for this repo.");
-        }
-        return Ok(());
-    };
-
-    // Single cheap liveness probe (spec: "Liveness probe is cheap"). The
-    // probe distinguishes a genuinely-absent tmux session (Stale) from a
-    // probe that could not run at all (Indeterminate → never reports stale).
-    let liveness = tmux::session_liveness(&existing.session_name);
-    let display = session::DisplayStatus::from_receipt(&existing.status, liveness);
-    let alive = matches!(liveness, tmux::SessionLiveness::Alive);
-
-    if json {
-        let worktrees: Vec<_> = existing
-            .worktrees
-            .iter()
-            .map(|e| {
-                serde_json::json!({
-                    "branch": e.branch,
-                    "cli": e.cli,
-                    "worktree_path": e.worktree_path,
-                })
-            })
-            .collect();
-        let obj = serde_json::json!({
-            "session": existing.session_name,
-            "status": display.as_str(),
-            "tmux_running": alive,
-            "worktrees": worktrees,
-        });
-        println!("{obj}");
-        return Ok(());
-    }
-
-    println!("Session: {}", existing.session_name);
-    println!("Status:  {} {display}", display.icon());
-    match display {
-        session::DisplayStatus::Paused => {
-            println!("  \u{21b3} run 'git paw start' to resume");
-        }
-        session::DisplayStatus::Stale => {
-            println!(
-                "  \u{21b3} tmux session no longer exists — run 'git paw start' to \
-                 self-heal, or 'git paw purge --stale' to clear it"
-            );
-        }
-        _ => {}
-    }
-    println!("Tmux:    {}", if alive { "running" } else { "not running" });
-    println!();
-
-    // Broker info
-    if let (Some(bind), Some(port)) = (&existing.broker_bind, existing.broker_port) {
-        let url = format!("http://{bind}:{port}");
-        match broker::probe_broker(&url) {
-            broker::ProbeResult::LiveBroker => println!("Broker:  {url} (running)"),
-            _ if display == session::DisplayStatus::Paused => {
-                println!("Broker:  {url} (paused \u{2014} run 'git paw start' to resume)");
-            }
-            _ => println!("Broker:  {url} (not responding)"),
-        }
-        println!();
-    }
-
-    if existing.worktrees.is_empty() {
-        println!("  (no worktrees)");
-    } else {
-        for entry in &existing.worktrees {
-            println!(
-                "  {} \u{2192} {} ({})",
-                entry.branch,
-                entry.cli,
-                entry.worktree_path.display()
-            );
-        }
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Command: list-clis
-// ---------------------------------------------------------------------------
-
-/// Lists all detected and custom AI CLIs.
-fn cmd_list_clis() -> Result<(), PawError> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
-    let repo_root = git::validate_repo(&cwd)?;
-    let config = config::load_config(&repo_root, None)?;
-    let custom_defs = config_to_custom_defs(&config);
-    let clis = detect::detect_clis(&custom_defs);
-
-    if clis.is_empty() {
-        println!("No AI CLIs found.");
-        println!("Install one or use `git paw add-cli` to register a custom CLI.");
-        return Ok(());
-    }
-
-    println!("{:<15} {:<10} PATH", "NAME", "SOURCE");
-    for cli in &clis {
-        println!(
-            "{:<15} {:<10} {}",
-            cli.binary_name,
-            cli.source,
-            cli.path.display()
-        );
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Command: add-cli
-// ---------------------------------------------------------------------------
-
-/// Registers a custom AI CLI in the global config.
-fn cmd_add_cli(name: &str, command: &str, display_name: Option<&str>) -> Result<(), PawError> {
-    config::add_custom_cli(name, command, display_name)?;
-    println!("Added custom CLI '{name}'.");
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Command: remove-cli
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Command: replay
-// ---------------------------------------------------------------------------
-
-/// Replays captured session logs.
-fn cmd_replay(
-    branch: Option<String>,
-    list: bool,
-    color: bool,
-    session: Option<&str>,
-) -> Result<(), PawError> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
-    let repo_root = git::validate_repo(&cwd)?;
-
-    if list {
-        return git_paw::replay::display_list(&repo_root);
-    }
-
-    // clap ensures branch is present when --list is absent
-    let branch = branch.expect("branch is required unless --list is passed");
-    let session_name = git_paw::replay::resolve_session(&repo_root, session)?;
-    let log_path = git_paw::replay::find_log(&repo_root, &session_name, &branch)?;
-
-    if color {
-        git_paw::replay::replay_colored(&log_path)
-    } else {
-        git_paw::replay::replay_stripped(&log_path)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Command: approvals
-// ---------------------------------------------------------------------------
-
-/// Resolves which session's manual-approval log to read.
-///
-/// `--session` wins when present. Otherwise the active session for the current
-/// repo is used. Unlike `replay`, a missing log file is not an error (the
-/// session simply recorded no manual approvals), so this only needs to name a
-/// session — it does not validate that a log exists.
-fn resolve_approvals_session(
-    repo_root: &Path,
-    session_flag: Option<&str>,
-) -> Result<String, PawError> {
-    if let Some(name) = session_flag {
-        return Ok(name.to_string());
-    }
-    match session::find_session_for_repo(repo_root)? {
-        Some(s) => Ok(s.session_name),
-        None => Err(PawError::SessionError(
-            "no active session for this repo; pass --session <NAME> to target one".to_string(),
-        )),
-    }
-}
-
-/// Reports the manually-approved command patterns for a session.
-///
-/// Reads the per-session manual-approval JSONL log, aggregates by pattern,
-/// applies the promotion-target heuristic, sorts by descending count, and
-/// renders either a text table (default) or JSON (`--json`). An empty/missing
-/// log produces an empty result without error.
-fn cmd_approvals(
-    session_flag: Option<&str>,
-    limit: Option<usize>,
-    json: bool,
-) -> Result<(), PawError> {
-    use git_paw::supervisor::manual_approvals::{self, AggregatedApproval, Suggestion};
-
-    let cwd = std::env::current_dir()
-        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
-    let repo_root = git::validate_repo(&cwd)?;
-    let session_name = resolve_approvals_session(&repo_root, session_flag)?;
-    let project_name = git::project_name(&repo_root);
-
-    let log_path = manual_approvals::log_path(&repo_root, &session_name);
-    let mut rows = manual_approvals::aggregate(&log_path)
-        .map_err(|e| PawError::SessionError(format!("failed to read manual-approvals log: {e}")))?;
-    if let Some(n) = limit {
-        rows.truncate(n);
-    }
-
-    // Pair each pattern with its promotion-target suggestion. Branch/worktree
-    // context is per-agent and not retained by aggregation, so the report
-    // leans on the project name plus the `./`-token rule.
-    let classified: Vec<(AggregatedApproval, Suggestion)> = rows
-        .into_iter()
-        .map(|r| {
-            let s = manual_approvals::suggest_target(&r.pattern, &project_name, "", None);
-            (r, s)
-        })
-        .collect();
-
-    if json {
-        let approvals: Vec<serde_json::Value> = classified
-            .iter()
-            .map(|(r, s)| {
-                serde_json::json!({
-                    "pattern": r.pattern,
-                    "count": r.count,
-                    "suggested_target": s.json_value(),
-                    "first_seen": r.first_seen,
-                    "last_seen": r.last_seen,
-                })
-            })
-            .collect();
-        let out = serde_json::json!({
-            "session": session_name,
-            "approvals": approvals,
-        });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out)
-                .map_err(|e| PawError::SessionError(format!("failed to serialize JSON: {e}")))?
-        );
-        return Ok(());
-    }
-
-    if classified.is_empty() {
-        println!("no manual approvals recorded for session '{session_name}'");
-        return Ok(());
-    }
-
-    // Text table: PATTERN / COUNT / SUGGEST, columns sized to content.
-    let pattern_w = classified
-        .iter()
-        .map(|(r, _)| r.pattern.len())
-        .max()
-        .unwrap_or(0)
-        .max("PATTERN".len());
-    let count_w = classified
-        .iter()
-        .map(|(r, _)| r.count.to_string().len())
-        .max()
-        .unwrap_or(0)
-        .max("COUNT".len());
-
-    println!("{:<pattern_w$}  {:>count_w$}  SUGGEST", "PATTERN", "COUNT");
-    for (r, s) in &classified {
-        println!(
-            "{:<pattern_w$}  {:>count_w$}  {}",
-            r.pattern,
-            r.count,
-            s.label()
-        );
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Command: remove-cli
-// ---------------------------------------------------------------------------
-
-/// Removes a custom AI CLI from the global config.
-fn cmd_remove_cli(name: &str) -> Result<(), PawError> {
-    // Check if it's an auto-detected CLI (not in config)
-    let cwd = std::env::current_dir()
-        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
-
-    // Try to load config to check if it's a custom CLI
-    // If we're not in a repo, just attempt removal directly
-    if let Ok(repo_root) = git::validate_repo(&cwd) {
-        let config = config::load_config(&repo_root, None)?;
-        if !config.clis.contains_key(name) {
-            // Check if it's a known auto-detected CLI
-            let detected = detect::detect_known_clis();
-            if detected.iter().any(|c| c.binary_name == name) {
-                return Err(PawError::CliNotFound(format!(
-                    "CLI '{name}' is auto-detected, not a custom CLI. Cannot remove."
-                )));
-            }
-        }
-    }
-
-    config::remove_custom_cli(name)?;
-    println!("Removed custom CLI '{name}'.");
-    Ok(())
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -5459,52 +4957,5 @@ mod submit_delay_tests {
                 "{cli} must use the agnostic default, not a hardcoded value"
             );
         }
-    }
-
-    fn config_with_settings_path(cli: &str, settings_path: Option<String>) -> PawConfig {
-        let mut clis = HashMap::new();
-        clis.insert(
-            cli.to_string(),
-            CustomCli {
-                command: cli.to_string(),
-                display_name: None,
-                submit_delay_ms: None,
-                settings_path,
-                approval_args: HashMap::new(),
-            },
-        );
-        PawConfig {
-            clis,
-            ..PawConfig::default()
-        }
-    }
-
-    #[test]
-    fn configured_settings_paths_returns_targets_with_existing_parents() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let target = dir.path().join("settings.json");
-        let cfg = config_with_settings_path("mycli", Some(target.to_string_lossy().into_owned()));
-        let paths = super::configured_settings_paths(&cfg);
-        assert_eq!(
-            paths,
-            vec![target],
-            "configured path with existing parent is returned"
-        );
-    }
-
-    #[test]
-    fn configured_settings_paths_skips_targets_with_absent_parent() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let target = dir.path().join("missing-subdir").join("settings.json");
-        let cfg = config_with_settings_path("mycli", Some(target.to_string_lossy().into_owned()));
-        assert!(
-            super::configured_settings_paths(&cfg).is_empty(),
-            "a configured path whose parent is absent must be skipped",
-        );
-    }
-
-    #[test]
-    fn configured_settings_paths_empty_when_no_clis() {
-        assert!(super::configured_settings_paths(&PawConfig::default()).is_empty());
     }
 }
