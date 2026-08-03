@@ -112,6 +112,38 @@ pub(crate) fn agent_pane_offset(session: &Session) -> usize {
     }
 }
 
+/// Attaches `tmux pipe-pane` to each coding-agent pane so the session-logging
+/// capture contract (spec `session-logging` → "Attach pipe-pane to capture
+/// output": *when logging is enabled and a pane is created*) is honoured on
+/// every launch path — bare `start`, `--from-specs`, and supervisor. A no-op
+/// when `[logging]` is disabled.
+///
+/// Must be called after the session is built (`builder.build()` /
+/// `build_supervisor_session`) and before `tmux_session.execute()`:
+/// [`pipe_pane`](git_paw::tmux::TmuxSession::pipe_pane) queues into the
+/// session's command list, applied in order at execute time (so the panes
+/// exist by the time pipe-pane runs). `first_agent_pane` is the pane index of
+/// the first coding agent (see [`agent_pane_offset`]); branch `i` maps to pane
+/// `first_agent_pane + i` in window 0.
+pub(crate) fn attach_session_logging(
+    tmux_session: &mut git_paw::tmux::TmuxSession,
+    config: &PawConfig,
+    repo_root: &std::path::Path,
+    branches: &[&str],
+    first_agent_pane: usize,
+) -> Result<(), PawError> {
+    if !config.logging.as_ref().is_some_and(|l| l.enabled) {
+        return Ok(());
+    }
+    git_paw::logging::ensure_log_dir(repo_root, &tmux_session.name)?;
+    for (i, branch) in branches.iter().enumerate() {
+        let log_path = git_paw::logging::log_file_path(repo_root, &tmux_session.name, branch);
+        let pane_target = format!("{}:0.{}", tmux_session.name, first_agent_pane + i);
+        tmux_session.pipe_pane(&pane_target, &log_path);
+    }
+    Ok(())
+}
+
 /// Error returned when add/remove is invoked on a bare-mode session.
 pub(crate) fn bare_mode_unsupported(session_name: &str, verb: &str) -> PawError {
     PawError::SessionError(format!(

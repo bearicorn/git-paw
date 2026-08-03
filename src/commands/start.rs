@@ -22,7 +22,9 @@ use git_paw::interactive;
 use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry};
 use git_paw::tmux;
 
-use super::helpers::{agent_pane_offset, config_to_custom_defs, to_interactive_cli};
+use super::helpers::{
+    agent_pane_offset, attach_session_logging, config_to_custom_defs, to_interactive_cli,
+};
 use super::recover::recover_session;
 use super::supervisor::cmd_supervisor;
 use crate::{
@@ -256,7 +258,19 @@ pub(crate) fn cmd_start(
         });
     }
 
-    let tmux_session = builder.build()?;
+    let mut tmux_session = builder.build()?;
+
+    // Attach session logging (no-op unless `[logging] enabled`). Pane offset
+    // matches the boot-block/discovery offset below: dashboard occupies pane 0
+    // when the broker is enabled, so coding agents start at pane 1.
+    let logging_branches: Vec<&str> = selection.mappings.iter().map(|(b, _)| b.as_str()).collect();
+    attach_session_logging(
+        &mut tmux_session,
+        &config,
+        &repo_root,
+        &logging_branches,
+        usize::from(broker_config.enabled),
+    )?;
 
     // Execute tmux session
     tmux_session.execute()?;
@@ -576,16 +590,16 @@ fn launch_spec_session(
 
     let mut tmux_session = builder.build()?;
 
-    // Set up logging if enabled — pane indices shift by 1 when broker is enabled
-    if config.logging.as_ref().is_some_and(|l| l.enabled) {
-        let pane_offset = usize::from(broker_config.enabled);
-        git_paw::logging::ensure_log_dir(repo_root, &tmux_session.name)?;
-        for (i, (branch, _)) in mappings.iter().enumerate() {
-            let log_path = git_paw::logging::log_file_path(repo_root, &tmux_session.name, branch);
-            let pane_target = format!("{}:{}.{}", tmux_session.name, 0, i + pane_offset);
-            tmux_session.pipe_pane(&pane_target, &log_path);
-        }
-    }
+    // Attach session logging (no-op unless `[logging] enabled`). Pane indices
+    // shift by 1 when the broker's dashboard occupies pane 0.
+    let logging_branches: Vec<&str> = mappings.iter().map(|(b, _)| b.as_str()).collect();
+    attach_session_logging(
+        &mut tmux_session,
+        config,
+        repo_root,
+        &logging_branches,
+        usize::from(broker_config.enabled),
+    )?;
 
     // Execute tmux session
     tmux_session.execute()?;
