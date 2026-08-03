@@ -2,9 +2,9 @@
 //! `session.json` state when the session is stopped or stale. Extracted
 //! verbatim from `main.rs` (code-analysis-refactor R2c).
 //!
-//! `resolve_supervisor_flags` and `attach_or_print_hint` remain in `main.rs`
-//! (supervisor-flow / dispatch helpers relocated in later waves) and are
-//! referenced through the crate root.
+//! `resolve_supervisor_flags` lives in [`super::supervisor`] (the supervisor
+//! cluster, R2d) and `attach_or_print_hint` remains in `main.rs`; both are
+//! referenced here across module boundaries.
 
 use std::path::Path;
 
@@ -14,7 +14,8 @@ use git_paw::session::{self, Session, SessionMode, SessionStatus};
 use git_paw::tmux;
 
 use super::helpers::configured_settings_paths;
-use crate::{attach_or_print_hint, resolve_supervisor_flags};
+use super::supervisor::resolve_supervisor_flags;
+use crate::attach_or_print_hint;
 
 /// Recovers a stopped/stale session by recreating the tmux session from saved state.
 pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<(), PawError> {

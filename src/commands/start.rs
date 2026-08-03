@@ -3,12 +3,12 @@
 //! spec-driven launch path. Extracted verbatim from `main.rs`
 //! (code-analysis-refactor R2c).
 //!
-//! Several dispatch/supervisor helpers used by these handlers remain in
-//! `main.rs` (relocated in later waves — the supervisor cluster in R2d, the
-//! purge cluster in R2b) and are referenced through the crate root:
-//! `apply_spec_mode`, `attach_or_print_hint`, `cmd_supervisor`,
-//! `invalidate_if_stale`, `resolve_submit_delay_ms`, `submit_prompt_to_pane`,
-//! `write_repo_discovery_file`, and the `SpecMode` dispatch enum.
+//! `cmd_supervisor` lives in [`super::supervisor`] (the supervisor cluster,
+//! R2d). The remaining shared helpers — `apply_spec_mode`,
+//! `attach_or_print_hint`, `invalidate_if_stale` (purge cluster, R2b),
+//! `resolve_submit_delay_ms`, `submit_prompt_to_pane`,
+//! `write_repo_discovery_file`, and the `SpecMode` dispatch enum — remain in
+//! `main.rs` and are referenced through the crate root.
 
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -24,9 +24,10 @@ use git_paw::tmux;
 
 use super::helpers::{agent_pane_offset, config_to_custom_defs, to_interactive_cli};
 use super::recover::recover_session;
+use super::supervisor::cmd_supervisor;
 use crate::{
-    SpecMode, apply_spec_mode, attach_or_print_hint, cmd_supervisor, invalidate_if_stale,
-    resolve_submit_delay_ms, submit_prompt_to_pane, write_repo_discovery_file,
+    SpecMode, apply_spec_mode, attach_or_print_hint, invalidate_if_stale, resolve_submit_delay_ms,
+    submit_prompt_to_pane, write_repo_discovery_file,
 };
 
 /// Smart start: reattach if active, recover if stale, launch fresh if new.

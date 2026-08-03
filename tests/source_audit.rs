@@ -1,36 +1,36 @@
 //! Static source-audit tests.
 //!
-//! These tests read `src/main.rs` as a string and assert structural
-//! properties of named functions. They are runtime tests, not compile-time
-//! checks — `cargo test` invokes them like any other `#[test]` function.
+//! These tests read `src/commands/supervisor.rs` as a string and assert
+//! structural properties of named functions. They are runtime tests, not
+//! compile-time checks — `cargo test` invokes them like any other `#[test]`
+//! function.
 //!
 //! Maps to scenarios from the v0.5.0 archived spec set; see
 //! `openspec/changes/test-coverage-v0-5-0/tasks.md` 12.9 and 13.1.
 
-use std::path::Path;
+const SUPERVISOR_RS: &str = include_str!("../src/commands/supervisor.rs");
 
-const MAIN_RS: &str = include_str!("../src/main.rs");
-
-/// Returns the function body for the named function in `src/main.rs`, located
-/// by its `fn <name>(` signature and parsed by walking the matching curly
-/// brace from the opening `{`. Panics if the function is not found.
+/// Returns the function body for the named function in
+/// `src/commands/supervisor.rs`, located by its `fn <name>(` signature and
+/// parsed by walking the matching curly brace from the opening `{`. Panics if
+/// the function is not found.
 fn function_body(name: &str) -> &'static str {
     let signature = format!("fn {name}(");
-    let start = MAIN_RS
+    let start = SUPERVISOR_RS
         .find(&signature)
-        .unwrap_or_else(|| panic!("`fn {name}(` not found in src/main.rs"));
-    let body_start = MAIN_RS[start..].find('{').map_or_else(
+        .unwrap_or_else(|| panic!("`fn {name}(` not found in src/commands/supervisor.rs"));
+    let body_start = SUPERVISOR_RS[start..].find('{').map_or_else(
         || panic!("opening brace not found after `fn {name}(`"),
         |o| start + o,
     );
     let mut depth: i32 = 0;
-    for (i, ch) in MAIN_RS[body_start..].char_indices() {
+    for (i, ch) in SUPERVISOR_RS[body_start..].char_indices() {
         match ch {
             '{' => depth += 1,
             '}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return &MAIN_RS[body_start..=body_start + i];
+                    return &SUPERVISOR_RS[body_start..=body_start + i];
                 }
             }
             _ => {}
@@ -66,25 +66,11 @@ fn cmd_supervisor_does_not_spawn_auto_approve_thread() {
          runs inside cmd_dashboard's __dashboard subprocess"
     );
 
-    // Sanity: the spawner must still exist somewhere in main.rs (otherwise
+    // Sanity: the spawner must still exist somewhere in supervisor.rs (otherwise
     // the grep target has vanished and this test silently passes).
     assert!(
-        MAIN_RS.contains("fn spawn_auto_approve_thread("),
+        SUPERVISOR_RS.contains("fn spawn_auto_approve_thread("),
         "spawn_auto_approve_thread function is missing — update this test if it was renamed"
-    );
-}
-
-// Defence in depth: make sure this test file actually opens the right
-// source — if `src/main.rs` ever moves, `include_str!` will fail at
-// compile time. This is a smoke assertion the body is non-empty.
-#[test]
-fn main_rs_source_is_non_empty() {
-    assert!(!MAIN_RS.is_empty(), "src/main.rs should not be empty");
-    // The constant is referenced so the linter doesn't strip it.
-    assert!(
-        Path::new("src/main.rs")
-            .to_string_lossy()
-            .contains("main.rs")
     );
 }
 
