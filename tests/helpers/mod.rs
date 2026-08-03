@@ -137,6 +137,30 @@ impl TmuxTestEnv {
     }
 }
 
+impl Drop for TmuxTestEnv {
+    /// Kill the tmux server on this test's private socket when the env drops, so
+    /// any panes it created — notably the `__dashboard` subprocess, which hosts
+    /// the broker — are reaped instead of leaking as orphaned, idle low-CPU
+    /// processes.
+    ///
+    /// Dropping the [`TempDir`] alone only removes the socket *file*; an
+    /// already-running tmux server keeps its sessions (and their dashboard
+    /// panes' controlling ptys) alive, so the dashboard never observes a
+    /// hang-up and never self-exits. Explicitly `kill-server` on this env's
+    /// socket closes those ptys. Scoped to `TMUX_TMPDIR = socket_dir` (with
+    /// `TMUX`/`TMUX_PANE` stripped, like [`apply`](Self::apply)), so it can only
+    /// affect this test's isolated server — never the user's real
+    /// default-socket sessions.
+    fn drop(&mut self) {
+        let _ = Command::new("tmux")
+            .env("TMUX_TMPDIR", self.socket_dir.path())
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .arg("kill-server")
+            .output();
+    }
+}
+
 /// RAII guard returned by [`TmuxTestEnv::apply_to_process`]. Restores the
 /// previous `TMUX_TMPDIR`, `TMUX`, and `TMUX_PANE` values on drop.
 ///
