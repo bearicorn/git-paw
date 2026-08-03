@@ -931,3 +931,20 @@ If no config files exist, git-paw uses defaults:
 - Mouse mode enabled
 - No custom CLIs
 - No presets
+
+## Checking your configuration
+
+`git paw doctor` reports what git-paw actually resolved from the files above —
+whether `.git-paw/config.toml` parses, the effective `worktree_placement`, the
+resolved spec system and its spec count, the `[broker]` bind/port state, and
+whether each `[supervisor]` gate command's binary is on `PATH`. It also flags
+keys this version does not recognise, which is the quickest way to catch a
+typo'd field that would otherwise be silently ignored.
+
+Doctor adds **no configuration fields of its own** — it only reads the settings
+documented on this page. See the [Doctor chapter](../user-guide/doctor.md).
+
+```bash
+git paw doctor          # grouped report
+git paw doctor --json   # same checks, machine-readable
+```
