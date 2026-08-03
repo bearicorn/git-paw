@@ -3,8 +3,9 @@
 //! Classifies a captured pane as ready / bare-shell / indeterminate and polls
 //! (with a bounded relaunch budget) before boot-block injection.
 
-use std::process::Command;
 use std::time::Duration;
+
+use crate::command_runner::{CommandRunner, RealCommandRunner};
 
 // ---------------------------------------------------------------------------
 // Launch-readiness gate (design D1, G1)
@@ -181,7 +182,7 @@ pub fn gate_pane_for_injection(
     gate_pane_generic(
         ReadinessBudget::default(),
         || crate::supervisor::permission_prompt::capture_pane(session_name, pane_index),
-        || relaunch_cli_into_pane(session_name, pane_index, cli_command),
+        || relaunch_cli_into_pane(&RealCommandRunner, session_name, pane_index, cli_command),
         std::thread::sleep,
     )
 }
@@ -190,12 +191,19 @@ pub fn gate_pane_for_injection(
 /// input line with `C-u` (matching the launch path) then send the command and
 /// `Enter`. Best-effort — tmux errors are swallowed so the fall-back injection
 /// still proceeds.
-fn relaunch_cli_into_pane(session_name: &str, pane_index: usize, cli_command: &str) {
+///
+/// Runs through the [`CommandRunner`] seam so the two-step send-keys argv is
+/// assertable without a live pane. Both invocations inherit git-paw's stdio, as
+/// the previous inline `Command::new("tmux")…status()` calls did, so a tmux
+/// diagnostic still reaches the user's stderr even though the status is ignored.
+pub(crate) fn relaunch_cli_into_pane(
+    runner: &dyn CommandRunner,
+    session_name: &str,
+    pane_index: usize,
+    cli_command: &str,
+) {
     let target = format!("{session_name}:0.{pane_index}");
-    let _ = Command::new("tmux")
-        .args(["send-keys", "-t", &target, "C-u"])
-        .status();
-    let _ = Command::new("tmux")
-        .args(["send-keys", "-t", &target, cli_command, "Enter"])
-        .status();
+    let _ = runner.run_inheriting_stdio("tmux", &["send-keys", "-t", &target, "C-u"]);
+    let _ =
+        runner.run_inheriting_stdio("tmux", &["send-keys", "-t", &target, cli_command, "Enter"]);
 }

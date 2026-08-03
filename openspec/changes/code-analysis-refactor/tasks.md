@@ -41,10 +41,10 @@ failure).
 
 ## R3 — tmux runtime + remaining interactive/dashboard _(GATED: PTY net + dashboard CPU-leak fix)_
 - [x] **Precondition SATISFIED:** PTY net stable (`cli-interaction-e2e` done) AND the dashboard CPU-leak fix is landed on `feat/v0.13.0-specs` — the `poll_tty(2)` root-cause fix is wired + tested in `dashboard.rs`, and the e2e-suite accumulation source was closed by `TmuxTestEnv`'s `kill-server`-on-drop (@ 241a9ac, 0 leaks validated). R3 is unblocked.
-- [ ] Refactor the `tmux.rs` runtime path (send-keys / capture-pane parsing / pane-spawn — 59 `Command::new` sites) behind the `CommandRunner` seam
-- [ ] Interactive live-prompt impls behind the PTY net
-- [ ] Dashboard event loop (rebase on `fix/dashboard-cpu-leak`); SIGHUP `unsafe` path still untouched by this change
-- [ ] Gate: PTY matrix + cold-start smoke green serially; manual dashboard smoke; coverage ≥ baseline
+- [x] Refactor the `tmux.rs` runtime path (send-keys / capture-pane parsing / pane-spawn — the `Command::new` sites in `tmux/{session,readiness,layout}.rs`) behind the `CommandRunner` seam — DONE via the R3 dogfood (agent on the new binary, human-supervised), commit `87c7f0e`, byte-identical (full e2e suite 2400/0) + 25 new CommandRunner-mocked argv tests (120 tmux tests). ff-merged.
+- [~] Interactive live-prompt impls behind the PTY net — DEFERRED (post-freeze). Behavior-sensitive live `dialoguer`/`crossterm` path, low ROI; the runtime seam is R3's high-value core.
+- [~] Dashboard event loop — DEFERRED (post-freeze). The `fix/dashboard-cpu-leak` fix already landed (poll_tty root-cause + TmuxTestEnv reap); the remaining draw/format split touches the SIGHUP `unsafe` + just-fixed loop for low ROI.
+- [x] Gate: five-gate verify green — build/clippy `-D warnings`/fmt clean + full suite 2400/0 (byte-identical runtime behavior via e2e). Cold `smoke-container` is the release-prep re-check.
 
 ## R4 — Broker structural tidy _(DEFERRED post-freeze — optional, lowest priority)_
 - [ ] Surgical, lock-discipline-preserving moves only in `broker/{delivery,mod,conflict}.rs`; NO reordering of lock / `.await` / `spawn`

@@ -32,6 +32,13 @@ pub use session::{
 // Private helpers exercised only by the in-crate test module (widened from
 // module-private to `pub(crate)` so `tests.rs` can reach them via `super::*`).
 #[cfg(test)]
-pub(crate) use readiness::gate_pane_generic;
+pub(crate) use layout::rebalance_agent_rows_with;
 #[cfg(test)]
-pub(crate) use session::classify_liveness;
+pub(crate) use readiness::{gate_pane_generic, relaunch_cli_into_pane};
+#[cfg(test)]
+pub(crate) use session::{
+    attach_with, classify_liveness, detach_client_with, is_session_alive_with,
+    kill_pane_by_id_with, kill_pane_with, kill_session_with, list_panes_with_paths_with,
+    reconcile_agents_to_panes_with, resolve_pane_id_for_worktree_with, resolve_session_name_with,
+    session_liveness_with,
+};
