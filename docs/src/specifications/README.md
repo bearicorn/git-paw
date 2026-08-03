@@ -83,7 +83,7 @@ blurb is condensed from that spec's `## Purpose`.
 
 A few entries are **internal process specs** — they govern the test suite,
 CI, or the verification workflow itself (e.g. `core-ci-hygiene`,
-`quality-selftest`) rather than a user-facing feature. These intentionally
+`core-opsx-role-gating`) rather than a user-facing feature. These intentionally
 have no user-guide chapter: the spec itself is their documentation.
 
 ### core-
