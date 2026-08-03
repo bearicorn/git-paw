@@ -18,17 +18,17 @@
 //! existing `tests/from_specs_launch_fixes_integration.rs` argv tests, so
 //! the call shape is covered separately.
 
-const MAIN_RS: &str = include_str!("../src/main.rs");
+const START_RS: &str = include_str!("../src/commands/start.rs");
 
 #[test]
 fn boot_block_failure_is_non_fatal() {
     // Locate the boot-block injection call site. `cmd_start_with_specs`
     // delegates to `launch_spec_session` which contains the injection
-    // loop; in `cmd_start` the loop is inlined. Both call sites are
-    // covered by searching for `build_boot_inject_args` across the file
-    // and then scanning the surrounding window for the non-fatal
-    // discard pattern.
-    let body = MAIN_RS;
+    // loop; in `cmd_start` the loop is inlined. Both handlers live in
+    // `src/commands/start.rs`, so both call sites are covered by searching
+    // for `build_boot_inject_args` across the file and then scanning the
+    // surrounding window for the non-fatal discard pattern.
+    let body = START_RS;
 
     // The boot-block injection path must use `build_boot_inject_args` and
     // discard the tmux status with `let _ = ...`. Find every call site
@@ -42,7 +42,7 @@ fn boot_block_failure_is_non_fatal() {
     }
     assert!(
         !call_sites.is_empty(),
-        "expected at least one build_boot_inject_args call site in main.rs"
+        "expected at least one build_boot_inject_args call site in commands/start.rs"
     );
 
     for site in &call_sites {

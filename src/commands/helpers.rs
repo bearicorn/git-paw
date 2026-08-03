@@ -5,7 +5,9 @@
 
 use git_paw::config::PawConfig;
 use git_paw::detect;
+use git_paw::error::PawError;
 use git_paw::interactive;
+use git_paw::session::{Session, SessionMode};
 
 /// Convert the config's `[clis.*]` table into the detector's custom-CLI
 /// definitions so a configured CLI is resolvable on `PATH` at launch time.
@@ -95,6 +97,29 @@ fn expand_tilde(path: &str) -> std::path::PathBuf {
         },
         None => std::path::PathBuf::from(path),
     }
+}
+
+/// Index of the first coding-agent pane in a session's tmux window.
+///
+/// Supervisor mode reserves pane 0 (supervisor) and pane 1 (dashboard), so
+/// agents start at [`SUPERVISOR_PANE_OFFSET`](git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET).
+/// Bare mode places the dashboard at pane 0 when the broker is enabled (agents
+/// at pane 1), or has no dashboard pane at all (agents at pane 0).
+pub(crate) fn agent_pane_offset(session: &Session) -> usize {
+    match session.mode {
+        SessionMode::Supervisor => git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET,
+        SessionMode::Bare => usize::from(session.broker_port.is_some()),
+    }
+}
+
+/// Error returned when add/remove is invoked on a bare-mode session.
+pub(crate) fn bare_mode_unsupported(session_name: &str, verb: &str) -> PawError {
+    PawError::SessionError(format!(
+        "`git paw {verb}` supports supervisor-mode sessions (the default). Session \
+         '{session_name}' was started in bare (no-supervisor) mode, whose tiled grid is \
+         not re-tiled incrementally in v0.6.0. Stop and re-start with the full branch set, \
+         or run the session in supervisor mode to use add/remove."
+    ))
 }
 
 #[cfg(test)]

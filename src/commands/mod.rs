@@ -7,10 +7,14 @@
 //! the tmux/git orchestration ones route through the [`git_paw::command_runner`]
 //! seam so their argv is unit-testable.
 
+pub mod add;
 pub mod approvals;
 pub mod clis;
 pub mod helpers;
 pub mod pause;
+pub mod recover;
+pub mod remove;
 pub mod replay;
+pub mod start;
 pub mod status;
 pub mod stop;
