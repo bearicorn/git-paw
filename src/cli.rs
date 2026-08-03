@@ -1437,6 +1437,24 @@ mod tests {
                 "root --help must not surface internal subcommand {hidden:?}; got: {help}"
             );
         }
+        // `doctor` replaces `selftest` as the advertised diagnostic entry point.
+        assert!(
+            help.contains("doctor"),
+            "root --help should surface doctor as the diagnostic entry point; got: {help}"
+        );
+    }
+
+    /// A hidden subcommand is hidden from *discovery*, not disabled: parsing
+    /// must still accept it so `git paw selftest` keeps working for dogfooding
+    /// and CI.
+    #[test]
+    fn hidden_subcommands_remain_invocable() {
+        for args in [vec!["selftest"], vec!["__dashboard"]] {
+            assert!(
+                Cli::try_parse_from(std::iter::once("git-paw").chain(args.iter().copied())).is_ok(),
+                "hidden subcommand {args:?} should still parse"
+            );
+        }
     }
 
     #[test]
@@ -1785,6 +1803,18 @@ mod tests {
         assert!(
             help.contains("git paw selftest"),
             "selftest --help should include a usage example; got: {help}"
+        );
+        // Reframed as doctor's live arm: the help must say it is internal and
+        // point at the command that now owns the diagnostic surface.
+        let lowered = help.to_lowercase();
+        assert!(
+            lowered.contains("internal diagnostic"),
+            "selftest --help should mark it an internal diagnostic; got: {help}"
+        );
+        assert!(
+            lowered.contains("doctor"),
+            "selftest --help should name doctor as the surface it is the live arm of; \
+             got: {help}"
         );
     }
 }

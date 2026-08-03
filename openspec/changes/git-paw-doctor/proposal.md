@@ -32,8 +32,13 @@ New capability, no breaking changes.
   status model, `--json` surface, and the exit-code contract.
 
 ### Modified Capabilities
-_None._ Doctor is purely additive; it reads existing config/detection/script state but
-changes no existing requirement.
+- `core-selftest`: `selftest` becomes an **internal diagnostic** — hidden from the command
+  list and reframed as the *live* arm of `doctor`, whose static preflight checks it
+  complements. The harness, its isolation recipe, and its direct invocation are unchanged;
+  the same lifecycle is now also reachable through `git paw doctor --live`.
+
+Doctor is otherwise purely additive: it reads existing config/detection/script state but
+changes no other requirement.
 
 ## Impact
 
