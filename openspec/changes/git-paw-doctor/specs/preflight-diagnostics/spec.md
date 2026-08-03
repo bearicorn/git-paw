@@ -217,6 +217,47 @@ orphaned worktree registrations, reporting ⚠ with a remedy to run `git paw pur
 - **WHEN** `git paw doctor` is run
 - **THEN** the Hygiene group SHALL report ⚠ with a remedy to run `git paw purge --stale`
 
+### Requirement: `--live` smoke arm
+
+The command SHALL accept a `--live` flag that additionally runs the `selftest`
+session-lifecycle harness and folds its verdict into the report as a Live-smoke check,
+so static preflight and live smoke sit under one diagnostic surface. Without `--live` the
+command SHALL remain static — it SHALL NOT spawn a tmux session or an AI CLI, and the
+Live-smoke group SHALL be absent. The `selftest` command SHALL remain available as the
+harness's direct entry point, with its own output unchanged. Because the static checks
+already report a missing prerequisite (notably tmux) as ✗, a smoke run that could not
+start SHALL be reported ⚠ rather than ✗.
+
+#### Scenario: `--live` adds the smoke verdict
+
+- **GIVEN** an environment where the session lifecycle completes
+- **WHEN** `git paw doctor --live` is run
+- **THEN** the report SHALL carry a Live-smoke check reporting ✓
+
+#### Scenario: A failing lifecycle is a hard failure
+
+- **GIVEN** an environment where a lifecycle step fails
+- **WHEN** `git paw doctor --live` is run
+- **THEN** the Live-smoke check SHALL report ✗ naming the failing step
+- **AND** the process SHALL exit non-zero
+
+#### Scenario: A smoke run that cannot start warns
+
+- **GIVEN** the lifecycle cannot run because tmux is unavailable
+- **WHEN** `git paw doctor --live` is run
+- **THEN** the Live-smoke check SHALL report ⚠ with a remedy rather than ✗
+
+#### Scenario: Static runs carry no Live-smoke group
+
+- **WHEN** `git paw doctor` is run without `--live`
+- **THEN** the report SHALL NOT contain a Live-smoke group
+
+#### Scenario: `--json --live` stays parseable
+
+- **WHEN** `git paw doctor --json --live` is run
+- **THEN** stdout SHALL remain a single parseable JSON document, with the harness's
+  per-step progress output suppressed
+
 ### Requirement: Diagnose-only (no `--fix` in v0.13.0)
 
 The command SHALL be diagnose-only in v0.13.0; it SHALL NOT expose a repair mode. (`--fix`

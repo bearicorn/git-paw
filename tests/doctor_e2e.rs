@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use assert_cmd::Command as AssertCommand;
+use serial_test::serial;
 use tempfile::TempDir;
 
 /// The eight groups `git paw doctor` reports under.
@@ -114,12 +115,42 @@ impl Sandbox {
 
     /// Runs `doctor --json` and returns `(exit code, parsed document)`.
     fn doctor_json(&self) -> (i32, serde_json::Value) {
-        let (code, stdout) = self.doctor(&["--json"]);
+        self.doctor_json_with(&[], &[])
+    }
+
+    /// Runs `doctor --json` with extra flags and environment, returning
+    /// `(exit code, parsed document)`.
+    fn doctor_json_with(&self, args: &[&str], env: &[(&str, &str)]) -> (i32, serde_json::Value) {
+        let mut full = vec!["doctor", "--json"];
+        full.extend_from_slice(args);
+        let mut cmd = self.paw(&full);
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        let out = cmd.output().expect("run doctor");
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
         let parsed = serde_json::from_str(&stdout).unwrap_or_else(|e| {
             panic!("--json stdout should be one JSON document ({e}):\n{stdout}")
         });
-        (code, parsed)
+        (
+            out.status.code().expect("doctor exited via a signal"),
+            parsed,
+        )
     }
+}
+
+/// Returns whether a `tmux` binary is callable, so the live arm's assertion
+/// can match what the harness will actually do.
+fn tmux_available() -> bool {
+    Command::new("tmux")
+        .arg("-V")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Returns the single Live-smoke check, or `None` when the group is absent.
+fn live_check(document: &serde_json::Value) -> Option<&serde_json::Value> {
+    checks(document).iter().find(|c| c["group"] == "Live smoke")
 }
 
 /// Snapshots every file under `root` as `path -> (len, modified)`, so a later
@@ -389,6 +420,77 @@ fn doctor_does_not_mutate_the_repository() {
         before, after,
         "doctor must not create, modify, or delete any file under the repository"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `--live` smoke arm
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_static_run_carries_no_live_smoke_group() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let (_, document) = sandbox.doctor_json();
+    assert!(
+        live_check(&document).is_none(),
+        "the Live-smoke group must only appear under --live; got: {document}"
+    );
+}
+
+#[test]
+#[serial]
+fn live_folds_the_lifecycle_verdict_in_and_keeps_json_parseable() {
+    // The harness isolates its own tmux socket, broker port, HOME and repo, so
+    // this never touches the caller's session. `doctor_json_with` already
+    // asserts stdout parsed as one document — the harness's per-step progress
+    // output must not leak into it.
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let (code, document) = sandbox.doctor_json_with(&["--live"], &[]);
+
+    let check = live_check(&document)
+        .unwrap_or_else(|| panic!("--live should add a Live-smoke check: {document}"));
+
+    if tmux_available() {
+        assert_eq!(
+            check["status"], "ok",
+            "the lifecycle should complete on a healthy build; check: {check}"
+        );
+        assert_eq!(code, 0, "document: {document}");
+    } else {
+        // A run that could not start is ⚠, not ✗ — the Environment group
+        // already reports the missing tmux as the hard failure.
+        assert_eq!(check["status"], "warn", "check: {check}");
+        assert!(!check["remedy"].as_str().unwrap_or("").is_empty());
+    }
+}
+
+#[test]
+#[serial]
+fn a_failing_lifecycle_step_is_a_hard_failure_naming_the_step() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux is not available, so the lifecycle cannot run");
+        return;
+    }
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    // The harness's forced-failure hook aborts at a named step, which is how
+    // the failure path is exercised without breaking a real build.
+    let (code, document) =
+        sandbox.doctor_json_with(&["--live"], &[("GIT_PAW_SELFTEST_FORCE_FAIL", "pick-port")]);
+
+    let check = live_check(&document)
+        .unwrap_or_else(|| panic!("--live should add a Live-smoke check: {document}"));
+    assert_eq!(check["status"], "fail", "check: {check}");
+    assert!(
+        check["detail"].as_str().unwrap_or("").contains("pick-port"),
+        "the detail should name the failing step; check: {check}"
+    );
+    assert!(
+        !check["remedy"].as_str().unwrap_or("").is_empty(),
+        "a ✗ needs a remedy; check: {check}"
+    );
+    assert_ne!(code, 0, "a failing lifecycle exits non-zero");
 }
 
 // ---------------------------------------------------------------------------
