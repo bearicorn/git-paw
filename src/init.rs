@@ -43,6 +43,31 @@ const BROKER_SCRIPT: &str = include_str!("../assets/scripts/broker.sh");
 /// `curl *` rule.
 const DOCS_FETCH_SCRIPT: &str = include_str!("../assets/scripts/docs-fetch.sh");
 
+/// The bundled helper scripts [`run_init`] installs, as
+/// `(file name, embedded content)` pairs in install order.
+///
+/// Exposed so diagnostics (`git paw doctor`) can compare the copies on disk
+/// under `.git-paw/scripts/` against the running binary's embedded versions
+/// without duplicating the `include_str!` set.
+#[must_use]
+pub fn bundled_scripts() -> [(&'static str, &'static str); 3] {
+    [
+        ("sweep.sh", SWEEP_SCRIPT),
+        ("broker.sh", BROKER_SCRIPT),
+        ("docs-fetch.sh", DOCS_FETCH_SCRIPT),
+    ]
+}
+
+/// The `.gitignore` entries [`run_init`] guarantees are present.
+///
+/// Exposed so diagnostics (`git paw doctor`) can report a missing entry
+/// against the same canonical list init writes, rather than a second copy
+/// that could drift.
+#[must_use]
+pub fn required_gitignore_entries() -> &'static [&'static str] {
+    GITIGNORE_ENTRIES
+}
+
 /// Runs the `git paw init` command.
 ///
 /// Creates `.git-paw/` directory structure, generates a default config,

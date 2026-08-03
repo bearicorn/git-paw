@@ -92,6 +92,13 @@ pub enum PawError {
     #[error("MCP error: {0}")]
     McpError(String),
 
+    /// One or more `git paw doctor` checks reported a hard failure.
+    ///
+    /// The report itself is already on stdout; this variant only carries the
+    /// non-zero exit status and a one-line pointer back at the remedies.
+    #[error("doctor found {0} failing check(s) — fix the ✗ remedies above and re-run")]
+    DoctorFailed(usize),
+
     /// I/O operation failed.
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),

@@ -24,6 +24,7 @@ pub mod coordination;
 pub mod dashboard;
 pub mod detect;
 pub mod dirs;
+pub mod doctor;
 pub mod domain;
 pub mod error;
 pub mod git;
