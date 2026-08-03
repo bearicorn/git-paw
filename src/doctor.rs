@@ -52,6 +52,8 @@ pub const GROUP_BROKER: &str = "Broker";
 pub const GROUP_SUPERVISOR: &str = "Supervisor";
 /// Repository-hygiene group heading.
 pub const GROUP_HYGIENE: &str = "Hygiene";
+/// Live session-lifecycle smoke group heading. Present only under `--live`.
+pub const GROUP_LIVE_SMOKE: &str = "Live smoke";
 
 /// Minimum supported `git` version — `git worktree`, the primitive git-paw is
 /// built on, landed in 2.5.
@@ -802,6 +804,46 @@ pub fn check_hygiene(probe: &HygieneProbe) -> Vec<CheckResult> {
     checks
 }
 
+/// Outcome of the optional live session-lifecycle smoke run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveSmokeProbe {
+    /// The lifecycle completed.
+    Passed,
+    /// The lifecycle did not run; the payload says why.
+    Skipped(String),
+    /// A lifecycle step failed; the payload names it.
+    Failed(String),
+}
+
+/// Live-smoke check: folds the `selftest` lifecycle verdict into the report.
+///
+/// A skip (typically no tmux) is ⚠, not ✗ — the static checks already report
+/// a missing tmux as the hard failure, so the smoke arm never double-fails.
+#[must_use]
+pub fn check_live_smoke(probe: &LiveSmokeProbe) -> Vec<CheckResult> {
+    vec![match probe {
+        LiveSmokeProbe::Passed => CheckResult::ok(
+            GROUP_LIVE_SMOKE,
+            "session lifecycle",
+            "start \u{2192} add \u{2192} remove \u{2192} stop completed against an isolated \
+             throwaway repository",
+        ),
+        LiveSmokeProbe::Skipped(reason) => CheckResult::warn(
+            GROUP_LIVE_SMOKE,
+            "session lifecycle",
+            format!("not run: {reason}"),
+            "resolve the Environment findings above, then re-run `git paw doctor --live`",
+        ),
+        LiveSmokeProbe::Failed(detail) => CheckResult::fail(
+            GROUP_LIVE_SMOKE,
+            "session lifecycle",
+            detail.clone(),
+            "re-run `git paw selftest` for the full step-by-step output, then file the \
+             failing step",
+        ),
+    }]
+}
+
 /// Runs every check function over `probes`, in report order.
 #[must_use]
 pub fn run_checks(probes: &Probes) -> Vec<CheckResult> {
@@ -1231,6 +1273,19 @@ fn probe_hygiene(repo_root: &Path) -> HygieneProbe {
     }
 }
 
+/// Runs the `selftest` session-lifecycle harness and maps its verdict onto a
+/// [`LiveSmokeProbe`].
+///
+/// `quiet` is passed straight through, so a `--json` report keeps stdout free
+/// of the harness's per-step progress lines.
+fn probe_live_smoke(quiet: bool) -> LiveSmokeProbe {
+    match crate::selftest::run_verdict(quiet) {
+        crate::selftest::Verdict::Passed => LiveSmokeProbe::Passed,
+        crate::selftest::Verdict::Skipped(reason) => LiveSmokeProbe::Skipped(reason),
+        crate::selftest::Verdict::Failed(err) => LiveSmokeProbe::Failed(err.to_string()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -1239,7 +1294,14 @@ fn probe_hygiene(repo_root: &Path) -> HygieneProbe {
 ///
 /// Prints the grouped report (or the `--json` document when `json` is set) and
 /// returns an error only when a check hard-failed, so the process exit code is
-/// the worst check's severity. Nothing is written to disk.
+/// the worst check's severity. The static checks write nothing to disk.
+///
+/// `live` appends the Live-smoke group: the `selftest` session-lifecycle
+/// harness runs against its own isolated throwaway repository and its verdict
+/// becomes one more check. That arm is the only part of doctor that creates
+/// anything, and it does so strictly inside its own sandbox
+/// (`.git-paw/tmp/`), which it removes again on both the success and failure
+/// paths.
 ///
 /// When the working directory is not inside a git repository, the repository
 /// -scoped groups cannot be probed; the report then carries the Environment
@@ -1250,7 +1312,7 @@ fn probe_hygiene(repo_root: &Path) -> HygieneProbe {
 /// Returns [`PawError::DoctorFailed`] when any check is ✗, or
 /// [`PawError::SessionError`] when the current directory or the JSON document
 /// cannot be read/serialised.
-pub fn run(json: bool) -> Result<(), PawError> {
+pub fn run(json: bool, live: bool) -> Result<(), PawError> {
     let cwd = std::env::current_dir()
         .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
     let repo_root = crate::git::validate_repo(&cwd).ok();
@@ -1261,13 +1323,17 @@ pub fn run(json: bool) -> Result<(), PawError> {
         in_repo: repo_root.is_some(),
     };
 
-    let checks = if let Some(root) = &repo_root {
+    let mut checks = if let Some(root) = &repo_root {
         run_checks(&collect_probes(root, environment))
     } else {
         let mut checks = check_environment(&environment);
         checks.extend(check_clis(&probe_clis(&PawConfig::default())));
         checks
     };
+
+    if live {
+        checks.extend(check_live_smoke(&probe_live_smoke(json)));
+    }
 
     if json {
         println!("{}", render_json(&checks)?);

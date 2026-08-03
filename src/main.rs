@@ -156,7 +156,7 @@ fn run(command: Command) -> Result<(), PawError> {
         Command::Mcp { repo, log_file } => {
             git_paw::mcp::cmd_mcp(repo.as_deref(), log_file.as_deref())
         }
-        Command::Doctor { json } => git_paw::doctor::run(json),
+        Command::Doctor { json, live } => git_paw::doctor::run(json, live),
         Command::Selftest => git_paw::selftest::run(),
     }
 }
