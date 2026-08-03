@@ -56,6 +56,8 @@ impl SpecsFormat {
                   git paw start --cli claude --branches feat/auth,feat/api\n\n  \
                   # Check session status\n  \
                   git paw status\n\n  \
+                  # Diagnose the environment before launching\n  \
+                  git paw doctor\n\n  \
                   # Pause session (detaches client, stops broker, keeps CLIs alive)\n  \
                   git paw pause\n\n  \
                   # Stop session (kills CLIs, preserves worktrees for later)\n  \
@@ -560,6 +562,33 @@ pub enum Command {
             help = "Also write tracing output to this file (stderr is always used)"
         )]
         log_file: Option<PathBuf>,
+    },
+
+    /// Diagnose the environment, configuration, and repository state
+    #[command(
+        about = "Diagnose the environment, configuration, and repository state",
+        long_about = "Runs read-only preflight checks and prints a grouped report answering \
+                      \"why won't it launch?\". Checks are grouped under Environment, CLIs, \
+                      Config, Spec system, Bundled scripts, Broker, Supervisor, and Hygiene; \
+                      each one reports \u{2713} (pass), \u{26a0} (warning), or \u{2717} \
+                      (failure), and every non-\u{2713} check prints an actionable remedy.\n\n\
+                      Doctor diagnoses but never repairs: no file, config, session, or other \
+                      persistent state is created, modified, or deleted. Apply the remedies \
+                      yourself (most are `git paw init`).\n\n\
+                      Exits non-zero when any check is \u{2717}, and zero when the worst status \
+                      is \u{26a0} or better \u{2014} so it works as a pre-launch or CI gate that \
+                      blocks only on true blockers. `--json` emits the same checks as one \
+                      machine-readable document with an identical exit-code contract.\n\n\
+                      Companion command: the hidden `git paw selftest` runs a live \
+                      session-lifecycle smoke check, where doctor inspects statically.\n\n\
+                      Examples:\n  \
+                      git paw doctor\n  \
+                      git paw doctor --json"
+    )]
+    Doctor {
+        /// Emit machine-readable JSON instead of the grouped report.
+        #[arg(long, help = "Emit machine-readable JSON")]
+        json: bool,
     },
 
     /// Run an isolated end-to-end session-lifecycle smoke check (internal; the live arm of `doctor`)
@@ -1643,6 +1672,61 @@ mod tests {
             assert!(
                 !help.contains(forbidden),
                 "mcp --help must not advertise {forbidden}; got: {help}"
+            );
+        }
+    }
+
+    // -- Doctor subcommand --
+
+    #[test]
+    fn doctor_parses_with_and_without_json() {
+        for (args, expected_json) in [(vec!["doctor"], false), (vec!["doctor", "--json"], true)] {
+            match parse(&args).command.unwrap() {
+                Command::Doctor { json } => {
+                    assert_eq!(json, expected_json, "args: {args:?}");
+                }
+                other => panic!("expected Doctor for {args:?}, got: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn doctor_help_describes_the_groups_and_does_not_advertise_a_repair_flag() {
+        let result = Cli::try_parse_from(["git-paw", "doctor", "--help"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+
+        for group in ["Environment", "Config", "Broker", "Supervisor", "Hygiene"] {
+            assert!(
+                help.contains(group),
+                "doctor --help should name the '{group}' group; got: {help}"
+            );
+        }
+        assert!(
+            help.contains("--json"),
+            "doctor --help should list --json; got: {help}"
+        );
+        assert!(
+            help.contains("git paw doctor"),
+            "doctor --help should include a usage example; got: {help}"
+        );
+        // Diagnose-only in v0.13.0: no repair mode is offered anywhere in help.
+        for forbidden in ["--fix", "--repair"] {
+            assert!(
+                !help.contains(forbidden),
+                "doctor is diagnose-only and must not advertise {forbidden}; got: {help}"
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_rejects_unknown_flags() {
+        for flag in ["--fix", "--repair", "--anything"] {
+            assert!(
+                Cli::try_parse_from(["git-paw", "doctor", flag]).is_err(),
+                "doctor should reject {flag}"
             );
         }
     }
