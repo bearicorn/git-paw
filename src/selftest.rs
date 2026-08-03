@@ -89,25 +89,67 @@ mod step {
 /// step fails, or [`PawError::NotAGitRepo`] when not invoked from inside a git
 /// repository.
 pub fn run() -> Result<(), PawError> {
+    match run_verdict(false) {
+        Verdict::Skipped(reason) => {
+            println!("selftest skipped: {reason}");
+            Ok(())
+        }
+        Verdict::Passed => {
+            println!("selftest passed");
+            Ok(())
+        }
+        Verdict::Failed(err) => Err(err),
+    }
+}
+
+/// The outcome of one selftest lifecycle run.
+///
+/// Returned by [`run_verdict`] for callers that render their own report —
+/// notably `git paw doctor --live`, which folds the verdict into its grouped
+/// ✓/⚠/✗ output instead of printing selftest's own summary line.
+#[derive(Debug)]
+pub enum Verdict {
+    /// The full lifecycle completed.
+    Passed,
+    /// The lifecycle did not run; the payload says why (a skip is not a
+    /// failure).
+    Skipped(String),
+    /// A lifecycle step failed; the error names the step.
+    Failed(PawError),
+}
+
+/// Runs the isolated lifecycle and returns its [`Verdict`] without printing a
+/// summary line.
+///
+/// `quiet` additionally suppresses the per-step progress lines the lifecycle
+/// writes to stdout, so a caller that owns stdout — `git paw doctor --json
+/// --live`, whose stdout must stay a single parseable document — keeps it
+/// clean. `git paw selftest` passes `false` and prints exactly as before.
+#[must_use]
+pub fn run_verdict(quiet: bool) -> Verdict {
     if !tmux_available() {
-        println!("selftest skipped: tmux not available");
-        return Ok(());
+        return Verdict::Skipped("tmux not available".to_string());
     }
 
-    let cwd = std::env::current_dir()
-        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
-    let repo_root = crate::git::validate_repo(&cwd)?;
+    let repo_root = match std::env::current_dir()
+        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))
+        .and_then(|cwd| crate::git::validate_repo(&cwd))
+    {
+        Ok(root) => root,
+        Err(err) => return Verdict::Failed(err),
+    };
 
-    let mut harness = Harness::new(&repo_root)?;
+    let mut harness = match Harness::new(&repo_root) {
+        Ok(harness) => harness,
+        Err(err) => return Verdict::Failed(err),
+    };
+    harness.quiet = quiet;
     let result = harness.run_lifecycle();
     harness.cleanup();
 
     match result {
-        Ok(()) => {
-            println!("selftest passed");
-            Ok(())
-        }
-        Err(err) => Err(err),
+        Ok(()) => Verdict::Passed,
+        Err(err) => Verdict::Failed(err),
     }
 }
 
@@ -181,6 +223,9 @@ struct Harness {
     port: u16,
     /// Tmux session name, learned from `start` stdout.
     session_name: Option<String>,
+    /// Suppresses the per-step progress lines. Set when a caller owns stdout
+    /// (`git paw doctor --live`); `git paw selftest` leaves it `false`.
+    quiet: bool,
 }
 
 impl Harness {
@@ -228,7 +273,15 @@ impl Harness {
             socket_dir,
             port: 0,
             session_name: None,
+            quiet: false,
         })
+    }
+
+    /// Writes a per-step progress line unless the run is quiet.
+    fn progress(&self, line: &str) {
+        if !self.quiet {
+            println!("{line}");
+        }
     }
 
     /// Builds a `git-paw` child command with the full isolation environment
@@ -273,7 +326,10 @@ impl Harness {
         // 4. The starting roster holds exactly the initial agent.
         maybe_force_fail(step::ROSTER_INITIAL)?;
         let roster = self.read_roster()?;
-        println!("selftest: roster after start: {}", render_roster(&roster));
+        self.progress(&format!(
+            "selftest: roster after start: {}",
+            render_roster(&roster)
+        ));
         if roster != [slug(INITIAL_BRANCH)] {
             return Err(step_failure(
                 step::ROSTER_INITIAL,
@@ -288,7 +344,10 @@ impl Harness {
         // 6. The roster grew to include the added agent.
         maybe_force_fail(step::ROSTER_AFTER_ADD)?;
         let roster = self.read_roster()?;
-        println!("selftest: roster after add: {}", render_roster(&roster));
+        self.progress(&format!(
+            "selftest: roster after add: {}",
+            render_roster(&roster)
+        ));
         if !roster.contains(&slug(TRANSIENT_BRANCH)) || !roster.contains(&slug(INITIAL_BRANCH)) {
             return Err(step_failure(
                 step::ROSTER_AFTER_ADD,
@@ -307,7 +366,10 @@ impl Harness {
         // 8. The roster shrank: the removed agent is gone, the rest unchanged.
         maybe_force_fail(step::ROSTER_AFTER_REMOVE)?;
         let roster = self.read_roster()?;
-        println!("selftest: roster after remove: {}", render_roster(&roster));
+        self.progress(&format!(
+            "selftest: roster after remove: {}",
+            render_roster(&roster)
+        ));
         if roster != [slug(INITIAL_BRANCH)] {
             return Err(step_failure(
                 step::ROSTER_AFTER_REMOVE,
@@ -413,7 +475,9 @@ impl Harness {
                 format!("session '{name}' did not appear on the private tmux socket"),
             ));
         }
-        println!("selftest: session '{name}' booted on its private tmux socket");
+        self.progress(&format!(
+            "selftest: session '{name}' booted on its private tmux socket"
+        ));
         self.session_name = Some(name);
         Ok(())
     }

@@ -662,6 +662,68 @@ fn a_clean_repository_passes_every_hygiene_check() {
     }
 }
 
+// -- Live smoke -----------------------------------------------------------
+
+#[test]
+fn live_smoke_check_grades_each_lifecycle_verdict() {
+    for (probe, expected) in [
+        (LiveSmokeProbe::Passed, CheckStatus::Ok),
+        (
+            // A skip is ⚠, not ✗: the Environment group already reports the
+            // missing prerequisite as the hard failure.
+            LiveSmokeProbe::Skipped("tmux not available".into()),
+            CheckStatus::Warn,
+        ),
+        (
+            LiveSmokeProbe::Failed("Session error: selftest step 'add' failed".into()),
+            CheckStatus::Fail,
+        ),
+    ] {
+        let checks = check_live_smoke(&probe);
+        let check = named(&checks, "session lifecycle");
+        assert_eq!(check.group, GROUP_LIVE_SMOKE);
+        assert_eq!(check.status, expected, "probe: {probe:?}");
+        if expected == CheckStatus::Ok {
+            assert!(check.remedy.is_none());
+        } else {
+            assert!(
+                !check
+                    .remedy
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty(),
+                "a non-✓ live-smoke check needs a remedy: {check:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_failed_live_smoke_names_the_failing_step() {
+    let checks = check_live_smoke(&LiveSmokeProbe::Failed(
+        "Session error: selftest step 'roster-after-add' failed".into(),
+    ));
+    let check = named(&checks, "session lifecycle");
+    assert!(
+        check.detail.contains("roster-after-add"),
+        "the detail should carry the failing step; got: {}",
+        check.detail
+    );
+}
+
+#[test]
+fn the_live_group_is_absent_from_a_static_report() {
+    let checks = run_checks(&Probes {
+        environment: healthy_environment(),
+        ..Probes::default()
+    });
+    assert!(
+        !checks.iter().any(|c| c.group == GROUP_LIVE_SMOKE),
+        "the live-smoke group should only appear under --live"
+    );
+}
+
 // -- Verdict + exit code --------------------------------------------------
 
 #[test]

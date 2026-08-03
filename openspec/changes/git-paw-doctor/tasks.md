@@ -7,8 +7,8 @@
 
 ## 1b. selftest → doctor's live-smoke arm (user decision 2026-07-27)
 - [x] Hide the `selftest` command from the public surface (`#[command(hide = true)]`) + reframe its help as the internal live arm of `doctor`; flip the help-visibility test to `selftest_is_hidden_from_help`; drop it from the root `after_help` quick-start (landed early on the branch as a `feat(cli)` slice)
-- [ ] Give `doctor` a live-smoke arm that runs the selftest lifecycle as part of the suite (e.g. `git paw doctor --live` / `--smoke`), reusing `src/selftest.rs` — static preflight + live smoke under one diagnostic surface
-- [ ] Keep `src/selftest.rs` as the harness + keep `tests/selftest_e2e.rs`; the harness is still reused by `unattended_drive_e2e`/`pause_e2e` — do NOT remove it
+- [x] Give `doctor` a live-smoke arm that runs the selftest lifecycle as part of the suite (e.g. `git paw doctor --live` / `--smoke`), reusing `src/selftest.rs` — static preflight + live smoke under one diagnostic surface
+- [x] Keep `src/selftest.rs` as the harness + keep `tests/selftest_e2e.rs`; the harness is still reused by `unattended_drive_e2e`/`pause_e2e` — do NOT remove it
 - [ ] Reconcile the `selftest` spec (`openspec/specs/selftest`) to hidden/internal + doctor-arm membership (defer the `openspec/specs/` edit until the spec-consolidation reorg settles, to avoid a concurrent-edit clash)
 - [ ] Docs: fold the `selftest` user-guide chapter under doctoring / mark internal; drop it from the public CLI-reference table + `SUMMARY.md` as a top-level command (coordinate with the spec-consolidation §6 docs restructure)
 

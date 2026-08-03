@@ -579,16 +579,29 @@ pub enum Command {
                       is \u{26a0} or better \u{2014} so it works as a pre-launch or CI gate that \
                       blocks only on true blockers. `--json` emits the same checks as one \
                       machine-readable document with an identical exit-code contract.\n\n\
-                      Companion command: the hidden `git paw selftest` runs a live \
-                      session-lifecycle smoke check, where doctor inspects statically.\n\n\
+                      `--live` adds a Live-smoke group that runs the full session lifecycle \
+                      (start \u{2192} add \u{2192} remove \u{2192} stop) against an isolated \
+                      throwaway repository and a dummy CLI \u{2014} the same harness the \
+                      internal `git paw selftest` drives \u{2014} so static preflight and live \
+                      smoke sit under one diagnostic surface. It is slower and it is the only \
+                      arm that writes anything, strictly inside its own `.git-paw/tmp/` \
+                      sandbox, which it removes again afterwards.\n\n\
                       Examples:\n  \
                       git paw doctor\n  \
-                      git paw doctor --json"
+                      git paw doctor --json\n  \
+                      git paw doctor --live"
     )]
     Doctor {
         /// Emit machine-readable JSON instead of the grouped report.
         #[arg(long, help = "Emit machine-readable JSON")]
         json: bool,
+
+        /// Also run the live session-lifecycle smoke check.
+        #[arg(
+            long,
+            help = "Also run the live session-lifecycle smoke check (slower; needs tmux)"
+        )]
+        live: bool,
     },
 
     /// Run an isolated end-to-end session-lifecycle smoke check (internal; the live arm of `doctor`)
@@ -1679,11 +1692,16 @@ mod tests {
     // -- Doctor subcommand --
 
     #[test]
-    fn doctor_parses_with_and_without_json() {
-        for (args, expected_json) in [(vec!["doctor"], false), (vec!["doctor", "--json"], true)] {
+    fn doctor_parses_its_flag_matrix() {
+        for (args, expected) in [
+            (vec!["doctor"], (false, false)),
+            (vec!["doctor", "--json"], (true, false)),
+            (vec!["doctor", "--live"], (false, true)),
+            (vec!["doctor", "--json", "--live"], (true, true)),
+        ] {
             match parse(&args).command.unwrap() {
-                Command::Doctor { json } => {
-                    assert_eq!(json, expected_json, "args: {args:?}");
+                Command::Doctor { json, live } => {
+                    assert_eq!((json, live), expected, "args: {args:?}");
                 }
                 other => panic!("expected Doctor for {args:?}, got: {other:?}"),
             }
@@ -1704,10 +1722,12 @@ mod tests {
                 "doctor --help should name the '{group}' group; got: {help}"
             );
         }
-        assert!(
-            help.contains("--json"),
-            "doctor --help should list --json; got: {help}"
-        );
+        for flag in ["--json", "--live"] {
+            assert!(
+                help.contains(flag),
+                "doctor --help should list {flag}; got: {help}"
+            );
+        }
         assert!(
             help.contains("git paw doctor"),
             "doctor --help should include a usage example; got: {help}"
@@ -1723,7 +1743,7 @@ mod tests {
 
     #[test]
     fn doctor_rejects_unknown_flags() {
-        for flag in ["--fix", "--repair", "--anything"] {
+        for flag in ["--fix", "--repair", "--smoke", "--anything"] {
             assert!(
                 Cli::try_parse_from(["git-paw", "doctor", flag]).is_err(),
                 "doctor should reject {flag}"
