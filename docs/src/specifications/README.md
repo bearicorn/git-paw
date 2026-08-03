@@ -152,6 +152,10 @@ have no user-guide chapter: the spec itself is their documentation.
 
 - [`spec-providers`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/spec-providers/spec.md) — discovers pending specs and represents them as launchable `SpecEntry` values through a pluggable backend system (OpenSpec, Markdown, Spec Kit, superpowers plans).
 
+### preflight-
+
+- [`preflight-diagnostics`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/preflight-diagnostics/spec.md) — `git paw doctor` runs read-only environment/config/repository checks, reporting each as ✓/⚠/✗ with a remedy, a `--json` surface, and an exit code equal to the worst check.
+
 ### mcp-
 
 - [`mcp-server`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/mcp-server/spec.md) — `git paw mcp` runs a stdio JSON-RPC MCP server exposing read-only, deterministically-sourced tools over a resolved repo/worktree root.

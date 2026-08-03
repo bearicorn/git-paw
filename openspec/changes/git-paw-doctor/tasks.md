@@ -10,7 +10,7 @@
 - [x] Give `doctor` a live-smoke arm that runs the selftest lifecycle as part of the suite (e.g. `git paw doctor --live` / `--smoke`), reusing `src/selftest.rs` — static preflight + live smoke under one diagnostic surface
 - [x] Keep `src/selftest.rs` as the harness + keep `tests/selftest_e2e.rs`; the harness is still reused by `unattended_drive_e2e`/`pause_e2e` — do NOT remove it
 - [ ] Reconcile the `selftest` spec (`openspec/specs/selftest`) to hidden/internal + doctor-arm membership (defer the `openspec/specs/` edit until the spec-consolidation reorg settles, to avoid a concurrent-edit clash)
-- [ ] Docs: fold the `selftest` user-guide chapter under doctoring / mark internal; drop it from the public CLI-reference table + `SUMMARY.md` as a top-level command (coordinate with the spec-consolidation §6 docs restructure)
+- [x] Docs: fold the `selftest` user-guide chapter under doctoring / mark internal; drop it from the public CLI-reference table + `SUMMARY.md` as a top-level command (coordinate with the spec-consolidation §6 docs restructure)
 
 ## 2. Diagnostics module (`src/doctor.rs`)
 - [x] Define `CheckStatus { Ok, Warn, Fail }` and a `CheckResult { group, name, status, detail, remedy }`
@@ -40,10 +40,10 @@
 - [x] Export-agnosticism: assert the supervisor check does not hard-code cargo/just verbs (sourced from preset)
 
 ## 5. Docs
-- [ ] `--help` (about/long_about/examples) for `doctor`
-- [ ] README CLI table row for `doctor`
-- [ ] New mdBook page (`docs/src/`) documenting doctor + its checks; cross-link from `selftest` page; `mdbook build docs/` passes
-- [ ] Configuration reference: note doctor (no new fields)
+- [x] `--help` (about/long_about/examples) for `doctor`
+- [x] README CLI table row for `doctor`
+- [x] New mdBook page (`docs/src/`) documenting doctor + its checks; cross-link from `selftest` page; `mdbook build docs/` passes
+- [x] Configuration reference: note doctor (no new fields)
 
 ## 6. Verification (five gates)
 - [ ] Gate 1 — `cargo test --no-fail-fast` for doctor's tests

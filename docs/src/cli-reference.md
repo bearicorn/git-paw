@@ -26,7 +26,7 @@ Commands:
   replay      View captured session logs
   approvals   Report manually-approved command patterns for a session
   mcp         Run a read-only Model Context Protocol (MCP) server over stdio
-  selftest    Run an isolated end-to-end session-lifecycle smoke check
+  doctor      Diagnose the environment, configuration, and repository state
   help        Print this message or the help of the given subcommand(s)
 
 Options:
@@ -507,7 +507,61 @@ git paw mcp --repo /path/to/repo
 git paw mcp --repo /path/to/repo --log-file /tmp/git-paw-mcp.log
 ```
 
+## `git paw doctor`
+
+Runs read-only preflight checks over the environment, configuration, and
+repository state and prints a grouped report answering "why won't it launch?".
+
+```
+Usage: git-paw doctor [OPTIONS]
+
+Options:
+      --json  Emit machine-readable JSON
+      --live  Also run the live session-lifecycle smoke check (slower; needs tmux)
+  -h, --help  Print help
+```
+
+Checks are grouped under **Environment**, **CLIs**, **Config**, **Spec system**,
+**Bundled scripts**, **Broker**, **Supervisor**, and **Hygiene**. Each reports
+`✓` (pass), `⚠` (warning), or `✗` (failure), and every non-`✓` check prints an
+actionable remedy on its own `↳` line.
+
+Doctor **diagnoses but never repairs** — no file, config, session, or other
+persistent state is created, modified, or deleted. There is deliberately no
+`--fix` flag.
+
+**Exit behaviour:**
+
+- Exits non-zero when any check is `✗`.
+- Exits `0` when the worst status is `⚠` or better — a warning alone never
+  blocks, so doctor works as a pre-launch or CI gate that fails only on true
+  blockers.
+- `--json` shares the identical exit-code contract and suppresses the human
+  rendering; stdout is a single JSON document with a top-level `status` and a
+  `checks` array whose entries carry `group`, `name`, `status`, `detail`, and
+  `remedy`.
+
+`--live` appends a **Live smoke** group carrying the verdict of the full
+session lifecycle (`start` → `add` → `remove` → `stop`) run against an isolated
+throwaway repository and a dummy CLI — the same harness `git paw selftest`
+drives. It is the only arm that writes anything, and only inside its own
+`.git-paw/tmp/` sandbox, which it removes afterwards.
+
+**Examples:**
+```bash
+git paw doctor
+git paw doctor --json
+git paw doctor --live
+```
+
+See the [Doctor chapter](user-guide/doctor.md) for the full check catalogue.
+
 ## `git paw selftest`
+
+> **Internal diagnostic (hidden from the command list).** `selftest` is the
+> **live** arm of `git paw doctor` — reachable directly for dogfooding and CI,
+> or through `git paw doctor --live`, which folds its verdict into the grouped
+> report.
 
 Runs an isolated, end-to-end session-lifecycle smoke check — the shipped form
 of the dogfood isolation recipe — so the orchestration plumbing can be verified
