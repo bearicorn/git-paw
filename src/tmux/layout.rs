@@ -3,8 +3,7 @@
 //! Pure per-pane column-width computation plus the live `resize-pane` pass
 //! that makes each agent row equal-width.
 
-use std::process::Command;
-
+use crate::command_runner::{CommandRunner, RealCommandRunner};
 use crate::error::PawError;
 
 /// Compute the per-pane column-width resize targets for the equal-width row
@@ -51,13 +50,18 @@ pub fn agent_row_widths(window_width: usize, agent_count: usize) -> Vec<(usize, 
 ///
 /// Returns `Ok(None)` when the session/window is gone so callers degrade to a
 /// no-op rather than failing.
-fn query_window_width(session_name: &str) -> Result<Option<usize>, PawError> {
+fn query_window_width(
+    runner: &dyn CommandRunner,
+    session_name: &str,
+) -> Result<Option<usize>, PawError> {
     let target = format!("{session_name}:0");
-    let output = Command::new("tmux")
-        .args(["display-message", "-p", "-t", &target, "#{window_width}"])
-        .output()
+    let output = runner
+        .run(
+            "tmux",
+            &["display-message", "-p", "-t", &target, "#{window_width}"],
+        )
         .map_err(|e| PawError::TmuxError(format!("failed to run tmux: {e}")))?;
-    if !output.status.success() {
+    if !output.success {
         return Ok(None);
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().parse().ok())
@@ -81,15 +85,28 @@ fn query_window_width(session_name: &str) -> Result<Option<usize>, PawError> {
 /// (design D5). Best-effort per resize; one pane's tmux failure does not abort
 /// the rest.
 pub fn rebalance_agent_rows(session_name: &str, agent_count: usize) -> Result<(), PawError> {
-    let Some(window_width) = query_window_width(session_name)? else {
+    rebalance_agent_rows_with(&RealCommandRunner, session_name, agent_count)
+}
+
+/// [`rebalance_agent_rows`] against an injected runner, so the width query and
+/// the per-pane `resize-pane` argv are assertable without a live window.
+///
+/// Each resize inherits git-paw's stdio, as the previous inline
+/// `Command::new("tmux")…status()` call did — the status is ignored
+/// (best-effort per pane) but a tmux diagnostic still reaches the user's stderr.
+pub(crate) fn rebalance_agent_rows_with(
+    runner: &dyn CommandRunner,
+    session_name: &str,
+    agent_count: usize,
+) -> Result<(), PawError> {
+    let Some(window_width) = query_window_width(runner, session_name)? else {
         return Ok(());
     };
     for (pane_idx, cols) in agent_row_widths(window_width, agent_count) {
         let target = format!("{session_name}:0.{pane_idx}");
         let cols_str = cols.to_string();
-        let _ = Command::new("tmux")
-            .args(["resize-pane", "-t", &target, "-x", &cols_str])
-            .status();
+        let _ =
+            runner.run_inheriting_stdio("tmux", &["resize-pane", "-t", &target, "-x", &cols_str]);
     }
     Ok(())
 }

@@ -2248,3 +2248,482 @@ fn gate_becomes_ready_after_a_relaunch() {
         "the bare shell was relaunched once before going ready"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Runtime path behind the `CommandRunner` seam (code-analysis-refactor R3)
+//
+// The session/readiness/layout operations shell out to a live tmux server, so
+// before the seam their argv and their success/failure branches were only
+// reachable end-to-end. These assert the exact argv git-paw emits plus each
+// documented reaction to tmux's output — no live server involved.
+// ---------------------------------------------------------------------------
+
+use crate::command_runner::CommandOutput;
+use crate::command_runner::test_support::FakeCommandRunner;
+
+/// A scripted tmux result: exit 0 with the given stdout.
+fn ok_out(stdout: &str) -> CommandOutput {
+    CommandOutput {
+        success: true,
+        code: Some(0),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: Vec::new(),
+    }
+}
+
+/// A scripted tmux result: exit 1 with the given stderr.
+fn err_out(stderr: &str) -> CommandOutput {
+    CommandOutput {
+        success: false,
+        code: Some(1),
+        stdout: Vec::new(),
+        stderr: stderr.as_bytes().to_vec(),
+    }
+}
+
+/// The argv of the single call the fake recorded.
+fn only_call(fake: &FakeCommandRunner) -> (String, Vec<String>) {
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 1, "expected exactly one tmux invocation");
+    calls.into_iter().next().unwrap()
+}
+
+#[test]
+fn is_session_alive_probes_has_session_and_maps_exit_status() {
+    let alive = FakeCommandRunner::succeeding("");
+    assert!(is_session_alive_with(&alive, "paw-proj").unwrap());
+    assert_eq!(
+        only_call(&alive),
+        (
+            "tmux".to_string(),
+            vec![
+                "has-session".to_string(),
+                "-t".to_string(),
+                "paw-proj".to_string()
+            ]
+        )
+    );
+
+    let gone = FakeCommandRunner::failing("can't find session");
+    assert!(
+        !is_session_alive_with(&gone, "paw-proj").unwrap(),
+        "a non-zero has-session exit means the session is not alive"
+    );
+}
+
+#[test]
+fn is_session_alive_surfaces_a_spawn_failure_as_an_error() {
+    let broken = FakeCommandRunner::scripted(|_, _| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "tmux missing",
+        ))
+    });
+    let err = is_session_alive_with(&broken, "paw-proj").unwrap_err();
+    assert!(
+        matches!(&err, PawError::TmuxError(m) if m.contains("failed to run tmux")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn session_liveness_distinguishes_alive_stale_and_indeterminate() {
+    let alive = FakeCommandRunner::succeeding("");
+    assert_eq!(
+        session_liveness_with(&alive, "paw-proj"),
+        SessionLiveness::Alive
+    );
+
+    let stale = FakeCommandRunner::failing("can't find session");
+    assert_eq!(
+        session_liveness_with(&stale, "paw-proj"),
+        SessionLiveness::Stale
+    );
+
+    // A probe that could not run at all is NOT evidence the session died.
+    let unspawnable = FakeCommandRunner::scripted(|_, _| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "tmux missing",
+        ))
+    });
+    assert_eq!(
+        session_liveness_with(&unspawnable, "paw-proj"),
+        SessionLiveness::Indeterminate
+    );
+}
+
+#[test]
+fn attach_sends_attach_session_and_names_the_session_on_failure() {
+    let ok = FakeCommandRunner::succeeding("");
+    assert!(attach_with(&ok, "paw-proj").is_ok());
+    assert_eq!(
+        only_call(&ok),
+        (
+            "tmux".to_string(),
+            vec![
+                "attach-session".to_string(),
+                "-t".to_string(),
+                "paw-proj".to_string()
+            ]
+        )
+    );
+
+    let gone = FakeCommandRunner::failing("no such session");
+    let err = attach_with(&gone, "paw-proj").unwrap_err();
+    assert!(
+        matches!(&err, PawError::TmuxError(m) if m.contains("paw-proj")),
+        "the failure must name the session: {err:?}"
+    );
+}
+
+#[test]
+fn detach_client_targets_the_session_and_treats_no_clients_as_a_no_op() {
+    let ok = FakeCommandRunner::succeeding("");
+    assert!(detach_client_with(&ok, "paw-proj").is_ok());
+    assert_eq!(
+        only_call(&ok),
+        (
+            "tmux".to_string(),
+            vec![
+                "detach-client".to_string(),
+                "-s".to_string(),
+                "paw-proj".to_string()
+            ]
+        )
+    );
+
+    for benign in ["no clients attached", "no current client"] {
+        let idempotent = FakeCommandRunner::failing(benign);
+        assert!(
+            detach_client_with(&idempotent, "paw-proj").is_ok(),
+            "'{benign}' is the already-detached no-op case"
+        );
+    }
+
+    let real = FakeCommandRunner::failing("  server exited unexpectedly  ");
+    let err = detach_client_with(&real, "paw-proj").unwrap_err();
+    assert!(
+        matches!(&err, PawError::TmuxError(m) if m == "server exited unexpectedly"),
+        "a genuine failure surfaces trimmed stderr: {err:?}"
+    );
+}
+
+#[test]
+fn kill_pane_addresses_session_window_pane_and_tolerates_a_missing_pane() {
+    let ok = FakeCommandRunner::succeeding("");
+    assert!(kill_pane_with(&ok, "paw-proj", 3).is_ok());
+    assert_eq!(
+        only_call(&ok),
+        (
+            "tmux".to_string(),
+            vec![
+                "kill-pane".to_string(),
+                "-t".to_string(),
+                "paw-proj:0.3".to_string()
+            ]
+        )
+    );
+
+    for benign in ["can't find pane", "no such pane", "pane not found"] {
+        let idempotent = FakeCommandRunner::failing(benign);
+        assert!(
+            kill_pane_with(&idempotent, "paw-proj", 3).is_ok(),
+            "'{benign}' is the already-gone no-op case"
+        );
+    }
+
+    let real = FakeCommandRunner::failing("permission denied");
+    assert!(kill_pane_with(&real, "paw-proj", 3).is_err());
+}
+
+#[test]
+fn kill_pane_by_id_targets_the_pane_id_and_tolerates_a_missing_pane() {
+    let ok = FakeCommandRunner::succeeding("");
+    assert!(kill_pane_by_id_with(&ok, "%7").is_ok());
+    assert_eq!(
+        only_call(&ok),
+        (
+            "tmux".to_string(),
+            vec!["kill-pane".to_string(), "-t".to_string(), "%7".to_string()]
+        )
+    );
+
+    let gone = FakeCommandRunner::failing("can't find pane %7");
+    assert!(
+        kill_pane_by_id_with(&gone, "%7").is_ok(),
+        "a pane that has already gone is an idempotent no-op"
+    );
+}
+
+#[test]
+fn kill_session_targets_the_session_and_surfaces_trimmed_stderr() {
+    let ok = FakeCommandRunner::succeeding("");
+    assert!(kill_session_with(&ok, "paw-proj").is_ok());
+    assert_eq!(
+        only_call(&ok),
+        (
+            "tmux".to_string(),
+            vec![
+                "kill-session".to_string(),
+                "-t".to_string(),
+                "paw-proj".to_string()
+            ]
+        )
+    );
+
+    let gone = FakeCommandRunner::failing("  can't find session: paw-proj\n");
+    let err = kill_session_with(&gone, "paw-proj").unwrap_err();
+    assert!(
+        matches!(&err, PawError::TmuxError(m) if m == "can't find session: paw-proj"),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn list_panes_requests_the_id_path_format_and_parses_the_pairs() {
+    let fake = FakeCommandRunner::scripted(|_, _| Ok(ok_out("%0 /repo\n%1 /repo/wt-a\n")));
+    let panes = list_panes_with_paths_with(&fake, "paw-proj").unwrap();
+    assert_eq!(
+        panes,
+        vec![
+            ("%0".to_string(), "/repo".to_string()),
+            ("%1".to_string(), "/repo/wt-a".to_string()),
+        ]
+    );
+    assert_eq!(
+        only_call(&fake),
+        (
+            "tmux".to_string(),
+            vec![
+                "list-panes".to_string(),
+                "-t".to_string(),
+                "paw-proj".to_string(),
+                "-F".to_string(),
+                "#{pane_id} #{pane_current_path}".to_string(),
+            ]
+        )
+    );
+}
+
+#[test]
+fn list_panes_degrades_to_empty_when_the_session_or_server_is_gone() {
+    for benign in ["can't find session", "no such window", "no server running"] {
+        let fake = FakeCommandRunner::failing(benign);
+        assert_eq!(
+            list_panes_with_paths_with(&fake, "paw-proj").unwrap(),
+            Vec::new(),
+            "'{benign}' degrades to no live panes rather than failing"
+        );
+    }
+
+    let real = FakeCommandRunner::failing("  bad -F format  ");
+    let err = list_panes_with_paths_with(&real, "paw-proj").unwrap_err();
+    assert!(
+        matches!(&err, PawError::TmuxError(m) if m == "bad -F format"),
+        "a genuine tmux failure still surfaces: {err:?}"
+    );
+}
+
+#[test]
+fn list_panes_skips_lines_without_a_space_separator() {
+    let fake = FakeCommandRunner::scripted(|_, _| Ok(ok_out("%0 /repo\ngarbage\n\n%1 /repo/wt\n")));
+    assert_eq!(
+        list_panes_with_paths_with(&fake, "paw-proj").unwrap(),
+        vec![
+            ("%0".to_string(), "/repo".to_string()),
+            ("%1".to_string(), "/repo/wt".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn resolve_session_name_returns_the_base_when_it_is_free() {
+    // has-session fails => nothing occupies the name.
+    let free = FakeCommandRunner::failing("can't find session");
+    assert_eq!(
+        resolve_session_name_with(&free, "proj").unwrap(),
+        "paw-proj"
+    );
+}
+
+#[test]
+fn resolve_session_name_walks_past_occupied_names() {
+    // `paw-proj` and `paw-proj-2` are taken; `paw-proj-3` is free.
+    let fake = FakeCommandRunner::scripted(|_, args| {
+        let target = args.last().copied().unwrap_or_default();
+        if target == "paw-proj" || target == "paw-proj-2" {
+            Ok(ok_out(""))
+        } else {
+            Ok(err_out("can't find session"))
+        }
+    });
+    assert_eq!(
+        resolve_session_name_with(&fake, "proj").unwrap(),
+        "paw-proj-3"
+    );
+}
+
+#[test]
+fn resolve_session_name_gives_up_after_too_many_collisions() {
+    // Every candidate is occupied.
+    let all_taken = FakeCommandRunner::succeeding("");
+    let err = resolve_session_name_with(&all_taken, "proj").unwrap_err();
+    assert!(
+        matches!(&err, PawError::TmuxError(m) if m.contains("too many session name collisions")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn resolve_pane_id_matches_the_worktree_path_and_reports_none_otherwise() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wt = tmp.path().join("wt-a");
+    std::fs::create_dir(&wt).unwrap();
+    let listing = format!("%0 /elsewhere\n%4 {}\n", wt.display());
+
+    let fake = FakeCommandRunner::scripted(move |_, _| Ok(ok_out(&listing)));
+    assert_eq!(
+        resolve_pane_id_for_worktree_with(&fake, "paw-proj", &wt).unwrap(),
+        Some("%4".to_string())
+    );
+
+    let none = FakeCommandRunner::scripted(|_, _| Ok(ok_out("%0 /elsewhere\n")));
+    assert_eq!(
+        resolve_pane_id_for_worktree_with(&none, "paw-proj", &wt).unwrap(),
+        None,
+        "no live pane for the worktree makes removal an idempotent no-op"
+    );
+}
+
+#[test]
+fn reconcile_reports_only_agents_whose_worktree_has_no_live_pane() {
+    let tmp = tempfile::tempdir().unwrap();
+    let live = tmp.path().join("wt-live");
+    let dead = tmp.path().join("wt-dead");
+    std::fs::create_dir(&live).unwrap();
+    std::fs::create_dir(&dead).unwrap();
+
+    let listing = format!("%1 {}\n", live.display());
+    let fake = FakeCommandRunner::scripted(move |_, _| Ok(ok_out(&listing)));
+    let agents = vec![
+        ("feat/live".to_string(), live.clone()),
+        ("feat/dead".to_string(), dead.clone()),
+    ];
+    assert_eq!(
+        reconcile_agents_to_panes_with(&fake, "paw-proj", &agents).unwrap(),
+        vec!["feat/dead".to_string()]
+    );
+}
+
+#[test]
+fn relaunch_clears_the_input_line_before_sending_the_cli_command() {
+    let fake = FakeCommandRunner::succeeding("");
+    relaunch_cli_into_pane(
+        &fake,
+        "paw-proj",
+        2,
+        "claude --dangerously-skip-permissions",
+    );
+    assert_eq!(
+        fake.calls(),
+        vec![
+            (
+                "tmux".to_string(),
+                vec![
+                    "send-keys".to_string(),
+                    "-t".to_string(),
+                    "paw-proj:0.2".to_string(),
+                    "C-u".to_string(),
+                ]
+            ),
+            (
+                "tmux".to_string(),
+                vec![
+                    "send-keys".to_string(),
+                    "-t".to_string(),
+                    "paw-proj:0.2".to_string(),
+                    "claude --dangerously-skip-permissions".to_string(),
+                    "Enter".to_string(),
+                ]
+            ),
+        ]
+    );
+}
+
+#[test]
+fn relaunch_swallows_tmux_failures_so_the_fallback_injection_proceeds() {
+    let failing = FakeCommandRunner::failing("can't find pane");
+    // Best-effort: no panic, and both sends are still attempted.
+    relaunch_cli_into_pane(&failing, "paw-proj", 9, "claude");
+    assert_eq!(failing.calls().len(), 2);
+}
+
+#[test]
+fn rebalance_queries_the_window_width_then_resizes_all_but_the_last_pane_in_a_row() {
+    // 80 columns, 2 agents => one row of 2 panes; only the first is resized,
+    // to (80 - 1 separator) / 2 = 39 columns.
+    let fake = FakeCommandRunner::scripted(|_, args| {
+        if args.first() == Some(&"display-message") {
+            Ok(ok_out("80\n"))
+        } else {
+            Ok(ok_out(""))
+        }
+    });
+    rebalance_agent_rows_with(&fake, "paw-proj", 2).unwrap();
+
+    let calls = fake.calls();
+    assert_eq!(
+        calls[0],
+        (
+            "tmux".to_string(),
+            vec![
+                "display-message".to_string(),
+                "-p".to_string(),
+                "-t".to_string(),
+                "paw-proj:0".to_string(),
+                "#{window_width}".to_string(),
+            ]
+        )
+    );
+    let resizes: Vec<Vec<String>> = calls[1..].iter().map(|(_, args)| args.clone()).collect();
+    assert_eq!(
+        resizes,
+        vec![vec![
+            "resize-pane".to_string(),
+            "-t".to_string(),
+            "paw-proj:0.2".to_string(),
+            "-x".to_string(),
+            "39".to_string(),
+        ]],
+        "exactly the panes agent_row_widths names are resized"
+    );
+}
+
+#[test]
+fn rebalance_is_a_no_op_when_the_window_is_gone() {
+    let gone = FakeCommandRunner::failing("can't find window");
+    rebalance_agent_rows_with(&gone, "paw-proj", 3).unwrap();
+    assert_eq!(
+        gone.calls().len(),
+        1,
+        "only the width query runs; no pane is resized"
+    );
+}
+
+#[test]
+fn rebalance_is_a_no_op_for_a_single_agent() {
+    let fake = FakeCommandRunner::scripted(|_, args| {
+        if args.first() == Some(&"display-message") {
+            Ok(ok_out("80\n"))
+        } else {
+            Ok(ok_out(""))
+        }
+    });
+    rebalance_agent_rows_with(&fake, "paw-proj", 1).unwrap();
+    assert_eq!(
+        fake.calls().len(),
+        1,
+        "a lone agent already spans the row; nothing to rebalance"
+    );
+}

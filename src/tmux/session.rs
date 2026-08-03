@@ -2,10 +2,17 @@
 //!
 //! Installation and liveness probes, session-name resolution, attach/detach,
 //! pane and session teardown, and JSON-to-pane reconciliation.
+//!
+//! Every tmux invocation here goes through the [`CommandRunner`] seam. Each
+//! public entry point keeps its original signature and delegates to a
+//! `*_with(runner, …)` sibling wired to [`RealCommandRunner`], so callers are
+//! untouched while the argv and the success/failure branches become assertable
+//! without a live tmux server (`code-analysis-refactor` D2). The real runner
+//! performs exactly what the previous inline `Command::new("tmux")` calls did.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
+use crate::command_runner::{CommandRunner, RealCommandRunner};
 use crate::error::PawError;
 
 /// Maximum number of session name collision retries.
@@ -22,14 +29,23 @@ pub fn ensure_tmux_installed() -> Result<(), PawError> {
 
 /// Check whether a tmux session with the given name is currently alive.
 pub fn is_session_alive(name: &str) -> Result<bool, PawError> {
-    let status = Command::new("tmux")
-        .args(["has-session", "-t", name])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+    is_session_alive_with(&RealCommandRunner, name)
+}
+
+/// [`is_session_alive`] against an injected runner.
+///
+/// Captures the probe's output rather than discarding it via `Stdio::null()` as
+/// the previous inline call did — indistinguishable to the user either way,
+/// since neither reaches the terminal and only the exit status is inspected.
+pub(crate) fn is_session_alive_with(
+    runner: &dyn CommandRunner,
+    name: &str,
+) -> Result<bool, PawError> {
+    let output = runner
+        .run("tmux", &["has-session", "-t", name])
         .map_err(|e| PawError::TmuxError(format!("failed to run tmux: {e}")))?;
 
-    Ok(status.success())
+    Ok(output.success)
 }
 
 /// Outcome of a session-liveness probe (design D3 of `session-bugfixes`).
@@ -70,13 +86,13 @@ pub(crate) fn classify_liveness(spawned: bool, success: bool) -> SessionLiveness
 /// `tmux has-session -t <name>` invocation and never probes the broker or
 /// agent processes.
 pub fn session_liveness(name: &str) -> SessionLiveness {
-    let spawn = Command::new("tmux")
-        .args(["has-session", "-t", name])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    match spawn {
-        Ok(status) => classify_liveness(true, status.success()),
+    session_liveness_with(&RealCommandRunner, name)
+}
+
+/// [`session_liveness`] against an injected runner.
+pub(crate) fn session_liveness_with(runner: &dyn CommandRunner, name: &str) -> SessionLiveness {
+    match runner.run("tmux", &["has-session", "-t", name]) {
+        Ok(output) => classify_liveness(true, output.success),
         Err(_) => classify_liveness(false, false),
     }
 }
@@ -86,15 +102,24 @@ pub fn session_liveness(name: &str) -> SessionLiveness {
 /// Starts with `paw-<project_name>` and appends `-2`, `-3`, etc. if the name
 /// is already taken by another session.
 pub fn resolve_session_name(project_name: &str) -> Result<String, PawError> {
+    resolve_session_name_with(&RealCommandRunner, project_name)
+}
+
+/// [`resolve_session_name`] against an injected runner, so the collision-retry
+/// walk and its exhaustion error are testable without occupying real sessions.
+pub(crate) fn resolve_session_name_with(
+    runner: &dyn CommandRunner,
+    project_name: &str,
+) -> Result<String, PawError> {
     let base = crate::domain::SessionName::for_project(project_name);
 
-    if !is_session_alive(base.as_str())? {
+    if !is_session_alive_with(runner, base.as_str())? {
         return Ok(base.into_string());
     }
 
     for suffix in 2..=MAX_COLLISION_RETRIES + 1 {
         let candidate = base.with_collision_suffix(suffix);
-        if !is_session_alive(candidate.as_str())? {
+        if !is_session_alive_with(runner, candidate.as_str())? {
             return Ok(candidate.into_string());
         }
     }
@@ -109,12 +134,20 @@ pub fn resolve_session_name(project_name: &str) -> Result<String, PawError> {
 /// This replaces the current process's stdio. Returns an error if the
 /// session does not exist or tmux fails.
 pub fn attach(name: &str) -> Result<(), PawError> {
-    let status = Command::new("tmux")
-        .args(["attach-session", "-t", name])
-        .status()
+    attach_with(&RealCommandRunner, name)
+}
+
+/// [`attach`] against an injected runner.
+///
+/// Uses [`CommandRunner::run_inheriting_stdio`] — `tmux attach-session` takes
+/// over this process's terminal, so its stdio MUST be inherited. Capturing it
+/// would leave the user with a hung, screen-less attach.
+pub(crate) fn attach_with(runner: &dyn CommandRunner, name: &str) -> Result<(), PawError> {
+    let status = runner
+        .run_inheriting_stdio("tmux", &["attach-session", "-t", name])
         .map_err(|e| PawError::TmuxError(format!("failed to attach to tmux session: {e}")))?;
 
-    if status.success() {
+    if status.success {
         Ok(())
     } else {
         Err(PawError::TmuxError(format!(
@@ -131,12 +164,19 @@ pub fn attach(name: &str) -> Result<(), PawError> {
 /// sessions). Leaves the tmux server, the session, and every pane
 /// process untouched.
 pub fn detach_client(session_name: &str) -> Result<(), PawError> {
-    let output = Command::new("tmux")
-        .args(["detach-client", "-s", session_name])
-        .output()
+    detach_client_with(&RealCommandRunner, session_name)
+}
+
+/// [`detach_client`] against an injected runner.
+pub(crate) fn detach_client_with(
+    runner: &dyn CommandRunner,
+    session_name: &str,
+) -> Result<(), PawError> {
+    let output = runner
+        .run("tmux", &["detach-client", "-s", session_name])
         .map_err(|e| PawError::TmuxError(format!("failed to run tmux: {e}")))?;
 
-    if output.status.success() {
+    if output.success {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
@@ -157,13 +197,21 @@ pub fn detach_client(session_name: &str) -> Result<(), PawError> {
 /// down the dashboard pane (which owns the broker subprocess) without
 /// killing the rest of the session.
 pub fn kill_pane(session_name: &str, pane_index: u32) -> Result<(), PawError> {
+    kill_pane_with(&RealCommandRunner, session_name, pane_index)
+}
+
+/// [`kill_pane`] against an injected runner.
+pub(crate) fn kill_pane_with(
+    runner: &dyn CommandRunner,
+    session_name: &str,
+    pane_index: u32,
+) -> Result<(), PawError> {
     let target = format!("{session_name}:0.{pane_index}");
-    let output = Command::new("tmux")
-        .args(["kill-pane", "-t", &target])
-        .output()
+    let output = runner
+        .run("tmux", &["kill-pane", "-t", &target])
         .map_err(|e| PawError::TmuxError(format!("failed to run tmux: {e}")))?;
 
-    if output.status.success() {
+    if output.success {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
@@ -181,12 +229,16 @@ pub fn kill_pane(session_name: &str, pane_index: u32) -> Result<(), PawError> {
 
 /// Kill the named tmux session.
 pub fn kill_session(name: &str) -> Result<(), PawError> {
-    let output = Command::new("tmux")
-        .args(["kill-session", "-t", name])
-        .output()
+    kill_session_with(&RealCommandRunner, name)
+}
+
+/// [`kill_session`] against an injected runner.
+pub(crate) fn kill_session_with(runner: &dyn CommandRunner, name: &str) -> Result<(), PawError> {
+    let output = runner
+        .run("tmux", &["kill-session", "-t", name])
         .map_err(|e| PawError::TmuxError(format!("failed to kill tmux session: {e}")))?;
 
-    if output.status.success() {
+    if output.success {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -203,12 +255,19 @@ pub fn kill_session(name: &str) -> Result<(), PawError> {
 /// orphan pane. A pane that has already gone is treated as an idempotent no-op,
 /// matching [`kill_pane`]'s missing-pane tolerance.
 pub fn kill_pane_by_id(pane_id: &str) -> Result<(), PawError> {
-    let output = Command::new("tmux")
-        .args(["kill-pane", "-t", pane_id])
-        .output()
+    kill_pane_by_id_with(&RealCommandRunner, pane_id)
+}
+
+/// [`kill_pane_by_id`] against an injected runner.
+pub(crate) fn kill_pane_by_id_with(
+    runner: &dyn CommandRunner,
+    pane_id: &str,
+) -> Result<(), PawError> {
+    let output = runner
+        .run("tmux", &["kill-pane", "-t", pane_id])
         .map_err(|e| PawError::TmuxError(format!("failed to run tmux: {e}")))?;
 
-    if output.status.success() {
+    if output.success {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
@@ -231,18 +290,29 @@ pub fn kill_pane_by_id(pane_id: &str) -> Result<(), PawError> {
 /// callers on a torn-down session degrade to "no live panes" rather than
 /// failing. Only a genuine tmux execution failure surfaces as an error.
 pub fn list_panes_with_paths(session_name: &str) -> Result<Vec<(String, String)>, PawError> {
-    let output = Command::new("tmux")
-        .args([
-            "list-panes",
-            "-t",
-            session_name,
-            "-F",
-            "#{pane_id} #{pane_current_path}",
-        ])
-        .output()
+    list_panes_with_paths_with(&RealCommandRunner, session_name)
+}
+
+/// [`list_panes_with_paths`] against an injected runner, so the `-F` output
+/// parse and the session-gone degradation are testable without a live server.
+pub(crate) fn list_panes_with_paths_with(
+    runner: &dyn CommandRunner,
+    session_name: &str,
+) -> Result<Vec<(String, String)>, PawError> {
+    let output = runner
+        .run(
+            "tmux",
+            &[
+                "list-panes",
+                "-t",
+                session_name,
+                "-F",
+                "#{pane_id} #{pane_current_path}",
+            ],
+        )
         .map_err(|e| PawError::TmuxError(format!("failed to run tmux: {e}")))?;
 
-    if !output.status.success() {
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
         if stderr.contains("can't find")
             || stderr.contains("no such")
@@ -277,8 +347,17 @@ pub fn resolve_pane_id_for_worktree(
     session_name: &str,
     worktree_path: &Path,
 ) -> Result<Option<String>, PawError> {
+    resolve_pane_id_for_worktree_with(&RealCommandRunner, session_name, worktree_path)
+}
+
+/// [`resolve_pane_id_for_worktree`] against an injected runner.
+pub(crate) fn resolve_pane_id_for_worktree_with(
+    runner: &dyn CommandRunner,
+    session_name: &str,
+    worktree_path: &Path,
+) -> Result<Option<String>, PawError> {
     let want = canonical_or_self(worktree_path);
-    for (pane_id, path) in list_panes_with_paths(session_name)? {
+    for (pane_id, path) in list_panes_with_paths_with(runner, session_name)? {
         if canonical_or_self(Path::new(&path)) == want {
             return Ok(Some(pane_id));
         }
@@ -330,7 +409,16 @@ pub fn reconcile_agents_to_panes(
     session_name: &str,
     agents: &[(String, PathBuf)],
 ) -> Result<Vec<String>, PawError> {
-    let live: Vec<PathBuf> = list_panes_with_paths(session_name)?
+    reconcile_agents_to_panes_with(&RealCommandRunner, session_name, agents)
+}
+
+/// [`reconcile_agents_to_panes`] against an injected runner.
+pub(crate) fn reconcile_agents_to_panes_with(
+    runner: &dyn CommandRunner,
+    session_name: &str,
+    agents: &[(String, PathBuf)],
+) -> Result<Vec<String>, PawError> {
+    let live: Vec<PathBuf> = list_panes_with_paths_with(runner, session_name)?
         .into_iter()
         .map(|(_, path)| PathBuf::from(path))
         .collect();
