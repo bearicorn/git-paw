@@ -47,9 +47,9 @@
 
 ## 6. Verification (five gates)
 - [x] Gate 1 — `cargo test --no-fail-fast` for doctor's tests
-- [ ] Gate 2 — full regression green vs merge-base
-- [ ] Gate 3 — spec audit: every `preflight-diagnostics` scenario maps to a test
-- [ ] Gate 4 — doc audit: `--help`, README, mdBook consistent
-- [ ] Gate 5 — security: read-only confirmed; export-agnostic supervisor check; no secrets
+- [x] Gate 2 — full regression green vs merge-base (2451 passed / 0 failed / 88 suites, clean post-stop env; merge-base = feat/v0.13.0-specs tip 841fe64)
+- [x] Gate 3 — spec audit: every `preflight-diagnostics` + `core-selftest` scenario maps to ≥1 test, no contradictions
+- [x] Gate 4 — doc audit: `--help`/README/mdBook consistent, no `--fix`, mdbook build clean (fixed phantom `quality-selftest` spec-index ref @ 55d77df)
+- [x] Gate 5 — security: read-only default confirmed (only `--live` writes, sandboxed+torn down); supervisor check config-sourced (export-agnostic); no secrets, safe shell/path
 - [x] `just check` green; `cargo fmt` before commit
 - [x] `openspec validate git-paw-doctor --strict` passes
