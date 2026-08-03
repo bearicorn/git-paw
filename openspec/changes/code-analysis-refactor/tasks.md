@@ -40,7 +40,7 @@ failure).
 - [x] Gate: five-gate verify green per wave — R2c: build/clippy/fmt clean + full suite 2377/0; R2d: build/clippy/fmt clean + full suite 2375/0 with `source_audit` passing after the `commands/supervisor.rs` repoint. (Verified allow-live in the worktree; the definitive cold `just smoke-container` re-check is the release-prep gate.)
 
 ## R3 — tmux runtime + remaining interactive/dashboard _(GATED: PTY net + dashboard CPU-leak fix)_
-- [ ] **Precondition:** PTY net proven stable AND the dashboard CPU-leak fix (`fix/dashboard-cpu-leak`) landed
+- [x] **Precondition SATISFIED:** PTY net stable (`cli-interaction-e2e` done) AND the dashboard CPU-leak fix is landed on `feat/v0.13.0-specs` — the `poll_tty(2)` root-cause fix is wired + tested in `dashboard.rs`, and the e2e-suite accumulation source was closed by `TmuxTestEnv`'s `kill-server`-on-drop (@ 241a9ac, 0 leaks validated). R3 is unblocked.
 - [ ] Refactor the `tmux.rs` runtime path (send-keys / capture-pane parsing / pane-spawn — 59 `Command::new` sites) behind the `CommandRunner` seam
 - [ ] Interactive live-prompt impls behind the PTY net
 - [ ] Dashboard event loop (rebase on `fix/dashboard-cpu-leak`); SIGHUP `unsafe` path still untouched by this change
