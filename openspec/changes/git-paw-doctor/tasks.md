@@ -46,10 +46,10 @@
 - [x] Configuration reference: note doctor (no new fields)
 
 ## 6. Verification (five gates)
-- [ ] Gate 1 — `cargo test --no-fail-fast` for doctor's tests
+- [x] Gate 1 — `cargo test --no-fail-fast` for doctor's tests
 - [ ] Gate 2 — full regression green vs merge-base
 - [ ] Gate 3 — spec audit: every `preflight-diagnostics` scenario maps to a test
 - [ ] Gate 4 — doc audit: `--help`, README, mdBook consistent
 - [ ] Gate 5 — security: read-only confirmed; export-agnostic supervisor check; no secrets
-- [ ] `just check` green; `cargo fmt` before commit
-- [ ] `openspec validate git-paw-doctor --strict` passes
+- [x] `just check` green; `cargo fmt` before commit
+- [x] `openspec validate git-paw-doctor --strict` passes
