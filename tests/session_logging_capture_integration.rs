@@ -8,11 +8,13 @@
 //! actually produces the per-branch log file on disk once a real tmux session
 //! is running.
 //!
-//! Session-logging capture is wired only into the from-specs launch path
-//! (`cmd_start_with_specs` → `launch_spec_session`; `src/main.rs`), so this
-//! test drives `git paw start --from-specs` with `[logging] enabled = true`,
-//! broker disabled (pane offset 0), and an `echo` fake CLI so panes boot
-//! without an LLM.
+//! Session-logging capture is wired into every launch path via the shared
+//! `commands::helpers::attach_session_logging` helper — bare `git paw start`,
+//! `--from-specs`, and supervisor. These tests drive the two non-supervisor
+//! entry points (`--from-specs` and bare `start`) with `[logging] enabled =
+//! true`, broker disabled (pane offset 0), and an `echo` fake CLI so panes
+//! boot without an LLM. (Earlier the capture side was attached only on the
+//! from-specs path; the bare-start test is the regression guard for that gap.)
 //!
 //! Isolation (see openspec/changes/test-tmux-isolation):
 //!   * tmux runs on a test-owned socket via `helpers::TmuxTestEnv`, so the
@@ -57,6 +59,25 @@ fn cmd_iso(fake_home: &Path, tmux_env: &TmuxTestEnv) -> Command {
     c.env("HOME", fake_home).env_remove("XDG_DATA_HOME");
     tmux_env.apply_assert(&mut c);
     c
+}
+
+/// Writes a `.git-paw/config.toml` enabling session logging and an `echo` fake
+/// CLI, with no `[specs]`/`[broker]`/`[supervisor]` sections. The absent
+/// supervisor section routes `git paw start` to the bare (non-supervisor)
+/// launch path, and the absent broker section leaves the dashboard off so
+/// coding agents start at pane 0 (offset 0).
+fn write_logging_bare_config(repo: &Path) {
+    let paw_dir = repo.join(".git-paw");
+    std::fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    let config = r#"
+[logging]
+enabled = true
+
+[clis.echo]
+command = "echo"
+display_name = "Echo"
+"#;
+    std::fs::write(paw_dir.join("config.toml"), config).expect("write config");
 }
 
 /// Writes a `.git-paw/config.toml` enabling session logging, the `OpenSpec`
@@ -264,5 +285,101 @@ fn logging_enabled_start_creates_per_branch_logs() {
     assert_eq!(
         pane_pipe, "1",
         "pipe-pane should be attached to pane {session_name}:0.0 (#{{pane_pipe}} == 1), got {pane_pipe:?}"
+    );
+}
+
+/// The bare (non-`--from-specs`) `git paw start` path SHALL also honour the
+/// session-logging capture contract: with `[logging] enabled = true` it creates
+/// the session log directory, a per-branch log file for every launched
+/// worktree, and attaches `tmux pipe-pane` to each coding-agent pane.
+///
+/// Regression guard for the wiring gap where session logging was attached only
+/// on the from-specs launch path — a logging-enabled bare `git paw start`
+/// produced no logs at all, contradicting the unscoped "Attach pipe-pane to
+/// capture output" requirement (*when logging is enabled and a pane is
+/// created*). Broker is off, so agents start at pane 0 (offset 0); one branch
+/// carries a `/` to also exercise filename sanitization on this path.
+#[test]
+#[serial]
+fn logging_enabled_bare_start_creates_per_branch_logs() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+
+    let tr = setup_test_repo();
+    let fake_home = TempDir::new().expect("home tempdir");
+    let tmux_env = tmux_test_env();
+
+    write_logging_bare_config(tr.path());
+    commit_all(tr.path(), "add logging config");
+
+    // Bare launch: `--branches`/`--cli` supplied so interactive selection is
+    // skipped; the branches are created as fresh worktrees. No `[specs]`
+    // section → the interactive (non-supervisor) start path.
+    let output = cmd_iso(fake_home.path(), &tmux_env)
+        .current_dir(tr.path())
+        .args(["start", "--cli", "echo", "--branches", "feat/log-a,plain-b"])
+        .output()
+        .expect("run bare start");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "logging-enabled bare launch should succeed; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let session_name = parse_session_name(&stdout);
+
+    let kill = |tmux_env: &TmuxTestEnv, name: &str| {
+        let mut cmd = std::process::Command::new("tmux");
+        cmd.args(["kill-session", "-t", name]);
+        tmux_env.apply(&mut cmd);
+        let _ = cmd.output();
+    };
+
+    // Per-branch log files appear at the exact derived paths; `feat/log-a`
+    // sanitizes to `feat--log-a.log`, `plain-b` stays `plain-b.log`.
+    let branches = ["feat/log-a", "plain-b"];
+    for branch in branches {
+        let log_path = git_paw::logging::log_file_path(tr.path(), &session_name, branch);
+        let sanitized = branch.replace('/', "--");
+        let expected_suffix = format!(".git-paw/logs/{session_name}/{sanitized}.log");
+        assert!(
+            log_path.to_string_lossy().ends_with(&expected_suffix),
+            "derived log path {} should end with {expected_suffix}",
+            log_path.display()
+        );
+        if !poll_until_exists(&log_path, LOG_APPEAR_TIMEOUT) {
+            kill(&tmux_env, &session_name);
+            panic!(
+                "per-branch log file was not created within {:?} at {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                LOG_APPEAR_TIMEOUT,
+                log_path.display()
+            );
+        }
+    }
+
+    let log_dir = tr.path().join(".git-paw/logs").join(&session_name);
+    assert!(
+        log_dir.is_dir(),
+        "session log directory should exist at {}",
+        log_dir.display()
+    );
+
+    // Direct pipe-pane-attach proof on the first agent pane (offset 0, no
+    // broker dashboard).
+    let pane_pipe = poll_pane_pipe(
+        &tmux_env,
+        &format!("{session_name}:0.0"),
+        Duration::from_secs(3),
+    );
+
+    kill(&tmux_env, &session_name);
+
+    assert_eq!(
+        pane_pipe, "1",
+        "pipe-pane should be attached to bare-start pane {session_name}:0.0, got {pane_pipe:?}"
     );
 }

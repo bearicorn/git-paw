@@ -27,8 +27,8 @@ use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry}
 use git_paw::tmux;
 
 use super::helpers::{
-    config_to_custom_defs, configured_settings_paths, session_cli_settings_paths,
-    to_interactive_cli,
+    attach_session_logging, config_to_custom_defs, configured_settings_paths,
+    session_cli_settings_paths, to_interactive_cli,
 };
 use crate::{
     AttachContext, SpecMode, UNATTENDED_ENV, apply_spec_mode, attach_agent,
@@ -651,7 +651,7 @@ pub(crate) fn cmd_supervisor(
         env_vars.push((UNATTENDED_ENV.to_string(), "1".to_string()));
     }
 
-    let tmux_session = tmux::build_supervisor_session(
+    let mut tmux_session = tmux::build_supervisor_session(
         &project,
         Some(session_name.clone()),
         &supervisor_pane,
@@ -662,6 +662,19 @@ pub(crate) fn cmd_supervisor(
         config.border_affordances_enabled(),
         &env_vars,
     )?;
+
+    // Attach session logging (no-op unless `[logging] enabled`). Supervisor
+    // mode reserves pane 0 (supervisor) and pane 1 (dashboard), so coding
+    // agents — in `branches` order, matching `agent_panes` and the boot loop
+    // below — start at SUPERVISOR_PANE_OFFSET.
+    attach_session_logging(
+        &mut tmux_session,
+        config,
+        repo_root,
+        &branch_refs,
+        git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET,
+    )?;
+
     tmux_session.execute()?;
 
     // Rebalance each agent row to equal width on the live window (design D4,
