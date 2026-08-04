@@ -363,10 +363,39 @@ fn publish_warn(state: &Arc<BrokerState>, violator: &str, short_sha: &str, reaso
     delivery::publish_message(state, &BrokerMessage::from(&record));
 }
 
+/// Test-support blocking delay injected into the guard's `HEAD` read, in
+/// milliseconds. Zero (a no-op) unless a test sets it via
+/// [`set_head_read_test_delay`].
+///
+/// The broker H1 offload regression test uses it to make the guard's blocking
+/// work take a deterministic, CPU-*releasing* duration (a sleep) so the
+/// `spawn_blocking` offload is observable by wall-clock regardless of the
+/// runner's core count — real `git` is CPU-bound and saturates a small CI
+/// runner, which hides the offload. Not part of the stable library API.
+static HEAD_READ_TEST_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Sets the [`HEAD_READ_TEST_DELAY_MS`] blocking delay applied inside
+/// [`head_commit_info`]. Test-support only; leaves production behavior
+/// unchanged when never called (the default delay is zero).
+#[doc(hidden)]
+pub fn set_head_read_test_delay(delay: std::time::Duration) {
+    HEAD_READ_TEST_DELAY_MS.store(
+        u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
 /// Best-effort read of `(short_sha, full_message)` for the worktree's `HEAD`
 /// commit. Returns `None` on any git failure (the caller then treats the SHA
 /// as `"unknown"` and classifies from the diff shape alone).
 fn head_commit_info(worktree: &Path) -> Option<(String, String)> {
+    // Test seam: block for the configured delay (no-op in production). Placed
+    // here so it counts as part of the guard's blocking read that the broker
+    // publish path offloads via `spawn_blocking`.
+    let test_delay = HEAD_READ_TEST_DELAY_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if test_delay > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(test_delay));
+    }
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(worktree)
