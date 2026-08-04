@@ -192,8 +192,13 @@ pub fn router(state: Arc<BrokerState>) -> Router {
 
 /// `POST /publish` — accepts a JSON [`BrokerMessage`] and queues it for delivery.
 ///
+/// Delivery is synchronous and can block (the opsx role-gating guard shells out
+/// to `git` for a `committed` artifact), so it runs on tokio's blocking pool
+/// rather than on an async worker thread.
+///
 /// - 415 if `Content-Type` is missing or not `application/json`
 /// - 400 if body is empty or fails validation
+/// - 500 if the offloaded delivery task fails
 /// - 202 on success
 async fn publish(
     State(state): State<Arc<BrokerState>>,
@@ -238,7 +243,22 @@ async fn publish(
             if let Some(rejection) = check_placeholder_fields(&msg) {
                 return rejection;
             }
-            delivery::publish_message(&state, &msg);
+            // `publish_message` is synchronous and, on the role-gating path,
+            // spawns a blocking `git` subprocess. Run it on tokio's blocking
+            // pool so a burst of `committed` artifacts cannot occupy every
+            // async worker thread and stall the rest of the HTTP surface. The
+            // delivery path itself — lock scope, routing, and the guard it
+            // invokes — is unchanged; only where it executes moves.
+            if tokio::task::spawn_blocking(move || delivery::publish_message(&state, &msg))
+                .await
+                .is_err()
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(serde_json::json!({"error": "publish task failed"})),
+                )
+                    .into_response();
+            }
             StatusCode::ACCEPTED.into_response()
         }
         Err(e) => (

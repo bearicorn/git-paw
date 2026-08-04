@@ -288,20 +288,25 @@ impl BrokerState {
 
     /// Acquires a read lock on the inner state.
     ///
-    /// # Panics
-    ///
-    /// Panics if the lock is poisoned (a thread panicked while holding it).
+    /// Recovers from a poisoned lock (a thread panicked while holding a guard)
+    /// by taking the guard out of the `PoisonError`, so one panic cannot brick
+    /// the broker. Broker state is ephemeral — an in-memory roster/log/queue
+    /// set rebuilt on every `git paw start`, with no persisted invariant a
+    /// partially-updated view could corrupt — so continuing to serve is
+    /// strictly better than wedging every later handler and background task.
     pub fn read(&self) -> std::sync::RwLockReadGuard<'_, BrokerStateInner> {
-        self.inner.read().expect("broker state lock poisoned")
+        self.inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Acquires a write lock on the inner state.
     ///
-    /// # Panics
-    ///
-    /// Panics if the lock is poisoned (a thread panicked while holding it).
+    /// Recovers from a poisoned lock exactly as [`BrokerState::read`] does.
     pub fn write(&self) -> std::sync::RwLockWriteGuard<'_, BrokerStateInner> {
-        self.inner.write().expect("broker state lock poisoned")
+        self.inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Atomically allocates the next sequence number (starting at 1).
@@ -780,6 +785,33 @@ mod tests {
         assert!(
             state.register_watch_target(&target),
             "after forgetting, the same path registers fresh again"
+        );
+    }
+
+    #[test]
+    fn read_and_write_recover_from_a_poisoned_lock() {
+        let state = Arc::new(BrokerState::new(None));
+        // Poison the lock the way a panicking handler or background task would:
+        // panic while a write guard is held. The panic message is expected
+        // noise in the test output.
+        let poisoner = Arc::clone(&state);
+        let outcome = std::thread::spawn(move || {
+            let _guard = poisoner.write();
+            panic!("deliberate panic while holding the broker state write guard");
+        })
+        .join();
+        assert!(outcome.is_err(), "the poisoning thread must have panicked");
+
+        // Both accessors must still hand back a usable guard.
+        assert!(state.read().queues.is_empty());
+        state
+            .write()
+            .queues
+            .entry("feat-x".to_string())
+            .or_default();
+        assert!(
+            state.read().queues.contains_key("feat-x"),
+            "a write through a recovered guard must be observable through a recovered read"
         );
     }
 
