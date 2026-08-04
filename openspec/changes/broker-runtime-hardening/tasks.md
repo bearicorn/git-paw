@@ -86,7 +86,21 @@
 > socket-isolated (see the justfile comment above the recipe). Under `just verify` the
 > whole suite is green; no test code and no guard was touched to get there.
 
-- [ ] Gate 1 — Testing: `cargo test --no-fail-fast` green for the broker tree incl. the two
+> **Supervisor gate run — clean serial environment, 2026-08-05: all five gates PASS.**
+> Closes the two Gate-2 caveats above: the full suite was re-run at the integrated
+> tip (`feat/v0.13.0-specs`) SERIALLY (no concurrent agent load) in a clean env
+> (fan-out session stopped, dashboards swept), diffed against merge-base `e7b37ea`
+> — **2469 passed / 0 failed across 89 suites**, exit 0. Gate 3 — all 4
+> `broker-server` scenarios map to reproducing tests that genuinely fail without
+> the fix (H1 burst uses a real `role_gating = Some(...)`; H2 panics without
+> recovery). Gate 4 — `read`/`write` `# Panics` docs rewritten, `mdbook build`
+> exit 0. Gate 5 — fix is sound (no `RwLock` guard held across `.await`;
+> `into_inner()` poison recovery is safe Rust, no UB) and surgical (only the
+> publish-handler blocking-git offload + read/write recovery; no other broker
+> concurrency touched). Non-blocking watch item: H1's `status_elapsed*2 <
+> burst_elapsed` ratio could flake under an extremely fast git.
+
+- [x] Gate 1 — Testing: `cargo test --no-fail-fast` green for the broker tree incl. the two
       new regression tests.
       *Agent evidence (not a gate pass):* `cargo test --no-fail-fast --lib broker` →
       **445 passed / 0 failed**. `cargo test --no-fail-fast --test broker_runtime_hardening`
@@ -94,7 +108,7 @@
       full run too: `broker_integration` (15), `broker_log_integration` (6),
       `broker_agent_id_validation` (1), `opsx_role_gating_integration` (8),
       `broker_runtime_hardening` (3).
-- [ ] Gate 2 — Regression: full suite green vs the merge-base; broker E2E run serially.
+- [x] Gate 2 — Regression: full suite green vs the merge-base; broker E2E run serially.
       *Agent evidence (not a gate pass):* `just verify` at the branch tip → **exit 0, 89
       suites, 2462 passed / 0 failed** (lint + `cargo deny` + full `--no-fail-fast` run).
       Two caveats the gate run should close: it was **not** diffed against the merge-base,
@@ -104,7 +118,7 @@
       re-run is the authoritative one. `hook_integration::git_commit_publishes_agent_artifact_to_broker`
       is the suite worth watching most closely: it exercises the real post-commit →
       `POST /publish` path this change touches, and it passed.
-- [ ] Gate 3 — Spec audit: every `broker-server` scenario added by this change maps to a
+- [x] Gate 3 — Spec audit: every `broker-server` scenario added by this change maps to a
       test (H1 non-stall, H2 poison-recovery).
       *Agent-prepared mapping for the gate run (4 scenarios):*
       1. *A publish burst does not stall other HTTP endpoints* →
@@ -120,7 +134,7 @@
          `broker_runtime_hardening::request_after_a_lock_poisoning_panic_is_still_served`
       4. *read and write both recover from poison* →
          `broker::tests::read_and_write_recover_from_a_poisoned_lock`
-- [ ] Gate 4 — Doc audit: `read`/`write` `# Panics` docs match the new behavior; confirm no
+- [x] Gate 4 — Doc audit: `read`/`write` `# Panics` docs match the new behavior; confirm no
       `--help`/README/config-reference change is required (no user-facing surface).
       *Agent evidence:* `read`/`write` doc comments rewritten (see group 3). The `publish`
       handler's rustdoc now records the blocking-pool offload and the new `500` row. Docs
@@ -129,7 +143,7 @@
       unrelated rebase prose (`user-guide/session-lifecycle.md:82`). `src/cli.rs`,
       `README.md`, and the configuration reference are untouched — no CLI flag, config
       field, or wire-format change.
-- [ ] Gate 5 — Security: no new shell/path handling, no secrets; least-privilege preserved
+- [x] Gate 5 — Security: no new shell/path handling, no secrets; least-privilege preserved
       (git args unchanged, only relocated to the blocking pool).
       *Agent evidence:* `src/opsx/role_guard.rs` is not in the diff — the `git -C <worktree>
       log -1 --pretty=format:%h%n%B` argv is byte-for-byte unchanged and still argv-passed
