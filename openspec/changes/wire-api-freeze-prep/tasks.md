@@ -44,7 +44,7 @@
 - [x] Gate 3 — Spec audit: every `Lenient list-field deserialization` scenario maps to a test; no other broker-messages requirement is contradicted (esp. the frozen serialization scenarios) — mapping below; scenario 6 needed a NEW byte-equivalence test (`artifact_payload_populated_lists_round_trip_byte_equivalent`) because the pre-existing `serde_roundtrip_artifact` only asserted values, not wire bytes
 - [x] Gate 4 — Doc audit: crate doc note present, `--help`/README/mdBook consistent, MSRV surfaced, `mdbook build docs/` succeeds — build exits 0 (the two `<name>` unclosed-tag WARNs in `specifications/index.md` are pre-existing and outside this diff)
 - [x] Gate 5 — Security: no secrets; relax-only parsing change introduces no unsafe shell/path handling; least-privilege unchanged — the diff is three serde attributes, doc comments, and one Cargo metadata key; no shell invocation, no path construction, no allowlist grant, no new dependency
-- [x] `just check` green; `cargo fmt` before commit — `cargo fmt --check` clean; `cargo clippy --all-targets -- -D warnings` clean (incl. the new `missing_docs`)
+- [x] `just check` green; `cargo fmt` before commit — `just lint` (= `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`) and `cargo build` all run **bare** and judged by their real exit code (0), per AGENTS.md Change Checklist 5; clippy is clean including the newly enabled `missing_docs`
 - [x] `openspec validate wire-api-freeze-prep --strict` passes (confirm by real exit code) — exit 0, "Change 'wire-api-freeze-prep' is valid"
 
 ### Gate 3 — scenario → test map
