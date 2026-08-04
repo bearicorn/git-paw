@@ -1,5 +1,9 @@
-## ADDED Requirements
+# safe-process-invocation Specification
 
+## Purpose
+Safe construction of the tmux/process commands git-paw builds from untrusted inputs: the tmux session name derived from the repository directory is sanitized to a tmux-safe form at a single construction boundary, and paths and binary invocations typed into a shell (the pipe-pane log path, the dashboard command) are shell-quoted — so repository, branch, or path names containing spaces or shell metacharacters cannot break out of a tmux target or a shell word.
+
+## Requirements
 ### Requirement: Session names are sanitized to a tmux-safe form
 
 The tmux session name derived from the repository directory SHALL be sanitized so that
@@ -101,3 +105,4 @@ tmux-safe string; its constructor SHALL sanitize any input it is given.
 - **WHEN** each builds its tmux/shell string
 - **THEN** each SHALL obtain its name via the `SessionName` constructor or its path via the shell-quoting helper
 - **AND** no site SHALL interpolate the raw directory name or an unquoted path directly
+

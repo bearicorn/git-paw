@@ -115,6 +115,10 @@ have no user-guide chapter: the spec itself is their documentation.
 
 - [`tmux-orchestration`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/tmux-orchestration/spec.md) — orchestrates tmux sessions with per-pane CLIs in worktrees via a testable builder with dry-run and automatic tiled layout.
 
+### safe-
+
+- [`safe-process-invocation`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/safe-process-invocation/spec.md) — safe construction of the tmux/process commands built from untrusted inputs: the tmux session name is sanitized at a single boundary and shell-typed paths/commands are shell-quoted, so names with spaces or shell metacharacters cannot break out of a tmux target or a shell word.
+
 ### session-
 
 - [`session-state`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/session-state/spec.md) — persists one JSON file per session for crash recovery, with atomic writes, tmux-liveness stale detection, and per-repo session receipts.
@@ -133,6 +137,8 @@ have no user-guide chapter: the spec itself is their documentation.
 - [`broker-agent-helper`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/broker-agent-helper/spec.md) — bundled shell helpers (`broker.sh` for agents, `sweep.sh` for the supervisor) that wrap every broker interaction and detect stuck-agent shapes.
 - [`broker-conflict-detection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/broker-conflict-detection/spec.md) — a broker-internal, supervisor-mode detector that flags forward/in-flight/ownership conflicts across agent intents and modified-file sets (with sub-file regions).
 - [`broker-dashboard`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/broker-dashboard/spec.md) — a ratatui TUI observing broker state: an agent-status table with a pinned supervisor row plus a scrolling, filterable broker-log panel.
+- [`broker-messages`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/broker-messages/spec.md) — forward-compatible payload deserialization for the wire freeze: no-non-empty-contract list fields default to empty when absent (lean/third-party publishers parse), contracted fields stay required, and serialized output is unchanged.
+- [`broker-server`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/broker-server/spec.md) — runtime robustness of the broker HTTP server: blocking subprocess work runs off the tokio worker threads so a publish burst cannot stall other endpoints, and a poisoned state lock is recovered rather than fatal.
 
 ### supervisor-
 
