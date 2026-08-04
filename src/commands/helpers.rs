@@ -144,6 +144,33 @@ pub(crate) fn attach_session_logging(
     Ok(())
 }
 
+/// The command that launches the dashboard in its own tmux pane.
+///
+/// `tmux send-keys` types this into the pane, and the pane's **shell** parses
+/// what it receives — so the installed-binary path from
+/// [`std::env::current_exe`] is shell-quoted
+/// ([`shell_quote`](git_paw::domain::shell_quote)). An unquoted path containing
+/// a space word-splits and the shell tries to run the first fragment, so the
+/// dashboard never starts; `send-keys -l` cannot help, because the splitting
+/// happens in the shell rather than in tmux's key parsing.
+///
+/// Falls back to the bare `git-paw` name (resolved on `PATH`) when the current
+/// executable cannot be read.
+pub(crate) fn dashboard_command() -> String {
+    dashboard_command_for(
+        &std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("git-paw")),
+    )
+}
+
+/// [`dashboard_command`] for an explicit executable path, so the quoting
+/// contract is exercisable without reinstalling the binary.
+pub(crate) fn dashboard_command_for(exe: &std::path::Path) -> String {
+    format!(
+        "{} __dashboard",
+        git_paw::domain::shell_quote(&exe.display().to_string())
+    )
+}
+
 /// Error returned when add/remove is invoked on a bare-mode session.
 pub(crate) fn bare_mode_unsupported(session_name: &str, verb: &str) -> PawError {
     PawError::SessionError(format!(
@@ -205,5 +232,109 @@ mod tests {
     #[test]
     fn configured_settings_paths_empty_when_no_clis() {
         assert!(configured_settings_paths(&PawConfig::default()).is_empty());
+    }
+
+    // Spec: safe-process-invocation — "Commands sent via send-keys are sent
+    // literally or shell-quoted".
+
+    #[test]
+    fn dashboard_command_shell_quotes_the_binary_path() {
+        for (exe, expected) in [
+            // A spaced install path is quoted so the pane's shell keeps it whole.
+            (
+                "/Users/My User/bin/git-paw",
+                "'/Users/My User/bin/git-paw' __dashboard",
+            ),
+            // A plain path behaves as before: the shell strips the quotes.
+            (
+                "/usr/local/bin/git-paw",
+                "'/usr/local/bin/git-paw' __dashboard",
+            ),
+            // The `current_exe` fallback still resolves on PATH when quoted.
+            ("git-paw", "'git-paw' __dashboard"),
+        ] {
+            assert_eq!(
+                dashboard_command_for(std::path::Path::new(exe)),
+                expected,
+                "exe: {exe}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_spaced_binary_path_launches_the_dashboard_command_in_a_pane() {
+        if std::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        // Stand in for an installed git-paw under a path with a space. The
+        // stub records the subcommand it was invoked with, which is what
+        // proves the pane's shell ran the whole path rather than its first
+        // word.
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin_dir = dir.path().join("My Bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let exe = bin_dir.join("git-paw");
+        let marker = dir.path().join("launched");
+        std::fs::write(
+            &exe,
+            format!(
+                "#!/bin/sh\nprintf %s \"$1\" > '{}'\n",
+                marker.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let session = "paw-dashboard-send-probe";
+        let target = format!("{session}:0.0");
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", session])
+            .output();
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", session, "-x", "200", "-y", "50"])
+            .status()
+            .expect("create probe session");
+        assert!(created.success());
+
+        let sent = std::process::Command::new("tmux")
+            .args([
+                "send-keys",
+                "-t",
+                &target,
+                &dashboard_command_for(&exe),
+                "Enter",
+            ])
+            .status()
+            .expect("send dashboard command");
+        assert!(sent.success());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut launched = String::new();
+        while std::time::Instant::now() < deadline {
+            launched = std::fs::read_to_string(&marker).unwrap_or_default();
+            if !launched.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", session])
+            .output();
+
+        assert_eq!(
+            launched, "__dashboard",
+            "the pane's shell did not launch the spaced binary path with its subcommand"
+        );
     }
 }

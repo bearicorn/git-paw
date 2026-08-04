@@ -66,17 +66,34 @@ reproducing test precedes every fix.
 
 ## 3. Bug 3 — `__dashboard` command sent unquoted via `send-keys`
 
-- [ ] Reproducing test FIRST: assert that the dashboard launch delivers the command in
+> **Amendment (implementation).** Design D4 preferred `send-keys -l`; that would **not**
+> fix this bug. Verified against live tmux: the whole command is one `send-keys` argv
+> element, so tmux already delivers it literally — the word-splitting happens afterwards,
+> in the **pane's shell**, which reads `/tmp/paw probe/bin/fake-paw __dashboard` as the
+> command `/tmp/paw` (probe: no launch, no output). The same command with the path
+> single-quoted launched and received `__dashboard` as `$1`. So this change takes the
+> spec's other permitted branch — "or with any embedded path shell-quoted" — which is
+> also what the scenario's outcome clause requires ("rather than the shell mis-parsing
+> the path on the space"). Bonus: it reuses group 2's `shell_quote`, so names and paths
+> share one quoting boundary instead of two mechanisms.
+
+- [x] Reproducing test FIRST: assert that the dashboard launch delivers the command in
       a way that survives a binary path containing a space — the send uses `send-keys
       -l` (literal) with a separate `Enter`, or the embedded path is shell-quoted.
       Confirm it FAILS on current `main`.
-- [ ] Fix the six `__dashboard` sites (`src/main.rs` ~:632, :1397/:1417, :2017, :2188,
-      :2409, :2481) and the pause/resume direct send (~:2226) to send the command
-      literally (`-l` + follow-up `Enter`) or shell-quote the `current_exe()` path.
-      Prefer the literal path to match the existing `build_send_keys_args` seam.
-- [ ] Test that a spaced binary path produces a send-keys argv that still launches the
-      dashboard (literal send / quoted path); a plain path is behavior-unchanged.
-- [ ] Verify the reproducing test now PASSES.
+      (`a_spaced_binary_path_launches_the_dashboard_command_in_a_pane` drives a real
+      tmux pane against a stub binary under `<tmp>/My Bin/git-paw`; with the pre-fix
+      unquoted construction the stub never ran and the marker stayed empty.)
+- [x] Fix the six `__dashboard` sites — `src/commands/start.rs` (spec-mode builder,
+      bare builder, and the pause/resume direct send in `restart_from_pause`),
+      `src/commands/recover.rs` (bare and supervisor recovery), and
+      `src/commands/supervisor.rs` — by routing them all through one
+      `helpers::dashboard_command()` that shell-quotes the `current_exe()` path.
+- [x] Test that a spaced binary path produces a send-keys argv that still launches the
+      dashboard (literal send / quoted path); a plain path is behavior-unchanged
+      (`dashboard_command_shell_quotes_the_binary_path` covers the spaced path, a plain
+      path, and the `git-paw` PATH fallback).
+- [x] Verify the reproducing test now PASSES.
 
 ## 4. Newtype boundary (generalize the fix)
 

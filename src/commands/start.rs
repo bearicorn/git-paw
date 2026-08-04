@@ -23,7 +23,8 @@ use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry}
 use git_paw::tmux;
 
 use super::helpers::{
-    agent_pane_offset, attach_session_logging, config_to_custom_defs, to_interactive_cli,
+    agent_pane_offset, attach_session_logging, config_to_custom_defs, dashboard_command,
+    to_interactive_cli,
 };
 use super::recover::recover_session;
 use super::supervisor::cmd_supervisor;
@@ -179,12 +180,7 @@ pub(crate) fn cmd_start(
         builder = builder.add_pane(tmux::PaneSpec {
             branch: "dashboard".to_string(),
             worktree: repo_str,
-            cli_command: format!(
-                "{} __dashboard",
-                std::env::current_exe()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("git-paw"))
-                    .display()
-            ),
+            cli_command: dashboard_command(),
         });
         builder = builder.set_environment("GIT_PAW_BROKER_URL", &broker_config.url());
     }
@@ -488,12 +484,7 @@ fn launch_spec_session(
         builder = builder.add_pane(tmux::PaneSpec {
             branch: "dashboard".to_string(),
             worktree: repo_str,
-            cli_command: format!(
-                "{} __dashboard",
-                std::env::current_exe()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("git-paw"))
-                    .display()
-            ),
+            cli_command: dashboard_command(),
         });
         builder = builder.set_environment("GIT_PAW_BROKER_URL", &broker_config.url());
     }
@@ -659,12 +650,7 @@ fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result<(), PawErr
     // recreate; pause+resume on a no-broker session is purely the tmux
     // detach/attach cycle.
     if existing.broker_port.is_some() {
-        let dashboard_command = format!(
-            "{} __dashboard",
-            std::env::current_exe()
-                .unwrap_or_else(|_| std::path::PathBuf::from("git-paw"))
-                .display()
-        );
+        let dashboard_command = dashboard_command();
         let repo_str = repo_root.to_string_lossy().to_string();
         // Anchor the new pane on the first agent pane (which still
         // exists in the live session); -b places the dashboard before

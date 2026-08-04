@@ -13,7 +13,7 @@ use git_paw::error::PawError;
 use git_paw::session::{self, Session, SessionMode, SessionStatus};
 use git_paw::tmux;
 
-use super::helpers::configured_settings_paths;
+use super::helpers::{configured_settings_paths, dashboard_command};
 use super::supervisor::resolve_supervisor_flags;
 use crate::attach_or_print_hint;
 
@@ -159,12 +159,7 @@ fn recover_bare_session(
         builder = builder.add_pane(tmux::PaneSpec {
             branch: "dashboard".to_string(),
             worktree: repo_str,
-            cli_command: format!(
-                "{} __dashboard",
-                std::env::current_exe()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("git-paw"))
-                    .display()
-            ),
+            cli_command: dashboard_command(),
         });
         builder = builder.set_environment("GIT_PAW_BROKER_URL", url);
     }
@@ -231,12 +226,7 @@ fn recover_supervisor_session(
     let dashboard_pane = tmux::PaneSpec {
         branch: "dashboard".to_string(),
         worktree: repo_str,
-        cli_command: format!(
-            "{} __dashboard",
-            std::env::current_exe()
-                .unwrap_or_else(|_| std::path::PathBuf::from("git-paw"))
-                .display()
-        ),
+        cli_command: dashboard_command(),
     };
     let agent_panes: Vec<tmux::PaneSpec> = existing
         .worktrees

@@ -48,16 +48,23 @@ characters the quoted form is byte-for-byte behavior-equivalent to today's outpu
 shell strips the quotes), preserving existing dry-run expectations except for the added
 quotes in the emitted command string.
 
-### D4 — `__dashboard` command sent literally
+### D4 — `__dashboard` command shell-quoted
 
 The `__dashboard` command embeds `std::env::current_exe()`, whose path can contain a
-space. The fix sends the command with `send-keys -l` (literal) followed by a separate
-`Enter` key — the established pattern already used for boot-prompt injection
-(`main.rs:1808/1814`, `tmux::build_send_keys_args`) — OR shell-quotes the binary path
-inside the command string. Sending literally is preferred because it matches the
-existing prompt-injection seam and needs no per-argument quoting. The follow-up `Enter`
-must be a separate `send-keys` invocation (a buffered first Enter does not submit — see
-the local learning on send-keys nudges).
+space. The spec permits either fix — `send-keys -l` (literal) with a separate `Enter`, or
+shell-quoting the embedded path — and **implementation chose quoting**, because a live
+tmux probe showed `-l` does not fix the bug: the whole command is a single `send-keys`
+argv element, so tmux already delivers it verbatim, and the word-splitting happens one
+layer down in the **pane's shell**, which reads `/Users/My User/bin/git-paw __dashboard`
+as the command `/Users/My`. Quoting the path is what makes the shell treat it as one
+word, which is also what the scenario's outcome clause demands ("rather than the shell
+mis-parsing the path on the space").
+
+Quoting additionally lets the same `shell_quote` helper serve D3 and D4, so every string
+crossing into a shell context — whether via `/bin/sh -c` or typed into a pane — goes
+through one boundary rather than two different mechanisms. The five `PaneSpec.cli_command`
+sites and the pause/resume direct send all build the command through a single
+`helpers::dashboard_command()` constructor.
 
 ### D5 — No frozen surface touched
 

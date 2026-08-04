@@ -119,3 +119,20 @@ git-paw checks tmux liveness to determine effective status. If something seems o
 git paw purge --force
 git paw start
 ```
+
+### Repository names with dots or spaces, and install paths with spaces
+
+Supported. git-paw derives the tmux session name from your repository's
+directory name, and it sanitizes that name to a valid tmux target: everything
+outside `A-Z a-z 0-9 _ -` becomes `-`, runs collapse, and leading or trailing
+runs are dropped. So a repo in `my.app` gets the session `paw-my-app`, and
+`My Project` gets `paw-My-Project`. Sanitizing matters because tmux reads `.`
+and `:` as its own window and pane separators — left alone, a dotted name made
+tmux parse `paw-my.app` as session `paw-my` plus pane `app`, and pane commands
+failed with `can't find pane`. A name already made only of safe characters is
+used unchanged, so existing sessions keep the names they have.
+
+Paths with spaces are handled too: the per-pane log path passed to tmux's
+`pipe-pane` and the dashboard command typed into its pane are both
+shell-quoted, so a repository under `/Users/My User/code` logs and launches
+normally.
