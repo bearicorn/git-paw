@@ -99,8 +99,10 @@ pub(crate) fn session_liveness_with(runner: &dyn CommandRunner, name: &str) -> S
 
 /// Resolve a unique session name, handling collisions with existing sessions.
 ///
-/// Starts with `paw-<project_name>` and appends `-2`, `-3`, etc. if the name
-/// is already taken by another session.
+/// Starts with the sanitised `paw-<project_name>` base
+/// ([`SessionName::from_project`](crate::domain::SessionName::from_project))
+/// and appends `-2`, `-3`, etc. to that base if the name is already taken by
+/// another session.
 pub fn resolve_session_name(project_name: &str) -> Result<String, PawError> {
     resolve_session_name_with(&RealCommandRunner, project_name)
 }
@@ -111,7 +113,7 @@ pub(crate) fn resolve_session_name_with(
     runner: &dyn CommandRunner,
     project_name: &str,
 ) -> Result<String, PawError> {
-    let base = crate::domain::SessionName::for_project(project_name);
+    let base = crate::domain::SessionName::from_project(project_name);
 
     if !is_session_alive_with(runner, base.as_str())? {
         return Ok(base.into_string());

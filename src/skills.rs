@@ -19,8 +19,9 @@
 //! During [`render`], the template content undergoes placeholder substitution:
 //!
 //! - `{{BRANCH_ID}}` is replaced with the slugified branch name (`feat/foo` → `feat-foo`)
-//! - `{{PROJECT_NAME}}` is replaced with the project name (e.g. `"git-paw"`), used in the
-//!   `paw-{{PROJECT_NAME}}` tmux session name
+//! - `{{PROJECT_NAME}}` is replaced with the project name sanitised to a tmux-safe slug
+//!   (e.g. `"git-paw"`), because templates use it as the `paw-{{PROJECT_NAME}}` tmux
+//!   session name the agent types into `tmux` commands
 //! - `{{GIT_PAW_BROKER_URL}}` is substituted at render time with the actual broker URL
 //! - `{{SKILL_NAME}}` is replaced with the skill name from metadata
 //! - `{{SKILL_DESCRIPTION}}` is replaced with the skill description from metadata
@@ -478,8 +479,10 @@ pub struct GateCommands<'a> {
 /// Substitutes the following placeholders at render time:
 ///
 /// - `{{BRANCH_ID}}` — the slugified branch name (`feat/foo` → `feat-foo`)
-/// - `{{PROJECT_NAME}}` — the project name (e.g. `"git-paw"`), used in the
-///   `paw-{{PROJECT_NAME}}` tmux session name
+/// - `{{PROJECT_NAME}}` — the project name sanitised to a tmux-safe slug via
+///   [`crate::domain::project_slug`] (e.g. `"git-paw"`). Templates use it as
+///   the `paw-{{PROJECT_NAME}}` tmux session name, so it must match the
+///   session name git-paw actually created rather than the raw directory name
 /// - `{{GIT_PAW_BROKER_URL}}` — the fully-qualified broker URL, pre-expanded
 ///   here so the agent's curl commands contain a literal URL and no shell
 ///   expansion is needed at execution time. Pre-expanding at render time is
@@ -562,7 +565,7 @@ pub fn render(
     let mut output = template
         .content
         .replace("{{BRANCH_ID}}", &branch_id)
-        .replace("{{PROJECT_NAME}}", project)
+        .replace("{{PROJECT_NAME}}", &crate::domain::project_slug(project))
         .replace("{{GIT_PAW_BROKER_URL}}", broker_url)
         .replace(
             "{{TEST_COMMAND}}",

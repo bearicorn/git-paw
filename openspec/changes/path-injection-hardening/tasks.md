@@ -4,26 +4,45 @@ Each of the three bugs gets a reproducing test FIRST (it must fail against curre
 `main`), then the fix makes it pass. This is a behavior change, so per code-standards a
 reproducing test precedes every fix.
 
+> **Amendment (implementation).** Three task details were written against a pre-split
+> layout and are corrected below: (a) the `SessionName` newtype already exists in
+> `src/domain.rs` — `code-analysis-refactor` landed it as a byte-identical construction
+> *seam* whose module docs name this change as the one that hardens it — so it is
+> hardened there, not introduced in `src/git.rs`; (b) `src/tmux.rs` is now
+> `src/tmux/{command,session}.rs` and the `__dashboard` sites moved out of `src/main.rs`
+> into `src/commands/{start,recover,supervisor}.rs`; (c) `send-keys -l` does not fix
+> bug 3 — see the amendment on group 3.
+
 ## 1. Bug 1 — unsanitized tmux session name
 
-- [ ] Reproducing test FIRST: assert that building a session for a repo dir named
+- [x] Reproducing test FIRST: assert that building a session for a repo dir named
       `My Project` (and separately `my.app`) yields a session name that is a valid tmux
       target — no whitespace, no `.`, no `:` — and that the emitted `session:0.N` pane
       targets are well-formed. Confirm it FAILS on current `main`.
-- [ ] Introduce a `SessionName` newtype in `src/git.rs` (co-located with
-      `worktree_dir_name` / `branch_slug`) with a `SessionName::from_project(&str)`
-      smart constructor that emits `paw-<slug>`; the slug keeps `[A-Za-z0-9_-]`, maps
-      every other char (incl. `.`, `:`, whitespace) to `-`, collapses runs of `-`, and
-      trims leading/trailing `-`. Empty/all-unsafe input falls back to the default. Add
-      `///` docs, `Debug`, `Display`, and `AsRef<str>`.
-- [ ] Route the three raw `format!("paw-{…}")` sites through the newtype:
-      `SessionBuilder::build` (`src/tmux.rs` ~:390), `resolve_session_name`
-      (~:615, appending the `-2`/`-3` collision suffix to the sanitized base), and the
-      supervisor builder (~:1119).
-- [ ] Unit tests over `SessionName::from_project`: `my.app` → `paw-my-app`,
+      (`awkward_project_names_yield_tmux_safe_session_names_and_pane_targets` failed with
+      `paw-My Project`; the live `a_session_for_a_dotted_project_name_resolves_its_pane_targets`
+      failed with tmux's `can't find session: paw-my.app` — a `.` makes tmux read the
+      name as session `paw-my` + pane `app`, so `split-window`/`select-layout` abort.)
+- [x] Harden the existing `SessionName` newtype in `src/domain.rs` with a
+      `SessionName::from_project(&str)` smart constructor that emits `paw-<slug>`; the
+      slug keeps `[A-Za-z0-9_-]`, maps every other char (incl. `.`, `:`, whitespace) to
+      `-`, collapses runs of `-`, and trims leading/trailing `-`. Empty/all-unsafe input
+      falls back to the default (`unknown`, matching `git::project_name`). Add `///`
+      docs, `Debug`, `Display`, and `AsRef<str>`. `with_collision_suffix` narrows from
+      `impl Display` to `u32` so no constructor can smuggle an unsanitized string in.
+- [x] Route the three raw `format!("paw-{…}")` sites through the newtype:
+      `TmuxSessionBuilder::build` (`src/tmux/command.rs`), `resolve_session_name_with`
+      (`src/tmux/session.rs`, appending the `-2`/`-3` collision suffix to the sanitized
+      base), and `build_supervisor_session` (`src/tmux/command.rs`).
+- [x] Also route the fourth interpolation site found during implementation: `skills::render`
+      substituted the **raw** directory name into `{{PROJECT_NAME}}`, which the bundled
+      supervisor skill uses only as the tmux target `paw-{{PROJECT_NAME}}` (10 sites in
+      `assets/agent-skills/supervisor.md`). It now renders `domain::project_slug`, so the
+      target the supervisor types matches the session git-paw actually created.
+- [x] Unit tests over `SessionName::from_project`: `my.app` → `paw-my-app`,
       `My Project` → `paw-My-Project`, `a:b` → `paw-a-b`, `my..app` → `paw-my-app`,
       well-formed `git-paw` → `paw-git-paw` (behavior-preserving), empty → fallback.
-- [ ] Verify the reproducing test now PASSES.
+- [x] Verify the reproducing test now PASSES.
 
 ## 2. Bug 2 — unquoted path in the `pipe_pane` shell body
 

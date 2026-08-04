@@ -2727,3 +2727,83 @@ fn rebalance_is_a_no_op_for_a_single_agent() {
         "a lone agent already spans the row; nothing to rebalance"
     );
 }
+
+// -----------------------------------------------------------------------
+// Spec: safe-process-invocation — "Session names are sanitized to a
+// tmux-safe form". Reproducing tests for the unsanitized-session-name bug:
+// a project directory named `My Project` or `my.app` produced a session
+// name tmux either refuses or whose `session:0.N` pane targets are
+// ambiguous (`.` and `:` are tmux's window/pane separators).
+// -----------------------------------------------------------------------
+
+#[test]
+fn awkward_project_names_yield_tmux_safe_session_names_and_pane_targets() {
+    for (project, expected) in [
+        ("My Project", "paw-My-Project"),
+        ("my.app", "paw-my-app"),
+        // Behavior-preserving: a well-formed name is byte-identical.
+        ("git-paw", "paw-git-paw"),
+    ] {
+        let session = TmuxSessionBuilder::new(project)
+            .add_pane(make_pane("main", "/tmp/wt0", "claude"))
+            .add_pane(make_pane("feat/api", "/tmp/wt1", "codex"))
+            .build()
+            .unwrap();
+
+        assert_eq!(session.name, expected, "project: {project}");
+        assert!(
+            !session
+                .name
+                .contains(|c: char| c == '.' || c == ':' || c.is_whitespace()),
+            "session name '{}' must be a valid tmux target (no . : or whitespace)",
+            session.name
+        );
+
+        // Every pane target derived from the name is unambiguous.
+        let cmds = session.command_strings();
+        for pane in 0..2 {
+            let target = format!("{expected}:0.{pane}");
+            assert!(
+                cmds.iter().any(|c| c.contains(&target)),
+                "pane target '{target}' missing from commands for project '{project}'"
+            );
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn a_session_for_a_dotted_project_name_resolves_its_pane_targets() {
+    // A `.` in the session name makes tmux read `paw-my.app` as
+    // session `paw-my` + pane `app`, so `split-window`/`select-layout`
+    // fail with "can't find pane: app" and the second pane is never
+    // created. Sanitizing the name to `paw-my-app` fixes it.
+    let session = TmuxSessionBuilder::new("my.app")
+        .add_pane(make_pane("main", "/tmp", "echo one"))
+        .add_pane(make_pane("feat/api", "/tmp", "echo two"))
+        .build()
+        .unwrap();
+    let name = session.name.clone();
+    cleanup_session(&name);
+
+    session
+        .execute()
+        .expect("a dotted project name must build a live session");
+    assert!(is_session_alive(&name).unwrap());
+
+    // Each `session:0.N` target addresses a real pane.
+    for pane in 0..2 {
+        let target = format!("{name}:0.{pane}");
+        let probe = std::process::Command::new("tmux")
+            .args(["display-message", "-t", &target, "-p", "#{pane_index}"])
+            .output()
+            .expect("probe pane target");
+        assert!(
+            probe.status.success(),
+            "pane target '{target}' did not resolve: {}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+    }
+
+    cleanup_session(&name);
+}
