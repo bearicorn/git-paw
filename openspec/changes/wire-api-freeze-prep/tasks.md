@@ -8,17 +8,17 @@
 - [x] Confirm no `skip_serializing_if` was added to any of the three defaulted fields (serialization output must stay byte-identical)
 
 ## 2. Internal-library-API doc note (Cargo/lint task — NOT a spec requirement)
-- [ ] Add a crate-level `//!` note to `src/lib.rs` stating the library API is internal, exists to serve the binary + tests, and is NOT covered by semver
-- [ ] Confirm the decision recorded: crate-level doc note chosen over `#[doc(hidden)]` on ~23 modules (the lighter option — one edit, no per-module churn, no docs.rs hiding)
+- [x] Add a crate-level `//!` note to `src/lib.rs` stating the library API is internal, exists to serve the binary + tests, and is NOT covered by semver
+- [x] Confirm the decision recorded: crate-level doc note chosen over `#[doc(hidden)]` on ~23 modules (the lighter option — one edit, no per-module churn, no docs.rs hiding)
 
 ## 3. Pin MSRV (Cargo task — NOT a spec requirement)
-- [ ] Add `rust-version = "1.97"` (current stable) to the `[package]` section of `Cargo.toml`
-- [ ] Verify `cargo build` succeeds and `Cargo.lock` still resolves
+- [x] Add `rust-version = "1.97"` (current stable) to the `[package]` section of `Cargo.toml`
+- [x] Verify `cargo build` succeeds and `Cargo.lock` still resolves
 
 ## 4. Enforce the doc-comment mandate (lint task — NOT a spec requirement)
-- [ ] Add a one-line `///` doc comment to `agents::inject_section_into_file` in `src/agents.rs` (the sole doc-coverage gap; precondition for the lint to pass clean)
-- [ ] Add `#![warn(missing_docs)]` to `src/lib.rs`
-- [ ] Verify `just check` (clippy `-D warnings`) passes with no missing-docs warning
+- [x] Add a one-line `///` doc comment to `agents::inject_section_into_file` in `src/agents.rs` (the sole doc-coverage gap; precondition for the lint to pass clean) — **no edit needed**: the function already carries a `///` doc comment (`src/agents.rs:776`), so the precondition was already satisfied; `#![warn(missing_docs)]` compiles clean with zero gaps
+- [x] Add `#![warn(missing_docs)]` to `src/lib.rs`
+- [x] Verify `just check` (clippy `-D warnings`) passes with no missing-docs warning
 
 ## 5. Tests (behavioral)
 - [x] Add a test: `{"status":"idle"}` deserializes as `StatusPayload` with empty `modified_files`

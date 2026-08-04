@@ -2,6 +2,16 @@
 //!
 //! Orchestrates multiple AI coding CLI sessions across git worktrees
 //! from a single terminal using tmux.
+//!
+//! # The library API is internal
+//!
+//! git-paw ships as a binary. This library target exists only to serve that
+//! binary and the integration tests in `tests/` — it is **not** a stable
+//! dependency surface, and it is **not** covered by semver. Every `pub` item
+//! below may change or disappear in any release, including patch releases.
+//! Depend on the `git-paw` CLI, not on this crate as a library.
+
+#![warn(missing_docs)]
 
 /// Default boot-prompt settle delay (ms) before the submit `Enter`, used
 /// for any CLI without a `[clis.<name>].submit_delay_ms` override.
