@@ -1,5 +1,9 @@
-## ADDED Requirements
+# preflight-diagnostics Specification
 
+## Purpose
+The read-only `git paw doctor` preflight command: grouped ✓/⚠/✗ diagnostics across environment, CLIs, config, spec system, bundled scripts, broker, supervisor, and hygiene — each non-passing check carrying a remedy — with a `--json` renderer, an optional `--live` session-lifecycle smoke arm, and an exit code that reflects the worst check. Doctor diagnoses but never repairs.
+
+## Requirements
 ### Requirement: `git paw doctor` runs read-only preflight checks
 
 The system SHALL provide a `git paw doctor` command that inspects the environment,
@@ -267,3 +271,4 @@ is deferred to a later cycle.)
 
 - **WHEN** `git paw doctor --help` is inspected
 - **THEN** it SHALL NOT advertise a `--fix` or other repair option
+

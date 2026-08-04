@@ -1,5 +1,9 @@
-## ADDED Requirements
+# broker-messages Specification
 
+## Purpose
+Forward-compatible deserialization of broker message payloads for the v1.0 wire freeze: the three `Vec` payload fields with no non-empty contract default to an empty vector when absent (so lean and third-party publishers parse), while fields carrying an intentional non-empty contract stay required. Serialized output is unchanged — empty arrays are still emitted on the wire.
+
+## Requirements
 ### Requirement: Lenient list-field deserialization
 
 The broker message deserializer SHALL treat the three required `Vec` payload
@@ -60,3 +64,4 @@ keeps the frozen-surface change to the minimum necessary.
 - **GIVEN** an `ArtifactPayload` with a non-empty `exports` and `modified_files`
 - **WHEN** it is serialized and then deserialized
 - **THEN** the round-trip SHALL preserve the value byte-equivalently, unchanged from the pre-freeze behaviour
+

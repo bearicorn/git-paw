@@ -1,5 +1,9 @@
-## ADDED Requirements
+# broker-server Specification
 
+## Purpose
+Runtime robustness of the broker HTTP server on the real multi-threaded path: blocking subprocess work reachable from an async handler runs off the tokio worker threads so a publish burst cannot stall other endpoints, and a poisoned state lock is recovered rather than fatal so a single panic can never brick the broker into "alive but permanently dead".
+
+## Requirements
 ### Requirement: Blocking subprocess calls run off the async worker threads
 
 Blocking work reachable from an async HTTP handler SHALL execute off the tokio runtime's
@@ -44,3 +48,4 @@ SHALL continue to acquire the lock and serve requests.
 - **GIVEN** a `BrokerState` whose inner lock has been poisoned
 - **WHEN** `BrokerState::read` or `BrokerState::write` is called
 - **THEN** the call SHALL return a usable guard for the inner state instead of panicking
+
