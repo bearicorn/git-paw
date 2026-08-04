@@ -27,7 +27,7 @@ use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry}
 use git_paw::tmux;
 
 use super::helpers::{
-    attach_session_logging, config_to_custom_defs, configured_settings_paths,
+    attach_session_logging, config_to_custom_defs, configured_settings_paths, dashboard_command,
     session_cli_settings_paths, to_interactive_cli,
 };
 use crate::{
@@ -571,12 +571,7 @@ pub(crate) fn cmd_supervisor(
     let inter_agent_rules = git_paw::agents::build_inter_agent_rules(&branch_refs);
 
     let repo_str = repo_root.to_string_lossy().to_string();
-    let dashboard_command = format!(
-        "{} __dashboard",
-        std::env::current_exe()
-            .unwrap_or_else(|_| std::path::PathBuf::from("git-paw"))
-            .display()
-    );
+    let dashboard_command = dashboard_command();
 
     let supervisor_cli_command = if supervisor_flags.is_empty() {
         supervisor_cli.clone()
