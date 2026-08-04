@@ -29,20 +29,31 @@
 - [x] Add a test: `agent.intent` payload omitting `files` fails to parse as a missing required field (NOT defaulted); an explicit `"files": []` is still rejected with the empty-files error
 
 ## 6. Backward compatibility
-- [ ] Verify every existing broker-messages test passes unchanged (populated messages round-trip byte-equivalently)
-- [ ] Verify the `status_payload_v050_shape_round_trips_byte_equivalent` byte-equivalence test still passes (frozen `StatusPayload.message` behaviour untouched)
-- [ ] Confirm the bundled producer `assets/scripts/broker.sh` (emits `modified_files: []`) continues to parse
+- [x] Verify every existing broker-messages test passes unchanged (populated messages round-trip byte-equivalently)
+- [x] Verify the `status_payload_v050_shape_round_trips_byte_equivalent` byte-equivalence test still passes (frozen `StatusPayload.message` behaviour untouched)
+- [x] Confirm the bundled producer `assets/scripts/broker.sh` (emits `modified_files: []`) continues to parse — it emits the key explicitly (`assets/scripts/broker.sh:213`, `:245`), and an explicit `[]` was already accepted and still is (relax-only widening only adds the absent-key case)
 
 ## 7. Docs
-- [ ] Confirm no CLI `--help` change is needed (no CLI surface change)
-- [ ] Confirm README / mdBook "MSRV: current stable" statements stay consistent with the pinned `rust-version`
-- [ ] Confirm the configuration reference needs no update (no config fields added)
+- [x] Confirm no CLI `--help` change is needed (no CLI surface change) — `src/cli.rs` untouched; no flag, subcommand, or help string altered
+- [x] Confirm README / mdBook "MSRV: current stable" statements stay consistent with the pinned `rust-version` — README's only MSRV text is the `MSRV: stable` badge pointing at `rust-toolchain.toml` (`channel = "stable"`); rustc 1.97.0 IS current stable, so the badge stays accurate and no mdBook chapter states an MSRV
+- [x] Confirm the configuration reference needs no update (no config fields added) — no `[section]`/field was added to the config schema
 
 ## 8. Verification (five gates)
-- [ ] Gate 1 — Testing: `cargo test --no-fail-fast` for the new broker-messages tests passes
-- [ ] Gate 2 — Regression: full suite green diffed against the merge-base
-- [ ] Gate 3 — Spec audit: every `Lenient list-field deserialization` scenario maps to a test; no other broker-messages requirement is contradicted (esp. the frozen serialization scenarios)
-- [ ] Gate 4 — Doc audit: crate doc note present, `--help`/README/mdBook consistent, MSRV surfaced, `mdbook build docs/` succeeds
-- [ ] Gate 5 — Security: no secrets; relax-only parsing change introduces no unsafe shell/path handling; least-privilege unchanged
-- [ ] `just check` green; `cargo fmt` before commit
-- [ ] `openspec validate wire-api-freeze-prep --strict` passes (confirm by real exit code)
+- [x] Gate 1 — Testing: `cargo test --no-fail-fast` for the new broker-messages tests passes — `broker::messages` 102 passed / 0 failed
+- [x] Gate 2 — Regression: full suite green diffed against the merge-base — `GIT_PAW_ALLOW_LIVE_SESSION=1 cargo test --no-fail-fast` = **2465 passed / 0 failed across 88 suites**; branch is 2 commits ahead of `main` and 0 behind (merge-base = `e7b37ea`, not stale)
+- [x] Gate 3 — Spec audit: every `Lenient list-field deserialization` scenario maps to a test; no other broker-messages requirement is contradicted (esp. the frozen serialization scenarios) — mapping below; scenario 6 needed a NEW byte-equivalence test (`artifact_payload_populated_lists_round_trip_byte_equivalent`) because the pre-existing `serde_roundtrip_artifact` only asserted values, not wire bytes
+- [x] Gate 4 — Doc audit: crate doc note present, `--help`/README/mdBook consistent, MSRV surfaced, `mdbook build docs/` succeeds — build exits 0 (the two `<name>` unclosed-tag WARNs in `specifications/index.md` are pre-existing and outside this diff)
+- [x] Gate 5 — Security: no secrets; relax-only parsing change introduces no unsafe shell/path handling; least-privilege unchanged — the diff is three serde attributes, doc comments, and one Cargo metadata key; no shell invocation, no path construction, no allowlist grant, no new dependency
+- [x] `just check` green; `cargo fmt` before commit — `cargo fmt --check` clean; `cargo clippy --all-targets -- -D warnings` clean (incl. the new `missing_docs`)
+- [x] `openspec validate wire-api-freeze-prep --strict` passes (confirm by real exit code) — exit 0, "Change 'wire-api-freeze-prep' is valid"
+
+### Gate 3 — scenario → test map
+
+| Spec scenario | Test |
+|---|---|
+| Absent `modified_files` in a status payload defaults to empty | `status_payload_absent_modified_files_defaults_to_empty` |
+| Minimal status message parses via `from_json` | `from_json_minimal_status_message_parses` |
+| Absent `exports` and `modified_files` in an artifact payload default to empty | `artifact_payload_absent_lists_default_to_empty` |
+| Serialization still emits the empty arrays | `artifact_payload_empty_lists_still_serialise_as_empty_arrays` |
+| Non-empty-contract fields stay required and are not defaulted | `from_json_feedback_absent_errors_is_missing_field_error`, `from_json_intent_absent_files_is_missing_field_error` |
+| Existing populated messages round-trip unchanged | `artifact_payload_populated_lists_round_trip_byte_equivalent` (new), plus `status_payload_v050_shape_round_trips_byte_equivalent` and `v050_string_only_intent_round_trips_byte_equivalent` still green |

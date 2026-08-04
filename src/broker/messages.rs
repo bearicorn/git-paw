@@ -1443,6 +1443,22 @@ mod tests {
     }
 
     #[test]
+    fn artifact_payload_populated_lists_round_trip_byte_equivalent() {
+        // GIVEN a populated artifact payload WHEN deserialised and re-serialised
+        // THEN the JSON is byte-equivalent — defaulting must not perturb the
+        // wire bytes of a message that carries both lists.
+        let json = r#"{"status":"done","exports":["PawError","BrokerMessage"],"modified_files":["src/a.rs","src/b.rs"]}"#;
+        let payload: ArtifactPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.exports, ["PawError", "BrokerMessage"]);
+        assert_eq!(payload.modified_files, ["src/a.rs", "src/b.rs"]);
+        let round_tripped = serde_json::to_string(&payload).unwrap();
+        assert_eq!(
+            round_tripped, json,
+            "populated artifact payload must round-trip byte-equivalently; got {round_tripped}"
+        );
+    }
+
+    #[test]
     fn from_json_feedback_absent_errors_is_missing_field_error() {
         // `errors` carries a non-empty contract, so it stays REQUIRED: omitting
         // it is a hard missing-field parse error, not a defaulted empty vec.
