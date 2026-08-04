@@ -2774,39 +2774,41 @@ fn awkward_project_names_yield_tmux_safe_session_names_and_pane_targets() {
 
 #[test]
 #[serial_test::serial]
-fn a_session_for_a_dotted_project_name_resolves_its_pane_targets() {
+fn a_session_for_an_awkward_project_name_resolves_its_pane_targets() {
     // A `.` in the session name makes tmux read `paw-my.app` as
     // session `paw-my` + pane `app`, so `split-window`/`select-layout`
     // fail with "can't find pane: app" and the second pane is never
     // created. Sanitizing the name to `paw-my-app` fixes it.
-    let session = TmuxSessionBuilder::new("my.app")
-        .add_pane(make_pane("main", "/tmp", "echo one"))
-        .add_pane(make_pane("feat/api", "/tmp", "echo two"))
-        .build()
-        .unwrap();
-    let name = session.name.clone();
-    cleanup_session(&name);
+    for project in ["my.app", "My Project"] {
+        let session = TmuxSessionBuilder::new(project)
+            .add_pane(make_pane("main", "/tmp", "echo one"))
+            .add_pane(make_pane("feat/api", "/tmp", "echo two"))
+            .build()
+            .unwrap();
+        let name = session.name.clone();
+        cleanup_session(&name);
 
-    session
-        .execute()
-        .expect("a dotted project name must build a live session");
-    assert!(is_session_alive(&name).unwrap());
+        session
+            .execute()
+            .unwrap_or_else(|e| panic!("project '{project}' must build a live session: {e}"));
+        assert!(is_session_alive(&name).unwrap(), "project: {project}");
 
-    // Each `session:0.N` target addresses a real pane.
-    for pane in 0..2 {
-        let target = format!("{name}:0.{pane}");
-        let probe = std::process::Command::new("tmux")
-            .args(["display-message", "-t", &target, "-p", "#{pane_index}"])
-            .output()
-            .expect("probe pane target");
-        assert!(
-            probe.status.success(),
-            "pane target '{target}' did not resolve: {}",
-            String::from_utf8_lossy(&probe.stderr)
-        );
+        // Each `session:0.N` target addresses a real pane.
+        for pane in 0..2 {
+            let target = format!("{name}:0.{pane}");
+            let probe = std::process::Command::new("tmux")
+                .args(["display-message", "-t", &target, "-p", "#{pane_index}"])
+                .output()
+                .expect("probe pane target");
+            assert!(
+                probe.status.success(),
+                "pane target '{target}' did not resolve: {}",
+                String::from_utf8_lossy(&probe.stderr)
+            );
+        }
+
+        cleanup_session(&name);
     }
-
-    cleanup_session(&name);
 }
 
 // -----------------------------------------------------------------------
