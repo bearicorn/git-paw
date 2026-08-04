@@ -1,11 +1,11 @@
 # Tasks — wire-api-freeze-prep
 
 ## 1. Lenient list-field deserialization (broker wire, relax-only)
-- [ ] Add `#[serde(default)]` (and ONLY `#[serde(default)]` — no `skip_serializing_if`) to `StatusPayload.modified_files` in `src/broker/messages.rs`
-- [ ] Add `#[serde(default)]` to `ArtifactPayload.exports`
-- [ ] Add `#[serde(default)]` to `ArtifactPayload.modified_files`
-- [ ] Leave `IntentPayload.files` and `FeedbackPayload.errors` REQUIRED (no default) — they carry non-empty contracts (`EmptyIntentFiles`, `EmptyErrors`); omitting them must stay a clean missing-field parse error
-- [ ] Confirm no `skip_serializing_if` was added to any of the three defaulted fields (serialization output must stay byte-identical)
+- [x] Add `#[serde(default)]` (and ONLY `#[serde(default)]` — no `skip_serializing_if`) to `StatusPayload.modified_files` in `src/broker/messages.rs`
+- [x] Add `#[serde(default)]` to `ArtifactPayload.exports`
+- [x] Add `#[serde(default)]` to `ArtifactPayload.modified_files`
+- [x] Leave `IntentPayload.files` and `FeedbackPayload.errors` REQUIRED (no default) — they carry non-empty contracts (`EmptyIntentFiles`, `EmptyErrors`); omitting them must stay a clean missing-field parse error
+- [x] Confirm no `skip_serializing_if` was added to any of the three defaulted fields (serialization output must stay byte-identical)
 
 ## 2. Internal-library-API doc note (Cargo/lint task — NOT a spec requirement)
 - [ ] Add a crate-level `//!` note to `src/lib.rs` stating the library API is internal, exists to serve the binary + tests, and is NOT covered by semver
@@ -21,12 +21,12 @@
 - [ ] Verify `just check` (clippy `-D warnings`) passes with no missing-docs warning
 
 ## 5. Tests (behavioral)
-- [ ] Add a test: `{"status":"idle"}` deserializes as `StatusPayload` with empty `modified_files`
-- [ ] Add a test: minimal `agent.status` message (payload omits `modified_files`) parses via `from_json` into `BrokerMessage::Status`
-- [ ] Add a test: artifact payload JSON omitting both `exports` and `modified_files` deserializes with both empty
-- [ ] Add a test: `ArtifactPayload` with empty vecs still serializes `exports` and `modified_files` as `[]` (serialization unchanged)
-- [ ] Add a test: `agent.feedback` payload omitting `errors` fails to parse as a missing required field (NOT defaulted); an explicit `"errors": []` is still rejected with the empty-errors error
-- [ ] Add a test: `agent.intent` payload omitting `files` fails to parse as a missing required field (NOT defaulted); an explicit `"files": []` is still rejected with the empty-files error
+- [x] Add a test: `{"status":"idle"}` deserializes as `StatusPayload` with empty `modified_files`
+- [x] Add a test: minimal `agent.status` message (payload omits `modified_files`) parses via `from_json` into `BrokerMessage::Status`
+- [x] Add a test: artifact payload JSON omitting both `exports` and `modified_files` deserializes with both empty
+- [x] Add a test: `ArtifactPayload` with empty vecs still serializes `exports` and `modified_files` as `[]` (serialization unchanged)
+- [x] Add a test: `agent.feedback` payload omitting `errors` fails to parse as a missing required field (NOT defaulted); an explicit `"errors": []` is still rejected with the empty-errors error
+- [x] Add a test: `agent.intent` payload omitting `files` fails to parse as a missing required field (NOT defaulted); an explicit `"files": []` is still rejected with the empty-files error
 
 ## 6. Backward compatibility
 - [ ] Verify every existing broker-messages test passes unchanged (populated messages round-trip byte-equivalently)
