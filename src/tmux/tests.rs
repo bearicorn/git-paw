@@ -910,7 +910,8 @@ fn pipe_pane_queues_correct_command() {
     let pipe_cmds: Vec<&String> = cmds.iter().filter(|c| c.contains("pipe-pane")).collect();
     assert_eq!(pipe_cmds.len(), 1);
     assert!(pipe_cmds[0].contains("pipe-pane -o -t paw-proj:0.0"));
-    assert!(pipe_cmds[0].contains("cat >> /repo/.git-paw/logs/paw-proj/feat--auth.log"));
+    // The path is shell-quoted — tmux runs the argument via `/bin/sh -c`.
+    assert!(pipe_cmds[0].contains("cat >> '/repo/.git-paw/logs/paw-proj/feat--auth.log'"));
 }
 
 // --- Gap #10: pipe-pane conditional on logging ---
@@ -2806,4 +2807,88 @@ fn a_session_for_a_dotted_project_name_resolves_its_pane_targets() {
     }
 
     cleanup_session(&name);
+}
+
+// -----------------------------------------------------------------------
+// Spec: safe-process-invocation — "Paths interpolated into shell contexts
+// are quoted". `pipe-pane`'s argument is run by tmux via `/bin/sh -c`, so an
+// unquoted path with a space made the shell read `cat >> /repo/My Project/x.log`
+// as "append to /repo/My, then read Project/x.log".
+// -----------------------------------------------------------------------
+
+#[test]
+fn pipe_pane_quotes_a_log_path_containing_a_space() {
+    let mut session = TmuxSessionBuilder::new("proj")
+        .add_pane(make_pane("main", "/tmp/wt", "claude"))
+        .build()
+        .unwrap();
+
+    let log_path = std::path::PathBuf::from("/repo/My Project/.git-paw/logs/main.log");
+    session.pipe_pane("paw-proj:0.0", &log_path);
+
+    let cmds = session.command_strings();
+    let pipe = commands_containing(&cmds, "pipe-pane");
+    assert_eq!(pipe.len(), 1);
+    assert!(
+        pipe[0].contains("cat >> '/repo/My Project/.git-paw/logs/main.log'"),
+        "pipe-pane must quote the whole path so the shell appends to one file: {}",
+        pipe[0]
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn pipe_pane_captures_into_a_log_path_containing_a_space() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A repo path with a space: unquoted, the shell appended to `<tmp>/My`
+    // and the capture never reached this file.
+    let log_dir = tmp.path().join("My Project").join("logs");
+    std::fs::create_dir_all(&log_dir).unwrap();
+    let log_path = log_dir.join("main.log");
+
+    let mut session = TmuxSessionBuilder::new("quoted-log-probe")
+        .add_pane(make_pane("main", "/tmp", "true"))
+        .build()
+        .unwrap();
+    let name = session.name.clone();
+    cleanup_session(&name);
+
+    let target = format!("{name}:0.0");
+    session.pipe_pane(&target, &log_path);
+    session.execute().expect("session with pipe-pane executes");
+
+    let marker = "paw-quoted-log-marker";
+    let sent = std::process::Command::new("tmux")
+        .args([
+            "send-keys",
+            "-t",
+            &target,
+            &format!("echo {marker}"),
+            "Enter",
+        ])
+        .status()
+        .expect("send marker");
+    assert!(sent.success());
+
+    // Poll until the capture lands rather than sleeping on a fixed budget.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut captured = String::new();
+    while std::time::Instant::now() < deadline {
+        captured = std::fs::read_to_string(&log_path).unwrap_or_default();
+        if captured.contains(marker) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    cleanup_session(&name);
+    assert!(
+        captured.contains(marker),
+        "pipe-pane did not capture into '{}' (read: {captured:?})",
+        log_path.display()
+    );
+    assert!(
+        !tmp.path().join("My").exists(),
+        "the path was split on the space — the shell wrote to a truncated path"
+    );
 }

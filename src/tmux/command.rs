@@ -228,13 +228,21 @@ impl TmuxSession {
     ///
     /// Appends `tmux pipe-pane -o -t <pane_target> "cat >> <log_path>"` to the
     /// command queue. Should be called after the pane has been created.
+    ///
+    /// tmux runs the argument through `/bin/sh -c`, so `log_path` is
+    /// shell-quoted ([`crate::domain::shell_quote`]) — a repository path
+    /// containing a space would otherwise split into two shell words and the
+    /// capture would append to the wrong file.
     pub fn pipe_pane(&mut self, pane_target: &str, log_path: &std::path::Path) -> &mut Self {
         self.commands.push(TmuxCommand::new(&[
             "pipe-pane",
             "-o",
             "-t",
             pane_target,
-            &format!("cat >> {}", log_path.display()),
+            &format!(
+                "cat >> {}",
+                crate::domain::shell_quote(&log_path.display().to_string())
+            ),
         ]));
         self
     }
