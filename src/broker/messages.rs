@@ -101,6 +101,12 @@ pub struct StatusPayload {
     /// Current status label (e.g. `"working"`, `"idle"`).
     pub status: String,
     /// List of files modified by the agent.
+    ///
+    /// Defaults to an empty vector when absent from the input JSON, so a lean
+    /// publisher that omits the key still parses. Serialisation is unchanged —
+    /// there is deliberately no `skip_serializing_if`, so an empty list is
+    /// still emitted as `[]` on the wire.
+    #[serde(default)]
     pub modified_files: Vec<String>,
     /// Optional human-readable message.
     pub message: Option<String>,
@@ -135,8 +141,17 @@ pub struct ArtifactPayload {
     /// Current status label (e.g. `"done"`).
     pub status: String,
     /// List of exported symbols or public API items.
+    ///
+    /// Defaults to an empty vector when absent from the input JSON. As with
+    /// [`StatusPayload::modified_files`], serialisation is unchanged: an empty
+    /// list is still emitted as `[]`.
+    #[serde(default)]
     pub exports: Vec<String>,
     /// List of files modified by the agent.
+    ///
+    /// Defaults to an empty vector when absent from the input JSON;
+    /// serialisation still emits `[]` for an empty list.
+    #[serde(default)]
     pub modified_files: Vec<String>,
 }
 
@@ -1371,6 +1386,106 @@ mod tests {
         let back: BrokerMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.agent_id(), "feat-x");
         assert_eq!(back.status_label(), "done");
+    }
+
+    // --- Lenient list-field deserialization ---
+
+    #[test]
+    fn status_payload_absent_modified_files_defaults_to_empty() {
+        // GIVEN a status payload JSON with no `modified_files` key
+        // WHEN it is deserialised THEN it succeeds with an empty vec.
+        let payload: StatusPayload = serde_json::from_str(r#"{"status":"idle"}"#).unwrap();
+        assert_eq!(payload.status, "idle");
+        assert!(
+            payload.modified_files.is_empty(),
+            "absent modified_files must default to an empty vec"
+        );
+    }
+
+    #[test]
+    fn from_json_minimal_status_message_parses() {
+        // GIVEN a minimal `agent.status` envelope whose payload omits
+        // `modified_files` WHEN parsed via from_json THEN it yields a Status.
+        let json = r#"{"type":"agent.status","agent_id":"feat-x","payload":{"status":"idle"}}"#;
+        let msg = BrokerMessage::from_json(json).unwrap();
+        let BrokerMessage::Status { payload, .. } = &msg else {
+            panic!("expected BrokerMessage::Status, got {msg:?}");
+        };
+        assert!(payload.modified_files.is_empty());
+    }
+
+    #[test]
+    fn artifact_payload_absent_lists_default_to_empty() {
+        // GIVEN an artifact payload JSON with neither `exports` nor
+        // `modified_files` WHEN deserialised THEN both default to empty.
+        let payload: ArtifactPayload = serde_json::from_str(r#"{"status":"done"}"#).unwrap();
+        assert!(payload.exports.is_empty(), "exports must default to empty");
+        assert!(
+            payload.modified_files.is_empty(),
+            "modified_files must default to empty"
+        );
+    }
+
+    #[test]
+    fn artifact_payload_empty_lists_still_serialise_as_empty_arrays() {
+        // Relax-only: defaulting widens INPUT only. An empty list must still be
+        // emitted as `[]` — no `skip_serializing_if` may creep in.
+        let payload = ArtifactPayload {
+            status: "done".to_string(),
+            exports: vec![],
+            modified_files: vec![],
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert_eq!(
+            json,
+            r#"{"status":"done","exports":[],"modified_files":[]}"#
+        );
+    }
+
+    #[test]
+    fn from_json_feedback_absent_errors_is_missing_field_error() {
+        // `errors` carries a non-empty contract, so it stays REQUIRED: omitting
+        // it is a hard missing-field parse error, not a defaulted empty vec.
+        let json =
+            r#"{"type":"agent.feedback","agent_id":"feat-x","payload":{"from":"supervisor"}}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        assert!(
+            matches!(err, MessageError::Deserialize(_)),
+            "expected a deserialize error, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("missing field `errors`"),
+            "expected a missing-field error naming `errors`, got {err}"
+        );
+
+        // AND an explicit empty array is still rejected by the validator.
+        let explicit = r#"{"type":"agent.feedback","agent_id":"feat-x","payload":{"from":"supervisor","errors":[]}}"#;
+        assert!(matches!(
+            BrokerMessage::from_json(explicit).unwrap_err(),
+            MessageError::EmptyErrors
+        ));
+    }
+
+    #[test]
+    fn from_json_intent_absent_files_is_missing_field_error() {
+        // Same required-field behaviour for `IntentPayload.files`.
+        let json = r#"{"type":"agent.intent","agent_id":"feat-x","payload":{"summary":"wire it","valid_for_seconds":900}}"#;
+        let err = BrokerMessage::from_json(json).unwrap_err();
+        assert!(
+            matches!(err, MessageError::Deserialize(_)),
+            "expected a deserialize error, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("missing field `files`"),
+            "expected a missing-field error naming `files`, got {err}"
+        );
+
+        // AND an explicit empty array is still rejected by the validator.
+        let explicit = r#"{"type":"agent.intent","agent_id":"feat-x","payload":{"files":[],"summary":"wire it","valid_for_seconds":900}}"#;
+        assert!(matches!(
+            BrokerMessage::from_json(explicit).unwrap_err(),
+            MessageError::EmptyIntentFiles
+        ));
     }
 
     #[test]
