@@ -18,6 +18,40 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+/// Quote `s` so a POSIX shell reads it as one literal word.
+///
+/// The string is wrapped in single quotes and any embedded single quote is
+/// escaped as `'\''` (close the quote, emit an escaped quote, reopen), which
+/// makes every other character — spaces, `>`, `;`, `$`, `` ` `` — literal. Use
+/// this for every path or argument interpolated into a shell command body,
+/// whether that body is handed to `/bin/sh -c` (tmux's `pipe-pane`) or typed
+/// into a pane's shell (`send-keys`).
+///
+/// The quoted form is behaviour-equivalent to the bare string for a path with
+/// no special characters: the shell strips the quotes and the same file is
+/// addressed.
+///
+/// ```
+/// use git_paw::domain::shell_quote;
+///
+/// assert_eq!(shell_quote("/repo/My Project/x.log"), "'/repo/My Project/x.log'");
+/// assert_eq!(shell_quote("/repo/it's/x.log"), r"'/repo/it'\''s/x.log'");
+/// ```
+#[must_use]
+pub fn shell_quote(s: &str) -> String {
+    let mut quoted = String::with_capacity(s.len() + 2);
+    quoted.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            quoted.push_str(r"'\''");
+        } else {
+            quoted.push(c);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
 /// The slug used when sanitising a project name leaves nothing usable.
 ///
 /// Matches [`crate::git::project_name`]'s own fallback for a repository
@@ -234,6 +268,49 @@ mod tests {
         let base = SessionName::from_project("my.app");
         assert_eq!(base.with_collision_suffix(2).as_str(), "paw-my-app-2");
         assert_eq!(base.with_collision_suffix(7).into_string(), "paw-my-app-7");
+    }
+
+    #[test]
+    fn shell_quote_makes_every_input_one_literal_shell_word() {
+        for (raw, expected) in [
+            // A plain path is behaviour-equivalent: the shell strips the quotes.
+            ("/repo/logs/main.log", "'/repo/logs/main.log'"),
+            // Spaces and metacharacters become literal.
+            ("/repo/My Project/x.log", "'/repo/My Project/x.log'"),
+            ("/repo/a;rm -rf b/x.log", "'/repo/a;rm -rf b/x.log'"),
+            ("/repo/$HOME/`id`/x.log", "'/repo/$HOME/`id`/x.log'"),
+            // An embedded single quote closes, escapes, and reopens.
+            ("/repo/it's/x.log", r"'/repo/it'\''s/x.log'"),
+            ("", "''"),
+        ] {
+            assert_eq!(shell_quote(raw), expected, "input: {raw:?}");
+        }
+    }
+
+    #[test]
+    fn shell_quote_survives_a_real_shell_round_trip() {
+        // The quoted form must reach `/bin/sh` as exactly one argument, byte
+        // for byte — this is the property `pipe-pane` and the pane-typed
+        // dashboard command both depend on.
+        for raw in [
+            "/repo/logs/main.log",
+            "/repo/My Project/x.log",
+            "/repo/it's/x.log",
+            "/repo/a;rm -rf b/x.log",
+            "/repo/$HOME/`id`/x.log",
+        ] {
+            let out = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("printf %s {}", shell_quote(raw)))
+                .output()
+                .expect("run /bin/sh");
+            assert!(out.status.success(), "sh failed for {raw:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                raw,
+                "quoted form did not round-trip through the shell: {raw:?}"
+            );
+        }
     }
 
     #[test]

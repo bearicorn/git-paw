@@ -46,18 +46,23 @@ reproducing test precedes every fix.
 
 ## 2. Bug 2 — unquoted path in the `pipe_pane` shell body
 
-- [ ] Reproducing test FIRST: assert that `pipe_pane` for a log path containing a space
+- [x] Reproducing test FIRST: assert that `pipe_pane` for a log path containing a space
       emits a `/bin/sh -c` body in which the path is quoted (so `cat >>` targets the
       whole path). Confirm it FAILS on current `main`.
-- [ ] Add a shell-quoting smart-constructor helper (single-quote wrap, escape embedded
-      `'` as `'\''`) and use it to quote `log_path.display()` in `pipe_pane`
-      (`src/tmux.rs` ~:230-237).
-- [ ] Unit tests over the shell-quote helper: a path with a space is wrapped; a path
+      (`pipe_pane_quotes_a_log_path_containing_a_space` failed on the emitted command;
+      the live `pipe_pane_captures_into_a_log_path_containing_a_space` failed with an
+      empty log — the shell had appended to the truncated `<tmp>/My` instead.)
+- [x] Add a shell-quoting helper (`domain::shell_quote` — single-quote wrap, escape
+      embedded `'` as `'\''`) and use it to quote `log_path.display()` in `pipe_pane`
+      (`src/tmux/command.rs`).
+- [x] Unit tests over the shell-quote helper: a path with a space is wrapped; a path
       with an embedded single quote is escaped; a plain path round-trips to a
-      shell-equivalent form.
-- [ ] Update any dry-run/command-string test pinned to the old unquoted `pipe_pane`
-      output to expect the quoted form.
-- [ ] Verify the reproducing test now PASSES.
+      shell-equivalent form. Plus a real `/bin/sh` round-trip over spaces, `;`, `$`,
+      backticks, and an embedded quote, asserting the quoted form reaches the shell as
+      one byte-identical argument.
+- [x] Update any dry-run/command-string test pinned to the old unquoted `pipe_pane`
+      output to expect the quoted form (`pipe_pane_queues_correct_command`).
+- [x] Verify the reproducing test now PASSES.
 
 ## 3. Bug 3 — `__dashboard` command sent unquoted via `send-keys`
 
