@@ -59,14 +59,20 @@ changes no existing requirement's contract for well-formed inputs.
 ## Impact
 
 - **Code:**
-  - `src/tmux.rs` — session-name construction (`SessionBuilder::build` ~:390,
-    `resolve_session_name` ~:615, the supervisor builder ~:1119) routes through a
-    `SessionName` smart constructor; `pipe_pane` (~:230) shell-quotes `log_path`.
-  - `src/git.rs` — `project_name` stays as-is (raw dir name); a new `SessionName`
-    newtype (co-located with the existing `worktree_dir_name` / `branch_slug`
-    sanitizers) owns the `paw-<slug>` sanitization.
-  - `src/main.rs` — the six `__dashboard` command sites send the command with `-l`
-    (plus a follow-up `Enter`) or via a shell-quoted binary path.
+  - `src/tmux/command.rs` — session-name construction (`TmuxSessionBuilder::build`,
+    `build_supervisor_session`) routes through the `SessionName` smart constructor;
+    `pipe_pane` shell-quotes `log_path`.
+  - `src/tmux/session.rs` — `resolve_session_name_with` appends the `-2`/`-3` collision
+    suffix to the already-sanitized base.
+  - `src/domain.rs` — `git::project_name` stays as-is (raw dir name); the existing
+    `SessionName` newtype (landed by `code-analysis-refactor` as a byte-identical
+    construction seam) gains the `paw-<slug>` sanitization, and a `shell_quote` helper
+    joins it as the quoting boundary for paths.
+  - `src/skills.rs` — `{{PROJECT_NAME}}` renders the sanitized slug, since the bundled
+    supervisor skill uses it only as the tmux target `paw-{{PROJECT_NAME}}`.
+  - `src/commands/{start,recover,supervisor}.rs` — the five `__dashboard` command sites
+    plus the pause/resume direct send build the command through one helper that
+    shell-quotes the `current_exe()` path.
 - **Not enum-variant ripple:** no `BrokerMessage` / `SpecBackendKind` variant is added
   or removed.
 - **Frozen surfaces untouched:** no config key, no broker wire shape, no serde

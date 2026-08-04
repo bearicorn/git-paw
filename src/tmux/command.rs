@@ -386,9 +386,13 @@ impl TmuxSessionBuilder {
             ));
         }
 
-        let session_name = self
-            .session_name_override
-            .unwrap_or_else(|| format!("paw-{}", self.project_name));
+        // An override carries a name already resolved through `SessionName`
+        // (see `resolve_session_name`); otherwise derive it here so a project
+        // directory named `my.app` or `My Project` still yields a valid tmux
+        // target.
+        let session_name = self.session_name_override.unwrap_or_else(|| {
+            crate::domain::SessionName::from_project(&self.project_name).into_string()
+        });
         let mut commands = Vec::new();
 
         // 1. Create detached session (pane 0 is implicit).
@@ -597,7 +601,8 @@ pub fn build_supervisor_session(
 ) -> Result<TmuxSession, PawError> {
     use crate::supervisor::layout::{SUPERVISOR_AGENTS_PER_ROW, SUPERVISOR_PANE_OFFSET};
 
-    let session_name = session_name_override.unwrap_or_else(|| format!("paw-{project_name}"));
+    let session_name = session_name_override
+        .unwrap_or_else(|| crate::domain::SessionName::from_project(project_name).into_string());
     let mut commands: Vec<TmuxCommand> = Vec::new();
 
     let push = |cmds: &mut Vec<TmuxCommand>, parts: &[&str]| {

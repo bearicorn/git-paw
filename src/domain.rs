@@ -6,42 +6,93 @@
 //! [`BranchSlug`], and [`WorktreePath`] centralise that construction in one
 //! place.
 //!
-//! **This change is a construction *seam* only.** Each constructor's output is
-//! **byte-identical** to the previous inline construction for every current
-//! input — no space/dot/quote sanitisation is added here, because adding it
-//! would be an observable behaviour change, and "a behaviour change is not a
-//! refactor". `path-injection-hardening` later hardens these constructors in
-//! this one place (sanitise/quote-at-construction) without having to hunt down
-//! scattered `format!` sites. Keeping the seam and the hardening separate is
-//! deliberate (design D3).
+//! The seam was introduced first (`code-analysis-refactor`) with
+//! byte-identical output, then hardened here by `path-injection-hardening`:
+//! [`SessionName::from_project`] sanitises the project name to a tmux-safe
+//! slug and [`shell_quote`] quotes a path before it is interpolated into a
+//! `/bin/sh -c` body or a command typed into a pane. Sanitising at
+//! construction is what stops downstream code from interpolating a raw
+//! untrusted string; for a well-formed input every constructor's output is
+//! unchanged from the seam's.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+/// The slug used when sanitising a project name leaves nothing usable.
+///
+/// Matches [`crate::git::project_name`]'s own fallback for a repository
+/// directory whose name cannot be read, so an unnameable directory keeps
+/// producing the same `paw-unknown` session name it does today.
+const PROJECT_SLUG_FALLBACK: &str = "unknown";
+
+/// Sanitise a project name into a slug that is safe inside a tmux target.
+///
+/// ASCII letters, digits, `_`, and `-` are kept verbatim — case included,
+/// since tmux session names are case-sensitive and case is not a target
+/// separator. Every other character is a separator: `.` and `:` (tmux's own
+/// window and pane separators) and whitespace all become `-`, a run of them
+/// collapses to a single `-`, and a leading or trailing run is dropped. So
+/// `my.app` → `my-app`, `My Project` → `My-Project`, and `my..app` → `my-app`.
+///
+/// A name made only of already-safe characters is returned unchanged (so
+/// `git-paw` → `git-paw` and even `my--app` keeps both dashes), which is what
+/// keeps the derived session name byte-identical for well-formed inputs. A
+/// name that sanitises to nothing yields [`PROJECT_SLUG_FALLBACK`].
+#[must_use]
+pub fn project_slug(project: &str) -> String {
+    let mut slug = String::with_capacity(project.len());
+    // Set when one or more separator characters have been seen but not yet
+    // emitted; a pending run collapses to one `-`, and a leading or trailing
+    // run is never emitted at all.
+    let mut pending_separator = false;
+    for c in project.chars() {
+        if matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '-') {
+            if pending_separator && !slug.is_empty() {
+                slug.push('-');
+            }
+            pending_separator = false;
+            slug.push(c);
+        } else {
+            pending_separator = true;
+        }
+    }
+
+    if slug.is_empty() {
+        PROJECT_SLUG_FALLBACK.to_owned()
+    } else {
+        slug
+    }
+}
+
 /// A tmux session name — the string git-paw passes to `tmux … -t <session>`.
 ///
-/// Constructed as `paw-<project>` (plus an optional numeric collision suffix),
-/// byte-identical to the previous inline `format!("paw-{project}")`.
+/// Constructed as `paw-<slug>` (plus an optional numeric collision suffix)
+/// where `<slug>` is [`project_slug`]'s tmux-safe form of the repository
+/// directory name. A `SessionName` therefore never holds a name that tmux
+/// would reject or mis-parse: an unsanitised `.` would make tmux read
+/// `paw-my.app` as session `paw-my` plus pane `app`, breaking every scoped
+/// pane command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionName(String);
 
 impl SessionName {
-    /// The base session name for `project`: `paw-<project>`.
+    /// The base session name for `project`: `paw-<slug>`.
     ///
-    /// Byte-identical to the previous inline `format!("paw-{project}")`; no
-    /// sanitisation is applied (see the module docs).
+    /// This is the only way to build a `SessionName` from a project name, so
+    /// [`project_slug`]'s sanitisation cannot be bypassed. For a project name
+    /// of only `[A-Za-z0-9_-]` the result is byte-identical to the
+    /// pre-hardening `paw-<project>`.
     #[must_use]
-    pub fn for_project(project: &str) -> Self {
-        Self(format!("paw-{project}"))
+    pub fn from_project(project: &str) -> Self {
+        Self(format!("paw-{}", project_slug(project)))
     }
 
     /// This name with a numeric collision suffix appended: `<base>-<n>`.
     ///
-    /// Takes any `Display` value so it is byte-identical to the previous inline
-    /// `format!("{base}-{suffix}")` regardless of the loop counter's integer
-    /// type.
+    /// The suffix is appended to the already-sanitised base, so the whole name
+    /// stays a valid tmux target.
     #[must_use]
-    pub fn with_collision_suffix(&self, n: impl fmt::Display) -> Self {
+    pub fn with_collision_suffix(&self, n: u32) -> Self {
         Self(format!("{}-{n}", self.0))
     }
 
@@ -61,6 +112,12 @@ impl SessionName {
 impl fmt::Display for SessionName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for SessionName {
+    fn as_ref(&self) -> &str {
+        &self.0
     }
 }
 
@@ -143,21 +200,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_name_is_paw_prefixed_verbatim() {
-        assert_eq!(
-            SessionName::for_project("my-project").as_str(),
-            "paw-my-project"
-        );
-        // No sanitisation: a space/dot passes through unchanged (byte-identical
-        // to the previous inline construction; hardening is #10's job).
-        assert_eq!(SessionName::for_project("a b.c").as_str(), "paw-a b.c");
+    fn session_name_sanitises_the_project_into_a_tmux_safe_target() {
+        for (project, expected) in [
+            // Characters tmux reserves inside a target, and whitespace.
+            ("my.app", "paw-my-app"),
+            ("My Project", "paw-My-Project"),
+            ("a:b", "paw-a-b"),
+            ("my..app", "paw-my-app"),
+            (".leading", "paw-leading"),
+            ("trailing.", "paw-trailing"),
+            // Already-safe names are byte-identical to the pre-hardening form.
+            ("git-paw", "paw-git-paw"),
+            ("my-project", "paw-my-project"),
+            ("my--app", "paw-my--app"),
+            ("snake_case9", "paw-snake_case9"),
+            // Nothing usable left => the `project_name` fallback.
+            ("", "paw-unknown"),
+            ("...", "paw-unknown"),
+        ] {
+            let name = SessionName::from_project(project);
+            assert_eq!(name.as_str(), expected, "project: {project:?}");
+            assert!(
+                !name
+                    .as_str()
+                    .contains(|c: char| c == '.' || c == ':' || c.is_whitespace()),
+                "sanitised name {name} still holds a tmux target separator"
+            );
+        }
     }
 
     #[test]
-    fn session_name_collision_suffix_matches_inline_format() {
-        let base = SessionName::for_project("proj");
-        assert_eq!(base.with_collision_suffix(2).as_str(), "paw-proj-2");
-        assert_eq!(base.with_collision_suffix(7).into_string(), "paw-proj-7");
+    fn session_name_collision_suffix_appends_to_the_sanitised_base() {
+        let base = SessionName::from_project("my.app");
+        assert_eq!(base.with_collision_suffix(2).as_str(), "paw-my-app-2");
+        assert_eq!(base.with_collision_suffix(7).into_string(), "paw-my-app-7");
     }
 
     #[test]
