@@ -97,31 +97,106 @@ reproducing test precedes every fix.
 
 ## 4. Newtype boundary (generalize the fix)
 
-- [ ] Confirm no raw `format!("paw-{…}")` or unquoted path/command interpolation into a
+- [x] Confirm no raw `format!("paw-{…}")` or unquoted path/command interpolation into a
       tmux/shell context remains for these sites — grep `src/` and assert every
       session-name / pipe-pane / dashboard-send path goes through `SessionName` or the
       shell-quote helper.
-- [ ] `///` docs on the newtype + helper; `//!` module docs unchanged; no
-      `unwrap()`/`expect()` in non-test code.
+      Result: `grep -rn 'format!("paw-' src/` leaves exactly one production hit,
+      `src/domain.rs` inside `SessionName::from_project` itself (the boundary); the other
+      two hits are test-local session names in `src/tmux/tests.rs`. All three
+      session-name consumers call `SessionName::from_project`; `pipe_pane` and
+      `dashboard_command_for` are the only two shell-body constructions and both call
+      `domain::shell_quote`. A sweep for other `sh -c` bodies found none (the
+      `publish_supervisor_question` comment claiming `sh -c curl` is stale — it posts
+      over HTTP).
+- [x] `///` docs on the newtype + helper; `//!` module docs unchanged; no
+      `unwrap()`/`expect()` in non-test code (`git diff` over this change's commits adds
+      `unwrap`/`expect` only inside `#[cfg(test)]` code).
 
 ## 5. Docs
 
-- [ ] mdBook: note in the troubleshooting/limitations page that repo directory names
+- [x] mdBook: note in the troubleshooting/limitations page that repo directory names
       containing `.` or spaces (and installed-binary paths with spaces) are now
-      supported. `mdbook build docs/` passes.
-- [ ] No `--help`, README CLI table, or configuration-reference change (no new surface).
+      supported (`docs/src/faq.md`, Troubleshooting → "Repository names with dots or
+      spaces, and install paths with spaces"). `mdbook build docs/` passes (exit 0; the
+      two `specifications/index.md` HTML-tag warnings are pre-existing).
+- [x] No `--help`, README CLI table, or configuration-reference change (no new surface):
+      `src/cli.rs`, `README.md`, and `docs/src/configuration/` are untouched by this
+      change.
 
 ## 6. Verification (five gates)
 
+> **Deferred to the supervisor (per supervisor directive, 2026-08-05).** The full
+> integration/e2e suite cannot be honestly run from inside the live dogfood session:
+> the `tests/helpers/mod.rs` guard refuses to run while a `paw-*` session owns the
+> default tmux socket (155 of 155 failures in a plain `cargo test --no-fail-fast` were
+> that guard, zero were real), and forcing it with `GIT_PAW_ALLOW_LIVE_SESSION=1` is
+> prohibited because it can disturb or kill the live supervisor session and yields
+> flaky results either way. The full suite plus the merge-base regression diff is
+> therefore deferred to the supervisor in a clean environment. The five-gate framework
+> is supervisor-owned; the boxes below stay unchecked, with the coding agent's evidence
+> recorded for the gate run.
+
 - [ ] Gate 1 — Testing: `cargo test --no-fail-fast` for the three reproducing tests +
       newtype/helper unit tests, all green.
+      *Agent evidence (not a gate pass):* `cargo test --lib --bins --no-fail-fast`
+      exit 0 — 1820 lib + 59 bin tests, 0 failed. That covers all three reproducing
+      tests and every newtype/helper unit test, but **skips every integration/e2e
+      test**, so the gate itself is unmet until the full suite runs.
 - [ ] Gate 2 — Regression: full suite green diffed against the merge-base (serialize
-      the tmux/e2e suites).
+      the tmux/e2e suites). Deferred — see the note above. Not attempted on a
+      `--lib`-only basis.
 - [ ] Gate 3 — Spec audit: every `safe-process-invocation` scenario maps to a test.
+      *Agent-prepared mapping for the gate run (10 scenarios):*
+      1. *Session name from a directory with a space* →
+         `tmux::tests::awkward_project_names_yield_tmux_safe_session_names_and_pane_targets`
+         (`My Project` row + pane-target assertions) and, for the "resolves to a real
+         pane" clause, `tmux::tests::a_session_for_an_awkward_project_name_resolves_its_pane_targets`.
+      2. *Session name from a dotted directory* → both tests above, `my.app` row.
+      3. *Well-formed name is unchanged* → `git-paw` row in the dry-run table plus
+         `domain::tests::session_name_sanitises_the_project_into_a_tmux_safe_target`
+         (`git-paw`, `my-project`, `my--app`, `snake_case9` rows).
+      4. *Collision suffix appends to the sanitized base* →
+         `domain::tests::session_name_collision_suffix_appends_to_the_sanitised_base`,
+         with the pre-existing `resolve_session_name_walks_past_occupied_names`.
+      5. *Logging to a path with a space* →
+         `tmux::tests::pipe_pane_quotes_a_log_path_containing_a_space` (the emitted
+         `/bin/sh -c` body) and `tmux::tests::pipe_pane_captures_into_a_log_path_containing_a_space`
+         (the capture lands in the one correct file).
+      6. *Plain path is behavior-equivalent* →
+         `domain::tests::shell_quote_survives_a_real_shell_round_trip` (plain-path row)
+         and `tmux::tests::pipe_pane_queues_correct_command`.
+      7. *Dashboard launches from a spaced binary path* →
+         `commands::helpers::tests::a_spaced_binary_path_launches_the_dashboard_command_in_a_pane`
+         (live pane + stub binary under `<tmp>/My Bin`).
+      8. *Plain binary path is unchanged* →
+         `commands::helpers::tests::dashboard_command_shell_quotes_the_binary_path`
+         (plain-path and `git-paw` PATH-fallback rows).
+      9. *Newtype constructor never yields an unsafe value* →
+         `domain::tests::session_name_sanitises_the_project_into_a_tmux_safe_target`
+         asserts no `.`, `:`, or whitespace survives for any row. The "no alternative
+         constructor" clause is an API property, not a behavior: the field is private
+         and the only constructors are `from_project` (sanitizes) and
+         `with_collision_suffix(u32)` (numeric, appends to a sanitized base).
+      10. *Single boundary, no ad-hoc call-site escaping* → the group-4 grep result
+          above (one production `paw-` construction, in the constructor; two
+          `shell_quote` call sites and no other shell body).
 - [ ] Gate 4 — Doc audit: mdBook note added; `mdbook build docs/` passes; `--help`
-      unchanged (no surface change).
+      unchanged (no surface change). *Agent evidence:* see group 5 — `docs/src/faq.md`
+      note added, `mdbook build docs/` exit 0, `src/cli.rs` untouched.
 - [ ] Gate 5 — Security: sanitization/quoting at a single construction boundary; no
       new shell-injection surface; no secrets; least privilege preserved.
+      *Agent evidence:* sanitization lives only in `SessionName::from_project` and
+      quoting only in `domain::shell_quote`; both narrow what reaches tmux/the shell
+      rather than widening it (`with_collision_suffix` narrowed from `impl Display` to
+      `u32`); no new process spawns, no config/allowlist/wire change, no secrets
+      introduced.
 - [ ] `just check` + `just deny` green, verified by real exit code (not piped output);
-      `cargo fmt` before commit.
-- [ ] `openspec validate path-injection-hardening --strict` passes.
+      `cargo fmt` before commit. *Partially verified:* `cargo fmt --check` exit 0,
+      `cargo clippy --all-targets -- -D warnings` exit 0, `cargo deny check` exit 0
+      (`advisories ok, bans ok, licenses ok, sources ok`; the
+      `RUSTSEC-2026-0002 advisory-not-detected` warning is a pre-existing stale
+      `deny.toml` entry). The `cargo test` half of `just check` is the deferred full
+      suite above, so this box stays unchecked.
+- [x] `openspec validate path-injection-hardening --strict` passes (exit 0,
+      "Change 'path-injection-hardening' is valid").
