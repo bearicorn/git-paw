@@ -27,9 +27,18 @@ use git_paw::config::RoleGatingMode;
 use git_paw::opsx::RoleGatingContext;
 
 /// How many `committed` artifacts the H1 burst publishes. Each one trips the
-/// guard's blocking `git` read, so the burst carries far more blocking work
-/// than the runtime has worker threads.
-const BURST: usize = 120;
+/// guard's blocking read, so the burst carries far more blocking work than the
+/// runtime has worker threads: offloaded it drains in ~one [`GUARD_DELAY`],
+/// blocked it serializes two-at-a-time through the workers.
+const BURST: usize = 40;
+
+/// Deterministic per-read blocking cost for the H1 test, injected via the
+/// role-guard test seam ([`set_head_read_test_delay`]). Using a sleep rather
+/// than relying on real `git` timing makes the offload observable by wall-clock
+/// on any core count: a sleep releases the CPU, whereas 120 real `git`
+/// subprocesses saturate a small CI runner and hide the offload. Blocked, the
+/// burst takes ~`BURST/2 * GUARD_DELAY` (3s); offloaded, ~one `GUARD_DELAY`.
+const GUARD_DELAY: Duration = Duration::from_millis(150);
 
 /// Upper bound on `GET /status` while the burst is in flight. Generous by
 /// design — the discriminating assertion is that `/status` answers *while* the
@@ -152,6 +161,12 @@ async fn publish_burst_with_role_gating_does_not_stall_status() {
     );
     let app = server::router(state);
 
+    // Make each guard read block for a deterministic, CPU-releasing delay so the
+    // offload is measurable regardless of runner core count (real git is
+    // CPU-bound and, at burst scale, saturates a small CI runner — hiding the
+    // offload behind scheduler contention). Reset before asserting.
+    git_paw::opsx::role_guard::set_head_read_test_delay(GUARD_DELAY);
+
     let started = Instant::now();
     let burst: Vec<_> = (0..BURST)
         .map(|_| {
@@ -180,6 +195,7 @@ async fn publish_burst_with_role_gating_does_not_stall_status() {
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
     }
     let burst_elapsed = started.elapsed();
+    git_paw::opsx::role_guard::set_head_read_test_delay(Duration::ZERO);
 
     assert!(
         status_elapsed * 2 < burst_elapsed,
