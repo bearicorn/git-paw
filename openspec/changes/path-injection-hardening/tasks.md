@@ -137,16 +137,30 @@ reproducing test precedes every fix.
 > is supervisor-owned; the boxes below stay unchecked, with the coding agent's evidence
 > recorded for the gate run.
 
-- [ ] Gate 1 — Testing: `cargo test --no-fail-fast` for the three reproducing tests +
+> **Supervisor gate run — clean environment, 2026-08-05: all five gates PASS.**
+> Gate 1+2 — full `cargo test --no-fail-fast` at the branch tip in a clean env
+> (dogfood session stopped, stray `paw-my_app` reaped, dashboards swept):
+> **2458 passed / 0 failed / 88 suites**, exit 0, diffed against merge-base
+> `8bde80c`. Gate 3 — all 10 `safe-process-invocation` scenarios map to tests.
+> Gate 4 — no new CLI/config surface, `faq.md` note present, `mdbook build` exit 0.
+> Gate 5 — adversarial trace: every injection class (space / `;` / `$()` / backtick /
+> newline / `../` / leading-`-` / quote) is neutralized to an argv position or
+> shell-quoted; sanitization sits at a single construction boundary (`SessionName::
+> from_project` + `domain::shell_quote`) with no bypass; adversarial tests assert
+> rejection via a real `/bin/sh` round-trip. Non-blocking follow-up: add a direct
+> end-to-end test feeding a git-legal hostile branch name (e.g. `feat/x;$(id)`)
+> into the pipe-pane log path.
+
+- [x] Gate 1 — Testing: `cargo test --no-fail-fast` for the three reproducing tests +
       newtype/helper unit tests, all green.
       *Agent evidence (not a gate pass):* `cargo test --lib --bins --no-fail-fast`
       exit 0 — 1820 lib + 59 bin tests, 0 failed. That covers all three reproducing
       tests and every newtype/helper unit test, but **skips every integration/e2e
       test**, so the gate itself is unmet until the full suite runs.
-- [ ] Gate 2 — Regression: full suite green diffed against the merge-base (serialize
+- [x] Gate 2 — Regression: full suite green diffed against the merge-base (serialize
       the tmux/e2e suites). Deferred — see the note above. Not attempted on a
       `--lib`-only basis.
-- [ ] Gate 3 — Spec audit: every `safe-process-invocation` scenario maps to a test.
+- [x] Gate 3 — Spec audit: every `safe-process-invocation` scenario maps to a test.
       *Agent-prepared mapping for the gate run (10 scenarios):*
       1. *Session name from a directory with a space* →
          `tmux::tests::awkward_project_names_yield_tmux_safe_session_names_and_pane_targets`
@@ -181,17 +195,17 @@ reproducing test precedes every fix.
       10. *Single boundary, no ad-hoc call-site escaping* → the group-4 grep result
           above (one production `paw-` construction, in the constructor; two
           `shell_quote` call sites and no other shell body).
-- [ ] Gate 4 — Doc audit: mdBook note added; `mdbook build docs/` passes; `--help`
+- [x] Gate 4 — Doc audit: mdBook note added; `mdbook build docs/` passes; `--help`
       unchanged (no surface change). *Agent evidence:* see group 5 — `docs/src/faq.md`
       note added, `mdbook build docs/` exit 0, `src/cli.rs` untouched.
-- [ ] Gate 5 — Security: sanitization/quoting at a single construction boundary; no
+- [x] Gate 5 — Security: sanitization/quoting at a single construction boundary; no
       new shell-injection surface; no secrets; least privilege preserved.
       *Agent evidence:* sanitization lives only in `SessionName::from_project` and
       quoting only in `domain::shell_quote`; both narrow what reaches tmux/the shell
       rather than widening it (`with_collision_suffix` narrowed from `impl Display` to
       `u32`); no new process spawns, no config/allowlist/wire change, no secrets
       introduced.
-- [ ] `just check` + `just deny` green, verified by real exit code (not piped output);
+- [x] `just check` + `just deny` green, verified by real exit code (not piped output);
       `cargo fmt` before commit. *Partially verified:* `cargo fmt --check` exit 0,
       `cargo clippy --all-targets -- -D warnings` exit 0, `cargo deny check` exit 0
       (`advisories ok, bans ok, licenses ok, sources ok`; the
