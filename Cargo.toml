@@ -2,7 +2,7 @@
 name = "git-paw"
 version = "0.13.0"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.96"
 description = "Parallel AI Worktrees — orchestrate multiple AI coding CLI sessions across git worktrees"
 license = "MIT"
 repository = "https://github.com/bearicorn/git-paw"
