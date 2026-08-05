@@ -5,7 +5,92 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.12.0] - 2026-07-22
+## [0.13.0] - 2026-08-05
+
+### Features
+
+- *(broker)* Default absent no-contract list fields to empty vectors
+- *(cli)* Give doctor a live session-lifecycle smoke arm
+- *(cli)* Add git paw doctor read-only preflight diagnostics
+- *(cli)* Hide selftest from the public command surface
+- *(skills)* Add spec-organization dev skill for the Gate-3 spec audit
+- *(detect,config)* Replace gemini cli with antigravity (agy)
+- *(skills)* Add doc-completeness, security-review, safety-review, definition-of-done skills
+- *(skills)* Add export-agnosticism agent skill across all export surfaces
+- *(skills)* Consult the project's .agents/skills standards at author and review time
+- *(skills)* Add code-standards agent skill (patterns, NFRs, do-not-touch)
+- *(skills)* Add test-strategy agent skill and conformance guard
+
+### Bug Fixes
+
+- *(broker)* Offload blocking publish work and recover a poisoned state lock
+- *(dashboard,cli)* Shell-quote the binary path in the __dashboard command
+- *(tmux,logging)* Shell-quote the pipe-pane log path
+- *(tmux,session)* Sanitize the tmux session name at construction
+- *(logging)* Attach pipe-pane on every launch path
+- *(specs)* Reconcile the auto-approval live-prompt window contradiction
+- *(specs)* Weave the agy-roster correction into merged cli-resolution
+
+### Refactor
+
+- *(tmux)* Route the runtime path through the CommandRunner seam
+- *(cli)* Move supervisor mode into commands::supervisor (repoint source_audit)
+- *(cli)* Extract the recover/start/add/remove handlers into src/commands
+- *(cli)* Split main.rs handlers into src/commands modules
+- *(git,tmux)* Add domain newtypes as the construction seam
+- *(tmux)* Introduce CommandRunner seam at the builder execute site
+- *(tmux)* Split tmux.rs into a tmux/ module tree (R1, behavior-preserving)
+- *(config)* Split config.rs into a config/ module tree (R1, behavior-preserving)
+- Code-analysis-refactor R1 idiom/hygiene (behavior-preserving)
+- *(skills)* Merge security-review + safety-review into one security-and-safety-review skill
+
+### Documentation
+
+- *(user-guide)* Document git paw doctor and fold selftest under it
+- *(specs)* Doctor checks for a python3 interpreter
+- *(skills)* Capture the net-first consolidation doctrine in test-strategy
+- *(skills)* Fold the namespacing doctrine into the spec-organization skill
+- *(specs)* Spec-consolidation wave 6 — domain-grouped Specifications index
+- *(specs)* Omit the deprecated --from-specs alias from the cli-interaction-e2e matrix
+
+### Testing
+
+- *(broker)* Make the H1 non-stall assertion deterministic on constrained CI
+- *(broker)* Assert populated artifact payloads round-trip byte-equivalently
+- *(cli)* Cover the doctor exit-code, --json and read-only contracts
+- *(tmux)* Reap the isolated tmux server on TmuxTestEnv drop
+- *(interactive)* Cover init migrate-supervisor prompt gating
+- *(worktree)* Parse list-panes with a space delimiter
+- *(cli)* Delete source-grep cli_specs_tty_proceeds_to_picker (behaviorally replaced)
+- *(cli)* Add bare --specs spec-picker shown-gate (PTY)
+- *(cli)* Add spec-launch dispatch rows to the cli-interaction-e2e matrix
+- *(broker)* Trim raw-TCP per-code dups + table-ify delivery routing
+- *(config)* Fold absent-section backward-compat fixtures into one table
+- *(session)* Delete redundant session_integration.rs (unit tests fully cover it)
+- *(config)* Table-ify default/section-absent/enum-parse clusters (safe wave)
+- *(cli,supervisor)* Table-ify cli arg-parse + classifier clusters (safe wave)
+- *(broker)* Table-ify messages.rs getter/slugify/payload clusters (safe wave)
+- Consolidate error/layout/dashboard unit clusters into tables (safe wave)
+- *(session)* Add session-logging capture-on-launch guard (net-first)
+- *(cli)* Add CLI-resolution-chain guard (net-first)
+- *(approval)* Add protected-path / out-of-worktree enforcement guard (net-first)
+- *(specs)* Add superpowers backend integration guard (net-first)
+- *(cli)* Fix clippy lints in prompt-matrix helpers
+- *(interactive)* Add destructive-confirmation gating rows (stop, purge --force)
+- *(interactive)* Add start-family PTY shown picker rows
+- *(interactive)* Add start-family bypass rows to the prompt matrix
+- *(interactive)* Promote shared PTY harness and add the init prompt-matrix slice
+- *(skills)* Explicitly guard the standards-consult wording in the lang-agnostic audit
+
+### CI/CD
+
+- *(smoke)* Install python3 in the container smoke image
+- *(container)* Run smoke-container as non-root + --init to mirror the CI runner
+
+### Miscellaneous
+
+- *(skills)* Rustfmt tests/standards_skill_consult.rs
+## [0.12.0] - 2026-07-24
 
 ### Features
 
@@ -223,6 +308,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 - Add CLI tool for parallel AI coding sessions across git worktrees
+[0.13.0]: https://github.com/bearicorn/git-paw/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/bearicorn/git-paw/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/bearicorn/git-paw/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/bearicorn/git-paw/compare/v0.9.0...v0.10.0
