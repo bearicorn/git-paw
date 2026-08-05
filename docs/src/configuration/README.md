@@ -32,7 +32,7 @@ mouse = true
 
 # Where agent worktrees are created: "child" (in-repo .git-paw/worktrees/)
 # or "sibling" (../<project>-<branch>). Absent = "sibling"; git paw init
-# writes "child" for new repos.
+# writes "child" for new repos and backfills it into a config that omits it.
 worktree_placement = "child"
 
 # Pane affordances: heavy borders, per-pane labels, active-pane highlight
@@ -87,6 +87,31 @@ cli = "codex"
 # readme = "README.md"
 # docs = "docs/src"
 ```
+
+## Upgrading an Existing Config
+
+`git paw init` is the upgrade path after a version bump: re-run it in an
+already-initialised repo and it brings `.git-paw/config.toml` up to the current
+defaults. The migration is **strictly additive** — it appends
+
+- any default `[section]` the file is missing, and
+- any **top-level default key** the file is missing, written with its
+  generated-default value (for example `worktree_placement`, added in v0.8.0).
+
+It never modifies or removes a section, a key, or a commented example you have
+already set, so your customised settings survive verbatim. Once every default
+section and top-level key is present the run is a no-op, and init reports
+`Already initialized. Nothing to do.`
+
+When something is added, init names it:
+
+```text
+  Updated .git-paw/config.toml (added missing keys: worktree_placement)
+```
+
+One backfilled key can change behaviour — see
+[`worktree_placement`](#worktree_placement) for the warning init prints in that
+case.
 
 ## Settings Reference
 
@@ -161,6 +186,36 @@ Placement only governs **new** worktree creation. Existing worktrees stay
 where they are: each session records the concrete worktree path it created,
 and resume/status/purge operate on that recorded path — so flipping the
 config mid-project never orphans an already-created worktree.
+
+**Backfilled by `git paw init`.** Because `worktree_placement` is a top-level
+default key, [re-running `git paw init`](#upgrading-an-existing-config) on a
+config that omits it writes `worktree_placement = "child"` — the generated
+default, not the `"sibling"` the field resolves to when absent. That is
+deliberate: the backfill exists to bring a config up to the current defaults.
+
+If the repo already has worktrees under the previous sibling layout, that
+changes where the *next* worktree is created, so init prints a warning:
+
+```text
+warning: init backfilled worktree_placement = "child" — new agent worktrees will be created inside the repo at .git-paw/worktrees/.
+  1 existing worktree(s) remain in their previous (sibling) location; init did not move them:
+    /work/my-project-feat-auth
+  To keep the previous layout, set worktree_placement = "sibling" in .git-paw/config.toml;
+  otherwise leave it as "child" and new agents will use the contained layout.
+```
+
+Init **never moves, deletes, or re-registers a worktree** — it only warns. You
+choose:
+
+- **Keep the old layout** — set `worktree_placement = "sibling"` in
+  `.git-paw/config.toml`. Init leaves an explicitly-set value alone on every
+  later run.
+- **Adopt the contained layout** — leave the backfilled `"child"`. Existing
+  worktrees stay beside the repo and keep working (their recorded paths are
+  unchanged); only newly created ones land in `.git-paw/worktrees/`.
+
+A config that already sets `worktree_placement` (to either value) is never
+touched, and the key is never duplicated.
 
 ### `docs_base_url`
 

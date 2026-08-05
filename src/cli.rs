@@ -441,6 +441,10 @@ pub enum Command {
         about = "Initialize .git-paw/ directory and configuration",
         long_about = "Creates the .git-paw/ directory with a default config and sets up \
                       .gitignore for logs.\n\n\
+                      Also the upgrade path after a version bump: re-running init on an \
+                      existing config appends any missing section and backfills any missing \
+                      top-level default key, without modifying settings you have already \
+                      set.\n\n\
                       Examples:\n  git paw init"
     )]
     Init,

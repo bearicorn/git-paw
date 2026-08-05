@@ -6,13 +6,14 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use dialoguer::{Confirm, Input, Select};
 
 use crate::config;
 use crate::error::PawError;
 use crate::git;
+use crate::session;
 
 /// Gitignore entries managed by init. `.git-paw/tmp/` is the repo-local
 /// scratch dir (isolated verify worktrees, self-test sessions) — preferred
@@ -143,11 +144,22 @@ pub fn run_init() -> Result<(), PawError> {
     // 4. Generate or migrate config. For a fresh config, prompt for supervisor
     //    preferences and for the spec system to record in `[specs]`. For an
     //    existing config without a [supervisor] section, append one (prompting
-    //    if stdin is interactive). Init never mutates existing sections — only
-    //    appends missing ones.
-    let (created_config, migrated_config) = if config_path.exists() {
-        let migrated = migrate_existing_config(&config_path)?;
-        (false, migrated)
+    //    if stdin is interactive), and backfill any top-level default key the
+    //    file is missing. Init never mutates existing sections or keys — it
+    //    only appends absent ones.
+    let mut placement_before = None;
+    let (created_config, migration) = if config_path.exists() {
+        // Resolve the placement BEFORE migrating, so a backfilled
+        // `worktree_placement` can be compared against what the repo actually
+        // resolved. An unreadable or invalid config resolves to the default,
+        // exactly as the rest of git-paw would treat it.
+        placement_before = Some(
+            config::load_config(&repo_root, None)
+                .unwrap_or_default()
+                .worktree_placement(),
+        );
+        let migration = migrate_existing_config(&config_path)?;
+        (false, migration)
     } else {
         let supervisor_section = prompt_supervisor_section()?;
         // The config is the source of truth for the spec system, so ASK the
@@ -159,13 +171,18 @@ pub fn run_init() -> Result<(), PawError> {
             Some(&supervisor_section),
             specs_section.as_deref(),
         )?;
-        (true, false)
+        (true, ConfigMigration::default())
     };
     if created_config {
         println!("  Created .git-paw/config.toml");
-    } else if migrated_config {
-        println!("  Updated .git-paw/config.toml (added missing sections)");
+    } else if migration.changed() {
+        println!("  Updated .git-paw/config.toml ({})", migration.summary());
     }
+
+    // 4b. Warn — never relocate — when the backfilled `worktree_placement`
+    //     changes the repo's resolved layout and worktrees already exist under
+    //     the previous one.
+    warn_if_placement_backfilled(&repo_root, &migration, placement_before);
 
     // 5. Manage .gitignore
     let updated_gitignore = ensure_gitignore_entry(&repo_root)?;
@@ -177,7 +194,7 @@ pub fn run_init() -> Result<(), PawError> {
         && !created_logs
         && !created_tmp
         && !created_config
-        && !migrated_config
+        && !migration.changed()
         && !updated_gitignore
     {
         println!("Already initialized. Nothing to do.");
@@ -258,36 +275,268 @@ fn create_dir_if_missing(path: &Path) -> Result<bool, PawError> {
     Ok(true)
 }
 
-/// Appends any missing sections to an existing `config.toml`. Returns `true`
-/// if the file was modified. Does not touch any existing field — this is the
-/// safe upgrade path for new config sections added across versions.
-fn migrate_existing_config(path: &Path) -> Result<bool, PawError> {
+/// The top-level config key whose generated default (`"child"`) differs from
+/// the placement resolved when the key is absent (`"sibling"`), so backfilling
+/// it changes where new worktrees are created.
+const WORKTREE_PLACEMENT_KEY: &str = "worktree_placement";
+
+/// What [`migrate_existing_config`] changed in an existing `config.toml`.
+#[derive(Debug, Default)]
+struct ConfigMigration {
+    /// Whether a missing `[section]` was appended.
+    sections_added: bool,
+    /// Top-level default keys backfilled, in generated-template order.
+    keys_added: Vec<String>,
+}
+
+impl ConfigMigration {
+    /// Returns `true` when the migration modified the file.
+    fn changed(&self) -> bool {
+        self.sections_added || !self.keys_added.is_empty()
+    }
+
+    /// Renders the action summary init prints after the file name, e.g.
+    /// `added missing keys: worktree_placement`.
+    fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if self.sections_added {
+            parts.push("added missing sections".to_string());
+        }
+        if !self.keys_added.is_empty() {
+            parts.push(format!(
+                "added missing keys: {}",
+                self.keys_added.join(", ")
+            ));
+        }
+        parts.join("; ")
+    }
+}
+
+/// Appends any missing sections AND backfills any missing top-level default
+/// key in an existing `config.toml`, reporting what changed. Does not touch
+/// any existing field, value, or commented example — this is the safe upgrade
+/// path for config surface added across versions.
+fn migrate_existing_config(path: &Path) -> Result<ConfigMigration, PawError> {
     let existing = fs::read_to_string(path)
         .map_err(|e| PawError::InitError(format!("failed to read config: {e}")))?;
+    let template = config::generate_default_config();
 
-    let mut appended = String::new();
+    // Top-level default keys absent from the file as the user left it,
+    // computed before the seeding below so an empty config still reports the
+    // keys it gains.
+    let missing_keys = missing_top_level_keys(&existing, &template);
+
+    // An empty config has no user content to preserve, so init seeds the
+    // generated template verbatim: every default section (commented out) plus
+    // every top-level default key.
+    let seeded_template = existing.trim().is_empty();
+    let mut new_content = if seeded_template { template } else { existing };
+
+    // Backfill absent top-level keys at the end of the root-table region, not
+    // the end of the file — a key appended after a `[section]` header would
+    // land in that section's table instead of the root one. Strictly additive:
+    // existing keys, values, and commented examples are left byte-for-byte.
+    if !seeded_template && !missing_keys.is_empty() {
+        let mut block = String::new();
+        for (_, line) in &missing_keys {
+            block.push_str(line);
+            block.push('\n');
+        }
+        let insert_at = top_level_insert_offset(&new_content);
+        if insert_at == new_content.len() {
+            if !new_content.is_empty() && !new_content.ends_with('\n') {
+                new_content.push('\n');
+            }
+            new_content.push_str(&block);
+        } else {
+            // Keep a blank line between the backfill and the section header it
+            // is inserted above.
+            block.push('\n');
+            new_content.insert_str(insert_at, &block);
+        }
+    }
 
     // [supervisor] — the only section currently managed by migration. We
     // detect presence with a simple line-based scan rather than parsing TOML
     // so we don't lose comments or reorder fields on round-trip.
-    if !has_section(&existing, "supervisor") {
+    let mut appended = String::new();
+    if !has_section(&new_content, "supervisor") {
         let section = prompt_supervisor_section()?;
         appended.push_str(&section);
     }
 
-    if appended.is_empty() {
-        return Ok(false);
+    let migration = ConfigMigration {
+        sections_added: seeded_template || !appended.is_empty(),
+        keys_added: missing_keys.into_iter().map(|(key, _)| key).collect(),
+    };
+    if !migration.changed() {
+        return Ok(migration);
     }
 
-    let mut new_content = existing;
-    if !new_content.ends_with('\n') {
-        new_content.push('\n');
+    if !appended.is_empty() {
+        if !new_content.ends_with('\n') {
+            new_content.push('\n');
+        }
+        new_content.push_str(&appended);
     }
-    new_content.push_str(&appended);
 
     fs::write(path, new_content)
         .map_err(|e| PawError::InitError(format!("failed to write config: {e}")))?;
-    Ok(true)
+    Ok(migration)
+}
+
+/// Returns the simple top-level `key = value` lines in `content`, as
+/// `(key, line)` pairs in file order.
+///
+/// "Top-level" is the region TOML assigns to the root table: everything before
+/// the first *active* `[section]` header (a commented header opens no table, so
+/// it is not a boundary). Parsing is deliberately conservative — only the bare
+/// `key = value` form the generated template emits is recognised, so anything
+/// exotic (quoted or dotted keys, multi-line values) is ignored rather than
+/// misread. A miss is fail-safe: the key is simply not backfilled.
+fn top_level_key_lines(content: &str) -> Vec<(&str, &str)> {
+    let mut keys = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            break;
+        }
+        let Some((key, _)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if !key.is_empty()
+            && key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            keys.push((key, trimmed));
+        }
+    }
+    keys
+}
+
+/// Returns the generated `template`'s top-level default keys that are absent
+/// from `existing`, as `(key, line)` pairs in template order.
+///
+/// The `line` is the assignment to append verbatim, so a backfilled key
+/// carries its generated-default value.
+fn missing_top_level_keys(existing: &str, template: &str) -> Vec<(String, String)> {
+    let present: std::collections::HashSet<&str> = top_level_key_lines(existing)
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    top_level_key_lines(template)
+        .into_iter()
+        .filter(|(key, _)| !present.contains(key))
+        .map(|(key, line)| (key.to_string(), line.to_string()))
+        .collect()
+}
+
+/// Returns the byte offset at which a backfilled top-level key must be
+/// inserted into `content`: the start of the first *active* `[section]` header
+/// line, or the end of the file when there is none.
+fn top_level_insert_offset(content: &str) -> usize {
+    let mut offset = 0;
+    for line in content.split_inclusive('\n') {
+        // A commented header starts with `#`, so it never matches here.
+        if line.trim().starts_with('[') {
+            return offset;
+        }
+        offset += line.len();
+    }
+    content.len()
+}
+
+/// Returns the recorded worktree paths that live OUTSIDE the repo's
+/// child-placement directory (`<repo_root>/.git-paw/worktrees/`) — the ones
+/// created under the previous sibling layout.
+///
+/// Enumerated from session state, the same mechanism `status` and `purge` use.
+fn sibling_layout_worktrees(
+    repo_root: &Path,
+    worktrees: &[session::WorktreeEntry],
+) -> Vec<PathBuf> {
+    let child_root = repo_root.join(".git-paw").join("worktrees");
+    worktrees
+        .iter()
+        .filter(|entry| !entry.worktree_path.starts_with(&child_root))
+        .map(|entry| entry.worktree_path.clone())
+        .collect()
+}
+
+/// Renders the warning for a backfilled `worktree_placement` that changes the
+/// repo's resolved layout, or `None` when no worktree exists under the previous
+/// layout (nothing to warn about).
+///
+/// Init only ever warns: no worktree is moved, deleted, or re-registered, so
+/// the message says where the existing ones stayed and how to keep the old
+/// layout.
+fn placement_backfill_warning(sibling_worktrees: &[PathBuf]) -> Option<String> {
+    if sibling_worktrees.is_empty() {
+        return None;
+    }
+    let mut lines = vec![
+        "warning: init backfilled worktree_placement = \"child\" — new agent worktrees \
+         will be created inside the repo at .git-paw/worktrees/."
+            .to_string(),
+        format!(
+            "  {} existing worktree(s) remain in their previous (sibling) location; \
+             init did not move them:",
+            sibling_worktrees.len()
+        ),
+    ];
+    lines.extend(
+        sibling_worktrees
+            .iter()
+            .map(|path| format!("    {}", path.display())),
+    );
+    lines.push(
+        "  To keep the previous layout, set worktree_placement = \"sibling\" in \
+         .git-paw/config.toml;"
+            .to_string(),
+    );
+    lines.push(
+        "  otherwise leave it as \"child\" and new agents will use the contained layout."
+            .to_string(),
+    );
+    Some(lines.join("\n") + "\n")
+}
+
+/// Warns — never relocates — when the migration backfilled
+/// `worktree_placement` and that changes the repo's resolved layout while
+/// worktrees already exist under the previous (sibling) one.
+///
+/// Worktrees are enumerated from session state, the mechanism `status` and
+/// `purge` use; a missing or unreadable session means there is nothing to warn
+/// about. `placement_before` is the placement the repo resolved *before* the
+/// migration wrote anything.
+fn warn_if_placement_backfilled(
+    repo_root: &Path,
+    migration: &ConfigMigration,
+    placement_before: Option<config::WorktreePlacement>,
+) {
+    if !migration
+        .keys_added
+        .iter()
+        .any(|key| key == WORKTREE_PLACEMENT_KEY)
+        || placement_before != Some(config::WorktreePlacement::Sibling)
+    {
+        return;
+    }
+    let recorded = session::find_session_for_repo(repo_root)
+        .ok()
+        .flatten()
+        .map(|s| s.worktrees)
+        .unwrap_or_default();
+    if let Some(warning) =
+        placement_backfill_warning(&sibling_layout_worktrees(repo_root, &recorded))
+    {
+        eprint!("{warning}");
+    }
 }
 
 /// Returns `true` if a non-commented `[section]` header exists in `content`.
@@ -787,10 +1036,10 @@ cli = "echo"
 "#;
         fs::write(&config_path, initial).unwrap();
 
-        let modified = migrate_existing_config(&config_path).unwrap();
+        let migration = migrate_existing_config(&config_path).unwrap();
         assert!(
-            !modified,
-            "migrate must be a no-op when [supervisor] already exists"
+            !migration.sections_added,
+            "migrate must not append a section when [supervisor] already exists"
         );
 
         let after = fs::read_to_string(&config_path).unwrap();
@@ -826,9 +1075,9 @@ cli = "echo"
         let initial = "[broker]\nenabled = true\nport = 9119\n";
         fs::write(&config_path, initial).unwrap();
 
-        let modified = migrate_existing_config(&config_path).unwrap();
+        let migration = migrate_existing_config(&config_path).unwrap();
         assert!(
-            modified,
+            migration.sections_added,
             "migrate must report that the file was modified when appending"
         );
 
@@ -863,10 +1112,10 @@ cli = "echo"
 
         migrate_existing_config(&config_path).unwrap();
         let first = fs::read_to_string(&config_path).unwrap();
-        let modified = migrate_existing_config(&config_path).unwrap();
+        let migration = migrate_existing_config(&config_path).unwrap();
         let second = fs::read_to_string(&config_path).unwrap();
 
-        assert!(!modified, "second migrate must be a no-op");
+        assert!(!migration.changed(), "second migrate must be a no-op");
         assert_eq!(first, second);
     }
 
@@ -890,10 +1139,10 @@ test_command = "just check"
 "#;
         fs::write(&config_path, initial).unwrap();
 
-        let modified = migrate_existing_config(&config_path).unwrap();
+        let migration = migrate_existing_config(&config_path).unwrap();
         assert!(
-            !modified,
-            "migrate must be a no-op when an uncommented [supervisor] block already exists"
+            !migration.sections_added,
+            "migrate must not append a section when an uncommented [supervisor] block already exists"
         );
 
         let after = fs::read_to_string(&config_path).unwrap();
@@ -930,9 +1179,9 @@ test_command = "just check"
         let config_path = dir.path().join("config.toml");
         fs::write(&config_path, "branch_prefix = \"feat/\"\n").unwrap();
 
-        let modified = migrate_existing_config(&config_path).unwrap();
+        let migration = migrate_existing_config(&config_path).unwrap();
         assert!(
-            modified,
+            migration.sections_added,
             "migrate must append the missing [supervisor] section"
         );
 
@@ -950,6 +1199,323 @@ test_command = "just check"
         let parsed: crate::config::PawConfig = toml::from_str(&after)
             .expect("config with branch_prefix + appended supervisor must parse cleanly");
         assert_eq!(parsed.branch_prefix.as_deref(), Some("feat/"));
+    }
+
+    // --- top-level default-key backfill (init-config-backfill) ---
+
+    /// The root-table region ends at the first ACTIVE `[section]` header, and a
+    /// commented example is not a set key — so both a key that only appears
+    /// inside a section and a key that is only shown commented out are still
+    /// reported as absent (and therefore backfilled, leaving the comment alone).
+    #[test]
+    fn missing_top_level_keys_reports_only_absent_root_table_keys() {
+        let template = "worktree_placement = \"child\"\nbranch_prefix = \"spec/\"\n";
+        for (existing, expected) in [
+            (
+                "worktree_placement = \"sibling\"\nbranch_prefix = \"feat/\"\n",
+                vec![],
+            ),
+            (
+                "[broker]\nport = 9200\n",
+                vec!["worktree_placement", "branch_prefix"],
+            ),
+            (
+                "# worktree_placement = \"sibling\"\nbranch_prefix = \"feat/\"\n",
+                vec!["worktree_placement"],
+            ),
+            (
+                "[broker]\nworktree_placement = \"child\"\n",
+                vec!["worktree_placement", "branch_prefix"],
+            ),
+        ] {
+            let missing = missing_top_level_keys(existing, template);
+            let keys: Vec<&str> = missing.iter().map(|(key, _)| key.as_str()).collect();
+            assert_eq!(keys, expected, "existing config:\n{existing}");
+        }
+    }
+
+    /// The backfilled assignment carries the template's generated-default
+    /// value, so the key is written as `worktree_placement = "child"`.
+    #[test]
+    fn missing_top_level_keys_carries_the_generated_default_value() {
+        let missing = missing_top_level_keys("", &crate::config::generate_default_config());
+        assert_eq!(
+            missing,
+            vec![(
+                "worktree_placement".to_string(),
+                "worktree_placement = \"child\"".to_string()
+            )],
+            "the generated template's only top-level default key is worktree_placement"
+        );
+    }
+
+    /// Scenario: Init backfills a missing top-level default key. A config with
+    /// every managed section but no `worktree_placement` gains the key at its
+    /// generated default, and every pre-existing byte survives.
+    #[test]
+    fn migrate_backfills_absent_top_level_key_and_preserves_other_content() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let initial = "# user config\nbranch_prefix = \"feat/\"\n\n[broker]\nport = 9200\n\n[supervisor]\nenabled = true\n";
+        fs::write(&config_path, initial).unwrap();
+
+        let migration = migrate_existing_config(&config_path).unwrap();
+        assert!(migration.changed());
+        assert_eq!(migration.keys_added, vec!["worktree_placement".to_string()]);
+        assert!(
+            !migration.sections_added,
+            "[supervisor] is already present, so no section is appended"
+        );
+
+        let after = fs::read_to_string(&config_path).unwrap();
+        let parsed: crate::config::PawConfig = toml::from_str(&after)
+            .unwrap_or_else(|e| panic!("backfilled config must parse; {e}\n{after}"));
+        assert_eq!(
+            parsed.worktree_placement(),
+            crate::config::WorktreePlacement::Child,
+            "the backfilled key resolves to the generated default; got:\n{after}"
+        );
+        // Existing settings untouched.
+        assert_eq!(parsed.branch_prefix.as_deref(), Some("feat/"));
+        assert_eq!(parsed.broker.port, 9200);
+        assert!(parsed.supervisor.expect("supervisor kept").enabled);
+        // Strictly additive: removing the single inserted assignment restores
+        // the original file byte-for-byte.
+        assert_eq!(
+            after.replace("worktree_placement = \"child\"\n\n", ""),
+            initial,
+            "backfill must only ADD the assignment; got:\n{after}"
+        );
+    }
+
+    /// Scenario: Init is a no-op only when all sections and top-level keys are
+    /// present — exercised against the exact config `git paw init` generates.
+    #[test]
+    fn migrate_is_noop_when_every_section_and_top_level_key_is_present() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let initial = format!(
+            "{}{}",
+            crate::config::generate_default_config(),
+            supervisor_section(false, "").unwrap()
+        );
+        fs::write(&config_path, &initial).unwrap();
+
+        let migration = migrate_existing_config(&config_path).unwrap();
+        assert!(
+            !migration.changed(),
+            "an already-current config must not be modified; reported: {}",
+            migration.summary()
+        );
+        assert_eq!(
+            fs::read_to_string(&config_path).unwrap(),
+            initial,
+            "the file content must be unchanged"
+        );
+    }
+
+    /// Scenario: Init on a completely empty config file adds all sections and
+    /// keys — the commented section templates plus every top-level default key.
+    #[test]
+    fn migrate_on_empty_config_adds_all_sections_commented_and_top_level_keys() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+
+        let migration = migrate_existing_config(&config_path).unwrap();
+        assert!(migration.sections_added);
+        assert_eq!(migration.keys_added, vec!["worktree_placement".to_string()]);
+
+        let after = fs::read_to_string(&config_path).unwrap();
+        let parsed: crate::config::PawConfig = toml::from_str(&after)
+            .unwrap_or_else(|e| panic!("seeded config must parse; {e}\n{after}"));
+        assert_eq!(
+            parsed.worktree_placement(),
+            crate::config::WorktreePlacement::Child,
+            "top-level default keys are written; got:\n{after}"
+        );
+        for header in [
+            "# [dashboard]",
+            "# [layout]",
+            "# [specs]",
+            "# [logging]",
+            "# [broker]",
+            "# [supervisor]",
+            "# [opsx]",
+            "# [governance]",
+            "# [mcp]",
+        ] {
+            assert!(
+                after.contains(header),
+                "empty config must gain the commented `{header}` template; got:\n{after}"
+            );
+        }
+    }
+
+    /// Back-compat: a config that already sets `worktree_placement` (either
+    /// value) is left exactly as-is — the key is neither duplicated nor
+    /// re-valued.
+    #[test]
+    fn migrate_preserves_an_already_set_worktree_placement() {
+        for value in ["child", "sibling"] {
+            let dir = TempDir::new().unwrap();
+            let config_path = dir.path().join("config.toml");
+            let initial =
+                format!("worktree_placement = \"{value}\"\n\n[supervisor]\nenabled = false\n");
+            fs::write(&config_path, &initial).unwrap();
+
+            let migration = migrate_existing_config(&config_path).unwrap();
+            assert!(
+                !migration.changed(),
+                "a config already setting worktree_placement = \"{value}\" is current"
+            );
+            let after = fs::read_to_string(&config_path).unwrap();
+            assert_eq!(after, initial, "content must be preserved for {value}");
+            assert_eq!(
+                after.matches("worktree_placement").count(),
+                1,
+                "the key must not be duplicated for {value}; got:\n{after}"
+            );
+        }
+    }
+
+    /// The action summary init prints names each kind of change, matching the
+    /// existing "added missing sections" reporting.
+    #[test]
+    fn config_migration_summary_reports_each_kind_of_change() {
+        for (sections_added, keys, expected) in [
+            (true, vec![], "added missing sections"),
+            (
+                false,
+                vec!["worktree_placement".to_string()],
+                "added missing keys: worktree_placement",
+            ),
+            (
+                true,
+                vec!["worktree_placement".to_string()],
+                "added missing sections; added missing keys: worktree_placement",
+            ),
+        ] {
+            let migration = ConfigMigration {
+                sections_added,
+                keys_added: keys,
+            };
+            assert_eq!(migration.summary(), expected);
+        }
+    }
+
+    // --- worktree-placement change warning (init-config-backfill) ---
+
+    /// Builds a recorded session worktree entry for `branch` at `path`.
+    fn worktree_entry(branch: &str, path: &Path) -> session::WorktreeEntry {
+        session::WorktreeEntry {
+            branch: branch.to_string(),
+            worktree_path: path.to_path_buf(),
+            cli: "claude".to_string(),
+            branch_created: true,
+            pending_boot_prompt: None,
+        }
+    }
+
+    /// Only worktrees outside `<repo>/.git-paw/worktrees/` are under the
+    /// previous (sibling) layout, so an already-contained worktree is not
+    /// reported as stranded.
+    #[test]
+    fn sibling_layout_worktrees_excludes_child_placed_entries() {
+        let repo_root = Path::new("/repo");
+        let entries = [
+            worktree_entry("feat/a", Path::new("/repo-feat-a")),
+            worktree_entry("feat/b", Path::new("/repo/.git-paw/worktrees/feat-b")),
+        ];
+        assert_eq!(
+            sibling_layout_worktrees(repo_root, &entries),
+            vec![PathBuf::from("/repo-feat-a")]
+        );
+    }
+
+    /// Scenario: Backfilling child placement into a repo with existing sibling
+    /// worktrees warns — and init moves, deletes, and re-registers nothing.
+    #[test]
+    fn backfilling_placement_warns_without_touching_existing_worktrees() {
+        let dir = TempDir::new().unwrap();
+        let repo_root = dir.path().join("proj");
+        fs::create_dir_all(repo_root.join(".git-paw")).unwrap();
+        // A sibling-layout worktree that already exists on disk, with work in it.
+        let sibling = dir.path().join("proj-feat-a");
+        fs::create_dir_all(&sibling).unwrap();
+        fs::write(sibling.join("agent-work.txt"), "in progress").unwrap();
+        let recorded = [worktree_entry("feat/a", &sibling)];
+
+        // A config that omits worktree_placement (so the repo resolves to the
+        // sibling layout) but needs no section appended.
+        let config_path = repo_root.join(".git-paw").join("config.toml");
+        fs::write(&config_path, "[supervisor]\nenabled = false\n").unwrap();
+
+        let migration = migrate_existing_config(&config_path).unwrap();
+        assert_eq!(
+            migration.keys_added,
+            vec![WORKTREE_PLACEMENT_KEY.to_string()]
+        );
+
+        let stranded = sibling_layout_worktrees(&repo_root, &recorded);
+        let warning = placement_backfill_warning(&stranded).expect("warning is emitted");
+        assert!(
+            warning.contains("previous (sibling) location"),
+            "warning states existing worktrees stay put; got:\n{warning}"
+        );
+        assert!(
+            warning.contains("did not move them"),
+            "warning states init did not move them; got:\n{warning}"
+        );
+        assert!(
+            warning.contains("worktree_placement = \"sibling\""),
+            "warning includes the keep-the-old-layout remediation; got:\n{warning}"
+        );
+        assert!(
+            warning.contains(&sibling.display().to_string()),
+            "warning names the stranded worktree; got:\n{warning}"
+        );
+
+        // Nothing moved, deleted, or re-registered: the worktree and its
+        // contents are still on disk, and the recorded path is unchanged.
+        assert_eq!(
+            fs::read_to_string(sibling.join("agent-work.txt")).unwrap(),
+            "in progress",
+            "init must not touch an existing worktree on disk"
+        );
+        assert_eq!(
+            recorded[0].worktree_path, sibling,
+            "init must not re-register an existing worktree"
+        );
+    }
+
+    /// Scenario: Backfilling placement with no existing worktrees does not
+    /// warn — the key is still written.
+    #[test]
+    fn backfilling_placement_with_no_worktrees_writes_key_without_warning() {
+        let dir = TempDir::new().unwrap();
+        let repo_root = dir.path().join("proj");
+        fs::create_dir_all(repo_root.join(".git-paw")).unwrap();
+        let config_path = repo_root.join(".git-paw").join("config.toml");
+        fs::write(&config_path, "[supervisor]\nenabled = false\n").unwrap();
+
+        let migration = migrate_existing_config(&config_path).unwrap();
+        assert_eq!(
+            migration.keys_added,
+            vec![WORKTREE_PLACEMENT_KEY.to_string()]
+        );
+        let after = fs::read_to_string(&config_path).unwrap();
+        let parsed: crate::config::PawConfig = toml::from_str(&after).unwrap();
+        assert_eq!(
+            parsed.worktree_placement(),
+            crate::config::WorktreePlacement::Child,
+            "the key is written even with no worktrees; got:\n{after}"
+        );
+
+        assert!(
+            placement_backfill_warning(&sibling_layout_worktrees(&repo_root, &[])).is_none(),
+            "no relocation warning when the repo has no worktrees"
+        );
     }
 
     // --- Idempotency ---

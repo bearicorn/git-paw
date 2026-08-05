@@ -64,7 +64,8 @@ re-derive it from the current `worktree_placement`. The consequences:
 
 This makes the upgrade to v0.8.0 a no-op for existing repositories: with no
 `worktree_placement` field, the effective placement is `sibling`, byte-for-byte
-identical to v0.7.0.
+identical to v0.7.0. Re-running `git paw init` backfills the field — see
+[below](#git-paw-init-backfills-the-field).
 
 ## Setting it
 
@@ -77,3 +78,16 @@ worktree_placement = "child"   # or "sibling"
 
 See the [Configuration reference](../configuration/README.md#worktree_placement)
 for the full field description and merging rules.
+
+### `git paw init` backfills the field
+
+Re-running `git paw init` in an already-initialised repo backfills every missing
+top-level default key, `worktree_placement = "child"` among them. If the repo
+already has worktrees under the sibling layout, init prints a warning naming
+them, states that it did not move them, and tells you how to keep the old
+layout. Nothing is moved, deleted, or re-registered — the choice is yours:
+
+- Set `worktree_placement = "sibling"` to pin the previous layout. Init never
+  touches an explicitly-set value, so the pin holds on every later run.
+- Or leave the backfilled `"child"`: existing worktrees keep resuming from their
+  recorded sibling paths, and only new ones land under `.git-paw/worktrees/`.

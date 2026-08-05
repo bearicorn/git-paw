@@ -111,9 +111,9 @@ The system SHALL print a summary of actions taken (directories created, files wr
 
 ### Requirement: Init merges new config fields without mutating existing ones
 
-When `git paw init` runs on a repo with an existing `.git-paw/config.toml`, the system SHALL compare the generated default config against the existing file and append only sections that are absent. The system SHALL NOT modify or remove any existing content.
+When `git paw init` runs on a repo with an existing `.git-paw/config.toml`, the system SHALL compare the generated default config against the existing file and append both (a) any `[section]` that is absent and (b) any top-level default key that is absent, writing each backfilled key with its generated-default value. The system SHALL NOT modify or remove any section or key the user has already set — the migration is strictly additive.
 
-This makes `init` a safe upgrade path for every version bump — users run `git paw init` after upgrading and new config sections are added without touching their customized settings.
+This makes `init` a complete, safe upgrade path for every version bump — users run `git paw init` after upgrading and new config sections AND new top-level default keys are added without touching their customized settings.
 
 #### Scenario: Init preserves existing broker config while adding supervisor
 
@@ -122,18 +122,26 @@ This makes `init` a safe upgrade path for every version bump — users run `git 
 - **THEN** the `[broker]` section SHALL still contain `port = 9200`
 - **AND** a `[supervisor]` section SHALL be appended
 
-#### Scenario: Init does not duplicate existing sections
+#### Scenario: Init backfills a missing top-level default key
 
-- **GIVEN** a `.git-paw/config.toml` that already has both `[broker]` and `[supervisor]` sections
+- **GIVEN** a `.git-paw/config.toml` that has every default section but no top-level `worktree_placement` key
 - **WHEN** `git paw init` is run
-- **THEN** no sections SHALL be added or modified
+- **THEN** the file SHALL gain a top-level `worktree_placement` key set to its generated-default value
+- **AND** every pre-existing section and key SHALL be preserved unchanged
+
+#### Scenario: Init is a no-op only when all sections and top-level keys are present
+
+- **GIVEN** a `.git-paw/config.toml` that already contains every default section AND every top-level default key
+- **WHEN** `git paw init` is run
+- **THEN** no section or key SHALL be added or modified
 - **AND** the file content SHALL be unchanged
 
-#### Scenario: Init on a completely empty config file adds all sections
+#### Scenario: Init on a completely empty config file adds all sections and keys
 
 - **GIVEN** a `.git-paw/config.toml` that exists but is empty
 - **WHEN** `git paw init` is run
 - **THEN** all default sections SHALL be appended (commented out)
+- **AND** all top-level default keys SHALL be written
 
 ### Requirement: Init installs the agent-broker helper script
 
@@ -189,4 +197,23 @@ Init SHALL NOT probe `.specify/`, `docs/superpowers/plans/`, or any other path t
 - **GIVEN** `git paw init` runs interactively and the user selects `speckit`
 - **WHEN** the config is generated
 - **THEN** it SHALL contain a `[specs]` section with `type = "speckit"` and `dir = ".specify/specs"`
+
+### Requirement: Init warns when a backfilled worktree placement changes the resolved layout
+
+`git paw init` SHALL warn, and SHALL NOT move, delete, or re-register any existing worktree, when backfilling the `worktree_placement` key changes the repository's resolved worktree layout. Because the generated default is `child` while the value the system resolves when the key is absent is `sibling`, backfilling the key into a repo that already has worktrees under the `sibling` layout changes where new worktrees are created; in that case init SHALL print a warning stating that existing worktrees remain in their previous location, and the warning SHALL include remediation.
+
+#### Scenario: Backfilling child placement into a repo with existing sibling worktrees warns
+
+- **GIVEN** a repo whose config omits `worktree_placement` (resolving to `sibling`) and that already has at least one worktree under the sibling layout
+- **WHEN** `git paw init` backfills `worktree_placement = "child"`
+- **THEN** init SHALL print a warning that existing worktrees remain in their previous (sibling) location
+- **AND** init SHALL NOT move, delete, or re-register any existing worktree
+- **AND** the warning SHALL include remediation (set `worktree_placement = "sibling"` to keep the old layout, or let new agents use the child layout)
+
+#### Scenario: Backfilling placement with no existing worktrees does not warn
+
+- **GIVEN** a repo whose config omits `worktree_placement` and that has no worktrees yet
+- **WHEN** `git paw init` backfills `worktree_placement = "child"`
+- **THEN** the key SHALL be written
+- **AND** no worktree-relocation warning SHALL be printed
 
