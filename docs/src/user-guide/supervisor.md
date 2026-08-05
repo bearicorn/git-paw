@@ -50,6 +50,9 @@ Each poll (~15 seconds) the loop:
   single risky prompt on one agent never freezes the others. Repeated
   escalations are deduplicated per `(agent, command-shape)` within a five-minute
   window.
+- **Re-engages a gate-failed worker**, when
+  [`[supervisor.correction] auto_loopback`](#unattended-correction-loop) is
+  enabled — closing the verify↔fix cycle without a human hop.
 
 The loop keeps polling until one of:
 
@@ -80,6 +83,66 @@ git paw start --unattended --branches feat/auth,feat/api
 
 Multiple feedback → fix → re-verify cycles per agent are normal and are **not**
 treated as a stuck signal — the loop lets agents iterate.
+
+### Unattended correction loop
+
+When a supervisor gate fails, git-paw publishes `agent.feedback` to the
+branch's inbox — but a *blocked* worker is not polling its inbox, so the
+correction stalls until a human re-engages the pane by hand. That single human
+hop was the dominant cost measured across the v0.9.0–v0.11.0 dogfoods (4–8
+manual verify↔fix cycles per branch).
+
+The `[supervisor.correction]` table promotes that cycle into the drive loop.
+Enable it with:
+
+```toml
+[supervisor.correction]
+auto_loopback = true       # default is false, for back-compat
+max_cycles = 5
+on_exhausted = "escalate"  # or "abandon"
+escalate_after_cycles = 3
+```
+
+With `auto_loopback = true`, each poll the loop:
+
+1. **Watches for failing gate verdicts.** A gate failure arrives as an
+   `agent.feedback` from the supervisor whose errors carry a `[<gate>]` tag
+   (`[testing]`, `[regression]`, `[spec audit]`, `[doc audit]`,
+   `[security audit]`, `[scope]`) — the shape
+   `.git-paw/scripts/sweep.sh feedback-gate` publishes. A passing gate
+   publishes `agent.verified` instead, so only failures start a cycle. Other
+   traffic on the same channel — conflict-detector warnings, peer feedback — is
+   never mistaken for a gate verdict.
+2. **Re-engages the worker's pane.** The branch's pane is resolved by
+   `pane_current_path`, re-captured immediately before the send, and typed with
+   the gate-tagged feedback plus a submitting `Enter` as a separate keystroke.
+   If the fresh capture shows the pane is no longer idle (a permission prompt
+   went up between the sweep and the send), nothing is typed and the correction
+   is retried on the next poll — deferred, never dropped.
+3. **Counts the cycle.** Each delivered re-engagement spends one of the
+   branch's `max_cycles`. A branch that reaches a terminal PASS leaves the
+   cycle and its counter resets, so an unrelated later failure starts from a
+   fresh budget.
+4. **Flags a slow converger once.** When the count reaches
+   `escalate_after_cycles` — and that lands strictly before `max_cycles` — an
+   early heads-up is surfaced while re-engagement continues.
+5. **Applies `on_exhausted` when the budget is spent.** `escalate` flags the
+   branch to the orchestrator/human as unrecoverable; `abandon` marks it failed
+   and sends no escalation. Neither re-engages that branch again, and the exit
+   summary lists it under *Correction budget exhausted*.
+
+Cycle counts are held in the drive loop's memory and are not persisted —
+restarting the supervisor restarts every branch's budget.
+
+The feature is **opt-in**: with `auto_loopback = false`, or with no
+`[supervisor.correction]` table at all, the loop sends no re-engagement
+keystrokes and the gate feedback is published exactly as it was before this
+existed.
+
+When `[supervisor] learnings = true`, exhausting a branch's budget also appends
+a `correction_exhausted` learning carrying the branch, the worker CLI, and the
+cycle count — the tiered-model tuning signal that tells you a worker's model is
+under-powered for a class of task. With learnings off, nothing is recorded.
 
 ### Run the supervisor pane at native full-auto
 

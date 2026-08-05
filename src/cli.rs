@@ -209,6 +209,12 @@ pub enum Command {
         /// detects completion, and exits with a summary. Designed for detached
         /// operation — it does not require an attached interactive terminal.
         ///
+        /// Set `[supervisor.correction] auto_loopback = true` to also close the
+        /// verify↔fix cycle without a human hop: a failed supervisor gate
+        /// re-engages that worker's pane with the gate's feedback, bounded by
+        /// `max_cycles` and ending in the `on_exhausted` policy. It defaults to
+        /// off, so an existing unattended setup keeps today's behaviour.
+        ///
         /// Mutually exclusive with `--no-supervisor` (they express opposing
         /// intents). May be combined with `--supervisor`, `--from-all-specs`,
         /// `--specs`, `--cli`, and `--branches`.

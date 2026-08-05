@@ -107,6 +107,21 @@ pub const CATEGORY_SCOPE_MISTAKE: &str = "scope_mistake";
 /// ```
 /// Primary identifier: `friction`.
 pub const CATEGORY_TOOLING_FRICTION: &str = "tooling_friction";
+/// Category tag for correction-exhaustion learnings: a branch whose supervisor
+/// correction loop spent its whole `[supervisor.correction] max_cycles` budget
+/// without the worker converging on a passing gate.
+///
+/// Emitted by the unattended drive loop (not by the aggregator) through the
+/// existing `agent.learning` wire variant, and only when `[supervisor]
+/// learnings` is enabled — no telemetry without consent.
+///
+/// Documented body shape:
+/// ```json
+/// { "observation": "feat-a exhausted its correction budget after 5 cycle(s) on claude",
+///   "branch": "feat-a", "cli": "claude", "cycles": 5 }
+/// ```
+/// Primary identifier: `branch`.
+pub const CATEGORY_CORRECTION_EXHAUSTED: &str = "correction_exhausted";
 
 /// Publishing `agent_id` for aggregator-produced learnings. The aggregator
 /// runs inside the broker/supervisor process, so every record is attributed

@@ -200,6 +200,14 @@ mod tests {
                 .push((session.to_string(), pane_index, key.to_string()));
             Ok(())
         }
+        fn send_text(
+            &mut self,
+            session: &str,
+            pane_index: usize,
+            text: &str,
+        ) -> std::io::Result<()> {
+            self.send_key(session, pane_index, text)
+        }
     }
 
     fn keys() -> Vec<String> {

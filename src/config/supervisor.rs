@@ -281,6 +281,143 @@ pub struct SupervisorConfig {
     /// serialising the all-default table.
     #[serde(default, skip_serializing_if = "TellConfig::is_default")]
     pub tell: TellConfig,
+    /// Correction-loop policy (`[supervisor.correction]`).
+    ///
+    /// Governs whether a failed supervisor gate automatically re-engages the
+    /// worker's pane, how many verify↔fix rounds a branch gets, and what
+    /// happens once that budget is spent. An absent table loads
+    /// [`CorrectionConfig::default`], which leaves `auto_loopback` off — so a
+    /// config written before the table existed behaves exactly as it did.
+    #[serde(default)]
+    pub correction: CorrectionConfig,
+}
+
+/// Action applied to a branch that has exhausted its correction-cycle budget
+/// (`[supervisor.correction] on_exhausted`).
+///
+/// The serde wire values are the lowercase strings `"escalate"` and
+/// `"abandon"`; an absent field resolves to [`Self::Escalate`]. Any other
+/// value is a config error naming the accepted set.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OnExhausted {
+    /// Flag the unrecoverable branch to the orchestrator/human, and stop
+    /// re-engaging it. This is the default.
+    #[default]
+    Escalate,
+    /// Mark the branch failed and leave it un-corrected, without flagging it
+    /// as a recoverable escalation.
+    Abandon,
+}
+
+/// Configuration for the supervisor correction loop
+/// (`[supervisor.correction]`).
+///
+/// The correction loop closes a gate-failure → re-engage → re-verify cycle
+/// without a human hop: when a supervisor gate fails, the drive loop injects
+/// the gate-tagged feedback back into the worker's pane instead of leaving it
+/// in an inbox the blocked worker never polls.
+///
+/// Embedded as a plain (non-`Option`) field on [`SupervisorConfig`] with
+/// `#[serde(default)]`, and every field is itself defaulted, so a
+/// `[supervisor]` section with no `[supervisor.correction]` table loads the
+/// documented defaults. `skip_serializing_if` is deliberately absent: the
+/// whole table is `default`, so it round-trips cleanly either way.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CorrectionConfig {
+    /// Whether a gate failure automatically re-engages the worker's pane with
+    /// the gate-tagged feedback.
+    ///
+    /// Default: `false`. The feature is opt-in so an existing unattended setup
+    /// keeps its observable behaviour after an upgrade (feedback is published,
+    /// no keystrokes are sent).
+    pub auto_loopback: bool,
+    /// Number of verify↔fix rounds the loop drives for one branch before it
+    /// gives up and applies [`Self::on_exhausted`]. Default: `5`.
+    ///
+    /// Must be a positive integer; `0` is a config error (it would spend the
+    /// budget before the first re-engagement, making `auto_loopback` silently
+    /// inert — say `auto_loopback = false` instead).
+    #[serde(deserialize_with = "deserialize_max_cycles")]
+    pub max_cycles: u32,
+    /// What to do with a branch that reaches [`Self::max_cycles`].
+    /// Default: [`OnExhausted::Escalate`].
+    pub on_exhausted: OnExhausted,
+    /// Cycle count at which a slow-converging worker is flagged early — once —
+    /// as a heads-up before its budget is spent.
+    ///
+    /// Re-engagement continues until [`Self::max_cycles`]. No distinct early
+    /// flag is emitted when this is greater than or equal to
+    /// [`Self::max_cycles`]. Default: `3`.
+    ///
+    /// Must be a positive integer; `0` is a config error (the early flag fires
+    /// at a cycle count, and no branch is ever at cycle 0 after a failure — to
+    /// suppress the flag, set it to or above `max_cycles`).
+    #[serde(deserialize_with = "deserialize_escalate_after_cycles")]
+    pub escalate_after_cycles: u32,
+}
+
+/// Rejects a zero cycle count with an actionable message naming the field and
+/// the fix, mirroring the accepted-values message serde produces for an invalid
+/// `on_exhausted`.
+fn positive_cycles<'de, D>(deserializer: D, field: &str, remedy: &str) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u32::deserialize(deserializer)?;
+    if value == 0 {
+        return Err(serde::de::Error::custom(format!(
+            "[supervisor.correction] {field} must be a positive integer (1 or greater), got 0; \
+             {remedy}"
+        )));
+    }
+    Ok(value)
+}
+
+/// `deserialize_with` shim for [`CorrectionConfig::max_cycles`].
+fn deserialize_max_cycles<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    positive_cycles(
+        deserializer,
+        "max_cycles",
+        "to turn the correction loop off set auto_loopback = false",
+    )
+}
+
+/// `deserialize_with` shim for [`CorrectionConfig::escalate_after_cycles`].
+fn deserialize_escalate_after_cycles<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    positive_cycles(
+        deserializer,
+        "escalate_after_cycles",
+        "to suppress the early heads-up set it to max_cycles or higher",
+    )
+}
+
+impl Default for CorrectionConfig {
+    fn default() -> Self {
+        Self {
+            auto_loopback: bool::default(),
+            max_cycles: Self::default_max_cycles(),
+            on_exhausted: OnExhausted::default(),
+            escalate_after_cycles: Self::default_escalate_after_cycles(),
+        }
+    }
+}
+
+impl CorrectionConfig {
+    fn default_max_cycles() -> u32 {
+        5
+    }
+
+    fn default_escalate_after_cycles() -> u32 {
+        3
+    }
 }
 
 /// Delivery mode for the supervisor `/tell` routing command.
@@ -828,4 +965,138 @@ pub fn resolve_approval_flags<S: std::hash::BuildHasher>(
         return args.clone();
     }
     approval_flags(cli, level).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::PawConfig;
+
+    fn supervisor_from(toml_src: &str) -> SupervisorConfig {
+        let config: PawConfig = toml::from_str(toml_src).expect("config parses");
+        config.supervisor.expect("[supervisor] section present")
+    }
+
+    /// Spec scenario "Table absent loads with defaults" — and the v0.13.0
+    /// back-compat contract (task 7.3): a `[supervisor]`-only config loads and
+    /// resolves the whole correction policy to its documented defaults, with
+    /// `auto_loopback` OFF so behaviour is identical to the previous version.
+    #[test]
+    fn absent_correction_table_resolves_to_documented_defaults() {
+        let supervisor = supervisor_from(
+            "[supervisor]\n\
+             enabled = true\n\
+             cli = \"claude\"\n\
+             test_command = \"just check\"\n\
+             agent_approval = \"auto\"\n",
+        );
+        assert!(
+            !supervisor.correction.auto_loopback,
+            "auto_loopback is off by default (back-compat)"
+        );
+        assert_eq!(supervisor.correction.max_cycles, 5);
+        assert_eq!(supervisor.correction.on_exhausted, OnExhausted::Escalate);
+        assert_eq!(supervisor.correction.escalate_after_cycles, 3);
+    }
+
+    /// Spec scenario "Fields parse to the resolved policy": explicit fields
+    /// win, and an omitted `escalate_after_cycles` still falls back to `3`.
+    #[test]
+    fn specified_fields_parse_and_omitted_field_falls_back() {
+        let supervisor = supervisor_from(
+            "[supervisor]\n\
+             enabled = true\n\
+             [supervisor.correction]\n\
+             auto_loopback = true\n\
+             max_cycles = 3\n\
+             on_exhausted = \"abandon\"\n",
+        );
+        assert!(supervisor.correction.auto_loopback);
+        assert_eq!(supervisor.correction.max_cycles, 3);
+        assert_eq!(supervisor.correction.on_exhausted, OnExhausted::Abandon);
+        assert_eq!(
+            supervisor.correction.escalate_after_cycles, 3,
+            "the omitted field falls back to its default"
+        );
+    }
+
+    /// Spec scenario "Invalid `on_exhausted` is a config error": loading fails
+    /// with a message naming the accepted values.
+    #[test]
+    fn invalid_on_exhausted_is_a_config_error() {
+        let err = toml::from_str::<PawConfig>(
+            "[supervisor]\n\
+             enabled = true\n\
+             [supervisor.correction]\n\
+             on_exhausted = \"reboot\"\n",
+        )
+        .expect_err("an unknown on_exhausted value must not parse");
+        let message = err.to_string();
+        assert!(
+            message.contains("escalate") && message.contains("abandon"),
+            "the error names the accepted values, got: {message}"
+        );
+    }
+
+    /// Spec scenario "Zero cycle counts are a config error": both cycle fields
+    /// are positive integers, so `0` fails to load with a message naming the
+    /// field and the remedy.
+    #[test]
+    fn zero_cycle_counts_are_config_errors() {
+        let max_err = toml::from_str::<PawConfig>(
+            "[supervisor]\n\
+             enabled = true\n\
+             [supervisor.correction]\n\
+             max_cycles = 0\n",
+        )
+        .expect_err("max_cycles = 0 must not parse")
+        .to_string();
+        assert!(
+            max_err.contains("max_cycles")
+                && max_err.contains("positive integer")
+                && max_err.contains("auto_loopback = false"),
+            "the error names the field and the remedy, got: {max_err}"
+        );
+
+        let early_err = toml::from_str::<PawConfig>(
+            "[supervisor]\n\
+             enabled = true\n\
+             [supervisor.correction]\n\
+             escalate_after_cycles = 0\n",
+        )
+        .expect_err("escalate_after_cycles = 0 must not parse")
+        .to_string();
+        assert!(
+            early_err.contains("escalate_after_cycles")
+                && early_err.contains("positive integer")
+                && early_err.contains("max_cycles or higher"),
+            "the error names the field and the remedy, got: {early_err}"
+        );
+
+        // `1` is the floor, not an error.
+        let supervisor = supervisor_from(
+            "[supervisor]\n\
+             enabled = true\n\
+             [supervisor.correction]\n\
+             max_cycles = 1\n\
+             escalate_after_cycles = 1\n",
+        );
+        assert_eq!(supervisor.correction.max_cycles, 1);
+        assert_eq!(supervisor.correction.escalate_after_cycles, 1);
+    }
+
+    /// A fully-specified table round-trips through serialization unchanged, so
+    /// saving a config never silently rewrites the operator's policy.
+    #[test]
+    fn correction_table_round_trips() {
+        let original = CorrectionConfig {
+            auto_loopback: true,
+            max_cycles: 7,
+            on_exhausted: OnExhausted::Abandon,
+            escalate_after_cycles: 2,
+        };
+        let text = toml::to_string(&original).expect("serializes");
+        let parsed: CorrectionConfig = toml::from_str(&text).expect("re-parses");
+        assert_eq!(parsed, original);
+    }
 }
