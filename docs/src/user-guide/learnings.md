@@ -215,11 +215,26 @@ a one-off is never recorded. **What to do:** treat it as the prime
 tool-improvement signal — fold it into a git-paw issue or a config/allowlist
 change.
 
+### Correction-budget exhaustion
+
+Emitted by the `--unattended` drive loop (not by the supervisor skill) when a
+branch spends its whole
+[`[supervisor.correction] max_cycles`](supervisor.md#unattended-correction-loop)
+budget without converging on a passing gate. The record carries the `branch`,
+the worker `cli`, and the `cycles` spent, under category
+`correction_exhausted`. **What to do:** read it as a tiered-model tuning
+signal — a branch that burns its whole budget is usually a task whose worker
+model is under-powered for that class of work, so re-assign it to a stronger
+CLI or split the spec. Like every learning it is emitted only when
+`[supervisor] learnings = true`.
+
 ### Unknown categories
 
 Records whose category the aggregator doesn't recognise (e.g. a category
 added by a newer supervisor skill) are never dropped — they appear under
-an **Other learnings** section so nothing is lost across version skew.
+an **Other learnings** section so nothing is lost across version skew. The
+`correction_exhausted` category above renders there too, as a title plus its
+JSON body.
 
 > **Non-goals.** Qualitative signals *flag* issues; they do not fix them.
 > git-paw does not auto-generate docs or ADRs, and it does not scan past

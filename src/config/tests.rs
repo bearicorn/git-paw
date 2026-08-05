@@ -1224,6 +1224,7 @@ fn supervisor_round_trips_through_save_and_load() {
             context_bloat_threshold_k: None,
             blocked_on_supervisor_window_seconds: None,
             tell: TellConfig::default(),
+            correction: CorrectionConfig::default(),
         }),
         ..Default::default()
     };

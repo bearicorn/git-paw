@@ -687,6 +687,44 @@ at the defaults above. Setting `[supervisor] enabled = false` (or omitting
 the section) disables the detector subsystem entirely — no auto-emitted
 warnings fire regardless of the values here.
 
+### Correction loop tuning
+
+The `[supervisor.correction]` table governs the self-healing correction cycle
+the `--unattended` drive loop runs when a supervisor gate fails: instead of
+publishing `agent.feedback` into an inbox a blocked worker never polls, the
+loop injects the gate-tagged feedback straight into the worker's pane and
+re-verifies. See
+[Supervisor § Unattended correction loop](../user-guide/supervisor.md#unattended-correction-loop)
+for the runtime walkthrough.
+
+```toml
+[supervisor.correction]
+auto_loopback = true       # default false — opt in to enable the loop
+max_cycles = 5
+on_exhausted = "escalate"  # "escalate" (default) | "abandon"
+escalate_after_cycles = 3
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `auto_loopback` | `false` | Whether a failing gate automatically re-engages the worker's pane with that gate's feedback. **Off by default** so an existing unattended setup behaves identically after an upgrade; the recommended config above turns it on. When `false`, the feedback is published exactly as before and no keystrokes are sent. |
+| `max_cycles` | `5` | Verify↔fix rounds the loop drives for one branch before giving up and applying `on_exhausted`. A branch that passes its gate leaves the cycle early and its counter resets. Must be a positive integer — `0` is a config error; to turn the loop off set `auto_loopback = false`. |
+| `on_exhausted` | `"escalate"` | What to do with a branch that reaches `max_cycles`. `"escalate"` flags it to the orchestrator/human as unrecoverable; `"abandon"` marks it failed and leaves it un-corrected without an escalation. Neither re-engages the branch again. Any other value is a config error naming the accepted set. |
+| `escalate_after_cycles` | `3` | Cycle count at which a slow-converging worker is flagged **once**, as an early heads-up, while re-engagement continues to `max_cycles`. No distinct early flag is emitted when this is greater than or equal to `max_cycles`. Must be a positive integer — `0` is a config error; to suppress the flag, set it to `max_cycles` or higher. |
+
+The `[supervisor.correction]` table is fully optional. A v0.13.0 config with
+`[supervisor]` and no `[supervisor.correction]` loads cleanly with every field
+at the defaults above — and because `auto_loopback` defaults to `false`, its
+observable behaviour is unchanged. Cycle counts live in the drive loop's
+in-process state and are **not persisted**: restarting the supervisor resets
+every branch's budget.
+
+When `[supervisor] learnings = true`, a branch that exhausts its budget also
+appends a `correction_exhausted` learning carrying the branch, the worker CLI,
+and the cycle count — the signal that tells you a worker's model tier is
+under-powered for a class of task. With learnings disabled, nothing is
+recorded.
+
 ### Routing through the supervisor (`/tell`)
 
 The `[supervisor.tell]` table tunes the `/agents` and `/tell` commands you

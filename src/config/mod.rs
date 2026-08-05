@@ -31,8 +31,8 @@ pub use layout::LayoutConfig;
 pub use specs::SpecsConfig;
 pub use supervisor::{
     ApprovalLevel, ApprovalLevelPreset, AutoApproveConfig, BrokerPublish, CommonDevAllowlistConfig,
-    ConflictConfig, LearningsConfig, SupervisorConfig, TellConfig, TellMode, approval_flags,
-    resolve_approval_flags,
+    ConflictConfig, CorrectionConfig, LearningsConfig, OnExhausted, SupervisorConfig, TellConfig,
+    TellMode, approval_flags, resolve_approval_flags,
 };
 
 /// Governance document paths.
@@ -784,6 +784,21 @@ worktree_placement = "child"
 # [supervisor.learnings_config]
 # flush_interval_seconds = 60
 # broker_publish = "auto"
+#
+# Correction loop. When a supervisor gate fails, the --unattended drive loop
+# re-engages that worker's pane with the gate's feedback instead of parking it
+# in an inbox the blocked worker is not polling. Recommended for unattended
+# runs — but `auto_loopback` defaults to FALSE so an existing setup keeps its
+# behaviour after an upgrade; set it true to opt in. Cycles are bounded by
+# max_cycles, after which on_exhausted applies ("escalate" flags the branch as
+# unrecoverable, "abandon" marks it failed); escalate_after_cycles emits one
+# early heads-up before the budget is spent (no early flag when it is >=
+# max_cycles).
+# [supervisor.correction]
+# auto_loopback = true
+# max_cycles = 5
+# on_exhausted = "escalate"  # one of: "escalate", "abandon"
+# escalate_after_cycles = 3
 
 # Common dev-command allowlist. When supervisor mode starts a session,
 # git-paw seeds .claude/settings.json::allowed_bash_prefixes with the

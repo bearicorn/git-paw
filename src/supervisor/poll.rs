@@ -212,6 +212,10 @@ pub struct AgentStatusRow {
     pub status: String,
     /// Seconds since the agent was last seen.
     pub last_seen_seconds: u64,
+    /// CLI running in this agent's pane (e.g. `"claude"`), as reported by the
+    /// broker. Empty when the broker has no CLI on record for the agent.
+    #[serde(default)]
+    pub cli: String,
 }
 
 /// Fetches the broker `/status` endpoint and returns the agent summary.
@@ -557,6 +561,14 @@ mod tests {
                 .push((session.to_string(), pane_index, key.to_string()));
             Ok(())
         }
+        fn send_text(
+            &mut self,
+            session: &str,
+            pane_index: usize,
+            text: &str,
+        ) -> std::io::Result<()> {
+            self.send_key(session, pane_index, text)
+        }
     }
 
     #[derive(Default)]
@@ -825,6 +837,7 @@ mod tests {
             agent_id: agent_id.to_string(),
             status: status.to_string(),
             last_seen_seconds,
+            cli: String::new(),
         }
     }
 

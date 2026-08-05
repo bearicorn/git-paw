@@ -844,6 +844,8 @@ fn drive_unattended_loop(
         whitelist: auto_approve.effective_whitelist(&supervisor_cfg.common_dev_allowlist),
         approve_worktree_writes: auto_approve.approve_worktree_writes(),
         protected_paths,
+        correction: supervisor_cfg.correction.clone(),
+        learnings_enabled: supervisor_cfg.learnings,
         broker_log_hint: state
             .broker_log_path
             .as_ref()
