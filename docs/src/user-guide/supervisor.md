@@ -50,6 +50,8 @@ Each poll (~15 seconds) the loop:
   single risky prompt on one agent never freezes the others. Repeated
   escalations are deduplicated per `(agent, command-shape)` within a five-minute
   window.
+- **Hands judgment calls to the supervisor pane**, when one is present — see
+  [The loop is a pump, the supervisor is the brain](#the-loop-is-a-pump-the-supervisor-is-the-brain).
 - **Re-engages a gate-failed worker**, when
   [`[supervisor.correction] auto_loopback`](#unattended-correction-loop) is
   enabled — closing the verify↔fix cycle without a human hop.
@@ -83,6 +85,86 @@ git paw start --unattended --branches feat/auth,feat/api
 
 Multiple feedback → fix → re-verify cycles per agent are normal and are **not**
 treated as a stuck signal — the loop lets agents iterate.
+
+### The loop is a pump, the supervisor is the brain
+
+The drive loop is deliberately mechanical: it can approve a safe prompt, but it
+cannot decide *anything*. A supervisor CLI is the opposite — it can reason about
+anything, but only acts when something triggers it. Left uncombined, those two
+halves produce the failure the unattended mode was supposed to remove: the loop
+escalates every judgment call into a broker inbox, and in a headless run nobody
+ever reads it. The wave stalls on the first prompt the classifier could not
+place.
+
+So when a **supervisor (orchestrator) pane is present**, the loop stops merely
+*recording* judgment calls and starts *handing them over*. It types the call
+directly into the supervisor's pane and moves straight on — the same free-text
+plus separate `Enter` keystrokes it uses to re-engage a worker. Four things
+arrive that way:
+
+| Handed over | Trigger |
+|---|---|
+| A risky or unknown permission prompt | the classifier returned `danger` / `unknown` |
+| An ambiguous question | a worker published `agent.question` |
+| A merge decision | a worker published a terminal `agent.artifact` |
+| A non-converging branch | the correction loop's slow / exhausted signal |
+
+Three properties make this safe to run unattended:
+
+- **The broker record is unchanged.** Every escalation is still published as a
+  drainable review item, whether or not a supervisor is running. The injection is
+  a *trigger* laid on top of that record, not a replacement for it — so if the
+  supervisor's pane happened to be busy, nothing is lost.
+- **The loop never waits.** A hand-off is fire-and-forget. The supervisor
+  deliberating over one call cannot freeze the wave; the other agents keep being
+  swept and approved.
+- **Injection is guarded by a fresh capture.** Nothing is typed into a pane that
+  is showing a live permission prompt (that state belongs to the approval path,
+  which never types free text into pane 0) or that is mid-response. A task
+  landing in the middle of the supervisor's own turn would pollute its context,
+  so it is deferred instead.
+
+**Orchestration nudge.** Some orchestration work has no triggering event at all —
+reconsidering spawn order, resequencing merges, revisiting a blocked worker. On a
+cadence of about five minutes (20× the approval tick, so the fast sweep is
+unaffected and the pane is not prompt-stormed) the loop nudges the supervisor to
+re-run its orchestration sweep. The nudge is suppressed while the pane is
+mid-response, and because its timer only advances on a *delivered* nudge, a busy
+supervisor has it deferred to the next tick rather than losing the whole
+interval.
+
+**Worker nudges skip finished workers.** Any nudge aimed at a *worker* pane is
+suppressed once that worker has **finished** — its broker status is `done` or
+`verified`. The signal is deliberately the broker status and never a
+pane-content diff: a finished worker's pane is just as unchanging as a stuck
+one's, so a diff cannot tell "idle because done" from "idle because stuck". A
+worker that later leaves the finished state becomes nudge-eligible again — the
+verdict is deferred, not dropped.
+
+Note this is a *narrower* set than the one stall detection treats as terminal,
+which also counts `blocked` and `committed`. That is deliberate: those two are
+exactly the states a worker occupies while it *awaits* correction — committed
+and standing by for re-verification, or blocked and not polling its inbox — and
+they are precisely who the
+[correction loop](#unattended-correction-loop) exists to re-engage. Suppressing
+them would silently disable it for its most common path. Finished and quiet are
+different conditions; only the first ends a worker's eligibility for a nudge.
+
+**What the supervisor does with a hand-off** is documented in the bundled
+supervisor skill under *Judgment calls handed to you*: derive spawn order from
+the agents' `agent.intent` declarations and the conflict detector's edges; answer
+a question from the specs plus cross-agent state; sequence merges after
+verifying; and declare a worker unrecoverable only per
+[`max_cycles` / `on_exhausted`](#unattended-correction-loop).
+
+**The human is the exception handler.** A human is re-engaged for what the
+supervisor genuinely cannot decide — plus the two structural cases: the
+heartbeat exit described above, and a run with **no supervisor pane at all**.
+In that no-supervisor case nothing is injected into any pane and
+escalations remain broker-only review items, so a pure `--unattended` run
+behaves exactly as it did before this existed. Presence of the supervisor pane is
+the only opt-in; there is no separate config switch, and the loop performs no
+liveness probe — pane presence *is* the signal.
 
 ### Unattended correction loop
 

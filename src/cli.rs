@@ -209,6 +209,19 @@ pub enum Command {
         /// detects completion, and exits with a summary. Designed for detached
         /// operation — it does not require an attached interactive terminal.
         ///
+        /// The loop is the pump and the supervisor pane is the brain. When a
+        /// supervisor (orchestrator) pane is present, each judgment call — a
+        /// risky/unknown prompt, a worker's question, a merge decision — is also
+        /// injected into that pane so the smart model is actively triggered
+        /// instead of relied on to poll an inbox, and a longer-cadence nudge asks
+        /// it to re-run its orchestration sweep. The loop never waits on it, so
+        /// the wave keeps moving. Nudges directed at a *worker* are skipped once
+        /// that worker has finished (broker status `done` or `verified`) — but
+        /// NOT while it is merely quiet at `blocked`/`committed`, which is when
+        /// the correction loop must still reach it. With no supervisor pane
+        /// nothing is injected anywhere and escalations stay broker-only review
+        /// items for the human, exactly as before.
+        ///
         /// Set `[supervisor.correction] auto_loopback = true` to also close the
         /// verify↔fix cycle without a human hop: a failed supervisor gate
         /// re-engages that worker's pane with the gate's feedback, bounded by
