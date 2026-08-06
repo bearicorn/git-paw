@@ -165,9 +165,9 @@ When the drive loop sends a nudge to a pane (any text intended to be submitted),
 
 When a live prompt is classified `danger` or `unknown` (not safe), the drive loop SHALL escalate it as a review item and SHALL NOT block the wave waiting on it. The loop SHALL surface the escalation (via the broker and in the exit summary) and SHALL continue sweeping and progressing the remaining agents. The wave SHALL NOT freeze indefinitely on a single risky prompt.
 
-The escalation channel SHALL be **uniform and supervisor-agnostic**: the loop escalates the same way regardless of whether a supervisor is running. The escalation is a drainable review item — a running supervisor consumes it (see `supervisor-skill-discipline`), and when no supervisor is running it persists on the broker for the human/driver to read. The loop SHALL NOT detect supervisor liveness or route escalations differently based on it.
+The escalation SHALL always be **recorded uniformly on the broker** as a drainable review item, regardless of whether an orchestrator is running. When no orchestrator (supervisor CLI) pane is present, the escalation persists on the broker for the human/driver to read — behavior unchanged from before. When an orchestrator pane IS present under unattended operation, the loop SHALL additionally **hand the escalation to the orchestrator** by injecting it into the orchestrator's pane so the smart model is actively triggered rather than relied on to poll a dead inbox (see `supervisor-autonomous-orchestrator`). This active hand-off is the one place the loop is orchestrator-aware; the broker record itself stays uniform, and a no-orchestrator run is byte-for-byte the prior behavior.
 
-Correspondingly, the drive loop SHALL be the **sole approver of classifier-safe prompts**: it approves the `safe` set and escalates the rest. No other component blanket-approves safe prompts while the loop is running (see `supervisor-skill-discipline`). This makes the loop's approvals and the supervisor's escalation-driven approvals **disjoint sets**, so two approvers never target the same prompt — the property that removes the approval-dispatch race without a claim marker or liveness detection.
+Correspondingly, the drive loop SHALL be the **sole approver of classifier-safe prompts**: it approves the `safe` set and escalates the rest. No other component blanket-approves safe prompts while the loop is running (see `supervisor-skill-discipline`). This makes the loop's approvals and the orchestrator's escalation-driven approvals **disjoint sets**, so two approvers do not target the same prompt. (A hard per-pane approval claim that replaces this disjoint-set convention with an enforced guarantee is specified separately.)
 
 #### Scenario: Risky prompt is escalated without blocking the wave
 
@@ -184,12 +184,12 @@ Correspondingly, the drive loop SHALL be the **sole approver of classifier-safe 
 - **THEN** the loop SHALL NOT send approval keystrokes
 - **AND** SHALL surface the prompt for review (broker + summary)
 
-#### Scenario: Escalation is surfaced uniformly regardless of supervisor presence
+#### Scenario: Escalation is recorded uniformly and handed to a present orchestrator
 
 - **WHEN** the drive loop escalates a `danger`/`unknown` prompt
-- **THEN** it SHALL publish the escalation to the broker as a review item
-- **AND** SHALL do so identically whether or not a supervisor is running
-- **AND** SHALL NOT branch its escalation behaviour on supervisor liveness
+- **THEN** it SHALL record the escalation on the broker as a review item
+- **AND** when an orchestrator pane is present it SHALL additionally inject the escalation into the orchestrator's pane
+- **AND** when no orchestrator pane is present it SHALL leave the escalation as a broker review item with no pane injection (prior behavior)
 
 #### Scenario: The loop approves only the safe set
 

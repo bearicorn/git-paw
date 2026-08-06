@@ -116,6 +116,19 @@ a stuck signal, or a ~25-minute heartbeat. It is designed for detached
 operation and needs no attached terminal. It is mutually exclusive with
 `--no-supervisor`. See [Supervisor → Unattended mode](user-guide/supervisor.md).
 
+When a supervisor (orchestrator) pane is present, the loop additionally **hands
+each judgment call to that pane** — a risky/unknown prompt, a worker's question,
+a merge decision, a non-converging branch — by injecting it as a task prompt, and
+nudges the pane to re-run its orchestration sweep on a longer (~5-minute)
+cadence. The escalation is still recorded on the broker either way, and the loop
+never waits on the supervisor's reply. Nudges aimed at a *worker* pane stop once
+that worker has finished (`done`/`verified`) — but not while it is merely quiet
+at `blocked`/`committed`, where the correction loop must still reach it. With no
+supervisor pane, nothing is
+injected anywhere and escalations stay broker-only review items — identical to
+the previous behaviour. See
+[the loop is a pump, the supervisor is the brain](user-guide/supervisor.md#the-loop-is-a-pump-the-supervisor-is-the-brain).
+
 The selection flags compose with `--supervisor`: `git paw start --supervisor
 --specs a,b` launches a supervisor session for **only** the named subset (`a`
 and `b`), exactly matching the non-supervisor `--specs` behaviour. `--supervisor

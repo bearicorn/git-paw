@@ -466,6 +466,56 @@ curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
 - Human intent is unclear
 - Trade-off decisions need human judgment
 
+### Judgment calls handed to you
+
+In an unattended session the drive loop is a **pump, not a brain**: it
+mechanically approves the classifier-safe permission prompts, and whenever it
+meets something that needs judgment it types that judgment call straight into
+your pane and moves on. It does not wait for you. So a task prompt can appear
+in your pane with no human behind it — that is the loop handing you work, and
+deciding it is your job, not the human's.
+
+Four kinds of judgment call reach you this way. For each, decide from the
+project's own specs plus the cross-agent state already visible on the broker.
+Escalate to the human ONLY when the call is genuinely undecidable — an
+ambiguity you can resolve from the specs is not a human's problem.
+
+1. **Dependency-aware spawn order.** Derive the order from what the agents have
+   declared, never from the order they happen to appear in the roster: read each
+   `agent.intent` and the conflict edges the detector reports between them. An
+   agent whose declared files another agent must produce first is downstream —
+   let the producer land before you unblock or spawn the consumer. Where the
+   declared regions do not intersect, the work is independent and may proceed in
+   parallel.
+2. **Answering an ambiguous `agent.question`.** The asking agent published the
+   question precisely because it could not decide, and it stays blocked until an
+   answer arrives. Resolve it from the specs and the cross-agent state (peer
+   intents, published artifacts, open conflicts), then publish `agent.answer`
+   **and** send the text to that agent's pane — see *Answer a peer agent's
+   question* and *Send the answer to the agent pane too*. Only when the specs
+   genuinely do not decide it does it become a human question.
+3. **Merge sequencing.** When an agent reaches a terminal artifact status, where
+   its branch sits in the merge order is your call: verify it first, then
+   sequence it against the other branches in flight — a branch whose files a
+   peer's work builds on merges before that peer's. Run the loop under *Merge
+   orchestration*.
+4. **Declaring a worker unrecoverable.** A worker that keeps failing the same
+   gate is bounded by policy, not by your patience.
+   `[supervisor.correction] max_cycles` is how many re-engagements a branch
+   gets, and `on_exhausted` decides what happens once that budget is spent
+   (`escalate` flags the branch for a human; `abandon` marks it failed). Do NOT
+   declare a worker unrecoverable before its budget is spent — remember that N
+   re-verify cycles is normal progress, not a stall — and do not keep
+   re-engaging it past that budget.
+
+**Non-blocking in both directions.** The loop never waits on your answer, so a
+call you deliberate over cannot freeze the wave; equally, do not sit on one.
+Every hand-off is also recorded on the broker as a review item, so nothing is
+lost when your pane happened to be busy at the moment the loop tried to hand it
+over. The loop will also nudge you to run an orchestration sweep on a longer
+cadence — that nudge is your cue to re-read the broker state and pick up
+whatever is still open, including anything a busy pane missed.
+
 ### Workflow
 
 1. **Baseline** — before any agent reports done, run `{{TEST_COMMAND}}` on `main` and

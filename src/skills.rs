@@ -406,16 +406,26 @@ pub fn build_boot_block(branch_id: &str, broker_url: &str) -> String {
 /// session is `--unattended` — an in-process drive loop is the sole approver of
 /// classifier-safe permission prompts. It tells the supervisor to consume the
 /// loop's escalations rather than blanket-approving, upholding the disjoint-set
-/// approval model (see the `supervisor-loop-escalation-tiering` spec).
+/// approval model (see the `supervisor-loop-escalation-tiering` spec), and that
+/// the loop hands judgment calls to this pane actively rather than parking them
+/// in an inbox (see `supervisor-autonomous-orchestrator`).
 const DRIVE_LOOP_DIRECTIVE: &str = "## Unattended: a drive loop is running\n\n\
 An in-process drive loop is auto-approving classifier-safe permission prompts on \
 every pane this session. It owns mechanical approval of safe prompts — do NOT \
 blanket-sweep-and-approve them yourself, or you will race the loop.\n\n\
+The loop is the pump; you are the brain. It does not merely park what it cannot \
+decide — it types each judgment call straight into THIS pane and moves on \
+without waiting for you, and it nudges you to run an orchestration sweep on a \
+longer cadence. A task prompt arriving here with no human behind it is the loop \
+handing you work; see **Judgment calls handed to you** for the four kinds and \
+how to decide each.\n\n\
 Your approval role this session is escalation-driven, in this order each cycle:\n\n\
 1. **Drain the loop's escalations first.** Prompts the loop could not classify \
-safe arrive as review items in your broker inbox. Reason about each and either \
-approve the specific escalated pane (`.git-paw/scripts/sweep.sh approve <pane>`) \
-or publish feedback — before anything else, so blocked agents unblock fastest.\n\
+safe are injected here AND recorded as review items in your broker inbox — the \
+inbox is the backstop for anything that arrived while this pane was busy. Reason \
+about each and either approve the specific escalated pane \
+(`.git-paw/scripts/sweep.sh approve <pane>`) or publish feedback — before \
+anything else, so blocked agents unblock fastest.\n\
 2. **Then run your normal sweep** — verification, merge, conflict handling, \
 detect-stuck, and status — as usual, but WITHOUT blanket-approving safe prompts \
 (the loop owns those).";

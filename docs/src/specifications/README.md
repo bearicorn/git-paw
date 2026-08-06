@@ -148,6 +148,7 @@ have no user-guide chapter: the spec itself is their documentation.
 - [`supervisor-unattended-operation`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-unattended-operation/spec.md) — the in-process drive loop under `--unattended` that keeps a wave moving with no human: polling, auto-approving safe prompts, detecting completion, and exiting with a summary.
 - [`supervisor-learnings`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-learnings/spec.md) — an opt-in, broker-internal aggregator that derives deterministic and qualitative learning signals into `.git-paw/session-learnings.md` (and the `agent.learning` broker variant), performing no telemetry.
 - [`supervisor-correction-loop`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-correction-loop/spec.md) — the optional `[supervisor.correction]` self-healing loop that re-engages a gate-failed worker's pane with the gate feedback, bounds retries by a per-branch cycle count, and applies an escalate-or-abandon policy when the budget is exhausted.
+- [`supervisor-autonomous-orchestrator`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-autonomous-orchestrator/spec.md) — the pump-to-brain layer: when a supervisor pane is present, the unattended loop injects each judgment call (risky prompt, `agent.question`, merge decision, non-converging branch) into that pane and nudges its orchestration sweep, instead of parking them in an unread inbox; with no supervisor pane nothing is injected.
 
 ### approval-
 

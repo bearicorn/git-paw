@@ -74,6 +74,12 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_mins(25);
 /// single alert within this window (W15-19).
 pub const DEDUP_WINDOW: Duration = Duration::from_mins(5);
 
+/// Orchestration-sweep cadence: the loop nudges the orchestrator pane to run an
+/// orchestration sweep on approximately this interval — deliberately a multiple
+/// of [`POLL_INTERVAL`] (20×), so the fast approval sweep is unchanged and the
+/// orchestrator is not prompt-stormed by a per-tick nudge.
+pub const ORCHESTRATION_NUDGE_INTERVAL: Duration = Duration::from_mins(5);
+
 /// The `agent_id` under which the supervisor's own pane (pane 0) is tracked.
 pub const SUPERVISOR_AGENT_ID: &str = "supervisor";
 
@@ -160,6 +166,34 @@ pub fn resolve_pane_agent(
         DASHBOARD_PANE_INDEX => PaneRole::Dashboard,
         _ => PaneRole::Unknown,
     }
+}
+
+/// Returns the pane index of the orchestrator (supervisor CLI) pane, or `None`
+/// when the session has no supervisor pane.
+///
+/// Resolution reuses [`resolve_pane_agent`], so the orchestrator is identified
+/// the same structural way every other pane is. There is deliberately no
+/// LLM-liveness probe and no broker heartbeat: the session layout already fixes
+/// pane 0 as the supervisor, so pane **presence** is the signal.
+#[must_use]
+pub fn orchestrator_pane_index(panes: &[PaneInfo], agents: &[AgentPane]) -> Option<usize> {
+    panes
+        .iter()
+        .find(|p| {
+            resolve_pane_agent(p.pane_index, &p.pane_current_path, agents) == PaneRole::Supervisor
+        })
+        .map(|p| p.pane_index)
+}
+
+/// Whether an orchestrator (supervisor CLI) pane is present — the predicate that
+/// selects between the hand-to-orchestrator path and the broker-only fallback.
+///
+/// A pure `--unattended` run with no supervisor pane returns `false`, and the
+/// loop's escalation behaviour is then identical to the pre-orchestrator
+/// version: a uniform broker review item and no pane injection at all.
+#[must_use]
+pub fn orchestrator_present(panes: &[PaneInfo], agents: &[AgentPane]) -> bool {
+    orchestrator_pane_index(panes, agents).is_some()
 }
 
 /// Canonicalises `p`, falling back to the path as-given when it cannot be
@@ -572,33 +606,91 @@ pub struct ExhaustedBranch {
     pub policy: OnExhausted,
 }
 
-/// Maximum length of the re-engagement text typed into a worker's pane. A gate
-/// verdict can carry a long error list; the pane only needs enough to re-orient
-/// the worker, which then reads the full feedback from its inbox.
-const REENGAGEMENT_TEXT_MAX_CHARS: usize = 600;
+/// Maximum length of free text the loop types into a pane. A gate verdict or an
+/// escalation can carry a long error list; the pane only needs enough to
+/// re-orient its model, which then reads the full detail from the broker.
+const INJECTED_TEXT_MAX_CHARS: usize = 600;
+
+/// Flattens `text` to a single line and caps it at [`INJECTED_TEXT_MAX_CHARS`].
+///
+/// Both steps are `send-keys` requirements, not cosmetics: an embedded newline
+/// would submit the message early (splitting one prompt into several), and an
+/// unbounded payload would flood the pane's input box.
+fn one_line_capped(text: &str) -> String {
+    let mut body = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if body.chars().count() > INJECTED_TEXT_MAX_CHARS {
+        body = body
+            .chars()
+            .take(INJECTED_TEXT_MAX_CHARS)
+            .collect::<String>();
+        body.push_str(" ...");
+    }
+    body
+}
 
 /// Renders the text injected into a gate-failed worker's pane.
 ///
 /// Names the failing gate, carries its feedback, and instructs the worker to
 /// fix and re-verify — so a blocked worker acts on the verdict without polling
-/// an inbox it is not polling. The feedback is flattened to a single line
-/// (embedded newlines would submit the message early through `send-keys`) and
-/// truncated to [`REENGAGEMENT_TEXT_MAX_CHARS`].
+/// an inbox it is not polling. Flattened and capped by [`one_line_capped`].
 #[must_use]
 pub fn reengagement_text(gate: &str, feedback: &str) -> String {
-    let flattened = feedback.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut body = format!(
+    one_line_capped(&format!(
         "Supervisor gate '{gate}' failed - fix the reported errors in your worktree, \
-         then commit and stand by for re-verification. Feedback: {flattened}"
-    );
-    if body.chars().count() > REENGAGEMENT_TEXT_MAX_CHARS {
-        body = body
-            .chars()
-            .take(REENGAGEMENT_TEXT_MAX_CHARS)
-            .collect::<String>();
-        body.push_str(" ...");
-    }
-    body
+         then commit and stand by for re-verification. Feedback: {feedback}"
+    ))
+}
+
+/// Renders the orchestration-sweep nudge injected into the orchestrator's pane
+/// on the [`ORCHESTRATION_NUDGE_INTERVAL`] cadence.
+///
+/// The nudge carries no per-agent detail on purpose: it asks the orchestrator to
+/// re-derive the whole picture from the broker (spawn order, merge sequencing,
+/// blocked workers) rather than pushing the loop's mechanical view of it, which
+/// is what keeps judgment in the smart model and mere triggering in the loop.
+#[must_use]
+pub fn orchestration_nudge_text() -> String {
+    one_line_capped(
+        "Run an orchestration sweep now: re-read the broker state and reconsider \
+         dependency-aware spawn order, merge sequencing, and any blocked or \
+         non-converging worker. Act on what you find; escalate to the human only \
+         what you genuinely cannot decide.",
+    )
+}
+
+/// Renders the task text injected into the orchestrator's pane when a worker
+/// asks an ambiguous question.
+///
+/// The worker published `agent.question` precisely because it could not decide,
+/// so the question itself is the ambiguity signal — the loop adds no classifier
+/// of its own. The text tells the orchestrator to answer from the specs and
+/// cross-agent state and to reach for the human only when the call is genuinely
+/// undecidable.
+#[must_use]
+pub fn question_handoff_text(agent_id: &str, question: &str) -> String {
+    one_line_capped(&format!(
+        "Judgment call handed to you: {agent_id} is waiting on an answer and is \
+         blocked until it arrives. Answer it from the specs and cross-agent state, \
+         publish the answer to {agent_id}, and escalate to the human only if it is \
+         genuinely undecidable. Question: {question}"
+    ))
+}
+
+/// Renders the task text injected into the orchestrator's pane when a worker
+/// publishes an artifact at a [`MERGE_CANDIDATE_STATUSES`] status — the point at
+/// which a **merge decision** becomes live.
+///
+/// A committed or done branch is what the supervisor's verify-then-merge
+/// sequencing keys off, so this is the loop triggering that decision rather than
+/// waiting for the orchestrator to notice the artifact on its own.
+#[must_use]
+pub fn merge_handoff_text(agent_id: &str, status: &str) -> String {
+    one_line_capped(&format!(
+        "Merge decision handed to you: {agent_id} reached status '{status}'. Verify \
+         it, then decide where it sits in the merge sequence relative to the other \
+         branches in flight; escalate to the human only if the sequencing is \
+         genuinely undecidable."
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -649,6 +741,24 @@ impl Escalation {
                 self.agent_id, self.verdict, self.command
             ),
         }
+    }
+
+    /// Renders the task text injected into the orchestrator's pane for this
+    /// escalation.
+    ///
+    /// Where [`Self::question`] asks a *human* to review a pane, this asks the
+    /// *orchestrator* to decide and act — it can approve the escalated pane,
+    /// publish an answer, or declare the branch unrecoverable itself. The human
+    /// framing is deliberately not reused: telling a model to "review the pane
+    /// and decide manually" invites it to wait for someone else.
+    #[must_use]
+    pub fn handoff_text(&self) -> String {
+        one_line_capped(&format!(
+            "Judgment call handed to you ({} / {}): {}. Decide it now from the specs \
+             and cross-agent state and act on it; escalate to the human only if it is \
+             genuinely undecidable.",
+            self.verdict, self.agent_id, self.command
+        ))
     }
 }
 
@@ -848,6 +958,9 @@ pub struct DriveConfig {
     pub heartbeat: Duration,
     /// Dedup window.
     pub dedup_window: Duration,
+    /// Cadence of the orchestration-sweep nudge injected into the orchestrator
+    /// pane — deliberately longer than `poll_interval`.
+    pub orchestration_nudge_interval: Duration,
     /// Effective safe-command whitelist.
     pub whitelist: Vec<String>,
     /// Whether in-worktree write/edit/create prompts auto-approve.
@@ -873,6 +986,7 @@ impl Default for DriveConfig {
             poll_interval: POLL_INTERVAL,
             heartbeat: HEARTBEAT_INTERVAL,
             dedup_window: DEDUP_WINDOW,
+            orchestration_nudge_interval: ORCHESTRATION_NUDGE_INTERVAL,
             whitelist: Vec::new(),
             approve_worktree_writes: true,
             protected_paths: ProtectedPaths::default(),
@@ -926,14 +1040,26 @@ pub fn drive_loop(
     let mut exhausted: Vec<ExhaustedBranch> = Vec::new();
 
     let start = deps.clock.now();
+    // Nudge timer starts at the loop's start, so the first orchestration nudge
+    // lands one full cadence in rather than on the opening tick.
+    let mut last_orchestration_nudge = start;
 
     // The loop is an expression that breaks with the terminal `(outcome,
     // latest_status)`: every exit path assigns both, so there are no
     // pre-initialised placeholders to leave dead.
     let (outcome, latest_status) = loop {
         // --- Sweep every pane (pane-keyed, explicit per-pane capture) --------
+        // The pane list is bound before the sweep because the orchestrator's
+        // presence is read from it: pane presence IS the orchestrator signal,
+        // and it is re-resolved every sweep so a supervisor pane that dies
+        // mid-wave falls back to broker-only escalation from then on.
+        let panes = deps.enumerator.list_panes(session);
+        let ctx = SweepContext {
+            session,
+            orchestrator: orchestrator_pane_index(&panes, agents),
+        };
         let mut pane_by_agent: HashMap<String, usize> = HashMap::new();
-        for pane in deps.enumerator.list_panes(session) {
+        for pane in panes {
             let role = resolve_pane_agent(pane.pane_index, &pane.pane_current_path, agents);
             let Some(agent_id) = role.agent_id() else {
                 continue; // dashboard pane — never acted on
@@ -943,7 +1069,7 @@ pub fn drive_loop(
 
             let worktree_root = worktree_by_id.get(&agent_id).map(PathBuf::as_path);
             if let Some(escalation) = sweep_pane(
-                session,
+                ctx,
                 &pane,
                 &agent_id,
                 worktree_root,
@@ -955,20 +1081,8 @@ pub fn drive_loop(
             }
         }
 
-        // --- Observe newly published gate verdicts ---------------------------
-        // A failing gate arrives as `agent.feedback`; the passing case
-        // publishes `agent.verified` and is handled by the status sweep below.
-        for msg in deps.messages.poll_new() {
-            if let BrokerMessage::Feedback { agent_id, payload } = &msg
-                && coding_ids.iter().any(|id| id == agent_id)
-                && let Some(gate) = gate_failure(payload)
-            {
-                correction.mark_gate_failure(
-                    agent_id,
-                    reengagement_text(gate, &payload.errors.join("; ")),
-                );
-            }
-        }
+        // --- Observe newly published worker messages -------------------------
+        observe_worker_messages(ctx, &coding_ids, deps, &mut correction);
 
         // --- Completion check ------------------------------------------------
         let latest_status = deps.status.fetch();
@@ -984,9 +1098,23 @@ pub fn drive_loop(
             break (outcome, latest_status);
         }
 
+        // --- Orchestration-sweep nudge (longer cadence) ----------------------
+        // Placed after the completion check so a finished wave is never nudged.
+        if let Some(pane_index) = ctx.orchestrator
+            && deps.clock.now().duration_since(last_orchestration_nudge)
+                >= config.orchestration_nudge_interval
+            // Suppressed while the orchestrator is mid-response: the timer is
+            // advanced only on a delivered nudge, so a busy orchestrator has its
+            // nudge deferred to the next tick rather than skipped for a whole
+            // cadence.
+            && hand_to_orchestrator(deps, session, pane_index, &orchestration_nudge_text())
+        {
+            last_orchestration_nudge = deps.clock.now();
+        }
+
         // --- Correction pass (auto-loopback) ---------------------------------
         let mut pass = CorrectionPass {
-            session,
+            ctx,
             panes: &pane_by_agent,
             status: &latest_status,
             correction: &mut correction,
@@ -1022,6 +1150,103 @@ pub fn drive_loop(
     }
 }
 
+/// `agent.artifact` statuses that make a **merge decision** live.
+///
+/// Deliberately NOT the whole terminal-status set: `blocked` and `verified`
+/// never arrive as an artifact status (they are `agent.blocked` and
+/// `agent.verified`), and treating a hypothetical `blocked` artifact as a merge
+/// candidate would hand the orchestrator a merge-sequencing task for a branch
+/// that is not ready — a misleading prompt for work that does not exist.
+const MERGE_CANDIDATE_STATUSES: &[&str] = &["committed", "done"];
+
+/// Reacts to the broker messages published since the previous sweep.
+///
+/// Three worker signals matter here, and each is a different kind of live
+/// judgment call:
+/// - **`agent.feedback`** carrying a `[<gate>]` tag is a FAILING gate verdict; it
+///   marks the branch for the correction pass. (A passing gate publishes
+///   `agent.verified`, which the `/status` sweep handles instead.)
+/// - **`agent.question`** is an ambiguous question. The worker published it
+///   precisely *because* it could not decide, so the message itself is the
+///   ambiguity signal — the loop adds no classifier of its own — and it is handed
+///   to the orchestrator to answer.
+/// - **`agent.artifact`** at a [`MERGE_CANDIDATE_STATUSES`] status is the point a
+///   **merge decision** becomes live, so it is handed over for verification and
+///   merge sequencing.
+///
+/// Every arm filters on `coding_ids` FIRST. The loop's own escalations go out as
+/// `agent.question` from the supervisor, so an unfiltered question arm would feed
+/// the loop its own tail — injecting each escalation twice and, worse, once per
+/// message it generated. Handing off is fire-and-forget throughout: no arm blocks
+/// the wave on the orchestrator's response.
+fn observe_worker_messages(
+    ctx: SweepContext<'_>,
+    coding_ids: &[String],
+    deps: &mut DriveDeps<'_>,
+    correction: &mut CorrectionState,
+) {
+    for msg in deps.messages.poll_new() {
+        let Some(agent_id) = coding_ids.iter().find(|id| *id == msg.agent_id()) else {
+            continue;
+        };
+        match &msg {
+            BrokerMessage::Feedback { payload, .. } => {
+                if let Some(gate) = gate_failure(payload) {
+                    correction.mark_gate_failure(
+                        agent_id,
+                        reengagement_text(gate, &payload.errors.join("; ")),
+                    );
+                }
+            }
+            BrokerMessage::Question { payload, .. } => {
+                if let Some(pane_index) = ctx.orchestrator {
+                    let text = question_handoff_text(agent_id, &payload.question);
+                    hand_to_orchestrator(deps, ctx.session, pane_index, &text);
+                }
+            }
+            BrokerMessage::Artifact { payload, .. } => {
+                if let Some(pane_index) = ctx.orchestrator
+                    && MERGE_CANDIDATE_STATUSES.contains(&payload.status.as_str())
+                {
+                    let text = merge_handoff_text(agent_id, &payload.status);
+                    hand_to_orchestrator(deps, ctx.session, pane_index, &text);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The tmux session plus the orchestrator pane resolved for the current sweep.
+///
+/// Bundled rather than passed as two parameters because every acting path needs
+/// both, and threading them separately pushes the sweep helpers past the
+/// argument-count lint.
+#[derive(Debug, Clone, Copy)]
+struct SweepContext<'a> {
+    /// tmux session name.
+    session: &'a str,
+    /// Orchestrator (supervisor CLI) pane index, or `None` when the session has
+    /// no supervisor pane — the broker-only fallback.
+    orchestrator: Option<usize>,
+}
+
+/// Records `escalation` on the broker — **uniformly**, whether or not an
+/// orchestrator is running — and, when an orchestrator pane is present, ALSO
+/// hands it to that pane as a task prompt.
+///
+/// The split matters: the broker record is the durable, drainable review item a
+/// human reads in a no-supervisor run, while the injection actively *triggers* a
+/// present orchestrator instead of relying on it to poll an inbox it never
+/// reads. With no orchestrator pane the second step does not happen at all, so
+/// the escalation path is identical to the pre-orchestrator version.
+fn record_escalation(deps: &mut DriveDeps<'_>, ctx: SweepContext<'_>, escalation: &Escalation) {
+    deps.alerts.escalate(escalation);
+    if let Some(pane_index) = ctx.orchestrator {
+        hand_to_orchestrator(deps, ctx.session, pane_index, &escalation.handoff_text());
+    }
+}
+
 /// Sweeps one pane: captures it, and when a LIVE prompt is in the tail either
 /// approves it (audit-logged first, then the option digit and `Enter` as two
 /// separate keystrokes, gated on a fresh re-confirm) or records a deduped
@@ -1032,7 +1257,7 @@ pub fn drive_loop(
 /// narration, or a resolved prompt scrolled into history — is left untouched;
 /// that is also what keeps pane 0 quiet.
 fn sweep_pane(
-    session: &str,
+    ctx: SweepContext<'_>,
     pane: &PaneInfo,
     agent_id: &str,
     worktree_root: Option<&Path>,
@@ -1040,6 +1265,7 @@ fn sweep_pane(
     config: &DriveConfig,
     dedup: &mut DedupWindow,
 ) -> Option<Escalation> {
+    let session = ctx.session;
     let capture = deps.capturer.capture(session, pane.pane_index);
     if !is_live_prompt(&capture) {
         return None;
@@ -1083,7 +1309,7 @@ fn sweep_pane(
                 verdict: verdict.label().to_string(),
                 command: dedup_shape(&capture),
             };
-            deps.alerts.escalate(&escalation);
+            record_escalation(deps, ctx, &escalation);
             // Opportunistic learning: the loop absorbed friction it could not
             // auto-approve.
             deps.learnings.record(
@@ -1099,8 +1325,8 @@ fn sweep_pane(
 /// The mutable slice of one sweep the correction pass operates on, bundled so
 /// [`run_correction_pass`] keeps a small signature.
 struct CorrectionPass<'a> {
-    /// tmux session name.
-    session: &'a str,
+    /// tmux session + orchestrator pane for this sweep.
+    ctx: SweepContext<'a>,
     /// Pane index per agent id, resolved during this sweep.
     panes: &'a HashMap<String, usize>,
     /// The `/status` snapshot taken this sweep (source of the worker CLI).
@@ -1149,10 +1375,19 @@ fn run_correction_pass(
         let Some(&pane_index) = pass.panes.get(&agent_id) else {
             continue;
         };
+        // Finished-status gate: a finished worker is never nudged. The signal is
+        // the worker's BROKER status, never a pane-content diff — a finished
+        // worker's pane is just as unchanging as a stuck one's, so a diff cannot
+        // tell "idle because done" from "idle because stuck". Keeping the
+        // correction pending means a worker that leaves the finished state is
+        // re-engaged on a later sweep rather than losing the verdict.
+        if is_finished_worker(pass.status, &agent_id) {
+            continue;
+        }
         match send_reengagement(
             deps.capturer,
             deps.dispatcher,
-            pass.session,
+            pass.ctx.session,
             pane_index,
             &feedback,
         ) {
@@ -1177,10 +1412,28 @@ fn run_correction_pass(
                     policy.max_cycles
                 ),
             };
-            deps.alerts.escalate(&escalation);
+            record_escalation(deps, pass.ctx, &escalation);
             pass.escalations.push(escalation);
         }
     }
+}
+
+/// Whether `agent_id`'s broker status in `rows` means the worker has FINISHED —
+/// [`AGENT_COMPLETE_STATUSES`], i.e. `done` / `verified`.
+///
+/// Deliberately narrower than `stall.rs`'s `TERMINAL_STATUSES`, which also lists
+/// `blocked` and `committed`. Those two are precisely the states a worker sits in
+/// while it awaits correction — committed and standing by for re-verification, or
+/// blocked and not polling its inbox — and they are what
+/// `supervisor-correction-loop` exists to re-engage. Suppressing a nudge there
+/// would silently disable that loop for its dominant path; "finished" and "quiet"
+/// are different conditions, and only the former ends nudge eligibility.
+///
+/// An agent with no row yet has NOT finished: a pane that has booted but never
+/// published is still nudge-eligible, matching the loop's pane-keyed sweep.
+fn is_finished_worker(rows: &[AgentStatusRow], agent_id: &str) -> bool {
+    rows.iter()
+        .any(|r| r.agent_id == agent_id && AGENT_COMPLETE_STATUSES.contains(&r.status.as_str()))
 }
 
 /// Applies the configured `on_exhausted` action to a branch whose correction
@@ -1205,7 +1458,7 @@ fn apply_exhaustion(
                 "branch is unrecoverable after {cycles} correction cycle(s); needs a human"
             ),
         };
-        deps.alerts.escalate(&escalation);
+        record_escalation(deps, pass.ctx, &escalation);
         pass.escalations.push(escalation);
     }
     pass.exhausted.push(ExhaustedBranch {
@@ -1281,8 +1534,31 @@ fn send_reengagement(
     pane_index: usize,
     text: &str,
 ) -> Result<bool, PawError> {
+    send_nudge(capturer, dispatcher, session, pane_index, text, |capture| {
+        !live_prompt_in_tail(capture)
+    })
+}
+
+/// Types `text` into `pane_index` followed by a separate submitting `Enter`,
+/// gated on a fresh capture taken immediately before the send satisfying
+/// `ready`.
+///
+/// Returns `Ok(true)` when the keystrokes went out and `Ok(false)` when `ready`
+/// rejected the fresh capture — the TOCTOU guard every free-text path shares, so
+/// no caller can skip it. Callers differ only in how strict `ready` is: the
+/// worker re-engagement needs the pane merely to be free of a live permission
+/// prompt, while an orchestrator hand-off additionally requires it not to be
+/// mid-response ([`orchestrator_ready`]).
+fn send_nudge(
+    capturer: &dyn PaneCapture,
+    dispatcher: &mut dyn KeyDispatcher,
+    session: &str,
+    pane_index: usize,
+    text: &str,
+    ready: impl Fn(&str) -> bool,
+) -> Result<bool, PawError> {
     let capture = capturer.capture(session, pane_index);
-    if live_prompt_in_tail(&capture) {
+    if !ready(&capture) {
         return Ok(false);
     }
     let [body, submit] = nudge_keystrokes(text);
@@ -1293,6 +1569,62 @@ fn send_reengagement(
         .send_key(session, pane_index, &submit)
         .map_err(|e| PawError::TmuxError(format!("send-keys {submit} failed: {e}")))?;
     Ok(true)
+}
+
+/// Capture markers that identify a pane actively producing a response — the CLI
+/// is mid-turn with its interrupt footer showing, rather than sitting at its
+/// input box.
+///
+/// The set is deliberately conservative: an unrecognised CLI matches nothing and
+/// is treated as idle, which at worst reproduces the injection behaviour of a
+/// pane whose state the loop cannot read.
+const MID_RESPONSE_MARKERS: &[&str] = &["esc to interrupt", "ctrl+c to interrupt"];
+
+/// Whether `capture` shows a pane mid-response (see [`MID_RESPONSE_MARKERS`]).
+fn pane_is_mid_response(capture: &str) -> bool {
+    let lowered = capture.to_ascii_lowercase();
+    MID_RESPONSE_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(marker))
+}
+
+/// Whether the orchestrator's pane is ready to receive an injected task.
+///
+/// Two conditions, each guarding a distinct hazard:
+/// - **No live permission prompt.** The approval path owns that pane state on
+///   this or a prior tick, and free text typed at a prompt lands *in* the prompt.
+///   This is what keeps the hand-off from colliding with the pane-0 approval
+///   no-pollution rule, which stays unmodified.
+/// - **Not mid-response.** A task injected into the middle of the orchestrator's
+///   own turn pollutes its context instead of queueing a job.
+fn orchestrator_ready(capture: &str) -> bool {
+    !live_prompt_in_tail(capture) && !pane_is_mid_response(capture)
+}
+
+/// Injects `text` into the orchestrator's pane as a task prompt, returning
+/// whether it was actually delivered.
+///
+/// Fire-and-forget by design: a refusal (the pane was busy) or a dispatch
+/// failure is swallowed, because the broker record is the durable channel and the
+/// injection is only the trigger. Nothing here blocks the wave — the loop moves
+/// straight on, and the next orchestration nudge re-triggers the orchestrator
+/// anyway. The returned flag lets a *cadenced* caller distinguish "delivered" from
+/// "suppressed" so it can retry rather than swallow the whole interval.
+fn hand_to_orchestrator(
+    deps: &mut DriveDeps<'_>,
+    session: &str,
+    pane_index: usize,
+    text: &str,
+) -> bool {
+    send_nudge(
+        deps.capturer,
+        deps.dispatcher,
+        session,
+        pane_index,
+        text,
+        orchestrator_ready,
+    )
+    .unwrap_or(false)
 }
 
 /// Builds the keystroke sequence for a *nudge* — free text the loop wants a
@@ -1643,6 +1975,10 @@ pub fn run_drive_loop(
         // design's open questions).
         poll_interval: duration_from_env_ms("GIT_PAW_DRIVE_POLL_MS", POLL_INTERVAL),
         heartbeat: duration_from_env_ms("GIT_PAW_DRIVE_HEARTBEAT_MS", HEARTBEAT_INTERVAL),
+        orchestration_nudge_interval: duration_from_env_ms(
+            "GIT_PAW_DRIVE_ORCHESTRATION_NUDGE_MS",
+            ORCHESTRATION_NUDGE_INTERVAL,
+        ),
         whitelist,
         approve_worktree_writes,
         protected_paths,
@@ -3297,5 +3633,578 @@ mod tests {
             1,
             "the safe decision was made (and audit-logged) before the prompt cleared"
         );
+    }
+
+    // --- autonomous orchestrator (supervisor-autonomous-orchestrator) --------
+
+    /// An orchestrator pane sitting at its input box: no live permission prompt,
+    /// not mid-turn — the state a hand-off may be injected into.
+    const IDLE_PANE: &str = "? for shortcuts";
+
+    /// An orchestrator pane actively producing a response. Injecting here would
+    /// land a task in the middle of the model's own turn.
+    const MID_RESPONSE_PANE: &str = "Boondoggling… (esc to interrupt)";
+
+    /// Two coding agents on distinct worktrees, the roster every orchestrator
+    /// test below shares.
+    fn two_agents() -> Vec<AgentPane> {
+        vec![
+            AgentPane {
+                agent_id: "feat-a".to_string(),
+                worktree_path: PathBuf::from("/repo-feat-a"),
+            },
+            AgentPane {
+                agent_id: "feat-b".to_string(),
+                worktree_path: PathBuf::from("/repo-feat-b"),
+            },
+        ]
+    }
+
+    fn pane(pane_index: usize, path: &str) -> PaneInfo {
+        PaneInfo {
+            pane_index,
+            pane_current_path: path.to_string(),
+        }
+    }
+
+    /// Runs the loop with fakes and hands back what it dispatched, escalated, and
+    /// summarised — the boilerplate every orchestrator test shares.
+    fn run_loop(
+        agents: &[AgentPane],
+        panes: Vec<PaneInfo>,
+        pane_text: &[(usize, &str)],
+        statuses: Vec<Vec<AgentStatusRow>>,
+        messages: &ScriptedMessages,
+        config: &DriveConfig,
+    ) -> (RecordingDispatcher, RecordingAlerts) {
+        let enumerator = FakeEnumerator { panes };
+        let capturer = FakeCapturer::new(pane_text);
+        let mut dispatcher = RecordingDispatcher::default();
+        let status = ScriptedStatus::new(statuses);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages,
+            clock: &clock,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+        };
+        drive_loop("paw-test", agents, &mut deps, config);
+        (dispatcher, alerts)
+    }
+
+    /// Asserts a payload containing `needle` was typed into `pane_index`
+    /// LITERALLY (`send-keys -l`) and submitted by a SEPARATE `Enter` keystroke
+    /// immediately after — the D6 nudge discipline.
+    fn assert_text_then_separate_enter(d: &RecordingDispatcher, pane_index: usize, needle: &str) {
+        let pos = d
+            .events
+            .iter()
+            .position(|(p, t)| *p == pane_index && t.contains(needle))
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a send containing {needle:?} to pane {pane_index}; \
+                     events were {:?}",
+                    d.events
+                )
+            });
+        assert!(
+            d.literal_sends
+                .iter()
+                .any(|(p, t)| *p == pane_index && t.contains(needle)),
+            "the body must go out literally (send-keys -l), never through tmux's key table"
+        );
+        assert_eq!(
+            d.events.get(pos + 1),
+            Some(&(pane_index, "Enter".to_string())),
+            "the submitting Enter must be its own keystroke, right after the text"
+        );
+    }
+
+    /// Whether any literal send to `pane_index` contains `needle`.
+    fn injected(d: &RecordingDispatcher, pane_index: usize, needle: &str) -> bool {
+        d.literal_sends
+            .iter()
+            .any(|(p, t)| *p == pane_index && t.contains(needle))
+    }
+
+    /// Presence is structural — a pane resolving to the supervisor IS the
+    /// orchestrator, and a session with no such pane has none.
+    #[test]
+    fn orchestrator_presence_is_read_from_the_pane_layout() {
+        let agents = two_agents();
+        let with_supervisor = vec![pane(0, "/repo"), pane(2, "/repo-feat-a")];
+        assert_eq!(
+            orchestrator_pane_index(&with_supervisor, &agents),
+            Some(0),
+            "pane 0 at the repo root is the orchestrator"
+        );
+        assert!(orchestrator_present(&with_supervisor, &agents));
+
+        let workers_only = vec![pane(2, "/repo-feat-a"), pane(3, "/repo-feat-b")];
+        assert_eq!(orchestrator_pane_index(&workers_only, &agents), None);
+        assert!(
+            !orchestrator_present(&workers_only, &agents),
+            "a pure --unattended run with no supervisor pane has no orchestrator"
+        );
+    }
+
+    /// Spec: "An unknown prompt is injected into the orchestrator pane" — the
+    /// escalation is recorded on the broker AND handed to the orchestrator, while
+    /// the other worker keeps progressing (the wave never blocks on the hand-off).
+    #[test]
+    fn unknown_prompt_is_handed_to_the_orchestrator_and_recorded_on_the_broker() {
+        let agents = two_agents();
+        let (dispatcher, alerts) = run_loop(
+            &agents,
+            vec![
+                pane(0, "/repo"),
+                pane(2, "/repo-feat-a"),
+                pane(3, "/repo-feat-b"),
+            ],
+            &[
+                (0, IDLE_PANE),
+                (2, &live_safe_capture("frobnicate --all")),
+                (3, &live_safe_capture("cargo build")),
+            ],
+            vec![
+                vec![row("feat-a", "working"), row("feat-b", "working")],
+                vec![row("supervisor", "done")],
+            ],
+            &ScriptedMessages::none(),
+            &DriveConfig {
+                whitelist: vec!["cargo build".to_string()],
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                ..DriveConfig::default()
+            },
+        );
+
+        // Recorded uniformly on the broker …
+        assert_eq!(alerts.escalations.len(), 1);
+        assert_eq!(alerts.escalations[0].agent_id, "feat-a");
+        assert_eq!(alerts.escalations[0].verdict, "unknown");
+        // … AND handed to the orchestrator's pane as a task prompt.
+        assert_text_then_separate_enter(&dispatcher, 0, "Judgment call handed to you");
+        assert!(
+            injected(&dispatcher, 0, "feat-a"),
+            "the hand-off names the agent whose judgment call it is"
+        );
+        // The other worker's safe prompt was still approved this same sweep.
+        assert!(
+            dispatcher.events.contains(&(3, "1".to_string()))
+                && dispatcher.events.contains(&(3, "Enter".to_string())),
+            "the wave kept progressing; events were {:?}",
+            dispatcher.events
+        );
+    }
+
+    /// Spec: "No orchestrator present falls back to broker-only escalation" —
+    /// the same input records the escalation and injects into NO pane. This is
+    /// also the back-compat guarantee for a pure `--unattended` run.
+    #[test]
+    fn unknown_prompt_without_an_orchestrator_records_only_the_broker_escalation() {
+        let agents = two_agents();
+        let (dispatcher, alerts) = run_loop(
+            &agents,
+            vec![pane(2, "/repo-feat-a"), pane(3, "/repo-feat-b")],
+            &[
+                (2, &live_safe_capture("frobnicate --all")),
+                (3, &live_safe_capture("cargo build")),
+            ],
+            vec![
+                vec![row("feat-a", "working"), row("feat-b", "working")],
+                vec![row("supervisor", "done")],
+            ],
+            &ScriptedMessages::none(),
+            &DriveConfig {
+                whitelist: vec!["cargo build".to_string()],
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                ..DriveConfig::default()
+            },
+        );
+
+        assert_eq!(alerts.escalations.len(), 1, "still recorded on the broker");
+        assert_eq!(alerts.escalations[0].verdict, "unknown");
+        assert!(
+            dispatcher.literal_sends.is_empty(),
+            "no pane injection at all without an orchestrator; literal sends were {:?}",
+            dispatcher.literal_sends
+        );
+        // Only the safe pane's approval keystrokes went out — the escalated pane
+        // was never typed into, which is the prior behaviour exactly.
+        assert!(
+            dispatcher
+                .events
+                .iter()
+                .all(|(p, key)| *p == 3 && matches!(key.as_str(), "1" | "Enter")),
+            "only pane 3's approval keystrokes are expected; events were {:?}",
+            dispatcher.events
+        );
+    }
+
+    /// Spec: "An ambiguous question is injected into the orchestrator pane" — a
+    /// worker's `agent.question` IS the ambiguity signal, so it goes straight to
+    /// the orchestrator for the smart model to answer.
+    #[test]
+    fn worker_question_is_handed_to_the_orchestrator_pane() {
+        let agents = two_agents();
+        let question = BrokerMessage::Question {
+            agent_id: "feat-a".to_string(),
+            payload: crate::broker::messages::QuestionPayload {
+                question: "spec says both A and B own this file — which wins?".to_string(),
+            },
+        };
+        let (dispatcher, _) = run_loop(
+            &agents,
+            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
+            &[(0, IDLE_PANE), (2, IDLE_PANE)],
+            vec![
+                vec![row("feat-a", "working"), row("feat-b", "working")],
+                vec![row("supervisor", "done")],
+            ],
+            &ScriptedMessages::new(vec![vec![question]]),
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                ..DriveConfig::default()
+            },
+        );
+
+        assert_text_then_separate_enter(&dispatcher, 0, "which wins?");
+        assert!(
+            injected(&dispatcher, 0, "Judgment call handed to you: feat-a"),
+            "the hand-off names the waiting worker; literal sends were {:?}",
+            dispatcher.literal_sends
+        );
+    }
+
+    /// A worker `agent.artifact` at `agent_status`, for the merge-decision arm.
+    fn artifact(agent_status: &str) -> BrokerMessage {
+        BrokerMessage::Artifact {
+            agent_id: "feat-a".to_string(),
+            payload: crate::broker::messages::ArtifactPayload {
+                status: agent_status.to_string(),
+                exports: Vec::new(),
+                modified_files: vec!["src/lib.rs".to_string()],
+            },
+        }
+    }
+
+    /// Drives one wave whose only message is a `feat-a` artifact at `status`, and
+    /// reports what reached the orchestrator pane.
+    fn run_artifact_wave(status: &str) -> RecordingDispatcher {
+        let agents = two_agents();
+        let (dispatcher, _) = run_loop(
+            &agents,
+            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
+            &[(0, IDLE_PANE), (2, IDLE_PANE)],
+            vec![
+                vec![row("feat-a", status), row("feat-b", "working")],
+                vec![row("supervisor", "done")],
+            ],
+            &ScriptedMessages::new(vec![vec![artifact(status)]]),
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                ..DriveConfig::default()
+            },
+        );
+        dispatcher
+    }
+
+    /// Spec: "A merge decision is injected into the orchestrator pane" — a
+    /// `committed` or `done` artifact is the point a merge decision becomes live,
+    /// so the loop triggers the orchestrator rather than waiting to be noticed.
+    #[test]
+    fn merge_candidate_artifact_hands_the_merge_decision_to_the_orchestrator() {
+        for status in MERGE_CANDIDATE_STATUSES {
+            let dispatcher = run_artifact_wave(status);
+            assert_text_then_separate_enter(&dispatcher, 0, "Merge decision handed to you: feat-a");
+            assert!(
+                injected(&dispatcher, 0, "merge sequence"),
+                "the {status} hand-off asks for merge sequencing"
+            );
+            assert!(
+                injected(&dispatcher, 0, status),
+                "the hand-off names the status that made the decision live"
+            );
+        }
+    }
+
+    /// …and no other artifact status does. `blocked` and `verified` never arrive
+    /// as an artifact status (they are `agent.blocked` / `agent.verified`), and a
+    /// merge-sequencing prompt for a branch in either state would be misleading —
+    /// there is no merge to sequence.
+    #[test]
+    fn non_merge_candidate_artifact_hands_over_nothing() {
+        for status in ["blocked", "verified", "working"] {
+            let dispatcher = run_artifact_wave(status);
+            assert!(
+                !injected(&dispatcher, 0, "Merge decision handed to you"),
+                "a {status} artifact is not a merge candidate; sends were {:?}",
+                dispatcher.literal_sends
+            );
+        }
+    }
+
+    /// The loop publishes its OWN escalations as `agent.question` from the
+    /// supervisor. Re-observing those must not inject anything, or the loop feeds
+    /// itself its own tail — one hand-off per escalation, forever.
+    #[test]
+    fn the_loops_own_escalation_question_is_never_handed_back() {
+        let agents = two_agents();
+        let own = BrokerMessage::Question {
+            agent_id: SUPERVISOR_AGENT_ID.to_string(),
+            payload: crate::broker::messages::QuestionPayload {
+                question: "feat-a is stalled on a danger permission prompt".to_string(),
+            },
+        };
+        let (dispatcher, _) = run_loop(
+            &agents,
+            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
+            &[(0, IDLE_PANE), (2, IDLE_PANE)],
+            vec![
+                vec![row("feat-a", "working"), row("feat-b", "working")],
+                vec![row("supervisor", "done")],
+            ],
+            &ScriptedMessages::new(vec![vec![own]]),
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                ..DriveConfig::default()
+            },
+        );
+
+        assert!(
+            dispatcher.literal_sends.is_empty(),
+            "a supervisor-authored question is not a worker judgment call; sends were {:?}",
+            dispatcher.literal_sends
+        );
+    }
+
+    /// A task injected mid-turn pollutes the orchestrator's context, so the
+    /// hand-off is suppressed while its pane is producing output — the broker
+    /// record still stands.
+    #[test]
+    fn handoff_is_suppressed_while_the_orchestrator_is_mid_response() {
+        let agents = two_agents();
+        let (dispatcher, alerts) = run_loop(
+            &agents,
+            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
+            &[
+                (0, MID_RESPONSE_PANE),
+                (2, &live_safe_capture("frobnicate --all")),
+            ],
+            vec![
+                vec![row("feat-a", "working"), row("feat-b", "working")],
+                vec![row("supervisor", "done")],
+            ],
+            &ScriptedMessages::none(),
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                ..DriveConfig::default()
+            },
+        );
+
+        assert_eq!(
+            alerts.escalations.len(),
+            1,
+            "the broker record still stands"
+        );
+        assert!(
+            dispatcher.literal_sends.is_empty(),
+            "nothing is typed into a mid-response orchestrator; sends were {:?}",
+            dispatcher.literal_sends
+        );
+    }
+
+    /// Spec: "Orchestration nudge fires on the longer cadence" — once the
+    /// orchestration interval elapses with no completion, the nudge goes out as
+    /// text plus a separate `Enter`.
+    #[test]
+    fn orchestration_nudge_fires_on_the_longer_cadence() {
+        let agents = two_agents();
+        let (dispatcher, _) = run_loop(
+            &agents,
+            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
+            &[(0, IDLE_PANE), (2, IDLE_PANE)],
+            vec![vec![row("feat-a", "working"), row("feat-b", "working")]],
+            &ScriptedMessages::none(),
+            &DriveConfig {
+                poll_interval: Duration::from_secs(15),
+                orchestration_nudge_interval: Duration::from_secs(10),
+                heartbeat: Duration::from_secs(20),
+                ..DriveConfig::default()
+            },
+        );
+
+        assert_text_then_separate_enter(&dispatcher, 0, "Run an orchestration sweep now");
+        assert!(
+            injected(&dispatcher, 0, "merge sequencing"),
+            "the nudge asks for spawn order, merge sequencing, and blocked workers"
+        );
+    }
+
+    /// …and within a single approval tick nothing is nudged: the orchestration
+    /// cadence is a multiple of the poll interval, so the fast sweep does not
+    /// prompt-storm the orchestrator.
+    #[test]
+    fn no_orchestration_nudge_within_a_single_approval_tick() {
+        let agents = two_agents();
+        let (dispatcher, _) = run_loop(
+            &agents,
+            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
+            &[(0, IDLE_PANE), (2, IDLE_PANE)],
+            vec![vec![row("feat-a", "working"), row("feat-b", "working")]],
+            &ScriptedMessages::none(),
+            &DriveConfig {
+                poll_interval: POLL_INTERVAL,
+                orchestration_nudge_interval: ORCHESTRATION_NUDGE_INTERVAL,
+                heartbeat: POLL_INTERVAL + Duration::from_secs(1),
+                ..DriveConfig::default()
+            },
+        );
+
+        assert!(
+            dispatcher.literal_sends.is_empty(),
+            "no orchestration nudge inside one approval tick; sends were {:?}",
+            dispatcher.literal_sends
+        );
+    }
+
+    /// The orchestration nudge is suppressed while the orchestrator is
+    /// mid-response, and — because the cadence timer only advances on a
+    /// delivered nudge — it is deferred rather than swallowed.
+    #[test]
+    fn orchestration_nudge_is_suppressed_while_the_orchestrator_is_mid_response() {
+        let agents = two_agents();
+        let (dispatcher, _) = run_loop(
+            &agents,
+            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
+            &[(0, MID_RESPONSE_PANE), (2, IDLE_PANE)],
+            vec![vec![row("feat-a", "working"), row("feat-b", "working")]],
+            &ScriptedMessages::none(),
+            &DriveConfig {
+                poll_interval: Duration::from_secs(15),
+                orchestration_nudge_interval: Duration::from_secs(10),
+                heartbeat: Duration::from_secs(20),
+                ..DriveConfig::default()
+            },
+        );
+
+        assert!(
+            dispatcher.literal_sends.is_empty(),
+            "a busy orchestrator is not nudged; sends were {:?}",
+            dispatcher.literal_sends
+        );
+    }
+
+    /// "Finished" is `done`/`verified` only, read from broker status rows. The
+    /// statuses a worker occupies while AWAITING correction — `blocked`,
+    /// `committed` — are deliberately NOT finished, or the correction loop could
+    /// never reach the workers it exists to re-engage.
+    #[test]
+    fn finished_worker_is_decided_by_the_complete_status_set() {
+        for status in AGENT_COMPLETE_STATUSES {
+            let rows = vec![row("feat-a", status)];
+            assert!(
+                is_finished_worker(&rows, "feat-a"),
+                "{status} means the worker has finished"
+            );
+        }
+        for status in ["blocked", "committed", "working"] {
+            assert!(
+                !is_finished_worker(&[row("feat-a", status)], "feat-a"),
+                "{status} is quiet, not finished — it stays nudge-eligible"
+            );
+        }
+        assert!(
+            !is_finished_worker(&[], "feat-a"),
+            "a pane that has not published yet stays nudge-eligible"
+        );
+    }
+
+    /// The correction-pass config every nudge-gate test below shares.
+    fn correcting_config() -> DriveConfig {
+        DriveConfig {
+            poll_interval: Duration::from_secs(1),
+            heartbeat: Duration::from_secs(1),
+            correction: CorrectionConfig {
+                auto_loopback: true,
+                ..CorrectionConfig::default()
+            },
+            ..DriveConfig::default()
+        }
+    }
+
+    /// Spec: "A verified worker is never nudged" / "A working worker remains
+    /// eligible for a nudge" — both decided from broker status, with both panes'
+    /// captures held identical and unchanging across ticks so a pane-content diff
+    /// could not possibly tell them apart. Both workers carry the same pending
+    /// gate failure, so the ONLY discriminator is the broker status.
+    ///
+    /// This asserts the *observable* rule end-to-end, but note it cannot isolate
+    /// which mechanism delivers it: `clear_completed` already drops a finished
+    /// branch's correction state earlier in the same sweep, so the outcome holds
+    /// even without the [`is_finished_worker`] gate. The gate is the explicit,
+    /// order-independent encoding of the requirement; the discriminating test for
+    /// the gate itself is [`finished_worker_is_decided_by_the_complete_status_set`].
+    #[test]
+    fn finished_worker_is_never_nudged_while_a_working_peer_still_is() {
+        let agents = two_agents();
+        let messages = ScriptedMessages::new(vec![vec![
+            gate_feedback("feat-a", "testing", "two tests fail"),
+            gate_feedback("feat-b", "testing", "two tests fail"),
+        ]]);
+        let (dispatcher, _) = run_loop(
+            &agents,
+            vec![pane(2, "/repo-feat-a"), pane(3, "/repo-feat-b")],
+            // Identical, unchanging captures: only the broker status differs.
+            &[(2, IDLE_PANE), (3, IDLE_PANE)],
+            vec![vec![row("feat-a", "verified"), row("feat-b", "working")]],
+            &messages,
+            &correcting_config(),
+        );
+
+        assert!(
+            !injected(&dispatcher, 2, "Supervisor gate"),
+            "a finished (verified) worker receives no nudge; sends were {:?}",
+            dispatcher.literal_sends
+        );
+        assert_text_then_separate_enter(&dispatcher, 3, "Supervisor gate 'testing' failed");
+    }
+
+    /// Spec: "A committed or blocked worker awaiting correction is still nudged".
+    ///
+    /// This is the case that separates *finished* from merely *quiet*. A worker
+    /// that committed and is standing by, or one blocked and not polling its
+    /// inbox, is exactly who `supervisor-correction-loop` exists to re-engage —
+    /// gating those out would silently disable it for its dominant path.
+    #[test]
+    fn worker_awaiting_correction_is_nudged_even_when_committed_or_blocked() {
+        let agents = two_agents();
+        let messages = ScriptedMessages::new(vec![vec![
+            gate_feedback("feat-a", "testing", "two tests fail"),
+            gate_feedback("feat-b", "testing", "two tests fail"),
+        ]]);
+        let (dispatcher, _) = run_loop(
+            &agents,
+            vec![pane(2, "/repo-feat-a"), pane(3, "/repo-feat-b")],
+            &[(2, IDLE_PANE), (3, IDLE_PANE)],
+            vec![vec![row("feat-a", "committed"), row("feat-b", "blocked")]],
+            &messages,
+            &correcting_config(),
+        );
+
+        assert_text_then_separate_enter(&dispatcher, 2, "Supervisor gate 'testing' failed");
+        assert_text_then_separate_enter(&dispatcher, 3, "Supervisor gate 'testing' failed");
     }
 }
