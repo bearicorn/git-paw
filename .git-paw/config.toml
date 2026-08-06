@@ -7,6 +7,8 @@ mouse = true
 default_spec_cli = "claude-oss"
 branch_prefix = "feat/"
 
+worktree_placement = "child"
+
 [specs]
 type = "openspec"
 dir = "openspec/changes"
