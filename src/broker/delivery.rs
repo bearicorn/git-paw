@@ -1364,6 +1364,7 @@ mod tests {
                 cli: Some("claude".to_string()),
                 phase: Some("merging".to_string()),
                 detail: None,
+                activity: None,
             },
         };
         publish_message(&state, &msg);
@@ -1403,6 +1404,7 @@ mod tests {
                 cli: Some("claude".to_string()),
                 phase: Some("baseline".to_string()),
                 detail: None,
+                activity: None,
             },
         };
         publish_message(&state, &msg);
@@ -1430,6 +1432,7 @@ mod tests {
                 cli: Some("claude-oss".to_string()),
                 phase: None,
                 detail: None,
+                activity: None,
             },
         };
         publish_message(&state, &msg);
@@ -1486,6 +1489,7 @@ mod tests {
                 cli: Some("claude".to_string()),
                 phase: None,
                 detail: None,
+                activity: None,
             },
         };
         publish_message(&state, &msg);

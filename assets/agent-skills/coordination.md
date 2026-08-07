@@ -54,6 +54,33 @@ the broker merges the two views of that field without conflict — so the
 heartbeat's only job is to refresh `last_seen` during the read-only and
 deliberation windows the watcher cannot see.
 
+#### Saying what you are doing
+
+An `agent.status` payload MAY carry an `activity` field — a short free-text
+phrase naming what you are doing right now, such as `"running the test suite"`
+or `"reading the parser module"`. It is entirely optional; a status without it
+renders exactly as it always has, and nothing you do depends on setting it.
+
+The field exists because a bare `working` heartbeat tells a reader nothing. The
+dashboard's broker-log panel renders the phrase alongside the status, and it
+also collapses a run of back-to-back heartbeats that are identical in every
+rendered field into one counted row — so a phrase that actually changes as your
+work moves along keeps each phase visible instead of folding into the row above
+it. Keep it short and concrete; describe the work, not your progress through a
+task list.
+
+Publish it on the `agent.status` payload alongside `status`:
+
+```bash
+curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
+  -H "Content-Type: application/json" \
+  -d '{"type":"agent.status","agent_id":"{{BRANCH_ID}}","payload":{"status":"working","activity":"<what you are doing>","modified_files":[]}}'
+```
+
+The bundled helper's one-line argument populates `message`, not `activity`, and
+that remains the simplest way to keep `last_seen` fresh — reach for the raw
+publish above only when you specifically want the activity phrase.
+
 ### Commit cadence
 
 Commit per **task group**, not per individual task. When your change has a

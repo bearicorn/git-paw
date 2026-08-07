@@ -24,9 +24,9 @@ use crate::error::PawError;
 /// `[supervisor].cli`). Pass `None` for coding-agent paths, which rely on
 /// the broker's watch-target map to populate the dashboard CLI column.
 ///
-/// `phase` is intentionally not exposed through this helper. Callers that
-/// want to publish a phase label SHALL construct the
-/// [`BrokerMessage::Status`] directly with a fully-populated
+/// `phase` and `activity` are intentionally not exposed through this helper.
+/// Callers that want to publish a phase label or an activity phrase SHALL
+/// construct the [`BrokerMessage::Status`] directly with a fully-populated
 /// [`StatusPayload`].
 pub fn build_status_message(
     agent_id: &str,
@@ -43,6 +43,7 @@ pub fn build_status_message(
             cli: cli.map(str::to_string),
             phase: None,
             detail: None,
+            activity: None,
         },
     }
 }

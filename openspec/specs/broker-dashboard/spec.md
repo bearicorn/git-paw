@@ -2,7 +2,6 @@
 
 ## Purpose
 A ratatui TUI that observes broker state, rendering an agent-status table (with pinned supervisor row, status symbols, and relative-age formatting) plus a title and status line, driven by an event-based draw loop that shares `BrokerState` without holding locks during rendering. It manages terminal lifecycle across clean exit, error, and panic, and terminates cleanly when its session is torn down or it is orphaned rather than busy-looping. It also adds a scrolling, filterable Broker log panel that displays recent broker messages newest-first from a bounded ring buffer, with per-type filter chips, a toggle hotkey, compact rows, a JSON details overlay, and buffer resilience across watcher restarts.
-
 ## Requirements
 ### Requirement: Dashboard entry point
 
@@ -693,3 +692,56 @@ learnings mode).
 
 - **WHEN** `docs/src/user-guide/dashboard.md` is inspected
 - **THEN** any reference to the dashboard's pane location in supervisor mode states that it is at pane 1
+
+### Requirement: Broker log surfaces the status activity phrase
+
+The broker-log panel SHALL render a status message's `activity` phrase, when the
+payload carries one, as part of that status line, so a heartbeat can convey what the
+agent is doing rather than only its bare status. When a status carries no `activity`,
+the line SHALL render exactly as it did before this field existed.
+
+#### Scenario: A status with activity shows the phrase
+
+- **GIVEN** an `agent.status` with status `working` and activity `running cargo test`
+- **WHEN** the broker-log panel renders that message
+- **THEN** the rendered line SHALL include the phrase `running cargo test`
+
+#### Scenario: A status without activity is unchanged
+
+- **GIVEN** an `agent.status` with status `working` and no `activity`
+- **WHEN** the broker-log panel renders that message
+- **THEN** the rendered line SHALL match the pre-existing bare-status format
+
+### Requirement: Broker log dedups consecutive identical status heartbeats
+
+The broker-log panel SHALL collapse a run of consecutive identical status heartbeats
+— same agent, same status, same `activity`, and same `message` — into a single row
+that shows the latest timestamp and a repeat count, so frequent bare heartbeats do
+not bury real state transitions. A status that differs from the immediately preceding
+one in agent, status, activity, or message SHALL begin a new row, as SHALL any
+message that is not a status.
+
+The key spans every field the row renders, so two heartbeats collapse only when the
+line a reader sees is identical. Because the panel renders a status's `message`, a
+narrower key would fold rows that display differently and lose their text.
+
+#### Scenario: Repeated identical heartbeats collapse to one row
+
+- **GIVEN** three consecutive `agent.status` messages from the same agent, all with status `working` and no activity
+- **WHEN** the broker-log panel renders them
+- **THEN** they SHALL appear as a single row
+- **AND** that row SHALL show a repeat count of `3` and the latest of the three timestamps
+
+#### Scenario: A changed status breaks the run
+
+- **GIVEN** two `working` heartbeats from an agent followed by a `verified` status from the same agent
+- **WHEN** the broker-log panel renders them
+- **THEN** the two `working` heartbeats SHALL collapse into one row
+- **AND** the `verified` status SHALL render as a separate row
+
+#### Scenario: Heartbeats differing only by message do not collapse
+
+- **GIVEN** two consecutive `working` heartbeats from the same agent with no `activity`, whose `message` values differ
+- **WHEN** the broker-log panel renders them
+- **THEN** they SHALL render as two separate rows, each with a repeat count of `1`
+

@@ -146,6 +146,44 @@ an ellipsis (`…`); the full body is available in the details overlay.
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
+#### Status activity phrases
+
+An `agent.status` payload may carry an optional `activity` field — a short
+phrase naming what the agent is doing right now. When present it is appended to
+the status summary in parentheses, so a heartbeat conveys the work rather than
+just a bare `working`:
+
+```
+│ 14:35:09 · status   · feat-auth · working (running the test suite)                     │
+```
+
+The field is optional and additive. A status that omits it renders exactly as it
+did before the field existed, and agents are never required to set one.
+
+#### Heartbeat collapsing
+
+Agents heartbeat often, and a wall of identical `working` lines buries the real
+state transitions between them. The panel therefore collapses a run of
+**consecutive** status rows that are identical in every rendered field — same
+agent, status, activity, and message — into one row carrying the run's latest
+timestamp and a `×N` repeat count:
+
+```
+│ 14:35:09 · status   · feat-auth · working ×12                                          │
+│ 14:33:40 · artifact · fix-typo  · done: src/typos.rs                                    │
+```
+
+Anything that differs breaks the run and starts a new row — a changed status, a
+changed activity phrase, a different message, another agent, or any non-status
+message arriving in between. So a real transition such as `working` → `verified`
+always gets its own row, and two distinct working phases separated by other
+traffic are never merged.
+
+Like filtering, the collapse is a **view** operation: the ring buffer still
+retains every individual message, the count in the panel title reflects the rows
+drawn, and opening the details overlay on a collapsed row shows the newest
+message of that run.
+
 ### Details overlay
 
 Highlight a row with the arrow keys (or `j`/`k`) and press `Enter` to open a

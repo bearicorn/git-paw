@@ -435,6 +435,25 @@ The heartbeat reuses the existing `agent.status` shape — no new wire format is
 introduced. The broker merges heartbeats with watcher-driven updates without
 conflict.
 
+### Activity phrases
+
+A status payload may also carry an optional `activity` field — a short phrase
+naming what the agent is doing right now:
+
+```bash
+curl -s -X POST http://127.0.0.1:9119/publish \
+  -H "Content-Type: application/json" \
+  -d '{"type":"agent.status","agent_id":"feat-auth","payload":{"status":"working","activity":"running the test suite","modified_files":[]}}'
+```
+
+The field is optional and backward compatible: a payload that omits it
+deserializes and re-serializes exactly as before, so existing agents and stored
+messages are unaffected. When present, the dashboard's
+[Broker log panel](dashboard.md#status-activity-phrases) renders the phrase
+alongside the status. Because the panel also
+[collapses consecutive identical heartbeats](dashboard.md#heartbeat-collapsing),
+a phrase that changes as the work moves along keeps each phase on its own row.
+
 ## Commit Cadence
 
 The bundled coordination skill teaches a **per-group** commit cadence. When a
