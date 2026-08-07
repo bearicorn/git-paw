@@ -89,7 +89,7 @@ pub enum MessageError {
 
 /// Payload for `agent.status` messages.
 ///
-/// `cli`, `phase`, and `detail` are optional and serialise with
+/// `cli`, `phase`, `detail`, and `activity` are optional and serialise with
 /// `skip_serializing_if = "Option::is_none"`, so legacy payloads without these
 /// fields deserialise as `None` and new payloads with `None` omit the field
 /// from the wire bytes — preserving v0.5.0 wire compatibility byte-for-byte.
@@ -133,6 +133,14 @@ pub struct StatusPayload {
     /// gracefully — extracting documented fields and ignoring the rest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<serde_json::Value>,
+    /// Optional short free-text phrase describing what the agent is doing
+    /// right now (e.g. `"running cargo test"`, `"editing drive.rs"`). Purely
+    /// descriptive — the broker does not validate or interpret it. The
+    /// dashboard's broker-log panel renders the phrase on the status line, so
+    /// a heartbeat can convey *what* rather than only a bare `working`.
+    /// Entirely optional: a status without it renders exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
 }
 
 /// Payload for `agent.artifact` messages.
@@ -1272,6 +1280,7 @@ mod tests {
                     cli: None,
                     phase: None,
                     detail: None,
+                    activity: None,
                 },
                 None,
                 None,
@@ -1285,6 +1294,7 @@ mod tests {
                     cli: Some("claude".to_string()),
                     phase: Some("watching".to_string()),
                     detail: None,
+                    activity: None,
                 },
                 Some("claude"),
                 Some("watching"),
@@ -1349,6 +1359,7 @@ mod tests {
                 "branch": "feat/x",
                 "audit_step": "tests",
             })),
+            activity: None,
         };
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains("\"phase\":\"audit\""));
@@ -1377,6 +1388,51 @@ mod tests {
             }
             other => panic!("expected Status variant, got {other:?}"),
         }
+    }
+
+    // --- StatusPayload activity field ---
+
+    #[test]
+    fn status_payload_activity_round_trips_when_present() {
+        // GIVEN an agent.status JSON whose payload includes an activity phrase
+        // WHEN it is deserialised as StatusPayload and re-serialised
+        // THEN the activity value is preserved.
+        let json = r#"{"type":"agent.status","agent_id":"feat-x","payload":{"status":"working","modified_files":[],"activity":"running cargo test"}}"#;
+        let msg = BrokerMessage::from_json(json).expect("activity phrase accepted");
+        let BrokerMessage::Status { payload, .. } = &msg else {
+            panic!("expected Status variant, got {msg:?}");
+        };
+        assert_eq!(payload.activity.as_deref(), Some("running cargo test"));
+
+        let round_tripped = serde_json::to_string(payload).unwrap();
+        assert!(
+            round_tripped.contains(r#""activity":"running cargo test""#),
+            "activity must survive re-serialisation; got {round_tripped}"
+        );
+        let back: StatusPayload = serde_json::from_str(&round_tripped).unwrap();
+        assert_eq!(&back, payload, "activity round-trip must be lossless");
+    }
+
+    #[test]
+    fn status_payload_absent_activity_is_omitted_not_null() {
+        // GIVEN a status payload with no `activity` key
+        // WHEN it is deserialised and re-serialised
+        // THEN deserialisation succeeds with activity unset AND the
+        // re-serialised payload carries no `activity` key at all — the wire
+        // bytes are identical to the pre-activity shape (back-compat, 6.3).
+        let json = r#"{"status":"working","modified_files":["src/a.rs"],"message":"booting"}"#;
+        let payload: StatusPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.activity, None, "absent activity must parse as None");
+
+        let round_tripped = serde_json::to_string(&payload).unwrap();
+        assert!(
+            !round_tripped.contains("activity"),
+            "an unset activity must be omitted, not emitted as null; got {round_tripped}"
+        );
+        assert_eq!(
+            round_tripped, json,
+            "a pre-activity payload must round-trip byte-equivalently; got {round_tripped}"
+        );
     }
 
     #[test]
@@ -2139,6 +2195,7 @@ mod tests {
                         cli: None,
                         phase: None,
                         detail: None,
+                        activity: None,
                     },
                 },
                 "agent.status",

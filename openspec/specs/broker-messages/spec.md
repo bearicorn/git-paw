@@ -2,7 +2,6 @@
 
 ## Purpose
 Forward-compatible deserialization of broker message payloads for the v1.0 wire freeze: the three `Vec` payload fields with no non-empty contract default to an empty vector when absent (so lean and third-party publishers parse), while fields carrying an intentional non-empty contract stay required. Serialized output is unchanged — empty arrays are still emitted on the wire.
-
 ## Requirements
 ### Requirement: Lenient list-field deserialization
 
@@ -64,4 +63,25 @@ keeps the frozen-surface change to the minimum necessary.
 - **GIVEN** an `ArtifactPayload` with a non-empty `exports` and `modified_files`
 - **WHEN** it is serialized and then deserialized
 - **THEN** the round-trip SHALL preserve the value byte-equivalently, unchanged from the pre-freeze behaviour
+
+### Requirement: Status payload carries an optional activity phrase
+
+`StatusPayload` SHALL accept an optional `activity` field — a short free-text phrase
+describing what the agent is currently doing — that is omitted from serialization
+when absent. An `agent.status` message that sets no `activity` SHALL deserialize and
+re-serialize byte-for-byte as it did before this field existed, so existing agents
+and stored messages are unaffected.
+
+#### Scenario: Activity round-trips when present
+
+- **GIVEN** an `agent.status` JSON whose payload includes `"activity":"running cargo test"`
+- **WHEN** it is deserialized as `StatusPayload` and re-serialized
+- **THEN** the `activity` value SHALL be preserved
+
+#### Scenario: Absent activity is omitted, not null
+
+- **GIVEN** an `agent.status` payload with no `activity` key
+- **WHEN** it is deserialized and re-serialized
+- **THEN** deserialization SHALL succeed with `activity` unset
+- **AND** the re-serialized payload SHALL NOT contain an `activity` key
 

@@ -294,16 +294,28 @@ impl BrokerLog {
             .filter(|entry| self.filter.matches(&entry.2))
     }
 
-    /// Count of messages matching the active filter.
+    /// The panel's rendered rows: the filtered messages, newest first, with
+    /// consecutive identical status heartbeats collapsed into counted rows
+    /// (see [`collapse_status_runs`]). The ring buffer keeps every message
+    /// regardless — the collapse is a view, not a data change.
     #[must_use]
-    pub fn visible_count(&self) -> usize {
-        self.iter_visible().count()
+    pub fn visible_rows(&self) -> Vec<CollapsedRow<'_>> {
+        collapse_status_runs(self.iter_visible())
     }
 
-    /// The currently highlighted entry, if any visible row exists.
+    /// Count of rendered rows: messages matching the active filter, after
+    /// consecutive identical heartbeats collapse. Row selection is indexed
+    /// against this count, so it is what the panel highlights and scrolls.
+    #[must_use]
+    pub fn visible_count(&self) -> usize {
+        self.visible_rows().len()
+    }
+
+    /// The currently highlighted row's entry, if any visible row exists. For a
+    /// collapsed run this is the newest heartbeat of the run.
     #[must_use]
     pub fn selected_entry(&self) -> Option<&LogEntry> {
-        self.iter_visible().nth(self.selected)
+        self.visible_rows().get(self.selected).map(|row| row.entry)
     }
 
     /// The highlighted row index, clamped to the visible range.
@@ -364,10 +376,20 @@ pub fn type_short(msg: &BrokerMessage) -> &'static str {
 #[must_use]
 pub fn derive_summary(msg: &BrokerMessage) -> String {
     match msg {
-        BrokerMessage::Status { payload, .. } => match &payload.message {
-            Some(m) if !m.trim().is_empty() => format!("{}: {m}", payload.status),
-            _ => payload.status.clone(),
-        },
+        BrokerMessage::Status { payload, .. } => {
+            // The bare-status / `status: message` shapes are exactly what this
+            // arm produced before `activity` existed; the phrase is appended
+            // in parentheses only when the payload carries a non-blank one, so
+            // a status without it renders byte-identically to before.
+            let base = match &payload.message {
+                Some(m) if !m.trim().is_empty() => format!("{}: {m}", payload.status),
+                _ => payload.status.clone(),
+            };
+            match &payload.activity {
+                Some(a) if !a.trim().is_empty() => format!("{base} ({a})"),
+                _ => base,
+            }
+        }
         BrokerMessage::Artifact { payload, .. } => {
             if let Some(first) = payload.modified_files.first() {
                 format!("{}: {first}", payload.status)
@@ -423,6 +445,74 @@ pub fn derive_summary(msg: &BrokerMessage) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Heartbeat run collapse (render-time)
+// ---------------------------------------------------------------------------
+
+/// One rendered broker-log row: an entry plus how many consecutive identical
+/// status heartbeats it stands for.
+///
+/// The ring buffer is untouched by the collapse — this is a render-time view
+/// built by [`collapse_status_runs`]. `repeat` is `1` for every row that was
+/// not collapsed, including every non-status message.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CollapsedRow<'a> {
+    /// The entry the row renders. For a collapsed run this is the newest
+    /// member, so the row carries the latest timestamp of the run.
+    pub entry: &'a LogEntry,
+    /// How many consecutive identical status heartbeats the row represents.
+    pub repeat: usize,
+}
+
+/// The identity that decides whether two adjacent rows are the same heartbeat
+/// repeated: agent, status label, activity phrase, and message.
+///
+/// The key spans every payload field [`derive_summary`] renders, so a run
+/// collapses only when the line a reader sees is identical — keying on less
+/// would fold rows that display differently and lose their text. Returns
+/// `None` for any message that is not a status; those never merge.
+fn heartbeat_key(msg: &BrokerMessage) -> Option<(&str, &str, Option<&str>, Option<&str>)> {
+    match msg {
+        BrokerMessage::Status { agent_id, payload } => Some((
+            agent_id.as_str(),
+            payload.status.as_str(),
+            payload.activity.as_deref(),
+            payload.message.as_deref(),
+        )),
+        _ => None,
+    }
+}
+
+/// Collapses consecutive identical status heartbeats into single counted rows,
+/// so frequent bare heartbeats do not bury real state transitions.
+///
+/// `entries` is consumed newest-first — the order [`BrokerLog::iter_visible`]
+/// yields — so each run's representative is its newest member and the row
+/// carries the latest timestamp of that run. A status differing in agent,
+/// status label, activity, or message ends the run, as does any non-status
+/// message in between. The underlying message log is unchanged.
+#[must_use]
+pub fn collapse_status_runs<'a>(
+    entries: impl IntoIterator<Item = &'a LogEntry>,
+) -> Vec<CollapsedRow<'a>> {
+    let mut rows: Vec<CollapsedRow<'a>> = Vec::new();
+    for entry in entries {
+        let key = heartbeat_key(&entry.2);
+        let extends_run = key.is_some()
+            && rows
+                .last()
+                .is_some_and(|last| heartbeat_key(&last.entry.2) == key);
+        if extends_run {
+            if let Some(last) = rows.last_mut() {
+                last.repeat += 1;
+            }
+            continue;
+        }
+        rows.push(CollapsedRow { entry, repeat: 1 });
+    }
+    rows
+}
+
 /// Formats a broker wall-clock timestamp as `HH:MM:SS` (UTC day clock).
 #[must_use]
 pub fn format_timestamp(ts: SystemTime) -> String {
@@ -459,6 +549,23 @@ pub fn truncate_ellipsis(s: &str, max: usize) -> String {
 /// `width`, the whole line is truncated with an ellipsis.
 #[must_use]
 pub fn format_row_line(entry: &LogEntry, width: usize) -> String {
+    compose_row_line(entry, 1, width)
+}
+
+/// Composes a collapsed row's line, appending a ` ×N` repeat marker when the
+/// row stands for more than one heartbeat. A row with `repeat == 1` renders
+/// exactly as [`format_row_line`] does.
+///
+/// The marker is reserved out of the width budget before the summary is
+/// truncated, so a long summary never pushes the count off the line.
+#[must_use]
+pub fn format_collapsed_row_line(row: &CollapsedRow<'_>, width: usize) -> String {
+    compose_row_line(row.entry, row.repeat, width)
+}
+
+/// Shared body of the two row formatters: prefix, then a width-fitted summary,
+/// then the repeat marker when `repeat > 1`.
+fn compose_row_line(entry: &LogEntry, repeat: usize, width: usize) -> String {
     let (_, ts, msg) = entry;
     let prefix = format!(
         "{} · {} · {} · ",
@@ -466,14 +573,20 @@ pub fn format_row_line(entry: &LogEntry, width: usize) -> String {
         type_short(msg),
         msg.agent_id(),
     );
+    let suffix = if repeat > 1 {
+        format!(" ×{repeat}")
+    } else {
+        String::new()
+    };
     let prefix_len = prefix.chars().count();
-    if prefix_len >= width {
-        return truncate_ellipsis(&prefix, width);
+    let suffix_len = suffix.chars().count();
+    if prefix_len + suffix_len >= width {
+        return truncate_ellipsis(&format!("{prefix}{suffix}"), width);
     }
     let summary = derive_summary(msg);
     format!(
-        "{prefix}{}",
-        truncate_ellipsis(&summary, width - prefix_len)
+        "{prefix}{}{suffix}",
+        truncate_ellipsis(&summary, width - prefix_len - suffix_len)
     )
 }
 
@@ -600,11 +713,14 @@ fn chip_line(filter: FilterMask) -> Line<'static> {
 /// Renders the Broker log panel into `area` (section 4). When the details
 /// overlay is open, it is drawn on top of the panel (section 7).
 pub fn render(frame: &mut Frame, area: Rect, log: &BrokerLog) {
+    // Build the collapsed row view once — the title, the empty check, and the
+    // list items all read from it.
+    let visible_rows = log.visible_rows();
     // The title doubles as the in-app key reference (task 6.6): the chip row
     // below documents the 1-9/0 digit filters; the title documents the rest.
     let title = format!(
         "Broker log ({} shown / {} held) — l hide · a all · 1-9·0 filter · ↵ details · Esc close",
-        log.visible_count(),
+        visible_rows.len(),
         log.len()
     );
     let block = Block::default().borders(Borders::ALL).title(title);
@@ -617,7 +733,7 @@ pub fn render(frame: &mut Frame, area: Rect, log: &BrokerLog) {
 
     let list_area = rows[1];
     let width = list_area.width as usize;
-    if log.visible_count() == 0 {
+    if visible_rows.is_empty() {
         let empty = Paragraph::new("(no messages match the active filter)")
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(empty, list_area);
@@ -626,9 +742,9 @@ pub fn render(frame: &mut Frame, area: Rect, log: &BrokerLog) {
             .bg(Color::Blue)
             .fg(Color::White)
             .add_modifier(Modifier::BOLD);
-        let items: Vec<ListItem> = log
-            .iter_visible()
-            .map(|entry| ListItem::new(format_row_line(entry, width.max(1))))
+        let items: Vec<ListItem> = visible_rows
+            .iter()
+            .map(|row| ListItem::new(format_collapsed_row_line(row, width.max(1))))
             .collect();
         // Render as a stateful list so ratatui scrolls the viewport to keep the
         // selected row visible — `Up`/`Down`/`k`/`j` then reach every retained
@@ -699,6 +815,24 @@ mod tests {
                 status: status.to_string(),
                 modified_files: vec![],
                 message: message.map(str::to_string),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn status_with_activity(
+        agent: &str,
+        status_label: &str,
+        message: Option<&str>,
+        activity: Option<&str>,
+    ) -> BrokerMessage {
+        BrokerMessage::Status {
+            agent_id: agent.to_string(),
+            payload: StatusPayload {
+                status: status_label.to_string(),
+                modified_files: vec![],
+                message: message.map(str::to_string),
+                activity: activity.map(str::to_string),
                 ..Default::default()
             },
         }
@@ -898,6 +1032,262 @@ mod tests {
     #[test]
     fn summary_status_without_message() {
         assert_eq!(derive_summary(&status("a", "idle", None)), "idle");
+    }
+
+    #[test]
+    fn summary_status_with_activity_shows_the_phrase() {
+        // GIVEN an agent.status with status `working` and an activity phrase
+        // WHEN the panel derives its summary
+        // THEN the rendered line includes the phrase.
+        let s = derive_summary(&status_with_activity(
+            "a",
+            "working",
+            None,
+            Some("running cargo test"),
+        ));
+        assert!(
+            s.contains("running cargo test"),
+            "activity phrase must reach the rendered line; got {s}"
+        );
+
+        // It also survives alongside a message rather than replacing it.
+        let with_message = derive_summary(&status_with_activity(
+            "a",
+            "working",
+            Some("rebasing onto main"),
+            Some("running cargo test"),
+        ));
+        assert!(
+            with_message.contains("rebasing onto main")
+                && with_message.contains("running cargo test"),
+            "activity must not displace the message; got {with_message}"
+        );
+    }
+
+    #[test]
+    fn summary_status_without_activity_matches_pre_existing_format() {
+        // GIVEN statuses carrying no activity (the pre-activity shape)
+        // WHEN the panel derives their summaries
+        // THEN they are byte-identical to the bare-status format that existed
+        // before the field — an explicitly-None activity behaves as an absent
+        // one, and a blank phrase is treated as absent rather than rendering
+        // empty parentheses.
+        assert_eq!(derive_summary(&status("a", "idle", None)), "idle");
+        assert_eq!(
+            derive_summary(&status("a", "working", Some("rebasing onto main"))),
+            "working: rebasing onto main"
+        );
+        assert_eq!(
+            derive_summary(&status_with_activity("a", "idle", None, None)),
+            "idle"
+        );
+        assert_eq!(
+            derive_summary(&status_with_activity("a", "idle", None, Some("   "))),
+            "idle",
+            "a blank activity must not render empty parentheses"
+        );
+    }
+
+    // -- Heartbeat run collapse ------------------------------------------
+
+    /// Feeds entries to the collapse in the newest-first order the panel
+    /// iterates, given a chronological (oldest-first) slice.
+    fn rows_of(entries: &[LogEntry]) -> Vec<CollapsedRow<'_>> {
+        collapse_status_runs(entries.iter().rev())
+    }
+
+    #[test]
+    fn repeated_identical_heartbeats_collapse_to_one_counted_row() {
+        // GIVEN three consecutive identical `working` heartbeats from one agent
+        // WHEN the panel builds its rows
+        // THEN they appear as a single row showing a repeat count of 3 and the
+        // latest of the three timestamps.
+        let entries: Vec<LogEntry> = (1..=3)
+            .map(|i| entry(i, status("feat-a", "working", None)))
+            .collect();
+        let rows = rows_of(&entries);
+
+        assert_eq!(rows.len(), 1, "identical heartbeats must collapse to a row");
+        assert_eq!(rows[0].repeat, 3, "the row must count the whole run");
+        assert_eq!(
+            rows[0].entry.1,
+            ts(3),
+            "the row must carry the latest timestamp of the run"
+        );
+    }
+
+    #[test]
+    fn changed_status_breaks_the_heartbeat_run() {
+        // GIVEN two `working` heartbeats followed by a `verified` status
+        // WHEN the panel builds its rows
+        // THEN the two `working` heartbeats collapse and `verified` is its own
+        // row. Rows are newest-first, so `verified` leads.
+        let entries = vec![
+            entry(1, status("feat-a", "working", None)),
+            entry(2, status("feat-a", "working", None)),
+            entry(3, status("feat-a", "verified", None)),
+        ];
+        let rows = rows_of(&entries);
+
+        assert_eq!(rows.len(), 2, "the transition must break the run");
+        assert_eq!(rows[0].repeat, 1, "verified renders as its own row");
+        assert_eq!(rows[0].entry.1, ts(3));
+        assert_eq!(rows[1].repeat, 2, "the working heartbeats collapse");
+        assert_eq!(rows[1].entry.1, ts(2));
+    }
+
+    #[test]
+    fn heartbeats_differing_only_by_message_do_not_collapse() {
+        // GIVEN two `working` heartbeats from one agent whose messages differ
+        // WHEN the panel builds its rows
+        // THEN they stay two rows — the key spans every rendered field, so
+        // rows that display differently are never folded together.
+        let entries = vec![
+            entry(1, status("feat-a", "working", Some("reading spec"))),
+            entry(
+                2,
+                status("feat-a", "working", Some("editing broker_log.rs")),
+            ),
+        ];
+        let rows = rows_of(&entries);
+
+        assert_eq!(rows.len(), 2, "differing messages must not collapse");
+        assert!(
+            rows.iter().all(|row| row.repeat == 1),
+            "neither row stands for more than one heartbeat"
+        );
+    }
+
+    #[test]
+    fn heartbeats_differing_only_by_activity_do_not_collapse() {
+        let entries = vec![
+            entry(
+                1,
+                status_with_activity("feat-a", "working", None, Some("running cargo test")),
+            ),
+            entry(
+                2,
+                status_with_activity("feat-a", "working", None, Some("editing drive.rs")),
+            ),
+        ];
+        assert_eq!(
+            rows_of(&entries).len(),
+            2,
+            "a changed activity phrase must break the run"
+        );
+    }
+
+    #[test]
+    fn identical_heartbeats_from_different_agents_do_not_collapse() {
+        let entries = vec![
+            entry(1, status("feat-a", "working", None)),
+            entry(2, status("feat-b", "working", None)),
+        ];
+        assert_eq!(
+            rows_of(&entries).len(),
+            2,
+            "heartbeats from different agents must stay separate rows"
+        );
+    }
+
+    #[test]
+    fn non_status_message_between_heartbeats_breaks_the_run() {
+        // A non-status message ends the run even when the heartbeats around it
+        // are identical — two genuinely distinct working phases stay distinct.
+        let entries = vec![
+            entry(1, status("feat-a", "working", None)),
+            entry(
+                2,
+                BrokerMessage::Question {
+                    agent_id: "feat-a".to_string(),
+                    payload: QuestionPayload {
+                        question: "rs256 or hs256?".to_string(),
+                    },
+                },
+            ),
+            entry(3, status("feat-a", "working", None)),
+        ];
+        let rows = rows_of(&entries);
+
+        assert_eq!(rows.len(), 3, "the question must split the two runs");
+        assert!(rows.iter().all(|row| row.repeat == 1));
+    }
+
+    #[test]
+    fn collapsed_row_line_shows_the_repeat_marker() {
+        let entries: Vec<LogEntry> = (1..=3)
+            .map(|i| entry(i, status("feat-a", "working", None)))
+            .collect();
+        let rows = rows_of(&entries);
+        let line = format_collapsed_row_line(&rows[0], 120);
+
+        assert_eq!(line, "00:00:03 · status · feat-a · working ×3");
+    }
+
+    #[test]
+    fn uncollapsed_row_line_matches_format_row_line() {
+        // A row standing for a single message renders byte-identically to the
+        // pre-collapse formatter — no stray marker on ordinary rows.
+        let entries = vec![entry(1, status("feat-a", "working", Some("rebasing")))];
+        let rows = rows_of(&entries);
+
+        assert_eq!(
+            format_collapsed_row_line(&rows[0], 120),
+            format_row_line(&entries[0], 120)
+        );
+    }
+
+    #[test]
+    fn repeat_marker_survives_a_narrow_width() {
+        // The marker is reserved out of the budget, so a long summary is
+        // truncated around it rather than pushing it off the line.
+        let entries: Vec<LogEntry> = (1..=4)
+            .map(|i| {
+                entry(
+                    i,
+                    status(
+                        "feat-a",
+                        "working",
+                        Some("a very long status message indeed"),
+                    ),
+                )
+            })
+            .collect();
+        let rows = rows_of(&entries);
+        let line = format_collapsed_row_line(&rows[0], 50);
+
+        assert!(line.ends_with("×4"), "the count must survive truncation");
+        assert!(line.chars().count() <= 50, "the line must fit the width");
+    }
+
+    #[test]
+    fn panel_collapses_heartbeats_but_the_buffer_retains_them() {
+        // The collapse is a render-time view: the panel shows one row while
+        // the ring buffer still holds every heartbeat.
+        let mut log = BrokerLog::new(50, true);
+        for i in 1..=3 {
+            log.push(entry(i, status("feat-a", "working", None)));
+        }
+
+        assert_eq!(log.len(), 3, "the buffer retains every message");
+        assert_eq!(log.visible_count(), 1, "the panel shows one collapsed row");
+        assert_eq!(log.visible_rows()[0].repeat, 3);
+        assert_eq!(
+            log.selected_entry().map(|e| e.0),
+            Some(3),
+            "the highlighted row resolves to the newest heartbeat of the run"
+        );
+    }
+
+    #[test]
+    fn row_line_for_status_without_activity_is_unchanged() {
+        // Back-compat (6.3): the full composed row for a pre-activity status
+        // is byte-identical to what the panel rendered before the field.
+        let e = entry(1, status("feat-auth", "working", Some("rebasing")));
+        assert_eq!(
+            format_row_line(&e, 120),
+            "00:00:01 · status · feat-auth · working: rebasing"
+        );
     }
 
     #[test]
@@ -1112,8 +1502,11 @@ mod tests {
     #[test]
     fn selection_navigates_within_visible_bounds() {
         let mut log = BrokerLog::new(10, true);
+        // Distinct messages so each heartbeat is its own row — identical ones
+        // would collapse into a single row and there would be nothing to
+        // navigate.
         for i in 1..=3 {
-            log.push(entry(i, status("a", "working", None)));
+            log.push(entry(i, status("a", "working", Some(&format!("step {i}")))));
         }
         assert_eq!(log.selected(), 0);
         log.select_up(); // already at top, stays
