@@ -1433,7 +1433,7 @@ fn build_for(agent_count: usize) -> TmuxSession {
     .expect("session builds")
 }
 
-/// 9.1 — 5-agent layout: 1 agent row, top 60% / agent row 40%.
+/// 9.1 — 5-agent layout: 1 agent row, top 50% / agent row 50%.
 #[test]
 fn supervisor_layout_5_agents_single_row() {
     let session = build_for(5);
@@ -1457,24 +1457,24 @@ fn supervisor_layout_5_agents_single_row() {
         .find(|c| c.contains(":0.1 ") && c.contains("__dashboard"))
         .expect("dashboard send-keys at pane :0.1");
     let _ = dashboard_pane;
-    // Top row resize-pane uses 60%.
+    // Top row resize-pane uses 50%.
     let resizes = commands_containing(&cmds, "resize-pane");
     assert!(
         resizes
             .iter()
-            .any(|c| c.contains(":0.0") && c.contains("60%")),
-        "top row resize to 60%, got resizes {resizes:#?}"
+            .any(|c| c.contains(":0.0") && c.contains("-y 50%")),
+        "top row resize to 50%, got resizes {resizes:#?}"
     );
-    // Single agent row resize at pane :0.2 with 40%.
+    // Single agent row resize at pane :0.2 with the other 50%.
     assert!(
         resizes
             .iter()
-            .any(|c| c.contains(":0.2") && c.contains("40%")),
-        "agent-row resize to 40% at :0.2, got resizes {resizes:#?}"
+            .any(|c| c.contains(":0.2") && c.contains("-y 50%")),
+        "agent-row resize to 50% at :0.2, got resizes {resizes:#?}"
     );
 }
 
-/// 9.2 — 10-agent layout: 2 rows of 5, top 40% / each agent row 30%.
+/// 9.2 — 10-agent layout: 2 rows of 5, top 50% / each agent row 25%.
 #[test]
 fn supervisor_layout_10_agents_two_rows() {
     let session = build_for(10);
@@ -1492,15 +1492,15 @@ fn supervisor_layout_10_agents_two_rows() {
     assert!(
         resizes
             .iter()
-            .any(|c| c.contains(":0.0") && c.contains("40%"))
+            .any(|c| c.contains(":0.0") && c.contains("-y 50%"))
     );
     assert!(
-        resizes.iter().filter(|c| c.contains("30%")).count() >= 2,
-        "two agent rows at 30% each, got {resizes:#?}"
+        resizes.iter().filter(|c| c.contains("-y 25%")).count() >= 2,
+        "two agent rows at 25% each, got {resizes:#?}"
     );
 }
 
-/// 9.3 — 11-agent layout: 3 agent rows (5+5+1), top 28% / each agent row 24%.
+/// 9.3 — 11-agent layout: 3 agent rows (5+5+1), top 50% / each agent row 16.7%.
 #[test]
 fn supervisor_layout_11_agents_three_rows() {
     let session = build_for(11);
@@ -1509,11 +1509,11 @@ fn supervisor_layout_11_agents_three_rows() {
     assert!(
         resizes
             .iter()
-            .any(|c| c.contains(":0.0") && c.contains("28%"))
+            .any(|c| c.contains(":0.0") && c.contains("-y 50%"))
     );
     assert!(
-        resizes.iter().filter(|c| c.contains("24%")).count() >= 3,
-        "three agent rows at 24% each, got {resizes:#?}"
+        resizes.iter().filter(|c| c.contains("-y 16.7%")).count() >= 3,
+        "three agent rows at 16.7% each, got {resizes:#?}"
     );
     // 11 agents start at pane 2 and run through pane 12.
     let send_keys: Vec<String> = commands_containing(&cmds, "send-keys")
@@ -1524,7 +1524,7 @@ fn supervisor_layout_11_agents_three_rows() {
     assert!(send_keys.iter().any(|c| c.contains(":0.12 ")));
 }
 
-/// 9.4 — 20-agent layout: 4 rows of 5, top 28% / each agent row 18%.
+/// 9.4 — 20-agent layout: 4 rows of 5, top 50% / each agent row 12.5%.
 #[test]
 fn supervisor_layout_20_agents_four_rows() {
     let session = build_for(20);
@@ -1533,15 +1533,15 @@ fn supervisor_layout_20_agents_four_rows() {
     assert!(
         resizes
             .iter()
-            .any(|c| c.contains(":0.0") && c.contains("28%"))
+            .any(|c| c.contains(":0.0") && c.contains("-y 50%"))
     );
     assert!(
-        resizes.iter().filter(|c| c.contains("18%")).count() >= 4,
-        "four agent rows at 18% each, got {resizes:#?}"
+        resizes.iter().filter(|c| c.contains("-y 12.5%")).count() >= 4,
+        "four agent rows at 12.5% each, got {resizes:#?}"
     );
 }
 
-/// 9.5 — 25-agent layout: 5 rows of 5, top 28% / each agent row 14.4%.
+/// 9.5 — 25-agent layout: 5 rows of 5, top 50% / each agent row 10%.
 #[test]
 fn supervisor_layout_25_agents_five_rows() {
     let session = build_for(25);
@@ -1550,11 +1550,11 @@ fn supervisor_layout_25_agents_five_rows() {
     assert!(
         resizes
             .iter()
-            .any(|c| c.contains(":0.0") && c.contains("28%"))
+            .any(|c| c.contains(":0.0") && c.contains("-y 50%"))
     );
     assert!(
-        resizes.iter().filter(|c| c.contains("14.4%")).count() >= 5,
-        "five agent rows at 14.4% each, got {resizes:#?}"
+        resizes.iter().filter(|c| c.contains("-y 10%")).count() >= 5,
+        "five agent rows at 10% each, got {resizes:#?}"
     );
 }
 

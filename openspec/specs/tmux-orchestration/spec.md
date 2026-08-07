@@ -356,17 +356,17 @@ When the tmux session is built for supervisor mode (per the `supervisor-launch` 
 - **Top row**: split horizontally 50/50 between pane 0 (supervisor agent) and pane 1 (dashboard).
 - **Agent grid below**: dynamically sized by agent count, with up to 5 columns per row in v0.5.0. The agent grid is a sequence of horizontal rows; each row holds up to 5 agent panes side-by-side.
 - **Pane indices**: pane 0 = supervisor; pane 1 = dashboard; panes 2..N+1 = coding agents in row-major order (left-to-right, top-to-bottom).
-- **Vertical proportions** by total-row count (top row + agent rows):
+- **Vertical proportions**: the top row SHALL occupy 50% of the session height regardless of agent count, and the agent rows SHALL share the remaining 50% evenly — each agent row occupying `50 / agent_rows` percent. This is a fixed rule, not a per-agent-count table: adding agents SHALL shrink the agent rows, never the top row.
 
-  | Total rows | Top row height | Each agent row height |
+  | Agent rows | Top row height | Each agent row height |
   |---|---|---|
-  | 2 (1-5 agents) | 60% | 40% |
-  | 3 (6-10 agents) | 40% | 30% each |
-  | 4 (11-15 agents) | 28% | 24% each |
-  | 5 (16-20 agents) | 28% | 18% each |
-  | 6 (21-25 agents) | 28% | 14.4% each |
+  | 1 (1-5 agents) | 50% | 50% |
+  | 2 (6-10 agents) | 50% | 25% each |
+  | 3 (11-15 agents) | 50% | 16.7% each |
+  | 4 (16-20 agents) | 50% | 12.5% each |
+  | 5 (21-25 agents) | 50% | 10% each |
 
-- **Equal-width agent panes within a row**: every agent pane in the same agent row SHALL be rendered at equal width (within a one-column rounding tolerance), i.e. each pane occupies `100 / agents_in_that_row` percent of the row's width. Because agents are added to a row by successive `tmux split-window -h` — and each `-h` split halves the *current* pane — a row populated by raw splits renders unequal widths (e.g. a 3-agent row renders 50/25/25, not equal thirds: the v0.8.0 G3 dogfood failure). The system SHALL therefore rebalance each agent row to equal width after its panes are created, by applying `tmux select-layout even-horizontal` scoped to that row's agent panes OR by issuing `tmux resize-pane` to set each agent pane to `100 / agents_in_row` percent of the row's width. The rebalance SHALL NOT alter the top row's explicit supervisor/dashboard 50/50 horizontal proportions nor the per-row vertical height proportions in the table above.
+- **Equal-width agent panes within a row**: every agent pane in the same agent row SHALL be rendered at equal width (within a one-column rounding tolerance), i.e. each pane occupies `100 / agents_in_that_row` percent of the row's width. Because agents are added to a row by successive `tmux split-window -h` — and each `-h` split halves the *current* pane — a row populated by raw splits renders unequal widths (e.g. a 3-agent row renders 50/25/25, not equal thirds: the v0.8.0 G3 dogfood failure). The system SHALL therefore rebalance each agent row to equal width after its panes are created, by applying `tmux select-layout even-horizontal` scoped to that row's agent panes OR by issuing `tmux resize-pane` to set each agent pane to `100 / agents_in_row` percent of the row's width. The rebalance SHALL NOT alter the top row's explicit supervisor/dashboard 50/50 horizontal proportions nor the vertical height proportions described above.
 
 - **Minimum usable pane width**: the layout SHALL keep agent panes wide enough to be usable up to the agent cap; at the maximum 5 columns per row the equal-width target is 20% of the window width per pane. The system SHALL NOT produce agent rows with more than 5 panes (`SUPERVISOR_AGENTS_PER_ROW`), which bounds the minimum equal-width target per pane.
 
@@ -381,15 +381,15 @@ The layout SHALL be built using `tmux split-window -h` and `-v` with explicit pe
 - **THEN** pane 0 SHALL be the supervisor at 50% of the top row's width
 - **AND** pane 1 SHALL be the dashboard at 50% of the top row's width
 - **AND** panes 2-6 SHALL be agents arranged in a single row below the top row
-- **AND** the top row's height SHALL be 60% and the agent row's height SHALL be 40%
+- **AND** the top row's height SHALL be 50% and the agent row's height SHALL be 50%
 
 #### Scenario: 10-agent supervisor layout has 2 agent rows
 
 - **GIVEN** a supervisor session with 10 agent branches
 - **WHEN** the tmux layout is built
 - **THEN** total row count SHALL be 3 (1 top + 2 agent rows)
-- **AND** the top row's height SHALL be 40%
-- **AND** each agent row's height SHALL be 30%
+- **AND** the top row's height SHALL be 50%
+- **AND** each agent row's height SHALL be 25%
 - **AND** the first agent row SHALL contain panes 2-6, the second agent row SHALL contain panes 7-11
 
 #### Scenario: 20-agent supervisor layout has 4 agent rows
@@ -397,8 +397,8 @@ The layout SHALL be built using `tmux split-window -h` and `-v` with explicit pe
 - **GIVEN** a supervisor session with 20 agent branches
 - **WHEN** the tmux layout is built
 - **THEN** total row count SHALL be 5 (1 top + 4 agent rows)
-- **AND** the top row's height SHALL be 28%
-- **AND** each of the 4 agent rows' height SHALL be 18%
+- **AND** the top row's height SHALL be 50%
+- **AND** each of the 4 agent rows' height SHALL be 12.5%
 
 #### Scenario: 26-agent supervisor session is rejected
 
@@ -428,7 +428,7 @@ The layout SHALL be built using `tmux split-window -h` and `-v` with explicit pe
 - **GIVEN** a supervisor session whose agent row is rebalanced to equal width
 - **WHEN** the layout is applied to a live tmux window
 - **THEN** pane 0 (supervisor) and pane 1 (dashboard) SHALL remain at approximately 50% of the window width each
-- **AND** the per-row vertical height proportions SHALL match the layout table
+- **AND** the vertical height proportions SHALL be unchanged: the top row at 50% and each agent row at `50 / agent_rows` percent
 
 #### Scenario: Full agent row stays at five equal-width columns
 

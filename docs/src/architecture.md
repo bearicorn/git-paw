@@ -308,17 +308,19 @@ state for its status table.
 
 ### Row-height proportions
 
-The top row is fixed at 50% of the supervisor pane width and the agent rows
-share the remaining vertical space. Row-height proportions for the agent
-grid depend on how many bottom rows the layout produces:
+The top row is always half the session height — the supervisor and dashboard
+panes split its width 50/50 — and the agent rows share the remaining 50%
+evenly, each taking `50 / agent_rows` percent. This is a fixed rule rather
+than a per-agent-count table: adding agents shrinks the agent rows, never the
+top row.
 
-| Agent rows | Bottom-row heights |
-|------------|--------------------|
-| 1 | 60% (top row 40%) |
-| 2 | 40% / 30% / 30%  (top + 2 bottom rows) |
-| 3 | 28% / 24% / 24% / 24% |
-| 4 | 28% / 18% / 18% / 18% / 18% |
-| 5 | 28% / 14.4% / 14.4% / 14.4% / 14.4% / 14.4% |
+| Agent rows | Top row | Each agent row |
+|------------|---------|----------------|
+| 1 | 50% | 50% |
+| 2 | 50% | 25% |
+| 3 | 50% | 16.7% |
+| 4 | 50% | 12.5% |
+| 5 | 50% | 10% |
 
 ### Equal-width agent columns
 

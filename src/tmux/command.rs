@@ -1085,8 +1085,8 @@ fn push_supervisor_resize_pass(
     }
 }
 
-/// Format a row-height percentage. Whole numbers render as "28%"; the 14.4%
-/// bucket renders as "14.4%".
+/// Format a row-height percentage. Whole numbers render as "25%"; fractional
+/// shares such as the 3-agent-row split render as "16.7%".
 fn format_supervisor_pct(pct: f32) -> String {
     if (pct - pct.round()).abs() < 0.05 {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

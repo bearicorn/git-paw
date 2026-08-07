@@ -7,7 +7,8 @@
 //! - Panes 2..N+1: coding agents, row-major, up to [`SUPERVISOR_AGENTS_PER_ROW`]
 //!   columns per row
 //!
-//! Vertical proportions vary with the total number of rows. See
+//! Vertically, the top row always takes half the session and the agent rows
+//! share the other half evenly. See
 //! `openspec/changes/supervisor-as-pane/specs/tmux-orchestration/spec.md`.
 
 use crate::error::PawError;
@@ -32,13 +33,18 @@ pub struct SupervisorLayout {
     /// Total tmux rows = `agent_rows + 1` (1 top row + agent rows).
     pub total_rows: usize,
     /// Height percentage allocated to the top row (supervisor + dashboard).
+    /// Always 50: the top row is half the session whatever the agent count.
     pub top_row_pct: u8,
-    /// Height percentage allocated to each agent row. `f32` because the
-    /// 21–25-agent bucket lands on 14.4%.
+    /// Height percentage allocated to each agent row: `50 / agent_rows`, the
+    /// even split of the half the top row leaves. `f32` because the split is
+    /// fractional for some row counts (3 agent rows land on 16.67%).
     pub agent_row_pct: f32,
 }
 
 /// Compute the layout for a supervisor session with `agent_count` coding agents.
+///
+/// The top row is always 50% of the session height; the agent rows split the
+/// remaining 50% evenly. Adding agents shrinks the agent rows, never the top row.
 ///
 /// Returns [`PawError::ConfigError`] when `agent_count > SUPERVISOR_MAX_AGENTS`.
 pub fn supervisor_layout(agent_count: usize) -> Result<SupervisorLayout, PawError> {
@@ -56,19 +62,15 @@ pub fn supervisor_layout(agent_count: usize) -> Result<SupervisorLayout, PawErro
     let agent_rows = agent_count.div_ceil(SUPERVISOR_AGENTS_PER_ROW).max(1);
     let total_rows = agent_rows + 1;
 
-    let (top_row_pct, agent_row_pct) = match total_rows {
-        2 => (60u8, 40.0_f32),
-        3 => (40u8, 30.0_f32),
-        4 => (28u8, 24.0_f32),
-        5 => (28u8, 18.0_f32),
-        6 => (28u8, 14.4_f32),
-        _ => unreachable!("agent_count > SUPERVISOR_MAX_AGENTS is rejected above"),
-    };
+    // `agent_rows` is capped at SUPERVISOR_MAX_AGENTS / SUPERVISOR_AGENTS_PER_ROW,
+    // so the widening cast is exact.
+    #[allow(clippy::cast_precision_loss)]
+    let agent_row_pct = 50.0_f32 / agent_rows as f32;
 
     Ok(SupervisorLayout {
         agent_rows,
         total_rows,
-        top_row_pct,
+        top_row_pct: 50,
         agent_row_pct,
     })
 }
@@ -93,20 +95,20 @@ mod tests {
     #[test]
     fn supervisor_layout_covers_each_agent_count_bucket() {
         // One row per agent count currently covered:
-        // agent_count -> (agent_rows, top_row_pct, agent_row_pct). Each row also
-        // asserts total_rows == agent_rows + 1. Rows straddle every bucket
-        // boundary (lower + upper edge of each row-count tier).
-        for (agent_count, expected_rows, expected_top, expected_agent) in [
-            (1, 1, 60u8, 40.0_f32),
-            (5, 1, 60, 40.0),
-            (6, 2, 40, 30.0),
-            (10, 2, 40, 30.0),
-            (11, 3, 28, 24.0),
-            (15, 3, 28, 24.0),
-            (16, 4, 28, 18.0),
-            (20, 4, 28, 18.0),
-            (21, 5, 28, 14.4),
-            (25, 5, 28, 14.4),
+        // agent_count -> (agent_rows, agent_row_pct). Each row also asserts
+        // total_rows == agent_rows + 1 and a top row of 50%. Rows straddle every
+        // bucket boundary (lower + upper edge of each row-count tier).
+        for (agent_count, expected_rows, expected_agent) in [
+            (1, 1, 50.0_f32),
+            (5, 1, 50.0),
+            (6, 2, 25.0),
+            (10, 2, 25.0),
+            (11, 3, 50.0 / 3.0),
+            (15, 3, 50.0 / 3.0),
+            (16, 4, 12.5),
+            (20, 4, 12.5),
+            (21, 5, 10.0),
+            (25, 5, 10.0),
         ] {
             let layout = supervisor_layout(agent_count).expect("layout should compute");
             assert_eq!(
@@ -119,13 +121,44 @@ mod tests {
                 "total_rows for {agent_count}"
             );
             assert_eq!(
-                layout.top_row_pct, expected_top,
-                "top_row_pct for {agent_count}"
+                layout.top_row_pct, 50,
+                "top_row_pct for {agent_count} is half the session"
             );
             assert!(
                 (layout.agent_row_pct - expected_agent).abs() < 0.01,
                 "agent_row_pct for {agent_count}: expected {expected_agent}, got {}",
                 layout.agent_row_pct
+            );
+        }
+    }
+
+    #[test]
+    fn top_row_stays_half_the_session_as_agents_grow() {
+        // Growing the agent count must shrink the agent rows, never the top row.
+        let small = supervisor_layout(2).expect("small layout should compute");
+        let large = supervisor_layout(25).expect("large layout should compute");
+
+        assert_eq!(small.top_row_pct, large.top_row_pct, "top row is unchanged");
+        assert_eq!(small.top_row_pct, 50, "top row is half the session");
+        assert!(
+            large.agent_row_pct < small.agent_row_pct,
+            "only the per-agent-row share shrinks: {} vs {}",
+            large.agent_row_pct,
+            small.agent_row_pct
+        );
+    }
+
+    #[test]
+    fn agent_rows_evenly_split_the_lower_half() {
+        // Whatever the row count, the agent rows sum back to the 50% the top
+        // row leaves.
+        for agent_count in 1..=SUPERVISOR_MAX_AGENTS {
+            let layout = supervisor_layout(agent_count).expect("layout should compute");
+            #[allow(clippy::cast_precision_loss)]
+            let total = layout.agent_row_pct * layout.agent_rows as f32;
+            assert!(
+                (total - 50.0).abs() < 0.01,
+                "agent rows for {agent_count} should sum to 50%, got {total}"
             );
         }
     }
