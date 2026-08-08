@@ -2,7 +2,6 @@
 
 ## Purpose
 Detects agent-CLI permission prompts non-invasively via rate-limited `tmux capture-pane`, classifying each stalled prompt into a fixed permission type (Curl, Cargo, Unknown, etc.), and classifies a captured command's command slice as auto-approvable or escalate-to-human by prefix-matching a configurable safe-command whitelist, while a terminal, curated per-OS danger-list (force-push, hard reset, sudo, device writes, process kills, etc.) always escalates — subject only to a scratch-path exception for `rm -rf` targeting repo/OS scratch paths — so callers can decide whether to auto-approve. It also seeds least-privilege command allowlists into agent CLI settings at session startup so routine agent actions run without permission prompts — covering the path-based broker-helper (curl) allowlist grant and its updates, config-driven seeding of the broker allowlist into each session CLI's configured `settings_path` (no hardcoded CLI names or paths), and the curated, stack-neutral dev-command prefix allowlist with opt-in named stack presets (`rust`, `node`, `python`, `go`) and a user `extra` list; all seeding is idempotent, dedup-preserving, per-path-once, non-fatal on failure, and applied both at the repo root and per agent worktree.
-
 ## Requirements
 ### Requirement: Whitelist of safe command classes
 
@@ -940,3 +939,33 @@ The seeder SHALL create `<worktree>/.claude/` when absent (it lies inside a work
 - **GIVEN** `[supervisor.common_dev_allowlist] enabled = false`
 - **WHEN** a session starts
 - **THEN** no agent worktree `.claude/settings.json` SHALL be written by this seeder
+
+### Requirement: Classifier normalizes a trailing exit-code probe before matching
+
+The safe-command classifier SHALL strip a trailing exit-code probe or output
+redirect from a command before prefix-matching it against the allowlist, so that an
+otherwise-safe command is not forced `unknown` merely because it was wrapped for
+gate reporting. Specifically it SHALL remove a trailing `; echo …$?` / `; RC=$?`
+clause and a trailing `>/dev/null 2>&1` (or `> /dev/null 2>&1`) redirect, then
+classify the remaining verb. The danger-list, worktree-confinement, and
+config-path rules SHALL be applied to the normalized command exactly as before —
+normalization SHALL NOT weaken any escalation.
+
+#### Scenario: A safe command with a trailing exit-code probe classifies safe
+
+- **GIVEN** the command `cargo test --lib; echo test-exit=$?`
+- **WHEN** the classifier evaluates it
+- **THEN** it SHALL classify the same as bare `cargo test --lib`
+
+#### Scenario: A trailing redirect is normalized away
+
+- **GIVEN** the command `mdbook build docs/ >/dev/null 2>&1`
+- **WHEN** the classifier evaluates it
+- **THEN** it SHALL classify the same as bare `mdbook build docs/`
+
+#### Scenario: Normalization does not rescue a danger command
+
+- **GIVEN** a danger-listed command with a trailing `; echo $?` appended
+- **WHEN** the classifier evaluates it
+- **THEN** it SHALL still escalate as danger — stripping the probe SHALL NOT downgrade it
+

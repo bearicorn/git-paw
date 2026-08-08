@@ -58,7 +58,8 @@ use super::approve::{KeyDispatcher, TmuxKeyDispatcher, approval_keystrokes};
 use super::auto_approve::{
     ProtectedPaths, detect_prompt_shape, extract_command_slice, extract_path_from_file_prompt,
     is_dangerous, is_live_prompt, is_protected_path_violation, is_safe_command, is_scratch_rm,
-    is_worktree_dev_test_op, is_worktree_file_op, is_worktree_git_op, select_option_index,
+    is_worktree_dev_test_op, is_worktree_file_op, is_worktree_git_op, normalize_command,
+    select_option_index,
 };
 use super::poll::{AgentStatusRow, fetch_status_over_http};
 
@@ -254,6 +255,15 @@ impl PromptVerdict {
 ///
 /// `worktree_root` is `None` for panes without a known worktree (the supervisor
 /// pane), which suppresses the worktree-scoped rules for that pane.
+///
+/// The slice is [`normalize_command`]-normalised first, so a routine command
+/// wrapped in a gate-reporting exit-code probe classifies as the bare command it
+/// is. Every rule below — danger-list included — runs against that normalised
+/// slice, so the wrapper can never downgrade an escalation.
+///
+/// The option index is resolved only once a safe rule has matched, so a prompt
+/// offering a durable "don't ask again" grant takes it for any safe /
+/// worktree-confined command rather than only a read-mostly verb.
 #[must_use]
 pub fn classify_prompt(
     captured: &str,
@@ -262,8 +272,8 @@ pub fn classify_prompt(
     approve_worktree_writes: bool,
     protected: &ProtectedPaths,
 ) -> PromptVerdict {
-    let slice = extract_command_slice(captured).unwrap_or_else(|| captured.to_string());
-    let option_index = select_option_index(detect_prompt_shape(captured), &slice);
+    let slice =
+        normalize_command(&extract_command_slice(captured).unwrap_or_else(|| captured.to_string()));
 
     // Danger-first precedence: a curated danger-list match — or a write
     // targeting the operator's protected config/memory territory
@@ -274,50 +284,41 @@ pub fn classify_prompt(
     {
         return PromptVerdict::Danger;
     }
-    // Scratch-path exception: an `rm -rf` whose every target is repo/OS scratch.
-    if is_scratch_rm(&slice) {
-        return PromptVerdict::Safe {
-            option_index,
-            matched: "scratch-rm".to_string(),
-        };
-    }
-    // Worktree-confined `git add` / `git commit` pre-approval.
-    if let Some(root) = worktree_root
-        && is_worktree_git_op(&slice, root)
+
+    // The safe rules, in the poll loop's precedence order:
+    // - the scratch-path exception (an `rm -rf` whose every target is repo/OS
+    //   scratch);
+    // - worktree-confined `git add` / `git commit` pre-approval;
+    // - worktree-confined dev-test shapes (`bash -n`, non-recursive chmod,
+    //   mktemp, interpreter-of-worktree-script);
+    // - the shell whitelist (read-mostly verbs + configured safe commands);
+    // - a write/edit/create prompt whose target resolves inside the worktree.
+    //
+    // The worktree-scoped rules are suppressed for panes without a known
+    // worktree (the supervisor pane).
+    let matched = if is_scratch_rm(&slice) {
+        Some("scratch-rm".to_string())
+    } else if worktree_root.is_some_and(|root| is_worktree_git_op(&slice, root)) {
+        Some("worktree-git".to_string())
+    } else if worktree_root.is_some_and(|root| is_worktree_dev_test_op(&slice, root)) {
+        Some("worktree-dev-test".to_string())
+    } else if let Some(entry) = first_whitelist_match(&slice, whitelist) {
+        Some(entry)
+    } else if worktree_root
+        .is_some_and(|root| is_worktree_file_op(captured, root, approve_worktree_writes))
     {
-        return PromptVerdict::Safe {
-            option_index,
-            matched: "worktree-git".to_string(),
-        };
+        Some("worktree-file-op".to_string())
+    } else {
+        None
+    };
+
+    match matched {
+        Some(matched) => PromptVerdict::Safe {
+            option_index: select_option_index(detect_prompt_shape(captured), &slice, true),
+            matched,
+        },
+        None => PromptVerdict::Unknown,
     }
-    // Worktree-confined dev-test shapes (`bash -n`, non-recursive chmod,
-    // mktemp, interpreter-of-worktree-script). Suppressed for panes without a
-    // known worktree (the supervisor pane).
-    if let Some(root) = worktree_root
-        && is_worktree_dev_test_op(&slice, root)
-    {
-        return PromptVerdict::Safe {
-            option_index,
-            matched: "worktree-dev-test".to_string(),
-        };
-    }
-    // Shell whitelist (read-mostly verbs + configured safe commands).
-    if let Some(entry) = first_whitelist_match(&slice, whitelist) {
-        return PromptVerdict::Safe {
-            option_index,
-            matched: entry,
-        };
-    }
-    // A write/edit/create prompt whose target resolves inside the worktree.
-    if let Some(root) = worktree_root
-        && is_worktree_file_op(captured, root, approve_worktree_writes)
-    {
-        return PromptVerdict::Safe {
-            option_index,
-            matched: "worktree-file-op".to_string(),
-        };
-    }
-    PromptVerdict::Unknown
 }
 
 /// Returns the first whitelist entry that matches any line of `captured`, using
@@ -1255,7 +1256,10 @@ fn record_escalation(deps: &mut DriveDeps<'_>, ctx: SweepContext<'_>, escalation
 /// Returns the escalation when one was newly recorded this sweep, so the caller
 /// accumulates it for the exit summary. A pane with no live prompt — mere
 /// narration, or a resolved prompt scrolled into history — is left untouched;
-/// that is also what keeps pane 0 quiet.
+/// that is also what keeps pane 0 quiet. The one exception is an IDLE pane whose
+/// input box still holds an unsubmitted directive: that gets a follow-up `Enter`
+/// (and nothing else) via [`submit_buffered_input`], because no other part of the
+/// loop can see a stall that never became a prompt.
 fn sweep_pane(
     ctx: SweepContext<'_>,
     pane: &PaneInfo,
@@ -1268,6 +1272,13 @@ fn sweep_pane(
     let session = ctx.session;
     let capture = deps.capturer.capture(session, pane.pane_index);
     if !is_live_prompt(&capture) {
+        let _ = submit_buffered_input(
+            deps.capturer,
+            deps.dispatcher,
+            session,
+            pane.pane_index,
+            &capture,
+        );
         return None;
     }
 
@@ -1568,6 +1579,76 @@ fn send_nudge(
     dispatcher
         .send_key(session, pane_index, &submit)
         .map_err(|e| PawError::TmuxError(format!("send-keys {submit} failed: {e}")))?;
+    Ok(true)
+}
+
+/// Extracts the text sitting in a pane's input box, or `None` when the capture
+/// shows no input box or the box is empty.
+///
+/// The input box is the bordered line carrying the CLI's prompt sigil (`│ > …`)
+/// — the same landmark [`crate::tmux::readiness::CLI_READY_MARKERS`] uses to
+/// recognise a launched CLI. The LAST such line wins, because a pane's live
+/// input box is always its most recent one. A numbered option line is never
+/// read as buffered input, so a boxed prompt option cannot be mistaken for a
+/// stranded directive.
+fn input_box_text(capture: &str) -> Option<String> {
+    let text = capture.lines().rev().find_map(|raw| {
+        let inner = raw.trim().strip_prefix('│')?.trim_end_matches('│').trim();
+        let text = inner
+            .strip_prefix('>')
+            .or_else(|| inner.strip_prefix('❯'))?
+            .trim();
+        Some(text.to_string())
+    })?;
+    let mut chars = text.chars();
+    let is_option = matches!(chars.next(), Some(c) if c.is_ascii_digit())
+        && matches!(chars.next(), Some('.' | ')'));
+    (!text.is_empty() && !is_option).then_some(text)
+}
+
+/// Whether `capture` shows an IDLE pane holding unsubmitted text in its input
+/// box — a directive whose first `Enter` the CLI swallowed into its paste
+/// buffer.
+///
+/// Idle means both markers are absent: no live permission prompt
+/// ([`live_prompt_in_tail`], the wider marker set so an `approval`-worded prompt
+/// also counts) and no mid-response footer ([`pane_is_mid_response`]). Such a
+/// pane is invisible to the approval sweep (there is no prompt to classify) and
+/// to the long stuck detector (it never reports itself stalled), so nothing else
+/// in the loop would surface it.
+fn pane_has_buffered_input(capture: &str) -> bool {
+    !live_prompt_in_tail(capture)
+        && !pane_is_mid_response(capture)
+        && input_box_text(capture).is_some()
+}
+
+/// Submits a directive stranded in an idle pane's input box by sending a
+/// follow-up `Enter`, the same keystroke [`nudge_keystrokes`] uses to flush a
+/// paste buffer.
+///
+/// Returns `Ok(true)` when the `Enter` went out and `Ok(false)` otherwise. The
+/// shape is checked twice: once on `swept`, the capture the sweep already took
+/// (so a pane with nothing buffered costs no extra `capture-pane`), and again on
+/// a fresh capture taken immediately before the send — the same TOCTOU
+/// discipline [`send_approval`] applies, so a pane that started responding or
+/// raised a prompt in between receives no stray keystroke. No text is ever
+/// typed, so the pane-0 no-pollution rule holds for the supervisor's own pane
+/// too.
+fn submit_buffered_input(
+    capturer: &dyn PaneCapture,
+    dispatcher: &mut dyn KeyDispatcher,
+    session: &str,
+    pane_index: usize,
+    swept: &str,
+) -> Result<bool, PawError> {
+    if !pane_has_buffered_input(swept)
+        || !pane_has_buffered_input(&capturer.capture(session, pane_index))
+    {
+        return Ok(false);
+    }
+    dispatcher
+        .send_key(session, pane_index, "Enter")
+        .map_err(|e| PawError::TmuxError(format!("send-keys Enter failed: {e}")))?;
     Ok(true)
 }
 
@@ -2416,6 +2497,262 @@ mod tests {
         assert_eq!(
             classify_prompt(&cap, &[], None, false, &ProtectedPaths::default()),
             PromptVerdict::Unknown
+        );
+    }
+
+    // --- exit-probe normalization (A) ---------------------------------------
+
+    /// Spec scenario "A safe command with a trailing exit-code probe classifies
+    /// safe": through the loop's own classifier, the wrapped command reaches the
+    /// same verdict as the bare one.
+    #[test]
+    fn classifies_safe_command_wrapped_in_an_exit_code_probe() {
+        let whitelist = vec!["cargo test".to_string()];
+        let bare = classify_prompt(
+            &live_safe_capture("cargo test --lib"),
+            &whitelist,
+            None,
+            false,
+            &ProtectedPaths::default(),
+        );
+        let wrapped = classify_prompt(
+            &live_safe_capture("cargo test --lib; echo test-exit=$?"),
+            &whitelist,
+            None,
+            false,
+            &ProtectedPaths::default(),
+        );
+        assert!(matches!(bare, PromptVerdict::Safe { .. }));
+        assert_eq!(wrapped, bare, "the probe must not change the verdict");
+    }
+
+    /// Spec scenario "A trailing redirect is normalized away".
+    #[test]
+    fn classifies_safe_command_wrapped_in_a_discard_redirect() {
+        let whitelist = vec!["mdbook build".to_string()];
+        let bare = classify_prompt(
+            &live_safe_capture("mdbook build docs/"),
+            &whitelist,
+            None,
+            false,
+            &ProtectedPaths::default(),
+        );
+        let wrapped = classify_prompt(
+            &live_safe_capture("mdbook build docs/ >/dev/null 2>&1"),
+            &whitelist,
+            None,
+            false,
+            &ProtectedPaths::default(),
+        );
+        assert!(matches!(bare, PromptVerdict::Safe { .. }));
+        assert_eq!(wrapped, bare, "the redirect must not change the verdict");
+    }
+
+    /// Spec scenario "Normalization does not rescue a danger command": the
+    /// danger-list runs on the normalized slice, so the wrapper buys nothing.
+    #[test]
+    fn exit_probe_does_not_rescue_a_danger_command() {
+        let cap = live_safe_capture("git push --force origin main; echo $?");
+        assert_eq!(
+            classify_prompt(
+                &cap,
+                &["git".to_string()],
+                None,
+                false,
+                &ProtectedPaths::default()
+            ),
+            PromptVerdict::Danger
+        );
+    }
+
+    // --- durable-grant preference (C) ---------------------------------------
+
+    /// A 3-option capture: `Yes` / the durable "don't ask again" grant / `No`.
+    fn live_durable_capture(cmd: &str) -> String {
+        format!(
+            "Bash command\n  {cmd}\nDo you want to proceed?\n❯ 1. Yes\n  2. Yes, and don't ask again for: {cmd}\n  3. No\n(esc to cancel)"
+        )
+    }
+
+    /// Spec scenario "A safe prompt offering a durable option takes it": a
+    /// stack command safe only through the resolved allowlist — `cargo` is not a
+    /// read-mostly verb — still takes the durable grant, so the identical prompt
+    /// stops re-appearing.
+    #[test]
+    fn safe_prompt_with_a_durable_option_takes_it() {
+        let cap = live_durable_capture("cargo test --lib");
+        match classify_prompt(
+            &cap,
+            &["cargo test".to_string()],
+            None,
+            false,
+            &ProtectedPaths::default(),
+        ) {
+            PromptVerdict::Safe { option_index, .. } => assert_eq!(option_index, 2),
+            other => panic!("expected Safe, got {other:?}"),
+        }
+    }
+
+    /// Spec scenario "A safe prompt with no durable option uses the once-only
+    /// option".
+    #[test]
+    fn safe_prompt_without_a_durable_option_uses_option_one() {
+        let cap = live_safe_capture("cargo test --lib");
+        match classify_prompt(
+            &cap,
+            &["cargo test".to_string()],
+            None,
+            false,
+            &ProtectedPaths::default(),
+        ) {
+            PromptVerdict::Safe { option_index, .. } => assert_eq!(option_index, 1),
+            other => panic!("expected Safe, got {other:?}"),
+        }
+    }
+
+    /// Spec scenario "A non-safe prompt is never granted durably": an unmatched
+    /// command escalates, so no option — durable or otherwise — is selected.
+    #[test]
+    fn non_safe_prompt_is_never_granted_durably() {
+        let cap = live_durable_capture("frobnicate --all");
+        assert_eq!(
+            classify_prompt(&cap, &[], None, false, &ProtectedPaths::default()),
+            PromptVerdict::Unknown,
+            "an unclassified command escalates instead of taking a durable grant"
+        );
+    }
+
+    /// End-to-end through the loop: the durable option's digit (`2`) is what
+    /// actually goes out on the wire for a safe 3-option prompt.
+    #[test]
+    fn loop_dispatches_the_durable_option_digit() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+        }];
+        let enumerator = FakeEnumerator {
+            panes: vec![PaneInfo {
+                pane_index: 2,
+                pane_current_path: "/repo-feat-a".to_string(),
+            }],
+        };
+        let capturer = FakeCapturer::new(&[(2, &live_durable_capture("cargo test --lib"))]);
+        let mut dispatcher = RecordingDispatcher::default();
+        // Complete on the first poll so exactly one sweep runs.
+        let status = ScriptedStatus::new(vec![vec![row("supervisor", "done")]]);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let messages = ScriptedMessages::none();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+        };
+        let config = DriveConfig {
+            whitelist: vec!["cargo test".to_string()],
+            poll_interval: Duration::from_secs(1),
+            heartbeat: Duration::from_hours(1),
+            ..DriveConfig::default()
+        };
+        drive_loop("paw-test", &agents, &mut deps, &config);
+        assert_eq!(
+            dispatcher.events,
+            vec![(2, "2".to_string()), (2, "Enter".to_string())],
+            "the durable grant's digit, then a separate Enter"
+        );
+    }
+
+    // --- idle pane with buffered input (D) ----------------------------------
+
+    /// An idle pane sitting at its input box with `text` unsubmitted.
+    fn idle_input_box(text: &str) -> String {
+        format!(
+            "● Ran tool\n╭────────────────────────────────╮\n│ > {text}                       │\n╰────────────────────────────────╯\n  ? for shortcuts"
+        )
+    }
+
+    /// Spec scenario "A buffered directive on an idle pane is submitted".
+    #[test]
+    fn idle_pane_with_buffered_input_gets_a_follow_up_enter() {
+        assert!(pane_has_buffered_input(&idle_input_box(
+            "please continue with task 3"
+        )));
+    }
+
+    /// Spec scenario "A mid-response pane is left alone": the same non-empty
+    /// input box while the CLI is generating is NOT submitted.
+    #[test]
+    fn mid_response_pane_is_never_submitted() {
+        let mut capture = idle_input_box("please continue with task 3");
+        capture.push_str("\n  Thinking… (esc to interrupt)");
+        assert!(!pane_has_buffered_input(&capture));
+    }
+
+    /// An empty input box is not a stranded directive, and neither is a pane
+    /// showing a live prompt (the approval path owns that state).
+    #[test]
+    fn empty_box_and_live_prompt_are_not_buffered_input() {
+        assert!(!pane_has_buffered_input(&idle_input_box("")));
+        assert!(!pane_has_buffered_input(&live_safe_capture("cargo test")));
+        assert!(
+            !pane_has_buffered_input("│ ❯ 1. Yes │"),
+            "a boxed option line is not buffered input"
+        );
+    }
+
+    /// End-to-end through the loop: an idle pane holding buffered text receives
+    /// exactly one `Enter` and nothing else — no free text, so pane 0's
+    /// no-pollution rule is untouched.
+    #[test]
+    fn loop_submits_a_stranded_directive_on_an_idle_pane() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+        }];
+        let enumerator = FakeEnumerator {
+            panes: vec![PaneInfo {
+                pane_index: 2,
+                pane_current_path: "/repo-feat-a".to_string(),
+            }],
+        };
+        let capturer = FakeCapturer::new(&[(2, &idle_input_box("/opsx:apply my-change"))]);
+        let mut dispatcher = RecordingDispatcher::default();
+        // Complete on the first poll so exactly one sweep runs.
+        let status = ScriptedStatus::new(vec![vec![row("supervisor", "done")]]);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let messages = ScriptedMessages::none();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+        };
+        let config = DriveConfig {
+            poll_interval: Duration::from_secs(1),
+            heartbeat: Duration::from_hours(1),
+            ..DriveConfig::default()
+        };
+        drive_loop("paw-test", &agents, &mut deps, &config);
+        assert_eq!(
+            dispatcher.events,
+            vec![(2, "Enter".to_string())],
+            "only the submitting Enter, never free text"
+        );
+        assert!(
+            dispatcher.literal_sends.is_empty(),
+            "nothing is typed into the pane"
         );
     }
 

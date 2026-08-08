@@ -31,7 +31,7 @@ use super::approve::{ApprovalRequest, KeyDispatcher, auto_approve_pane};
 use super::auto_approve::{
     ProtectedPaths, detect_prompt_shape, extract_command_slice, is_dangerous, is_live_prompt,
     is_protected_path_violation, is_safe_command, is_scratch_rm, is_worktree_dev_test_op,
-    is_worktree_file_op, is_worktree_git_op, select_option_index,
+    is_worktree_file_op, is_worktree_git_op, normalize_command, select_option_index,
 };
 use super::permission_prompt::{PermissionType, detect_permission_prompt};
 use super::stall::detect_stalled_agents;
@@ -334,8 +334,13 @@ where
         // Classify against the prompted COMMAND slice (text between the
         // `Bash command` / `Bash(` header and the confirmation question), not
         // the surrounding narration. Fall back to the whole capture when no
-        // header is present.
-        let slice = extract_command_slice(&captured).unwrap_or_else(|| captured.clone());
+        // header is present. The slice is normalised first, so a command
+        // wrapped in a gate-reporting exit-code probe classifies as the bare
+        // command it is — every rule below, danger-list included, then runs
+        // against the normalised slice.
+        let slice = normalize_command(
+            &extract_command_slice(&captured).unwrap_or_else(|| captured.clone()),
+        );
 
         // Live-prompt gate: act only when the prompt's structural markers
         // (option glyphs / `Do you want to …` / `Esc to cancel`) are at the
@@ -347,9 +352,6 @@ where
             out.push((agent_id, TickOutcome::NoPrompt));
             continue;
         }
-
-        // Option-index selection per the prompt shape and broad-grant rule.
-        let option_index = select_option_index(detect_prompt_shape(&captured), &slice);
 
         // Danger-first precedence: a curated danger-list match — or a write
         // targeting the operator's protected config/memory territory
@@ -366,6 +368,12 @@ where
             out.push((agent_id, TickOutcome::Forwarded { kind }));
             continue;
         }
+
+        // Option-index selection per the prompt shape and broad-grant rule.
+        // Resolved AFTER the danger gate, so every branch that consumes it has
+        // already classified the command safe / worktree-confined and a prompt
+        // offering a durable "don't ask again" grant takes it.
+        let option_index = select_option_index(detect_prompt_shape(&captured), &slice, true);
 
         // Scratch-path exception: an `rm -rf` whose every target is repo/OS
         // scratch classifies safe-by-pattern (the danger-list does not escalate

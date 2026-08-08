@@ -1220,6 +1220,43 @@ def extract_slice(cap):
                 return c
     return None
 
+# --- gate-wrapper normalization -------------------------------------------
+# Mirror of normalize_command in src/supervisor/auto_approve.rs: strip the
+# gate-reporting wrappers an agent appends when it is only reading the exit
+# status -- a trailing "; echo ...$?" / "; NAME=$?" probe and a trailing
+# /dev/null discard redirect. Every rule below (danger-list included) then runs
+# against the normalized command, so a wrapper can never downgrade an
+# escalation. Only the /dev/null target is stripped; a redirect to a real
+# device stays put so the "> /dev/" danger pattern still matches it.
+DISCARD_REDIRECTS = [">/dev/null 2>&1", "> /dev/null 2>&1"]
+
+def strip_exit_probe(cmd):
+    head, sep, tail = cmd.rpartition(";")
+    if not sep:
+        return None
+    tail = tail.strip()
+    parts = tail.split(None, 1)
+    echo_probe = len(parts) == 2 and parts[0] == "echo" and "$?" in parts[1]
+    name = tail[:-3] if tail.endswith("=$?") else ""
+    assign_probe = bool(name) and all(c.isalnum() or c == "_" for c in name)
+    return head.rstrip() if echo_probe or assign_probe else None
+
+def strip_discard_redirect(cmd):
+    for redirect in DISCARD_REDIRECTS:
+        if cmd.endswith(redirect):
+            return cmd[:-len(redirect)].rstrip()
+    return None
+
+def normalize_command(s):
+    cmd = s.strip()
+    while True:
+        nxt = strip_exit_probe(cmd)
+        if nxt is None:
+            nxt = strip_discard_redirect(cmd)
+        if nxt is None:
+            return cmd
+        cmd = nxt
+
 # --- curated danger-list --------------------------------------------------
 DANGER_BASE = ["rm -rf", "rm -fr", "git push", "--force", "force-push",
     "reset --hard", "git rebase", "git checkout ", "branch -D",
@@ -1626,19 +1663,35 @@ def is_arbitrary(s):
         return True
     return "bash -c" in s or "sh -c" in s or " -c " in s
 
-def select_option(shape, s):
+# Mirror of classify_prompt in src/supervisor/drive.rs: the safe rules in the
+# poll loop precedence order, with the danger-list and protected-path rule
+# winning outright.
+def classified_safe(cap, s, root):
+    if is_dangerous(s) or protected_violation(cap, s, root):
+        return False
+    return (is_scratch_rm(s) or is_worktree_git_op(s, root)
+            or is_worktree_dev_test(s, root) or is_safe_command(s))
+
+# Mirror of select_option_index in src/supervisor/auto_approve.rs. A command
+# already classified safe / worktree-confined prefers the durable "do not ask
+# again" grant, so a routine prompt is permanently allowed rather than
+# re-prompting on every identical occurrence. An arbitrary-code runner never
+# receives a durable grant, whatever the classification.
+def select_option(shape, s, safe):
     if shape == "two":
         return 1
-    if leading_verb(s) in READ_MOSTLY and not is_arbitrary(s):
+    if is_arbitrary(s):
+        return 1
+    if safe or leading_verb(s) in READ_MOSTLY:
         return 2
     return 1
 
 # --- approve-path option resolution ----------------------------------------
 # `sweep.sh approve` reuses this classifier body (RESOLVE_OPTION non-empty)
 # for its pre-send gate: liveness is re-checked on the FRESH capture, then
-# the option index is resolved with the same shape detection and broad-grant
-# rule (READ_MOSTLY + arbitrary-code check) as the full classification below,
-# so the helper and the in-tool auto-approver resolve the same index.
+# the option index is resolved with the same normalization, shape detection
+# and durable-grant rule as the full classification below, so the helper and
+# the in-tool auto-approver resolve the same index.
 if os.environ.get("RESOLVE_OPTION"):
     if not is_live(cap):
         print("cleared")
@@ -1646,7 +1699,9 @@ if os.environ.get("RESOLVE_OPTION"):
     s = extract_slice(cap)
     if s is None:
         s = cap
-    print(select_option(detect_shape(cap), s))
+    s = normalize_command(s)
+    print(select_option(detect_shape(cap), s,
+                        classified_safe(cap, s, worktree_root)))
     raise SystemExit(0)
 
 # --- decision -------------------------------------------------------------
@@ -1657,7 +1712,8 @@ if not is_live(cap):
 s = extract_slice(cap)
 if s is None:
     s = cap
-opt = select_option(detect_shape(cap), s)
+s = normalize_command(s)
+opt = select_option(detect_shape(cap), s, classified_safe(cap, s, worktree_root))
 
 if is_dangerous(s) or protected_violation(cap, s, worktree_root):
     print("escalate (danger)")

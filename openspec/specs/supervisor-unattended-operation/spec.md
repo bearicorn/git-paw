@@ -307,3 +307,52 @@ The `--unattended` drive loop SHALL be the supported mechanism for running a wav
 - **THEN** the loop SHALL auto-approve the dummy safe prompt, detect the completion signal, and exit with a summary
 - **AND** the test SHALL require no real LLM backend and no interactive terminal
 
+### Requirement: Auto-approval prefers a durable grant for a safe prompt
+
+The drive loop SHALL select a prompt's broader "don't ask again" option, when the
+prompt offers one, for a command it has classified safe or worktree-confined, so a
+routine prompt is permanently allowed instead of re-prompting on every identical
+occurrence. When no durable option is offered, the loop SHALL fall back to the
+once-only option as before. The loop SHALL NOT select a durable grant for a command
+that did not classify safe / worktree-confined.
+
+#### Scenario: A safe prompt offering a durable option takes it
+
+- **GIVEN** a safe-classified prompt whose options are `1. Yes` and `2. Yes, and don't ask again for <cmd>`
+- **WHEN** the drive loop approves it
+- **THEN** it SHALL select the durable "don't ask again" option
+- **AND** the identical prompt SHALL NOT re-appear for that command on a later occurrence
+
+#### Scenario: A safe prompt with no durable option uses the once-only option
+
+- **GIVEN** a safe-classified 2-option `Yes` / `No` prompt with no durable grant
+- **WHEN** the drive loop approves it
+- **THEN** it SHALL select the once-only `Yes` option as before
+
+#### Scenario: A non-safe prompt is never granted durably
+
+- **GIVEN** a prompt that did NOT classify safe / worktree-confined
+- **WHEN** the drive loop evaluates it
+- **THEN** it SHALL NOT select any durable "don't ask again" option (it escalates instead)
+
+### Requirement: Idle pane with buffered input is submitted
+
+The drive loop SHALL detect a pane that is idle — showing no live-prompt marker and
+no mid-response marker — while its input box holds non-empty unsubmitted text, and
+SHALL submit that text with a follow-up `Enter`, the way it already sends a
+follow-up `Enter` to clear a paste buffer. This recovers a directive left buffered
+when the CLI swallowed the first `Enter`, which neither the live-prompt scan nor the
+long stuck-detector would otherwise surface.
+
+#### Scenario: A buffered directive on an idle pane is submitted
+
+- **GIVEN** a pane with no live-prompt marker and no mid-response marker whose input box holds non-empty text
+- **WHEN** the drive loop sweeps that pane
+- **THEN** it SHALL send a follow-up `Enter` to submit the buffered text
+
+#### Scenario: A mid-response pane is left alone
+
+- **GIVEN** a pane showing a mid-response marker (the agent is actively generating)
+- **WHEN** the drive loop sweeps it
+- **THEN** it SHALL NOT send an `Enter` — the buffered-input detector applies only to an idle pane
+

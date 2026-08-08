@@ -188,6 +188,67 @@ fn declared_rust_stack_approves_cargo_via_config() {
     );
 }
 
+/// Spec scenario "A safe command with a trailing exit-code probe classifies
+/// safe" through the helper: the probe is normalized away before matching, so
+/// the wrapped command approves exactly as the bare one does.
+#[test]
+#[serial]
+fn exit_code_probe_is_normalized_before_matching() {
+    let fx = setup();
+    append_config(
+        &fx,
+        "\n[supervisor.common_dev_allowlist]\nstacks = [\"rust\"]\n",
+    );
+    let out = classify(
+        &fx,
+        "Bash command\n  cargo test --lib; echo test-exit=$?\nDo you want to proceed?\nEsc to cancel",
+        None,
+    );
+    assert!(
+        out.contains("approve") && out.contains("whitelist"),
+        "a probe-wrapped cargo test must approve, got: {out}"
+    );
+}
+
+/// Spec scenario "Normalization does not rescue a danger command" through the
+/// helper: the danger-list runs on the normalized command.
+#[test]
+#[serial]
+fn exit_code_probe_does_not_rescue_a_danger_command() {
+    let fx = setup();
+    let out = classify(
+        &fx,
+        "Bash command\n  git push --force origin main; echo $?\nDo you want to proceed?\nEsc to cancel",
+        None,
+    );
+    assert!(
+        out.contains("escalate") && out.contains("danger"),
+        "a probe must not downgrade a force-push, got: {out}"
+    );
+}
+
+/// Spec scenario "A safe prompt offering a durable option takes it" through the
+/// helper: the bundled script resolves the same option index as the in-tool
+/// auto-approver for a stack command that is safe but not read-mostly.
+#[test]
+#[serial]
+fn safe_stack_command_resolves_the_durable_option() {
+    let fx = setup();
+    append_config(
+        &fx,
+        "\n[supervisor.common_dev_allowlist]\nstacks = [\"rust\"]\n",
+    );
+    let out = classify(
+        &fx,
+        "Bash command\n  cargo test --lib\nDo you want to proceed?\n1. Yes\n2. Yes, and don't ask again for: cargo test\n3. No\nEsc to cancel",
+        None,
+    );
+    assert!(
+        out.contains("approve") && out.contains("option=2"),
+        "a safe stack command must take the durable grant, got: {out}"
+    );
+}
+
 /// Spec scenario "Default whitelist is stack-neutral" through the helper:
 /// without a declared stack, a cargo prompt escalates as unknown.
 #[test]

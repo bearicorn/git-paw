@@ -2,7 +2,6 @@
 
 ## Purpose
 Records every command the auto-approve loop forwards for a manual human decision to a per-session JSONL log, and provides the `git paw approvals` subcommand to aggregate those patterns by frequency with a promotion-target hint (project allowlist vs bundled preset candidate). First-seen patterns can also emit a `permission_pattern` learning record, surfacing which prompts recur so they can be promoted into the allowlist. The whole channel is opt-out via config.
-
 ## Requirements
 ### Requirement: Manual-decision log file
 
@@ -191,4 +190,25 @@ learnings records derived from manual approvals.
 - **WHEN** the user runs `git paw approvals`
 - **THEN** the subcommand SHALL still aggregate from the
   existing file (the opt-out affects writes, not reads)
+
+### Requirement: Permission-pattern learning is extracted from the prompt slice
+
+The `permission_pattern` learning SHALL derive its command pattern from the same
+prompt slice the classifier uses to detect the pending command, NOT from surrounding
+pane text (an accept-edits diff line, a subsequent command's output). When the slice
+does not yield a value that parses as a command, the system SHALL produce no
+`permission_pattern` learning for that observation rather than record a spurious one.
+
+#### Scenario: The pattern comes from the pending command, not adjacent text
+
+- **GIVEN** a pane whose prompt slice holds the pending command and whose surrounding lines hold an accept-edits diff line and a later command's output
+- **WHEN** a `permission_pattern` learning is built
+- **THEN** its pattern SHALL be derived from the pending command in the prompt slice
+- **AND** SHALL NOT be derived from the adjacent diff or output text
+
+#### Scenario: A non-command slice yields no learning
+
+- **GIVEN** a prompt slice whose extracted text does not parse as a command
+- **WHEN** the learning extractor runs
+- **THEN** it SHALL produce no `permission_pattern` learning for that observation
 
