@@ -312,6 +312,14 @@ pub fn find_session_for_repo_in(repo_path: &Path, dir: &Path) -> Result<Option<S
         }
     };
 
+    // Match on the canonical path so a symlinked or non-normalized repo path
+    // (e.g. `/var/...` resolving to `/private/var/...`, or a `..` segment) still
+    // resolves to its session. Falls back to the raw path when canonicalization
+    // fails (e.g. the repo directory no longer exists).
+    let want_canonical = repo_path
+        .canonicalize()
+        .unwrap_or_else(|_| repo_path.to_path_buf());
+
     for entry in entries {
         let entry =
             entry.map_err(|e| PawError::SessionError(format!("failed to read dir entry: {e}")))?;
@@ -330,7 +338,11 @@ pub fn find_session_for_repo_in(repo_path: &Path, dir: &Path) -> Result<Option<S
             Err(_) => continue, // skip malformed files
         };
 
-        if session.repo_path == repo_path {
+        let session_canonical = session
+            .repo_path
+            .canonicalize()
+            .unwrap_or_else(|_| session.repo_path.clone());
+        if session_canonical == want_canonical {
             return Ok(Some(session));
         }
     }
@@ -769,6 +781,28 @@ mod tests {
         let missing = dir.path().join("does-not-exist");
         let found = find_session_for_repo_in(Path::new("/any"), &missing).unwrap();
         assert!(found.is_none());
+    }
+
+    #[test]
+    fn find_matches_a_symlinked_repo_path() {
+        use std::os::unix::fs::symlink;
+        let sessions = TempDir::new().unwrap();
+        let real_repo = TempDir::new().unwrap();
+
+        // A session registered at the real repo path.
+        let mut session = sample_session();
+        session.repo_path = real_repo.path().to_path_buf();
+        save_session_in(&session, sessions.path()).unwrap();
+
+        // Look it up via a symlink that resolves to the same repo directory.
+        let link_parent = TempDir::new().unwrap();
+        let link = link_parent.path().join("repo-link");
+        symlink(real_repo.path(), &link).unwrap();
+
+        let found = find_session_for_repo_in(&link, sessions.path())
+            .unwrap()
+            .expect("session should resolve through the symlink to the same repo");
+        assert_eq!(found.session_name, session.session_name);
     }
 
     // -- delete_session: removes file, load returns None afterwards --

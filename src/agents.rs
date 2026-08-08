@@ -1080,7 +1080,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("AGENTS.md error"), "got: {msg}");
+        assert!(msg.contains("AGENTS.md:"), "got: {msg}");
         assert!(
             msg.contains("AGENTS.md"),
             "should mention file path, got: {msg}"
@@ -1619,7 +1619,7 @@ mod tests {
         let err = result.unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("AGENTS.md error"),
+            msg.contains("AGENTS.md:"),
             "should return AgentsMdError, got: {msg}"
         );
     }

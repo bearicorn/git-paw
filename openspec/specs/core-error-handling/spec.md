@@ -185,3 +185,24 @@ The following variants SHALL exist:
 - **WHEN** `exit_code()` is called
 - **THEN** it SHALL return `1`
 
+### Requirement: A wrapping error's Display does not embed a redundant error prefix
+
+A `PawError` variant that wraps a message SHALL NOT embed the word `error` in its
+own `Display`, because the top-level exit path prepends `error: ` when printing.
+Doubling it produces user-facing output like `error: Worktree error: …`. Each
+string-wrapping variant SHALL render as `<Category>: <message>` (e.g. `Worktree: …`,
+`Session: …`), so the printed line carries exactly one `error:` prefix.
+
+#### Scenario: A wrapping variant prints a single error prefix
+
+- **GIVEN** a `PawError` variant that wraps a message (e.g. a worktree failure)
+- **WHEN** its `Display` is rendered and the exit path prepends `error: `
+- **THEN** the resulting line SHALL contain exactly one `error:` prefix
+- **AND** the variant's own `Display` SHALL NOT contain the word `error`
+
+#### Scenario: Standalone messages are unchanged
+
+- **GIVEN** a variant whose message stands alone (e.g. the not-a-git-repository or cancelled messages)
+- **WHEN** its `Display` is rendered
+- **THEN** it SHALL be unchanged by this requirement
+

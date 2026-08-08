@@ -2182,7 +2182,7 @@ fn gate_returns_ready_without_relaunch_when_marker_present() {
         || relaunches += 1,
         |_| {},
     );
-    assert_eq!(outcome, GateOutcome::Ready);
+    assert_eq!(outcome, ReadinessOutcome::Ready);
     assert_eq!(relaunches, 0, "a ready pane is never relaunched");
 }
 
@@ -2197,7 +2197,7 @@ fn gate_relaunches_a_persistent_bare_shell_then_falls_back() {
     );
     assert_eq!(
         outcome,
-        GateOutcome::FellBack,
+        ReadinessOutcome::FellBack,
         "a never-ready bare shell falls back after the relaunch budget"
     );
     assert_eq!(
@@ -2216,7 +2216,7 @@ fn gate_does_not_relaunch_an_unrecognised_cli() {
         || relaunches += 1,
         |_| {},
     );
-    assert_eq!(outcome, GateOutcome::FellBack);
+    assert_eq!(outcome, ReadinessOutcome::FellBack);
     assert_eq!(
         relaunches, 0,
         "an unrecognised (indeterminate) CLI falls back without relaunching"
@@ -2243,7 +2243,7 @@ fn gate_becomes_ready_after_a_relaunch() {
         || relaunches += 1,
         |_| {},
     );
-    assert_eq!(outcome, GateOutcome::Ready);
+    assert_eq!(outcome, ReadinessOutcome::Ready);
     assert_eq!(
         relaunches, 1,
         "the bare shell was relaunched once before going ready"
