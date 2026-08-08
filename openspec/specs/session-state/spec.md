@@ -568,7 +568,6 @@ An attached client still resizes the session to the real terminal on attach.
 - **THEN** all panes SHALL tile successfully (no `no space for new pane`
   error)
 
-
 ### Requirement: write_session_summary function
 
 The system SHALL provide a public function `pub fn write_session_summary(state: &BrokerState, session: &PawSession, merge_order: &[String], output_path: &Path) -> Result<(), PawError>` in a new `src/summary.rs` module.
@@ -699,4 +698,27 @@ The supervisor SHALL call `write_supervisor_summary`, which writes the rendered 
 - **WHEN** `write_supervisor_summary` is called
 - **THEN** `.git-paw/sessions/` SHALL be created
 - **AND** the rendered summary SHALL be written inside it
+
+### Requirement: Session lookup matches on the canonical repository path
+
+`find_session_for_repo` SHALL match a stored session to a repository by comparing
+the two paths in canonical form, so a repository referred to by a symlinked or
+non-normalized path (for example `/var/…` resolving to `/private/var/…`, or a path
+containing a `..` segment) still resolves to its session. When a path cannot be
+canonicalized (for example the repository directory no longer exists), the system
+SHALL fall back to comparing the raw paths, preserving the prior behavior for that
+case.
+
+#### Scenario: A session is found through a symlinked repo path
+
+- **GIVEN** a session registered at a repository directory
+- **AND** a symlink that resolves to that same directory
+- **WHEN** the session is looked up by the symlink path
+- **THEN** the session SHALL be found
+
+#### Scenario: A non-existent path falls back to raw comparison
+
+- **GIVEN** a session registered at a repository path that does not exist on disk
+- **WHEN** it is looked up by that same (non-existent) path
+- **THEN** the session SHALL still be found via the raw-path fallback
 

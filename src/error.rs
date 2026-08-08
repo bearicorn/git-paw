@@ -33,19 +33,19 @@ pub enum PawError {
     NoCLIsFound,
 
     /// Git worktree operation failed.
-    #[error("Worktree error: {0}")]
+    #[error("Worktree: {0}")]
     WorktreeError(String),
 
     /// Session state read/write failed.
-    #[error("Session error: {0}")]
+    #[error("Session: {0}")]
     SessionError(String),
 
     /// Config file parsing failed.
-    #[error("Config error: {0}")]
+    #[error("Config: {0}")]
     ConfigError(String),
 
     /// Branch operation failed.
-    #[error("Branch error: {0}")]
+    #[error("Branch: {0}")]
     BranchError(String),
 
     /// User cancelled via Ctrl+C or empty selection.
@@ -53,7 +53,7 @@ pub enum PawError {
     UserCancelled,
 
     /// tmux operation failed.
-    #[error("Tmux error: {0}")]
+    #[error("Tmux: {0}")]
     TmuxError(String),
 
     /// Custom CLI not found in config.
@@ -61,23 +61,23 @@ pub enum PawError {
     CliNotFound(String),
 
     /// Init operation failed.
-    #[error("Init error: {0}")]
+    #[error("Init: {0}")]
     InitError(String),
 
     /// AGENTS.md operation failed.
-    #[error("AGENTS.md error: {0}")]
+    #[error("AGENTS.md: {0}")]
     AgentsMdError(String),
 
     /// Spec scanning failed.
-    #[error("Spec error: {0}")]
+    #[error("Spec: {0}")]
     SpecError(String),
 
     /// Replay operation failed.
-    #[error("Replay error: {0}")]
+    #[error("Replay: {0}")]
     ReplayError(String),
 
     /// Broker operation failed.
-    #[error("Broker error: {0}")]
+    #[error("Broker: {0}")]
     BrokerError(#[from] crate::broker::BrokerError),
 
     /// Skill template loading failed.
@@ -85,11 +85,11 @@ pub enum PawError {
     SkillError(#[from] crate::skills::SkillError),
 
     /// Dashboard TUI operation failed.
-    #[error("Dashboard error: {0}")]
+    #[error("Dashboard: {0}")]
     DashboardError(String),
 
     /// MCP server startup / repository-resolution failure.
-    #[error("MCP error: {0}")]
+    #[error("MCP: {0}")]
     McpError(String),
 
     /// One or more `git paw doctor` checks reported a hard failure.
@@ -100,7 +100,7 @@ pub enum PawError {
     DoctorFailed(usize),
 
     /// I/O operation failed.
-    #[error("I/O error: {0}")]
+    #[error("I/O: {0}")]
     IoError(#[from] std::io::Error),
 }
 
@@ -208,6 +208,31 @@ mod tests {
         ];
         for err in errors {
             assert_eq!(err.exit_code(), exit_code::ERROR, "failed for {err:?}");
+        }
+    }
+
+    #[test]
+    fn wrapping_variant_display_does_not_embed_error() {
+        // `exit()` prepends "error: ", so a wrapping variant's own Display must
+        // not also say "error" or the user sees a doubled "error: Worktree error: ...".
+        let msg = PawError::WorktreeError("disk full".into()).to_string();
+        assert_eq!(msg, "Worktree: disk full");
+        assert!(
+            !msg.to_ascii_lowercase().contains("error"),
+            "wrapping variant Display must not embed 'error': {msg}"
+        );
+        // A representative sample across the string-wrapping variants (their
+        // Display is fully controlled, unlike the #[from] source variants).
+        for err in [
+            PawError::SessionError("x".into()),
+            PawError::ConfigError("x".into()),
+            PawError::TmuxError("x".into()),
+            PawError::SpecError("x".into()),
+        ] {
+            assert!(
+                !err.to_string().to_ascii_lowercase().contains("error"),
+                "wrapping variant Display must not embed 'error': {err}"
+            );
         }
     }
 }

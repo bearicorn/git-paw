@@ -19,7 +19,7 @@ pub use command::{
 };
 pub use layout::{agent_row_widths, rebalance_agent_rows};
 pub use readiness::{
-    CLI_READY_MARKERS, GateOutcome, PaneReadiness, ReadinessBudget, classify_pane_readiness,
+    CLI_READY_MARKERS, PaneReadiness, ReadinessBudget, ReadinessOutcome, classify_pane_readiness,
     gate_pane_for_injection,
 };
 pub use session::{

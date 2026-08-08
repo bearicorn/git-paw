@@ -57,7 +57,7 @@ pub enum PaneReadiness {
 
 /// Outcome of gating a pane before boot-block injection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GateOutcome {
+pub enum ReadinessOutcome {
     /// A CLI-readiness marker was observed; inject the boot block.
     Ready,
     /// The readiness budget elapsed without a positive classification (an
@@ -128,13 +128,13 @@ pub fn classify_pane_readiness(captured: &str) -> PaneReadiness {
 /// Polls `capture` on `budget.poll_interval` until a [`PaneReadiness::Ready`]
 /// classification is seen or `budget.timeout` elapses. On a bare-shell timeout
 /// it invokes `relaunch` and re-polls, up to `budget.relaunch_attempts`. An
-/// indeterminate or persistently-bare pane returns [`GateOutcome::FellBack`].
+/// indeterminate or persistently-bare pane returns [`ReadinessOutcome::FellBack`].
 pub(crate) fn gate_pane_generic<C, R, S>(
     budget: ReadinessBudget,
     mut capture: C,
     mut relaunch: R,
     mut sleep: S,
-) -> GateOutcome
+) -> ReadinessOutcome
 where
     C: FnMut() -> Option<String>,
     R: FnMut(),
@@ -145,7 +145,7 @@ where
         loop {
             let captured = capture().unwrap_or_default();
             if classify_pane_readiness(&captured) == PaneReadiness::Ready {
-                return GateOutcome::Ready;
+                return ReadinessOutcome::Ready;
             }
             if waited >= budget.timeout {
                 break;
@@ -162,7 +162,7 @@ where
             break;
         }
     }
-    GateOutcome::FellBack
+    ReadinessOutcome::FellBack
 }
 
 /// Gate an agent pane before boot-block injection (design D1, G1).
@@ -171,14 +171,14 @@ where
 /// bare shell when the per-attempt timeout elapses, relaunches `cli_command`
 /// into the pane (clearing the input line with `C-u` first, as the launch path
 /// does) and re-polls, up to the relaunch budget. An unrecognised CLI whose UI
-/// matches no marker falls back to [`GateOutcome::FellBack`] so the caller
+/// matches no marker falls back to [`ReadinessOutcome::FellBack`] so the caller
 /// injects anyway — never worse than the prior fixed-sleep launch.
 #[must_use]
 pub fn gate_pane_for_injection(
     session_name: &str,
     pane_index: usize,
     cli_command: &str,
-) -> GateOutcome {
+) -> ReadinessOutcome {
     gate_pane_generic(
         ReadinessBudget::default(),
         || crate::supervisor::permission_prompt::capture_pane(session_name, pane_index),
