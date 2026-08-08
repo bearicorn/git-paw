@@ -8,7 +8,6 @@ git-paw clears an unattended agent's safe permission prompts through three compl
 3. **File-edit auto-approval.** The classifier recognises Claude's write/edit/create/delete filesystem-prompt patterns and treats them as safe when the canonicalized target path resolves inside the agent's own worktree (guarding against symlink escape), gated by `approve_worktree_writes` (default true) and purely additive to the shell-command auto-approval.
 
 These layers form one set: the keystroke gate decides WHETHER a prompt is safe to approve, the send-gate re-confirm decides whether it is STILL LIVE to dispatch at the last instant, and file-edit auto-approval extends the safe-classification set to worktree-confined filesystem operations.
-
 ## Requirements
 ### Requirement: Auto-approval keystroke sequence
 
@@ -163,13 +162,41 @@ The classifier SHALL pre-approve `git add` and `git commit` prompts when the age
 
 ### Requirement: Broad grant restricted to allowlisted non-arbitrary-code verbs
 
-When a prompt offers the permanent broad grant option ("Yes, and don't ask again for: X"), the auto-approver SHALL select that option ONLY when X's leading verb is in the read-mostly allowlist (per `safe-command-classification`) AND X is NOT an arbitrary-code runner. Arbitrary-code runners SHALL include `python`, `bash -c`, `sh -c`, `eval`, `node`, and any command containing a bare ` -c ` code-string flag. For an arbitrary-code runner the auto-approver SHALL select the one-time "Yes" option and SHALL NEVER select the permanent broad grant.
+The auto-approver SHALL select a prompt's permanent broad grant option ("Yes, and don't
+ask again for: X"), when the prompt offers one, only when X is NOT an arbitrary-code
+runner AND either X has already been classified safe / worktree-confined by the decision
+order, or X's leading verb is in the read-mostly allowlist (per
+`safe-command-classification`).
+The classification gate is what lets a routine stack command — one safe only through the
+resolved `[supervisor.common_dev_allowlist]` preset, such as `cargo test`, whose verb is
+not read-mostly — be permanently allowed instead of re-prompting on every identical
+occurrence (per `supervisor-unattended-operation`'s **Auto-approval prefers a durable
+grant for a safe prompt**). A command that did NOT classify safe is escalated, so no
+option is selected for it at all.
+
+Arbitrary-code runners SHALL include `python`, `bash -c`, `sh -c`, `eval`, `node`, and
+any command containing a bare ` -c ` code-string flag. For an arbitrary-code runner the
+auto-approver SHALL select the one-time "Yes" option and SHALL NEVER select the permanent
+broad grant, whatever its classification — so an interpreter run of a worktree-resident
+script stays a one-time approval even though it classifies safe.
 
 #### Scenario: Allowlisted verb takes the broad grant
 
 - **GIVEN** a live 3-option prompt for `git status` offering "Yes, and don't ask again for: git status"
 - **WHEN** the auto-approver fires
 - **THEN** it SHALL select the broad-grant option (option 2)
+
+#### Scenario: A safe-classified stack command takes the broad grant
+
+- **GIVEN** a live 3-option prompt for `cargo test --lib`, safe through the resolved allowlist but with a verb that is not read-mostly
+- **WHEN** the auto-approver fires
+- **THEN** it SHALL select the broad-grant option (option 2)
+
+#### Scenario: An unclassified command takes no broad grant
+
+- **GIVEN** a live 3-option prompt for a command that matched no safe rule
+- **WHEN** the auto-approver evaluates it
+- **THEN** it SHALL escalate and SHALL NOT select the permanent broad-grant option
 
 #### Scenario: python -c never gets a permanent broad grant
 

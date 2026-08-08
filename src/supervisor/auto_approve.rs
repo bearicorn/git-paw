@@ -441,6 +441,72 @@ pub fn extract_command_slice(capture: &str) -> Option<String> {
     None
 }
 
+/// Discard-redirect suffixes [`normalize_command`] strips: the two spellings of
+/// a `/dev/null` redirect wrapped onto a command purely to silence its output.
+///
+/// Only the `/dev/null` target is listed. A redirect to any other device (e.g.
+/// `> /dev/sda`) is left in place so the `> /dev/` danger pattern still matches
+/// it.
+const DISCARD_REDIRECTS: &[&str] = &[">/dev/null 2>&1", "> /dev/null 2>&1"];
+
+/// Strips a trailing exit-code-probe clause (`; echo …$?`, `; RC=$?`) from
+/// `cmd`, or returns `None` when the command carries none.
+///
+/// Only the clause after the LAST `;` is considered, and only when it is
+/// recognisably a probe: an `echo` mentioning `$?`, or a bare
+/// `NAME=$?` assignment. Anything else — including a second real command — is
+/// left intact.
+fn strip_exit_probe(cmd: &str) -> Option<&str> {
+    let (head, tail) = cmd.rsplit_once(';')?;
+    let tail = tail.trim();
+    let is_echo_probe = tail
+        .strip_prefix("echo")
+        .is_some_and(|rest| rest.starts_with(char::is_whitespace) && rest.contains("$?"));
+    let is_assign_probe = tail.strip_suffix("=$?").is_some_and(|name| {
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    });
+    (is_echo_probe || is_assign_probe).then(|| head.trim_end())
+}
+
+/// Strips a trailing [`DISCARD_REDIRECTS`] suffix from `cmd`, or returns `None`
+/// when the command ends in no such redirect.
+fn strip_discard_redirect(cmd: &str) -> Option<&str> {
+    DISCARD_REDIRECTS
+        .iter()
+        .find_map(|redirect| cmd.strip_suffix(redirect))
+        .map(str::trim_end)
+}
+
+/// Normalises a command slice for classification by removing the gate-reporting
+/// wrappers an agent appends to a command it is only observing the exit status
+/// of: a trailing `; echo …$?` / `; RC=$?` exit-code probe and a trailing
+/// `>/dev/null 2>&1` discard redirect.
+///
+/// The probe text differs on every run, so an un-normalised slice never matches
+/// a prefix allowlist entry and a routine gate command re-prompts forever. Only
+/// those two suffix forms are stripped — this is deliberately not a shell
+/// parser, and anything unrecognised is returned unchanged.
+///
+/// Normalisation is a pure rewrite performed BEFORE any classification, so the
+/// danger-list ([`is_dangerous`]), the worktree-confinement rules, and the
+/// protected-path rule all run against the normalised command and stripping can
+/// never downgrade an escalation — `git push; echo $?` normalises to `git push`
+/// and still escalates.
+#[must_use]
+pub fn normalize_command(slice: &str) -> String {
+    let mut cmd = slice.trim();
+    loop {
+        if let Some(head) = strip_exit_probe(cmd) {
+            cmd = head;
+        } else if let Some(head) = strip_discard_redirect(cmd) {
+            cmd = head;
+        } else {
+            break;
+        }
+    }
+    cmd.to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Curated danger-list (Section 2)
 // ---------------------------------------------------------------------------
@@ -1129,16 +1195,27 @@ fn verb_is_read_mostly(slice: &str) -> bool {
 /// Selects the 1-based option index to dispatch for a `slice` at a prompt of
 /// the given `shape`.
 ///
-/// - 2-option → option 1 (`Yes`).
-/// - 3-option → option 2 (the permanent broad grant) ONLY when the slice's
-///   verb is read-mostly-allowlisted AND not an arbitrary-code runner;
-///   otherwise option 1 (one-time `Yes`).
+/// - 2-option → option 1 (`Yes`); there is no durable option to prefer.
+/// - 3-option → option 2 (the permanent broad grant) when the slice is NOT an
+///   arbitrary-code runner AND either the caller has already classified the
+///   command safe / worktree-confined (`classified_safe`) or the slice's verb is
+///   read-mostly-allowlisted; otherwise option 1 (one-time `Yes`).
+///
+/// `classified_safe` is what makes a routine prompt permanently allowed instead
+/// of re-prompting on every identical occurrence: a stack command such as
+/// `cargo test` classifies safe through the resolved allowlist even though
+/// `cargo` is not a read-mostly verb. Callers that have not classified the
+/// command pass `false` and get the narrower read-mostly rule unchanged. An
+/// arbitrary-code runner NEVER receives a durable grant, whatever the
+/// classification.
 #[must_use]
-pub fn select_option_index(shape: PromptShape, slice: &str) -> u8 {
+pub fn select_option_index(shape: PromptShape, slice: &str, classified_safe: bool) -> u8 {
     match shape {
         PromptShape::TwoOption => 1,
         PromptShape::ThreeOption => {
-            if verb_is_read_mostly(slice) && !is_arbitrary_code_runner(slice) {
+            if is_arbitrary_code_runner(slice) {
+                1
+            } else if classified_safe || verb_is_read_mostly(slice) {
                 2
             } else {
                 1
@@ -1643,9 +1720,9 @@ Do you want to proceed?";
         std::fs::write(tmp.path().join("tools/gen.py"), "print(1)\n").unwrap();
         assert!(is_worktree_dev_test_op("python3 tools/gen.py", tmp.path()));
         assert_eq!(
-            select_option_index(PromptShape::ThreeOption, "python3 tools/gen.py"),
+            select_option_index(PromptShape::ThreeOption, "python3 tools/gen.py", true),
             1,
-            "interpreter runs must take the one-time option"
+            "interpreter runs must take the one-time option even once classified safe"
         );
     }
 
@@ -2074,37 +2151,163 @@ Here is my plan:
         assert!(!is_arbitrary_code_runner("cargo test"));
     }
 
-    /// Spec scenario "Two-option prompt selects Yes".
+    /// Spec scenarios "Two-option prompt selects Yes" and "A safe prompt with no
+    /// durable option uses the once-only option": with no durable option on
+    /// offer there is nothing to prefer, classified safe or not.
     #[test]
     fn two_option_selects_yes() {
-        assert_eq!(select_option_index(PromptShape::TwoOption, "git status"), 1);
-        assert_eq!(select_option_index(PromptShape::TwoOption, "cargo test"), 1);
+        assert_eq!(
+            select_option_index(PromptShape::TwoOption, "git status", false),
+            1
+        );
+        assert_eq!(
+            select_option_index(PromptShape::TwoOption, "cargo test", true),
+            1
+        );
     }
 
-    /// Spec scenario "Allowlisted verb takes the broad grant".
+    /// Spec scenario "Allowlisted verb takes the broad grant": a read-mostly verb
+    /// takes the durable option even when the caller has not classified it.
     #[test]
     fn three_option_allowlisted_takes_broad_grant() {
         assert_eq!(
-            select_option_index(PromptShape::ThreeOption, "git status"),
+            select_option_index(PromptShape::ThreeOption, "git status", false),
             2
         );
-        assert_eq!(select_option_index(PromptShape::ThreeOption, "grep foo"), 2);
+        assert_eq!(
+            select_option_index(PromptShape::ThreeOption, "grep foo", false),
+            2
+        );
+    }
+
+    /// Spec scenario "A safe prompt offering a durable option takes it": a
+    /// stack command that classifies safe through the resolved allowlist takes
+    /// the durable grant even though its verb is not read-mostly.
+    #[test]
+    fn three_option_safe_classified_takes_durable_grant() {
+        assert_eq!(
+            select_option_index(PromptShape::ThreeOption, "cargo test --lib", true),
+            2
+        );
+        assert_eq!(
+            select_option_index(PromptShape::ThreeOption, "mdbook build docs/", true),
+            2
+        );
+    }
+
+    /// Spec scenario "A non-safe prompt is never granted durably": an
+    /// unclassified non-read-mostly command stays on the once-only option.
+    #[test]
+    fn three_option_unclassified_command_gets_no_durable_grant() {
+        assert_eq!(
+            select_option_index(PromptShape::ThreeOption, "cargo test --lib", false),
+            1
+        );
+        assert_eq!(
+            select_option_index(PromptShape::ThreeOption, "frobnicate --all", false),
+            1
+        );
     }
 
     /// Spec scenarios "python -c / bash -c never gets a permanent broad grant":
-    /// arbitrary-code runners take the one-time Yes (option 1).
+    /// arbitrary-code runners take the one-time Yes (option 1) even when the
+    /// caller classified them safe (a worktree-resident script run).
     #[test]
     fn arbitrary_code_never_takes_broad_grant() {
+        for classified_safe in [false, true] {
+            assert_eq!(
+                select_option_index(
+                    PromptShape::ThreeOption,
+                    "python3 -c \"import os; os.remove('x')\"",
+                    classified_safe
+                ),
+                1
+            );
+            assert_eq!(
+                select_option_index(
+                    PromptShape::ThreeOption,
+                    "bash -c \"do-thing\"",
+                    classified_safe
+                ),
+                1
+            );
+            assert_eq!(
+                select_option_index(PromptShape::ThreeOption, "python3 tools/gen.py", true),
+                1,
+                "an interpreter run of a worktree script is one-time safe only"
+            );
+        }
+    }
+
+    // --- Section: exit-probe / discard-redirect normalization ---------------
+
+    /// Spec scenario "A safe command with a trailing exit-code probe classifies
+    /// safe": the probe is stripped, so the remainder matches the allowlist the
+    /// same way the bare command does.
+    #[test]
+    fn normalize_strips_trailing_exit_code_probe() {
+        let whitelist = vec!["cargo test".to_string()];
         assert_eq!(
-            select_option_index(
-                PromptShape::ThreeOption,
-                "python3 -c \"import os; os.remove('x')\""
-            ),
-            1
+            normalize_command("cargo test --lib; echo test-exit=$?"),
+            "cargo test --lib"
+        );
+        assert!(is_safe_command(
+            &normalize_command("cargo test --lib; echo test-exit=$?"),
+            &whitelist
+        ));
+        assert_eq!(normalize_command("just check; RC=$?"), "just check");
+        assert_eq!(normalize_command("just check ; echo $?"), "just check");
+    }
+
+    /// Spec scenario "A trailing redirect is normalized away".
+    #[test]
+    fn normalize_strips_trailing_discard_redirect() {
+        assert_eq!(
+            normalize_command("mdbook build docs/ >/dev/null 2>&1"),
+            "mdbook build docs/"
         );
         assert_eq!(
-            select_option_index(PromptShape::ThreeOption, "bash -c \"do-thing\""),
-            1
+            normalize_command("mdbook build docs/ > /dev/null 2>&1"),
+            "mdbook build docs/"
         );
+        // Both wrappers at once still reduce to the bare command.
+        assert_eq!(
+            normalize_command("mdbook build docs/ >/dev/null 2>&1; echo $?"),
+            "mdbook build docs/"
+        );
+    }
+
+    /// Spec scenario "Normalization does not rescue a danger command": the
+    /// danger-list runs against the normalized command, so stripping the probe
+    /// cannot downgrade the escalation.
+    #[test]
+    fn normalize_does_not_rescue_a_danger_command() {
+        for wrapped in [
+            "git push --force; echo $?",
+            "sudo rm -rf /etc; echo rc=$?",
+            "git push >/dev/null 2>&1",
+        ] {
+            assert!(
+                is_dangerous(&normalize_command(wrapped)),
+                "{wrapped} must still escalate after normalization"
+            );
+        }
+        // A redirect to a real device is NOT a discard redirect and stays put.
+        assert!(is_dangerous(&normalize_command("cat secrets > /dev/sda")));
+    }
+
+    /// Normalization is conservative: only the documented suffix forms are
+    /// removed, and anything else is returned unchanged.
+    #[test]
+    fn normalize_leaves_unrecognised_suffixes_intact() {
+        for unchanged in [
+            "cargo test --lib",
+            "cargo test; cargo build",
+            "echo $? > rc.txt",
+            "grep -rn 'echo $?' src/",
+            "cargo test > out.log 2>&1",
+        ] {
+            assert_eq!(normalize_command(unchanged), unchanged);
+        }
     }
 }

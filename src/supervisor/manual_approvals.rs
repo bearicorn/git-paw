@@ -331,40 +331,60 @@ fn is_prompt_boilerplate(lower: &str) -> bool {
     PROMPT_BOILERPLATE.iter().any(|n| lower.contains(n)) || lower == "yes" || lower == "no"
 }
 
+/// Returns `true` when `text` reads as a command (or a file-operation target
+/// path) rather than as surrounding pane text.
+///
+/// The check is deliberately shallow — it inspects only the leading token, past
+/// any `NAME=value` environment assignments — but it is enough to reject what
+/// actually leaks into a capture: prompt boilerplate, and a diff or output line
+/// whose first token is punctuation (`+`, `⎿`, `123:`). A token made only of
+/// command-name characters, carrying at least one alphanumeric, is accepted.
+fn parses_as_command(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() || is_prompt_boilerplate(&text.to_ascii_lowercase()) {
+        return false;
+    }
+    let head = text
+        .split_whitespace()
+        .find(|tok| {
+            !tok.split_once('=')
+                .is_some_and(|(k, _)| !k.is_empty() && k.chars().all(is_env_name_char))
+        })
+        .unwrap_or_default();
+    head.chars().any(|c| c.is_ascii_alphanumeric())
+        && head
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '~'))
+}
+
+/// Whether `c` may appear in a shell environment-variable name.
+fn is_env_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
 /// Extracts the candidate command pattern from a forwarded prompt's captured
 /// pane text.
 ///
-/// This is a heuristic (the suggestion downstream is "allowed to be wrong"):
+/// The pattern comes from the SAME prompt slice the classifier reads, never from
+/// the surrounding pane:
 ///
-/// 1. A recognised file-operation prompt yields its target path (reusing the
-///    auto-approve file-prompt extractor).
-/// 2. Otherwise the first non-empty, non-boilerplate line is taken as the
-///    command, with a leading `Running ` / `$ ` shell-echo prefix stripped.
+/// 1. The prompted command slice — the text between the `Bash command` /
+///    `Bash(` header and the confirmation question
+///    ([`extract_command_slice`](super::auto_approve::extract_command_slice)).
+/// 2. Failing that, a recognised file-operation prompt's target path (reusing
+///    the auto-approve file-prompt extractor).
 ///
-/// Returns `None` when no command-like line can be found.
+/// Scraping adjacent lines is deliberately NOT a fallback: it recorded whatever
+/// happened to sit next to the prompt — an accept-edits diff line, a previous
+/// command's output — as if it were the command awaiting a decision. Returns
+/// `None` when neither source yields text that [`parses_as_command`], so no
+/// spurious pattern is recorded.
 #[must_use]
 pub fn extract_forwarded_pattern(captured: &str) -> Option<String> {
-    if let Some(path) = super::auto_approve::extract_path_from_file_prompt(captured) {
-        return Some(path);
-    }
-    for raw in captured.lines() {
-        let line = raw.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if is_prompt_boilerplate(&line.to_ascii_lowercase()) {
-            continue;
-        }
-        let cmd = line
-            .strip_prefix("Running ")
-            .or_else(|| line.strip_prefix("$ "))
-            .unwrap_or(line)
-            .trim();
-        if !cmd.is_empty() {
-            return Some(cmd.to_string());
-        }
-    }
-    None
+    super::auto_approve::extract_command_slice(captured)
+        .or_else(|| super::auto_approve::extract_path_from_file_prompt(captured))
+        .map(|pattern| pattern.trim().to_string())
+        .filter(|pattern| parses_as_command(pattern))
 }
 
 // ---------------------------------------------------------------------------
@@ -758,22 +778,41 @@ mod tests {
         );
     }
 
+    /// Spec scenario "The pattern comes from the pending command, not adjacent
+    /// text": the prompt slice wins over an accept-edits diff line above it and
+    /// a later command's output below it.
     #[test]
-    fn extract_skips_boilerplate_and_returns_command() {
-        let captured = "Do you want to proceed?\nrm -rf /tmp/foo\n[y/N]";
+    fn extract_takes_the_prompt_slice_not_adjacent_pane_text() {
+        let captured = concat!(
+            "+    let normalized = normalize_command(&slice);\n",
+            "Bash command\n",
+            "  cargo test --lib supervisor\n",
+            "Do you want to proceed?\n",
+            "❯ 1. Yes\n",
+            "  2. No\n",
+            "test result: ok. 42 passed; 0 failed\n",
+        );
         assert_eq!(
             extract_forwarded_pattern(captured).as_deref(),
-            Some("rm -rf /tmp/foo")
+            Some("cargo test --lib supervisor")
         );
     }
 
+    /// Spec scenario "A non-command slice yields no learning": a capture with no
+    /// command header and no file-op prompt records nothing, rather than
+    /// scraping whichever adjacent line happened to be there.
     #[test]
-    fn extract_strips_running_prefix() {
-        let captured = "do you want to proceed\nRunning ./scripts/deploy.sh";
-        assert_eq!(
-            extract_forwarded_pattern(captured).as_deref(),
-            Some("./scripts/deploy.sh")
-        );
+    fn extract_returns_none_when_no_prompt_slice_is_present() {
+        let captured = "Do you want to proceed?\n+    let x = 5;\n[y/N]";
+        assert_eq!(extract_forwarded_pattern(captured), None);
+    }
+
+    /// A slice that is present but does not parse as a command (a diff line
+    /// picked up as the `Bash command` body) yields no pattern.
+    #[test]
+    fn extract_returns_none_for_a_non_command_slice() {
+        let captured = "Bash command\n  +    let x = 5;\nDo you want to proceed?";
+        assert_eq!(extract_forwarded_pattern(captured), None);
     }
 
     #[test]

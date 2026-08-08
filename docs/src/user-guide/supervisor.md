@@ -44,6 +44,13 @@ Each poll (~15 seconds) the loop:
   ever sent the minimal approval keystrokes the prompt consumes — never
   free-text or a stray newline that could pollute the supervisor's
   conversation.
+- **Submits a directive left buffered on an idle pane.** A pane showing no
+  live prompt and no mid-response marker, whose input box still holds
+  unsubmitted text, has a stranded directive: the CLI swallowed the first
+  `Enter` into its paste buffer. The loop sends a follow-up `Enter` — and
+  nothing else, no free text — to submit it. Neither the live-prompt scan (there
+  is no prompt) nor the ~25-minute stuck detector would otherwise surface that
+  stall. A pane that is actively generating is never touched.
 - **Escalates risky/unknown prompts without blocking** — anything the
   classifier does not consider safe is surfaced for later human review (via the
   broker and the exit summary) while the rest of the wave keeps moving. A
@@ -464,6 +471,13 @@ time. The bundled supervisor and coordination skills instruct agents to run dev
 commands bare and read the exit status directly; keep your own commands to the
 same shape so a seeded prefix actually suppresses the prompt.
 
+git-paw's own classifier is forgiving about the two most common wrappers — it
+normalises a trailing `; echo …$?` / `; RC=$?` probe and a trailing
+`>/dev/null 2>&1` redirect away before matching (see
+[Auto-approve classification](#auto-approve-classification)) — but the *CLI's*
+own permission whitelisting is not, so a wrapped command still re-prompts the
+agent's CLI. Run them bare.
+
 ## Auto-approve classification
 
 When `[supervisor.auto_approve]` is enabled, the poll loop classifies each
@@ -476,6 +490,16 @@ The classifier reads the prompted **command slice** — the text between the
 `Bash command` / `Bash(…)` header and the confirmation question — not the
 surrounding narration. A supervisor that merely *mentions* `rm -rf /` in prose
 is never mistaken for a prompt to run it.
+
+The slice is then **normalised**: a trailing exit-code probe (`; echo …$?`,
+`; RC=$?`) and a trailing `>/dev/null 2>&1` discard redirect are stripped, so a
+routine gate command wrapped for reporting classifies as the bare command it is
+instead of being forced `Unknown` by text that differs on every run. Only those
+two suffix forms are removed — this is not a shell parser — and every rule
+below, danger-list included, runs against the **normalised** command, so a
+wrapper can never downgrade an escalation: `git push; echo $?` still escalates,
+and a redirect to a real device (`> /dev/sda`) is left in place for the
+`> /dev/` danger pattern to catch.
 
 ### Decision order
 
@@ -576,12 +600,22 @@ existing `agent.question`.
 
 When the classifier approves, it selects the prompt option by shape: a 2-option
 `Yes` / `No` prompt takes option 1 (`Yes`); a 3-option `Yes` /
-`Yes, and don't ask again` / `No` prompt takes option 2 (the **permanent broad
-grant**) only when the command's verb is read-mostly-allowlisted **and** is not
-an arbitrary-code runner. Arbitrary-code runners — `python`, `bash -c`,
-`sh -c`, `eval`, `node`, or any bare ` -c ` code-string flag — take the
-one-time `Yes` only and **never** receive a permanent grant: a standing grant
-on `python -c` is effectively a standing grant on anything.
+`Yes, and don't ask again` / `No` prompt **prefers** option 2 (the **permanent
+broad grant**). The preference is the point: a routine prompt granted once only
+re-appears on every identical occurrence, which is exactly the friction that
+stalls an unattended wave. So when a prompt offers a durable option, any command
+the classifier already decided was safe or worktree-confined takes it — not just
+a read-mostly verb, but a `cargo test` or `just check` that is safe through your
+declared stack preset. When no durable option is offered, the once-only `Yes` is
+used as before.
+
+Two things are never durably granted. A command that did **not** classify safe
+is escalated, so no option is selected for it at all. And arbitrary-code runners
+— `python`, `bash -c`, `sh -c`, `eval`, `node`, or any bare ` -c ` code-string
+flag — take the one-time `Yes` only, whatever the classification: a standing
+grant on `python -c` is effectively a standing grant on anything. That is why an
+interpreter run of a worktree-resident script classifies safe but stays a
+one-time approval.
 
 `sweep.sh approve <pane>` follows the same option-index selection: it parses
 the prompt from the fresh pre-send capture and dispatches the **resolved
@@ -589,8 +623,8 @@ option digit** followed by `Enter` (two separate keystrokes), reporting
 `approved pane <N> (option <digit>)`. It never dispatches a blind
 cursor-movement sequence — `Down` + `Enter` lands on `No` on a 2-option
 prompt and takes the permanent broad grant on a 3-option one, so the helper
-resolves the digit through the same shape and broad-grant rules as the
-in-tool auto-approver.
+resolves the digit through the same normalisation, shape and durable-grant
+rules as the in-tool auto-approver.
 
 ## Out-of-worktree write violations
 
@@ -642,6 +676,16 @@ observable signal: **a command that required a manual decision**. A command
 forwarded seven times is a strong allowlist candidate regardless of each
 individual yes/no — the friction it causes is what you want to remove.
 Auto-approved (preset-matched) commands are **not** recorded.
+
+The `pattern` comes from the same **prompt slice** the classifier reads — the
+command between the `Bash command` / `Bash(…)` header and the confirmation
+question, or a file-operation prompt's target path. Surrounding pane text is
+never scraped, so an accept-edits diff line or a previous command's output
+sitting next to the prompt cannot be recorded as if it were the command
+awaiting a decision. When neither source yields something that parses as a
+command, **no** line is written and no `permission_pattern` learning is emitted
+— an unusable pattern is worse than a missing one, because it pollutes the
+promotion report you act on.
 
 ### Reporting
 
