@@ -72,7 +72,8 @@ without the docs** in that case rather than block or retry in a loop.
 ## Least-privilege install
 
 `git paw init` installs `docs-fetch.sh` into `.git-paw/scripts/` alongside
-`broker.sh` and `sweep.sh`, and the agent allowlist grants that exact script
+`broker.sh`, `sweep.sh`, and the shared `_paw_common.sh` preamble they source,
+and the agent allowlist grants that exact script
 path — both the bare path and the `bash <path>` form — never a broad `curl`
 wildcard. A single by-path grant covers every subcommand, so an agent consults
 the docs without any wildcard network permission.

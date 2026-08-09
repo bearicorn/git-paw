@@ -33,84 +33,21 @@ set -u
 
 # ---------------------------------------------------------------------------
 # Discovery: project root, paw dir, docs base URL, Python interpreter.
+#
+# The project root, `.git-paw` paths, Python 3 interpreter and
+# `discover_docs_base_url` all come from the shared preamble `_paw_common.sh`,
+# installed as a sibling of this script by `git paw init`. Resolving it relative
+# to this file's own location works from both the bundled `assets/scripts/` tree
+# and the deployed `.git-paw/scripts/` directory.
 # ---------------------------------------------------------------------------
 
-# Built-in default docs site. Kept in sync with the `docs_base_url` default
-# documented in `git paw init`'s config template and the Rust config accessor.
-DEFAULT_DOCS_BASE_URL="https://bearicorn.github.io/git-paw"
-
-repo_root() {
-  git rev-parse --show-toplevel 2>/dev/null
-}
-
-PROJECT_ROOT=$(repo_root)
-if [[ -z "${PROJECT_ROOT}" ]]; then
-  echo "docs-fetch.sh: not inside a git repository" >&2
-  exit 2
+PAW_SCRIPT_NAME="docs-fetch.sh"
+_PAW_COMMON="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/_paw_common.sh"
+# shellcheck source=_paw_common.sh
+if [[ ! -r "${_PAW_COMMON}" ]] || ! . "${_PAW_COMMON}"; then
+  echo "docs-fetch.sh: cannot load shared preamble '${_PAW_COMMON}' — re-run \`git paw init\`" >&2
+  exit 3
 fi
-
-PAW_DIR="${PROJECT_ROOT}/.git-paw"
-CONFIG_TOML="${PAW_DIR}/config.toml"
-
-# Locate a Python 3 interpreter for config parsing and HTML/llms.txt shaping.
-if command -v python3 >/dev/null 2>&1; then
-  PY=python3
-elif command -v python >/dev/null 2>&1 && \
-     [[ "$(python -c 'import sys;print(sys.version_info[0])' 2>/dev/null)" == "3" ]]; then
-  PY=python
-else
-  echo "docs-fetch.sh: requires Python 3 on PATH (python3 or python)" >&2
-  exit 4
-fi
-
-# Resolve the docs base URL: top-level `docs_base_url` from config.toml, else
-# the built-in default. Trailing slashes are trimmed by callers as needed.
-discover_docs_base_url() {
-  if [[ ! -f "${CONFIG_TOML}" ]]; then
-    printf '%s\n' "${DEFAULT_DOCS_BASE_URL}"
-    return
-  fi
-  DEFAULT_URL="${DEFAULT_DOCS_BASE_URL}" "${PY}" -c "$(cat <<'PY'
-import os, sys
-
-path = sys.argv[1]
-default = os.environ.get("DEFAULT_URL", "")
-try:
-    import tomllib  # py311+
-    mode = "rb"
-except ModuleNotFoundError:
-    try:
-        import tomli as tomllib  # py<311
-        mode = "rb"
-    except ModuleNotFoundError:
-        tomllib = None
-
-if tomllib is None:
-    # Minimal fallback: read the top-level `docs_base_url` key that appears
-    # before any [section] header, avoiding a tomli dependency.
-    import re
-    text = open(path).read()
-    in_root = True
-    val = None
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            in_root = False
-            continue
-        if not in_root:
-            continue
-        m = re.match(r"^\s*docs_base_url\s*=\s*\"([^\"]+)\"", line)
-        if m:
-            val = m.group(1)
-    print(val or default)
-else:
-    with open(path, mode) as f:
-        data = tomllib.load(f)
-    url = data.get("docs_base_url")
-    print(url if url else default)
-PY
-)" "${CONFIG_TOML}"
-}
 
 BASE_URL=$(discover_docs_base_url)
 

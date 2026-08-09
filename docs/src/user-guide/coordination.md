@@ -27,7 +27,8 @@ When skill templates are enabled (the default), each agent's `AGENTS.md` boot bl
 checkout does not contain it. `git paw start` and `git paw add` therefore
 **auto-provision the helper into each agent worktree** at setup: they write
 `broker.sh` (whenever the broker is enabled) and `docs-fetch.sh` (whenever
-`docs_base_url` is configured) into the worktree's `.git-paw/scripts/`,
+`docs_base_url` is configured) — with the shared `_paw_common.sh` preamble
+both scripts source — into the worktree's `.git-paw/scripts/`,
 executable, from the same bundled assets `init` installs. The scripts are
 (re)written on every attach, so a worktree's helper always matches the running
 binary's version and agents never copy it by hand from `assets/`. The agent
