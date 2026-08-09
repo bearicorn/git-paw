@@ -272,8 +272,7 @@ pub fn classify_prompt(
     approve_worktree_writes: bool,
     protected: &ProtectedPaths,
 ) -> PromptVerdict {
-    let slice =
-        normalize_command(&extract_command_slice(captured).unwrap_or_else(|| captured.to_string()));
+    let slice = prompt_command_slice(captured);
 
     // Danger-first precedence: a curated danger-list match — or a write
     // targeting the operator's protected config/memory territory
@@ -319,6 +318,20 @@ pub fn classify_prompt(
         },
         None => PromptVerdict::Unknown,
     }
+}
+
+/// Returns the normalised command slice a capture is classified against: the
+/// prompted command text ([`extract_command_slice`], falling back to the whole
+/// capture when no command header is present), with the gate-reporting wrappers
+/// stripped by [`normalize_command`].
+///
+/// [`classify_prompt`] derives its slice through this function, so exposing it
+/// lets the hidden `git paw __classify` subcommand resolve the option index for
+/// a non-[`PromptVerdict::Safe`] verdict from the exact same slice the
+/// classification saw, instead of re-deriving it.
+#[must_use]
+pub fn prompt_command_slice(captured: &str) -> String {
+    normalize_command(&extract_command_slice(captured).unwrap_or_else(|| captured.to_string()))
 }
 
 /// Returns the first whitelist entry that matches any line of `captured`, using

@@ -105,9 +105,18 @@ fn run_approve(capture: &str, pane: &str) -> ApproveRun {
     let log_file = repo.path().join("tmux.log");
     fs::write(&log_file, "").expect("create tmux log");
 
+    // Fake tmux first, then the freshly built binary: `sweep.sh approve`
+    // resolves its option index by delegating to `git paw __classify`, so THIS
+    // build must be the `git-paw` that `git paw` finds. Without it the helper
+    // correctly fails closed and sends nothing — a different scenario from the
+    // option-selection ones asserted here.
     let path = format!(
-        "{}:{}",
+        "{}:{}:{}",
         fakebin.display(),
+        assert_cmd::cargo::cargo_bin("git-paw")
+            .parent()
+            .expect("built binary has a parent dir")
+            .display(),
         std::env::var("PATH").unwrap_or_default()
     );
     let out = StdCommand::new("bash")

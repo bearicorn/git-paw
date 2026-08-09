@@ -113,11 +113,20 @@ fn send_line(session: &str, pane: usize, line: &str) {
 
 /// Runs `sweep.sh approve <pane>` from the repo and returns combined
 /// stdout+stderr.
+///
+/// The helper resolves its option index by delegating to `git paw __classify`,
+/// so the freshly built binary is prepended to `PATH` for the child: without
+/// it the delegation yields no verdict and `approve` correctly fails closed
+/// (sending nothing), which is a different scenario from the ones here.
 fn run_approve(repo: &Path, sweep: &Path, pane: &str) -> String {
+    let bin = assert_cmd::cargo::cargo_bin("git-paw");
+    let bin_dir = bin.parent().expect("built binary has a parent dir");
+    let path = std::env::var("PATH").unwrap_or_default();
     let out = Command::new("bash")
         .arg(sweep)
         .args(["approve", pane])
         .current_dir(repo)
+        .env("PATH", format!("{}:{path}", bin_dir.display()))
         .output()
         .expect("run sweep.sh approve");
     format!(

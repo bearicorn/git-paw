@@ -311,6 +311,10 @@ STUCK_DEDUP_FILE="${PAW_DIR}/.sweep-stuck-dedup"
 # LIVE_PROMPT_PROCEED / LIVE_PROMPT_TAIL / LIVE_PROMPT_BLOCK) so `approve`
 # and `classify` agree with the in-tool auto-approver on what "live" means.
 LIVE_PROMPT_MARKERS_REGEX='do you want to|esc to cancel'
+# A numbered option line once its leading TUI decoration (box-drawing glyphs,
+# bullets, the selection caret) is skipped — mirrors strip_decoration +
+# is_option_line in src/supervisor/auto_approve.rs.
+LIVE_PROMPT_OPTION_REGEX='^[[:space:]│─╭╮╰╯├┤┐└┘┌⎿❯●•*·]*[0-9][.)]'
 
 # --- Additional stuck shapes: stream-timeout, context-bloat, no-progress -----
 # A coding agent's CLI API call can fail mid-stream (transport error / timeout)
@@ -449,15 +453,20 @@ cmd_approve() {
   fi
   # Re-confirm a live permission prompt on a FRESH capture taken immediately
   # before sending keys (structural markers at the tail), and resolve the
-  # option index from that same capture: the classifier mirror
-  # (run_classifier RESOLVE_OPTION mode) parses the prompt and applies the
-  # same shape detection and broad-grant rule as the in-tool auto-approver,
-  # so both resolve the same index. If the prompt cleared between the
-  # decision and now, send NOTHING (no stray digits into the agent's CLI).
-  local cap opt
+  # option index from that same capture: run_classifier's RESOLVE_OPTION mode
+  # delegates to `git paw __classify --resolve-option`, so the index is the one
+  # the in-tool auto-approver would select — the same classifier decides both.
+  # If the prompt cleared between the decision and now, or the classifier
+  # produced no verdict, send NOTHING (no stray digits into the agent's CLI).
+  local cap opt rc=0
   cap=$(tmux capture-pane -t "${SESSION}:0.${pane}" -p -S -50 2>/dev/null | tail -50)
-  if ! opt=$(printf '%s' "${cap}" | run_classifier "${PROJECT_ROOT}" resolve); then
-    echo "cleared before send, no keys sent (pane ${pane})"
+  opt=$(printf '%s' "${cap}" | run_classifier "${PROJECT_ROOT}" resolve) || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    if [[ ${rc} -eq 3 ]]; then
+      echo "classifier produced no verdict, no keys sent (pane ${pane})"
+    else
+      echo "cleared before send, no keys sent (pane ${pane})"
+    fi
     return 0
   fi
   # Dispatch the resolved option digit + Enter as two separate keystrokes —
@@ -1148,587 +1157,100 @@ cmd_stuck_eval() {
   printf '%s' "${cap}" | stuck_eval "${agent}" "${last_seen}" "${checkbox}" "${commit}" "${blocked_age}"
 }
 
-# Auto-approve classification, mirroring the Rust classifier
-# (src/supervisor/auto_approve.rs) so the bundled helper decides identically:
-# command-slice extraction, the curated danger-list (+ per-OS addendum) with
-# the rm -rf scratch exception, the protected-path rule (writes targeting
-# operator config/memory territory escalate as danger — agent-memory-
-# isolation), the stack-neutral whitelist composed with the
-# [supervisor.common_dev_allowlist] stack presets and safe_commands from
-# .git-paw/config.toml (fail-safe: built-ins only when unreadable), worktree-
-# confined git add/commit and dev-test shapes, the live-prompt gate, and
-# option-index selection.
+# Auto-approve classification. The classification RULES are not implemented
+# here: sweep.sh obtains its verdict by delegating to the hidden
+# `git paw __classify` subcommand, which runs git-paw's one Rust classifier
+# (src/supervisor/auto_approve.rs + classify_prompt in drive.rs) over the same
+# resolved whitelist, protected-path set and worktree-write policy the in-tool
+# auto-approver uses. No parallel implementation is left here to drift.
 #
 # Reads a pane capture on stdin; takes an optional worktree root (defaults to
-# the project root) used by the worktree-confined rules. Prints one of:
+# the project root) forwarded to the worktree-confined rules. Prints one of:
 #   no-op (not live)
 #   escalate (danger|unknown)
-#   approve option=<N> (scratch-rm|worktree-git|worktree-dev-test|whitelist)
+#   escalate (classifier unavailable)
+#   approve option=<N> (safe)
 cmd_classify() {
   local root=${1:-${PROJECT_ROOT}}
   run_classifier "${root}" ""
 }
 
+# Live-prompt gate (arg 1: the pane capture). Structural mirror of
+# live_prompt_markers_at_tail in src/supervisor/auto_approve.rs: a textual
+# marker (LIVE_PROMPT_MARKERS_REGEX, case-insensitive) within the last 4
+# non-blank lines, or a numbered option line anchoring that tail with a
+# textual marker within the last 15 non-blank lines -- a multi-option prompt
+# bottoms out in its option list, with the question above it.
+#
+# Prompt DETECTION stays in the helper; only CLASSIFICATION moved to
+# `git paw __classify`. This gate runs BEFORE any delegation, so a pane with
+# no live prompt costs no subprocess and can never be approved.
+is_live_capture() {
+  local nonblank tail4 tail15
+  nonblank=$(grep -v '^[[:space:]]*$' <<<"${1}")
+  tail4=$(tail -4 <<<"${nonblank}")
+  if grep -Eqi "${LIVE_PROMPT_MARKERS_REGEX}" <<<"${tail4}"; then
+    return 0
+  fi
+  tail15=$(tail -15 <<<"${nonblank}")
+  grep -Eq "${LIVE_PROMPT_OPTION_REGEX}" <<<"${tail4}" &&
+    grep -Eqi "${LIVE_PROMPT_MARKERS_REGEX}" <<<"${tail15}"
+}
+
 # Shared classifier invocation (stdin: pane capture). $1 = worktree root,
-# $2 = non-empty to run the approve-path RESOLVE_OPTION mode: liveness on
-# the fresh capture plus option-index resolution only — prints `cleared`
-# (exit 1) or the resolved option digit (exit 0). Both `classify` and
-# `approve` run this one Python body, so the live-prompt gate, shape
-# detection, and broad-grant rule cannot drift between them.
+# $2 = non-empty to run the approve-path RESOLVE_OPTION mode: liveness on the
+# fresh capture plus option-index resolution only -- prints the resolved option
+# digit (exit 0), or nothing when the prompt cleared (exit 1) or the classifier
+# produced no verdict (exit 3).
+#
+# Both `classify` and `approve` run this one function, and both take their
+# verdict from `git paw __classify`, so the classification and the
+# broad-grant rule cannot drift between them or from the in-tool
+# auto-approver -- there is one implementation, not two that agree. The
+# live-prompt gate above is the exception: it is still a bash mirror of the
+# Rust gate, kept honest by tests/sweep_sh_live_gate_parity.rs rather than by
+# construction.
+#
+# FAIL CLOSED: a missing `git paw` binary, an unrecognised subcommand, or any
+# other error yields no verdict -- the prompt escalates and is NEVER
+# auto-approved.
 run_classifier() {
-  RESOLVE_OPTION="${2:-}" WORKTREE_ROOT="${1}" CONFIG_TOML="${CONFIG_TOML}" \
-    PROJECT_ROOT="${PROJECT_ROOT}" \
-    LIVE_MARKERS="${LIVE_PROMPT_MARKERS_REGEX}" "${PY}" -c "$(cat <<'PY'
-import os, platform, re, sys
+  local root=$1 resolve=${2:-} cap verdict class opt
+  cap=$(cat)
 
-cap = sys.stdin.read()
-worktree_root = os.environ.get("WORKTREE_ROOT", "")
-config_toml = os.environ.get("CONFIG_TOML", "")
+  if ! is_live_capture "${cap}"; then
+    if [[ -n "${resolve}" ]]; then
+      return 1
+    fi
+    echo "no-op (not live)"
+    return 0
+  fi
 
-# --- command-slice extraction --------------------------------------------
-DECOR = " \t│─╭╮╰╯├┤┐└┘┌⎿❯●•*·"
+  local -a classify_args=(__classify --worktree-root "${root}")
+  if [[ -n "${resolve}" ]]; then
+    classify_args+=(--resolve-option)
+  fi
+  verdict=$(printf '%s' "${cap}" | git paw "${classify_args[@]}" 2>/dev/null)
 
-def strip_decoration(line):
-    return line.lstrip(DECOR).rstrip()
+  if [[ -n "${resolve}" ]]; then
+    read -r opt <<<"${verdict}"
+    if [[ -z "${opt}" ]]; then
+      return 3
+    fi
+    printf '%s\n' "${opt}"
+    return 0
+  fi
 
-def is_option_line(line):
-    s = line.lstrip()
-    return len(s) >= 2 and s[0].isdigit() and s[1] in ".)"
-
-def is_boundary(line):
-    low = line.lower()
-    return (low.startswith("do you want to") or "requires approval" in low
-            or "[y/n]" in low or "(y/n)" in low or is_option_line(line))
-
-def extract_slice(cap):
-    lines = cap.splitlines()
-    for i in range(len(lines) - 1, -1, -1):
-        line = strip_decoration(lines[i])
-        idx = line.find("Bash(")
-        if idx != -1:
-            after = line[idx + 5:]
-            end = after.rfind(")")
-            if end != -1 and after[:end].strip():
-                return after[:end].strip()
-        if line.lower().startswith("bash command"):
-            for nxt in lines[i + 1:]:
-                c = strip_decoration(nxt)
-                if not c:
-                    continue
-                if is_boundary(c):
-                    break
-                return c
-    return None
-
-# --- gate-wrapper normalization -------------------------------------------
-# Mirror of normalize_command in src/supervisor/auto_approve.rs: strip the
-# gate-reporting wrappers an agent appends when it is only reading the exit
-# status -- a trailing "; echo ...$?" / "; NAME=$?" probe and a trailing
-# /dev/null discard redirect. Every rule below (danger-list included) then runs
-# against the normalized command, so a wrapper can never downgrade an
-# escalation. Only the /dev/null target is stripped; a redirect to a real
-# device stays put so the "> /dev/" danger pattern still matches it.
-DISCARD_REDIRECTS = [">/dev/null 2>&1", "> /dev/null 2>&1"]
-
-def strip_exit_probe(cmd):
-    head, sep, tail = cmd.rpartition(";")
-    if not sep:
-        return None
-    tail = tail.strip()
-    parts = tail.split(None, 1)
-    echo_probe = len(parts) == 2 and parts[0] == "echo" and "$?" in parts[1]
-    name = tail[:-3] if tail.endswith("=$?") else ""
-    assign_probe = bool(name) and all(c.isalnum() or c == "_" for c in name)
-    return head.rstrip() if echo_probe or assign_probe else None
-
-def strip_discard_redirect(cmd):
-    for redirect in DISCARD_REDIRECTS:
-        if cmd.endswith(redirect):
-            return cmd[:-len(redirect)].rstrip()
-    return None
-
-def normalize_command(s):
-    cmd = s.strip()
-    while True:
-        nxt = strip_exit_probe(cmd)
-        if nxt is None:
-            nxt = strip_discard_redirect(cmd)
-        if nxt is None:
-            return cmd
-        cmd = nxt
-
-# --- curated danger-list --------------------------------------------------
-DANGER_BASE = ["rm -rf", "rm -fr", "git push", "--force", "force-push",
-    "reset --hard", "git rebase", "git checkout ", "branch -D",
-    "git worktree remove", "clean -fd", "clean -fdx", "sudo", "mkfs",
-    "dd if=", "> /dev/", "chmod -R", "chown -R", "pkill", "kill"]
-OS_ADDENDUM = ["diskutil", "/dev/disk"] if platform.system() == "Darwin" \
-    else ["/dev/sd", "/dev/nvme", "mkfs"]
-
-def contains_word(hay, word):
-    return re.search(r"(?<![A-Za-z0-9_])" + re.escape(word) + r"(?![A-Za-z0-9_])", hay) is not None
-
-def danger_match(s, pat):
-    if pat in ("sudo", "kill", "pkill"):
-        return contains_word(s, pat)
-    return pat in s
-
-# --- rm -rf scratch-path exception ---------------------------------------
-def is_scratch_path(p):
-    p = p.strip().strip('"').strip("'")
-    if p.startswith("/tmp/paw-") or p.startswith("/private/tmp/paw-"):
-        return True
-    if p.startswith(".git-paw/tmp/") or "/.git-paw/tmp/" in p:
-        return True
-    tmp = os.environ.get("TMPDIR", "")
-    base = tmp.rstrip("/")
-    if base and p.startswith(base + "/paw-"):
-        return True
-    return False
-
-def parse_var_ref(t):
-    if not t.startswith("$"):
-        return None
-    rest = t[1:]
-    if rest.startswith("{"):
-        rest = rest[1:].rstrip("}")
-    if rest and all(c.isalnum() or c == "_" for c in rest):
-        return rest
-    return None
-
-def resolve_target(tok, assigns):
-    t = tok.strip('"').strip("'")
-    name = parse_var_ref(t)
-    if name is not None:
-        if name in assigns:
-            return assigns[name]
-        return os.environ.get(name)
-    if "$TMPDIR" in t:
-        tmp = os.environ.get("TMPDIR")
-        return None if tmp is None else t.replace("$TMPDIR", tmp.rstrip("/"))
-    return t
-
-def rm_targets(s):
-    assigns, targets, seen_rm = {}, [], False
-    for tok in s.split():
-        if tok in ("&&", "||", ";", "|"):
-            break
-        if not seen_rm:
-            if "=" in tok:
-                k, v = tok.split("=", 1)
-                if k and all(c.isalnum() or c == "_" for c in k):
-                    assigns[k] = v
-                    continue
-            if tok == "rm":
-                seen_rm = True
-            continue
-        if tok.startswith("-"):
-            continue
-        r = resolve_target(tok, assigns)
-        if r is None:
-            return None
-        targets.append(r)
-    return targets
-
-def rm_all_scratch(s):
-    t = rm_targets(s)
-    return bool(t) and all(is_scratch_path(x) for x in t)
-
-def is_dangerous(s):
-    for pat in DANGER_BASE + OS_ADDENDUM:
-        if danger_match(s, pat):
-            if pat in ("rm -rf", "rm -fr") and rm_all_scratch(s):
-                continue
-            return True
-    return False
-
-def is_scratch_rm(s):
-    if "rm -rf" not in s and "rm -fr" not in s:
-        return False
-    return rm_all_scratch(s) and not is_dangerous(s)
-
-# --- composed whitelist + worktree git -----------------------------------
-# Stack-neutral built-ins, kept in lockstep with the Rust constants
-# (READ_MOSTLY_VERBS / default_safe_commands in src/supervisor/auto_approve.rs
-# and the presets in src/supervisor/dev_allowlist.rs) — a list-parity test in
-# tests/sweep_sh_classify.rs asserts byte-for-byte equality.
-READ_MOSTLY = ["curl", "cat", "ls", "grep", "rg", "git", "echo", "sed", "awk",
-    "find", "wc", "head", "tail", "jq", "mkdir", "touch", "export", "tmux",
-    "env"]
-EXPLICIT_SAFE = ["git commit", "git push", "curl http://127.0.0.1:"]
-DEV_UNIVERSAL = ["git status", "git log", "git diff", "git show", "git fetch",
-    "git commit", "git push", "git pull", "git merge", "git stash", "git add",
-    "git restore", "git rm", "find", "grep", "sed -n"]
-STACK_RUST = ["cargo build", "cargo test", "cargo clippy", "cargo fmt",
-    "cargo check", "cargo tree", "cargo deny", "cargo update"]
-STACK_NODE = ["npm install", "npm ci", "npm test", "npm run", "pnpm install",
-    "pnpm test", "pnpm run", "yarn install", "yarn test"]
-STACK_PYTHON = ["pytest", "pip install", "ruff", "black", "mypy", "flake8",
-    "uv pip", "uv sync"]
-STACK_GO = ["go build", "go test", "go vet", "go fmt", "gofmt", "go mod",
-    "golangci-lint"]
-STACKS = {"rust": STACK_RUST, "node": STACK_NODE, "python": STACK_PYTHON,
-    "go": STACK_GO}
-
-def read_allowlist_config(path):
-    # Resolved stacks / extra / safe_commands from .git-paw/config.toml.
-    # Fail-safe: any read or parse problem (missing file, malformed TOML,
-    # pre-3.11 Python without tomllib) composes built-ins only — fewer
-    # auto-approvals, never more.
-    try:
-        import tomllib
-        with open(path, "rb") as f:
-            data = tomllib.load(f)
-        sup = data.get("supervisor", {})
-        dev = sup.get("common_dev_allowlist", {})
-        stacks = [s for s in dev.get("stacks", []) if isinstance(s, str)]
-        extra = [s for s in dev.get("extra", []) if isinstance(s, str)]
-        aa = sup.get("auto_approve", {})
-        safe_cmds = [s for s in aa.get("safe_commands", []) if isinstance(s, str)]
-        return stacks, extra, safe_cmds
-    except Exception:
-        return [], [], []
-
-def compose_whitelist(stacks, extra, safe_cmds):
-    # Composition order mirrors AutoApproveConfig::effective_whitelist:
-    # built-ins, then universal + stack + extra dev patterns, then
-    # safe_commands, de-duplicated.
-    out = []
-    def push(p):
-        if p not in out:
-            out.append(p)
-    for p in EXPLICIT_SAFE + READ_MOSTLY:
-        push(p)
-    for p in DEV_UNIVERSAL:
-        push(p)
-    for name in stacks:
-        for p in STACKS.get(name, []):
-            push(p)
-    for p in extra:
-        push(p)
-    for p in safe_cmds:
-        push(p)
-    return out
-
-CFG_STACKS, CFG_EXTRA, CFG_SAFE = read_allowlist_config(config_toml)
-WHITELIST = compose_whitelist(CFG_STACKS, CFG_EXTRA, CFG_SAFE)
-
-def leading_verb(s):
-    for tok in s.split():
-        if "=" in tok:
-            k = tok.split("=", 1)[0]
-            if k and all(c.isalnum() or c == "_" for c in k):
-                continue
-        return tok.rsplit("/", 1)[-1]
-    return None
-
-def starts_with_boundary(s, entry):
-    s = s.lstrip()
-    if not s.startswith(entry):
-        return False
-    nxt = s[len(entry):len(entry) + 1]
-    return nxt == "" or nxt.isspace()
-
-def is_safe_command(s):
-    return any(starts_with_boundary(s, e) for e in WHITELIST)
-
-def is_worktree_git_op(s, root):
-    if not (starts_with_boundary(s, "git add") or starts_with_boundary(s, "git commit")):
-        return False
-    return bool(root) and os.path.isdir(root)
-
-# --- worktree-confined dev-test shapes (rider rules) ----------------------
-# Mirrors is_worktree_dev_test_op in src/supervisor/auto_approve.rs: bash -n
-# on a worktree script, non-recursive chmod on worktree paths, mktemp, and
-# interpreter runs of worktree-resident scripts. Inline -c code strings,
-# shell metacharacters, and out-of-worktree paths never match (fail-closed).
-INTERPRETERS = ("bash", "sh", "python3", "python", "node")
-# chr(96) is the backtick — spelled numerically so the bash heredoc that
-# carries this Python body never sees a literal backtick (quote-tracking).
-METACHARS = (";", "|", "&", "$", chr(96), ">", "<")
-
-def inside_worktree(p, root):
-    rp = os.path.realpath(os.path.join(root, p))
-    rr = os.path.realpath(root)
-    return rp == rr or rp.startswith(rr + os.sep)
-
-def command_args(s):
-    # Tokens with leading VAR=value assignments skipped.
-    toks = s.split()
-    while toks:
-        head = toks[0]
-        if "=" in head:
-            k = head.split("=", 1)[0]
-            if k and all(c.isalnum() or c == "_" for c in k):
-                toks = toks[1:]
-                continue
-        break
-    return toks
-
-def is_worktree_dev_test(s, root):
-    s = s.strip()
-    if any(m in s for m in METACHARS):
-        return False
-    if not (root and os.path.isdir(root)):
-        return False
-    toks = command_args(s)
-    if not toks:
-        return False
-    verb = toks[0].rsplit("/", 1)[-1]
-    args = toks[1:]
-    if "-c" in args:
-        return False
-    if verb == "mktemp":
-        return all(t.startswith("-") for t in args)
-    if verb == "chmod":
-        if any(t.startswith("-") for t in args):
-            return False
-        paths = args[1:]
-        return bool(paths) and all(inside_worktree(p, root) for p in paths)
-    if verb in INTERPRETERS:
-        paths = [t for t in args if not t.startswith("-")]
-        return bool(paths) and all(inside_worktree(p, root) for p in paths)
-    return False
-
-# --- protected-path set (agent-memory-isolation) ---------------------------
-# Mirrors ProtectedPaths / is_protected_path_violation in
-# src/supervisor/auto_approve.rs: a write targeting operator config/memory
-# territory escalates as danger at danger-list precedence. The set derives
-# from config and well-known defaults (the claude-format ~/.claude default,
-# CLAUDE_CONFIG_DIR, [clis.<name>].settings_path parents, their
-# projects/*/memory subtrees, and the repo-root .claude/.git-paw control
-# dirs) — never hardcoded CLI product names. Reads never match; the pane
-# worktree root is carved out.
-project_root = os.environ.get("PROJECT_ROOT", "")
-
-def read_settings_paths(path):
-    # [clis.<name>].settings_path values from .git-paw/config.toml.
-    # Fail-safe: any read or parse problem yields an empty list.
-    try:
-        import tomllib
-        with open(path, "rb") as f:
-            data = tomllib.load(f)
-        out = []
-        for cli in data.get("clis", {}).values():
-            sp = cli.get("settings_path") if isinstance(cli, dict) else None
-            if isinstance(sp, str):
-                out.append(sp)
-        return out
-    except Exception:
-        return []
-
-def protected_entries():
-    dirs = [os.path.expanduser(os.path.join("~", ".claude"))]
-    ccd = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    if ccd:
-        dirs.append(os.path.expanduser(ccd))
-    for sp in read_settings_paths(config_toml):
-        parent = os.path.dirname(os.path.expanduser(sp))
-        if parent:
-            dirs.append(parent)
-    for d in list(dirs):
-        projects = os.path.join(d, "projects")
-        try:
-            for name in os.listdir(projects):
-                mem = os.path.join(projects, name, "memory")
-                if os.path.isdir(mem):
-                    dirs.append(mem)
-        except OSError:
-            pass
-    if project_root:
-        dirs.append(os.path.join(project_root, ".claude"))
-        dirs.append(os.path.join(project_root, ".git-paw"))
-    return [os.path.realpath(d) for d in dirs]
-
-PROTECTED = protected_entries()
-
-def protected_target(p, root):
-    p = p.strip().strip('"').strip("'").strip(chr(96))
-    if not p:
-        return False
-    p = os.path.expanduser(p)
-    if not os.path.isabs(p):
-        if not root:
-            return False
-        p = os.path.join(root, p)
-    rp = os.path.realpath(p)
-    if root:
-        rr = os.path.realpath(root)
-        if rp == rr or rp.startswith(rr + os.sep):
-            return False
-    return any(rp == e or rp.startswith(e + os.sep) for e in PROTECTED)
-
-# Mirror of extract_path_from_file_prompt (write/edit/create prompt shapes).
-FILE_PROMPT_RE = re.compile(
-    r"(?i)(?:allow this write to|allow this edit to|make this edit to"
-    r"|write to|create file|edit file|write file)"
-    r"\s+(?:the file\s+)?(.+?)\s*\??\s*$")
-
-def file_prompt_path(cap):
-    for line in cap.splitlines():
-        m = FILE_PROMPT_RE.search(line)
-        if m:
-            path = m.group(1).strip().strip('"').strip("'").strip(chr(96))
-            if path:
-                return path
-    return None
-
-# Mirror of slice_write_targets: redirect targets plus mutating-verb targets.
-WRITE_ALL_VERBS = ("tee", "touch", "mkdir", "rm", "rmdir", "truncate")
-WRITE_DEST_VERBS = ("cp", "mv", "ln")
-
-def segment_write_targets(toks, out):
-    rest = []
-    pending = False
-    for tok in toks:
-        if pending:
-            out.append(tok)
-            pending = False
-            continue
-        stripped = tok.lstrip("0123456789&")
-        if stripped.startswith(">"):
-            after = stripped.lstrip(">")
-            if not after:
-                pending = True
-            elif not after.startswith("&"):
-                out.append(after)
-            continue
-        rest.append(tok)
-    while rest:
-        head = rest[0]
-        if "=" in head:
-            k = head.split("=", 1)[0]
-            if k and all(c.isalnum() or c == "_" for c in k):
-                rest = rest[1:]
-                continue
-        break
-    if not rest:
-        return
-    verb = rest[0].rsplit("/", 1)[-1]
-    args = rest[1:]
-    paths = [t for t in args if not t.startswith("-")]
-    if verb in WRITE_ALL_VERBS:
-        out.extend(paths)
-    elif verb in WRITE_DEST_VERBS:
-        # Only the destination (last path arg) is a write; the source is a read.
-        if len(paths) >= 2:
-            out.append(paths[-1])
-    elif verb == "sed" and any(t.startswith("-i") for t in args):
-        out.extend(paths)
-
-def slice_write_targets(s):
-    out, seg = [], []
-    for tok in s.split():
-        if tok in ("&&", "||", ";", "|"):
-            segment_write_targets(seg, out)
-            seg = []
-        else:
-            seg.append(tok)
-    segment_write_targets(seg, out)
-    return out
-
-def protected_violation(cap, s, root):
-    if not PROTECTED:
-        return False
-    fp = file_prompt_path(cap)
-    if fp is not None and protected_target(fp, root):
-        return True
-    return any(protected_target(t, root) for t in slice_write_targets(s))
-
-# --- live-prompt gate -----------------------------------------------------
-# Structural mirror of is_live_prompt in src/supervisor/auto_approve.rs: a
-# textual marker (LIVE_MARKERS, case-insensitive) within the last 4 non-blank
-# lines, or a numbered option line anchoring that tail with a textual marker
-# within the last 15 non-blank lines (a multi-option prompt bottoms out in
-# its numbered option list, with the question above it).
-LIVE_MARKERS = os.environ.get("LIVE_MARKERS", "do you want to|esc to cancel")
-
-def live_textual(lines):
-    return any(re.search(LIVE_MARKERS, l, re.IGNORECASE) for l in lines)
-
-def is_live(cap):
-    nonblank = [l for l in cap.splitlines() if l.strip()]
-    tail, block = nonblank[-4:], nonblank[-15:]
-    if live_textual(tail):
-        return True
-    return any(is_option_line(strip_decoration(l)) for l in tail) and live_textual(block)
-
-# --- prompt shape + option-index selection -------------------------------
-def detect_shape(cap):
-    low = cap.lower()
-    return "three" if ("don't ask again" in low or "don’t ask again" in low) else "two"
-
-def is_arbitrary(s):
-    if leading_verb(s) in ("python", "python3", "node", "eval"):
-        return True
-    return "bash -c" in s or "sh -c" in s or " -c " in s
-
-# Mirror of classify_prompt in src/supervisor/drive.rs: the safe rules in the
-# poll loop precedence order, with the danger-list and protected-path rule
-# winning outright.
-def classified_safe(cap, s, root):
-    if is_dangerous(s) or protected_violation(cap, s, root):
-        return False
-    return (is_scratch_rm(s) or is_worktree_git_op(s, root)
-            or is_worktree_dev_test(s, root) or is_safe_command(s))
-
-# Mirror of select_option_index in src/supervisor/auto_approve.rs. A command
-# already classified safe / worktree-confined prefers the durable "do not ask
-# again" grant, so a routine prompt is permanently allowed rather than
-# re-prompting on every identical occurrence. An arbitrary-code runner never
-# receives a durable grant, whatever the classification.
-def select_option(shape, s, safe):
-    if shape == "two":
-        return 1
-    if is_arbitrary(s):
-        return 1
-    if safe or leading_verb(s) in READ_MOSTLY:
-        return 2
-    return 1
-
-# --- approve-path option resolution ----------------------------------------
-# `sweep.sh approve` reuses this classifier body (RESOLVE_OPTION non-empty)
-# for its pre-send gate: liveness is re-checked on the FRESH capture, then
-# the option index is resolved with the same normalization, shape detection
-# and durable-grant rule as the full classification below, so the helper and
-# the in-tool auto-approver resolve the same index.
-if os.environ.get("RESOLVE_OPTION"):
-    if not is_live(cap):
-        print("cleared")
-        raise SystemExit(1)
-    s = extract_slice(cap)
-    if s is None:
-        s = cap
-    s = normalize_command(s)
-    print(select_option(detect_shape(cap), s,
-                        classified_safe(cap, s, worktree_root)))
-    raise SystemExit(0)
-
-# --- decision -------------------------------------------------------------
-if not is_live(cap):
-    print("no-op (not live)")
-    raise SystemExit(0)
-
-s = extract_slice(cap)
-if s is None:
-    s = cap
-s = normalize_command(s)
-opt = select_option(detect_shape(cap), s, classified_safe(cap, s, worktree_root))
-
-if is_dangerous(s) or protected_violation(cap, s, worktree_root):
-    print("escalate (danger)")
-elif is_scratch_rm(s):
-    print(f"approve option={opt} (scratch-rm)")
-elif is_worktree_git_op(s, worktree_root):
-    print(f"approve option={opt} (worktree-git)")
-elif is_worktree_dev_test(s, worktree_root):
-    print(f"approve option={opt} (worktree-dev-test)")
-elif is_safe_command(s):
-    print(f"approve option={opt} (whitelist)")
-else:
-    print("escalate (unknown)")
-PY
-)"
+  read -r class opt <<<"${verdict}"
+  if [[ -z "${class}" || -z "${opt}" ]]; then
+    echo "escalate (classifier unavailable)"
+    return 0
+  fi
+  case "${class}" in
+    safe) echo "approve option=${opt} (safe)" ;;
+    danger) echo "escalate (danger)" ;;
+    *) echo "escalate (unknown)" ;;
+  esac
 }
 
 main() {

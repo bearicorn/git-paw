@@ -482,9 +482,26 @@ agent's CLI. Run them bare.
 
 When `[supervisor.auto_approve]` is enabled, the poll loop classifies each
 captured permission prompt into **escalate-to-human** or **auto-approve**. The
-decision is deterministic and reviewable — the same logic ships in the bundled
-`sweep.sh` helper (`sweep.sh classify`, fed a pane capture on stdin) so the
-shell path and the Rust path agree.
+decision is deterministic and reviewable.
+
+The classifier is **single-source**: it exists once, in git-paw itself. The
+bundled `sweep.sh` helper does not carry its own copy — `sweep.sh classify`
+(fed a pane capture on stdin) obtains its verdict by delegating to the hidden
+`git paw __classify` subcommand, which runs that one classifier and prints the
+class (`safe` / `danger` / `unknown`) plus the option index to select. So the
+shell path and the in-tool auto-approver cannot merely *agree*; they are the
+same implementation and cannot drift. `sweep.sh approve` resolves its option
+index the same way.
+
+`__classify` is read-only — it classifies a capture and sends no keystroke,
+contacts no broker, and writes no file — and the supervisor session's allowlist
+grants exactly that one subcommand (never a broad `git paw`). If the binary
+cannot be reached the helper **fails closed**: it reports the missing verdict
+and the prompt is escalated, never auto-approved.
+
+Prompt *detection* is the one part that stays in the helper: the live-prompt
+gate below runs in `sweep.sh` before any delegation, so a pane showing no live
+prompt is a no-op.
 
 The classifier reads the prompted **command slice** — the text between the
 `Bash command` / `Bash(…)` header and the confirmation question — not the
@@ -617,14 +634,15 @@ grant on `python -c` is effectively a standing grant on anything. That is why an
 interpreter run of a worktree-resident script classifies safe but stays a
 one-time approval.
 
-`sweep.sh approve <pane>` follows the same option-index selection: it parses
-the prompt from the fresh pre-send capture and dispatches the **resolved
-option digit** followed by `Enter` (two separate keystrokes), reporting
+`sweep.sh approve <pane>` uses the same option-index selection, because it asks
+the same classifier for it: it feeds the fresh pre-send capture to
+`git paw __classify --resolve-option` and dispatches the **resolved option
+digit** followed by `Enter` (two separate keystrokes), reporting
 `approved pane <N> (option <digit>)`. It never dispatches a blind
 cursor-movement sequence — `Down` + `Enter` lands on `No` on a 2-option
-prompt and takes the permanent broad grant on a 3-option one, so the helper
-resolves the digit through the same normalisation, shape and durable-grant
-rules as the in-tool auto-approver.
+prompt and takes the permanent broad grant on a 3-option one. If the delegation
+yields no verdict the helper sends **nothing** and says so, distinctly from a
+prompt that cleared between the decision and the send.
 
 ## Out-of-worktree write violations
 

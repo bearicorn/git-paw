@@ -472,6 +472,44 @@ pub enum Command {
     )]
     Dashboard,
 
+    /// Internal: classify a permission-prompt capture read from stdin
+    #[command(
+        hide = true,
+        name = "__classify",
+        about = "Internal: classify a permission-prompt capture read from stdin",
+        long_about = "Internal subcommand used by the bundled sweep.sh helper to classify a \
+                      permission-prompt pane capture with git-paw's own safe-command \
+                      classifier, so the helper and the in-tool auto-approver cannot \
+                      disagree.\n\n\
+                      Reads the capture on stdin and prints `<class> <option-index>`, where \
+                      class is safe, danger, or unknown. With --resolve-option only the \
+                      option index is printed.\n\n\
+                      Read-only: it classifies and never sends a keystroke, contacts the \
+                      broker, or writes a file. Not intended for direct invocation.\n\n\
+                      MUST be invoked from inside the target repository (the supervisor \
+                      pane's working directory, which is what sweep.sh does): the config \
+                      and the repo-root half of the protected-path set are both derived \
+                      from the CURRENT WORKING DIRECTORY, not from --worktree-root. A \
+                      mismatch degrades the whitelist safely — a missing config falls back \
+                      to the stack-neutral built-ins, so FEWER commands classify safe — but \
+                      it also points the repo-root `.claude/` + `.git-paw/` protected \
+                      entries at the wrong repository, which weakens that rule. Run it \
+                      from the repo root."
+    )]
+    Classify {
+        /// Worktree root the worktree-confined classification rules resolve against.
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Worktree root the worktree-confined rules resolve against"
+        )]
+        worktree_root: Option<PathBuf>,
+
+        /// Print only the option index to select, omitting the class.
+        #[arg(long, help = "Print only the option index to select")]
+        resolve_option: bool,
+    },
+
     /// View captured session logs
     #[command(
         about = "View captured session logs",
@@ -1454,7 +1492,7 @@ mod tests {
         let help = Cli::try_parse_from(["git-paw", "--help"])
             .unwrap_err()
             .to_string();
-        for hidden in ["__dashboard", "selftest"] {
+        for hidden in ["__dashboard", "__classify", "selftest"] {
             assert!(
                 !help.contains(hidden),
                 "root --help must not surface internal subcommand {hidden:?}; got: {help}"
@@ -1472,7 +1510,7 @@ mod tests {
     /// and CI.
     #[test]
     fn hidden_subcommands_remain_invocable() {
-        for args in [vec!["selftest"], vec!["__dashboard"]] {
+        for args in [vec!["selftest"], vec!["__dashboard"], vec!["__classify"]] {
             assert!(
                 Cli::try_parse_from(std::iter::once("git-paw").chain(args.iter().copied())).is_ok(),
                 "hidden subcommand {args:?} should still parse"
@@ -1592,6 +1630,43 @@ mod tests {
     fn dashboard_parses() {
         let cli = parse(&["__dashboard"]);
         assert!(matches!(cli.command.unwrap(), Command::Dashboard));
+    }
+
+    // -- __classify subcommand --
+
+    #[test]
+    fn classify_parses_with_no_flags() {
+        let cli = parse(&["__classify"]);
+        match cli.command.unwrap() {
+            Command::Classify {
+                worktree_root,
+                resolve_option,
+            } => {
+                assert!(worktree_root.is_none());
+                assert!(!resolve_option);
+            }
+            other => panic!("expected Classify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_parses_worktree_root_and_resolve_option() {
+        let cli = parse(&[
+            "__classify",
+            "--worktree-root",
+            "/tmp/wt",
+            "--resolve-option",
+        ]);
+        match cli.command.unwrap() {
+            Command::Classify {
+                worktree_root,
+                resolve_option,
+            } => {
+                assert_eq!(worktree_root, Some(PathBuf::from("/tmp/wt")));
+                assert!(resolve_option);
+            }
+            other => panic!("expected Classify, got {other:?}"),
+        }
     }
 
     // -- Approvals subcommand --

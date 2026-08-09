@@ -15,7 +15,7 @@ The built-in entries SHALL NOT contain stack- or tool-specific patterns. In part
 
 A whitelist match SHALL be subordinate to the danger-list: when the curated danger-list (see "Curated danger-list escalates to human") matches the same command, the command SHALL escalate regardless of any whitelist match.
 
-The bundled `sweep.sh classify` helper SHALL compose its whitelist from the same three sources (reading the resolved stacks and extensions from `.git-paw/config.toml`) so the Rust classifier and the helper agree.
+The bundled `sweep.sh classify` helper SHALL NOT maintain its own copy of the whitelist or the classification logic. It SHALL obtain its verdict by delegating to the single Rust classifier via the hidden `git paw __classify` subcommand (see "Safe-command classification is exposed via a hidden __classify subcommand"), so the helper and the in-tool auto-approver are the same implementation and cannot drift.
 
 #### Scenario: Default whitelist is stack-neutral
 
@@ -58,12 +58,12 @@ The bundled `sweep.sh classify` helper SHALL compose its whitelist from the same
 - **THEN** although `git` is a read-mostly safe verb, the danger-list match on `git push` SHALL win
 - **AND** the classifier SHALL escalate to the human rather than auto-approve
 
-#### Scenario: sweep.sh composes the same whitelist
+#### Scenario: sweep.sh classifies by delegating to the Rust classifier
 
 - **GIVEN** `[supervisor.common_dev_allowlist] stacks = ["rust"]` in `.git-paw/config.toml`
 - **WHEN** `sweep.sh classify` evaluates a capture whose command slice is `cargo fmt --check`
-- **THEN** its decision SHALL agree with the Rust classifier (safe)
-- **AND** a list-parity guard SHALL assert the helper's built-in verb lists equal the Rust classifier's
+- **THEN** it SHALL obtain its verdict by invoking `git paw __classify` and render that verdict (safe)
+- **AND** a guard SHALL assert `sweep.sh` contains no parallel classifier verb lists — classification is single-source
 
 ### Requirement: Configurable whitelist extension
 
@@ -968,4 +968,32 @@ normalization SHALL NOT weaken any escalation.
 - **GIVEN** a danger-listed command with a trailing `; echo $?` appended
 - **WHEN** the classifier evaluates it
 - **THEN** it SHALL still escalate as danger — stripping the probe SHALL NOT downgrade it
+
+### Requirement: Safe-command classification is exposed via a hidden __classify subcommand
+
+The system SHALL provide a hidden `git paw __classify` subcommand that runs the one safe-command classifier and emits its verdict, so the bundled `sweep.sh` helper classifies by delegating to it rather than re-implementing the classifier in embedded Python. `__classify` SHALL read a pane capture on stdin and take the worktree root as an argument; it SHALL emit on stdout the classification (`safe`, `danger`, or `unknown`) and the option index to select, computed by the exact classifier path the in-tool auto-approver uses, so the two cannot disagree. `__classify` SHALL be read-only — it classifies and SHALL NOT send keystrokes, contact the broker, or write any file. It SHALL be hidden from `git paw --help`, like `__dashboard`. The supervisor session's allowlist SHALL grant `git paw __classify` path-scoped (never a broad `git paw *`).
+
+#### Scenario: __classify emits the classifier's verdict for a danger command
+
+- **GIVEN** a pane capture whose command slice is a danger-listed command
+- **WHEN** `git paw __classify` classifies it
+- **THEN** it SHALL emit `danger`
+- **AND** the verdict SHALL match what the in-tool auto-approver would decide for the same capture
+
+#### Scenario: __classify emits a safe verdict with the option index
+
+- **GIVEN** a pane capture for a classifier-safe prompt offering a durable option
+- **WHEN** `git paw __classify` classifies it
+- **THEN** it SHALL emit `safe` and the option index the in-tool auto-approver would select
+
+#### Scenario: __classify is read-only
+
+- **WHEN** `git paw __classify` runs against a capture
+- **THEN** it SHALL emit a verdict on stdout
+- **AND** SHALL NOT send any tmux keystroke, issue any broker request, or write any file
+
+#### Scenario: __classify is hidden from help
+
+- **WHEN** `git paw --help` is inspected
+- **THEN** `__classify` SHALL NOT appear as a listed subcommand
 

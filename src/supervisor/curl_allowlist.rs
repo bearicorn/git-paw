@@ -5,6 +5,10 @@
 //! agents nor the supervisor hit a permission prompt when they invoke a
 //! bundled broker helper (`agent-broker-helper`) on every broker round-trip.
 //!
+//! Alongside the helper paths, the supervisor side also grants the single
+//! hidden subcommand `sweep.sh` delegates its classification to
+//! (`git paw __classify`) — scoped to that verb, never a broad `git paw`.
+//!
 //! Three bundled helpers are granted by their single, stable relative paths:
 //! `.git-paw/scripts/broker.sh` and `.git-paw/scripts/docs-fetch.sh` (the
 //! agent-side helpers) and `.git-paw/scripts/sweep.sh` (the supervisor-side
@@ -36,6 +40,13 @@ pub const SWEEP_HELPER_PATH: &str = ".git-paw/scripts/sweep.sh";
 /// Stable relative path of the bundled agent docs-fetch helper, installed by
 /// `git paw init` at `<repo>/.git-paw/scripts/docs-fetch.sh`.
 pub const DOCS_FETCH_HELPER_PATH: &str = ".git-paw/scripts/docs-fetch.sh";
+
+/// Exact invocation prefix of the hidden classifier subcommand the bundled
+/// `sweep.sh` helper delegates its verdict to.
+///
+/// Scoped to the one subcommand — never a broad `git paw` (which would
+/// authorise every verb, including session-mutating ones).
+pub const CLASSIFY_COMMAND_PREFIX: &str = "git paw __classify";
 
 /// Returns the least-privilege allowlist prefixes authorising the bundled
 /// agent-broker helper (`broker.sh`).
@@ -87,14 +98,31 @@ pub fn docs_fetch_prefixes() -> Vec<String> {
     ]
 }
 
+/// Returns the least-privilege allowlist prefix authorising the hidden
+/// classifier subcommand `sweep.sh` delegates to.
+///
+/// `sweep.sh classify` / `sweep.sh approve` obtain their verdict by running
+/// `git paw __classify`, so the supervisor needs that one subcommand granted
+/// alongside the helper path itself. The grant names the exact subcommand
+/// ([`CLASSIFY_COMMAND_PREFIX`]) and nothing wider — a `git paw` prefix would
+/// authorise every git-paw verb, and `__classify` is read-only (it classifies
+/// a capture on stdin and touches no tmux session, broker, or file), so this
+/// is the narrowest grant that keeps the delegation from stalling on a prompt.
+#[must_use]
+pub fn classify_prefixes() -> Vec<String> {
+    vec![CLASSIFY_COMMAND_PREFIX.to_string()]
+}
+
 /// Returns the union of every bundled-helper by-path grant seeded into a
 /// session's Claude settings: [`broker_prefixes`] and [`docs_fetch_prefixes`]
-/// (agent side) followed by [`sweep_prefixes`] (supervisor side).
+/// (agent side) followed by [`sweep_prefixes`] and [`classify_prefixes`]
+/// (supervisor side).
 #[must_use]
 pub fn helper_prefixes() -> Vec<String> {
     let mut prefixes = broker_prefixes();
     prefixes.extend(docs_fetch_prefixes());
     prefixes.extend(sweep_prefixes());
+    prefixes.extend(classify_prefixes());
     prefixes
 }
 
@@ -337,6 +365,37 @@ mod tests {
                 "no curl prefix in union; found `{e}`"
             );
             assert_ne!(e, "curl *");
+        }
+    }
+
+    /// classifier-single-source scenario "Safe-command classification is
+    /// exposed via a hidden __classify subcommand" (allowlist clause): the
+    /// seeded set SHALL grant `git paw __classify` so the `sweep.sh`
+    /// delegation never stalls on a prompt, and SHALL NOT grant a broad
+    /// `git paw` wildcard (which would authorise every git-paw verb).
+    #[test]
+    fn grants_classify_subcommand_without_a_broad_git_paw_wildcard() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.json");
+        setup_curl_allowlist(&path).unwrap();
+
+        for entries in [read_array(&path), helper_prefixes()] {
+            assert!(
+                entries.iter().any(|s| s == "git paw __classify"),
+                "the classify delegation must be granted; got: {entries:?}"
+            );
+            for e in &entries {
+                assert_ne!(e, "git paw", "broad `git paw` grant must never be seeded");
+                assert_ne!(e, "git paw *", "wildcard `git paw *` must never be seeded");
+                assert_ne!(e, "git-paw", "broad `git-paw` grant must never be seeded");
+                // Any git-paw grant must name a subcommand, not the bare verb.
+                if let Some(rest) = e.strip_prefix("git paw") {
+                    assert!(
+                        rest.starts_with(' ') && rest.trim() == "__classify",
+                        "`git paw` grants must be scoped to __classify; found `{e}`"
+                    );
+                }
+            }
         }
     }
 
