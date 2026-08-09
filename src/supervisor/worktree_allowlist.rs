@@ -39,7 +39,9 @@ use crate::supervisor::{curl_allowlist, dev_allowlist};
 /// Content sources, each independently gated:
 ///
 /// - `broker_enabled` — the `broker.sh` / `sweep.sh` helper-path prefixes
-///   ([`curl_allowlist::broker_prefixes`] / [`curl_allowlist::sweep_prefixes`]).
+///   ([`curl_allowlist::broker_prefixes`] / [`curl_allowlist::sweep_prefixes`]),
+///   plus the `git paw __classify` subcommand `sweep.sh` delegates its
+///   classification to ([`curl_allowlist::classify_prefixes`]).
 /// - `docs_fetch_configured` — the `docs-fetch.sh` helper-path prefixes
 ///   ([`curl_allowlist::docs_fetch_prefixes`]); mirrors the gate that
 ///   provisions the script itself.
@@ -70,6 +72,7 @@ pub fn seed_worktree_allowlists(
     if broker_enabled {
         helper_entries.extend(curl_allowlist::broker_prefixes());
         helper_entries.extend(curl_allowlist::sweep_prefixes());
+        helper_entries.extend(curl_allowlist::classify_prefixes());
     }
     if docs_fetch_configured {
         helper_entries.extend(curl_allowlist::docs_fetch_prefixes());
@@ -252,6 +255,10 @@ mod tests {
         assert!(entries.iter().any(|e| e == ".git-paw/scripts/sweep.sh"));
         assert!(entries.iter().any(|e| e == "git status"));
         assert!(entries.iter().any(|e| e == "cargo test"));
+        // The classification `sweep.sh` delegates to, scoped to the one
+        // subcommand — never a broad `git paw` (classifier-single-source).
+        assert!(entries.iter().any(|e| e == "git paw __classify"));
+        assert!(!entries.iter().any(|e| e == "git paw" || e == "git paw *"));
         // Docs not configured — its helper prefix must not ride along.
         assert!(
             !entries
@@ -273,6 +280,7 @@ mod tests {
         let entries = read_array(&tmp.path().join(".claude").join("settings.json"));
         assert!(!entries.iter().any(|e| e.contains("broker.sh")));
         assert!(!entries.iter().any(|e| e.contains("sweep.sh")));
+        assert!(!entries.iter().any(|e| e.contains("__classify")));
         assert!(entries.iter().any(|e| e == "git status"));
     }
 

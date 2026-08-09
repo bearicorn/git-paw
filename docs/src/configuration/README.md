@@ -585,10 +585,11 @@ sources, in order, de-duplicated:
 
 A whitelist match is always subordinate to the danger-list: `git push`
 escalates even though the `git` verb is whitelisted. The bundled
-`sweep.sh classify` helper composes its whitelist from the same three sources
-(reading the resolved stacks and extensions from `.git-paw/config.toml`, with
-a fail-safe fallback to built-ins only when the config is unreadable), so the
-helper and the Rust classifier agree.
+`sweep.sh classify` helper does not compose a whitelist of its own — it
+delegates to `git paw __classify`, which composes these same three sources
+from `.git-paw/config.toml` — so the helper and the in-tool auto-approver are
+the same classifier and cannot drift. See
+[Auto-approve classification](../user-guide/supervisor.md#auto-approve-classification).
 
 > **Migration note (v0.11.0).** Earlier releases baked `cargo fmt`,
 > `cargo clippy`, `cargo test`, `cargo build`, `openspec`, and `just` into the

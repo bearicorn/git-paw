@@ -48,6 +48,9 @@ fn main() {
 }
 
 /// Dispatch and execute the given CLI command.
+// Length is inherent to a total dispatch match — it grows by one arm per
+// subcommand, with no logic to extract.
+#[allow(clippy::too_many_lines)]
 fn run(command: Command) -> Result<(), PawError> {
     match command {
         Command::Start {
@@ -141,6 +144,10 @@ fn run(command: Command) -> Result<(), PawError> {
         } => commands::clis::cmd_add_cli(&name, &command, display_name.as_deref()),
         Command::RemoveCli { name } => commands::clis::cmd_remove_cli(&name),
         Command::Dashboard => cmd_dashboard(),
+        Command::Classify {
+            worktree_root,
+            resolve_option,
+        } => cmd_classify(worktree_root.as_deref(), resolve_option),
         Command::Init => git_paw::init::run_init(),
         Command::Replay {
             branch,
@@ -611,6 +618,114 @@ fn write_repo_discovery_file(
     if let Err(e) = session::write_repo_session_file(repo_root, &file) {
         eprintln!("warning: failed to write per-repo session discovery file: {e}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Command: __classify
+// ---------------------------------------------------------------------------
+
+/// Classifies a permission-prompt pane capture read from stdin and prints the
+/// verdict (internal command).
+///
+/// This is the IPC seam that makes the safe-command classifier single-source:
+/// the bundled `sweep.sh` helper invokes `git paw __classify` instead of
+/// re-implementing the classification rules, so the helper and the in-tool
+/// auto-approver cannot drift. The capture is classified by the very function
+/// the unattended drive loop consumes
+/// ([`git_paw::supervisor::drive::classify_prompt`]) over the same resolved
+/// inputs the loop builds — the composed whitelist, the derived protected-path
+/// set, and the worktree-write policy.
+///
+/// Output is one line on stdout: `<class> <option-index>` (class is `safe`,
+/// `danger`, or `unknown`), or just the option index under `--resolve-option`
+/// (the `sweep.sh approve` path, which has already decided to approve).
+///
+/// The command is READ-ONLY: it classifies and returns. It sends no keystroke,
+/// issues no broker request, and writes no file.
+///
+/// A config that cannot be parsed degrades to the defaults-only derivation
+/// (built-in whitelist, defaults-only protected set) exactly as the drive loop
+/// does, rather than aborting. `AutoApproveConfig::resolved()` is deliberately
+/// NOT applied: it only forces `enabled` off and clamps the stall threshold —
+/// neither is a classification input — and its clamp warning would be
+/// re-emitted on every sweep. `tests/classify_subcommand.rs` pins its reference
+/// verdict to the drive loop's construction *including* `resolved()`, so that
+/// skip stops being safe the moment `resolved()` touches a classification input.
+///
+/// # Working directory
+///
+/// Two inputs come from the **current working directory**, not from
+/// `worktree_root`: the repo whose config is loaded
+/// ([`git::validate_repo`] on the cwd), and the `repo_root` passed to
+/// [`ProtectedPaths::derive`]. So this MUST be invoked from inside the target
+/// repository — which is what `sweep.sh` does, since it refuses to run outside
+/// a git repo and never changes directory. A subdirectory is fine
+/// (`rev-parse --show-toplevel` resolves upward); an embedded worktree resolves
+/// to that worktree, matching what `sweep.sh` computed as `PROJECT_ROOT` before
+/// this delegation existed, so the behaviour is unchanged.
+///
+/// The two legs degrade in OPPOSITE directions on a cwd mismatch, so this is
+/// not a uniformly fail-safe fallback:
+///
+/// - the **whitelist** degrades safely — an absent config yields the
+///   stack-neutral built-ins, so strictly fewer commands classify safe;
+/// - the **protected-path set** degrades UNSAFELY in one leg — its home-level
+///   entries (`~/.claude`, `CLAUDE_CONFIG_DIR`, and their `projects/**/memory`
+///   subtrees) survive because they come from the environment, but the
+///   repo-root `.claude/` + `.git-paw/` entries would name the wrong
+///   repository, leaving the intended repo's control directories unprotected
+///   against a write that another rule then classifies safe.
+///
+/// That asymmetry is the reason the cwd requirement is a MUST rather than a
+/// recommendation.
+fn cmd_classify(worktree_root: Option<&Path>, resolve_option: bool) -> Result<(), PawError> {
+    use git_paw::supervisor::auto_approve::{
+        ProtectedPaths, detect_prompt_shape, select_option_index,
+    };
+    use git_paw::supervisor::drive::{PromptVerdict, classify_prompt, prompt_command_slice};
+
+    let capture = std::io::read_to_string(std::io::stdin())
+        .map_err(|e| PawError::SessionError(format!("cannot read capture from stdin: {e}")))?;
+
+    let cwd = std::env::current_dir()
+        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
+    let repo_root = git::validate_repo(&cwd)?;
+    let config = config::load_config(&repo_root, None).unwrap_or_default();
+    let supervisor_cfg = config.supervisor.clone().unwrap_or_default();
+    let auto_approve = supervisor_cfg.auto_approve.clone().unwrap_or_default();
+
+    let verdict = classify_prompt(
+        &capture,
+        &auto_approve.effective_whitelist(&supervisor_cfg.common_dev_allowlist),
+        worktree_root,
+        auto_approve.approve_worktree_writes(),
+        &ProtectedPaths::derive(&config, Some(&repo_root)),
+    );
+
+    // A `Safe` verdict already carries the index the auto-approver would
+    // select. An escalating verdict carries none, so the index is resolved the
+    // same way the pre-delegation helper did — `select_option_index` with
+    // `classified_safe = false` — keeping this a de-duplication rather than a
+    // policy change. Note that `false` does not force the one-time option: the
+    // read-mostly-verb rule can still prefer the durable grant, which is why
+    // the auto-approver's danger-first precedence (not this index) is what
+    // stops an escalating prompt from ever being approved unattended.
+    // `--resolve-option` is the operator-initiated `sweep.sh approve` path.
+    let option_index = match &verdict {
+        PromptVerdict::Safe { option_index, .. } => *option_index,
+        PromptVerdict::Danger | PromptVerdict::Unknown => select_option_index(
+            detect_prompt_shape(&capture),
+            &prompt_command_slice(&capture),
+            false,
+        ),
+    };
+
+    if resolve_option {
+        println!("{option_index}");
+    } else {
+        println!("{} {option_index}", verdict.label());
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
