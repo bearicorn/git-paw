@@ -37,32 +37,23 @@ set -u
 
 # ---------------------------------------------------------------------------
 # Discovery: project root, paw dir, broker URL, session name, test command.
+#
+# The project root, `.git-paw` paths, Python 3 interpreter and
+# `discover_broker_url` all come from the shared preamble `_paw_common.sh`,
+# installed as a sibling of this script by `git paw init`. Resolving it relative
+# to this file's own location works from both the bundled `assets/scripts/` tree
+# and the deployed `.git-paw/scripts/` directory.
 # ---------------------------------------------------------------------------
 
-repo_root() {
-  git rev-parse --show-toplevel 2>/dev/null
-}
-
-PROJECT_ROOT=$(repo_root)
-if [[ -z "${PROJECT_ROOT}" ]]; then
-  echo "sweep.sh: not inside a git repository" >&2
-  exit 2
+PAW_SCRIPT_NAME="sweep.sh"
+_PAW_COMMON="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/_paw_common.sh"
+# shellcheck source=_paw_common.sh
+if [[ ! -r "${_PAW_COMMON}" ]] || ! . "${_PAW_COMMON}"; then
+  echo "sweep.sh: cannot load shared preamble '${_PAW_COMMON}' — re-run \`git paw init\`" >&2
+  exit 3
 fi
 
-PAW_DIR="${PROJECT_ROOT}/.git-paw"
 SESSIONS_DIR="${PAW_DIR}/sessions"
-CONFIG_TOML="${PAW_DIR}/config.toml"
-
-# Locate a Python 3 interpreter for JSON / TOML parsing.
-if command -v python3 >/dev/null 2>&1; then
-  PY=python3
-elif command -v python >/dev/null 2>&1 && \
-     [[ "$(python -c 'import sys;print(sys.version_info[0])' 2>/dev/null)" == "3" ]]; then
-  PY=python
-else
-  echo "sweep.sh: requires Python 3 on PATH (python3 or python)" >&2
-  exit 4
-fi
 
 # Discover the active session name.
 #
@@ -113,59 +104,6 @@ PY
     return 1
   fi
   printf '%s\n' "${name}"
-}
-
-# Parse [broker] port + bind from config.toml. Defaults to 127.0.0.1:9119.
-discover_broker_url() {
-  if [[ ! -f "${CONFIG_TOML}" ]]; then
-    echo "http://127.0.0.1:9119"
-    return
-  fi
-  "${PY}" - "${CONFIG_TOML}" <<'PY'
-import sys
-
-try:
-    import tomllib  # py311+
-    mode = "rb"
-except ModuleNotFoundError:
-    try:
-        import tomli as tomllib  # py<311
-        mode = "rb"
-    except ModuleNotFoundError:
-        tomllib = None
-
-if tomllib is None:
-    # Fall back to a tiny regex parser for the two fields we care about —
-    # avoids requiring tomli on minimal Python installs.
-    import re
-    text = open(sys.argv[1]).read()
-    in_broker = False
-    port = 9119
-    bind = "127.0.0.1"
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            in_broker = stripped == "[broker]"
-            continue
-        if not in_broker:
-            continue
-        m = re.match(r"^\s*port\s*=\s*(\d+)", line)
-        if m:
-            port = int(m.group(1))
-            continue
-        m = re.match(r"^\s*bind\s*=\s*\"([^\"]+)\"", line)
-        if m:
-            bind = m.group(1)
-            continue
-    print(f"http://{bind}:{port}")
-else:
-    with open(sys.argv[1], mode) as f:
-        data = tomllib.load(f)
-    broker = data.get("broker", {})
-    port = broker.get("port", 9119)
-    bind = broker.get("bind", "127.0.0.1")
-    print(f"http://{bind}:{port}")
-PY
 }
 
 # Parse [supervisor].test_command from config.toml. Prints empty string if

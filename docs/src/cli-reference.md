@@ -57,6 +57,10 @@ Running `init` is idempotent — it's safe to run multiple times.
 - `.git-paw/scripts/broker.sh` — bundled agent-broker helper (the agent side
   of `sweep.sh`); the agent boot block calls it to self-report to the broker.
   See [Coordination → Broker helper](user-guide/coordination.md#broker-helper)
+- `.git-paw/scripts/_paw_common.sh` — shared preamble the bundled helpers
+  source for repository-root resolution, Python 3 detection, and broker /
+  docs URL discovery. Binary-managed like the helpers themselves: it is
+  overwritten on every `git paw init`, and a helper cannot run without it
 
 **Example:**
 ```bash

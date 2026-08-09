@@ -46,13 +46,20 @@ fn init_git_repo(dir: &Path) {
     run(&["commit", "-q", "-m", "init"]);
 }
 
-/// Copies the bundled sweep.sh asset into `<repo>/.git-paw/scripts/`.
+/// Copies the bundled sweep.sh asset — together with the `_paw_common.sh`
+/// preamble it sources — into `<repo>/.git-paw/scripts/`, mirroring the
+/// co-deployment `git paw init` guarantees.
 fn install_sweep(repo: &Path) -> std::path::PathBuf {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts/sweep.sh");
+    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts");
     let dst_dir = repo.join(".git-paw/scripts");
     fs::create_dir_all(&dst_dir).expect("mk scripts dir");
+    fs::copy(
+        assets.join("_paw_common.sh"),
+        dst_dir.join("_paw_common.sh"),
+    )
+    .expect("copy _paw_common.sh");
     let dst = dst_dir.join("sweep.sh");
-    fs::copy(&src, &dst).expect("copy sweep.sh");
+    fs::copy(assets.join("sweep.sh"), &dst).expect("copy sweep.sh");
     dst
 }
 

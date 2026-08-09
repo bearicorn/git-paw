@@ -26,6 +26,13 @@ const GITIGNORE_ENTRIES: &[&str] = &[
     ".git-paw/session-learnings.md",
 ];
 
+/// Bundled shared shell preamble, embedded at compile time and written to
+/// `<repo>/.git-paw/scripts/_paw_common.sh` by [`run_init`]. The sibling
+/// helpers ([`SWEEP_SCRIPT`], [`BROKER_SCRIPT`], [`DOCS_FETCH_SCRIPT`]) source
+/// it for their shared discovery functions rather than each re-defining them,
+/// so it MUST be installed wherever any of them is.
+const COMMON_SCRIPT: &str = include_str!("../assets/scripts/_paw_common.sh");
+
 /// Bundled supervisor-sweep helper script, embedded at compile time and
 /// written to `<repo>/.git-paw/scripts/sweep.sh` by [`run_init`].
 const SWEEP_SCRIPT: &str = include_str!("../assets/scripts/sweep.sh");
@@ -51,8 +58,9 @@ const DOCS_FETCH_SCRIPT: &str = include_str!("../assets/scripts/docs-fetch.sh");
 /// under `.git-paw/scripts/` against the running binary's embedded versions
 /// without duplicating the `include_str!` set.
 #[must_use]
-pub fn bundled_scripts() -> [(&'static str, &'static str); 3] {
+pub fn bundled_scripts() -> [(&'static str, &'static str); 4] {
     [
+        ("_paw_common.sh", COMMON_SCRIPT),
         ("sweep.sh", SWEEP_SCRIPT),
         ("broker.sh", BROKER_SCRIPT),
         ("docs-fetch.sh", DOCS_FETCH_SCRIPT),
@@ -115,6 +123,16 @@ pub fn run_init() -> Result<(), PawError> {
     let created_scripts = create_dir_if_missing(&scripts_dir)?;
     if created_scripts {
         println!("  Created .git-paw/scripts/");
+    }
+    // The shared preamble installs first: the three helpers source it, so it
+    // must be on disk before any of them can run.
+    let common_path = scripts_dir.join("_paw_common.sh");
+    let common_existed = common_path.exists();
+    install_script(&common_path, COMMON_SCRIPT)?;
+    if common_existed {
+        println!("  Updated .git-paw/scripts/_paw_common.sh");
+    } else {
+        println!("  Created .git-paw/scripts/_paw_common.sh");
     }
     let sweep_path = scripts_dir.join("sweep.sh");
     let sweep_existed = sweep_path.exists();
@@ -222,6 +240,8 @@ pub fn run_init() -> Result<(), PawError> {
 /// so re-attaching a reused worktree refreshes them without error. `broker.sh`
 /// is provisioned when `broker_enabled`; `docs-fetch.sh` when
 /// `docs_base_url_configured` (mirroring the docs-fetch skill's injection gate).
+/// The shared `_paw_common.sh` preamble accompanies whichever helper is
+/// provisioned — each one sources it, so a helper without it cannot run.
 pub fn provision_worktree_helpers(
     worktree_root: &Path,
     broker_enabled: bool,
@@ -229,6 +249,9 @@ pub fn provision_worktree_helpers(
 ) -> Result<(), PawError> {
     let scripts_dir = worktree_root.join(".git-paw").join("scripts");
     create_dir_if_missing(&scripts_dir)?;
+    if broker_enabled || docs_base_url_configured {
+        install_script(&scripts_dir.join("_paw_common.sh"), COMMON_SCRIPT)?;
+    }
     if broker_enabled {
         install_script(&scripts_dir.join("broker.sh"), BROKER_SCRIPT)?;
     }
