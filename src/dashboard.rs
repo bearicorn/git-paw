@@ -3,8 +3,22 @@
 //! Reads from [`BrokerState`] on a 1-second tick
 //! and renders a read-only agent status table. The v0.3.0 dashboard is
 //! display-only — the only interaction is quitting with `q`.
+//!
+//! The dashboard is structured as **Model-View-Update**:
+//!
+//! - the **Model** ([`Model`]) holds the redraw state — the derived agent rows,
+//!   the footer status line, the Broker log buffer, and the quit flag;
+//! - the **View** ([`mod@view`]) is a pure function of the Model producing the
+//!   rendered frame;
+//! - the **Update** ([`update`]) applies a [`Msg`] — a key press, a status
+//!   snapshot, or a broker-log ingest — to the Model, and performs no I/O.
+//!
+//! This module keeps what MVU cannot: the terminal lifecycle, the SIGHUP/
+//! `poll_tty` FFI, the orphan-exit gate, and the event loop that drains
+//! crossterm events into `Msg` values and renders the resulting Model.
 
 pub mod broker_log;
+pub mod view;
 
 use std::collections::HashMap;
 use std::io::{self, Stdout};
@@ -13,17 +27,18 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
-use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Alignment, Constraint, Layout};
-use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Paragraph, Row, Table};
 
 use crate::broker::delivery;
 use crate::broker::{AgentStatusEntry, BrokerHandle, BrokerState};
-use crate::dashboard::broker_log::{BrokerLog, LogKeyAction};
+use crate::dashboard::broker_log::{BrokerLog, LogEntry, LogKeyAction};
 use crate::error::PawError;
+
+pub use view::{
+    AgentRow, AgentTableRow, arrange_with_supervisor_pinned, format_age, format_agent_rows,
+    format_status_line, render_dashboard, status_symbol,
+};
 
 /// Idle refresh interval for the dashboard draw loop.
 ///
@@ -35,12 +50,6 @@ use crate::error::PawError;
 /// (~20 Hz) unconditional redraw was the ~10%-per-dashboard idle cost. Input
 /// stays instant regardless, since a keystroke wakes the blocking poll.
 const TICK_INTERVAL: Duration = Duration::from_millis(800);
-
-/// Placeholder shown in the agent table's CLI column when an agent's CLI
-/// cannot be resolved (neither its `agent.status` payload nor the seeded
-/// `agent_clis` map names one). A visible `"?"` reads as "unknown" rather
-/// than a blank cell that looks like a rendering bug (W15-15).
-const UNKNOWN_CLI: &str = "?";
 
 /// Returns `true` when this dashboard process has been orphaned — its parent
 /// died and it was reparented to init (PID 1).
@@ -175,173 +184,110 @@ fn should_exit(shutdown: bool, orphaned: bool, tty_gone: bool) -> bool {
     shutdown || orphaned || tty_gone
 }
 
-/// The `agent_id` of the supervisor's pinned row. The supervisor is the only
-/// publisher whose `phase` introspection field is surfaced unconditionally in
-/// the agent table (see [`format_agent_rows`]).
-const SUPERVISOR_AGENT_ID: &str = "supervisor";
+// ---------------------------------------------------------------------------
+// Model
+// ---------------------------------------------------------------------------
 
-/// The one `phase` value the dashboard honours on a *non-supervisor* row.
+/// The dashboard's redraw state — everything the [`view`] needs to draw a
+/// frame, and nothing else.
 ///
-/// `detect-stuck` (the bundled sweep helper) publishes a synthetic
-/// `agent.status` with `phase = "stuck-on-prompt"` *targeting the stalled
-/// coding agent's row* so the stall is visible there without scraping panes.
-/// This is a supervisor-authored alert about the subject agent, not the coding
-/// agent's own introspection, so it is the documented exception to the
-/// "phase is supervisor-only" rule in the `supervisor-introspection`
-/// capability.
-const STUCK_ON_PROMPT_PHASE: &str = "stuck-on-prompt";
-
-/// A formatted row for display in the agent status table.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentRow {
-    /// The agent identifier (slugified branch name).
-    pub agent_id: String,
-    /// The CLI name (e.g. `"claude"`).
-    pub cli: String,
-    /// Status symbol and label (e.g. `"🔵 working"`).
-    pub status: String,
-    /// Relative time since last message (e.g. `"3m ago"`).
-    pub age: String,
+/// Before the MVU refactor these fields lived as local `mut` bindings inside
+/// the draw loop, recomputed inline on every iteration. Collecting them into
+/// one value is what makes the state transitions testable: a [`Msg`] applied
+/// by [`update`] is a pure function of this struct, with no terminal attached.
+#[derive(Debug)]
+pub struct Model {
+    /// The formatted agent rows rendered in the status table.
+    pub rows: Vec<AgentRow>,
+    /// The footer summary line (agent counts by status).
+    pub status_line: String,
+    /// The Broker log ring buffer and its panel state.
+    ///
+    /// Owned by the dashboard for its whole lifetime and never cleared, so a
+    /// transient broker-watcher restart leaves history intact (design.md D8).
+    pub broker_log: BrokerLog,
+    /// Set once a quit key has been handled; the loop exits on the next check.
+    pub quit: bool,
+    /// Row count of the visible Broker log panel (from
+    /// `[dashboard.broker_log] height_lines`).
+    pub panel_height: u16,
 }
 
-/// Maps an agent status label to a Unicode symbol.
-///
-/// | Input | Output |
-/// |---|---|
-/// | `"working"` | `"🔵"` |
-/// | `"done"` | `"🟢"` |
-/// | `"verified"` | `"🟢"` |
-/// | `"committed"` | `"🟣"` |
-/// | `"blocked"` | `"🟡"` |
-/// | anything else | `"⚪"` |
-pub fn status_symbol(status: &str) -> &'static str {
-    match status {
-        "working" => "🔵",
-        "done" | "verified" => "🟢",
-        "committed" => "🟣",
-        "blocked" => "🟡",
-        _ => "⚪",
-    }
-}
-
-/// Formats an elapsed duration as a human-readable relative time string.
-///
-/// - Less than 60 seconds: `"Xs ago"` (e.g. `"30s ago"`)
-/// - 1 to 59 minutes: `"Xm ago"` (e.g. `"3m ago"`)
-/// - 60 minutes or more: `"Xh Ym ago"` (e.g. `"1h 15m ago"`)
-pub fn format_age(elapsed: Duration) -> String {
-    let secs = elapsed.as_secs();
-    if secs < 60 {
-        format!("{secs}s ago")
-    } else if secs < 3600 {
-        let mins = secs / 60;
-        format!("{mins}m ago")
-    } else {
-        let hours = secs / 3600;
-        let mins = (secs % 3600) / 60;
-        format!("{hours}h {mins}m ago")
-    }
-}
-
-/// Converts raw agent status entries into formatted display rows.
-///
-/// The `phase` introspection field is the supervisor's lifecycle surface
-/// (`supervisor-introspection` capability): when present on the supervisor
-/// row, the status field renders that phase (with the matching status symbol)
-/// instead of the message-type-derived label — labels like `"feedback"` (the
-/// wire message type) are misleading, and the real lifecycle phase is `"sweep"`,
-/// `"audit"`, `"merge"`, etc.
-///
-/// `phase` is honoured **only** for the supervisor row. A non-supervisor row
-/// ignores its `phase` and renders the message-type-derived status label —
-/// coding agents do not emit introspection phases in v0.6.0. The single
-/// exception is the supervisor-published [`STUCK_ON_PROMPT_PHASE`] alert, which
-/// `detect-stuck` targets at the stalled coding agent's row by design.
-///
-/// Pure function: performs no I/O, holds no locks, and is deterministic
-/// given the same inputs.
-pub fn format_agent_rows(agents: &[AgentStatusEntry], now: Instant) -> Vec<AgentRow> {
-    agents
-        .iter()
-        .map(|agent| {
-            let elapsed = now.saturating_duration_since(agent.last_seen);
-            // Surface `phase` for the supervisor row, plus the one
-            // supervisor-authored `stuck-on-prompt` alert that targets a
-            // coding agent's row. Every other non-supervisor phase is ignored.
-            let honour_phase = agent.agent_id == SUPERVISOR_AGENT_ID
-                || agent.phase.as_deref() == Some(STUCK_ON_PROMPT_PHASE);
-            let label = match agent.phase.as_deref() {
-                Some(phase) if honour_phase => phase,
-                _ => &agent.status,
-            };
-            let symbol = status_symbol(label);
-            let cli = if agent.cli.trim().is_empty() {
-                UNKNOWN_CLI.to_string()
-            } else {
-                agent.cli.clone()
-            };
-            AgentRow {
-                agent_id: agent.agent_id.clone(),
-                cli,
-                status: format!("{symbol} {label}"),
-                age: format_age(elapsed),
-            }
-        })
-        .collect()
-}
-
-/// One entry in the dashboard's agent table, either an agent row or a
-/// visual divider rendered between the pinned supervisor row and the
-/// coding-agent rows beneath it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AgentTableRow {
-    /// A normal agent row.
-    Agent(AgentRow),
-    /// A divider separating the pinned supervisor row from coding-agent rows.
-    Divider,
-}
-
-/// Reorders a slice of `AgentRow` so the supervisor row (if present) is
-/// pinned to position 0, followed by a [`AgentTableRow::Divider`], with
-/// the remaining coding-agent rows in their incoming (alphabetical) order.
-///
-/// When no row has `agent_id == "supervisor"`, the output preserves the
-/// incoming order and contains no divider.
-///
-/// Pure function: no I/O, no locks, deterministic.
-pub fn arrange_with_supervisor_pinned(rows: Vec<AgentRow>) -> Vec<AgentTableRow> {
-    let mut supervisor: Option<AgentRow> = None;
-    let mut coding: Vec<AgentRow> = Vec::with_capacity(rows.len());
-    for row in rows {
-        if row.agent_id == "supervisor" {
-            supervisor = Some(row);
-        } else {
-            coding.push(row);
+impl Model {
+    /// Builds the dashboard's initial state, mirroring the draw loop's state
+    /// before its first iteration: no rows, an empty status line, a fresh
+    /// Broker log sized by `max_messages`/`default_visible`, and not quitting.
+    #[must_use]
+    pub fn new(max_messages: usize, default_visible: bool, panel_height: u16) -> Self {
+        Self {
+            rows: Vec::new(),
+            status_line: String::new(),
+            broker_log: BrokerLog::new(max_messages, default_visible),
+            quit: false,
+            panel_height,
         }
     }
-
-    let mut out: Vec<AgentTableRow> = Vec::with_capacity(coding.len() + 2);
-    if let Some(sup) = supervisor {
-        out.push(AgentTableRow::Agent(sup));
-        out.push(AgentTableRow::Divider);
-    }
-    out.extend(coding.into_iter().map(AgentTableRow::Agent));
-    out
 }
 
-/// Produces a summary status line for the dashboard footer.
+// ---------------------------------------------------------------------------
+// Update
+// ---------------------------------------------------------------------------
+
+/// An event the dashboard reacts to, decoded from the draw loop's I/O.
 ///
-/// Returns a string like `"5 agents: 2 working, 1 done, 1 blocked, 1 committed"`.
-pub fn format_status_line(
-    total: usize,
-    working: usize,
-    done: usize,
-    blocked: usize,
-    committed: usize,
-) -> String {
-    format!(
-        "{total} agents: {working} working, {done} done, {blocked} blocked, {committed} committed"
-    )
+/// The loop owns the I/O — polling the tty, reading crossterm events, taking a
+/// broker snapshot — and turns each outcome into one of these values; [`update`]
+/// owns the resulting state transition.
+#[derive(Debug)]
+pub enum Msg {
+    /// A key was pressed. Offered to the Broker log panel first; a key the
+    /// panel ignores falls through to the quit check.
+    Key(KeyCode),
+    /// The tick/redraw event: a fresh agent-status snapshot taken at `now`,
+    /// from which the rows and the footer status line are derived.
+    Snapshot {
+        /// The agent status entries read from the broker.
+        agents: Vec<AgentStatusEntry>,
+        /// The instant the snapshot was taken, used to age each row.
+        now: Instant,
+    },
+    /// Broker-log entries newer than the log's cursor, to append to the panel.
+    BrokerIngest(Vec<LogEntry>),
+}
+
+/// Applies one [`Msg`] to the [`Model`].
+///
+/// Pure: it touches no terminal, spawns no process, and reads no clock — every
+/// input it needs is carried by the message. That is what lets each transition
+/// be asserted directly against a constructed `Model`.
+pub fn update(model: &mut Model, msg: Msg) {
+    match msg {
+        Msg::Key(code) => {
+            // Offer the key to the panel first. It returns `Ignored`
+            // for keys it does not own (notably `q`), which then
+            // fall through to the quit check.
+            if broker_log::handle_key(&mut model.broker_log, code) == LogKeyAction::Ignored
+                && should_quit(code)
+            {
+                model.quit = true;
+            }
+        }
+        Msg::Snapshot { agents, now } => {
+            model.rows = format_agent_rows(&agents, now);
+            let working = agents.iter().filter(|a| a.status == "working").count();
+            let done = agents
+                .iter()
+                .filter(|a| a.status == "done" || a.status == "verified")
+                .count();
+            let blocked = agents.iter().filter(|a| a.status == "blocked").count();
+            let committed = agents.iter().filter(|a| a.status == "committed").count();
+            model.status_line = format_status_line(agents.len(), working, done, blocked, committed);
+        }
+        // Pull only messages newer than the cursor and push them onto the ring
+        // buffer (newest ends up at the top). This is the same in-process state
+        // the agent table reads — no extra traffic.
+        Msg::BrokerIngest(entries) => model.broker_log.ingest(entries),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -383,60 +329,6 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
         .map_err(|e| PawError::DashboardError(format!("failed to show cursor: {e}")))
 }
 
-// ---------------------------------------------------------------------------
-// Draw
-// ---------------------------------------------------------------------------
-
-/// Renders one frame of the dashboard TUI to the given `Frame`.
-///
-/// Public wrapper around the internal `draw_frame` so integration tests can
-/// drive a real frame with `ratatui::backend::TestBackend` and assert against
-/// the resulting buffer. `panel_height` is the visible Broker log panel's row
-/// count (from `[dashboard.broker_log] height_lines`).
-pub fn render_dashboard(
-    frame: &mut Frame,
-    rows: &[AgentRow],
-    status_line: &str,
-    broker_log: &BrokerLog,
-    panel_height: u16,
-) {
-    draw_frame(frame, rows, status_line, broker_log, panel_height);
-}
-
-/// Minimum number of rows the agent-status table keeps when the Broker log
-/// panel is visible (header plus a few agent rows). Expressed as a `Min`
-/// constraint so the table still absorbs the terminal's slack on tall
-/// terminals, but on a terminal too short to grant both their full heights
-/// ratatui shrinks the panel's `Length` before driving the table below this
-/// floor — the enlarged panel cannot starve the table.
-pub(crate) const MIN_AGENT_TABLE_HEIGHT: u16 = 6;
-
-/// Returns the vertical layout constraints for the dashboard frame.
-///
-/// `show_panel = false` (the v0.5.0 layout after the prompt-inbox removal)
-/// produces a three-segment layout: title, agent table, status line. This is
-/// the byte-equivalent baseline the Broker log panel must reproduce when
-/// hidden. `show_panel = true` appends a fourth segment for the Broker log
-/// panel, sized to `panel_height` rows (from `[dashboard.broker_log]
-/// height_lines`, default `20` — materially larger than the v0.6.0 fixed
-/// `12`).
-pub(crate) fn build_layout_constraints(show_panel: bool, panel_height: u16) -> Vec<Constraint> {
-    if show_panel {
-        vec![
-            Constraint::Length(1),                   // title
-            Constraint::Min(MIN_AGENT_TABLE_HEIGHT), // agent table
-            Constraint::Length(1),                   // status line
-            Constraint::Length(panel_height),        // broker log panel
-        ]
-    } else {
-        vec![
-            Constraint::Length(1), // title
-            Constraint::Min(0),    // agent table
-            Constraint::Length(1), // status line
-        ]
-    }
-}
-
 /// Returns true when the given key code should terminate the dashboard
 /// event loop. Only `q` (lowercase, no modifiers) quits; every other key
 /// — including `Tab`, printable characters, and arrow keys — is ignored.
@@ -446,93 +338,6 @@ pub(crate) fn build_layout_constraints(show_panel: bool, panel_height: u16) -> V
 /// no focusable element for `Tab` to advance through.
 pub(crate) fn should_quit(code: KeyCode) -> bool {
     matches!(code, KeyCode::Char('q'))
-}
-
-/// Renders one frame of the dashboard TUI. `panel_height` sizes the visible
-/// Broker log panel's segment (from `[dashboard.broker_log] height_lines`).
-fn draw_frame(
-    frame: &mut Frame,
-    rows: &[AgentRow],
-    status_line: &str,
-    broker_log: &BrokerLog,
-    panel_height: u16,
-) {
-    // The prompt-inbox panel was removed in v0.5.0 (supervisor-as-pane-
-    // followups D3). The supervisor pane is the human's input surface for
-    // replying to `agent.question` events; the dashboard is observation-
-    // only. v0.6.0 fills the freed region with the Broker log panel when
-    // `broker_log.visible`; when hidden the layout is byte-equivalent to
-    // the v0.5.0 three-segment shape.
-    let layout_constraints = build_layout_constraints(broker_log.visible, panel_height);
-
-    let chunks = Layout::vertical(layout_constraints).split(frame.area());
-
-    let title =
-        Paragraph::new("git-paw dashboard").style(Style::default().add_modifier(Modifier::BOLD));
-    frame.render_widget(title, chunks[0]);
-
-    if rows.is_empty() {
-        let empty = Paragraph::new("No agents connected yet").alignment(Alignment::Center);
-        frame.render_widget(empty, chunks[1]);
-    } else {
-        let header = Row::new(["Agent", "CLI", "Status", "Last Update"])
-            .style(Style::default().add_modifier(Modifier::BOLD));
-        // Pin the supervisor row to row 0 and insert a divider beneath it
-        // before rendering. The arrangement is computed from the same
-        // `rows` slice rather than reaching back into the snapshot —
-        // tests can verify the ordering against `arrange_with_supervisor_pinned`
-        // independently of ratatui internals.
-        let arranged = arrange_with_supervisor_pinned(rows.to_vec());
-        let divider_segment = "─".repeat(20);
-        let table_rows: Vec<Row> = arranged
-            .iter()
-            .map(|entry| match entry {
-                AgentTableRow::Agent(r) => Row::new(vec![
-                    r.agent_id.clone(),
-                    r.cli.clone(),
-                    r.status.clone(),
-                    r.age.clone(),
-                ]),
-                AgentTableRow::Divider => Row::new(vec![
-                    divider_segment.clone(),
-                    divider_segment.clone(),
-                    divider_segment.clone(),
-                    divider_segment.clone(),
-                ])
-                .style(Style::default().add_modifier(Modifier::DIM)),
-            })
-            .collect();
-        let widths = [
-            Constraint::Min(15),
-            Constraint::Length(10),
-            Constraint::Length(15),
-            // Wide enough to render the full "Last Update" header label (11
-            // chars) and relative-time values like "1h 15m ago" without
-            // truncation — space reclaimed from the dropped Summary column.
-            Constraint::Length(12),
-        ];
-        let table = Table::new(table_rows, widths).header(header);
-        frame.render_widget(table, chunks[1]);
-    }
-
-    // When the Broker log panel is hidden, its title bar (which documents the
-    // `l` toggle) is gone, so append a one-line restore hint to the always-
-    // present status line. The agent-table/segment layout stays byte-identical
-    // to v0.5.0 — only the status text gains the suffix.
-    let status_text = if broker_log.visible {
-        status_line.to_string()
-    } else {
-        format!("{status_line}  ·  broker log hidden — press l to show")
-    };
-    let status = Paragraph::new(status_text);
-    frame.render_widget(status, chunks[2]);
-
-    // Broker log panel: occupies the v0.5.0-freed inbox region when visible.
-    // When hidden there is no fourth chunk, so the layout above is identical
-    // to v0.5.0's three-segment shape (spec: "Hidden layout matches v0.5.0").
-    if broker_log.visible {
-        broker_log::render(frame, chunks[3], broker_log);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -601,11 +406,12 @@ pub fn run_dashboard_with_panes<S: std::hash::BuildHasher>(
     let terminal = setup_terminal()?;
     let mut guard = TerminalGuard { terminal };
 
-    // The Broker log ring buffer is owned by the dashboard process for its
-    // whole lifetime. It is fed each tick from the broker's in-process
-    // message log via a monotonic seq cursor and is never cleared, so a
-    // transient broker-watcher restart leaves history intact (design.md D8).
-    let mut broker_log = BrokerLog::new(max_messages, default_visible);
+    // The redraw state. Its Broker log ring buffer is owned by the dashboard
+    // process for its whole lifetime: it is fed each tick from the broker's
+    // in-process message log via a monotonic seq cursor and is never cleared,
+    // so a transient broker-watcher restart leaves history intact (design.md
+    // D8). Every mutation below goes through `update`.
+    let mut model = Model::new(max_messages, default_visible, height_lines);
 
     // Latches once the controlling terminal is observed to be gone — a poll
     // error or a failed terminal write. It is consulted by `should_exit` at the
@@ -663,13 +469,8 @@ pub fn run_dashboard_with_panes<S: std::hash::BuildHasher>(
                     if let Event::Key(key) = ev
                         && key.kind == KeyEventKind::Press
                     {
-                        // Offer the key to the panel first. It returns `Ignored`
-                        // for keys it does not own (notably `q`), which then
-                        // fall through to the quit check.
-                        if broker_log::handle_key(&mut broker_log, key.code)
-                            == LogKeyAction::Ignored
-                            && should_quit(key.code)
-                        {
+                        update(&mut model, Msg::Key(key.code));
+                        if model.quit {
                             return restore_terminal(&mut guard.terminal);
                         }
                     }
@@ -677,34 +478,22 @@ pub fn run_dashboard_with_panes<S: std::hash::BuildHasher>(
             }
         }
 
+        // The tick/redraw: read the broker snapshot and the clock here — the
+        // loop owns the I/O — and let `update` derive the rows and the status
+        // line from them.
         let agents = delivery::agent_status_snapshot(state);
         let now = Instant::now();
-        let rows = format_agent_rows(&agents, now);
-        let working = agents.iter().filter(|a| a.status == "working").count();
-        let done = agents
-            .iter()
-            .filter(|a| a.status == "done" || a.status == "verified")
-            .count();
-        let blocked = agents.iter().filter(|a| a.status == "blocked").count();
-        let committed = agents.iter().filter(|a| a.status == "committed").count();
-        let status_line = format_status_line(agents.len(), working, done, blocked, committed);
+        update(&mut model, Msg::Snapshot { agents, now });
 
-        // Feed the Broker log: pull only messages newer than the cursor and
-        // push them onto the ring buffer (newest ends up at the top). This is
-        // the same in-process state the agent table reads — no extra traffic.
-        broker_log.ingest(delivery::full_log(state, broker_log.last_seq()));
+        // Feed the Broker log with the messages newer than its cursor.
+        let new_entries = delivery::full_log(state, model.broker_log.last_seq());
+        update(&mut model, Msg::BrokerIngest(new_entries));
 
         // A failed draw means the write to the terminal failed — the same
         // tty-gone signal as a poll error. Latch it; the gate at the top of the
         // next iteration exits rather than propagating an error or spinning
         // against a dead terminal.
-        if guard
-            .terminal
-            .draw(|f| {
-                draw_frame(f, &rows, &status_line, &broker_log, height_lines);
-            })
-            .is_err()
-        {
+        if guard.terminal.draw(|f| view::render(f, &model)).is_err() {
             tty_gone = true;
         }
     }
@@ -717,19 +506,6 @@ pub fn run_dashboard_with_panes<S: std::hash::BuildHasher>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A hidden Broker log panel for `draw_frame` calls that exercise the
-    /// agent-table/observation layout. Hidden so the rendered frame is the
-    /// v0.5.0 three-segment shape these assertions expect.
-    fn hidden_log() -> BrokerLog {
-        BrokerLog::new(500, false)
-    }
-
-    /// The production default panel height (`[dashboard.broker_log]
-    /// height_lines`), for `draw_frame` calls in tests.
-    fn default_panel_height() -> u16 {
-        crate::config::BrokerLogConfig::default().height_lines
-    }
 
     /// The orphan guard must run without panicking and report "not orphaned"
     /// for a normal process — the test runner is its live parent, so `getppid`
@@ -780,723 +556,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // status_symbol
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn status_symbol_maps_each_label_to_its_symbol() {
-        // One row per status label -> symbol; the final row is the wildcard
-        // (any unrecognised label) case.
-        for (label, expected) in [
-            ("working", "🔵"),
-            ("done", "🟢"),
-            ("verified", "🟢"),
-            ("committed", "🟣"),
-            ("blocked", "🟡"),
-            ("idle", "⚪"),
-            ("something-unexpected", "⚪"),
-        ] {
-            assert_eq!(status_symbol(label), expected, "label: {label}");
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // format_age
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn format_age_formats_each_duration_bucket() {
-        // One row per elapsed-duration bucket: sub-minute (seconds), minutes,
-        // and the hours+minutes composite (including the exact-hour edge).
-        for (elapsed, expected) in [
-            (Duration::from_secs(0), "0s ago"),
-            (Duration::from_secs(30), "30s ago"),
-            (Duration::from_mins(3), "3m ago"),
-            (Duration::from_hours(1), "1h 0m ago"),
-            (Duration::from_mins(75), "1h 15m ago"),
-        ] {
-            assert_eq!(format_age(elapsed), expected, "elapsed: {elapsed:?}");
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // format_agent_rows
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn format_agent_rows_three_agents() {
-        let now = Instant::now();
-        let agents = vec![
-            AgentStatusEntry {
-                agent_id: "feat-a".to_string(),
-                cli: "claude".to_string(),
-                status: "working".to_string(),
-                last_seen: now.checked_sub(Duration::from_secs(10)).unwrap(),
-                last_seen_seconds: 10,
-                phase: None,
-            },
-            AgentStatusEntry {
-                agent_id: "feat-b".to_string(),
-                cli: "cursor".to_string(),
-                status: "done".to_string(),
-                last_seen: now.checked_sub(Duration::from_mins(1)).unwrap(),
-                last_seen_seconds: 60,
-                phase: None,
-            },
-            AgentStatusEntry {
-                agent_id: "feat-c".to_string(),
-                cli: "claude".to_string(),
-                status: "blocked".to_string(),
-                last_seen: now.checked_sub(Duration::from_mins(5)).unwrap(),
-                last_seen_seconds: 300,
-                phase: None,
-            },
-        ];
-        let rows = format_agent_rows(&agents, now);
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].agent_id, "feat-a");
-        assert_eq!(rows[1].agent_id, "feat-b");
-        assert_eq!(rows[2].agent_id, "feat-c");
-    }
-
-    #[test]
-    fn format_agent_rows_single_done_three_minutes() {
-        let now = Instant::now();
-        let agents = vec![AgentStatusEntry {
-            agent_id: "feat-errors".to_string(),
-            cli: "claude".to_string(),
-            status: "done".to_string(),
-            last_seen: now.checked_sub(Duration::from_mins(3)).unwrap(),
-            last_seen_seconds: 180,
-            phase: None,
-        }];
-        let rows = format_agent_rows(&agents, now);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].agent_id, "feat-errors");
-        assert_eq!(rows[0].age, "3m ago");
-        assert!(rows[0].status.contains("done"));
-    }
-
-    #[test]
-    fn format_agent_rows_with_committed_status() {
-        let now = Instant::now();
-        let agents = vec![
-            AgentStatusEntry {
-                agent_id: "feat-committed".to_string(),
-                cli: "claude".to_string(),
-                status: "committed".to_string(),
-                last_seen: now.checked_sub(Duration::from_mins(1)).unwrap(),
-                last_seen_seconds: 60,
-                phase: None,
-            },
-            AgentStatusEntry {
-                agent_id: "feat-working".to_string(),
-                cli: "cursor".to_string(),
-                status: "working".to_string(),
-                last_seen: now.checked_sub(Duration::from_secs(30)).unwrap(),
-                last_seen_seconds: 30,
-                phase: None,
-            },
-        ];
-        let rows = format_agent_rows(&agents, now);
-        assert_eq!(rows.len(), 2);
-
-        // Find the committed agent and verify it has the correct symbol
-        let committed_row = rows
-            .iter()
-            .find(|r| r.agent_id == "feat-committed")
-            .unwrap();
-        assert!(committed_row.status.contains("🟣"));
-        assert!(committed_row.status.contains("committed"));
-
-        // Find the working agent and verify it has the correct symbol
-        let working_row = rows.iter().find(|r| r.agent_id == "feat-working").unwrap();
-        assert!(working_row.status.contains("🔵"));
-        assert!(working_row.status.contains("working"));
-    }
-
-    #[test]
-    fn format_agent_rows_empty_input() {
-        let rows = format_agent_rows(&[], Instant::now());
-        assert!(rows.is_empty());
-    }
-
-    #[test]
-    fn agent_row_exposes_only_four_fields_no_summary() {
-        // Scenario: AgentRow exposes no summary field. The agent-status table
-        // no longer renders a Summary column, so the row struct carries exactly
-        // `agent_id`, `cli`, `status`, `age` and nothing else. This construction
-        // names every field exhaustively — if a `summary` (or any other) field
-        // were reintroduced, this would fail to compile.
-        let now = Instant::now();
-        let agents = vec![AgentStatusEntry {
-            agent_id: "feat-errors".to_string(),
-            cli: "claude".to_string(),
-            status: "done".to_string(),
-            last_seen: now.checked_sub(Duration::from_mins(3)).unwrap(),
-            last_seen_seconds: 180,
-            phase: None,
-        }];
-        let rows = format_agent_rows(&agents, now);
-        assert_eq!(rows.len(), 1);
-        let AgentRow {
-            agent_id,
-            cli,
-            status,
-            age,
-        } = &rows[0];
-        assert_eq!(agent_id, "feat-errors");
-        assert_eq!(cli, "claude");
-        assert!(status.contains("done"));
-        assert_eq!(age, "3m ago");
-    }
-
-    // -----------------------------------------------------------------------
-    // CLI column population (W15-15)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn format_agent_rows_populates_cli_for_every_agent() {
-        // W15-15: the CLI column was blank for coding agents (only the
-        // supervisor row carried a CLI). Every row must render its CLI.
-        let now = Instant::now();
-        let agents = vec![
-            AgentStatusEntry {
-                agent_id: "supervisor".to_string(),
-                cli: "claude-oss".to_string(),
-                status: "working".to_string(),
-                last_seen: now,
-                last_seen_seconds: 0,
-                phase: Some("watching".to_string()),
-            },
-            AgentStatusEntry {
-                agent_id: "feat-a".to_string(),
-                cli: "claude-oss".to_string(),
-                status: "working".to_string(),
-                last_seen: now,
-                last_seen_seconds: 0,
-                phase: None,
-            },
-            AgentStatusEntry {
-                agent_id: "feat-b".to_string(),
-                cli: "claude-oss".to_string(),
-                status: "working".to_string(),
-                last_seen: now,
-                last_seen_seconds: 0,
-                phase: None,
-            },
-        ];
-        let rows = format_agent_rows(&agents, now);
-        assert_eq!(rows.len(), 3);
-        for row in &rows {
-            assert_eq!(
-                row.cli, "claude-oss",
-                "every agent row must render its CLI, not just the supervisor: {row:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn format_agent_rows_shows_placeholder_for_unresolved_cli() {
-        // W15-15: an unresolved CLI shows the documented "?" placeholder
-        // rather than a blank cell that reads as a rendering bug.
-        let now = Instant::now();
-        let agents = vec![AgentStatusEntry {
-            agent_id: "feat-mystery".to_string(),
-            cli: String::new(),
-            status: "working".to_string(),
-            last_seen: now,
-            last_seen_seconds: 0,
-            phase: None,
-        }];
-        let rows = format_agent_rows(&agents, now);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(
-            rows[0].cli, UNKNOWN_CLI,
-            "blank CLI must render the documented placeholder, not an empty string",
-        );
-        assert!(!rows[0].cli.is_empty());
-    }
-
-    // -----------------------------------------------------------------------
-    // Bug 8: dashboard accepts committed -> working re-entry
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn dashboard_row_transitions_committed_to_working_within_ttl() {
-        use crate::broker::BrokerState;
-        use crate::broker::delivery::{agent_status_snapshot, publish_message};
-        use crate::broker::messages::{ArtifactPayload, BrokerMessage, StatusPayload};
-        use std::sync::Arc;
-
-        let state = Arc::new(BrokerState::new(None)); // default TTL 60s
-        publish_message(
-            &state,
-            &BrokerMessage::Artifact {
-                agent_id: "feat-x".to_string(),
-                payload: ArtifactPayload {
-                    status: "committed".to_string(),
-                    exports: vec![],
-                    modified_files: vec![],
-                },
-            },
-        );
-        // Render shows committed.
-        let snap = agent_status_snapshot(&state);
-        let rows = format_agent_rows(&snap, Instant::now());
-        let row = rows.iter().find(|r| r.agent_id == "feat-x").unwrap();
-        assert!(row.status.contains("committed"), "should start committed");
-
-        // Agent keeps working within the TTL window.
-        publish_message(
-            &state,
-            &BrokerMessage::Status {
-                agent_id: "feat-x".to_string(),
-                payload: StatusPayload {
-                    status: "working".to_string(),
-                    modified_files: vec!["src/lib.rs".to_string()],
-                    message: None,
-                    ..Default::default()
-                },
-            },
-        );
-        let snap = agent_status_snapshot(&state);
-        let rows = format_agent_rows(&snap, Instant::now());
-        let row = rows.iter().find(|r| r.agent_id == "feat-x").unwrap();
-        assert!(
-            row.status.contains("working") && row.status.contains("🔵"),
-            "dashboard row must transition committed -> working, got {:?}",
-            row.status
-        );
-    }
-
-    #[test]
-    fn dashboard_row_stays_committed_when_ttl_zero() {
-        // v0.5.0 byte-equivalence: with TTL=0 the row stays committed.
-        use crate::broker::BrokerState;
-        use crate::broker::delivery::{agent_status_snapshot, publish_message};
-        use crate::broker::messages::{ArtifactPayload, BrokerMessage, StatusPayload};
-        use std::sync::Arc;
-
-        let state = Arc::new(BrokerState::new(None));
-        state.set_republish_working_ttl(Duration::ZERO);
-        publish_message(
-            &state,
-            &BrokerMessage::Artifact {
-                agent_id: "feat-y".to_string(),
-                payload: ArtifactPayload {
-                    status: "committed".to_string(),
-                    exports: vec![],
-                    modified_files: vec![],
-                },
-            },
-        );
-        publish_message(
-            &state,
-            &BrokerMessage::Status {
-                agent_id: "feat-y".to_string(),
-                payload: StatusPayload {
-                    status: "working".to_string(),
-                    modified_files: vec!["src/lib.rs".to_string()],
-                    message: None,
-                    ..Default::default()
-                },
-            },
-        );
-        let snap = agent_status_snapshot(&state);
-        let rows = format_agent_rows(&snap, Instant::now());
-        let row = rows.iter().find(|r| r.agent_id == "feat-y").unwrap();
-        assert!(
-            row.status.contains("committed"),
-            "with TTL=0 the dashboard row must stay committed, got {:?}",
-            row.status
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Phase-aware status rendering (tasks 5.4, 5.5)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn format_agent_rows_prefers_phase_over_status_for_supervisor() {
-        let now = Instant::now();
-        let agents = vec![AgentStatusEntry {
-            agent_id: "supervisor".to_string(),
-            cli: "claude".to_string(),
-            status: "feedback".to_string(),
-            last_seen: now,
-            last_seen_seconds: 0,
-            phase: Some("merging".to_string()),
-        }];
-        let rows = format_agent_rows(&agents, now);
-        assert_eq!(rows.len(), 1);
-        assert!(
-            rows[0].status.contains("merging"),
-            "expected phase 'merging' in status field; got {:?}",
-            rows[0].status,
-        );
-        assert!(
-            !rows[0].status.contains("feedback"),
-            "phase must replace status label, not append; got {:?}",
-            rows[0].status,
-        );
-    }
-
-    #[test]
-    fn format_agent_rows_falls_back_to_status_when_phase_is_none() {
-        let now = Instant::now();
-        let agents = vec![AgentStatusEntry {
-            agent_id: "feat-broker".to_string(),
-            cli: "claude".to_string(),
-            status: "working".to_string(),
-            last_seen: now,
-            last_seen_seconds: 0,
-            phase: None,
-        }];
-        let rows = format_agent_rows(&agents, now);
-        assert!(
-            rows[0].status.contains("working"),
-            "expected 'working' in status field; got {:?}",
-            rows[0].status,
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // supervisor-introspection: phase honoured for supervisor row only
-    // (tasks 3.1 - 3.4)
-    // -----------------------------------------------------------------------
-
-    /// Builds an entry with an explicit phase for the introspection tests.
-    fn entry_with_phase(agent_id: &str, status: &str, phase: Option<&str>) -> AgentStatusEntry {
-        AgentStatusEntry {
-            agent_id: agent_id.to_string(),
-            cli: "claude".to_string(),
-            status: status.to_string(),
-            last_seen: Instant::now(),
-            last_seen_seconds: 0,
-            phase: phase.map(str::to_string),
-        }
-    }
-
-    #[test]
-    fn format_agent_rows_supervisor_shows_introspection_phase() {
-        // Scenario: supervisor row shows phase when present.
-        let now = Instant::now();
-        let agents = vec![entry_with_phase("supervisor", "working", Some("audit"))];
-        let rows = format_agent_rows(&agents, now);
-        assert!(
-            rows[0].status.contains("audit"),
-            "supervisor row must surface the introspection phase; got {:?}",
-            rows[0].status,
-        );
-    }
-
-    #[test]
-    fn format_agent_rows_supervisor_falls_back_when_phase_absent() {
-        // Scenario: supervisor row falls back to the status label when phase
-        // absent (v0.5.0 layout preserved).
-        let now = Instant::now();
-        let agents = vec![entry_with_phase("supervisor", "working", None)];
-        let rows = format_agent_rows(&agents, now);
-        assert!(
-            rows[0].status.contains("working"),
-            "without a phase the supervisor row renders the status label; got {:?}",
-            rows[0].status,
-        );
-    }
-
-    #[test]
-    fn format_agent_rows_non_supervisor_ignores_phase() {
-        // Scenario: non-supervisor agent rows unchanged — a coding agent that
-        // set a phase still renders as v0.5.0 (phase ignored).
-        let now = Instant::now();
-        let agents = vec![entry_with_phase("feat-auth", "working", Some("audit"))];
-        let rows = format_agent_rows(&agents, now);
-        assert!(
-            rows[0].status.contains("working"),
-            "a coding agent's phase must be ignored; got {:?}",
-            rows[0].status,
-        );
-        assert!(
-            !rows[0].status.contains("audit"),
-            "the introspection phase must not leak onto a coding-agent row; got {:?}",
-            rows[0].status,
-        );
-    }
-
-    #[test]
-    fn format_agent_rows_non_supervisor_still_shows_stuck_on_prompt() {
-        // The one documented exception: the supervisor-published
-        // `stuck-on-prompt` alert targets the coding agent's row by design and
-        // must remain visible there.
-        let now = Instant::now();
-        let agents = vec![entry_with_phase(
-            "feat-auth",
-            "working",
-            Some(STUCK_ON_PROMPT_PHASE),
-        )];
-        let rows = format_agent_rows(&agents, now);
-        assert!(
-            rows[0].status.contains(STUCK_ON_PROMPT_PHASE),
-            "the supervisor-authored stuck-on-prompt alert must surface on the \
-             coding-agent row; got {:?}",
-            rows[0].status,
-        );
-    }
-
-    #[test]
-    fn format_agent_rows_supervisor_phase_snapshot_layout() {
-        // Snapshot: supervisor row with `phase` present renders the exact
-        // `{symbol} {phase}` status field; without `phase` it matches the
-        // v0.5.0 `{symbol} {status}` layout.
-        let now = Instant::now();
-        let with_phase = format_agent_rows(
-            &[entry_with_phase("supervisor", "feedback", Some("merge"))],
-            now,
-        );
-        assert_eq!(with_phase[0].status, "⚪ merge");
-
-        let without_phase =
-            format_agent_rows(&[entry_with_phase("supervisor", "working", None)], now);
-        assert_eq!(without_phase[0].status, "🔵 working");
-    }
-
-    // -----------------------------------------------------------------------
-    // arrange_with_supervisor_pinned (tasks 4.4 - 4.6)
-    // -----------------------------------------------------------------------
-
-    fn agent_row(id: &str) -> AgentRow {
-        AgentRow {
-            agent_id: id.to_string(),
-            cli: "claude".to_string(),
-            status: "🔵 working".to_string(),
-            age: "0s ago".to_string(),
-        }
-    }
-
-    #[test]
-    fn arrange_with_supervisor_pinned_yields_supervisor_then_divider_then_coding() {
-        let rows = vec![
-            agent_row("feat-broker"),
-            agent_row("feat-dashboard"),
-            agent_row("supervisor"),
-        ];
-        let arranged = arrange_with_supervisor_pinned(rows);
-        assert_eq!(arranged.len(), 4, "supervisor + divider + 2 coding agents");
-        assert!(
-            matches!(&arranged[0], AgentTableRow::Agent(r) if r.agent_id == "supervisor"),
-            "supervisor must be at row 0; got {:?}",
-            arranged[0]
-        );
-        assert_eq!(
-            arranged[1],
-            AgentTableRow::Divider,
-            "divider must immediately follow supervisor"
-        );
-        assert!(matches!(&arranged[2], AgentTableRow::Agent(r) if r.agent_id == "feat-broker"),);
-        assert!(matches!(&arranged[3], AgentTableRow::Agent(r) if r.agent_id == "feat-dashboard"),);
-    }
-
-    #[test]
-    fn arrange_with_supervisor_pinned_emits_no_divider_when_supervisor_absent() {
-        let rows = vec![agent_row("feat-broker"), agent_row("feat-dashboard")];
-        let arranged = arrange_with_supervisor_pinned(rows);
-        assert_eq!(arranged.len(), 2);
-        for row in &arranged {
-            assert!(
-                !matches!(row, AgentTableRow::Divider),
-                "no divider when supervisor is absent; got {row:?}"
-            );
-        }
-        assert!(matches!(&arranged[0], AgentTableRow::Agent(r) if r.agent_id == "feat-broker"));
-        assert!(matches!(&arranged[1], AgentTableRow::Agent(r) if r.agent_id == "feat-dashboard"));
-    }
-
-    #[test]
-    fn arrange_with_supervisor_pinned_empty_input_yields_empty_output() {
-        let arranged = arrange_with_supervisor_pinned(Vec::new());
-        assert!(arranged.is_empty());
-    }
-
-    #[test]
-    fn supervisor_row_appears_above_coding_rows_in_rendered_frame() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        // Construct three formatted rows with snapshot already in
-        // alphabetical order (this matches what agent_status_snapshot
-        // emits before pinning). The pinning happens inside draw_frame.
-        let rows = vec![
-            agent_row("feat-broker"),
-            agent_row("feat-dashboard"),
-            agent_row("supervisor"),
-        ];
-
-        let backend = TestBackend::new(140, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| draw_frame(f, &rows, "3 agents", &hidden_log(), default_panel_height()))
-            .unwrap();
-
-        // Flatten the buffer to a single string so we can check row order
-        // by substring positions across the rendered output.
-        let buffer = terminal.backend().buffer().clone();
-        let mut rendered = String::new();
-        for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                rendered.push_str(buffer[(x, y)].symbol());
-            }
-            rendered.push('\n');
-        }
-
-        let pos_supervisor = rendered
-            .find("supervisor")
-            .expect("supervisor row should be in rendered frame");
-        let pos_broker = rendered
-            .find("feat-broker")
-            .expect("feat-broker row should be in rendered frame");
-        let pos_dashboard = rendered
-            .find("feat-dashboard")
-            .expect("feat-dashboard row should be in rendered frame");
-        assert!(
-            pos_supervisor < pos_broker && pos_supervisor < pos_dashboard,
-            "supervisor row must render above coding-agent rows; supervisor@{pos_supervisor}, broker@{pos_broker}, dashboard@{pos_dashboard}",
-        );
-
-        // A divider row containing horizontal-line characters appears
-        // between the supervisor row and the first coding-agent row.
-        let pos_divider = rendered[pos_supervisor..]
-            .find('─')
-            .map(|p| pos_supervisor + p)
-            .expect("divider row should contain horizontal-line characters");
-        assert!(
-            pos_divider > pos_supervisor && pos_divider < pos_broker,
-            "divider must render between supervisor and first coding row; divider@{pos_divider}, supervisor@{pos_supervisor}, broker@{pos_broker}",
-        );
-    }
-
-    #[test]
-    fn header_row_has_four_columns_and_no_summary() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        // Scenario: Table has a header row. With at least one agent rendered,
-        // the header must label exactly Agent, CLI, Status, Last Update and
-        // must NOT contain a Summary column (the dead column was removed).
-        let rows = vec![agent_row("feat-broker")];
-
-        let backend = TestBackend::new(140, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| draw_frame(f, &rows, "1 agent", &hidden_log(), default_panel_height()))
-            .unwrap();
-
-        let buffer = terminal.backend().buffer().clone();
-        let mut rendered = String::new();
-        for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                rendered.push_str(buffer[(x, y)].symbol());
-            }
-            rendered.push('\n');
-        }
-
-        for label in ["Agent", "CLI", "Status", "Last Update"] {
-            assert!(
-                rendered.contains(label),
-                "header must contain the {label:?} column label; got:\n{rendered}",
-            );
-        }
-        assert!(
-            !rendered.contains("Summary"),
-            "header must NOT contain a 'Summary' column label; got:\n{rendered}",
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // format_status_line
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn format_status_line_formats_each_count_mix() {
-        // One row per count mix: mixed, all-done, zero-agents, and with a
-        // non-zero committed tally.
-        for (total, working, done, blocked, committed, expected) in [
-            (
-                4,
-                2,
-                1,
-                1,
-                0,
-                "4 agents: 2 working, 1 done, 1 blocked, 0 committed",
-            ),
-            (
-                3,
-                0,
-                3,
-                0,
-                0,
-                "3 agents: 0 working, 3 done, 0 blocked, 0 committed",
-            ),
-            (
-                0,
-                0,
-                0,
-                0,
-                0,
-                "0 agents: 0 working, 0 done, 0 blocked, 0 committed",
-            ),
-            (
-                5,
-                2,
-                1,
-                1,
-                1,
-                "5 agents: 2 working, 1 done, 1 blocked, 1 committed",
-            ),
-        ] {
-            assert_eq!(
-                format_status_line(total, working, done, blocked, committed),
-                expected,
-                "input: total={total} working={working} done={done} blocked={blocked} committed={committed}"
-            );
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Prompt-inbox removal (tasks 6.8, 6.9)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn rendered_frame_contains_no_questions_or_reply_input() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let backend = TestBackend::new(140, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| draw_frame(f, &[], "0 agents", &hidden_log(), default_panel_height()))
-            .unwrap();
-
-        let buffer = terminal.backend().buffer().clone();
-        let mut rendered = String::new();
-        for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                rendered.push_str(buffer[(x, y)].symbol());
-            }
-            rendered.push('\n');
-        }
-
-        assert!(
-            !rendered.contains("Questions ("),
-            "dashboard MUST NOT render a 'Questions (' prompt-inbox header; got:\n{rendered}",
-        );
-        assert!(
-            !rendered.contains("Reply to"),
-            "dashboard MUST NOT render a 'Reply to' input prompt; got:\n{rendered}",
-        );
-    }
-
     // supervisor-as-pane[-followups] dashboard input contract.
     //
     // After the prompt-inbox removal in v0.5.0 the dashboard has no
@@ -1537,257 +596,223 @@ mod tests {
         );
     }
 
-    #[test]
-    fn layout_collapses_without_message_log() {
-        // With show_message_log = false the layout is three segments
-        // (title, agent table, status line). The pre-inbox-removal shape
-        // had 5 or 6 segments — a regression to that would imply the
-        // prompt-inbox panel is back.
-        let constraints = build_layout_constraints(false, default_panel_height());
-        assert_eq!(
-            constraints.len(),
-            3,
-            "layout without message log must be exactly 3 segments (title, table, status), got {} constraints",
-            constraints.len(),
-        );
+    // -----------------------------------------------------------------------
+    // Model / update (MVU)
+    //
+    // Every assertion below runs with no terminal attached, which is the point:
+    // `update` applies exactly the mutation the pre-refactor loop performed
+    // inline, and it does so purely.
+    // -----------------------------------------------------------------------
 
-        // With show_message_log = true the layout adds the messages
-        // panel as a 4th segment. Asserting both shapes catches the case
-        // where the helper accidentally drops the messages panel or
-        // grows a spurious 5th segment.
-        let with_log = build_layout_constraints(true, default_panel_height());
-        assert_eq!(
-            with_log.len(),
-            4,
-            "layout with message log must be exactly 4 segments, got {} constraints",
-            with_log.len(),
-        );
-
-        // The panel segment is the new configurable height, no longer the
-        // v0.6.0 fixed `Length(12)`.
-        assert_eq!(
-            with_log[3],
-            Constraint::Length(default_panel_height()),
-            "the broker-log panel segment must be the configured height, not the old fixed 12",
-        );
+    /// The production default panel height (`[dashboard.broker_log]
+    /// height_lines`), so the constructed Models match the launcher's.
+    fn default_panel_height() -> u16 {
+        crate::config::BrokerLogConfig::default().height_lines
     }
 
-    #[test]
-    fn visible_panel_default_height_exceeds_twelve() {
-        // Task 3.1 / spec "Visible panel gets more than twelve rows by
-        // default": with the default height the panel segment is a fixed
-        // `Length` strictly greater than the v0.6.0 fixed 12. We assert the
-        // computed constraint, not pixels (the TUI draw loop is
-        // coverage-exempt).
-        let constraints = build_layout_constraints(true, default_panel_height());
-        let panel = constraints[3];
-        match panel {
-            Constraint::Length(n) => assert!(
-                n > 12,
-                "default panel height must be strictly greater than 12, got {n}",
-            ),
-            other => panic!("panel segment must be a Length constraint, got {other:?}"),
+    /// Builds a status entry seen `0s` ago, for the snapshot transitions.
+    fn entry(agent_id: &str, status: &str) -> AgentStatusEntry {
+        AgentStatusEntry {
+            agent_id: agent_id.to_string(),
+            cli: "claude".to_string(),
+            status: status.to_string(),
+            last_seen: Instant::now(),
+            last_seen_seconds: 0,
+            phase: None,
         }
     }
 
-    #[test]
-    fn configured_height_sets_panel_segment_length() {
-        // Task 3.2 / spec "Configured height_lines sets the panel height":
-        // an explicit height is reflected exactly in the panel segment.
-        let constraints = build_layout_constraints(true, 24);
-        assert_eq!(
-            constraints[3],
-            Constraint::Length(24),
-            "configured height_lines must size the panel segment exactly",
-        );
-    }
-
-    #[test]
-    fn agent_table_keeps_positive_minimum() {
-        // Task 3.3 / spec "Agent table keeps a positive minimum height": the
-        // table segment is a `Min` with a positive lower bound, so the
-        // enlarged panel cannot starve it (ratatui honours `Min` before the
-        // panel's `Length`).
-        let constraints = build_layout_constraints(true, default_panel_height());
-        match constraints[1] {
-            Constraint::Min(m) => assert!(
-                m > 0,
-                "agent-table segment must keep a positive minimum height, got Min({m})",
-            ),
-            other => panic!("agent-table segment must be a Min constraint, got {other:?}"),
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Broker log layout integration (tasks 5.1-5.3)
-    // -----------------------------------------------------------------------
-
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-    use ratatui::buffer::Buffer;
-
-    fn draw_to_buffer(rows: &[AgentRow], status: &str, log: &broker_log::BrokerLog) -> Buffer {
-        let backend = TestBackend::new(120, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| draw_frame(f, rows, status, log, default_panel_height()))
-            .unwrap();
-        terminal.backend().buffer().clone()
-    }
-
-    fn sample_log_entry(seq: u64) -> broker_log::LogEntry {
+    /// Builds a broker-log entry for the ingest transitions.
+    fn log_entry(seq: u64, agent_id: &str) -> LogEntry {
         (
             seq,
             std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(seq),
             crate::broker::messages::BrokerMessage::Status {
-                agent_id: "feat-auth".to_string(),
+                agent_id: agent_id.to_string(),
                 payload: crate::broker::messages::StatusPayload {
                     status: "working".to_string(),
                     modified_files: vec![],
-                    message: Some("rebasing onto main".to_string()),
+                    message: Some(format!("msg-{seq}")),
                     ..Default::default()
                 },
             },
         )
     }
 
-    fn log_entry_with_message(seq: u64, msg: &str) -> broker_log::LogEntry {
-        (
-            seq,
-            std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(seq),
-            crate::broker::messages::BrokerMessage::Status {
-                agent_id: "feat-auth".to_string(),
-                payload: crate::broker::messages::StatusPayload {
-                    status: "working".to_string(),
-                    modified_files: vec![],
-                    message: Some(msg.to_string()),
-                    ..Default::default()
-                },
+    #[test]
+    fn model_new_mirrors_the_loops_initial_state() {
+        // Before its first iteration the pre-refactor loop had no rows, no
+        // status line, a freshly constructed Broker log, and no quit signal.
+        let model = Model::new(500, true, default_panel_height());
+        assert!(model.rows.is_empty(), "no rows before the first snapshot");
+        assert!(
+            model.status_line.is_empty(),
+            "no status line before the first snapshot"
+        );
+        assert!(!model.quit, "the loop does not start in the quit state");
+        assert_eq!(model.panel_height, default_panel_height());
+        assert!(
+            model.broker_log.visible,
+            "the log's initial visibility comes from `default_visible`"
+        );
+        assert_eq!(model.broker_log.capacity(), 500);
+        assert_eq!(model.broker_log.len(), 0);
+        assert_eq!(model.broker_log.last_seq(), 0);
+    }
+
+    #[test]
+    fn update_quit_key_sets_the_quit_flag() {
+        // Pre-refactor, `q` fell through the panel as `Ignored` and hit
+        // `should_quit`, which returned from the loop. The Model's quit flag is
+        // that same decision, made without a terminal to restore.
+        let mut model = Model::new(500, false, default_panel_height());
+        update(&mut model, Msg::Key(KeyCode::Char('q')));
+        assert!(model.quit, "`q` must set the quit flag");
+    }
+
+    #[test]
+    fn update_key_the_panel_claims_does_not_quit() {
+        // `l` toggles the panel and reports `Handled`, so the quit check is
+        // never consulted — exactly as the pre-refactor short-circuit did.
+        let mut model = Model::new(500, false, default_panel_height());
+        update(&mut model, Msg::Key(KeyCode::Char('l')));
+        assert!(
+            model.broker_log.visible,
+            "`l` must toggle the panel through `update`"
+        );
+        assert!(!model.quit, "a panel-claimed key must not quit");
+    }
+
+    #[test]
+    fn update_key_neither_the_panel_nor_quit_claims_is_inert() {
+        // Keys the panel ignores and `should_quit` rejects leave the Model
+        // untouched — the dashboard has no buffer to accumulate them into.
+        let mut model = Model::new(500, false, default_panel_height());
+        for code in [KeyCode::Tab, KeyCode::Char('z'), KeyCode::Char(' ')] {
+            update(&mut model, Msg::Key(code));
+            assert!(!model.quit, "{code:?} must not quit the dashboard");
+            assert!(
+                !model.broker_log.visible,
+                "{code:?} must not touch the panel"
+            );
+            assert!(model.rows.is_empty(), "{code:?} must not touch the rows");
+        }
+    }
+
+    #[test]
+    fn update_snapshot_derives_the_same_rows_and_status_line_as_the_inline_recompute() {
+        // The pre-refactor loop called `format_agent_rows`, tallied the four
+        // status buckets, and built the status line inline. The `Snapshot`
+        // message must produce byte-identical results.
+        let agents = vec![
+            entry("supervisor", "working"),
+            entry("feat-a", "done"),
+            entry("feat-b", "blocked"),
+            entry("feat-c", "committed"),
+            entry("feat-d", "verified"),
+        ];
+        let now = Instant::now();
+        let expected_rows = format_agent_rows(&agents, now);
+        // total=5, working=1, done+verified=2, blocked=1, committed=1.
+        let expected_status_line = format_status_line(5, 1, 2, 1, 1);
+
+        let mut model = Model::new(500, false, default_panel_height());
+        update(&mut model, Msg::Snapshot { agents, now });
+
+        assert_eq!(
+            model.rows, expected_rows,
+            "the snapshot must yield the same rows the loop computed inline"
+        );
+        assert_eq!(
+            model.status_line, expected_status_line,
+            "the snapshot must yield the same counters the loop computed inline"
+        );
+    }
+
+    #[test]
+    fn update_snapshot_replaces_rather_than_accumulates_rows() {
+        // Each tick re-derived the rows from scratch; a second snapshot must
+        // not append to the previous one.
+        let mut model = Model::new(500, false, default_panel_height());
+        update(
+            &mut model,
+            Msg::Snapshot {
+                agents: vec![entry("feat-a", "working"), entry("feat-b", "working")],
+                now: Instant::now(),
             },
-        )
-    }
-
-    fn buffer_text(buffer: &Buffer) -> String {
-        let mut rendered = String::new();
-        for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                rendered.push_str(buffer[(x, y)].symbol());
-            }
-            rendered.push('\n');
-        }
-        rendered
-    }
-
-    #[test]
-    fn scrolling_reaches_messages_beyond_the_first_screen() {
-        // Bug: a plain List with no offset only ever showed the first
-        // screenful. With stateful-list scrolling, moving the selection to the
-        // bottom must scroll the viewport so the oldest message becomes visible.
-        let rows = vec![agent_row("feat-auth")];
-        let mut log = BrokerLog::new(500, true);
-        // 40 distinct messages; push_front means msg-00 ends up at the bottom.
-        for i in 0..40 {
-            log.push(log_entry_with_message(i, &format!("scroll-msg-{i:02}")));
-        }
-        // At offset 0 the oldest (scroll-msg-00) is off-screen.
-        let at_top = buffer_text(&draw_to_buffer(&rows, "1 agents", &log));
-        assert!(
-            !at_top.contains("scroll-msg-00"),
-            "precondition: the oldest message should be off-screen before scrolling; got:\n{at_top}"
         );
-        // Move the selection to the bottom row.
-        for _ in 0..39 {
-            log.select_down();
-        }
-        let scrolled = buffer_text(&draw_to_buffer(&rows, "1 agents", &log));
-        assert!(
-            scrolled.contains("scroll-msg-00"),
-            "scrolling to the bottom must reveal the oldest message; got:\n{scrolled}"
+        assert_eq!(model.rows.len(), 2);
+
+        update(
+            &mut model,
+            Msg::Snapshot {
+                agents: vec![entry("feat-a", "done")],
+                now: Instant::now(),
+            },
         );
-    }
-
-    #[test]
-    fn hidden_panel_status_line_shows_restore_hint() {
-        let rows = vec![agent_row("feat-auth")];
-        let log = BrokerLog::new(500, false); // hidden
-        let rendered = buffer_text(&draw_to_buffer(&rows, "1 agents", &log));
-        assert!(
-            rendered.contains("press l to show"),
-            "hidden panel must hint the `l` toggle in the status line; got:\n{rendered}"
-        );
-        assert!(
-            !rendered.contains("Broker log ("),
-            "hidden panel must not render the panel title region; got:\n{rendered}"
-        );
-    }
-
-    #[test]
-    fn hidden_panel_layout_is_byte_equivalent_regardless_of_buffer_contents() {
-        // Task 5.3: with the panel hidden, the rendered frame must match the
-        // v0.5.0 post-inbox-removal layout — i.e. the Broker log must have
-        // zero effect on the rendered bytes. We prove this by rendering a
-        // hidden panel with an empty buffer and a hidden panel holding many
-        // messages: the buffers must be byte-identical.
-        let rows = vec![agent_row("feat-auth"), agent_row("feat-db")];
-
-        let empty = BrokerLog::new(500, false);
-        let mut full = BrokerLog::new(500, false);
-        for i in 1..=50 {
-            full.push(sample_log_entry(i));
-        }
-
-        let buf_empty = draw_to_buffer(&rows, "2 agents", &empty);
-        let buf_full = draw_to_buffer(&rows, "2 agents", &full);
         assert_eq!(
-            buf_empty, buf_full,
-            "a hidden Broker log must not alter the rendered frame regardless of buffered messages",
+            model.rows.len(),
+            1,
+            "a snapshot replaces the derived rows, it does not accumulate"
         );
+        assert_eq!(model.status_line, format_status_line(1, 0, 1, 0, 0));
     }
 
     #[test]
-    fn visible_panel_renders_broker_log_region() {
-        // Tasks 5.1/5.2: when visible the panel occupies the fourth segment
-        // and renders its titled region with the buffered row.
-        let rows = vec![agent_row("feat-auth")];
-        let mut log = BrokerLog::new(500, true);
-        log.push(sample_log_entry(1));
+    fn update_broker_ingest_appends_the_same_entries_as_a_direct_ingest() {
+        // The pre-refactor loop called `broker_log.ingest(...)` directly. The
+        // `BrokerIngest` message must leave the log in the same state, cursor
+        // included.
+        let entries = vec![log_entry(1, "feat-a"), log_entry(2, "feat-b")];
 
-        let buffer = draw_to_buffer(&rows, "1 agents", &log);
-        let mut rendered = String::new();
-        for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                rendered.push_str(buffer[(x, y)].symbol());
-            }
-            rendered.push('\n');
-        }
-        assert!(
-            rendered.contains("Broker log"),
-            "visible panel must render its titled region; got:\n{rendered}",
-        );
-        assert!(
-            rendered.contains("rebasing onto main"),
-            "visible panel must render the buffered message summary; got:\n{rendered}",
-        );
-    }
+        let mut model = Model::new(500, true, default_panel_height());
+        update(&mut model, Msg::BrokerIngest(entries.clone()));
 
-    #[test]
-    fn toggling_visibility_returns_to_hidden_layout() {
-        // Toggling the panel off via the `l` key must restore the exact
-        // hidden-layout bytes (round-trip safety for the toggle hotkey).
-        let rows = vec![agent_row("feat-auth")];
-        let mut log = BrokerLog::new(500, false);
-        log.push(sample_log_entry(1));
-        let hidden_before = draw_to_buffer(&rows, "1 agents", &log);
-
-        broker_log::handle_key(&mut log, KeyCode::Char('l')); // show
-        assert!(log.visible);
-        broker_log::handle_key(&mut log, KeyCode::Char('l')); // hide again
-        assert!(!log.visible);
-        let hidden_after = draw_to_buffer(&rows, "1 agents", &log);
+        let mut expected = BrokerLog::new(500, true);
+        expected.ingest(entries);
 
         assert_eq!(
-            hidden_before, hidden_after,
-            "hiding the panel again must reproduce the hidden layout exactly",
+            model.broker_log.last_seq(),
+            expected.last_seq(),
+            "the ingest must advance the seq cursor identically"
+        );
+        assert_eq!(
+            model.broker_log.iter_visible().collect::<Vec<_>>(),
+            expected.iter_visible().collect::<Vec<_>>(),
+            "the ingest must append the same rows the loop appended"
+        );
+    }
+
+    #[test]
+    fn update_is_pure_and_needs_no_terminal() {
+        // Purity, asserted behaviourally: two independently constructed Models
+        // driven through the identical message sequence end in the same
+        // observable state — and every one of these calls runs with no
+        // terminal, no tty, and no process spawned.
+        let now = Instant::now();
+        let agents = vec![entry("feat-a", "working"), entry("supervisor", "blocked")];
+        let entries = vec![log_entry(1, "feat-a")];
+
+        let mut first = Model::new(500, true, default_panel_height());
+        let mut second = Model::new(500, true, default_panel_height());
+        for model in [&mut first, &mut second] {
+            update(
+                model,
+                Msg::Snapshot {
+                    agents: agents.clone(),
+                    now,
+                },
+            );
+            update(model, Msg::BrokerIngest(entries.clone()));
+            update(model, Msg::Key(KeyCode::Char('q')));
+        }
+
+        assert_eq!(first.rows, second.rows);
+        assert_eq!(first.status_line, second.status_line);
+        assert_eq!(first.quit, second.quit);
+        assert_eq!(
+            first.broker_log.iter_visible().collect::<Vec<_>>(),
+            second.broker_log.iter_visible().collect::<Vec<_>>(),
         );
     }
 }
