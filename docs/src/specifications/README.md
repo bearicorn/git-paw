@@ -105,6 +105,10 @@ have no user-guide chapter: the spec itself is their documentation.
 - [`cli-resolution`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/cli-resolution/spec.md) — detects AI coding CLIs on PATH, merges user-defined custom CLIs, and resolves which CLI each branch uses via a priority chain.
 - [`cli-interactive-selection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/cli-interactive-selection/spec.md) — interactive prompts for choosing branches and CLIs (uniform or per-branch), with logic separated from UI via the `Prompter` trait.
 
+### code-
+
+- [`code-architecture`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/code-architecture/spec.md) — the enforceable structural and regression contract for behavior-preserving refactors: byte-identical observable surface (CLI/config/wire), injectable process/tmux/git seam, single newtype construction boundary, domain-module organization with preserved re-exports, frozen serde/wire/lock/SIGHUP surfaces untouched, and test-gated waves.
+
 ### git-
 
 - [`git-operations`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/git-operations/spec.md) — validates repos, lists branches, creates/removes worktrees, and derives worktree directory names — the git plumbing under parallel sessions.
