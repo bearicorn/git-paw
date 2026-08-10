@@ -2,11 +2,30 @@
 //!
 //! Validates git repositories, lists branches, creates and removes worktrees,
 //! and derives worktree directory names from project and branch names.
+//!
+//! Every git invocation here goes through the [`CommandRunner`] seam. Each
+//! public entry point keeps its original signature and delegates to a
+//! `*_with(runner, …)` sibling wired to [`RealCommandRunner`], so callers are
+//! untouched while the argv and the success/failure branches become assertable
+//! without spawning a real `git` (`git-command-runner-seam` D1). The real runner
+//! performs exactly what the previous inline `Command::new("git")` calls did.
+//!
+//! # Working directory
+//!
+//! Every call here targets a specific repository or worktree, which the inline
+//! calls expressed as `Command::current_dir(<path>)`. [`CommandRunner`] models
+//! only `(program, argv)`, so the same working directory is carried as a leading
+//! `-C <path>` — git chdirs there before anything else, so the effective
+//! behaviour (repo discovery, relative pathspecs, inherited env) is unchanged
+//! (`git-command-runner-seam` D2). Paths enter argv via
+//! [`Path::to_string_lossy`]; in practice every path git-paw handles is already
+//! UTF-8, because the repository root it derives them from is itself decoded
+//! lossily out of `git rev-parse --show-toplevel` in [`validate_repo`].
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
+use crate::command_runner::{CommandRunner, RealCommandRunner};
 use crate::config::WorktreePlacement;
 use crate::domain::WorktreePath;
 use crate::error::PawError;
@@ -16,13 +35,20 @@ use crate::specs::SpecEntry;
 ///
 /// Returns the absolute path to the repository root.
 pub fn validate_repo(path: &Path) -> Result<PathBuf, PawError> {
-    let output = Command::new("git")
-        .current_dir(path)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
+    validate_repo_with(&RealCommandRunner, path)
+}
+
+/// [`validate_repo`] against an injected runner.
+pub(crate) fn validate_repo_with(
+    runner: &dyn CommandRunner,
+    path: &Path,
+) -> Result<PathBuf, PawError> {
+    let cwd = path.to_string_lossy();
+    let output = runner
+        .run("git", &["-C", &cwd, "rev-parse", "--show-toplevel"])
         .map_err(|e| PawError::BranchError(format!("failed to run git: {e}")))?;
 
-    if !output.status.success() {
+    if !output.success {
         return Err(PawError::NotAGitRepo);
     }
 
@@ -37,13 +63,23 @@ pub fn validate_repo(path: &Path) -> Result<PathBuf, PawError> {
 /// exists both locally and remotely, only one entry appears. `HEAD` pointers
 /// are excluded.
 pub fn list_branches(repo_root: &Path) -> Result<Vec<String>, PawError> {
-    let output = Command::new("git")
-        .current_dir(repo_root)
-        .args(["branch", "-a", "--format=%(refname:short)"])
-        .output()
+    list_branches_with(&RealCommandRunner, repo_root)
+}
+
+/// [`list_branches`] against an injected runner.
+pub(crate) fn list_branches_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+) -> Result<Vec<String>, PawError> {
+    let cwd = repo_root.to_string_lossy();
+    let output = runner
+        .run(
+            "git",
+            &["-C", &cwd, "branch", "-a", "--format=%(refname:short)"],
+        )
         .map_err(|e| PawError::BranchError(format!("failed to run git branch: {e}")))?;
 
-    if !output.status.success() {
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(PawError::BranchError(format!(
             "git branch failed: {stderr}"
@@ -107,13 +143,23 @@ pub fn branch_slug(branch: &str) -> String {
 
 /// Returns the name of the default branch (usually "main" or "master").
 pub fn default_branch(repo_root: &Path) -> Result<String, PawError> {
-    let output = Command::new("git")
-        .current_dir(repo_root)
-        .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
-        .output()
+    default_branch_with(&RealCommandRunner, repo_root)
+}
+
+/// [`default_branch`] against an injected runner.
+pub(crate) fn default_branch_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+) -> Result<String, PawError> {
+    let cwd = repo_root.to_string_lossy();
+    let output = runner
+        .run(
+            "git",
+            &["-C", &cwd, "symbolic-ref", "refs/remotes/origin/HEAD"],
+        )
         .map_err(|e| PawError::BranchError(format!("failed to run git symbolic-ref: {e}")))?;
 
-    if !output.status.success() {
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(PawError::BranchError(format!(
             "git symbolic-ref failed: {stderr}"
@@ -132,13 +178,20 @@ pub fn default_branch(repo_root: &Path) -> Result<String, PawError> {
 
 /// Returns the short name of the current branch (e.g., "main", "feat/add-auth").
 pub fn current_branch(repo_root: &Path) -> Result<String, PawError> {
-    let output = Command::new("git")
-        .current_dir(repo_root)
-        .args(["branch", "--show-current"])
-        .output()
+    current_branch_with(&RealCommandRunner, repo_root)
+}
+
+/// [`current_branch`] against an injected runner.
+pub(crate) fn current_branch_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+) -> Result<String, PawError> {
+    let cwd = repo_root.to_string_lossy();
+    let output = runner
+        .run("git", &["-C", &cwd, "branch", "--show-current"])
         .map_err(|e| PawError::BranchError(format!("failed to run git branch: {e}")))?;
 
-    if !output.status.success() {
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(PawError::BranchError(format!(
             "git branch failed: {stderr}"
@@ -174,13 +227,20 @@ pub struct WorktreeCreation {
 
 /// Returns the path of the worktree (main repo or any sibling worktree) that
 /// currently has `branch` checked out, if any.
-fn find_worktree_for_branch(repo_root: &Path, branch: &str) -> Result<Option<PathBuf>, PawError> {
-    let list = Command::new("git")
-        .current_dir(repo_root)
-        .args(["worktree", "list", "--porcelain"])
-        .output()
+///
+/// Private, and reached only from [`rebase_branch_onto_default_with`], which
+/// already carries a runner — so unlike the public entry points there is no
+/// no-runner wrapper to preserve.
+fn find_worktree_for_branch_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    branch: &str,
+) -> Result<Option<PathBuf>, PawError> {
+    let cwd = repo_root.to_string_lossy();
+    let list = runner
+        .run("git", &["-C", &cwd, "worktree", "list", "--porcelain"])
         .map_err(|e| PawError::WorktreeError(format!("failed to run git worktree list: {e}")))?;
-    if !list.status.success() {
+    if !list.success {
         return Ok(None);
     }
     let listing = String::from_utf8_lossy(&list.stdout);
@@ -209,47 +269,46 @@ fn find_worktree_for_branch(repo_root: &Path, branch: &str) -> Result<Option<Pat
 /// On rebase failure, runs `git rebase --abort` (best-effort), restores the
 /// main repo's HEAD if it was switched, and returns a `WorktreeError`
 /// containing git's stderr. The branch is left at its pre-rebase HEAD.
-fn rebase_branch_onto_default(repo_root: &Path, branch: &str) -> Result<(), PawError> {
-    let default = default_branch(repo_root)?;
+///
+/// Private, and reached only from [`create_worktree_with`], which already
+/// carries a runner — so unlike the public entry points there is no no-runner
+/// wrapper to preserve.
+fn rebase_branch_onto_default_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    branch: &str,
+) -> Result<(), PawError> {
+    let default = default_branch_with(runner, repo_root)?;
+    let repo_cwd = repo_root.to_string_lossy();
 
-    let occupied_at = find_worktree_for_branch(repo_root, branch)?;
+    let occupied_at = find_worktree_for_branch_with(runner, repo_root, branch)?;
     let (workdir, original_head): (PathBuf, Option<String>) = if let Some(wt) = occupied_at {
         (wt, None)
     } else {
-        let original = Command::new("git")
-            .current_dir(repo_root)
-            .args(["symbolic-ref", "--short", "HEAD"])
-            .output()
+        let original = runner
+            .run("git", &["-C", &repo_cwd, "symbolic-ref", "--short", "HEAD"])
             .ok()
-            .filter(|o| o.status.success())
+            .filter(|o| o.success)
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
         (repo_root.to_path_buf(), original)
     };
 
-    let mut invocation = Command::new("git");
-    invocation.current_dir(&workdir);
+    let workdir_cwd = workdir.to_string_lossy();
+    let mut rebase_argv: Vec<&str> = vec!["-C", &workdir_cwd, "rebase", &default];
     if original_head.is_some() {
-        invocation.args(["rebase", &default, branch]);
-    } else {
-        invocation.args(["rebase", &default]);
+        rebase_argv.push(branch);
     }
-    let output = invocation
-        .output()
+    let output = runner
+        .run("git", &rebase_argv)
         .map_err(|e| PawError::WorktreeError(format!("failed to run git rebase: {e}")))?;
 
-    if !output.status.success() {
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let _ = Command::new("git")
-            .current_dir(&workdir)
-            .args(["rebase", "--abort"])
-            .output();
+        let _ = runner.run("git", &["-C", &workdir_cwd, "rebase", "--abort"]);
         if let Some(orig) = &original_head
             && orig != branch
         {
-            let _ = Command::new("git")
-                .current_dir(repo_root)
-                .args(["checkout", orig])
-                .output();
+            let _ = runner.run("git", &["-C", &repo_cwd, "checkout", orig]);
         }
         return Err(PawError::WorktreeError(format!(
             "rebase onto main failed: {stderr}"
@@ -259,10 +318,7 @@ fn rebase_branch_onto_default(repo_root: &Path, branch: &str) -> Result<(), PawE
     if let Some(orig) = original_head
         && orig != branch
     {
-        let _ = Command::new("git")
-            .current_dir(repo_root)
-            .args(["checkout", &orig])
-            .output();
+        let _ = runner.run("git", &["-C", &repo_cwd, "checkout", &orig]);
     }
 
     Ok(())
@@ -333,7 +389,25 @@ pub fn create_worktree(
     rebase_onto_main: bool,
     placement: WorktreePlacement,
 ) -> Result<WorktreeCreation, PawError> {
+    create_worktree_with(
+        &RealCommandRunner,
+        repo_root,
+        branch,
+        rebase_onto_main,
+        placement,
+    )
+}
+
+/// [`create_worktree`] against an injected runner.
+pub(crate) fn create_worktree_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    branch: &str,
+    rebase_onto_main: bool,
+    placement: WorktreePlacement,
+) -> Result<WorktreeCreation, PawError> {
     let worktree_path = resolve_worktree_path(repo_root, branch, placement)?.into_path_buf();
+    let cwd = repo_root.to_string_lossy();
 
     // Rebase agent branch onto the repo's default branch BEFORE the
     // idempotency check. Resolves MILESTONE.md drift item 48: the supervisor
@@ -343,13 +417,12 @@ pub fn create_worktree(
     // baseline. Order matters: rebasing before the idempotency check means a
     // surviving worktree's branch ref is updated transparently on resume.
     if rebase_onto_main {
-        let branch_exists = Command::new("git")
-            .current_dir(repo_root)
-            .args(["rev-parse", "--verify", &format!("refs/heads/{branch}")])
-            .output()
-            .is_ok_and(|o| o.status.success());
+        let branch_ref = format!("refs/heads/{branch}");
+        let branch_exists = runner
+            .run("git", &["-C", &cwd, "rev-parse", "--verify", &branch_ref])
+            .is_ok_and(|o| o.success);
         if branch_exists {
-            rebase_branch_onto_default(repo_root, branch)?;
+            rebase_branch_onto_default_with(runner, repo_root, branch)?;
         }
     }
 
@@ -363,14 +436,12 @@ pub fn create_worktree(
         // (e.g. macOS's `/private/var/folders/...` vs `/var/folders/...`)
         // compares equal to the path git-paw computed for the worktree.
         let expected_canonical = std::fs::canonicalize(&worktree_path).ok();
-        let list = Command::new("git")
-            .current_dir(repo_root)
-            .args(["worktree", "list", "--porcelain"])
-            .output()
+        let list = runner
+            .run("git", &["-C", &cwd, "worktree", "list", "--porcelain"])
             .map_err(|e| {
                 PawError::WorktreeError(format!("failed to run git worktree list: {e}"))
             })?;
-        if list.status.success() {
+        if list.success {
             let listing = String::from_utf8_lossy(&list.stdout);
             let expected_branch_ref = format!("refs/heads/{branch}");
             // Parse porcelain blocks separated by blank lines. Each block has
@@ -399,13 +470,12 @@ pub fn create_worktree(
     }
 
     // Try with existing branch first.
-    let output = Command::new("git")
-        .current_dir(repo_root)
-        .args(["worktree", "add", &worktree_path.to_string_lossy(), branch])
-        .output()
+    let target = worktree_path.to_string_lossy();
+    let output = runner
+        .run("git", &["-C", &cwd, "worktree", "add", &target, branch])
         .map_err(|e| PawError::WorktreeError(format!("failed to run git worktree add: {e}")))?;
 
-    if output.status.success() {
+    if output.success {
         return Ok(WorktreeCreation {
             path: worktree_path,
             branch_created: false,
@@ -416,21 +486,16 @@ pub fn create_worktree(
 
     // If the branch doesn't exist, create it with -b.
     if stderr.contains("invalid reference") {
-        let output = Command::new("git")
-            .current_dir(repo_root)
-            .args([
-                "worktree",
-                "add",
-                "-b",
-                branch,
-                &worktree_path.to_string_lossy(),
-            ])
-            .output()
+        let output = runner
+            .run(
+                "git",
+                &["-C", &cwd, "worktree", "add", "-b", branch, &target],
+            )
             .map_err(|e| {
                 PawError::WorktreeError(format!("failed to run git worktree add -b: {e}"))
             })?;
 
-        if output.status.success() {
+        if output.success {
             return Ok(WorktreeCreation {
                 path: worktree_path,
                 branch_created: true,
@@ -452,17 +517,35 @@ pub fn create_worktree(
 ///
 /// The path should be the worktree directory path, not a branch name.
 pub fn remove_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), PawError> {
+    remove_worktree_with(&RealCommandRunner, repo_root, worktree_path)
+}
+
+/// [`remove_worktree`] against an injected runner.
+///
+/// `worktree_path` reaches argv via [`Path::to_string_lossy`], so a
+/// (Unix-legal) non-UTF-8 path is passed to `git` with its invalid bytes
+/// replaced rather than verbatim — the removal then fails cleanly instead of
+/// panicking. git-paw never produces such a path itself: it derives every
+/// worktree path from a repository root that [`validate_repo`] already decoded
+/// lossily, plus an ASCII-safe [`branch_slug`].
+pub(crate) fn remove_worktree_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    worktree_path: &Path,
+) -> Result<(), PawError> {
     // Always pass --force per `git-operations/spec.md`'s "SHALL force-remove a
     // worktree" requirement. `remove_worktree` is only called from purge,
     // which is destructive by nature: an agent that produced uncommitted or
     // untracked files in its worktree would otherwise trip "contains modified
     // or untracked files, use --force to delete it" and leak the worktree on
     // disk even though the user already typed `--force` at the CLI.
-    let output = Command::new("git")
-        .current_dir(repo_root)
-        .args(["worktree", "remove", "--force"])
-        .arg(worktree_path.as_os_str())
-        .output()
+    let cwd = repo_root.to_string_lossy();
+    let target = worktree_path.to_string_lossy();
+    let output = runner
+        .run(
+            "git",
+            &["-C", &cwd, "worktree", "remove", "--force", &target],
+        )
         .map_err(|e| {
             PawError::WorktreeError(format!(
                 "failed to remove worktree at {}: {e}",
@@ -470,7 +553,7 @@ pub fn remove_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), Paw
             ))
         })?;
 
-    if !output.status.success() {
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(PawError::WorktreeError(format!(
             "git worktree remove failed for worktree at {}: {stderr}",
@@ -485,13 +568,20 @@ pub fn remove_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), Paw
 ///
 /// This should be called before creating new worktrees to avoid conflicts.
 pub fn prune_worktrees(repo_root: &Path) -> Result<(), PawError> {
-    let output = Command::new("git")
-        .current_dir(repo_root)
-        .args(["worktree", "prune"])
-        .output()
+    prune_worktrees_with(&RealCommandRunner, repo_root)
+}
+
+/// [`prune_worktrees`] against an injected runner.
+pub(crate) fn prune_worktrees_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+) -> Result<(), PawError> {
+    let cwd = repo_root.to_string_lossy();
+    let output = runner
+        .run("git", &["-C", &cwd, "worktree", "prune"])
         .map_err(|e| PawError::WorktreeError(format!("failed to prune worktrees: {e}")))?;
 
-    if !output.status.success() {
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(PawError::WorktreeError(format!(
             "git worktree prune failed: {stderr}"
@@ -515,8 +605,18 @@ pub fn check_uncommitted_specs(
     repo_root: &Path,
     specs: &[SpecEntry],
 ) -> Result<Vec<String>, PawError> {
+    check_uncommitted_specs_with(&RealCommandRunner, repo_root, specs)
+}
+
+/// [`check_uncommitted_specs`] against an injected runner.
+pub(crate) fn check_uncommitted_specs_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    specs: &[SpecEntry],
+) -> Result<Vec<String>, PawError> {
     let mut uncommitted_specs = Vec::new();
 
+    let cwd = repo_root.to_string_lossy();
     let specs_dir = repo_root.join("specs");
 
     for spec in specs {
@@ -531,10 +631,11 @@ pub fn check_uncommitted_specs(
             continue;
         };
 
-        let output = Command::new("git")
-            .current_dir(repo_root)
-            .args(["status", "--porcelain", "--", &porcelain_target])
-            .output()
+        let output = runner
+            .run(
+                "git",
+                &["-C", &cwd, "status", "--porcelain", "--", &porcelain_target],
+            )
             .map_err(|e| {
                 PawError::BranchError(format!(
                     "failed to run git status for spec {}: {e}",
@@ -542,7 +643,7 @@ pub fn check_uncommitted_specs(
                 ))
             })?;
 
-        if !output.status.success() {
+        if !output.success {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(PawError::BranchError(format!(
                 "git status failed for spec {}: {stderr}",
@@ -574,10 +675,17 @@ pub fn check_uncommitted_specs(
 /// included. An empty vec means the worktree is clean. Used by `git paw
 /// remove`'s uncommitted-work safety check (design D7).
 pub fn uncommitted_files(worktree_root: &Path) -> Result<Vec<String>, PawError> {
-    let output = Command::new("git")
-        .current_dir(worktree_root)
-        .args(["status", "--porcelain", "-z"])
-        .output()
+    uncommitted_files_with(&RealCommandRunner, worktree_root)
+}
+
+/// [`uncommitted_files`] against an injected runner.
+pub(crate) fn uncommitted_files_with(
+    runner: &dyn CommandRunner,
+    worktree_root: &Path,
+) -> Result<Vec<String>, PawError> {
+    let cwd = worktree_root.to_string_lossy();
+    let output = runner
+        .run("git", &["-C", &cwd, "status", "--porcelain", "-z"])
         .map_err(|e| {
             PawError::WorktreeError(format!(
                 "failed to run git status in {}: {e}",
@@ -585,7 +693,7 @@ pub fn uncommitted_files(worktree_root: &Path) -> Result<Vec<String>, PawError> 
             ))
         })?;
 
-    if !output.status.success() {
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(PawError::WorktreeError(format!(
             "git status failed in {}: {stderr}",
@@ -621,18 +729,29 @@ pub fn uncommitted_files(worktree_root: &Path) -> Result<Vec<String>, PawError> 
 ///
 /// Returns `true` if the merge was successful, `false` if there were conflicts.
 pub fn merge_branch(repo_root: &Path, branch: &str) -> Result<bool, PawError> {
-    let output = Command::new("git")
-        .current_dir(repo_root)
-        .args(["merge", "--no-ff", "--no-commit", branch])
-        .output()
+    merge_branch_with(&RealCommandRunner, repo_root, branch)
+}
+
+/// [`merge_branch`] against an injected runner.
+pub(crate) fn merge_branch_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    branch: &str,
+) -> Result<bool, PawError> {
+    let cwd = repo_root.to_string_lossy();
+    let output = runner
+        .run(
+            "git",
+            &["-C", &cwd, "merge", "--no-ff", "--no-commit", branch],
+        )
         .map_err(|e| {
             PawError::WorktreeError(format!("failed to run git merge for branch {branch}: {e}"))
         })?;
 
-    if !output.status.success() {
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         // Check if this is a conflict (exit code 1) vs other error
-        if output.status.code() == Some(1) {
+        if output.code == Some(1) {
             return Ok(false);
         }
         return Err(PawError::WorktreeError(format!(
@@ -645,13 +764,21 @@ pub fn merge_branch(repo_root: &Path, branch: &str) -> Result<bool, PawError> {
 
 /// Deletes a branch.
 pub fn delete_branch(repo_root: &Path, branch: &str) -> Result<(), PawError> {
-    let output = Command::new("git")
-        .current_dir(repo_root)
-        .args(["branch", "-D", branch])
-        .output()
+    delete_branch_with(&RealCommandRunner, repo_root, branch)
+}
+
+/// [`delete_branch`] against an injected runner.
+pub(crate) fn delete_branch_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    branch: &str,
+) -> Result<(), PawError> {
+    let cwd = repo_root.to_string_lossy();
+    let output = runner
+        .run("git", &["-C", &cwd, "branch", "-D", branch])
         .map_err(|e| PawError::BranchError(format!("failed to delete branch {branch}: {e}")))?;
 
-    if !output.status.success() {
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(PawError::BranchError(format!(
             "git branch -D failed for branch {branch}: {stderr}"
@@ -733,15 +860,29 @@ pub fn exclude_from_git(worktree_root: &Path, filename: &str) -> Result<(), PawE
 /// staging the file. Returns `Ok` even if the command fails, as this
 /// is a belt-and-suspenders measure.
 pub fn assume_unchanged(worktree_root: &Path, filename: &str) -> Result<(), PawError> {
-    // `.output()` rather than `.status()` so git's "fatal: Unable to mark
-    // file" stderr (emitted when the file isn't tracked) doesn't bleed
-    // through to the parent process. This is belt-and-suspenders — failure
-    // is silent by design because `exclude_from_git` is the primary
-    // protection for untracked AGENTS.md.
-    let _ = std::process::Command::new("git")
-        .current_dir(worktree_root)
-        .args(["update-index", "--assume-unchanged", filename])
-        .output();
+    assume_unchanged_with(&RealCommandRunner, worktree_root, filename)
+}
+
+/// [`assume_unchanged`] against an injected runner.
+// Always-`Ok` by design: the wrap mirrors the public sibling's `Result`
+// contract, which callers already use with `?`, and this call is
+// belt-and-suspenders so its failure is deliberately silent.
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn assume_unchanged_with(
+    runner: &dyn CommandRunner,
+    worktree_root: &Path,
+    filename: &str,
+) -> Result<(), PawError> {
+    // `CommandRunner::run` (captured) rather than `run_inheriting_stdio` so
+    // git's "fatal: Unable to mark file" stderr (emitted when the file isn't
+    // tracked) doesn't bleed through to the parent process. This is
+    // belt-and-suspenders — failure is silent by design because
+    // `exclude_from_git` is the primary protection for untracked AGENTS.md.
+    let cwd = worktree_root.to_string_lossy();
+    let _ = runner.run(
+        "git",
+        &["-C", &cwd, "update-index", "--assume-unchanged", filename],
+    );
     Ok(())
 }
 
@@ -754,12 +895,31 @@ pub fn assume_unchanged(worktree_root: &Path, filename: &str) -> Result<(), PawE
 /// git-paw version may carry a stale assume-unchanged bit on `AGENTS.md`, and
 /// clearing it on every start makes the upgrade transparent to the user.
 pub fn no_assume_unchanged(worktree_root: &Path, filename: &str) -> Result<(), PawError> {
-    // `.output()` rather than `.status()` so git's stderr (emitted when the
-    // file isn't tracked) doesn't bleed through to the parent process.
-    let _ = std::process::Command::new("git")
-        .current_dir(worktree_root)
-        .args(["update-index", "--no-assume-unchanged", filename])
-        .output();
+    no_assume_unchanged_with(&RealCommandRunner, worktree_root, filename)
+}
+
+/// [`no_assume_unchanged`] against an injected runner.
+// Always-`Ok` by design — see [`assume_unchanged_with`].
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn no_assume_unchanged_with(
+    runner: &dyn CommandRunner,
+    worktree_root: &Path,
+    filename: &str,
+) -> Result<(), PawError> {
+    // `CommandRunner::run` (captured) rather than `run_inheriting_stdio` so
+    // git's stderr (emitted when the file isn't tracked) doesn't bleed through
+    // to the parent process.
+    let cwd = worktree_root.to_string_lossy();
+    let _ = runner.run(
+        "git",
+        &[
+            "-C",
+            &cwd,
+            "update-index",
+            "--no-assume-unchanged",
+            filename,
+        ],
+    );
     Ok(())
 }
 
@@ -983,10 +1143,11 @@ mod tests {
     fn remove_worktree_does_not_panic_on_non_utf8_path() {
         // Regression test for the previous `worktree_path.to_str().unwrap()`
         // panic at the call site in `remove_worktree`. A `PathBuf` built from
-        // non-UTF-8 bytes (legal on Unix) must flow through `Command::arg(...)`
-        // via `as_os_str()` without ever unwrapping to `&str`. The `git`
-        // invocation is expected to fail (the path does not exist); the test
-        // asserts only that we reach the failure path without panicking.
+        // non-UTF-8 bytes (legal on Unix) must reach argv without ever
+        // unwrapping to `&str` — today via `to_string_lossy()`, which replaces
+        // the invalid bytes rather than panicking. The `git` invocation is
+        // expected to fail (the path does not exist); the test asserts only
+        // that we reach the failure path without panicking.
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
         use std::path::PathBuf;
@@ -1132,5 +1293,676 @@ mod tests {
             files[0].contains("evil") && files[0].contains("**WARNING"),
             "the single record should carry the whole path: {files:?}"
         );
+    }
+
+    // --- CommandRunner seam (git-command-runner-seam) ---
+    //
+    // These exercise the `*_with(runner, …)` entry points against a
+    // `FakeCommandRunner`: the argv each function hands to `git` is the
+    // observable outbound contract of this module, and the scripted exit
+    // status / stdout / stderr drives each success and failure branch. No real
+    // `git` is spawned.
+
+    mod seam {
+        use std::path::Path;
+
+        use tempfile::TempDir;
+
+        use crate::command_runner::CommandOutput;
+        use crate::command_runner::test_support::FakeCommandRunner;
+        use crate::config::WorktreePlacement;
+        use crate::error::PawError;
+        use crate::specs::{SpecBackendKind, SpecEntry};
+
+        /// A scripted git result: exit 0 with the given stdout.
+        fn ok_with(stdout: &str) -> CommandOutput {
+            CommandOutput {
+                success: true,
+                code: Some(0),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: Vec::new(),
+            }
+        }
+
+        /// A scripted git result: exit `code` with the given stderr.
+        fn fail_with(code: i32, stderr: &str) -> CommandOutput {
+            CommandOutput {
+                success: false,
+                code: Some(code),
+                stdout: Vec::new(),
+                stderr: stderr.as_bytes().to_vec(),
+            }
+        }
+
+        /// A runner that cannot spawn `git` at all.
+        fn unspawnable() -> FakeCommandRunner {
+            FakeCommandRunner::scripted(|_, _| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "git missing",
+                ))
+            })
+        }
+
+        /// The single `(program, argv)` the fake recorded.
+        fn only_call(fake: &FakeCommandRunner) -> (String, Vec<String>) {
+            let calls = fake.calls();
+            assert_eq!(calls.len(), 1, "expected exactly one git invocation");
+            calls.into_iter().next().unwrap()
+        }
+
+        /// Every recorded argv, in call order.
+        fn argv_sequence(fake: &FakeCommandRunner) -> Vec<Vec<String>> {
+            fake.calls().into_iter().map(|(_, argv)| argv).collect()
+        }
+
+        fn spec_entry(id: &str) -> SpecEntry {
+            SpecEntry {
+                id: id.to_string(),
+                backend: SpecBackendKind::OpenSpec,
+                branch: format!("feat/{id}"),
+                cli: None,
+                prompt: String::new(),
+                owned_files: None,
+            }
+        }
+
+        /// One row per single-shot entry point: the exact argv it builds,
+        /// including the leading `-C <cwd>` that carries the working directory
+        /// the inline calls set with `Command::current_dir`.
+        #[test]
+        #[allow(clippy::too_many_lines)] // one row per entry point — a data table
+        fn each_entry_point_builds_its_exact_git_argv() {
+            type Invoke = Box<dyn Fn(&FakeCommandRunner)>;
+            let repo = Path::new("/repo");
+            let cases: Vec<(&str, Vec<&str>, Invoke)> = vec![
+                (
+                    "validate_repo",
+                    vec!["-C", "/repo", "rev-parse", "--show-toplevel"],
+                    Box::new(|r| {
+                        let _ = super::super::validate_repo_with(r, repo);
+                    }),
+                ),
+                (
+                    "list_branches",
+                    vec!["-C", "/repo", "branch", "-a", "--format=%(refname:short)"],
+                    Box::new(|r| {
+                        let _ = super::super::list_branches_with(r, repo);
+                    }),
+                ),
+                (
+                    "default_branch",
+                    vec!["-C", "/repo", "symbolic-ref", "refs/remotes/origin/HEAD"],
+                    Box::new(|r| {
+                        let _ = super::super::default_branch_with(r, repo);
+                    }),
+                ),
+                (
+                    "current_branch",
+                    vec!["-C", "/repo", "branch", "--show-current"],
+                    Box::new(|r| {
+                        let _ = super::super::current_branch_with(r, repo);
+                    }),
+                ),
+                (
+                    "find_worktree_for_branch",
+                    vec!["-C", "/repo", "worktree", "list", "--porcelain"],
+                    Box::new(|r| {
+                        let _ = super::super::find_worktree_for_branch_with(r, repo, "feat/x");
+                    }),
+                ),
+                (
+                    "remove_worktree",
+                    vec![
+                        "-C",
+                        "/repo",
+                        "worktree",
+                        "remove",
+                        "--force",
+                        "/repo/.git-paw/worktrees/feat-x",
+                    ],
+                    Box::new(|r| {
+                        let _ = super::super::remove_worktree_with(
+                            r,
+                            repo,
+                            Path::new("/repo/.git-paw/worktrees/feat-x"),
+                        );
+                    }),
+                ),
+                (
+                    "prune_worktrees",
+                    vec!["-C", "/repo", "worktree", "prune"],
+                    Box::new(|r| {
+                        let _ = super::super::prune_worktrees_with(r, repo);
+                    }),
+                ),
+                (
+                    "uncommitted_files",
+                    vec!["-C", "/repo", "status", "--porcelain", "-z"],
+                    Box::new(|r| {
+                        let _ = super::super::uncommitted_files_with(r, repo);
+                    }),
+                ),
+                (
+                    "merge_branch",
+                    vec!["-C", "/repo", "merge", "--no-ff", "--no-commit", "feat/x"],
+                    Box::new(|r| {
+                        let _ = super::super::merge_branch_with(r, repo, "feat/x");
+                    }),
+                ),
+                (
+                    "delete_branch",
+                    vec!["-C", "/repo", "branch", "-D", "feat/x"],
+                    Box::new(|r| {
+                        let _ = super::super::delete_branch_with(r, repo, "feat/x");
+                    }),
+                ),
+                (
+                    "assume_unchanged",
+                    vec![
+                        "-C",
+                        "/repo",
+                        "update-index",
+                        "--assume-unchanged",
+                        "AGENTS.md",
+                    ],
+                    Box::new(|r| {
+                        let _ = super::super::assume_unchanged_with(r, repo, "AGENTS.md");
+                    }),
+                ),
+                (
+                    "no_assume_unchanged",
+                    vec![
+                        "-C",
+                        "/repo",
+                        "update-index",
+                        "--no-assume-unchanged",
+                        "AGENTS.md",
+                    ],
+                    Box::new(|r| {
+                        let _ = super::super::no_assume_unchanged_with(r, repo, "AGENTS.md");
+                    }),
+                ),
+            ];
+
+            for (label, expected, invoke) in cases {
+                let fake = FakeCommandRunner::succeeding("");
+                invoke(&fake);
+                let (program, argv) = only_call(&fake);
+                assert_eq!(program, "git", "{label}: must invoke git");
+                assert_eq!(argv, expected, "{label}: argv mismatch");
+            }
+        }
+
+        #[test]
+        fn validate_repo_reports_the_toplevel_and_maps_failure_to_not_a_git_repo() {
+            let inside = FakeCommandRunner::succeeding("/repo/root\n");
+            assert_eq!(
+                super::super::validate_repo_with(&inside, Path::new("/repo/root/sub")).unwrap(),
+                Path::new("/repo/root")
+            );
+
+            let outside = FakeCommandRunner::failing("fatal: not a git repository");
+            assert!(
+                matches!(
+                    super::super::validate_repo_with(&outside, Path::new("/tmp")),
+                    Err(PawError::NotAGitRepo)
+                ),
+                "a non-zero rev-parse means the path is not in a repo"
+            );
+        }
+
+        #[test]
+        fn list_branches_dedupes_strips_remote_prefixes_and_drops_head() {
+            let fake = FakeCommandRunner::succeeding(
+                "main\nfeat/x\norigin/main\norigin/feat/y\nrefs/remotes/origin/feat/z\norigin/HEAD\n\n",
+            );
+            assert_eq!(
+                super::super::list_branches_with(&fake, Path::new("/repo")).unwrap(),
+                ["feat/x", "feat/y", "feat/z", "main"],
+                "remote prefixes strip, duplicates collapse, HEAD pointers drop"
+            );
+
+            let broken = FakeCommandRunner::failing("fatal: not a git repository");
+            let err = super::super::list_branches_with(&broken, Path::new("/repo")).unwrap_err();
+            assert!(
+                matches!(&err, PawError::BranchError(m)
+                    if m.contains("git branch failed") && m.contains("not a git repository")),
+                "the failure must carry git's stderr: {err:?}"
+            );
+        }
+
+        #[test]
+        fn default_branch_strips_the_ref_prefix_and_rejects_an_unexpected_ref() {
+            let fake = FakeCommandRunner::succeeding("refs/remotes/origin/trunk\n");
+            assert_eq!(
+                super::super::default_branch_with(&fake, Path::new("/repo")).unwrap(),
+                "trunk"
+            );
+
+            let odd = FakeCommandRunner::succeeding("refs/heads/main\n");
+            let err = super::super::default_branch_with(&odd, Path::new("/repo")).unwrap_err();
+            assert!(
+                matches!(&err, PawError::BranchError(m) if m.contains("unexpected ref format")),
+                "a ref outside refs/remotes/origin/ is not a default branch: {err:?}"
+            );
+
+            let no_head = FakeCommandRunner::failing(
+                "fatal: ref refs/remotes/origin/HEAD is not a symbolic ref",
+            );
+            let err = super::super::default_branch_with(&no_head, Path::new("/repo")).unwrap_err();
+            assert!(
+                matches!(&err, PawError::BranchError(m) if m.contains("git symbolic-ref failed")),
+                "unexpected error: {err:?}"
+            );
+        }
+
+        #[test]
+        fn current_branch_trims_the_name_and_rejects_a_detached_head() {
+            let on_branch = FakeCommandRunner::succeeding("feat/add-auth\n");
+            assert_eq!(
+                super::super::current_branch_with(&on_branch, Path::new("/repo")).unwrap(),
+                "feat/add-auth"
+            );
+
+            // `git branch --show-current` succeeds with empty output on a
+            // detached HEAD.
+            let detached = FakeCommandRunner::succeeding("\n");
+            let err = super::super::current_branch_with(&detached, Path::new("/repo")).unwrap_err();
+            assert!(
+                matches!(&err, PawError::BranchError(m) if m.contains("detached HEAD")),
+                "empty output means detached HEAD: {err:?}"
+            );
+        }
+
+        #[test]
+        fn merge_branch_maps_exit_one_to_conflict_and_other_failures_to_an_error() {
+            let clean = FakeCommandRunner::succeeding("");
+            assert!(
+                super::super::merge_branch_with(&clean, Path::new("/repo"), "feat/x").unwrap(),
+                "a successful merge reports true"
+            );
+
+            let conflicted =
+                FakeCommandRunner::scripted(|_, _| Ok(fail_with(1, "CONFLICT in a.txt")));
+            assert!(
+                !super::super::merge_branch_with(&conflicted, Path::new("/repo"), "feat/x")
+                    .unwrap(),
+                "exit 1 is a conflict, not an error"
+            );
+
+            let broken =
+                FakeCommandRunner::scripted(|_, _| Ok(fail_with(128, "fatal: not something")));
+            let err =
+                super::super::merge_branch_with(&broken, Path::new("/repo"), "feat/x").unwrap_err();
+            assert!(
+                matches!(&err, PawError::WorktreeError(m)
+                    if m.contains("git merge failed") && m.contains("not something")),
+                "any exit other than 1 is a real failure: {err:?}"
+            );
+        }
+
+        #[test]
+        fn uncommitted_files_parses_nul_records_and_consumes_a_rename_origin() {
+            // Records: modified, untracked, and a rename whose SECOND field is
+            // the origin path — which must be consumed, not reported.
+            let fake = FakeCommandRunner::succeeding(
+                " M src/git.rs\0?? notes.txt\0R  new/name.rs\0old/name.rs\0",
+            );
+            assert_eq!(
+                super::super::uncommitted_files_with(&fake, Path::new("/wt")).unwrap(),
+                ["src/git.rs", "notes.txt", "new/name.rs"],
+                "a rename reports the new path only"
+            );
+
+            let clean = FakeCommandRunner::succeeding("");
+            assert!(
+                super::super::uncommitted_files_with(&clean, Path::new("/wt"))
+                    .unwrap()
+                    .is_empty(),
+                "no records means a clean worktree"
+            );
+
+            let broken = FakeCommandRunner::failing("fatal: not a git repository");
+            let err = super::super::uncommitted_files_with(&broken, Path::new("/wt")).unwrap_err();
+            assert!(
+                matches!(&err, PawError::WorktreeError(m)
+                    if m.contains("git status failed in /wt")),
+                "the failure must name the worktree: {err:?}"
+            );
+        }
+
+        #[test]
+        fn worktree_and_branch_failures_surface_gits_stderr() {
+            let fake = FakeCommandRunner::failing("fatal: refusing to do that");
+
+            let err = super::super::remove_worktree_with(
+                &fake,
+                Path::new("/repo"),
+                Path::new("/wt/feat-x"),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&err, PawError::WorktreeError(m)
+                    if m.contains("/wt/feat-x") && m.contains("refusing to do that")),
+                "remove must name the worktree and carry stderr: {err:?}"
+            );
+
+            let err = super::super::prune_worktrees_with(&fake, Path::new("/repo")).unwrap_err();
+            assert!(
+                matches!(&err, PawError::WorktreeError(m)
+                    if m.contains("git worktree prune failed") && m.contains("refusing to do that")),
+                "unexpected error: {err:?}"
+            );
+
+            let err =
+                super::super::delete_branch_with(&fake, Path::new("/repo"), "feat/x").unwrap_err();
+            assert!(
+                matches!(&err, PawError::BranchError(m)
+                    if m.contains("feat/x") && m.contains("refusing to do that")),
+                "delete must name the branch and carry stderr: {err:?}"
+            );
+        }
+
+        #[test]
+        fn a_spawn_failure_surfaces_as_a_paw_error() {
+            let broken = unspawnable();
+
+            assert!(
+                matches!(
+                    super::super::validate_repo_with(&broken, Path::new("/repo")),
+                    Err(PawError::BranchError(ref m)) if m.contains("failed to run git")
+                ),
+                "an unspawnable git is an error, not 'not a repo'"
+            );
+            assert!(
+                matches!(
+                    super::super::uncommitted_files_with(&broken, Path::new("/wt")),
+                    Err(PawError::WorktreeError(ref m)) if m.contains("failed to run git status")
+                ),
+                "unexpected result"
+            );
+        }
+
+        #[test]
+        fn the_update_index_helpers_stay_silent_when_git_fails() {
+            // Belt-and-suspenders by design: `exclude_from_git` is the primary
+            // protection, so a failing `update-index` must not surface.
+            let fake = FakeCommandRunner::failing("fatal: Unable to mark file AGENTS.md");
+            assert!(
+                super::super::assume_unchanged_with(&fake, Path::new("/wt"), "AGENTS.md").is_ok()
+            );
+            assert!(
+                super::super::no_assume_unchanged_with(&fake, Path::new("/wt"), "AGENTS.md")
+                    .is_ok()
+            );
+
+            let broken = unspawnable();
+            assert!(
+                super::super::assume_unchanged_with(&broken, Path::new("/wt"), "AGENTS.md").is_ok(),
+                "even an unspawnable git must stay silent"
+            );
+        }
+
+        #[test]
+        fn check_uncommitted_specs_probes_each_existing_spec_path() {
+            let sandbox = TempDir::new().expect("tempdir");
+            let repo = sandbox.path();
+            std::fs::create_dir_all(repo.join("specs").join("alpha")).unwrap();
+            std::fs::write(repo.join("specs").join("beta.md"), "# beta\n").unwrap();
+
+            let specs = [
+                spec_entry("alpha"),
+                spec_entry("beta"),
+                spec_entry("absent"),
+            ];
+            let fake = FakeCommandRunner::scripted(|_, args| {
+                if args.last() == Some(&"specs/alpha") {
+                    Ok(ok_with(" M specs/alpha/spec.md\n"))
+                } else {
+                    Ok(ok_with(""))
+                }
+            });
+
+            assert_eq!(
+                super::super::check_uncommitted_specs_with(&fake, repo, &specs).unwrap(),
+                ["alpha"],
+                "only the spec with porcelain output is reported dirty"
+            );
+
+            let cwd = repo.to_string_lossy().into_owned();
+            let expected: Vec<Vec<&str>> = vec![
+                vec!["-C", &cwd, "status", "--porcelain", "--", "specs/alpha"],
+                vec!["-C", &cwd, "status", "--porcelain", "--", "specs/beta.md"],
+            ];
+            assert_eq!(
+                argv_sequence(&fake),
+                expected,
+                "a directory spec probes the directory, a file spec the file, \
+                 and a spec present in neither layout is skipped without a git call"
+            );
+        }
+
+        #[test]
+        fn create_worktree_adds_the_existing_branch_at_the_resolved_path() {
+            let sandbox = TempDir::new().expect("tempdir");
+            let repo = sandbox.path();
+
+            let fake = FakeCommandRunner::succeeding("");
+            let created = super::super::create_worktree_with(
+                &fake,
+                repo,
+                "feat/x",
+                false,
+                WorktreePlacement::Child,
+            )
+            .expect("a succeeding worktree add");
+
+            let expected_path = repo.join(".git-paw").join("worktrees").join("feat-x");
+            assert_eq!(created.path, expected_path);
+            assert!(
+                !created.branch_created,
+                "the plain `worktree add` path reuses an existing branch"
+            );
+
+            let cwd = repo.to_string_lossy().into_owned();
+            let target = expected_path.to_string_lossy().into_owned();
+            let expected: Vec<&str> = vec!["-C", &cwd, "worktree", "add", &target, "feat/x"];
+            assert_eq!(only_call(&fake).1, expected);
+        }
+
+        #[test]
+        fn create_worktree_retries_with_dash_b_on_an_invalid_reference() {
+            let sandbox = TempDir::new().expect("tempdir");
+            let repo = sandbox.path();
+
+            let fake = FakeCommandRunner::scripted(|_, args| {
+                if args.contains(&"-b") {
+                    Ok(ok_with(""))
+                } else {
+                    Ok(fail_with(128, "fatal: invalid reference: feat/new"))
+                }
+            });
+            let created = super::super::create_worktree_with(
+                &fake,
+                repo,
+                "feat/new",
+                false,
+                WorktreePlacement::Child,
+            )
+            .expect("the -b retry succeeds");
+            assert!(
+                created.branch_created,
+                "the -b path created the branch, so it must be reported"
+            );
+
+            let cwd = repo.to_string_lossy().into_owned();
+            let target = repo
+                .join(".git-paw")
+                .join("worktrees")
+                .join("feat-new")
+                .to_string_lossy()
+                .into_owned();
+            let expected: Vec<Vec<&str>> = vec![
+                vec!["-C", &cwd, "worktree", "add", &target, "feat/new"],
+                vec!["-C", &cwd, "worktree", "add", "-b", "feat/new", &target],
+            ];
+            assert_eq!(argv_sequence(&fake), expected);
+        }
+
+        #[test]
+        fn create_worktree_does_not_retry_a_failure_that_is_not_an_invalid_reference() {
+            let sandbox = TempDir::new().expect("tempdir");
+            let repo = sandbox.path();
+
+            let fake = FakeCommandRunner::failing("fatal: '/wt/feat-x' already exists");
+            let err = super::super::create_worktree_with(
+                &fake,
+                repo,
+                "feat/x",
+                false,
+                WorktreePlacement::Child,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&err, PawError::WorktreeError(m)
+                    if m.contains("git worktree add failed for branch 'feat/x'")
+                        && m.contains("already exists")),
+                "unexpected error: {err:?}"
+            );
+            assert_eq!(
+                argv_sequence(&fake).len(),
+                1,
+                "only an 'invalid reference' failure justifies the -b retry"
+            );
+        }
+
+        #[test]
+        fn rebase_onto_default_switches_head_when_the_branch_is_not_checked_out() {
+            let fake = FakeCommandRunner::scripted(|_, args| match args {
+                [.., "symbolic-ref", "refs/remotes/origin/HEAD"] => {
+                    Ok(ok_with("refs/remotes/origin/main\n"))
+                }
+                // The branch is checked out nowhere.
+                [.., "worktree", "list", "--porcelain"] => {
+                    Ok(ok_with("worktree /repo\nbranch refs/heads/main\n\n"))
+                }
+                [.., "symbolic-ref", "--short", "HEAD"] => Ok(ok_with("main\n")),
+                _ => Ok(ok_with("")),
+            });
+
+            super::super::rebase_branch_onto_default_with(&fake, Path::new("/repo"), "feat/x")
+                .expect("a succeeding rebase");
+
+            let expected: Vec<Vec<&str>> = vec![
+                vec!["-C", "/repo", "symbolic-ref", "refs/remotes/origin/HEAD"],
+                vec!["-C", "/repo", "worktree", "list", "--porcelain"],
+                vec!["-C", "/repo", "symbolic-ref", "--short", "HEAD"],
+                // Branch operand present because HEAD was switched for us.
+                vec!["-C", "/repo", "rebase", "main", "feat/x"],
+                // The original HEAD is restored afterwards.
+                vec!["-C", "/repo", "checkout", "main"],
+            ];
+            assert_eq!(argv_sequence(&fake), expected);
+        }
+
+        #[test]
+        fn rebase_onto_default_runs_inside_the_worktree_holding_the_branch() {
+            let fake = FakeCommandRunner::scripted(|_, args| match args {
+                [.., "symbolic-ref", "refs/remotes/origin/HEAD"] => {
+                    Ok(ok_with("refs/remotes/origin/main\n"))
+                }
+                [.., "worktree", "list", "--porcelain"] => Ok(ok_with(
+                    "worktree /repo\nbranch refs/heads/main\n\nworktree /wt/feat-x\nbranch refs/heads/feat/x\n\n",
+                )),
+                _ => Ok(ok_with("")),
+            });
+
+            super::super::rebase_branch_onto_default_with(&fake, Path::new("/repo"), "feat/x")
+                .expect("a succeeding rebase");
+
+            let expected: Vec<Vec<&str>> = vec![
+                vec!["-C", "/repo", "symbolic-ref", "refs/remotes/origin/HEAD"],
+                vec!["-C", "/repo", "worktree", "list", "--porcelain"],
+                // Runs in the occupied worktree, with no branch operand and no
+                // HEAD probe or restore in the main repo.
+                vec!["-C", "/wt/feat-x", "rebase", "main"],
+            ];
+            assert_eq!(argv_sequence(&fake), expected);
+        }
+
+        #[test]
+        fn rebase_onto_default_aborts_and_restores_head_on_conflict() {
+            let fake = FakeCommandRunner::scripted(|_, args| match args {
+                [.., "symbolic-ref", "refs/remotes/origin/HEAD"] => {
+                    Ok(ok_with("refs/remotes/origin/main\n"))
+                }
+                [.., "worktree", "list", "--porcelain"] => {
+                    Ok(ok_with("worktree /repo\nbranch refs/heads/main\n\n"))
+                }
+                [.., "symbolic-ref", "--short", "HEAD"] => Ok(ok_with("main\n")),
+                [.., "rebase", "main", "feat/x"] => {
+                    Ok(fail_with(1, "CONFLICT (content): Merge conflict in a.txt"))
+                }
+                _ => Ok(ok_with("")),
+            });
+
+            let err =
+                super::super::rebase_branch_onto_default_with(&fake, Path::new("/repo"), "feat/x")
+                    .unwrap_err();
+            assert!(
+                matches!(&err, PawError::WorktreeError(m)
+                    if m.contains("rebase onto main failed") && m.contains("CONFLICT")),
+                "the error must carry git's stderr: {err:?}"
+            );
+
+            let expected: Vec<Vec<&str>> = vec![
+                vec!["-C", "/repo", "symbolic-ref", "refs/remotes/origin/HEAD"],
+                vec!["-C", "/repo", "worktree", "list", "--porcelain"],
+                vec!["-C", "/repo", "symbolic-ref", "--short", "HEAD"],
+                vec!["-C", "/repo", "rebase", "main", "feat/x"],
+                // The abort and the HEAD restore both run after the failure.
+                vec!["-C", "/repo", "rebase", "--abort"],
+                vec!["-C", "/repo", "checkout", "main"],
+            ];
+            assert_eq!(argv_sequence(&fake), expected);
+        }
+
+        #[test]
+        fn create_worktree_skips_the_rebase_when_the_branch_does_not_exist_locally() {
+            let sandbox = TempDir::new().expect("tempdir");
+            let repo = sandbox.path();
+
+            let fake = FakeCommandRunner::scripted(|_, args| {
+                if args.contains(&"--verify") {
+                    Ok(fail_with(128, "fatal: Needed a single revision"))
+                } else {
+                    Ok(ok_with(""))
+                }
+            });
+            super::super::create_worktree_with(
+                &fake,
+                repo,
+                "feat/new",
+                true,
+                WorktreePlacement::Child,
+            )
+            .expect("worktree add succeeds");
+
+            let cwd = repo.to_string_lossy().into_owned();
+            let target = repo
+                .join(".git-paw")
+                .join("worktrees")
+                .join("feat-new")
+                .to_string_lossy()
+                .into_owned();
+            let expected: Vec<Vec<&str>> = vec![
+                vec!["-C", &cwd, "rev-parse", "--verify", "refs/heads/feat/new"],
+                // No rebase calls: the existence probe failed, so the whole
+                // rebase step is skipped even with rebase_onto_main = true.
+                vec!["-C", &cwd, "worktree", "add", &target, "feat/new"],
+            ];
+            assert_eq!(argv_sequence(&fake), expected);
+        }
     }
 }
