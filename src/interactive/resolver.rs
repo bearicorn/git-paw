@@ -1,200 +1,26 @@
-//! Interactive selection prompts.
+//! Terminal-free interactive selection logic.
 //!
-//! User-facing selection flows for `git paw start`. The two multi-select
-//! prompts — the branch picker ([`TerminalPrompter::select_branches`]) and the
-//! spec picker ([`TerminalPrompter::select_specs`]) — are built on a shared
-//! `ratatui` + `crossterm` fuzzy multi-select helper ([`fuzzy_multi_select`])
-//! that lets the user type a query to filter a long candidate list. The
-//! single-select prompts (mode picker and CLI pickers) stay on
-//! `dialoguer::Select`. Logic is separated from UI via the [`Prompter`] trait,
-//! and the filter/selection bookkeeping lives in the pure, terminal-free
-//! [`PickerState`] for testability.
+//! Holds the pure half of the interactive flow: the [`run_selection`] and
+//! [`resolve_cli_for_specs`] entry points, the [`PickerState`] filter and
+//! selection bookkeeping that the `ratatui` loop in [`super::picker`] drives,
+//! the finalizers that map a picker result back to branch names or `SpecEntry`
+//! values, and the spec grouping helpers. Nothing here touches a terminal, so
+//! the whole selection contract is unit-testable without a TTY.
 
 use std::collections::HashSet;
-use std::fmt;
-use std::io::{self, Stdout};
-
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
-use dialoguer::Select;
-use ratatui::Frame;
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{List, ListItem, Paragraph};
 
 use crate::config::PawConfig;
 use crate::error::PawError;
 use crate::specs::SpecEntry;
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/// Information about an available AI CLI.
-///
-/// Contains the data needed to display a CLI option in interactive prompts.
-pub struct CliInfo {
-    /// Human-readable name shown in prompts (e.g., "My Agent").
-    pub display_name: String,
-    /// Binary name used for invocation (e.g., "my-agent").
-    pub binary_name: String,
-}
-
-impl fmt::Display for CliInfo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.display_name == self.binary_name {
-            write!(f, "{}", self.binary_name)
-        } else {
-            write!(f, "{} ({})", self.display_name, self.binary_name)
-        }
-    }
-}
-
-/// How the user wants to assign CLIs to branches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CliMode {
-    /// Same CLI for all selected branches.
-    Uniform,
-    /// Different CLI for each branch.
-    PerBranch,
-}
-
-impl fmt::Display for CliMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Uniform => write!(f, "Same CLI for all branches"),
-            Self::PerBranch => write!(f, "Different CLI per branch"),
-        }
-    }
-}
-
-/// Result of the full interactive selection flow.
-#[derive(Debug)]
-pub struct SelectionResult {
-    /// Branch-to-CLI mappings as `(branch_name, cli_binary_name)` pairs.
-    pub mappings: Vec<(String, String)>,
-}
-
-// ---------------------------------------------------------------------------
-// Prompter trait (separates logic from UI)
-// ---------------------------------------------------------------------------
-
-/// Abstraction over interactive prompts, allowing test doubles.
-pub trait Prompter {
-    /// Ask the user to choose between uniform and per-branch CLI assignment.
-    fn select_mode(&self) -> Result<CliMode, PawError>;
-
-    /// Ask the user to pick one or more branches. Returns selected branch names.
-    fn select_branches(&self, branches: &[String]) -> Result<Vec<String>, PawError>;
-
-    /// Ask the user to pick a single CLI for all branches. Returns binary name.
-    ///
-    /// When `default` is `Some` and matches a CLI's `binary_name`, that entry
-    /// is pre-selected in the picker. Otherwise the first item is selected.
-    fn select_cli(&self, clis: &[CliInfo], default: Option<&str>) -> Result<String, PawError>;
-
-    /// Ask the user to pick a CLI for a specific branch. Returns binary name.
-    fn select_cli_for_branch(&self, branch: &str, clis: &[CliInfo]) -> Result<String, PawError>;
-
-    /// Ask the user to pick one or more specs. Returns the selected
-    /// `SpecEntry` values expanded from grouped logical units.
-    ///
-    /// Each row in the picker represents one logical unit (a Spec Kit
-    /// feature, an `OpenSpec` change, or a Markdown spec). Selecting a row
-    /// returns every underlying `SpecEntry` belonging to that unit.
-    fn select_specs(&self, specs: &[SpecEntry]) -> Result<Vec<SpecEntry>, PawError>;
-}
-
-// ---------------------------------------------------------------------------
-// Real prompter (dialoguer)
-// ---------------------------------------------------------------------------
-
-/// Interactive prompter using `dialoguer` for terminal UI.
-pub struct TerminalPrompter;
-
-impl Prompter for TerminalPrompter {
-    fn select_mode(&self) -> Result<CliMode, PawError> {
-        let modes = [CliMode::Uniform, CliMode::PerBranch];
-        let labels: Vec<String> = modes.iter().map(ToString::to_string).collect();
-
-        let selection = Select::new()
-            .with_prompt("CLI assignment mode")
-            .items(&labels)
-            .default(0)
-            .interact_opt()
-            .map_err(|e| map_dialoguer_error(&e))?;
-
-        match selection {
-            Some(idx) => Ok(modes[idx]),
-            None => Err(PawError::UserCancelled),
-        }
-    }
-
-    fn select_branches(&self, branches: &[String]) -> Result<Vec<String>, PawError> {
-        let selection = fuzzy_multi_select(
-            "Select branches (type to filter, ctrl-u to clear, space to toggle, enter to confirm)",
-            branches,
-        )?;
-        finalize_branch_selection(branches, selection)
-    }
-
-    fn select_cli(&self, clis: &[CliInfo], default: Option<&str>) -> Result<String, PawError> {
-        let labels: Vec<String> = clis.iter().map(ToString::to_string).collect();
-
-        let default_idx = default
-            .and_then(|name| clis.iter().position(|c| c.binary_name == name))
-            .unwrap_or(0);
-
-        let selection = Select::new()
-            .with_prompt("Select AI CLI for all branches")
-            .items(&labels)
-            .default(default_idx)
-            .interact_opt()
-            .map_err(|e| map_dialoguer_error(&e))?;
-
-        match selection {
-            Some(idx) => Ok(clis[idx].binary_name.clone()),
-            None => Err(PawError::UserCancelled),
-        }
-    }
-
-    fn select_cli_for_branch(&self, branch: &str, clis: &[CliInfo]) -> Result<String, PawError> {
-        let labels: Vec<String> = clis.iter().map(ToString::to_string).collect();
-
-        let selection = Select::new()
-            .with_prompt(format!("Select CLI for {branch}"))
-            .items(&labels)
-            .default(0)
-            .interact_opt()
-            .map_err(|e| map_dialoguer_error(&e))?;
-
-        match selection {
-            Some(idx) => Ok(clis[idx].binary_name.clone()),
-            None => Err(PawError::UserCancelled),
-        }
-    }
-
-    fn select_specs(&self, specs: &[SpecEntry]) -> Result<Vec<SpecEntry>, PawError> {
-        let groups = group_specs_by_unit(specs);
-        let labels: Vec<String> = groups.iter().map(|(label, _)| label.clone()).collect();
-
-        let selection = fuzzy_multi_select(
-            "Select specs (type to filter, ctrl-u to clear, space to toggle, enter to confirm)",
-            &labels,
-        )?;
-
-        finalize_spec_selection(specs, &groups, selection)
-    }
-}
+use super::{CliInfo, CliMode, Prompter, SelectionResult};
 
 /// Pure post-processing for `select_branches`: maps the picker's
 /// `Option<Vec<usize>>` selection (indices into the original `branches` slice)
 /// back to branch names, treating both `None` (Ctrl+C / Esc) and `Some(empty)`
 /// (zero rows toggled) as `PawError::UserCancelled` — matching `select_specs`
 /// via [`finalize_spec_selection`].
-fn finalize_branch_selection(
+pub(super) fn finalize_branch_selection(
     branches: &[String],
     selection: Option<Vec<usize>>,
 ) -> Result<Vec<String>, PawError> {
@@ -210,7 +36,7 @@ fn finalize_branch_selection(
 /// `SpecEntry` values, and treats both `None` (Ctrl+C) and `Some(empty)`
 /// (zero rows selected) as `PawError::UserCancelled` — matching
 /// `select_branches`.
-fn finalize_spec_selection(
+pub(super) fn finalize_spec_selection(
     specs: &[SpecEntry],
     groups: &[(String, Vec<usize>)],
     selection: Option<Vec<usize>>,
@@ -239,7 +65,7 @@ fn finalize_spec_selection(
 ///
 /// Order follows the discovery order of the first entry in each group, so
 /// the picker preserves the backend's natural listing.
-fn group_specs_by_unit(specs: &[SpecEntry]) -> Vec<(String, Vec<usize>)> {
+pub(super) fn group_specs_by_unit(specs: &[SpecEntry]) -> Vec<(String, Vec<usize>)> {
     let mut order: Vec<String> = Vec::new();
     let mut groups: std::collections::HashMap<String, Vec<usize>> =
         std::collections::HashMap::new();
@@ -323,21 +149,8 @@ fn id_is_phase(id: &str) -> bool {
     !after.is_empty() && after.chars().all(|c| c.is_ascii_digit())
 }
 
-/// Maps dialoguer errors to `PawError`, treating I/O interrupted (Ctrl+C) as
-/// user cancellation.
-fn map_dialoguer_error(err: &dialoguer::Error) -> PawError {
-    match err {
-        dialoguer::Error::IO(io_err) if io_err.kind() == std::io::ErrorKind::Interrupted => {
-            PawError::UserCancelled
-        }
-        dialoguer::Error::IO(_) => {
-            PawError::SessionError(format!("Interactive prompt failed: {err}"))
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Fuzzy multi-select picker
+// Fuzzy multi-select picker state
 // ---------------------------------------------------------------------------
 
 /// Pure filtering and selection state for the fuzzy multi-select picker.
@@ -348,19 +161,20 @@ fn map_dialoguer_error(err: &dialoguer::Error) -> PawError {
 /// survive a query change: toggling a row under one query and then filtering it
 /// out of view never drops it from `selected`. The struct has no terminal
 /// dependency, so the filter/selection contract is unit-tested without a TTY;
-/// the `ratatui` render loop in [`fuzzy_multi_select`] is a thin shell over it.
-struct PickerState {
+/// the `ratatui` render loop in [`super::picker::fuzzy_multi_select`] is a thin
+/// shell over it.
+pub(super) struct PickerState {
     /// All candidate labels, in their original (unfiltered) order.
-    labels: Vec<String>,
+    pub(super) labels: Vec<String>,
     /// Current filter query. Empty means "show everything".
-    query: String,
+    pub(super) query: String,
     /// Selected rows, keyed by original index into `labels`.
     selected: HashSet<usize>,
 }
 
 impl PickerState {
     /// Creates a picker over `labels` with an empty query and no selection.
-    fn new(labels: Vec<String>) -> Self {
+    pub(super) fn new(labels: Vec<String>) -> Self {
         Self {
             labels,
             query: String::new(),
@@ -373,7 +187,7 @@ impl PickerState {
     /// An empty query yields every index in original order. Otherwise a label
     /// matches when the query is a case-insensitive substring of it; matching
     /// indices are returned in original order.
-    fn visible_indices(&self) -> Vec<usize> {
+    pub(super) fn visible_indices(&self) -> Vec<usize> {
         if self.query.is_empty() {
             return (0..self.labels.len()).collect();
         }
@@ -387,17 +201,17 @@ impl PickerState {
     }
 
     /// Replaces the filter query wholesale.
-    fn set_query(&mut self, query: String) {
+    pub(super) fn set_query(&mut self, query: String) {
         self.query = query;
     }
 
     /// Appends one character to the filter query.
-    fn push_char(&mut self, c: char) {
+    pub(super) fn push_char(&mut self, c: char) {
         self.query.push(c);
     }
 
     /// Removes the last character from the filter query (no-op when empty).
-    fn pop_char(&mut self) {
+    pub(super) fn pop_char(&mut self) {
         self.query.pop();
     }
 
@@ -405,7 +219,7 @@ impl PickerState {
     ///
     /// `visible_row` is an index into the current [`Self::visible_indices`]; a
     /// row outside that range is ignored.
-    fn toggle(&mut self, visible_row: usize) {
+    pub(super) fn toggle(&mut self, visible_row: usize) {
         if let Some(&original_index) = self.visible_indices().get(visible_row) {
             // `insert` returns false when the value was already present, so a
             // failed insert means "was selected" → remove it.
@@ -416,194 +230,27 @@ impl PickerState {
     }
 
     /// Returns true when the given original index is currently selected.
-    fn is_selected(&self, original_index: usize) -> bool {
+    pub(super) fn is_selected(&self, original_index: usize) -> bool {
         self.selected.contains(&original_index)
     }
 
     /// Returns the selected original indices, sorted ascending.
-    fn confirm(&self) -> Vec<usize> {
+    pub(super) fn confirm(&self) -> Vec<usize> {
         let mut out: Vec<usize> = self.selected.iter().copied().collect();
         out.sort_unstable();
         out
     }
 }
 
-/// Guard that restores the terminal on drop, ensuring cleanup even on panic or
-/// early return. Mirrors the `TerminalGuard` discipline in `src/dashboard.rs`.
-struct PickerTerminalGuard {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
-}
-
-impl Drop for PickerTerminalGuard {
-    fn drop(&mut self) {
-        let _ = terminal::disable_raw_mode();
-        let _ = crossterm::execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
-        let _ = self.terminal.show_cursor();
-    }
-}
-
-/// Enters raw mode and the alternate screen, returning a configured terminal.
-fn picker_setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, PawError> {
-    terminal::enable_raw_mode()
-        .map_err(|e| PawError::SessionError(format!("failed to enable raw mode: {e}")))?;
-    crossterm::execute!(io::stdout(), EnterAlternateScreen)
-        .map_err(|e| PawError::SessionError(format!("failed to enter alternate screen: {e}")))?;
-    Terminal::new(CrosstermBackend::new(io::stdout()))
-        .map_err(|e| PawError::SessionError(format!("failed to create terminal: {e}")))
-}
-
-/// Disables raw mode, leaves the alternate screen, and shows the cursor.
-fn picker_restore_terminal(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-) -> Result<(), PawError> {
-    terminal::disable_raw_mode()
-        .map_err(|e| PawError::SessionError(format!("failed to disable raw mode: {e}")))?;
-    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)
-        .map_err(|e| PawError::SessionError(format!("failed to leave alternate screen: {e}")))?;
-    terminal
-        .show_cursor()
-        .map_err(|e| PawError::SessionError(format!("failed to show cursor: {e}")))
-}
-
 /// Clamps `cursor` so it stays a valid index into the visible rows after the
 /// query changed. An empty visible list parks the cursor at 0.
-fn clamp_cursor(cursor: &mut usize, state: &PickerState) {
+pub(super) fn clamp_cursor(cursor: &mut usize, state: &PickerState) {
     let visible = state.visible_indices().len();
     if visible == 0 {
         *cursor = 0;
     } else if *cursor >= visible {
         *cursor = visible - 1;
     }
-}
-
-/// Renders one frame of the fuzzy multi-select picker.
-///
-/// Layout: a bold prompt line, the live filter query, then the visible rows
-/// (each prefixed with a cursor marker and a `[x]`/`[ ]` checkbox). TUI draw
-/// code is exempt from the coverage gate; the testable logic lives in
-/// [`PickerState`].
-fn draw_picker(frame: &mut Frame, prompt: &str, state: &PickerState, cursor: usize) {
-    let chunks = Layout::vertical([
-        Constraint::Length(1), // prompt
-        Constraint::Length(1), // filter query
-        Constraint::Min(1),    // candidate rows
-    ])
-    .split(frame.area());
-
-    let title = Paragraph::new(prompt).style(Style::default().add_modifier(Modifier::BOLD));
-    frame.render_widget(title, chunks[0]);
-
-    let query_line = Paragraph::new(format!("filter: {}", state.query));
-    frame.render_widget(query_line, chunks[1]);
-
-    let items: Vec<ListItem> = state
-        .visible_indices()
-        .iter()
-        .enumerate()
-        .map(|(row, &original_index)| {
-            let checkbox = if state.is_selected(original_index) {
-                "[x]"
-            } else {
-                "[ ]"
-            };
-            let pointer = if row == cursor { '>' } else { ' ' };
-            ListItem::new(format!(
-                "{pointer} {checkbox} {}",
-                state.labels[original_index]
-            ))
-        })
-        .collect();
-
-    frame.render_widget(List::new(items), chunks[2]);
-}
-
-/// Presents a `ratatui` fuzzy-filter multi-select over `labels` and returns the
-/// selected **original** indices, or `None` when the user cancels (Ctrl+C or
-/// Esc).
-///
-/// Key handling: printable characters edit the filter query, Backspace deletes
-/// the last query character, Ctrl+U clears the whole query, Up/Down move the
-/// cursor over the visible (filtered) rows, Space toggles the cursor row, Enter
-/// confirms, and Ctrl+C / Esc cancel. Selection persists across query changes
-/// because it is keyed by original index (see [`PickerState`]).
-///
-/// The terminal is always restored — raw mode disabled, alternate screen left —
-/// on every exit path (clean exit, early `?` error, or panic) via
-/// [`PickerTerminalGuard`] and an installed panic hook, mirroring
-/// `src/dashboard.rs`.
-///
-/// # Errors
-///
-/// Returns [`PawError::SessionError`] if the terminal cannot be set up, drawn,
-/// or read from.
-fn fuzzy_multi_select(prompt: &str, labels: &[String]) -> Result<Option<Vec<usize>>, PawError> {
-    // Restore the terminal before the default hook prints a panic message, so
-    // a panic inside the loop never leaves the terminal in raw mode.
-    let original_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = terminal::disable_raw_mode();
-        let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen);
-        original_hook(info);
-    }));
-
-    let terminal = picker_setup_terminal()?;
-    let mut guard = PickerTerminalGuard { terminal };
-
-    let mut state = PickerState::new(labels.to_vec());
-    let mut cursor: usize = 0;
-
-    let selection = loop {
-        guard
-            .terminal
-            .draw(|f| draw_picker(f, prompt, &state, cursor))
-            .map_err(|e| PawError::SessionError(format!("picker draw failed: {e}")))?;
-
-        let event = event::read()
-            .map_err(|e| PawError::SessionError(format!("picker input read failed: {e}")))?;
-        let Event::Key(key) = event else { continue };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break None,
-            KeyCode::Esc => break None,
-            // Ctrl+U clears the whole filter (readline convention), restoring
-            // the full list with selections intact.
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                state.set_query(String::new());
-                cursor = 0;
-            }
-            KeyCode::Enter => break Some(state.confirm()),
-            KeyCode::Up => cursor = cursor.saturating_sub(1),
-            KeyCode::Down => {
-                let visible = state.visible_indices().len();
-                if visible > 0 {
-                    cursor = (cursor + 1).min(visible - 1);
-                }
-            }
-            KeyCode::Char(' ') => state.toggle(cursor),
-            KeyCode::Backspace => {
-                state.pop_char();
-                clamp_cursor(&mut cursor, &state);
-            }
-            // Printable characters edit the query. Control/Alt combos (other
-            // than the Ctrl+C handled above) are ignored rather than typed.
-            KeyCode::Char(c)
-                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(KeyModifiers::ALT) =>
-            {
-                state.push_char(c);
-                clamp_cursor(&mut cursor, &state);
-            }
-            _ => {}
-        }
-    };
-
-    // Explicit restore for the clean path; the guard also restores on drop as a
-    // safety net for the early-return and panic paths.
-    picker_restore_terminal(&mut guard.terminal)?;
-    Ok(selection)
 }
 
 // ---------------------------------------------------------------------------
@@ -1095,34 +742,6 @@ mod tests {
             result.mappings,
             vec![("fix/api".to_string(), "alpha".to_string())]
         );
-    }
-
-    // -----------------------------------------------------------------------
-    // Display impls
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn cli_mode_display() {
-        assert_eq!(CliMode::Uniform.to_string(), "Same CLI for all branches");
-        assert_eq!(CliMode::PerBranch.to_string(), "Different CLI per branch");
-    }
-
-    #[test]
-    fn cli_info_display_same_names() {
-        let info = CliInfo {
-            display_name: "claude".to_string(),
-            binary_name: "claude".to_string(),
-        };
-        assert_eq!(info.to_string(), "claude");
-    }
-
-    #[test]
-    fn cli_info_display_different_names() {
-        let info = CliInfo {
-            display_name: "My Agent".to_string(),
-            binary_name: "my-agent".to_string(),
-        };
-        assert_eq!(info.to_string(), "My Agent (my-agent)");
     }
 
     // -----------------------------------------------------------------------

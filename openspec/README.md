@@ -37,7 +37,7 @@ openspec/
 | `tmux-orchestration` | `src/tmux.rs` |
 | `session-state` | `src/session.rs` |
 | `configuration` | `src/config.rs` |
-| `interactive-selection` | `src/interactive.rs` |
+| `interactive-selection` | `src/interactive/` |
 | `error-handling` | `src/error.rs` |
 
 ## Usage
