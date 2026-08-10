@@ -174,3 +174,36 @@ security), cold-start, before the next wave begins.
 - **WHEN** the refactor waves are executed
 - **THEN** the bug fix SHALL ship as its own spec+test-gated change with a reproducing test, not inside a refactor wave
 
+### Requirement: The dashboard is modeled as Model-View-Update
+
+The dashboard SHALL be structured as Model-View-Update: the pure draw/format helpers form
+the **View** (a pure function of the Model producing the rendered frame), the redraw state
+forms the **Model**, and a pure `update(&mut Model, Msg)` applies the state transitions.
+The crossterm event loop SHALL drain input/tick/broker events into `Msg` values, route them
+through `update`, and render the resulting Model via the View — rather than mutating local
+state inline. The SIGHUP/`poll_tty` FFI, the `getppid()==1` orphan-exit, the poll cadence
+and timeout, and terminal setup/teardown SHALL remain byte-identical to the pre-refactor
+implementation (frozen surface). Rendered frames, key handling (including quit), and
+broker-log ingest SHALL be observably identical to the pre-refactor direct-mutation loop.
+
+#### Scenario: The View renders purely from the Model
+
+- **GIVEN** a `Model` value and a `TestBackend`
+- **WHEN** the View renders the Model
+- **THEN** the produced frame SHALL match the pre-refactor render for the same state
+- **AND** the View SHALL read only the Model (no I/O, no `poll_tty`, no terminal side effects)
+
+#### Scenario: Update applies a message exactly as the old inline mutation did
+
+- **GIVEN** a `Model` and a `Msg` (a key press, a tick/redraw, or a broker-message ingest)
+- **WHEN** `update(&mut model, msg)` runs
+- **THEN** the Model SHALL transition exactly as the pre-refactor inline handling did — e.g. a quit key sets the quit flag, a broker ingest appends the same row the old loop appended, a status snapshot yields the same rows/counters
+- **AND** `update` SHALL be pure (no terminal or process I/O)
+
+#### Scenario: The SIGHUP and poll FFI are untouched
+
+- **GIVEN** the MVU refactor
+- **WHEN** `src/dashboard.rs` is inspected
+- **THEN** `orphaned()`, `poll_tty()`, the `getppid()==1` orphan-exit, and the poll cadence/timeout SHALL be byte-identical to the pre-refactor code
+- **AND** the event loop SHALL still call `poll_tty` and drain crossterm events exactly as before, only routing them through `update`
+

@@ -82,6 +82,20 @@ the shared broker state. The dashboard pane sits at pane index 1 in supervisor
 mode (see the layout diagram below) and at pane 0 in non-supervisor broker
 mode.
 
+The dashboard is structured as **Model-View-Update**:
+
+| File | Purpose |
+|------|---------|
+| `src/dashboard.rs` | The **Model** (`Model` — the redraw state: derived agent rows, footer status line, Broker log buffer, quit flag) and the **Update** (`Msg` + a pure `update(&mut Model, Msg)`), plus what MVU cannot own: terminal setup/teardown, the SIGHUP/`poll_tty` FFI, the `getppid() == 1` orphan-exit gate, and the event loop. |
+| `src/dashboard/view.rs` | The **View** — a pure function of the `Model` producing the rendered frame (`render`, `render_dashboard`, `draw_frame`, and the `status_symbol` / `format_age` / `format_agent_rows` / `arrange_with_supervisor_pinned` / `format_status_line` helpers). No I/O, so frames are asserted against a `TestBackend` without a live pty. |
+| `src/dashboard/broker_log.rs` | The Broker log panel: ring buffer, filter chips, selection/overlay state, key handling, and its own rendering. |
+
+The event loop drains crossterm key presses, the per-tick status snapshot, and
+new broker-log entries into `Msg` values, routes each through `update`, and
+renders the resulting `Model` via the View — rather than mutating local state
+inline. The View re-exports keep `crate::dashboard::{render_dashboard,
+format_agent_rows, …}` resolving from the parent module.
+
 ### `src/supervisor/` modules
 
 | File | Purpose |
