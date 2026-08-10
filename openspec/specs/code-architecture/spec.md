@@ -2,7 +2,6 @@
 
 ## Purpose
 The enforceable structural and regression contract every behavior-preserving refactor must uphold: the observable public surface (CLI, config TOML, broker wire) stays byte-identical, process/tmux/git invocation is reachable through an injectable `CommandRunner` seam, injection-prone strings flow through a single newtype construction point, the codebase is organized into cohesive domain modules with preserved re-exports, the frozen serde/wire/lock/SIGHUP surfaces are never touched, and structural refactors land in test-gated waves. It keeps "refactor" strictly behavior-preserving and distinct from behavior changes across the pre-v1.0.0 hardening.
-
 ## Requirements
 ### Requirement: Refactors preserve the observable public surface
 
@@ -37,7 +36,9 @@ Process execution on the orchestration path SHALL depend on an injectable `Comma
 rather than calling `std::process::Command` inline in logic. Production SHALL wire a real runner
 whose behavior is identical to the pre-refactor inline calls; tests SHALL be able to inject a fake
 runner that records the invoked argv and returns scripted output, so tmux/git orchestration is
-unit-testable without spawning a real process.
+unit-testable without spawning a real process. The `src/git.rs` git module SHALL route its git
+invocations through this seam via `*_with(runner, …)` functions whose public wrappers delegate with
+the real runner, so every caller compiles unchanged and production git behavior is byte-identical.
 
 #### Scenario: A tmux-orchestration unit test asserts argv without spawning a process
 
@@ -51,6 +52,14 @@ unit-testable without spawning a real process.
 - **GIVEN** the production real `CommandRunner`
 - **WHEN** an orchestration command runs end-to-end
 - **THEN** the external tmux/git calls SHALL be identical to the pre-refactor inline invocations
+
+#### Scenario: A git-operation unit test asserts git argv without spawning git
+
+- **GIVEN** a `src/git.rs` function routed through the seam and a `FakeCommandRunner` injected via its `*_with(runner, …)` entry point
+- **WHEN** a git-operation unit test runs
+- **THEN** it SHALL assert the exact `git` argv (subcommand, flags, path/branch operands) the function builds
+- **AND** it SHALL drive the function's success/failure branches from the fake's scripted exit status and stdout/stderr
+- **AND** no real `git` process SHALL be spawned
 
 ### Requirement: Injection-prone strings flow through a single newtype construction point
 
