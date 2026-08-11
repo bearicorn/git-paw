@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-08-10
+
+### Features
+
+- *(supervisor)* Enforce one approver per pane with an exclusive claim
+- *(cli,supervisor)* Single-source the classifier via a hidden __classify seam
+- *(supervisor,approval)* Harden the unattended loop against four dogfood stalls
+- *(dashboard,broker)* Status activity phrase and broker-log heartbeat dedup
+- *(supervisor,tmux)* Fix supervisor top row at half the session height
+- *(supervisor)* Autonomous orchestrator (pump-to-brain hand-off)
+- *(init,config)* Backfill missing top-level config keys on init
+- *(supervisor,config,broker)* Self-healing correction loop
+
+### Bug Fixes
+
+- *(session,error,tmux)* Pre-freeze code-quality closeout
+
+### Refactor
+
+- *(supervisor)* Model the worker lifecycle as a WorkerPhase enum
+- *(dashboard)* Restructure the dashboard TUI as Model-View-Update
+- *(git)* Route git.rs through the CommandRunner seam
+- *(interactive)* Split interactive.rs into resolver/prompter/picker submodules
+- *(init,broker,supervisor)* Source shared _paw_common.sh preamble from bundled helpers
+
+### Documentation
+
+- *(user-guide)* Add tiered-model workflow guide
 ## [0.13.0] - 2026-08-05
 
 ### Features
@@ -23,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- Lower the declared MSRV from 1.97 to 1.96
 - *(broker)* Offload blocking publish work and recover a poisoned state lock
 - *(dashboard,cli)* Shell-quote the binary path in the __dashboard command
 - *(tmux,logging)* Shell-quote the pipe-pane log path
@@ -308,6 +337,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 - Add CLI tool for parallel AI coding sessions across git worktrees
+[0.14.0]: https://github.com/bearicorn/git-paw/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/bearicorn/git-paw/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/bearicorn/git-paw/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/bearicorn/git-paw/compare/v0.10.0...v0.11.0
