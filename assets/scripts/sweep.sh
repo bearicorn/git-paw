@@ -15,9 +15,11 @@
 # Subcommands implemented (per supervisor-bugfixes-v0-5-x §3.2):
 #   snapshot                            — capture-pane tail of every coding pane
 #   capture <pane>                      — single-pane full tail-50 capture
-#   approve <pane>                      — re-confirm live prompt on a fresh capture,
+#   approve <pane>                      — take the pane's exclusive approval claim,
+#                                         re-confirm live prompt on a fresh capture,
 #                                         then send the resolved option digit + Enter
-#                                         (option-index selection); refuses pane 0
+#                                         (option-index selection); refuses pane 0 and
+#                                         skips a pane another approver has claimed
 #   status [--all]                      — broker /status, phantoms filtered by default
 #   worktrees-status                    — uncommitted-file count per agent worktree
 #   inbox                               — agent.question/feedback/blocked from supervisor inbox
@@ -313,7 +315,8 @@ usage: $0 <subcommand> [args]
   snapshot                            capture-pane tail of every coding-agent pane
   capture <pane>                      single-pane full tail-50 capture
   approve <pane>                      re-confirm live prompt on a fresh capture, then send
-                                      the resolved option digit + Enter; refuses pane 0
+                                      the resolved option digit + Enter; refuses pane 0;
+                                      skips a pane another approver has claimed
   detect-stuck                        flag stuck agents (prompt/stream-timeout/bloat/no-progress/blocked)
   stuck-eval <agent> <last_seen> [checkbox_count] [commit_count] [blocked_age]
                                       (stdin: capture) run the stuck decision for one agent
@@ -375,6 +378,71 @@ cmd_capture() {
   tmux capture-pane -t "${SESSION}:0.${pane}" -p -S -50 2>&1 | tail -50
 }
 
+# ---------------------------------------------------------------------------
+# Per-pane approval claim.
+#
+# Approval keystrokes reach a pane from this helper, from git-paw's in-process
+# drive loop, and from its dashboard auto-approver — three separate processes.
+# Each takes the pane's claim before sending, so two can never both land a
+# keystroke on the same pane. The path formula and the TTL below MUST stay
+# byte-identical to the ones the binary uses, or the exclusion stops spanning
+# processes.
+# ---------------------------------------------------------------------------
+
+# Seconds after which an untouched claim is treated as abandoned by a
+# hard-killed approver and may be stolen, bounding the wedge to one TTL.
+CLAIM_TTL_SECONDS=10
+
+# Claim file for a pane: <repo>/.git-paw/tmp/approve-pane-<N>.claim
+claim_path() {
+  printf '%s\n' "${PROJECT_ROOT}/.git-paw/tmp/approve-pane-${1}.claim"
+}
+
+# Succeeds when the claim file exists and has gone untouched for longer than
+# CLAIM_TTL_SECONDS. An unreadable claim is never reported abandoned.
+claim_is_abandoned() {
+  CLAIM_FILE="$1" CLAIM_TTL="${CLAIM_TTL_SECONDS}" "${PY}" -c "$(cat <<'PY'
+import os, sys, time
+try:
+    age = time.time() - os.path.getmtime(os.environ["CLAIM_FILE"])
+except OSError:
+    sys.exit(1)
+sys.exit(0 if age > float(os.environ["CLAIM_TTL"]) else 1)
+PY
+)"
+}
+
+# Path of the claim this process holds, released by the EXIT trap. Global, not
+# local to cmd_approve, so the trap can still read it after that function
+# returns.
+PAW_CLAIM_FILE=""
+release_pane_claim() {
+  if [[ -n "${PAW_CLAIM_FILE}" ]]; then
+    rm -f "${PAW_CLAIM_FILE}"
+  fi
+  return 0
+}
+
+# Atomically takes the claim at $1: 0 when acquired, 1 when another approver
+# holds it. `set -C` (noclobber) makes the create-if-absent atomic, so exactly
+# one of two concurrent acquirers wins. Acquisition is NON-BLOCKING — a caller
+# that fails skips the pane rather than waiting. On success an EXIT trap is
+# armed, so the claim is released on a normal exit, an error, and an interrupt.
+acquire_pane_claim() {
+  local claim=$1
+  mkdir -p "$(dirname "${claim}")" 2>/dev/null || return 1
+  if ! ( set -C; : > "${claim}" ) 2>/dev/null; then
+    # Held. Steal it only if its owner left it untouched past the TTL, and only
+    # once — a racer that wins the re-create keeps it and we skip the pane.
+    claim_is_abandoned "${claim}" || return 1
+    rm -f "${claim}" 2>/dev/null
+    ( set -C; : > "${claim}" ) 2>/dev/null || return 1
+  fi
+  PAW_CLAIM_FILE="${claim}"
+  trap release_pane_claim EXIT
+  return 0
+}
+
 cmd_approve() {
   require_session
   local pane=${1:-}
@@ -387,6 +455,15 @@ cmd_approve() {
   # concern owned by the drive loop.
   if [[ "${pane}" == "0" ]]; then
     echo "pane 0 excluded from blind send-keys (supervisor pane)"
+    return 0
+  fi
+  # Take the pane's exclusive claim before doing anything else that could send
+  # keys. git-paw's drive loop honours the same claim, so a pane it is already
+  # approving is left alone here (and vice versa) rather than approved twice.
+  local claim
+  claim=$(claim_path "${pane}")
+  if ! acquire_pane_claim "${claim}"; then
+    echo "pane ${pane} claimed by another approver, no keys sent (${claim})"
     return 0
   fi
   # Re-confirm a live permission prompt on a FRESH capture taken immediately

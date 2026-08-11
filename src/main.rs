@@ -1026,6 +1026,7 @@ fn cmd_dashboard() -> Result<(), PawError> {
                     worktree_map,
                     recorder,
                     protected_paths,
+                    repo_root: sess.repo_path.clone(),
                 },
             )
         });

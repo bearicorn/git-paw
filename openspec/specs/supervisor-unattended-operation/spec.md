@@ -167,7 +167,7 @@ When a live prompt is classified `danger` or `unknown` (not safe), the drive loo
 
 The escalation SHALL always be **recorded uniformly on the broker** as a drainable review item, regardless of whether an orchestrator is running. When no orchestrator (supervisor CLI) pane is present, the escalation persists on the broker for the human/driver to read — behavior unchanged from before. When an orchestrator pane IS present under unattended operation, the loop SHALL additionally **hand the escalation to the orchestrator** by injecting it into the orchestrator's pane so the smart model is actively triggered rather than relied on to poll a dead inbox (see `supervisor-autonomous-orchestrator`). This active hand-off is the one place the loop is orchestrator-aware; the broker record itself stays uniform, and a no-orchestrator run is byte-for-byte the prior behavior.
 
-Correspondingly, the drive loop SHALL be the **sole approver of classifier-safe prompts**: it approves the `safe` set and escalates the rest. No other component blanket-approves safe prompts while the loop is running (see `supervisor-skill-discipline`). This makes the loop's approvals and the orchestrator's escalation-driven approvals **disjoint sets**, so two approvers do not target the same prompt. (A hard per-pane approval claim that replaces this disjoint-set convention with an enforced guarantee is specified separately.)
+Correspondingly, the drive loop SHALL be the **sole approver of classifier-safe prompts**: it approves the `safe` set and escalates the rest. No other component blanket-approves safe prompts while the loop is running (see `supervisor-skill-discipline`). The loop's approvals and the orchestrator's escalation-driven approvals SHALL additionally be made mutually exclusive by an **enforced per-pane approval claim** (see "Approval on a pane is guarded by an exclusive per-pane claim"): before sending an approval keystroke to a pane, an approver MUST hold that pane's exclusive claim, so a double-approval on one pane is structurally impossible rather than reliant on the disjoint-set convention being obeyed.
 
 #### Scenario: Risky prompt is escalated without blocking the wave
 
@@ -183,20 +183,6 @@ Correspondingly, the drive loop SHALL be the **sole approver of classifier-safe 
 - **WHEN** the drive loop evaluates it
 - **THEN** the loop SHALL NOT send approval keystrokes
 - **AND** SHALL surface the prompt for review (broker + summary)
-
-#### Scenario: Escalation is recorded uniformly and handed to a present orchestrator
-
-- **WHEN** the drive loop escalates a `danger`/`unknown` prompt
-- **THEN** it SHALL record the escalation on the broker as a review item
-- **AND** when an orchestrator pane is present it SHALL additionally inject the escalation into the orchestrator's pane
-- **AND** when no orchestrator pane is present it SHALL leave the escalation as a broker review item with no pane injection (prior behavior)
-
-#### Scenario: The loop approves only the safe set
-
-- **GIVEN** the drive loop sweeps a pane showing a classifier-`safe` prompt and another showing an `unknown` prompt
-- **WHEN** it acts
-- **THEN** it SHALL send approval keystrokes only to the `safe` prompt
-- **AND** SHALL escalate (never approve) the `unknown` prompt, leaving it for a consumer of the escalation stream
 
 ### Requirement: Alert dedup keys on command/agent identity, never on boilerplate text
 
@@ -355,4 +341,51 @@ long stuck-detector would otherwise surface.
 - **GIVEN** a pane showing a mid-response marker (the agent is actively generating)
 - **WHEN** the drive loop sweeps it
 - **THEN** it SHALL NOT send an `Enter` — the buffered-input detector applies only to an idle pane
+
+### Requirement: Approval on a pane is guarded by an exclusive per-pane claim
+
+Before any component sends an approval keystroke to an agent pane, it SHALL acquire an
+**exclusive per-pane claim**, and SHALL release it once the keystroke(s) for that approval
+are sent. The claim SHALL be an atomic filesystem claim — created via an atomic
+create-if-absent so two concurrent acquirers cannot both succeed — keyed by pane and
+located under a gitignored runtime directory. The claim SHALL be honored identically by
+the in-process drive loop (Rust) and the bundled `sweep.sh` approval helper (shell), so
+approvers in DIFFERENT processes cannot both approve the same pane. Acquisition SHALL be
+**non-blocking**: if the claim is already held, the approver SHALL skip that pane for this
+attempt (it SHALL NOT wait) and rely on a later tick, preserving the non-blocking
+escalation guarantee. The claim SHALL be released even on error (RAII in Rust, `trap` in
+shell) so a crashed or interrupted approver does not permanently wedge a pane.
+
+#### Scenario: An approver holds the pane's claim before sending
+
+- **GIVEN** an approver about to approve the live prompt on pane N
+- **WHEN** it dispatches the approval keystroke(s)
+- **THEN** it SHALL hold pane N's exclusive claim for the duration of the send
+
+#### Scenario: Two approvers race on one pane — exactly one sends
+
+- **GIVEN** two approvers concurrently attempting to approve the live prompt on the same pane N
+- **WHEN** both try to acquire pane N's claim
+- **THEN** exactly one SHALL acquire the claim and send the approval
+- **AND** the other SHALL fail to acquire and SHALL NOT send any keystroke
+
+#### Scenario: Acquisition is non-blocking when the claim is held
+
+- **GIVEN** pane N's claim is currently held by another approver
+- **WHEN** an approver attempts to approve pane N
+- **THEN** it SHALL skip pane N for this attempt rather than block, and try again on a later tick
+
+#### Scenario: The Rust loop and the shell helper are mutually exclusive
+
+- **GIVEN** the in-process drive loop holds pane N's claim
+- **WHEN** `sweep.sh approve N` runs in a separate process
+- **THEN** it SHALL observe the claim as held and SHALL NOT send an approval keystroke
+- **AND** the same exclusion SHALL hold in the reverse direction (shell holds it, Rust skips)
+
+#### Scenario: The claim is released after the send and on error
+
+- **GIVEN** an approver that acquired pane N's claim and then finished sending (or hit an error)
+- **WHEN** the approval attempt returns
+- **THEN** pane N's claim SHALL be released so a later approver can acquire it
+- **AND** an approver that panics/errors mid-send SHALL NOT leave pane N permanently claimed
 

@@ -7,6 +7,7 @@
 pub mod approval_gate;
 pub mod approve;
 pub mod auto_approve;
+pub mod claim;
 pub mod curl_allowlist;
 pub mod dev_allowlist;
 pub mod drive;

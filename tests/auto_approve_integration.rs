@@ -27,6 +27,13 @@ use git_paw::supervisor::poll::TmuxPaneInspector;
 
 mod helpers;
 
+/// A throwaway repository root for the exclusive pane claim each approval
+/// takes, so these serial tests never inherit a claim from one another and
+/// never write into the real repository's `.git-paw/tmp/`.
+fn claim_root() -> tempfile::TempDir {
+    tempfile::tempdir().expect("temp repo root")
+}
+
 fn tmux_available() -> bool {
     Command::new("tmux")
         .arg("-V")
@@ -125,9 +132,11 @@ fn safe_prompt_dispatches_keystrokes_against_real_tmux() {
     // digit + Enter via send-keys.
     let capturer = TmuxPaneInspector;
     let mut dispatcher = TmuxKeyDispatcher;
+    let repo = claim_root();
     let req = ApprovalRequest {
         enabled: true,
         session: &session,
+        repo_root: repo.path(),
         pane_index: 2,
         agent_id: "feat-test",
         kind: PermissionType::Cargo,
@@ -138,6 +147,10 @@ fn safe_prompt_dispatches_keystrokes_against_real_tmux() {
     };
     let fired = auto_approve_pane(&capturer, &mut dispatcher, req).expect("auto_approve_pane");
     assert!(fired, "safe prompt must dispatch keystrokes");
+    assert!(
+        !git_paw::supervisor::claim::claim_path(repo.path(), 2).exists(),
+        "the pane claim must be released once the approval returns"
+    );
 
     // After the Enter, the shell should still be alive — capture again.
     std::thread::sleep(Duration::from_millis(150));
@@ -172,9 +185,11 @@ fn unsafe_prompt_is_noop_against_real_tmux() {
 
     let capturer = TmuxPaneInspector;
     let mut dispatcher = TmuxKeyDispatcher;
+    let repo = claim_root();
     let req = ApprovalRequest {
         enabled: true,
         session: &session,
+        repo_root: repo.path(),
         pane_index: 2,
         agent_id: "feat-test",
         kind: PermissionType::Unknown,
@@ -206,9 +221,11 @@ fn disabled_config_is_noop_against_real_tmux() {
     let mut dispatcher = TmuxKeyDispatcher;
     // Even with a safe class, enabled=false must short-circuit before
     // touching tmux.
+    let repo = claim_root();
     let req = ApprovalRequest {
         enabled: false,
         session: &session,
+        repo_root: repo.path(),
         pane_index: 2,
         agent_id: "feat-test",
         kind: PermissionType::Cargo,

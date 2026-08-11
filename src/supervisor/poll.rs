@@ -154,6 +154,9 @@ where
     pub state: Option<&'a BrokerState>,
     /// tmux session name.
     pub session: &'a str,
+    /// Repository root, from which each pane's exclusive approval claim path is
+    /// built (see [`crate::supervisor::claim`]).
+    pub repo_root: &'a Path,
     /// Auto-approve config (presets applied by [`poll_tick`]).
     pub config: &'a AutoApproveConfig,
     /// Resolved `[supervisor.common_dev_allowlist]` section — its `stacks` +
@@ -489,6 +492,7 @@ where
     let req = ApprovalRequest {
         enabled,
         session: ctx.session,
+        repo_root: ctx.repo_root,
         pane_index,
         agent_id,
         kind,
@@ -544,6 +548,15 @@ mod tests {
     use crate::config::AutoApproveConfig;
     use std::cell::RefCell;
     use std::time::Instant;
+
+    /// A throwaway repository root for the pane claim each approval takes.
+    ///
+    /// Every tick gets its own, so tests running in parallel — most of which
+    /// approve pane 2 — never contend for one another's claim file, and none
+    /// writes into the real repository's `.git-paw/tmp/`.
+    fn claim_root() -> tempfile::TempDir {
+        tempfile::tempdir().expect("temp repo root")
+    }
 
     struct StubInspector {
         kind: Option<PermissionType>,
@@ -629,12 +642,14 @@ mod tests {
         let no_worktree = |_id: &str| None::<PathBuf>;
         let dev_allowlist = CommonDevAllowlistConfig::default();
         let protected = ProtectedPaths::default();
+        let repo = claim_root();
         let mut dispatcher = RecordingDispatcher { events: vec![] };
         let mut forwarder = RecordingForwarder::default();
         let out = {
             let mut ctx = PollContext {
                 state: Some(state),
                 session: "paw-x",
+                repo_root: repo.path(),
                 config: cfg,
                 dev_allowlist: &dev_allowlist,
                 resolver,
@@ -893,12 +908,14 @@ mod tests {
         };
         let no_worktree = |_id: &str| None::<PathBuf>;
         let protected = ProtectedPaths::default();
+        let repo = claim_root();
         let mut dispatcher = RecordingDispatcher { events: vec![] };
         let mut forwarder = RecordingForwarder::default();
         let out = {
             let mut ctx = PollContext {
                 state: None,
                 session: "paw-x",
+                repo_root: repo.path(),
                 config: &cfg,
                 dev_allowlist: &dev_allowlist,
                 resolver: &resolver,
@@ -940,12 +957,14 @@ mod tests {
     {
         let dev_allowlist = CommonDevAllowlistConfig::default();
         let protected = ProtectedPaths::default();
+        let repo = claim_root();
         let mut dispatcher = RecordingDispatcher { events: vec![] };
         let mut forwarder = RecordingForwarder::default();
         let out = {
             let mut ctx = PollContext {
                 state: Some(state),
                 session: "paw-x",
+                repo_root: repo.path(),
                 config: cfg,
                 dev_allowlist: &dev_allowlist,
                 resolver,
@@ -1177,12 +1196,14 @@ mod tests {
         Wt: WorktreeResolver,
     {
         let dev_allowlist = CommonDevAllowlistConfig::default();
+        let repo = claim_root();
         let mut dispatcher = RecordingDispatcher { events: vec![] };
         let mut forwarder = RecordingForwarder::default();
         let out = {
             let mut ctx = PollContext {
                 state: Some(state),
                 session: "paw-x",
+                repo_root: repo.path(),
                 config: cfg,
                 dev_allowlist: &dev_allowlist,
                 resolver,

@@ -158,6 +158,9 @@ pub(crate) struct AutoApproveWiring {
     /// Protected-path set for the operator config/memory danger rule
     /// (`agent-memory-isolation`).
     pub(crate) protected_paths: git_paw::supervisor::auto_approve::ProtectedPaths,
+    /// Repository root, from which each pane's exclusive approval claim path is
+    /// built (`supervisor-unattended-operation`).
+    pub(crate) repo_root: std::path::PathBuf,
 }
 
 /// Spawns a background thread that periodically polls the broker `/status`
@@ -186,6 +189,7 @@ pub(crate) fn spawn_auto_approve_thread(
         worktree_map,
         recorder,
         protected_paths,
+        repo_root,
     } = wiring;
     let cfg = config?.resolved();
     if !cfg.enabled {
@@ -272,6 +276,7 @@ pub(crate) fn spawn_auto_approve_thread(
             let mut ctx = PollContext {
                 state: None,
                 session: &session_name,
+                repo_root: &repo_root,
                 config: &cfg,
                 dev_allowlist: &dev_allowlist,
                 resolver: &resolver,

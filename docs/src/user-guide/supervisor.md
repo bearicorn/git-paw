@@ -613,6 +613,32 @@ awaiting approval is the existing `agent.status` with `phase:
 "stuck-on-prompt"`, and an unsafe or unknown prompt is escalated with the
 existing `agent.question`.
 
+### One approver per pane, enforced
+
+The re-confirm above stops a *stale* approval. A different race remains: two
+approvers deciding on the same pane at the same time. Approval keystrokes can
+come from the unattended drive loop, from the dashboard auto-approver, and from
+`sweep.sh approve` run by your orchestrator model or by you — three separate
+processes. If two of them land on one pane, the second keystroke falls through
+onto whatever prompt appears next.
+
+So before sending, every approver takes that pane's **exclusive claim**: an
+atomic create-if-absent of `<repo>/.git-paw/tmp/approve-pane-<N>.claim`, held
+across the send and released immediately after. Because the file system decides
+who wins, exactly one approver can hold a pane at a time, and the exclusion
+works across processes and languages — the shell helper and the binary compute
+the same path and honour each other's claims.
+
+Taking the claim never blocks. An approver that finds a pane already claimed
+**skips it** and moves on to the rest of the wave, retrying on a later sweep;
+`sweep.sh approve` reports `pane <N> claimed by another approver, no keys sent`
+and names the claim file. Release is automatic on every exit path, including an
+error or a crash mid-send. If an approver is hard-killed (`SIGKILL`) with a
+claim held, the next approver steals it once it has gone untouched for 10
+seconds — so a crash costs one pane one sweep, never a permanent wedge. The
+claim directory is ephemeral and already gitignored; you never need to manage
+it by hand, though removing a stale file is harmless.
+
 ### Option selection and the arbitrary-code policy
 
 When the classifier approves, it selects the prompt option by shape: a 2-option

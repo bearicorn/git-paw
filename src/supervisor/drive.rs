@@ -61,6 +61,7 @@ use super::auto_approve::{
     is_worktree_dev_test_op, is_worktree_file_op, is_worktree_git_op, normalize_command,
     select_option_index,
 };
+use super::claim::PaneClaim;
 use super::poll::{AgentStatusRow, fetch_status_over_http};
 
 /// Poll cadence: the loop re-sweeps every pane on approximately this interval.
@@ -1112,7 +1113,8 @@ impl Default for DriveConfig {
 ///    when a LIVE prompt footer is in the tail.
 /// 3. Classifies the live prompt; safe prompts are approved (audit-logged
 ///    first, then the option digit + `Enter` as separate keystrokes, gated on a
-///    fresh re-confirm), risky/unknown prompts are escalated non-blocking and
+///    fresh re-confirm and on holding the pane's exclusive claim under
+///    `repo_root`), risky/unknown prompts are escalated non-blocking and
 ///    deduped on `(agent_id, shape)`.
 /// 4. Fetches `/status`; on completion the loop exits, otherwise it checks the
 ///    heartbeat and sleeps for the poll interval.
@@ -1124,6 +1126,7 @@ impl Default for DriveConfig {
 /// conditions.
 pub fn drive_loop(
     session: &str,
+    repo_root: &Path,
     agents: &[AgentPane],
     deps: &mut DriveDeps<'_>,
     config: &DriveConfig,
@@ -1156,6 +1159,7 @@ pub fn drive_loop(
         let panes = deps.enumerator.list_panes(session);
         let ctx = SweepContext {
             session,
+            repo_root,
             orchestrator: orchestrator_pane_index(&panes, agents),
         };
         let mut pane_by_agent: HashMap<String, usize> = HashMap::new();
@@ -1320,15 +1324,18 @@ fn observe_worker_messages(
     }
 }
 
-/// The tmux session plus the orchestrator pane resolved for the current sweep.
+/// The tmux session, the repository root, and the orchestrator pane resolved
+/// for the current sweep.
 ///
-/// Bundled rather than passed as two parameters because every acting path needs
-/// both, and threading them separately pushes the sweep helpers past the
+/// Bundled rather than passed as separate parameters because every acting path
+/// needs them, and threading them separately pushes the sweep helpers past the
 /// argument-count lint.
 #[derive(Debug, Clone, Copy)]
 struct SweepContext<'a> {
     /// tmux session name.
     session: &'a str,
+    /// Repository root, from which the per-pane approval claim path is built.
+    repo_root: &'a Path,
     /// Orchestrator (supervisor CLI) pane index, or `None` when the session has
     /// no supervisor pane — the broker-only fallback.
     orchestrator: Option<usize>,
@@ -1405,6 +1412,7 @@ fn sweep_pane(
             let _ = send_approval(
                 deps.capturer,
                 deps.dispatcher,
+                ctx.repo_root,
                 session,
                 pane.pane_index,
                 option_index,
@@ -1596,21 +1604,35 @@ fn worker_cli<'a>(rows: &'a [AgentStatusRow], agent_id: &str) -> &'a str {
         .map_or("unknown", |r| r.cli.as_str())
 }
 
-/// Re-confirms a live prompt with a fresh capture immediately before the send,
-/// then dispatches the option digit followed by a separate `Enter`.
+/// Takes the pane's exclusive approval claim, re-confirms a live prompt with a
+/// fresh capture immediately before the send, then dispatches the option digit
+/// followed by a separate `Enter`.
 ///
-/// Returns `Ok(true)` when the keystrokes were sent, `Ok(false)` when the
-/// prompt cleared between the sweep and the send (no stray input). This gate
-/// applies to EVERY pane including pane 0 — the drive loop is the sole approver
-/// for an unattended session and is explicitly permitted to clear the
-/// supervisor's own safe prompts, but only with these minimal keystrokes.
+/// Returns `Ok(true)` when the keystrokes were sent and `Ok(false)` when the
+/// send was skipped — either another approver holds the pane's claim, or the
+/// prompt cleared between the sweep and the send (no stray input either way).
+/// This gate applies to EVERY pane including pane 0 — the drive loop is the
+/// sole approver of classifier-safe prompts for an unattended session and is
+/// explicitly permitted to clear the supervisor's own safe prompts, but only
+/// with these minimal keystrokes.
+///
+/// The claim is what makes "sole approver" enforced rather than conventional: a
+/// pane already being driven by the orchestrator's `sweep.sh approve` (a
+/// separate process) is skipped this tick and retried on a later one, so the
+/// two can never both land a keystroke. It is held across the re-confirm AND
+/// the dispatch, and released by [`PaneClaim`]'s `Drop` on every return path
+/// including an error or a panic.
 fn send_approval(
     capturer: &dyn PaneCapture,
     dispatcher: &mut dyn KeyDispatcher,
+    repo_root: &Path,
     session: &str,
     pane_index: usize,
     option_index: u8,
 ) -> Result<bool, PawError> {
+    let Some(_claim) = PaneClaim::try_acquire(repo_root, pane_index) else {
+        return Ok(false); // another approver owns this pane — skip, never wait
+    };
     let capture = capturer.capture(session, pane_index);
     if !live_prompt_in_tail(&capture) {
         return Ok(false);
@@ -2183,7 +2205,7 @@ pub fn run_drive_loop(
         learnings: &mut learnings,
     };
 
-    let summary = drive_loop(session, agents, &mut deps, &config);
+    let summary = drive_loop(session, repo_root, agents, &mut deps, &config);
     println!("{}", summary.render());
     Ok(summary)
 }
@@ -2192,6 +2214,22 @@ pub fn run_drive_loop(
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+
+    /// Runs the loop against a throwaway repository root.
+    ///
+    /// Every approval the sweep dispatches first takes that pane's claim under
+    /// this root, so tests running in parallel — several of which approve the
+    /// same pane index — never contend for one another's claim files, and none
+    /// writes into the real repository's `.git-paw/tmp/`.
+    fn drive_loop_in_tmp(
+        session: &str,
+        agents: &[AgentPane],
+        deps: &mut DriveDeps<'_>,
+        config: &DriveConfig,
+    ) -> DriveSummary {
+        let repo = tempfile::tempdir().expect("temp repo root");
+        drive_loop(session, repo.path(), agents, deps, config)
+    }
 
     // --- Fakes --------------------------------------------------------------
 
@@ -2762,7 +2800,7 @@ mod tests {
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
         };
-        drive_loop("paw-test", &agents, &mut deps, &config);
+        drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
         assert_eq!(
             dispatcher.events,
             vec![(2, "2".to_string()), (2, "Enter".to_string())],
@@ -2846,7 +2884,7 @@ mod tests {
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
         };
-        drive_loop("paw-test", &agents, &mut deps, &config);
+        drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
         assert_eq!(
             dispatcher.events,
             vec![(2, "Enter".to_string())],
@@ -3048,7 +3086,7 @@ mod tests {
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
         };
-        drive_loop("paw-test", &agents, &mut deps, &config);
+        drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
         // Panes 0 and 2 captured once each; pane 1 (dashboard) never captured.
         assert_eq!(
             capturer.calls.get(),
@@ -3108,7 +3146,7 @@ mod tests {
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
         };
-        let summary = drive_loop("paw-test", &agents, &mut deps, &config);
+        let summary = drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
 
         assert_eq!(summary.outcome, DriveOutcome::Completed);
         // The safe prompt on the coding pane was approved with `1` then Enter.
@@ -3118,6 +3156,88 @@ mod tests {
         );
         assert_eq!(alerts.approvals.len(), 1, "one approval logged");
         assert!(alerts.escalations.is_empty(), "no escalations");
+    }
+
+    /// Spec scenario "The Rust loop and the shell helper are mutually
+    /// exclusive", reverse direction: another approver (here `sweep.sh`, which
+    /// creates the very same claim file from its own process) already holds
+    /// pane 2, so the loop dispatches NO keystroke for a prompt it classified
+    /// safe — and pane 3, unclaimed, is approved in the same sweep, proving the
+    /// skip is per-pane and does not block the wave.
+    #[test]
+    fn a_pane_claimed_by_another_approver_receives_no_keystroke() {
+        let agents = vec![
+            AgentPane {
+                agent_id: "feat-a".to_string(),
+                worktree_path: PathBuf::from("/repo-feat-a"),
+            },
+            AgentPane {
+                agent_id: "feat-b".to_string(),
+                worktree_path: PathBuf::from("/repo-feat-b"),
+            },
+        ];
+        let enumerator = FakeEnumerator {
+            panes: vec![
+                PaneInfo {
+                    pane_index: 2,
+                    pane_current_path: "/repo-feat-a".to_string(),
+                },
+                PaneInfo {
+                    pane_index: 3,
+                    pane_current_path: "/repo-feat-b".to_string(),
+                },
+            ],
+        };
+        let capturer = FakeCapturer::new(&[
+            (2, &live_safe_capture("cargo test")),
+            (3, &live_safe_capture("cargo test")),
+        ]);
+        let mut dispatcher = RecordingDispatcher::default();
+        // Both agents are terminal on the first poll, so exactly one sweep runs
+        // and the keystroke count is deterministic.
+        let status = ScriptedStatus::new(vec![vec![
+            row("feat-a", "verified"),
+            row("feat-b", "verified"),
+        ]]);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let messages = ScriptedMessages::none();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+        };
+        let config = DriveConfig {
+            whitelist: vec!["cargo test".to_string()],
+            poll_interval: Duration::from_secs(1),
+            heartbeat: Duration::from_hours(1),
+            ..DriveConfig::default()
+        };
+
+        let repo = tempfile::tempdir().expect("temp repo root");
+        // Stand in for the other approver: the claim file, at the path both
+        // sides compute, taken before the sweep runs.
+        let claimed = crate::supervisor::claim::claim_path(repo.path(), 2);
+        std::fs::create_dir_all(claimed.parent().expect("claim parent")).expect("mk tmp dir");
+        std::fs::write(&claimed, "").expect("write foreign claim");
+
+        drive_loop("paw-test", repo.path(), &agents, &mut deps, &config);
+
+        assert_eq!(
+            dispatcher.events,
+            vec![(3, "1".to_string()), (3, "Enter".to_string())],
+            "the claimed pane must receive nothing; the free pane is still approved"
+        );
+        assert!(
+            claimed.exists(),
+            "the loop must leave the other approver's claim in place"
+        );
     }
 
     // --- full loop: danger escalation is non-blocking (task 8.2 in-memory) --
@@ -3177,7 +3297,7 @@ mod tests {
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
         };
-        let summary = drive_loop("paw-test", &agents, &mut deps, &config);
+        let summary = drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
 
         // The danger prompt was escalated, NOT approved.
         assert_eq!(alerts.escalations.len(), 1);
@@ -3232,7 +3352,7 @@ mod tests {
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
         };
-        drive_loop("paw-test", &agents, &mut deps, &config);
+        drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
         // Pane 0 IS approved (W15-3) but only with the minimal digit+Enter
         // (W15-13) — no free text.
         assert_eq!(
@@ -3273,7 +3393,7 @@ mod tests {
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
         };
-        drive_loop("paw-test", &agents, &mut deps, &config);
+        drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
         assert!(
             dispatcher.events.is_empty(),
             "no keystrokes to pane 0 without a live prompt"
@@ -3318,7 +3438,7 @@ mod tests {
             heartbeat: Duration::from_secs(5),
             ..DriveConfig::default()
         };
-        let summary = drive_loop("paw-test", &agents, &mut deps, &config);
+        let summary = drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
         assert_eq!(summary.outcome, DriveOutcome::Heartbeat);
         // No keystrokes and no escalation for a plainly-iterating agent
         // (feedback-cycle tolerance, task 5.4).
@@ -3366,7 +3486,7 @@ mod tests {
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
         };
-        drive_loop("paw-test", &agents, &mut deps, &config);
+        drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
         assert!(
             dispatcher.events.iter().any(|(p, _)| *p == 2),
             "a pane with no broker record was still swept and approved"
@@ -3414,7 +3534,7 @@ mod tests {
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
         };
-        drive_loop("paw-test", &agents, &mut deps, &config);
+        drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
         assert!(
             dispatcher.events.is_empty(),
             "a scrollback prompt must not trigger keystrokes"
@@ -3541,7 +3661,7 @@ mod tests {
             },
             ..DriveConfig::default()
         };
-        drive_loop("paw-test", &agents, &mut deps, &config);
+        drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
 
         assert_eq!(dispatcher.events.len(), 2, "one text keystroke + one Enter");
         let (pane, text) = &dispatcher.events[0];
@@ -3678,7 +3798,7 @@ mod tests {
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
         };
-        let summary = drive_loop("paw-test", &agents, &mut deps, &config);
+        let summary = drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
 
         assert!(
             dispatcher.events.is_empty(),
@@ -3734,7 +3854,7 @@ mod tests {
             },
             ..DriveConfig::default()
         };
-        drive_loop("paw-test", &agents, &mut deps, &config);
+        drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
 
         assert_eq!(
             dispatcher.events.len(),
@@ -3791,7 +3911,7 @@ mod tests {
                 learnings_enabled,
                 ..DriveConfig::default()
             };
-            drive_loop("paw-test", &agents, &mut deps, &config)
+            drive_loop_in_tmp("paw-test", &agents, &mut deps, &config)
         };
         (summary, dispatcher, alerts, learnings)
     }
@@ -4011,7 +4131,7 @@ mod tests {
             },
             ..DriveConfig::default()
         };
-        let summary = drive_loop("paw-test", &agents, &mut deps, &config);
+        let summary = drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
 
         assert_eq!(dispatcher.events.len(), 2, "re-engaged once");
         assert!(
@@ -4062,7 +4182,7 @@ mod tests {
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
         };
-        drive_loop("paw-test", &agents, &mut deps, &config);
+        drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
         assert!(
             dispatcher.events.is_empty(),
             "a prompt that cleared between decision and send must dispatch zero keystrokes"
@@ -4133,7 +4253,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
         };
-        drive_loop("paw-test", agents, &mut deps, config);
+        drive_loop_in_tmp("paw-test", agents, &mut deps, config);
         (dispatcher, alerts)
     }
 
