@@ -207,3 +207,36 @@ broker-log ingest SHALL be observably identical to the pre-refactor direct-mutat
 - **THEN** `orphaned()`, `poll_tty()`, the `getppid()==1` orphan-exit, and the poll cadence/timeout SHALL be byte-identical to the pre-refactor code
 - **AND** the event loop SHALL still call `poll_tty` and drain crossterm events exactly as before, only routing them through `update`
 
+### Requirement: The worker lifecycle is an explicit phase enum with a single mapping
+
+The supervisor SHALL represent a coding agent's lifecycle phase as an explicit enum
+(`WorkerPhase` — the phases the drive loop reacts to: `Working`, `Idle`, `Blocked`,
+`Committed`, `Verified`, `Done`, plus an `Other` fallback for any unrecognized status)
+derived from the broker status string through a single mapping (`WorkerPhase::from_status`),
+rather than by scattered inline string comparisons and parallel status-string constant
+arrays. The phase predicates the loop needs SHALL be methods on the enum: "is a completed
+phase" (the old `AGENT_COMPLETE_STATUSES` = `verified`/`done`) and "is a merge-candidate
+phase" (the old `MERGE_CANDIDATE_STATUSES` = `committed`/`done`). Each predicate's result
+SHALL be identical to the pre-refactor `.contains()` check for every status string. The
+refactor SHALL be behavior-preserving: the drive loop's nudge/escalate/merge/correction
+decisions are unchanged.
+
+#### Scenario: Each status string maps to its phase
+
+- **WHEN** a broker status string is passed to `WorkerPhase::from_status`
+- **THEN** `working`→`Working`, `idle`→`Idle`, `blocked`→`Blocked`, `committed`→`Committed`, `verified`→`Verified`, `done`→`Done`
+- **AND** any unrecognized status maps to `Other`
+
+#### Scenario: The completed and merge-candidate predicates equal the old arrays
+
+- **GIVEN** any status string
+- **WHEN** the enum's "completed" and "merge-candidate" predicates are evaluated for its phase
+- **THEN** "completed" SHALL be true exactly when the status was in `AGENT_COMPLETE_STATUSES` (`verified`/`done`)
+- **AND** "merge-candidate" SHALL be true exactly when the status was in `MERGE_CANDIDATE_STATUSES` (`committed`/`done`)
+
+#### Scenario: Drive-loop behavior is unchanged
+
+- **GIVEN** the lifecycle-enum refactor
+- **WHEN** the unattended-drive e2e suite and the drive-loop unit tests run
+- **THEN** the loop's nudge, escalation, merge, and correction decisions SHALL be identical to the pre-refactor behavior
+

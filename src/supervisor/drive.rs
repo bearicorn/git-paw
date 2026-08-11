@@ -401,12 +401,98 @@ impl DedupWindow {
 }
 
 // ---------------------------------------------------------------------------
+// Worker lifecycle phase
+// ---------------------------------------------------------------------------
+
+/// A coding agent's lifecycle phase, derived from its broker status string.
+///
+/// The loop reacts to *phases* — "has this worker finished?", "is a merge
+/// decision live?" — not to status spellings. Deriving the phase through the
+/// single [`WorkerPhase::from_status`] mapping keeps that judgment in one named
+/// type instead of spreading status-string comparisons across the sweep.
+///
+/// [`WorkerPhase::Other`] absorbs every status the loop does not react to: the
+/// broker's status vocabulary is open, and an unrecognized status must never be
+/// mistaken for a phase the loop acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerPhase {
+    /// `working` — the worker is actively progressing its task.
+    Working,
+    /// `idle` — the worker is alive but not progressing.
+    Idle,
+    /// `blocked` — the worker is waiting on a peer or the supervisor.
+    Blocked,
+    /// `committed` — the worker committed; verification and merge are due.
+    Committed,
+    /// `verified` — the supervisor's gates passed for this worker.
+    Verified,
+    /// `done` — the worker reported its task complete.
+    Done,
+    /// Any status the loop does not react to.
+    Other,
+}
+
+impl WorkerPhase {
+    /// Maps a broker status string to its lifecycle phase.
+    ///
+    /// This is the loop's only status→phase mapping; anything unrecognized is
+    /// [`WorkerPhase::Other`].
+    fn from_status(status: &str) -> Self {
+        match status {
+            "working" => Self::Working,
+            "idle" => Self::Idle,
+            "blocked" => Self::Blocked,
+            "committed" => Self::Committed,
+            "verified" => Self::Verified,
+            "done" => Self::Done,
+            _ => Self::Other,
+        }
+    }
+
+    /// The broker status string this phase is derived from — the empty string
+    /// for [`WorkerPhase::Other`], which stands for no particular status and so
+    /// belongs to none of the phase sets below.
+    fn as_status(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Idle => "idle",
+            Self::Blocked => "blocked",
+            Self::Committed => "committed",
+            Self::Verified => "verified",
+            Self::Done => "done",
+            Self::Other => "",
+        }
+    }
+
+    /// Whether the worker has FINISHED — the [`AGENT_COMPLETE_STATUSES`] phases,
+    /// i.e. [`WorkerPhase::Verified`] / [`WorkerPhase::Done`].
+    ///
+    /// Delegating to the array rather than matching the two variants directly
+    /// keeps the array the single authoritative definition, so the predicate
+    /// cannot drift from it.
+    fn is_completed(self) -> bool {
+        AGENT_COMPLETE_STATUSES.contains(&self.as_status())
+    }
+
+    /// Whether the phase makes a **merge decision** live — the
+    /// [`MERGE_CANDIDATE_STATUSES`] phases, i.e. [`WorkerPhase::Committed`] /
+    /// [`WorkerPhase::Done`]. Delegates to the array for the same reason
+    /// [`WorkerPhase::is_completed`] does.
+    fn is_merge_candidate(self) -> bool {
+        MERGE_CANDIDATE_STATUSES.contains(&self.as_status())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Completion detection
 // ---------------------------------------------------------------------------
 
 /// Agent statuses that count as "task complete" for the all-agents-checked
 /// completion rule. `committed` is deliberately excluded — a commit is not yet
 /// a verified completion.
+///
+/// The authoritative definition of [`WorkerPhase::is_completed`]; decision sites
+/// read the phase predicate, never this array.
 const AGENT_COMPLETE_STATUSES: &[&str] = &["verified", "done"];
 
 /// Supervisor statuses that count as a terminal PASS/FAIL verdict for the wave.
@@ -441,7 +527,7 @@ pub fn detect_completion(
     if !coding_agent_ids.is_empty()
         && coding_agent_ids.iter().all(|id| {
             rows.iter()
-                .any(|r| &r.agent_id == id && AGENT_COMPLETE_STATUSES.contains(&r.status.as_str()))
+                .any(|r| &r.agent_id == id && WorkerPhase::from_status(&r.status).is_completed())
         })
     {
         return Some(CompletionReason::AllTasksChecked);
@@ -552,7 +638,7 @@ impl CorrectionState {
     /// from a fresh budget and the exhaustion policy is not applied.
     pub fn clear_completed(&mut self, rows: &[AgentStatusRow]) {
         for row in rows {
-            if AGENT_COMPLETE_STATUSES.contains(&row.status.as_str()) {
+            if WorkerPhase::from_status(&row.status).is_completed() {
                 self.branches.remove(&row.agent_id);
             }
         }
@@ -1171,6 +1257,9 @@ pub fn drive_loop(
 /// `agent.verified`), and treating a hypothetical `blocked` artifact as a merge
 /// candidate would hand the orchestrator a merge-sequencing task for a branch
 /// that is not ready — a misleading prompt for work that does not exist.
+///
+/// The authoritative definition of [`WorkerPhase::is_merge_candidate`]; decision
+/// sites read the phase predicate, never this array.
 const MERGE_CANDIDATE_STATUSES: &[&str] = &["committed", "done"];
 
 /// Reacts to the broker messages published since the previous sweep.
@@ -1220,7 +1309,7 @@ fn observe_worker_messages(
             }
             BrokerMessage::Artifact { payload, .. } => {
                 if let Some(pane_index) = ctx.orchestrator
-                    && MERGE_CANDIDATE_STATUSES.contains(&payload.status.as_str())
+                    && WorkerPhase::from_status(&payload.status).is_merge_candidate()
                 {
                     let text = merge_handoff_text(agent_id, &payload.status);
                     hand_to_orchestrator(deps, ctx.session, pane_index, &text);
@@ -1457,7 +1546,7 @@ fn run_correction_pass(
 /// published is still nudge-eligible, matching the loop's pane-keyed sweep.
 fn is_finished_worker(rows: &[AgentStatusRow], agent_id: &str) -> bool {
     rows.iter()
-        .any(|r| r.agent_id == agent_id && AGENT_COMPLETE_STATUSES.contains(&r.status.as_str()))
+        .any(|r| r.agent_id == agent_id && WorkerPhase::from_status(&r.status).is_completed())
 }
 
 /// Applies the configured `on_exhausted` action to a branch whose correction
@@ -4455,6 +4544,57 @@ mod tests {
             "a busy orchestrator is not nudged; sends were {:?}",
             dispatcher.literal_sends
         );
+    }
+
+    /// Spec: "Each status string maps to its phase" — one mapping owns the
+    /// status→phase derivation, and anything outside the vocabulary the loop
+    /// reacts to lands on `Other` rather than on a phase it acts upon. The
+    /// mapping is exact, so a differently-cased status is unrecognized too.
+    #[test]
+    fn from_status_maps_each_broker_status_to_its_phase() {
+        for (status, expected) in [
+            ("working", WorkerPhase::Working),
+            ("idle", WorkerPhase::Idle),
+            ("blocked", WorkerPhase::Blocked),
+            ("committed", WorkerPhase::Committed),
+            ("verified", WorkerPhase::Verified),
+            ("done", WorkerPhase::Done),
+            ("booting", WorkerPhase::Other),
+            ("DONE", WorkerPhase::Other),
+            ("", WorkerPhase::Other),
+        ] {
+            assert_eq!(
+                WorkerPhase::from_status(status),
+                expected,
+                "status {status:?} maps to the wrong phase"
+            );
+        }
+    }
+
+    /// Spec: "The completed and merge-candidate predicates equal the old
+    /// arrays" — the decision sites now read the predicates, so each must answer
+    /// exactly what its authoritative status array answers, for every status
+    /// either array lists plus the ones neither does.
+    #[test]
+    fn phase_predicates_agree_with_the_status_arrays() {
+        let statuses = AGENT_COMPLETE_STATUSES
+            .iter()
+            .chain(MERGE_CANDIDATE_STATUSES)
+            .copied()
+            .chain(["working", "idle", "blocked", "booting", ""]);
+        for status in statuses {
+            let phase = WorkerPhase::from_status(status);
+            assert_eq!(
+                phase.is_completed(),
+                AGENT_COMPLETE_STATUSES.contains(&status),
+                "is_completed disagrees with AGENT_COMPLETE_STATUSES for {status:?}"
+            );
+            assert_eq!(
+                phase.is_merge_candidate(),
+                MERGE_CANDIDATE_STATUSES.contains(&status),
+                "is_merge_candidate disagrees with MERGE_CANDIDATE_STATUSES for {status:?}"
+            );
+        }
     }
 
     /// "Finished" is `done`/`verified` only, read from broker status rows. The
