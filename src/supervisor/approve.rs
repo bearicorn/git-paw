@@ -13,6 +13,7 @@
 //! The send-keys invoker is abstracted through [`KeyDispatcher`] so unit
 //! tests can record argument vectors without spawning tmux.
 
+use std::path::Path;
 use std::process::Command;
 
 use crate::broker::publish::{build_status_message, publish_to_broker_http};
@@ -20,6 +21,7 @@ use crate::error::PawError;
 use crate::supervisor::approval_gate::{
     GateOutcome, PaneCapturer, SUPERVISOR_PANE_INDEX, approval_send_gate,
 };
+use crate::supervisor::claim::PaneClaim;
 use crate::supervisor::permission_prompt::PermissionType;
 
 /// Keystrokes (in tmux notation) that select the 1-based `option_index` at a
@@ -102,6 +104,11 @@ pub struct ApprovalRequest<'a> {
     pub enabled: bool,
     /// tmux session name (e.g. `"paw-myproject"`).
     pub session: &'a str,
+    /// Repository root, from which the pane's exclusive approval claim path is
+    /// built. Must be the same root the drive loop and `sweep.sh` resolve
+    /// (`git rev-parse --show-toplevel`) or the exclusion does not span
+    /// processes.
+    pub repo_root: &'a Path,
     /// Pane index inside `session:0.<idx>` to receive the keystrokes.
     pub pane_index: usize,
     /// Agent ID for the audit log entry (slugified branch name).
@@ -141,7 +148,13 @@ pub struct ApprovalRequest<'a> {
 ///    broker. Failures are non-fatal — see the spec rationale. Kept BEFORE
 ///    the re-confirm capture so no broker round-trip sits between the
 ///    re-confirm and the send.
-/// 4. Pass the keystrokes through [`approval_send_gate`], which re-captures the
+/// 4. Take the pane's exclusive approval claim ([`PaneClaim`]). When another
+///    approver — the in-process drive loop, or `sweep.sh approve` in a separate
+///    process — already holds it, dispatch nothing and return `Ok(false)`; the
+///    acquisition is non-blocking, so this pane is simply left to the approver
+///    that owns it. The claim is held across the gate below and released by
+///    RAII on every return path.
+/// 5. Pass the keystrokes through [`approval_send_gate`], which re-captures the
 ///    pane immediately before the send and confirms a live prompt is still in
 ///    the tail; only then are the option digit and `Enter` dispatched as two
 ///    separate `send-keys` calls (see [`approval_keystrokes`]). When the prompt
@@ -182,6 +195,13 @@ pub fn auto_approve_pane<C: PaneCapturer, D: KeyDispatcher>(
             );
         }
     }
+
+    // No approver sends into a pane another approver already drives. Taken
+    // immediately before the re-confirm so the held window stays sub-second,
+    // and released by RAII when this returns.
+    let Some(_claim) = PaneClaim::try_acquire(req.repo_root, req.pane_index) else {
+        return Ok(false);
+    };
 
     // Re-confirm a live prompt with a fresh capture immediately before the
     // send. A cleared prompt dispatches nothing — no stray input.
@@ -245,14 +265,25 @@ mod tests {
         }
     }
 
-    fn req(
+    /// A throwaway repository root for the pane claim an approval takes.
+    ///
+    /// Every test gets its own, so the several that approve pane 2 in parallel
+    /// never contend for one another's claim file — and none writes into the
+    /// real repository's `.git-paw/tmp/`.
+    fn claim_root() -> tempfile::TempDir {
+        tempfile::tempdir().expect("temp repo root")
+    }
+
+    fn req<'a>(
+        repo_root: &'a Path,
         enabled: bool,
         kind: PermissionType,
-        matched_entry: Option<&str>,
-    ) -> ApprovalRequest<'_> {
+        matched_entry: Option<&'a str>,
+    ) -> ApprovalRequest<'a> {
         ApprovalRequest {
             enabled,
             session: "paw-test",
+            repo_root,
             pane_index: 2,
             agent_id: "feat-foo",
             kind,
@@ -266,10 +297,11 @@ mod tests {
     #[test]
     fn safe_prompt_types_option_digit_then_enter() {
         let mut rec = Recorder::new();
+        let repo = claim_root();
         let fired = auto_approve_pane(
             &StubCapturer::live(),
             &mut rec,
-            req(true, PermissionType::Cargo, Some("cargo test")),
+            req(repo.path(), true, PermissionType::Cargo, Some("cargo test")),
         )
         .unwrap();
         assert!(fired, "should fire when enabled, safe, and live");
@@ -284,9 +316,10 @@ mod tests {
     #[test]
     fn broad_grant_selects_option_two() {
         let mut rec = Recorder::new();
+        let repo = claim_root();
         let request = ApprovalRequest {
             option_index: 2,
-            ..req(true, PermissionType::SafeCommand, Some("git"))
+            ..req(repo.path(), true, PermissionType::SafeCommand, Some("git"))
         };
         auto_approve_pane(&StubCapturer::live(), &mut rec, request).unwrap();
         let keys: Vec<&str> = rec.events.iter().map(|(_, _, k)| k.as_str()).collect();
@@ -296,10 +329,11 @@ mod tests {
     #[test]
     fn each_key_dispatched_separately() {
         let mut rec = Recorder::new();
+        let repo = claim_root();
         auto_approve_pane(
             &StubCapturer::live(),
             &mut rec,
-            req(true, PermissionType::Curl, None),
+            req(repo.path(), true, PermissionType::Curl, None),
         )
         .unwrap();
         // Two distinct invocations (digit + Enter), no concatenated string.
@@ -309,10 +343,16 @@ mod tests {
     #[test]
     fn disabled_config_is_noop() {
         let mut rec = Recorder::new();
+        let repo = claim_root();
         let fired = auto_approve_pane(
             &StubCapturer::live(),
             &mut rec,
-            req(false, PermissionType::Cargo, Some("cargo test")),
+            req(
+                repo.path(),
+                false,
+                PermissionType::Cargo,
+                Some("cargo test"),
+            ),
         )
         .unwrap();
         assert!(!fired);
@@ -322,10 +362,11 @@ mod tests {
     #[test]
     fn unknown_class_is_noop() {
         let mut rec = Recorder::new();
+        let repo = claim_root();
         let fired = auto_approve_pane(
             &StubCapturer::live(),
             &mut rec,
-            req(true, PermissionType::Unknown, None),
+            req(repo.path(), true, PermissionType::Unknown, None),
         )
         .unwrap();
         assert!(!fired);
@@ -337,9 +378,15 @@ mod tests {
     #[test]
     fn non_live_prompt_is_noop() {
         let mut rec = Recorder::new();
+        let repo = claim_root();
         let request = ApprovalRequest {
             live_prompt: false,
-            ..req(true, PermissionType::SafeCommand, Some("cargo test"))
+            ..req(
+                repo.path(),
+                true,
+                PermissionType::SafeCommand,
+                Some("cargo test"),
+            )
         };
         let fired = auto_approve_pane(&StubCapturer::live(), &mut rec, request).unwrap();
         assert!(!fired, "non-live prompt must not fire");
@@ -352,10 +399,11 @@ mod tests {
     #[test]
     fn cleared_prompt_suppresses_keystrokes_via_auto_approve() {
         let mut rec = Recorder::new();
+        let repo = claim_root();
         let fired = auto_approve_pane(
             &StubCapturer::cleared(),
             &mut rec,
-            req(true, PermissionType::Cargo, Some("cargo test")),
+            req(repo.path(), true, PermissionType::Cargo, Some("cargo test")),
         )
         .unwrap();
         assert!(!fired, "cleared prompt must not fire");
@@ -371,9 +419,15 @@ mod tests {
     #[test]
     fn pane_zero_is_never_auto_approved() {
         let mut rec = Recorder::new();
+        let repo = claim_root();
         let request = ApprovalRequest {
             pane_index: 0,
-            ..req(true, PermissionType::SafeCommand, Some("cargo test"))
+            ..req(
+                repo.path(),
+                true,
+                PermissionType::SafeCommand,
+                Some("cargo test"),
+            )
         };
         let fired = auto_approve_pane(&StubCapturer::live(), &mut rec, request).unwrap();
         assert!(!fired, "pane 0 must never be blind-approved");
@@ -401,7 +455,8 @@ mod tests {
     /// records the receive time relative to the recorded keystroke times,
     /// and asserts the audit log entry preceded every key.
     #[test]
-    #[allow(clippy::items_after_statements)]
+    // A listener, a timed recorder and an event enum, all local to the test.
+    #[allow(clippy::items_after_statements, clippy::too_many_lines)]
     fn broker_audit_message_published_before_keystrokes() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -470,9 +525,11 @@ mod tests {
             timeline: Arc::clone(&timeline),
         };
         let broker_url = format!("http://{addr}");
+        let repo = claim_root();
         let req = ApprovalRequest {
             enabled: true,
             session: "paw-test",
+            repo_root: repo.path(),
             pane_index: 2,
             agent_id: "feat-foo",
             kind: PermissionType::Cargo,

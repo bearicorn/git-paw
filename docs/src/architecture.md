@@ -28,11 +28,12 @@ This chapter covers git-paw's internal architecture: module structure, data flow
 │  ├── mod.rs               ├── mod.rs              ├── mod.rs     │
 │  ├── server.rs            ├── approve.rs          ├── openspec.rs│
 │  ├── messages.rs          ├── auto_approve.rs     ├── markdown.rs│
-│  ├── delivery.rs          ├── curl_allowlist.rs   ├── speckit.rs │
-│  ├── conflict.rs          ├── dev_allowlist.rs    └── resolve.rs │
-│  ├── learnings.rs         ├── layout.rs                          │
-│  ├── watcher.rs           ├── permission_prompt.rs               │
-│  └── publish.rs           ├── poll.rs                            │
+│  ├── delivery.rs          ├── claim.rs            ├── speckit.rs │
+│  ├── conflict.rs          ├── curl_allowlist.rs   └── resolve.rs │
+│  ├── learnings.rs         ├── dev_allowlist.rs                   │
+│  ├── watcher.rs           ├── layout.rs                          │
+│  └── publish.rs           ├── permission_prompt.rs               │
+│                           ├── poll.rs                            │
 │                           └── stall.rs                           │
 └───────────────────────────────────────────────────────────────────┘
 ```
@@ -103,6 +104,7 @@ format_agent_rows, …}` resolving from the parent module.
 | `src/supervisor/mod.rs` | Supervisor boot — composes the subsystems below and drives the supervisor pane. |
 | `src/supervisor/approve.rs` | Generic approval/feedback decision plumbing shared by the auto-approver. |
 | `src/supervisor/auto_approve.rs` | Safe-command auto-approver against stalled panes (`approval_level`, `safe_commands`, sweeps). |
+| `src/supervisor/claim.rs` | Exclusive per-pane approval claim. Every approver — the drive loop, the dashboard auto-approver, and the bundled `sweep.sh approve` in its own process — atomically creates `<repo>/.git-paw/tmp/approve-pane-<N>.claim` before sending a keystroke, so two can never both approve one pane. Non-blocking (a held pane is skipped, not waited on), released by RAII, and stealable once untouched past a 10s TTL so a hard-killed approver cannot wedge a pane. |
 | `src/supervisor/curl_allowlist.rs` | Seeds the least-privilege agent-broker helper path (`.git-paw/scripts/broker.sh`) into `.claude/settings.json::allowed_bash_prefixes` so the agent's first broker call never hits a permission prompt — a single stable path grant, not per-endpoint `curl` prefixes or a broad `curl *` rule. |
 | `src/supervisor/dev_allowlist.rs` | Seeds the curated `[supervisor.common_dev_allowlist]` preset (cargo / git / just / mdBook / OpenSpec) into `.claude/settings.json`. |
 | `src/supervisor/layout.rs` | Supervisor-as-pane tmux layout: pane 0 supervisor, pane 1 dashboard, agent panes 2 onwards in the bottom-row grid (row-height proportions documented below). |
