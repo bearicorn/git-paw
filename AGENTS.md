@@ -83,6 +83,8 @@ Durable principles that govern this project.
 
 Anything the binary EXPORTS to a consumer — bundled skills (`assets/agent-skills/*`), helper scripts, boot blocks, the `git paw init` default config, allowlist/classifier presets — MUST be project-agnostic. Per-project *conventions* (commit-message format, stack/test/build commands, governance docs, spec-workflow tooling) belong to the CONSUMER via their injected `AGENTS.md`/config, and must never be baked into the export. git-paw's OWN conventions (Conventional Commits for its changelog, its cargo/just/openspec stack) are repo-specific and live ONLY in this file / `cliff.toml` — never in `assets/`. Check every new bundled asset against this before shipping; this explicitly includes the auto-approve safe-command classifier (it must not hard-code git-paw's toolchain as always-safe for every consumer — source toolchain verbs from the resolved stack preset instead).
 
+**Enforcing this principle**: follow the `export-agnosticism` agent skill (`.agents/skills/export-agnosticism/SKILL.md`) — the export-surface inventory (bundled skills, shell scripts + mirrored logic, the init default config, allowlist/classifier presets, injected `AGENTS.md` sections / boot blocks / git hooks / settings seeding, templates), how to stay agnostic per surface, the enforcing audits, and the review-gate checklist. Repo-local dev skill; conformance guarded by `tests/agent_skills_conform.rs`.
+
 ### Supervisor verification is a five-gate framework
 
 `/opsx:verify` is supervisor-only (coding agents never invoke it), and `agent.verified` is published only after ALL five gates pass, in order:
@@ -91,6 +93,8 @@ Anything the binary EXPORTS to a consumer — bundled skills (`assets/agent-skil
 3. **Spec audit** — every OpenSpec scenario maps to a test; no SHALL/MUST requirement left unimplemented or contradicted.
 4. **Doc audit** — `--help`, README, mdBook, and the configuration reference updated to match the change.
 5. **Security** — no secrets, no unsafe shell/path handling, least-privilege preserved (path-scoped allowlists, never `curl *` / `cd *`).
+
+Gate 5 (and the safety angle running through all five) is the `security-and-safety-review` agent skill (`.agents/skills/security-and-safety-review/SKILL.md`) — SECURITY (external attackers on the tool or the consumer's environment) + SAFETY (the blast radius of a rogue or mistaken agent git-paw itself runs with auto-approved execution power). Consult it whenever a change touches allowlists, process spawning, paths, untrusted input, secrets, dependencies, command classification, worktree confinement, or git/file operations. Repo-local dev skill; conformance guarded by `tests/agent_skills_conform.rs`.
 
 ## Project Structure
 
@@ -216,6 +220,8 @@ External tools are integrated using standard process invocation patterns. Error 
 ## Change Checklist
 
 Every change (feature, fix, refactor) must complete ALL of the following before it is considered done. This applies whether the work is done by a human or an AI agent.
+
+This checklist and the five-gate framework are captured as one skill — follow the `definition-of-done` agent skill (`.agents/skills/definition-of-done/SKILL.md`): a change is done only when every dimension (spec, code, tests, docs, security, safety, export-agnosticism) is satisfied, tied together via the per-dimension standards skills. Use it at author-time to self-check before publishing done, and at the supervisor review gate. Repo-local dev skill; conformance guarded by `tests/agent_skills_conform.rs`.
 
 ### 1. Specs updated
 - If the change adds new behavior: create or update OpenSpec specs under `openspec/changes/` or `openspec/specs/`
@@ -343,6 +349,8 @@ Direct file writes to `openspec/changes/<change>/{proposal,design,tasks}.md` or 
 4. `just api-docs` / Rustdoc — API docs for contributors
 
 All layers must be consistent.
+
+**Verifying doc completeness**: follow the `doc-completeness` agent skill (`.agents/skills/doc-completeness/SKILL.md`) — the Gate-4 doc audit. It maps each change type (a CLI command/flag, a config field, a capability, a module) to the layers it must update, requires the four layers stay consistent and `mdbook build` passes, and gives the doc-audit checklist. Repo-local dev skill; conformance guarded by `tests/agent_skills_conform.rs`.
 
 ## Platform Support
 
