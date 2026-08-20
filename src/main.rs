@@ -408,6 +408,9 @@ struct AttachContext<'a> {
     no_rebase: bool,
     /// Worktree placement (child vs sibling) for `create_worktree`.
     placement: git_paw::config::WorktreePlacement,
+    /// Resolved `[worktree]` runtime-provisioning config (env-file copies and
+    /// port allocation). Inert when neither sub-table is configured.
+    worktree_runtime: &'a git_paw::config::WorktreeConfig,
     /// Resolved `[supervisor.common_dev_allowlist]` config for the
     /// per-worktree allowlist seeding (gating + stacks + extra).
     common_dev_allowlist: &'a git_paw::config::CommonDevAllowlistConfig,
@@ -439,9 +442,30 @@ fn attach_agent(
     ctx: &AttachContext,
     branch: &str,
     spec_entry: Option<&git_paw::specs::SpecEntry>,
+    runtime_slot: u16,
 ) -> Result<AttachedAgent, PawError> {
     let wt = git::create_worktree(ctx.repo_root, branch, !ctx.no_rebase, ctx.placement)?;
     let wt_str = wt.path.to_string_lossy().to_string();
+
+    // Provision the worktree's runtime state — the declared env-file copies,
+    // this agent's port block in a generated `.env.local`, and the consumer's
+    // `on_create` hook. This runs here, after the worktree exists and before the
+    // pane spec this function returns is ever launched, so the agent's CLI
+    // observes a fully provisioned checkout on its first read. A no-op unless
+    // `[worktree.env]` / `[worktree.ports]` / `[worktree.hooks]` is configured.
+    let provisioned = git_paw::worktree_provision::provision_worktree(
+        ctx.repo_root,
+        &wt.path,
+        branch,
+        ctx.worktree_runtime,
+        runtime_slot,
+    )?;
+    for warning in &provisioned.warnings {
+        eprintln!("warning: {branch}: {warning}");
+    }
+    if let Some(summary) = provisioned.hook_summary() {
+        println!("  {branch}: {summary}");
+    }
 
     // Provision the bundled helper scripts the agent's boot block invokes into
     // this worktree's `.git-paw/scripts/` (idempotent, executable). A fresh
@@ -540,6 +564,7 @@ fn attach_agent(
             cli: ctx.agent_cli.to_string(),
             branch_created: wt.branch_created,
             pending_boot_prompt: None,
+            runtime_slot: provisioned.runtime_slot,
         },
     })
 }
@@ -1212,17 +1237,39 @@ fn cmd_purge_stale() -> Result<(), PawError> {
     Ok(())
 }
 
-/// Tears down a single agent's worktree: removes the worktree directory (with
-/// the per-worktree `Removing worktree ...` / `...done (Xs)` progress markers)
-/// and, when git-paw created the branch, deletes it afterwards.
+/// Tears down a single agent's worktree: runs the consumer's `on_remove` hook,
+/// removes the worktree directory (with the per-worktree
+/// `Removing worktree ...` / `...done (Xs)` progress markers) and, when git-paw
+/// created the branch, deletes it afterwards.
 ///
 /// Extracted from `cmd_purge`'s per-worktree loop (design D6, task 1.3) so
 /// `cmd_remove` performs byte-identical removal for a single agent that
-/// `git paw purge` performs for every agent. Best-effort: a failed
-/// worktree-remove or branch-delete is surfaced as a `warning:` on `stderr`
-/// and does not abort — matching purge's resilience on large or busy
-/// worktrees.
-fn detach_worktree(repo_root: &Path, entry: &WorktreeEntry, stderr: &mut dyn std::io::Write) {
+/// `git paw purge` performs for every agent. Both teardown paths therefore run
+/// the hook by construction — `on_remove` lives here rather than being repeated
+/// at each command handler. Best-effort throughout: a failed hook, a failed
+/// worktree-remove, or a failed branch-delete is surfaced as a `warning:` on
+/// `stderr` and does not abort — a resource git-paw could not drop must never
+/// cost the operator a stranded worktree.
+///
+/// `on_remove` is the configured `[worktree.hooks] on_remove` command, or `None`
+/// when the consumer declared no hook (in which case nothing is run).
+fn detach_worktree(
+    repo_root: &Path,
+    entry: &WorktreeEntry,
+    on_remove: Option<&str>,
+    stderr: &mut dyn std::io::Write,
+) {
+    // Before the directory is deleted, so the hook can still read the checkout.
+    if let Some(command) = on_remove
+        && let Some(warning) = git_paw::worktree_provision::run_remove_hook(
+            command,
+            &entry.branch,
+            &entry.worktree_path,
+        )
+    {
+        let _ = writeln!(stderr, "warning: {warning}");
+    }
+
     let _ = writeln!(
         stderr,
         "Removing worktree {}...",
@@ -1311,13 +1358,20 @@ fn purge_with_prompt(
 
     kill_tmux(&session.session_name)?;
 
-    // Per-worktree teardown (worktree-remove + branch cleanup), delegated to
-    // the shared `detach_worktree` helper so `cmd_remove` performs the exact
-    // same per-worktree removal `purge` does (design D6, task 1.3). The helper
-    // emits the per-worktree begin / `...done (Xs)` progress markers Bug D in
-    // v0-5-0-audit-cleanup added.
+    // Per-worktree teardown (`on_remove` hook + worktree-remove + branch
+    // cleanup), delegated to the shared `detach_worktree` helper so `cmd_remove`
+    // performs the exact same per-worktree removal `purge` does (design D6, task
+    // 1.3). The helper emits the per-worktree begin / `...done (Xs)` progress
+    // markers Bug D in v0-5-0-audit-cleanup added. The hook is resolved once
+    // rather than per entry — purge tears down every agent, and re-reading the
+    // config in the loop would buy nothing. A config that cannot be read leaves
+    // it unset, so an unreadable config never blocks a purge.
+    let worktree_runtime = config::load_config(repo_root, None)
+        .unwrap_or_default()
+        .worktree_runtime();
+    let on_remove = worktree_runtime.on_remove_hook();
     for entry in &session.worktrees {
-        detach_worktree(repo_root, entry, stderr);
+        detach_worktree(repo_root, entry, on_remove, stderr);
     }
 
     if let Some(ref log_path) = session.broker_log_path {
@@ -1334,6 +1388,10 @@ fn purge_with_prompt(
         );
     }
 
+    // Deleting the session file releases every worktree's runtime port block
+    // along with its entry — the slots live on the entries and
+    // `worktree_provision::allocate_slot` reads the live roster, so the next
+    // session starts from slot 0 again.
     session::delete_session_in(&session.session_name, sessions_dir)?;
 
     // Remove the per-repo discovery file sweep.sh reads (capability
@@ -2135,6 +2193,7 @@ mod tests {
                 cli: "claude".to_string(),
                 branch_created: wt.branch_created,
                 pending_boot_prompt: None,
+                runtime_slot: None,
             }],
             broker_port: None,
             broker_bind: None,

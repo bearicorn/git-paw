@@ -333,31 +333,73 @@ fn rebase_branch_onto_default_with(
 /// resolves to `<repo_parent>/<project>-<branch-slug>` (the v0.7.0 layout)
 /// and creates nothing. Factored out of [`create_worktree`] so the path
 /// derivation stays readable and independently testable.
-fn resolve_worktree_path(
+/// Computes the absolute worktree directory path for `branch` under `placement`
+/// **without creating anything** — a pure derivation safe for previews such as
+/// `git paw start --dry-run`.
+///
+/// [`WorktreePlacement::Child`] → `<repo_root>/.git-paw/worktrees/<branch-slug>`;
+/// [`WorktreePlacement::Sibling`] → `<repo_parent>/<project>-<branch-slug>`.
+pub fn worktree_path_for(
     repo_root: &Path,
     branch: &str,
     placement: WorktreePlacement,
-) -> Result<WorktreePath, PawError> {
+) -> Result<PathBuf, PawError> {
     match placement {
-        WorktreePlacement::Child => {
-            let worktrees_dir = repo_root.join(".git-paw").join("worktrees");
-            std::fs::create_dir_all(&worktrees_dir).map_err(|e| {
-                PawError::WorktreeError(format!(
-                    "failed to create '{}': {e}",
-                    worktrees_dir.display()
-                ))
-            })?;
-            Ok(WorktreePath::new(worktrees_dir.join(branch_slug(branch))))
-        }
+        WorktreePlacement::Child => Ok(repo_root
+            .join(".git-paw")
+            .join("worktrees")
+            .join(branch_slug(branch))),
         WorktreePlacement::Sibling => {
             let project = project_name(repo_root);
             let dir_name = worktree_dir_name(&project, branch);
             let parent = repo_root.parent().ok_or_else(|| {
                 PawError::WorktreeError("cannot determine parent directory of repo".to_string())
             })?;
-            Ok(WorktreePath::new(parent.join(&dir_name)))
+            Ok(parent.join(&dir_name))
         }
     }
+}
+
+/// A short, human-readable rendering of the worktree path for `--dry-run`
+/// previews: relative to the repo root for a child worktree
+/// (`.git-paw/worktrees/<slug>`), or `../<name>` for a sibling. Reflects the
+/// configured [`WorktreePlacement`] rather than assuming the sibling layout.
+pub fn worktree_display_path(
+    repo_root: &Path,
+    branch: &str,
+    placement: WorktreePlacement,
+) -> Result<String, PawError> {
+    let path = worktree_path_for(repo_root, branch, placement)?;
+    Ok(path.strip_prefix(repo_root).map_or_else(
+        |_| {
+            path.file_name().map_or_else(
+                || path.display().to_string(),
+                |n| format!("../{}", n.to_string_lossy()),
+            )
+        },
+        |rel| rel.display().to_string(),
+    ))
+}
+
+fn resolve_worktree_path(
+    repo_root: &Path,
+    branch: &str,
+    placement: WorktreePlacement,
+) -> Result<WorktreePath, PawError> {
+    // A child worktree needs its `.git-paw/worktrees/` parent to exist before
+    // `git worktree add`; the resolved path itself is the pure derivation.
+    if placement == WorktreePlacement::Child {
+        let worktrees_dir = repo_root.join(".git-paw").join("worktrees");
+        std::fs::create_dir_all(&worktrees_dir).map_err(|e| {
+            PawError::WorktreeError(format!(
+                "failed to create '{}': {e}",
+                worktrees_dir.display()
+            ))
+        })?;
+    }
+    Ok(WorktreePath::new(worktree_path_for(
+        repo_root, branch, placement,
+    )?))
 }
 
 /// Creates a git worktree for `branch`.
@@ -932,7 +974,9 @@ mod tests {
 
     use crate::config::WorktreePlacement;
     use crate::error::PawError;
-    use crate::git::{WorktreeCreation, branch_slug, create_worktree};
+    use crate::git::{
+        WorktreeCreation, branch_slug, create_worktree, worktree_display_path, worktree_path_for,
+    };
 
     /// Sets up a temp repo with `origin/HEAD` pointing to `refs/heads/main`,
     /// an initial commit on `main`, and the `feat/example` branch at the same
@@ -1204,6 +1248,40 @@ mod tests {
         assert!(
             r.path().join(".git-paw").join("worktrees").is_dir(),
             ".git-paw/worktrees/ must be created"
+        );
+    }
+
+    #[test]
+    fn worktree_display_path_reflects_placement() {
+        let r = setup_rebase_repo();
+        // Child: rendered relative to the repo root — NOT as a `../` sibling
+        // (the `--dry-run` bug this fixes: it hardcoded `../<dir>` regardless).
+        let child = worktree_display_path(r.path(), "feat/auth-flow", WorktreePlacement::Child)
+            .expect("child display path");
+        assert_eq!(child, ".git-paw/worktrees/feat-auth-flow");
+        assert!(
+            !child.starts_with("../"),
+            "a child worktree must not render as a sibling: {child}"
+        );
+        // Sibling: rendered as `../<project>-<slug>` beside the repo.
+        let sibling = worktree_display_path(r.path(), "feat/auth-flow", WorktreePlacement::Sibling)
+            .expect("sibling display path");
+        assert!(
+            sibling.starts_with("../") && sibling.ends_with("-feat-auth-flow"),
+            "a sibling worktree renders beside the repo: {sibling}"
+        );
+    }
+
+    #[test]
+    fn worktree_path_for_creates_nothing() {
+        let r = setup_rebase_repo();
+        let path = worktree_path_for(r.path(), "feat/x", WorktreePlacement::Child)
+            .expect("pure path derivation");
+        // The preview derivation must not create the worktree (dry-run safety).
+        assert!(
+            !path.exists(),
+            "worktree_path_for must not create anything: {}",
+            path.display()
         );
     }
 

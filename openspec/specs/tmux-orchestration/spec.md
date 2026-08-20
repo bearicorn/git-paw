@@ -501,3 +501,31 @@ fixed-sleep behaviour for an unrecognised CLI.
   than rejecting the launch, so behaviour is no worse than the prior
   fixed-sleep launch for an unrecognised CLI
 
+### Requirement: The dry-run plan preview reflects worktree placement
+
+The `git paw start --dry-run` session-plan preview SHALL render each agent's
+worktree path according to the configured [`WorktreePlacement`], rather than
+assuming the sibling layout: `.git-paw/worktrees/<branch-slug>` (relative to the
+repo root) for child placement, and `../<project>-<branch-slug>` for sibling
+placement. This applies uniformly to the plain, `--supervisor`, and
+`--from-specs` dry-run previews. Computing the preview path MUST NOT create any
+directory (the dry run stays read-only).
+
+**Test:** `git::tests::worktree_display_path_reflects_placement`,
+`git::tests::worktree_path_for_creates_nothing`
+
+#### Scenario: Child placement preview shows the in-repo path
+- **GIVEN** a repository configured with child worktree placement
+- **WHEN** the dry-run plan renders the worktree path for branch `feat/auth-flow`
+- **THEN** it SHALL show `.git-paw/worktrees/feat-auth-flow`
+- **AND** it SHALL NOT show a `../`-prefixed sibling path
+
+#### Scenario: Sibling placement preview shows the sibling path
+- **GIVEN** a repository configured with sibling worktree placement
+- **WHEN** the dry-run plan renders the worktree path for branch `feat/auth-flow`
+- **THEN** it SHALL show `../<project>-feat-auth-flow` beside the repository
+
+#### Scenario: Rendering the preview path creates nothing
+- **WHEN** the dry-run preview computes a child-placement worktree path
+- **THEN** no worktree directory or `.git-paw/worktrees/` entry is created on disk
+

@@ -33,6 +33,7 @@ fn make_session_with_broker(suffix: &str) -> Session {
             cli: "claude".to_string(),
             branch_created: false,
             pending_boot_prompt: None,
+            runtime_slot: None,
         }],
         broker_port: Some(9120),
         broker_bind: Some("127.0.0.1".to_string()),

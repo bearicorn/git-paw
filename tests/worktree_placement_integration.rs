@@ -75,6 +75,7 @@ fn session_with_worktree(repo: &Path, branch: &str, wt_path: &Path) -> Session {
             cli: "claude".to_string(),
             branch_created: true,
             pending_boot_prompt: None,
+            runtime_slot: None,
         }],
         broker_port: None,
         broker_bind: None,

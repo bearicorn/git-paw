@@ -1437,6 +1437,7 @@ test_command = "just check"
             cli: "claude".to_string(),
             branch_created: true,
             pending_boot_prompt: None,
+            runtime_slot: None,
         }
     }
 

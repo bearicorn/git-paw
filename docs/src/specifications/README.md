@@ -98,6 +98,7 @@ have no user-guide chapter: the spec itself is their documentation.
 - [`core-governance-config`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/core-governance-config/spec.md) — `PawConfig.governance`: optional root-relative pointers to a project's governance/doc artifacts, paths-only with no gating semantics.
 - [`core-opsx-role-gating`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/core-opsx-role-gating/spec.md) — enforces the supervisor-only boundary on `/opsx:verify` and `/opsx:archive`, with a post-commit guard detecting archive activity by coding agents.
 - [`core-selftest`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/core-selftest/spec.md) — `git paw selftest` runs an isolated end-to-end session lifecycle against a throwaway repo with a dummy CLI and reports a single pass/fail verdict.
+- [`core-security-posture`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/core-security-posture/spec.md) — the consolidated trust-model disclaimer (what the sandbox / classifier / allowlists / protected-paths / remote control do and do not guarantee) and the documented FS-scoped sandbox workflow (`sandbox-exec`/`bwrap` via the custom-CLI seam), plus the `git paw doctor` sandbox-availability pointer.
 
 ### cli-
 
@@ -127,6 +128,7 @@ have no user-guide chapter: the spec itself is their documentation.
 
 - [`session-state`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/session-state/spec.md) — persists one JSON file per session for crash recovery, with atomic writes, tmux-liveness stale detection, and per-repo session receipts.
 - [`session-logging`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/session-logging/spec.md) — captures raw per-pane terminal output via tmux pipe-pane and replays it (ANSI strip/preserve, fuzzy branch match, most-recent auto-select).
+- [`session-runtime-isolation`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/session-runtime-isolation/spec.md) — per-worktree runtime provisioning: verbatim env-file copy, index-derived port blocks written to a generated `.env.local`, and consumer `on_create`/`on_remove` lifecycle hooks (stdout merged into `.env.local`).
 
 ### boot-
 

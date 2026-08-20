@@ -155,6 +155,23 @@ pub struct WorktreeEntry {
     /// immediately). Omitted from JSON when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_boot_prompt: Option<String>,
+
+    /// Runtime port slot assigned to this worktree, when `[worktree.ports]` is
+    /// configured.
+    ///
+    /// The slot indexes the worktree's port block
+    /// (`base + slot * stride`; see [`crate::worktree_provision`]). It is
+    /// persisted rather than derived from the entry's position because a
+    /// positional index shifts when a *middle* worktree is removed, which would
+    /// hand a newly added worktree a live worktree's ports. Removing the entry
+    /// releases the slot for the next allocation.
+    ///
+    /// `None` when port allocation is not configured, and on every state file
+    /// written before this field existed. Omitted from JSON when `None`, so a
+    /// session created without port allocation serializes byte-identically to
+    /// prior versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_slot: Option<u16>,
 }
 
 /// Persisted session state for a git-paw session.
@@ -656,6 +673,7 @@ mod tests {
                     cli: "claude".to_string(),
                     branch_created: false,
                     pending_boot_prompt: None,
+                    runtime_slot: None,
                 },
                 WorktreeEntry {
                     branch: "fix/api".to_string(),
@@ -663,6 +681,7 @@ mod tests {
                     cli: "gemini".to_string(),
                     branch_created: false,
                     pending_boot_prompt: None,
+                    runtime_slot: None,
                 },
                 WorktreeEntry {
                     branch: "feature/logging".to_string(),
@@ -670,6 +689,7 @@ mod tests {
                     cli: "claude".to_string(),
                     branch_created: false,
                     pending_boot_prompt: None,
+                    runtime_slot: None,
                 },
             ],
             broker_port: None,
@@ -727,6 +747,66 @@ mod tests {
 
         assert_eq!(loaded.status, SessionStatus::Stopped);
         assert_eq!(loaded.worktrees.len(), 2);
+    }
+
+    // -- runtime_slot: additive optional field (worktree-env-port-provisioning) --
+
+    #[test]
+    fn saved_session_round_trips_runtime_slots_intact() {
+        let dir = TempDir::new().unwrap();
+        let mut session = sample_session();
+        session.worktrees[0].runtime_slot = Some(0);
+        session.worktrees[1].runtime_slot = Some(1);
+        session.worktrees[2].runtime_slot = Some(2);
+        save_session_in(&session, dir.path()).unwrap();
+
+        let loaded = load_session_from("paw-my-project", dir.path())
+            .unwrap()
+            .expect("session should exist");
+
+        let slots: Vec<Option<u16>> = loaded.worktrees.iter().map(|w| w.runtime_slot).collect();
+        assert_eq!(slots, vec![Some(0), Some(1), Some(2)]);
+    }
+
+    #[test]
+    fn state_file_without_runtime_slot_loads_with_none() {
+        // A state file written before the field existed must still load, with
+        // every worktree reporting no allocated block.
+        let dir = TempDir::new().unwrap();
+        let json = r#"{
+            "session_name": "paw-legacy",
+            "repo_path": "/Users/test/code/legacy",
+            "project_name": "legacy",
+            "created_at": "2024-03-23T13:20:00Z",
+            "status": "active",
+            "worktrees": [
+                {
+                    "branch": "feature/auth",
+                    "worktree_path": "/Users/test/code/legacy-feature-auth",
+                    "cli": "claude",
+                    "branch_created": false
+                }
+            ]
+        }"#;
+        std::fs::write(dir.path().join("paw-legacy.json"), json).unwrap();
+
+        let loaded = load_session_from("paw-legacy", dir.path())
+            .unwrap()
+            .expect("legacy session should load");
+        assert_eq!(loaded.worktrees[0].runtime_slot, None);
+    }
+
+    #[test]
+    fn absent_runtime_slot_is_omitted_from_serialized_state() {
+        // A session that allocates no ports must serialize byte-identically to
+        // one written by a prior version.
+        let dir = TempDir::new().unwrap();
+        save_session_in(&sample_session(), dir.path()).unwrap();
+        let written = std::fs::read_to_string(dir.path().join("paw-my-project.json")).unwrap();
+        assert!(
+            !written.contains("runtime_slot"),
+            "absent slot must not be serialized; got:\n{written}"
+        );
     }
 
     // -- load_session: WHEN load_session("nonexistent") is called, THEN returns None --

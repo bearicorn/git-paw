@@ -51,3 +51,4 @@ pub mod skills;
 pub mod specs;
 pub mod supervisor;
 pub mod tmux;
+pub mod worktree_provision;

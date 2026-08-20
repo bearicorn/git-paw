@@ -124,17 +124,33 @@ pub(crate) fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Resu
         }
     }
 
-    // 5.7 Delegate to detach_worktree for removal, unless --keep-worktree.
+    // 5.7 Delegate to detach_worktree for removal, unless --keep-worktree. The
+    // helper runs the consumer's `on_remove` hook before deleting the directory;
+    // `--keep-worktree` skips both, since the worktree — and so whatever the
+    // hook would tear down — is deliberately being left in place.
     if keep_worktree {
         println!(
             "Keeping worktree on disk: {}",
             target.worktree_path.display()
         );
     } else {
-        detach_worktree(&repo_root, &target, &mut std::io::stderr());
+        let worktree_runtime = git_paw::config::load_config(&repo_root, None)
+            .unwrap_or_default()
+            .worktree_runtime();
+        detach_worktree(
+            &repo_root,
+            &target,
+            worktree_runtime.on_remove_hook(),
+            &mut std::io::stderr(),
+        );
     }
 
-    // 5.8 Drop the branch/pane entry from the session JSON.
+    // 5.8 Drop the branch/pane entry from the session JSON. This also releases
+    // the agent's runtime port block: the slot lives on the entry, and
+    // `worktree_provision::allocate_slot` reads the live roster, so the next
+    // `git paw add` reuses the freed slot instead of climbing past it. Nothing
+    // else has to be cleaned up — do not start caching slots elsewhere, or the
+    // free list silently stops working.
     let mut updated = existing.clone();
     updated.worktrees.remove(pos);
     session::save_session(&updated)?;

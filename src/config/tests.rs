@@ -544,6 +544,7 @@ fn config_survives_save_and_load() {
         mcp: McpConfig::default(),
         worktree_placement: Some(WorktreePlacement::Child),
         docs_base_url: Some("https://docs.example.test".into()),
+        worktree: None,
     };
 
     save_config_to(&config_path, &original).unwrap();
@@ -3371,4 +3372,211 @@ fn worktree_placement_default_skipped_on_serialize() {
         !serialized.contains("worktree_placement"),
         "absent placement must not be serialized; got:\n{serialized}"
     );
+}
+
+#[test]
+fn worktree_runtime_tables_parse() {
+    let tmp = TempDir::new().unwrap();
+    let repo_root = tmp.path().join("repo");
+    fs::create_dir_all(&repo_root).unwrap();
+    write_file(
+        &repo_config_path(&repo_root),
+        "worktree_placement = \"child\"\n\
+         [worktree.env]\n\
+         copy = [\".env\", \".env.development\"]\n\
+         [worktree.ports]\n\
+         base = 3000\n\
+         stride = 10\n\
+         vars = [\"PORT\", \"VITE_PORT\"]\n",
+    );
+
+    let config = load_repo_config(&repo_root).unwrap();
+    let runtime = config.worktree_runtime();
+    assert!(!runtime.is_inert());
+    assert_eq!(
+        runtime.env.as_ref().unwrap().copy,
+        vec![".env".to_string(), ".env.development".to_string()]
+    );
+    let ports = runtime.ports.as_ref().unwrap();
+    assert_eq!(ports.base, 3000);
+    assert_eq!(ports.stride, 10);
+    assert_eq!(
+        ports.vars,
+        vec!["PORT".to_string(), "VITE_PORT".to_string()]
+    );
+    // The new table must not disturb the pre-existing top-level field.
+    assert_eq!(config.worktree_placement(), WorktreePlacement::Child);
+}
+
+#[test]
+fn config_without_worktree_tables_loads_with_provisioning_inert() {
+    // "Existing configuration loads unchanged" — a config written by a prior
+    // version (no [worktree] table at all) parses with provisioning disabled.
+    let tmp = TempDir::new().unwrap();
+    let repo_root = tmp.path().join("repo");
+    fs::create_dir_all(&repo_root).unwrap();
+    write_file(
+        &repo_config_path(&repo_root),
+        "default_cli = \"claude\"\nworktree_placement = \"child\"\n[broker]\nenabled = true\n",
+    );
+
+    let config = load_repo_config(&repo_root).unwrap();
+    assert!(config.worktree.is_none());
+    assert!(config.worktree_runtime().is_inert());
+    assert!(worktree_runtime_warnings(&config).is_empty());
+}
+
+#[test]
+fn worktree_hooks_table_parses_both_commands() {
+    let config: PawConfig = toml::from_str(
+        "[worktree.hooks]\n\
+         on_create = \"scripts/branch-db.sh {worktree_id}\"\n\
+         on_remove = \"scripts/drop-db.sh {worktree_id}\"\n",
+    )
+    .expect("parse");
+    let runtime = config.worktree_runtime();
+    assert!(
+        !runtime.is_inert(),
+        "a hooks table alone activates the table"
+    );
+    assert_eq!(
+        runtime.on_create_hook(),
+        Some("scripts/branch-db.sh {worktree_id}")
+    );
+    assert_eq!(
+        runtime.on_remove_hook(),
+        Some("scripts/drop-db.sh {worktree_id}")
+    );
+}
+
+#[test]
+fn worktree_hooks_table_accepts_one_command_alone() {
+    // Declaring only a teardown hook must not require a create hook.
+    let config: PawConfig =
+        toml::from_str("[worktree.hooks]\non_remove = \"scripts/drop-db.sh {worktree_id}\"\n")
+            .expect("parse");
+    let runtime = config.worktree_runtime();
+    assert_eq!(runtime.on_create_hook(), None);
+    assert_eq!(
+        runtime.on_remove_hook(),
+        Some("scripts/drop-db.sh {worktree_id}")
+    );
+}
+
+#[test]
+fn absent_worktree_hooks_table_declares_no_hooks() {
+    // "Absent hooks configuration runs nothing" — env/port provisioning alone
+    // leaves both hooks unset, so nothing can be executed.
+    let config: PawConfig =
+        toml::from_str("[worktree.ports]\nbase = 3000\nvars = [\"PORT\"]\n").expect("parse");
+    let runtime = config.worktree_runtime();
+    assert!(runtime.hooks.is_none());
+    assert_eq!(runtime.on_create_hook(), None);
+    assert_eq!(runtime.on_remove_hook(), None);
+}
+
+#[test]
+fn absent_worktree_hooks_skipped_on_serialize() {
+    // A worktree table with no hooks must round-trip without inventing the
+    // sub-table, so a pre-existing config stays byte-stable.
+    let cfg = PawConfig {
+        worktree: Some(WorktreeConfig {
+            env: None,
+            ports: Some(WorktreePortsConfig {
+                base: 3000,
+                stride: 10,
+                vars: vec!["PORT".to_string()],
+            }),
+            hooks: None,
+        }),
+        ..PawConfig::default()
+    };
+    let serialized = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(
+        !serialized.contains("hooks"),
+        "absent [worktree.hooks] must not be serialized; got:\n{serialized}"
+    );
+}
+
+#[test]
+fn worktree_ports_with_empty_vars_assigns_nothing() {
+    // "No implicit defaults" — an empty vars list means git-paw supplies no
+    // port variables of its own.
+    let config: PawConfig =
+        toml::from_str("[worktree.ports]\nbase = 3000\nstride = 10\n").expect("parse");
+    let ports = config.worktree_runtime().ports.expect("ports table");
+    assert!(ports.vars.is_empty());
+    assert!(ports.stride_warning().is_none());
+}
+
+#[test]
+fn worktree_ports_stride_below_var_count_warns_and_clamps() {
+    let config: PawConfig =
+        toml::from_str("[worktree.ports]\nbase = 3000\nstride = 1\nvars = [\"A\", \"B\", \"C\"]\n")
+            .expect("parse");
+    let ports = config.worktree_runtime().ports.expect("ports table");
+    assert_eq!(
+        ports.effective_stride(),
+        3,
+        "stride clamps up to vars.len()"
+    );
+
+    let warnings = worktree_runtime_warnings(&config);
+    assert_eq!(warnings.len(), 1, "got {warnings:?}");
+    assert!(
+        warnings[0].contains("stride") && warnings[0].contains("overlap"),
+        "warning should name the overlap hazard; got {:?}",
+        warnings[0]
+    );
+}
+
+#[test]
+fn worktree_runtime_survives_round_trip() {
+    let cfg = PawConfig {
+        worktree: Some(WorktreeConfig {
+            env: Some(WorktreeEnvConfig {
+                copy: vec![".env".to_string()],
+            }),
+            ports: Some(WorktreePortsConfig {
+                base: 4000,
+                stride: 20,
+                vars: vec!["PORT".to_string()],
+            }),
+            hooks: Some(WorktreeHooksConfig {
+                on_create: Some("scripts/branch-db.sh {worktree_id}".to_string()),
+                on_remove: Some("scripts/drop-db.sh {worktree_id}".to_string()),
+            }),
+        }),
+        worktree_placement: Some(WorktreePlacement::Child),
+        ..PawConfig::default()
+    };
+    let serialized = toml::to_string_pretty(&cfg).expect("serialize");
+    let reparsed: PawConfig = toml::from_str(&serialized).expect("reparse");
+    assert_eq!(reparsed, cfg);
+}
+
+#[test]
+fn absent_worktree_runtime_skipped_on_serialize() {
+    let serialized = toml::to_string_pretty(&PawConfig::default()).expect("serialize");
+    assert!(
+        !serialized.contains("[worktree]"),
+        "absent [worktree] must not be serialized; got:\n{serialized}"
+    );
+}
+
+#[test]
+fn worktree_runtime_repo_overrides_global() {
+    let tmp = TempDir::new().unwrap();
+    let global_path = tmp.path().join("global").join("config.toml");
+    let repo_root = tmp.path().join("repo");
+    fs::create_dir_all(&repo_root).unwrap();
+
+    write_file(&global_path, "[worktree.ports]\nbase = 3000\nstride = 10\n");
+    write_file(
+        &repo_config_path(&repo_root),
+        "[worktree.ports]\nbase = 5000\nstride = 10\n",
+    );
+
+    let config = load_config_from(&global_path, &repo_root).unwrap();
+    assert_eq!(config.worktree_runtime().ports.unwrap().base, 5000);
 }
