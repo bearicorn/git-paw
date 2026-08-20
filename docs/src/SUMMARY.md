@@ -9,6 +9,7 @@
 - [User Guide](user-guide/README.md)
   - [Session Lifecycle](user-guide/session-lifecycle.md)
   - [Worktree Placement](user-guide/worktree-placement.md)
+  - [Runtime Isolation](user-guide/runtime-isolation.md)
   - [Spec-Driven Launch](user-guide/spec-driven-launch.md)
   - [Session Logging](user-guide/session-logging.md)
   - [AGENTS.md Injection](user-guide/agents-md.md)

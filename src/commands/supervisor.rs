@@ -448,13 +448,13 @@ pub(crate) fn cmd_supervisor(
         }
         println!();
         for branch in &branches {
-            let wt_dir = git::worktree_dir_name(&project, branch);
+            let wt = git::worktree_display_path(repo_root, branch, config.worktree_placement())?;
             let cmd = if agent_flags.is_empty() {
                 agent_cli.clone()
             } else {
                 format!("{agent_cli} {agent_flags}")
             };
-            println!("  {branch} \u{2192} {cmd} (../{wt_dir})");
+            println!("  {branch} \u{2192} {cmd} ({wt})");
         }
         return Ok(());
     }
@@ -613,6 +613,7 @@ pub(crate) fn cmd_supervisor(
         .as_ref()
         .is_none_or(SupervisorConfig::strict_branch_guard);
     let gate_commands = supervisor_cfg.gate_commands();
+    let worktree_runtime = config.worktree_runtime();
     let attach_ctx = AttachContext {
         repo_root,
         project: &project,
@@ -628,10 +629,14 @@ pub(crate) fn cmd_supervisor(
         no_rebase,
         placement: config.worktree_placement(),
         common_dev_allowlist: &supervisor_cfg.common_dev_allowlist,
+        worktree_runtime: &worktree_runtime,
     };
 
     for branch in &branches {
-        let attached = attach_agent(&attach_ctx, branch, spec_by_branch.get(branch))?;
+        // Each agent takes the lowest slot not held by an already-attached
+        // peer, so the port blocks in this session never overlap.
+        let slot = git_paw::worktree_provision::allocate_slot(&worktree_entries);
+        let attached = attach_agent(&attach_ctx, branch, spec_by_branch.get(branch), slot)?;
         agent_panes.push(attached.pane);
         agent_prompts.push(attached.prompt);
         worktree_entries.push(attached.entry);

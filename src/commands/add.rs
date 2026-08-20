@@ -173,6 +173,7 @@ pub(crate) fn cmd_add(
         .collect();
     all_branches.push(branch.as_str());
     let inter_agent_rules = git_paw::agents::build_inter_agent_rules(&all_branches);
+    let worktree_runtime = config.worktree_runtime();
 
     let attach_ctx = AttachContext {
         repo_root: &repo_root,
@@ -189,14 +190,18 @@ pub(crate) fn cmd_add(
         no_rebase: false,
         placement: config.worktree_placement(),
         common_dev_allowlist: &supervisor_cfg.common_dev_allowlist,
+        worktree_runtime: &worktree_runtime,
     };
 
     // 4.6 Reuse create_worktree + attach_agent to build the new pane's setup.
+    // The new agent takes the lowest port slot no live agent holds, so a slot
+    // freed by an earlier `git paw remove` is reused instead of climbing.
+    let slot = git_paw::worktree_provision::allocate_slot(&existing.worktrees);
     let AttachedAgent {
         pane,
         prompt,
         mut entry,
-    } = attach_agent(&attach_ctx, &branch, spec_entry.as_ref())?;
+    } = attach_agent(&attach_ctx, &branch, spec_entry.as_ref(), slot)?;
     // Capture the new worktree's path before `entry` is moved into the
     // session, so we can register it as a live broker watch target below.
     let new_worktree_path = entry.worktree_path.clone();

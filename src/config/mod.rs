@@ -187,6 +187,164 @@ pub enum WorktreePlacement {
     Child,
 }
 
+/// Env-file provisioning for agent worktrees (`[worktree.env]`).
+///
+/// `copy` names files, relative to the repository root, that git-paw copies
+/// verbatim into each new worktree after the worktree is created and before the
+/// agent CLI launches. The propagated file is an independent copy, never a
+/// symlink, so a worktree's edits never reach the source or a sibling worktree.
+///
+/// git-paw supplies no default filename — an absent table (or an empty `copy`)
+/// copies nothing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeEnvConfig {
+    /// Repository-root-relative paths to copy into each new worktree.
+    ///
+    /// An entry with no matching source file is skipped with a warning; the
+    /// worktree creation still succeeds. Absolute paths and paths escaping the
+    /// repository root (`..`) are rejected with a warning.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copy: Vec<String>,
+}
+
+/// Per-worktree port allocation (`[worktree.ports]`).
+///
+/// Each worktree is assigned a port *block* derived from its runtime slot:
+/// `base + slot * stride`. The Nth entry of `vars` receives
+/// `base + slot * stride + N`, written into the worktree's generated
+/// `.env.local`.
+///
+/// Assignment is deterministic, not probed — git-paw does not scan the host for
+/// free ports, so an allocated port can still be occupied by an unrelated
+/// process. Resolve that by changing `base` or `stride`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreePortsConfig {
+    /// First port of the first worktree's block.
+    #[serde(default)]
+    pub base: u16,
+    /// Block size per worktree. SHOULD be at least `vars.len()`, otherwise
+    /// adjacent worktrees' blocks would overlap; see
+    /// [`WorktreePortsConfig::effective_stride`].
+    #[serde(default)]
+    pub stride: u16,
+    /// Environment-variable names that receive sequential ports within the
+    /// block. Empty (the default) writes no port lines — git-paw supplies no
+    /// default port variables.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vars: Vec<String>,
+}
+
+impl WorktreePortsConfig {
+    /// Returns the stride actually used for block arithmetic: the configured
+    /// `stride` clamped up to `vars.len()`.
+    ///
+    /// A `stride` smaller than the number of `vars` would make adjacent
+    /// worktrees' blocks overlap, handing two live agents the same port.
+    /// Clamping up keeps blocks disjoint; [`Self::stride_warning`] surfaces the
+    /// misconfiguration to the operator.
+    #[must_use]
+    pub fn effective_stride(&self) -> u16 {
+        let needed = u16::try_from(self.vars.len()).unwrap_or(u16::MAX);
+        self.stride.max(needed)
+    }
+
+    /// Returns a human-readable warning when `stride` is smaller than the
+    /// number of `vars` (blocks would overlap), otherwise `None`.
+    #[must_use]
+    pub fn stride_warning(&self) -> Option<String> {
+        let needed = u16::try_from(self.vars.len()).unwrap_or(u16::MAX);
+        (self.stride < needed).then(|| {
+            format!(
+                "[worktree.ports] stride = {} is smaller than the {} declared vars; \
+                 adjacent worktree port blocks would overlap. Using stride = {needed}.",
+                self.stride,
+                self.vars.len()
+            )
+        })
+    }
+}
+
+/// Per-worktree lifecycle hooks (`[worktree.hooks]`).
+///
+/// Both commands are consumer-authored and optional. `on_create` runs after the
+/// env copies and port allocation, before the agent's CLI launches; `on_remove`
+/// runs when the worktree is removed or purged, before the directory is deleted.
+/// Each is executed with the worktree as its working directory, and
+/// `{worktree_id}` / `{worktree_path}` are substituted first.
+///
+/// The hooks exist because the remaining runtime collision — a shared database,
+/// container, or tenant — is irreducibly stack-specific. git-paw ships the
+/// mechanism (run a command, capture its `KEY=value` stdout, substitute the
+/// worktree's identity) and never a driver or a policy: no database, stack, or
+/// default command is assumed.
+///
+/// The commands run with the operator's own privileges, exactly like
+/// [`CustomCli::command`] and the `[supervisor]` commands. git-paw never builds a
+/// hook command from broker, network, or agent input — only from this config.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeHooksConfig {
+    /// Command run in a freshly provisioned worktree, before the agent starts.
+    ///
+    /// Its stdout is parsed as `KEY=value` lines and merged into the same
+    /// `.env.local` managed block port allocation writes, so a hook that
+    /// provisions an isolated resource can hand its connection details to the
+    /// agent. A non-zero exit fails that worktree's provisioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_create: Option<String>,
+    /// Command run at `git paw remove` / `git paw purge`, before the worktree
+    /// directory is deleted, so per-worktree resources are torn down.
+    ///
+    /// A non-zero exit is surfaced as a warning and does NOT block removal — a
+    /// failed teardown must never strand a worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_remove: Option<String>,
+}
+
+/// Per-worktree runtime provisioning (`[worktree]`).
+///
+/// Every sub-table is optional and opt-in: with none present git-paw creates
+/// worktrees exactly as it did before this table existed — copying no files,
+/// generating no `.env.local`, and running no hook.
+///
+/// This table is independent of the top-level `worktree_placement` field, which
+/// is deliberately left where it is so pre-existing configs keep parsing
+/// unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeConfig {
+    /// Env files copied into each new worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<WorktreeEnvConfig>,
+    /// Per-worktree port block allocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ports: Option<WorktreePortsConfig>,
+    /// Consumer commands run at worktree create and remove.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<WorktreeHooksConfig>,
+}
+
+impl WorktreeConfig {
+    /// Returns `true` when no sub-table is configured, i.e. provisioning is a
+    /// no-op and worktree creation behaves exactly as in prior versions.
+    #[must_use]
+    pub fn is_inert(&self) -> bool {
+        self.env.is_none() && self.ports.is_none() && self.hooks.is_none()
+    }
+
+    /// Returns the configured `on_create` command, or `None` when no hook is
+    /// declared.
+    #[must_use]
+    pub fn on_create_hook(&self) -> Option<&str> {
+        self.hooks.as_ref()?.on_create.as_deref()
+    }
+
+    /// Returns the configured `on_remove` command, or `None` when no hook is
+    /// declared.
+    #[must_use]
+    pub fn on_remove_hook(&self) -> Option<&str> {
+        self.hooks.as_ref()?.on_remove.as_deref()
+    }
+}
+
 /// Top-level git-paw configuration.
 ///
 /// All fields are optional — absent config files produce empty defaults.
@@ -292,6 +450,17 @@ pub struct PawConfig {
     /// byte-stable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docs_base_url: Option<String>,
+
+    /// Per-worktree runtime provisioning (`[worktree.env]` /
+    /// `[worktree.ports]`).
+    ///
+    /// Absent (every config written before this table existed) loads as `None`,
+    /// which [`PawConfig::worktree_runtime`] resolves to an inert
+    /// [`WorktreeConfig::default`] — no files copied, no `.env.local`
+    /// generated. Declared last in the struct so the TOML serializer emits this
+    /// table after every scalar key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<WorktreeConfig>,
 }
 
 /// Default documentation site the `docs-fetch` helper targets when
@@ -391,7 +560,16 @@ impl PawConfig {
                 .docs_base_url
                 .clone()
                 .or_else(|| self.docs_base_url.clone()),
+            worktree: overlay.worktree.clone().or_else(|| self.worktree.clone()),
         }
+    }
+
+    /// Resolves the effective per-worktree runtime provisioning config,
+    /// returning an inert [`WorktreeConfig::default`] when `[worktree]` is
+    /// absent.
+    #[must_use]
+    pub fn worktree_runtime(&self) -> WorktreeConfig {
+        self.worktree.clone().unwrap_or_default()
     }
 
     /// Resolves the effective docs base URL for the `docs-fetch` helper,
@@ -474,6 +652,9 @@ pub(crate) fn load_config_file(path: &Path) -> Result<Option<PawConfig>, PawErro
             let config: PawConfig = toml::from_str(&contents)
                 .map_err(|e| PawError::ConfigError(format!("{}: {e}", path.display())))?;
             validate_approval_args(&config, path)?;
+            for warning in worktree_runtime_warnings(&config) {
+                eprintln!("warning: {}: {warning}", path.display());
+            }
             Ok(Some(config))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -500,6 +681,24 @@ fn validate_approval_args(config: &PawConfig, path: &Path) -> Result<(), PawErro
         }
     }
     Ok(())
+}
+
+/// Collects non-fatal warnings about the `[worktree]` runtime-provisioning
+/// tables.
+///
+/// A misconfiguration here degrades gracefully (see
+/// [`WorktreePortsConfig::effective_stride`]) rather than failing the load, so
+/// these are surfaced as warnings on the config-validation path instead of
+/// errors — a stale `stride` should never stop a session from starting.
+#[must_use]
+pub fn worktree_runtime_warnings(config: &PawConfig) -> Vec<String> {
+    config
+        .worktree
+        .as_ref()
+        .and_then(|w| w.ports.as_ref())
+        .and_then(WorktreePortsConfig::stride_warning)
+        .into_iter()
+        .collect()
 }
 
 /// Loads only the repo-level configuration (`.git-paw/config.toml`).
@@ -659,6 +858,46 @@ pub fn generate_default_config() -> String {
 #   "sibling" — beside the repo at ../<project>-<branch-slug> (v0.7.0 layout).
 # Omit the field to default to "sibling".
 worktree_placement = "child"
+
+# Per-worktree runtime isolation. Every table is opt-in: omit them and worktree
+# creation copies nothing, generates no .env.local, and runs no command.
+#
+# [worktree.env] copy — files copied verbatim from the repo root into each new
+# worktree, after it is created and before the agent CLI starts. The copy is
+# independent (never a symlink), so one agent's edits never reach the source or
+# a sibling worktree. A declared file that does not exist is skipped with a
+# warning.
+# [worktree.env]
+# copy = [".env", ".env.development"]
+#
+# [worktree.ports] — each worktree gets its own port block starting at
+# base + slot * stride; the Nth listed var receives base + slot * stride + N.
+# The assignments are written into a git-paw-managed block in the worktree's
+# .env.local, so a copied .env is never modified. Keep stride >= the number of
+# vars or adjacent worktrees' blocks would overlap. Ports are deterministic,
+# not probed: git-paw does not scan for free ports, so change base/stride if a
+# block clashes with something else on the host.
+# [worktree.ports]
+# base   = 3000
+# stride = 10
+# vars   = ["PORT", "VITE_PORT"]
+#
+# [worktree.hooks] — your own commands, run per worktree, for the isolation
+# git-paw cannot do generically (a database branch, a container, a tenant).
+# Each runs through /bin/sh with the worktree as its working directory, with
+# {worktree_id} (the branch-derived slug) and {worktree_path} (absolute)
+# substituted. on_create runs after the copies and ports above and before the
+# agent CLI starts; every KEY=value line it prints on stdout is merged into the
+# same managed block of .env.local, so a script that provisions a database can
+# hand back its DATABASE_URL. Other output is ignored. on_remove runs at
+# `git paw remove` / `git paw purge` before the worktree is deleted.
+# A non-zero on_create fails that worktree; a non-zero on_remove only warns and
+# the removal continues, so write teardown to be idempotent.
+# These run arbitrary commands with your privileges — same trust model as
+# [clis.*].command.
+# [worktree.hooks]
+# on_create = "scripts/paw-db-branch.sh {worktree_id}"
+# on_remove = "scripts/paw-db-drop.sh {worktree_id}"
 
 # Dashboard message log configuration.
 # [dashboard]

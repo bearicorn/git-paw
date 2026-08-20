@@ -157,8 +157,8 @@ pub(crate) fn cmd_start(
         println!("  Mouse:    {}", if mouse { "on" } else { "off" });
         println!();
         for (branch, cli) in &selection.mappings {
-            let wt_dir = git::worktree_dir_name(&project, branch);
-            println!("  {branch} \u{2192} {cli} (../{wt_dir})");
+            let wt = git::worktree_display_path(&repo_root, branch, config.worktree_placement())?;
+            println!("  {branch} \u{2192} {cli} ({wt})");
         }
         return Ok(());
     }
@@ -195,9 +195,31 @@ pub(crate) fn cmd_start(
         None
     };
 
+    let worktree_runtime = config.worktree_runtime();
+
     for (branch, cli) in &selection.mappings {
         let wt = git::create_worktree(&repo_root, branch, !no_rebase, config.worktree_placement())?;
         let wt_str = wt.path.to_string_lossy().to_string();
+
+        // Provision runtime state (declared env copies, this agent's port
+        // block, the `on_create` hook) after the worktree exists and before its
+        // pane is built, so the agent's CLI starts against a fully provisioned
+        // checkout. Each agent takes the lowest slot no already-created peer
+        // holds.
+        let slot = git_paw::worktree_provision::allocate_slot(&worktree_entries);
+        let provisioned = git_paw::worktree_provision::provision_worktree(
+            &repo_root,
+            &wt.path,
+            branch,
+            &worktree_runtime,
+            slot,
+        )?;
+        for warning in &provisioned.warnings {
+            eprintln!("warning: {branch}: {warning}");
+        }
+        if let Some(summary) = provisioned.hook_summary() {
+            println!("  {branch}: {summary}");
+        }
 
         // Inject AGENTS.md with skill content when broker is enabled.
         // Non-supervisor `start` flow has no resolved spec backends —
@@ -251,6 +273,7 @@ pub(crate) fn cmd_start(
             cli: cli.clone(),
             branch_created: wt.branch_created,
             pending_boot_prompt: None,
+            runtime_slot: provisioned.runtime_slot,
         });
     }
 
@@ -438,8 +461,8 @@ pub(crate) fn cmd_start_with_specs(
         println!("  Mouse:    {}", if mouse { "on" } else { "off" });
         println!();
         for (branch, cli) in &mappings {
-            let wt_dir = git::worktree_dir_name(&project, branch);
-            println!("  {branch} \u{2192} {cli} (../{wt_dir})");
+            let wt = git::worktree_display_path(&repo_root, branch, config.worktree_placement())?;
+            println!("  {branch} \u{2192} {cli} ({wt})");
         }
         return Ok(());
     }
@@ -512,9 +535,28 @@ fn launch_spec_session(
         seen
     };
 
+    let worktree_runtime = config.worktree_runtime();
+
     for (branch, cli) in mappings {
         let wt = git::create_worktree(repo_root, branch, !no_rebase, config.worktree_placement())?;
         let wt_str = wt.path.to_string_lossy().to_string();
+
+        // Same seam as `cmd_start`: provision after create, before the pane is
+        // built, taking the lowest slot no already-created peer holds.
+        let slot = git_paw::worktree_provision::allocate_slot(&worktree_entries);
+        let provisioned = git_paw::worktree_provision::provision_worktree(
+            repo_root,
+            &wt.path,
+            branch,
+            &worktree_runtime,
+            slot,
+        )?;
+        for warning in &provisioned.warnings {
+            eprintln!("warning: {branch}: {warning}");
+        }
+        if let Some(summary) = provisioned.hook_summary() {
+            println!("  {branch}: {summary}");
+        }
 
         // Set up AGENTS.md with spec + skill content
         let rendered_skill = skill_template.as_ref().map(|tmpl| {
@@ -576,6 +618,7 @@ fn launch_spec_session(
             cli: cli.clone(),
             branch_created: wt.branch_created,
             pending_boot_prompt: None,
+            runtime_slot: provisioned.runtime_slot,
         });
     }
 

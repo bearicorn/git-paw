@@ -40,6 +40,16 @@ worktree_placement = "child"
 # [layout]
 # border_affordances = true
 
+# Per-worktree runtime isolation (both opt-in; absent = no copying, no
+# .env.local). Files are copied verbatim into each worktree; each worktree
+# gets its own port block base + slot * stride. Keep stride >= vars length.
+# [worktree.env]
+# copy = [".env", ".env.development"]
+# [worktree.ports]
+# base   = 3000
+# stride = 10
+# vars   = ["PORT", "VITE_PORT"]
+
 # Custom CLI definitions
 [clis.my-agent]
 command = "/usr/local/bin/my-agent"
@@ -48,6 +58,11 @@ display_name = "My Agent"
 [clis.local-llm]
 command = "ollama-code"
 display_name = "Local LLM"
+
+# A custom CLI is also the seam for the optional FS-scoped sandbox: point
+# `command` at a PATH-resolvable wrapper that execs the real CLI under
+# sandbox-exec/bwrap. git-paw launches a CLI by its name on PATH, so the wrapper
+# must be on PATH (not just a script path). See the FS-Scoped Sandbox guide.
 
 # Named presets for quick launch
 [presets.backend]
@@ -232,6 +247,219 @@ The `docs-fetch.sh` helper resolves this value from `.git-paw/config.toml` for
 both discovery (`llms.txt`) and page retrieval, falling back to the built-in
 default when the field is absent. Documentation lookup is best-effort: an
 unreachable site or missing page never blocks the agent.
+
+## Worktree runtime provisioning
+
+git-paw isolates each agent's *source* — every agent gets its own worktree —
+but not its *runtime*. Sibling worktrees otherwise read the same `.env` and
+collide on the same ports the moment two agents start a dev server, preview, or
+debugger. The `[worktree]` table gives each worktree its own copy of the env
+files you name, its own block of ports, and a pair of hooks for whatever else
+your stack needs isolated.
+
+Every sub-table is **opt-in**. With none present, worktree creation behaves
+exactly as it did before this table existed: no files are copied, no
+`.env.local` is generated, and no command runs. git-paw ships the mechanism
+only — it assumes no filename, no port, and no stack, so you declare what your
+project actually needs.
+
+```toml
+[worktree.env]
+copy = [".env", ".env.development"]
+
+[worktree.ports]
+base   = 3000
+stride = 10
+vars   = ["PORT", "VITE_PORT"]
+
+[worktree.hooks]
+on_create = "scripts/paw-db-branch.sh {worktree_id}"
+on_remove = "scripts/paw-db-drop.sh {worktree_id}"
+```
+
+### `[worktree.env]`
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `copy` | list of strings | `[]` | Repository-root-relative files copied into each new worktree |
+
+Each entry is copied **verbatim** from the repository root into the new
+worktree, after the worktree is created and before the agent's CLI starts — so
+the agent's first read already sees a provisioned checkout.
+
+The propagated file is an **independent copy, never a symlink**. That is
+deliberate: a symlinked `.env` is shared mutable state across every agent, which
+is the exact silent runtime corruption worktrees exist to prevent. A copy
+diverges cleanly instead, and any drift surfaces at merge time.
+
+A declared file that does not exist at the repository root is **skipped with a
+warning** and the worktree is still created — per-branch divergence is normal
+and a missing optional env file should not cost you a session. Entries that are
+absolute paths, or that escape the repository root with `..`, are rejected with
+a warning; provisioning only ever reads from the repository and writes into the
+worktree.
+
+### `[worktree.ports]`
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `base` | integer (u16) | `0` | First port of the first worktree's block |
+| `stride` | integer (u16) | `0` | Block size per worktree |
+| `vars` | list of strings | `[]` | Env-var names that receive sequential ports within the block |
+
+Each worktree holds a **runtime slot** and its block starts at
+`base + slot * stride`. The Nth entry of `vars` receives
+`base + slot * stride + N`. With the example above, the first worktree gets
+`PORT=3000` / `VITE_PORT=3001` and the second gets `PORT=3010` /
+`VITE_PORT=3011`.
+
+The assignments are written into a delimited managed block in the worktree's
+`.env.local` — the override layer most stacks load last:
+
+```
+# >>> git-paw (managed) >>>
+PORT=3000
+VITE_PORT=3001
+# <<< git-paw (managed) <<<
+```
+
+Anything you keep in `.env.local` outside that block is preserved, and
+regenerating the block is idempotent. A copied `.env` is **never** modified;
+offset ports live only in `.env.local`.
+
+An empty `vars` list writes no port lines at all — git-paw supplies no default
+port variables.
+
+> **`stride` must be at least `vars.len()`.** A smaller stride would make
+> adjacent worktrees' blocks overlap and hand two live agents the same port.
+> git-paw clamps the stride up to the number of vars and warns when it loads a
+> config that gets this wrong, but set it correctly — leave headroom for vars
+> you add later.
+
+> **Ports are deterministic, not probed.** git-paw does not scan the host for
+> free ports, so an assigned port can still be occupied by an unrelated process.
+> The trade is simplicity and stability: the same worktree keeps the same ports
+> across restarts. If a block clashes with something else on your machine,
+> change `base` or `stride`.
+
+### Slots across add/remove churn
+
+The slot is recorded in session state (`runtime_slot` on the worktree entry)
+rather than derived from the worktree's position in the list. Position would
+shift when a *middle* worktree is removed, handing a newly added agent a live
+agent's ports.
+
+A new agent takes the **lowest slot no live agent holds**, so blocks stay
+bounded instead of climbing forever, and removing an agent frees its block for
+the next `git paw add`. Two concurrently active worktrees are never assigned
+overlapping blocks. Session state written before this field existed loads with
+no slot and is assigned one on next provisioning.
+
+### `[worktree.hooks]`
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `on_create` | string | unset | Command run in a new worktree after env/port provisioning, before the agent's CLI starts |
+| `on_remove` | string | unset | Command run in the worktree at `git paw remove` / `git paw purge`, before the directory is deleted |
+
+The third shared runtime resource — a **database** — cannot be isolated by a
+built-in mechanism, because branching one is entirely stack-specific: a Neon or
+PlanetScale branch API, a local `CREATE DATABASE`, a Docker volume, a Redis
+namespace. git-paw therefore ships no driver and instead runs *your* command at
+the two lifecycle points, letting you provision and tear down whatever
+per-worktree resource your stack needs.
+
+```toml
+[worktree.hooks]
+on_create = "scripts/paw-db-branch.sh {worktree_id}"
+on_remove = "scripts/paw-db-drop.sh {worktree_id}"
+```
+
+Both keys are optional and independent — declare one, both, or neither. With no
+`[worktree.hooks]` table, no command runs and worktree lifecycle is byte-identical
+to configuring `[worktree.env]` / `[worktree.ports]` alone.
+
+#### Placeholders
+
+Before the command is executed, git-paw substitutes:
+
+| Placeholder | Expands to |
+|---|---|
+| `{worktree_id}` | The worktree's stable identifier — the branch-derived slug that also names its directory (`feat/auth-flow` → `feat-auth-flow`) |
+| `{worktree_path}` | The worktree's absolute path |
+
+The id is restricted to `[A-Za-z0-9._-]`, so it is always safe to interpolate.
+`{worktree_path}` is substituted verbatim — **quote it in your command**
+(`db.sh '{worktree_path}'`) if your repository path may contain spaces.
+
+Each command runs through `/bin/sh -c` **with the worktree as its working
+directory**, so relative paths in your script resolve against the checkout and
+`scripts/paw-db-branch.sh` means the copy in that worktree. Nothing extra is
+injected into its environment.
+
+#### `on_create` stdout becomes environment
+
+git-paw reads `on_create`'s standard output and merges every `KEY=value` line
+into **the same `.env.local` managed block** the port assignments are written
+to. That is how a hook hands its connection details to the agent:
+
+```console
+$ cat scripts/paw-db-branch.sh
+#!/bin/sh
+createdb "paw_$1" >/dev/null
+echo "DATABASE_URL=postgres://localhost/paw_$1"
+
+$ cat ../myproject-feat-two/.env.local
+# >>> git-paw (managed) >>>
+PORT=3010
+VITE_PORT=3011
+DATABASE_URL=postgres://localhost/paw_feat-two
+# <<< git-paw (managed) <<<
+```
+
+A line counts as an assignment only if it is an identifier
+(`[A-Za-z_][A-Za-z0-9_]*`) followed by `=`. Everything else — progress text,
+blank lines, your script's chatter — is **ignored**, so a hook is free to be
+talkative. The value is taken verbatim to end of line, so a URL keeps its own
+`=` signs. Content outside the managed block is untouched, and re-provisioning
+the same worktree is idempotent.
+
+Because the ports are written *before* the hook runs, a hook that needs its
+agent's port can read `.env.local` and use it.
+
+#### Failure policy
+
+The two hooks fail in deliberately opposite directions:
+
+- **`on_create` non-zero fails that worktree's provisioning**, reporting the
+  hook's exit status and its stderr. Handing an agent a half-built runtime is
+  worse than refusing to start it.
+- **`on_remove` non-zero only warns** and the removal continues. A failed
+  teardown must never strand a worktree on disk — so write your teardown script
+  to be **idempotent** and reconcilable out of band. git-paw does not track
+  external resource state, and a crash or a force-purge can skip the hook
+  entirely.
+
+#### Secrets and trust
+
+> **Print secrets to stdout, diagnostics to stderr.** git-paw logs only the
+> *names* of the variables a hook merged, never their values, so a
+> `DATABASE_URL` carrying a password never reaches a log line or an error. A
+> failing hook's **stderr is surfaced**, so anything secret there would be
+> printed.
+
+> **`.env.local` is a plain file — gitignore it.** git-paw writes the hook's
+> values into the worktree's `.env.local` with ordinary permissions. If your
+> repository does not already ignore it, add it, or an agent may commit a
+> credential.
+
+> **Hooks run arbitrary consumer commands.** This is by design and is the same
+> trust model as `[clis.*].command` and the `[supervisor]` command keys: the
+> command comes from your repository's config file and runs with your
+> privileges. git-paw never builds a hook out of broker, network, or
+> agent-supplied input. Treat write access to `.git-paw/config.toml` as
+> equivalent to command execution on your machine, and review changes to it in
+> the same way you review a build script.
 
 ## Custom CLIs
 
@@ -1015,6 +1243,7 @@ When both global and repo configs exist, they merge with these rules:
 | `layout` | Repo wins |
 | `opsx` | Repo wins |
 | `mcp` | Per-field merge (repo wins on each set field, unset fields fall back to global) |
+| `worktree` | Repo wins (the whole table, including both sub-tables) |
 
 **Example:** If global config defines `[clis.my-agent]` and repo config defines `[clis.my-agent]` with a different command, the repo version wins. But a `[clis.other-tool]` in global config still appears — maps are merged, not replaced.
 

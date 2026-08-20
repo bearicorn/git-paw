@@ -128,6 +128,7 @@ impl Fixture {
                 cli: "claude".to_string(),
                 branch_created: true,
                 pending_boot_prompt: None,
+                runtime_slot: None,
             }],
             broker_port: None,
             broker_bind: None,

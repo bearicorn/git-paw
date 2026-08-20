@@ -290,6 +290,7 @@ fn make_session_with_worktree(
             cli: "echo".to_string(),
             branch_created: wt.branch_created,
             pending_boot_prompt: None,
+            runtime_slot: None,
         }],
         broker_port: None,
         broker_bind: None,
