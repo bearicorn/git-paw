@@ -44,6 +44,10 @@ fn every_non_ok_check_carries_a_remedy() {
     // Drive every check function into its non-✓ branches at once.
     let probes = Probes {
         environment: EnvironmentProbe::default(),
+        sandbox: SandboxProbe {
+            backend: "sandbox-exec",
+            available: true,
+        },
         clis: Vec::new(),
         config: ConfigProbe {
             path: ".git-paw/config.toml".into(),
@@ -809,4 +813,73 @@ fn json_report_carries_every_required_field() {
     assert_eq!(entries[0]["status"], "ok");
     assert!(entries[0]["remedy"].is_null(), "a ✓ carries no remedy");
     assert_eq!(entries[1]["remedy"], "install one");
+}
+
+// --- Sandbox-availability check (preflight-diagnostics delta) -----------------
+
+#[test]
+fn sandbox_backend_present_reports_ok() {
+    let check = check_sandbox(&SandboxProbe {
+        backend: "sandbox-exec",
+        available: true,
+    });
+    assert_eq!(check.status, CheckStatus::Ok);
+    assert_eq!(check.group, GROUP_ENVIRONMENT);
+    assert_eq!(check.name, "sandbox");
+    assert!(check.remedy.is_none(), "a ✓ check carries no remedy");
+}
+
+#[test]
+fn sandbox_backend_absent_warns_with_a_remedy_never_fails() {
+    let check = check_sandbox(&SandboxProbe {
+        backend: "bwrap",
+        available: false,
+    });
+    // Absence of an OPTIONAL hardening is a ⚠, never a ✗ that blocks a launch.
+    assert_eq!(check.status, CheckStatus::Warn);
+    let remedy = check.remedy.as_deref().unwrap_or("");
+    assert!(
+        !remedy.trim().is_empty(),
+        "a ⚠ check needs an actionable remedy"
+    );
+    assert!(
+        remedy.contains("bwrap"),
+        "the remedy should name the missing backend: {remedy}"
+    );
+    // Spec: "Doctor points at the posture" — the remedy references the docs so a
+    // user knows where to configure the sandbox. Asserted on the check's output
+    // (behavioral), not by grepping the source.
+    assert!(
+        remedy.contains("posture"),
+        "the remedy should point at the security-posture docs: {remedy}"
+    );
+}
+
+#[test]
+fn sandbox_unknown_platform_warns_not_fails() {
+    let check = check_sandbox(&SandboxProbe {
+        backend: "",
+        available: false,
+    });
+    assert_eq!(
+        check.status,
+        CheckStatus::Warn,
+        "a platform with no known backend is ⚠, not ✗"
+    );
+    assert!(!check.remedy.as_deref().unwrap_or("").trim().is_empty());
+}
+
+#[test]
+fn report_includes_the_sandbox_check_and_never_fails_on_it() {
+    let checks = run_checks(&Probes {
+        environment: healthy_environment(),
+        ..Probes::default()
+    });
+    let sandbox = named(&checks, "sandbox");
+    assert_eq!(sandbox.group, GROUP_ENVIRONMENT);
+    assert_ne!(
+        sandbox.status,
+        CheckStatus::Fail,
+        "a missing optional sandbox must never be a hard ✗ failure"
+    );
 }

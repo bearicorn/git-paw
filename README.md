@@ -327,6 +327,25 @@ git paw start  → auto-recovers (or restarts a paused session)
 git paw purge  → removes everything
 ```
 
+## Security
+
+git-paw runs AI agents that **execute arbitrary code with your user's
+privileges** — often in full-auto with skipped permissions. The blast radius is
+your user account: an agent (malicious, prompt-injected, or mistaken) can by
+default read and write anything you can, including SSH keys, cloud credentials,
+and other repositories.
+
+The auto-approve classifier, command allowlists, and protected-paths rule reduce
+prompt fatigue and mistakes — they are **not** containment. For kernel-enforced
+confinement, git-paw documents an optional, opt-in [FS-scoped sandbox][sandbox]
+(`sandbox-exec` / `bwrap`) that scopes an agent's writes to its worktree.
+
+Read the [Security Posture][posture] before trusting git-paw with autonomous
+execution — it states plainly what each control does and does **not** guarantee.
+
+[posture]: https://bearicorn.github.io/git-paw/user-guide/security-posture.html
+[sandbox]: https://bearicorn.github.io/git-paw/user-guide/sandbox.html
+
 ## Contributing
 
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.

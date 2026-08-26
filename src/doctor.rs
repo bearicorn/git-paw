@@ -179,6 +179,21 @@ pub struct EnvironmentProbe {
     pub in_repo: bool,
 }
 
+/// Availability of this OS's FS-scoped sandbox backend.
+///
+/// The sandbox is an optional, user-configured hardening (it confines an agent
+/// CLI's writes to its worktree via a wrapper on `[clis.*].command`); git-paw
+/// never launches it. This probe only reports whether the backend the docs
+/// reference is installed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SandboxProbe {
+    /// The sandbox binary this OS uses — `sandbox-exec` (macOS) or `bwrap`
+    /// (Linux/WSL). Empty when the platform has no known FS-scoped backend.
+    pub backend: &'static str,
+    /// Whether that backend resolves on `PATH`.
+    pub available: bool,
+}
+
 /// One AI CLI that resolved on `PATH`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliProbe {
@@ -333,6 +348,8 @@ pub struct Probes {
     pub supervisor: SupervisorProbe,
     /// Hygiene facts.
     pub hygiene: HygieneProbe,
+    /// FS-scoped sandbox backend availability.
+    pub sandbox: SandboxProbe,
 }
 
 // ---------------------------------------------------------------------------
@@ -448,6 +465,46 @@ pub fn check_environment(probe: &EnvironmentProbe) -> Vec<CheckResult> {
             )
         },
     ]
+}
+
+/// Sandbox-availability check: whether this OS's FS-scoped sandbox backend
+/// (`sandbox-exec` on macOS, `bwrap` on Linux/WSL) is on `PATH`.
+///
+/// The sandbox is optional, user-configured worker confinement (git-paw never
+/// launches it), so its absence is a ⚠ with a remedy pointing at the docs —
+/// never a ✗ that blocks a launch. This check is read-only: it only consults a
+/// probe of `PATH`.
+#[must_use]
+pub fn check_sandbox(probe: &SandboxProbe) -> CheckResult {
+    const DOCS: &str = "see the FS-scoped sandbox guide in the security-posture docs";
+    if probe.backend.is_empty() {
+        return CheckResult::warn(
+            GROUP_ENVIRONMENT,
+            "sandbox",
+            "no known FS-scoped sandbox backend for this platform".to_string(),
+            format!("optional worker confinement is unavailable here — {DOCS}"),
+        );
+    }
+    if probe.available {
+        CheckResult::ok(
+            GROUP_ENVIRONMENT,
+            "sandbox",
+            format!(
+                "{} available for optional worker confinement",
+                probe.backend
+            ),
+        )
+    } else {
+        CheckResult::warn(
+            GROUP_ENVIRONMENT,
+            "sandbox",
+            format!("{} not found on PATH", probe.backend),
+            format!(
+                "install {} to optionally confine agents to their worktree — {DOCS}",
+                probe.backend
+            ),
+        )
+    }
 }
 
 /// CLI-availability check: the detected roster, or the `NoCLIsFound` launch
@@ -848,6 +905,7 @@ pub fn check_live_smoke(probe: &LiveSmokeProbe) -> Vec<CheckResult> {
 #[must_use]
 pub fn run_checks(probes: &Probes) -> Vec<CheckResult> {
     let mut checks = check_environment(&probes.environment);
+    checks.push(check_sandbox(&probes.sandbox));
     checks.extend(check_clis(&probes.clis));
     checks.extend(check_config(&probes.config));
     checks.extend(check_spec_system(&probes.spec_system));
@@ -1079,6 +1137,25 @@ fn collect_probes(repo_root: &Path, environment: EnvironmentProbe) -> Probes {
         broker: probe_broker(&config),
         supervisor: probe_supervisor(&config, repo_root),
         hygiene: probe_hygiene(repo_root),
+        sandbox: probe_sandbox(),
+    }
+}
+
+/// Probes the current OS's FS-scoped sandbox backend on `PATH`.
+///
+/// `sandbox-exec` on macOS, `bwrap` on Linux/WSL; other platforms have no known
+/// backend (empty). Read-only: it only resolves the binary, never runs it.
+fn probe_sandbox() -> SandboxProbe {
+    let backend = if cfg!(target_os = "macos") {
+        "sandbox-exec"
+    } else if cfg!(target_os = "linux") {
+        "bwrap"
+    } else {
+        ""
+    };
+    SandboxProbe {
+        backend,
+        available: !backend.is_empty() && which::which(backend).is_ok(),
     }
 }
 
@@ -1327,6 +1404,7 @@ pub fn run(json: bool, live: bool) -> Result<(), PawError> {
         run_checks(&collect_probes(root, environment))
     } else {
         let mut checks = check_environment(&environment);
+        checks.push(check_sandbox(&probe_sandbox()));
         checks.extend(check_clis(&probe_clis(&PawConfig::default())));
         checks
     };
