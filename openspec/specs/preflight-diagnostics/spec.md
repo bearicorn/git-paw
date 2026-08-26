@@ -2,7 +2,6 @@
 
 ## Purpose
 The read-only `git paw doctor` preflight command: grouped ✓/⚠/✗ diagnostics across environment, CLIs, config, spec system, bundled scripts, broker, supervisor, and hygiene — each non-passing check carrying a remedy — with a `--json` renderer, an optional `--live` session-lifecycle smoke arm, and an exit code that reflects the worst check. Doctor diagnoses but never repairs.
-
 ## Requirements
 ### Requirement: `git paw doctor` runs read-only preflight checks
 
@@ -271,4 +270,29 @@ is deferred to a later cycle.)
 
 - **WHEN** `git paw doctor --help` is inspected
 - **THEN** it SHALL NOT advertise a `--fix` or other repair option
+
+### Requirement: Sandbox-availability check
+
+`git paw doctor` SHALL include a check that detects whether an FS-scoped sandbox
+backend is available for the current operating system — `sandbox-exec` on macOS,
+`bwrap` on Linux/WSL — and report it with a ✓/⚠ status and, when unavailable or
+degraded, an actionable remedy pointing at the sandbox setup documentation. The
+check MUST be read-only (it MUST NOT invoke the sandbox or mutate any file) and
+MUST follow the existing doctor conventions (grouped output, status glyph,
+remedy line), degrading gracefully like the tmux availability check rather than
+failing the command.
+
+**Test:** `tests/doctor_sandbox_check.rs`
+
+#### Scenario: Backend present reports pass
+- **WHEN** `git paw doctor` runs on a system where the OS sandbox backend (`sandbox-exec` on macOS or `bwrap` on Linux) is on `PATH`
+- **THEN** the sandbox check reports ✓ and the command's exit code is unaffected by this check
+
+#### Scenario: Backend absent warns with a remedy
+- **WHEN** `git paw doctor` runs on a system where the OS sandbox backend is not available
+- **THEN** the sandbox check reports ⚠ with a remedy line pointing at the sandbox setup documentation, and does not report ✗ (absence is not a failure)
+
+#### Scenario: Check is read-only
+- **WHEN** the sandbox-availability check runs
+- **THEN** no file under `.git-paw/` is created, modified, or deleted, and the sandbox is not launched
 
