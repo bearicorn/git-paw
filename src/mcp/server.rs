@@ -39,6 +39,10 @@ impl GitPawMcpServer {
     }
 }
 
+// The `#[tool_handler]` macro expands to an async trait method with no `.await`;
+// silence clippy's 1.98 lint for the generated code. `unknown_lints` keeps this
+// harmless on the older toolchains (MSRV 1.96) that do not know the lint yet.
+#[allow(unknown_lints, clippy::unused_async_trait_impl)]
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for GitPawMcpServer {
     fn get_info(&self) -> ServerInfo {

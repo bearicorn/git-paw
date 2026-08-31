@@ -101,8 +101,7 @@ fn is_gitignored(repo_root: &Path, path: &str) -> bool {
         .current_dir(repo_root)
         .args(["check-ignore", "-q", "--", path])
         .output()
-        .ok()
-        .is_some_and(|out| out.status.success())
+        .is_ok_and(|out| out.status.success())
 }
 
 /// Reads one file from the local working tree, confined to the repository

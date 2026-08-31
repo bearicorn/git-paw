@@ -5,7 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.14.0] - 2026-08-10
+## [0.15.0] - 2026-08-31
+
+### Features
+
+- *(doctor,user-guide)* FS-scoped sandbox workflow + security posture
+- *(worktree,cli)* Per-worktree runtime isolation
+
+### Documentation
+
+- *(agents)* Link the remaining dev skills in AGENTS.md
+## [0.14.0] - 2026-08-11
 
 ### Features
 
@@ -286,13 +296,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(skills)* Supervisor + coordination skill v0.5.0 doctrine
 - *(specs)* Spec Kit backend, backend-tagged SpecEntry, per-backend boot-prompt dispatch
 - *(broker)* Agent.intent, learnings aggregator, conflict detector, status payload metadata, agent_id validation
-- *(supervisor)* Auto-approve patterns
-- *(supervisor)* Mode with merge loop, session summary, recovery, question forwarding
-- *(cli,config,init,git)* Supervisor + force flags, supervisor config schema, branch handling
-- *(dashboard)* Committed counter, prompt-inbox interactivity, message log panel, layout
-- *(broker)* Hook injection, watcher, sticky terminal status, real uptime, verified/feedback messages
-- *(skills)* Standardize agent-skill resolution to agentskills.io layout
-- *(detect)* Expand auto-detection to cover 10 additional AI CLI tools
 
 ### Bug Fixes
 
@@ -304,12 +307,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Align README, mdBook, AGENTS.md, and user-guide with v0.5.0 surface
 - *(specs)* V0.5.0 OpenSpec changes, archive plan, and main-spec alignment
+
+### Testing
+
+- Behavioral coverage for v0.5.0 surfaces + tmux/config-integration isolation harness
+## [0.4.0] - 2026-05-06
+
+### Features
+
+- *(supervisor)* Auto-approve patterns
+- *(supervisor)* Mode with merge loop, session summary, recovery, question forwarding
+- *(cli,config,init,git)* Supervisor + force flags, supervisor config schema, branch handling
+- *(dashboard)* Committed counter, prompt-inbox interactivity, message log panel, layout
+- *(broker)* Hook injection, watcher, sticky terminal status, real uptime, verified/feedback messages
+- *(skills)* Standardize agent-skill resolution to agentskills.io layout
+- *(detect)* Expand auto-detection to cover 10 additional AI CLI tools
+
+### Documentation
+
 - Align README, mdBook, and AGENTS.md with v0.4.0 surface
 - *(specs)* V0.4.0 OpenSpec changes, archive plan, and main-spec alignment
 
 ### Testing
 
-- Behavioral coverage for v0.5.0 surfaces + tmux/config-integration isolation harness
 - Behavioral integration and unit tests for v0.4.0
 ## [0.3.0] - 2026-04-10
 
@@ -337,6 +357,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 - Add CLI tool for parallel AI coding sessions across git worktrees
+[0.15.0]: https://github.com/bearicorn/git-paw/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/bearicorn/git-paw/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/bearicorn/git-paw/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/bearicorn/git-paw/compare/v0.11.0...v0.12.0
@@ -346,7 +367,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.8.0]: https://github.com/bearicorn/git-paw/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/bearicorn/git-paw/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/bearicorn/git-paw/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/bearicorn/git-paw/compare/v0.3.0...v0.5.0
+[0.5.0]: https://github.com/bearicorn/git-paw/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/bearicorn/git-paw/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/bearicorn/git-paw/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/bearicorn/git-paw/compare/v0.1.0...v0.2.0
 
