@@ -57,9 +57,9 @@ use super::approval_gate::{approval_dedup_key, live_prompt_in_tail};
 use super::approve::{KeyDispatcher, TmuxKeyDispatcher, approval_keystrokes};
 use super::auto_approve::{
     ProtectedPaths, detect_prompt_shape, extract_command_slice, extract_path_from_file_prompt,
-    is_dangerous, is_live_prompt, is_protected_path_violation, is_safe_command, is_scratch_rm,
-    is_worktree_dev_test_op, is_worktree_file_op, is_worktree_git_op, normalize_command,
-    select_option_index,
+    is_dangerous, is_git_dir_write, is_live_prompt, is_managed_script_invocation,
+    is_protected_path_violation, is_safe_command, is_scratch_rm, is_worktree_dev_test_op,
+    is_worktree_file_op, is_worktree_git_op, normalize_command, select_option_index,
 };
 use super::claim::PaneClaim;
 use super::poll::{AgentStatusRow, fetch_status_over_http};
@@ -248,11 +248,12 @@ impl PromptVerdict {
 
 /// Classifies a live prompt capture into a [`PromptVerdict`], mirroring the
 /// danger-first decision order the dashboard poll loop uses
-/// ([`crate::supervisor::poll`]): danger-list first (terminal escalate), then
-/// the scratch-`rm` exception, the worktree-confined `git add`/`git commit`
-/// pre-approval, the worktree-confined dev-test shapes, the shell whitelist,
-/// and finally the worktree file-op boundary. Anything unmatched is
-/// [`PromptVerdict::Unknown`].
+/// ([`crate::supervisor::poll`]): danger-list plus the `.git/`-write rule
+/// first (terminal escalate), then the scratch-`rm` exception, an invocation
+/// of one of git-paw's own managed helper scripts, the worktree-confined
+/// `git add`/`git commit` pre-approval, the worktree-confined dev-test
+/// shapes, the shell whitelist, and finally the worktree file-op boundary.
+/// Anything unmatched is [`PromptVerdict::Unknown`].
 ///
 /// `worktree_root` is `None` for panes without a known worktree (the supervisor
 /// pane), which suppresses the worktree-scoped rules for that pane.
@@ -281,6 +282,7 @@ pub fn classify_prompt(
     // whitelist / safe-by-pattern match.
     if is_dangerous(&slice)
         || is_protected_path_violation(captured, &slice, protected, worktree_root)
+        || is_git_dir_write(captured, &slice, worktree_root)
     {
         return PromptVerdict::Danger;
     }
@@ -288,6 +290,8 @@ pub fn classify_prompt(
     // The safe rules, in the poll loop's precedence order:
     // - the scratch-path exception (an `rm -rf` whose every target is repo/OS
     //   scratch);
+    // - an invocation of one of git-paw's own bundled helper scripts
+    //   (GP-02b);
     // - worktree-confined `git add` / `git commit` pre-approval;
     // - worktree-confined dev-test shapes (`bash -n`, non-recursive chmod,
     //   mktemp, interpreter-of-worktree-script);
@@ -298,6 +302,8 @@ pub fn classify_prompt(
     // worktree (the supervisor pane).
     let matched = if is_scratch_rm(&slice) {
         Some("scratch-rm".to_string())
+    } else if is_managed_script_invocation(&slice, worktree_root) {
+        Some("managed-script".to_string())
     } else if worktree_root.is_some_and(|root| is_worktree_git_op(&slice, root)) {
         Some("worktree-git".to_string())
     } else if worktree_root.is_some_and(|root| is_worktree_dev_test_op(&slice, root)) {
@@ -2605,6 +2611,41 @@ mod tests {
         assert_eq!(
             classify_prompt(cap, &[], None, false, &ProtectedPaths::default()),
             PromptVerdict::Unknown
+        );
+    }
+
+    /// GP-02b: an invocation of one of git-paw's own bundled helper scripts
+    /// classifies safe through the drive-loop classifier.
+    #[test]
+    fn classifies_managed_script_invocation_as_safe() {
+        let cap = live_safe_capture(".git-paw/scripts/broker.sh --agent feat-x status booting");
+        assert!(matches!(
+            classify_prompt(&cap, &[], None, false, &ProtectedPaths::default()),
+            PromptVerdict::Safe { .. }
+        ));
+    }
+
+    /// GP-04b: a write into a repository `.git/` directory is a terminal
+    /// danger escalation through the drive-loop classifier, even when the
+    /// verb (`echo`) is whitelisted.
+    #[test]
+    fn classifies_git_dir_write_as_danger() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(tmp.path())
+            .status()
+            .expect("git init");
+        let cap = live_safe_capture("echo x >> .git/info/exclude");
+        assert_eq!(
+            classify_prompt(
+                &cap,
+                &["echo".to_string()],
+                Some(tmp.path()),
+                false,
+                &ProtectedPaths::default()
+            ),
+            PromptVerdict::Danger
         );
     }
 

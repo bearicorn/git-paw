@@ -18,6 +18,8 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
+use crate::agents::is_managed_path;
+
 /// Read-mostly command verbs eligible for auto-approval.
 ///
 /// These leading verbs are routine, low-risk operations (reads, searches,
@@ -337,6 +339,83 @@ pub fn is_worktree_dev_test_op(slice: &str, worktree_root: &Path) -> bool {
     }
 }
 
+/// Interpreters through which a managed helper script may be invoked
+/// (`bash .git-paw/scripts/broker.sh …`), in addition to direct invocation.
+const SCRIPT_INTERPRETERS: &[&str] = &["bash", "sh"];
+
+/// Filenames of git-paw's own bundled helper scripts eligible for the GP-02b
+/// safe-invocation rule.
+const MANAGED_HELPER_SCRIPTS: &[&str] = &["broker.sh", "sweep.sh", "docs-fetch.sh"];
+
+/// Returns `true` when `token` names one of [`MANAGED_HELPER_SCRIPTS`],
+/// resolved against `worktree_root` when the token is a relative path.
+///
+/// Delegates the "is this under git-paw's own managed subtree" question to
+/// [`is_managed_path`] — the single source of truth `agent-memory-isolation`
+/// and `remove` also consult; this function narrows it to the specific
+/// helper-script filenames the safe-invocation rule covers (an arbitrary
+/// `.git-paw/` file, e.g. `config.toml`, is managed bookkeeping but is NOT a
+/// script git-paw ever executes on an agent's behalf).
+fn is_managed_script_path(token: &str, worktree_root: Option<&Path>) -> bool {
+    let path = Path::new(token);
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if !MANAGED_HELPER_SCRIPTS.contains(&name) {
+        return false;
+    }
+    let Some(root) = worktree_root else {
+        // No worktree root known: fall back to the unambiguous relative
+        // shape `.git-paw/scripts/<name>` so the rule still applies where it
+        // safely can.
+        return path
+            .to_str()
+            .is_some_and(|s| s == format!(".git-paw/scripts/{name}"));
+    };
+    let rel = if path.is_absolute() {
+        let root_resolved = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let resolved = resolve_for_boundary(path).unwrap_or_else(|| path.to_path_buf());
+        match resolved.strip_prefix(&root_resolved) {
+            Ok(rel) => rel.to_path_buf(),
+            Err(_) => return false,
+        }
+    } else {
+        path.to_path_buf()
+    };
+    rel.to_str().is_some_and(|s| is_managed_path(root, s))
+}
+
+/// Classifies a command slice as an invocation of one of git-paw's own
+/// managed helper scripts (`.git-paw/scripts/{broker,sweep,docs-fetch}.sh`) —
+/// the GP-02b safe rule. git-paw authors these scripts and they perform only
+/// bounded coordination actions, so an unattended agent's boot-time call into
+/// one of them is safe by construction.
+///
+/// Matches direct invocation (`.git-paw/scripts/broker.sh …`) and
+/// interpreter-invoked forms (`bash .git-paw/scripts/broker.sh …`). Callers
+/// evaluate this AFTER the danger-list, so a slice that chains a
+/// managed-script call with a danger-class operation
+/// (`sweep.sh snapshot && rm -rf /`) still escalates — the danger-list match
+/// is found first and this rule is never consulted for that slice.
+#[must_use]
+pub fn is_managed_script_invocation(slice: &str, worktree_root: Option<&Path>) -> bool {
+    let mut tokens = slice
+        .split_whitespace()
+        .skip_while(|tok| is_assignment_token(tok));
+    let Some(first) = tokens.next() else {
+        return false;
+    };
+    let path_token = if SCRIPT_INTERPRETERS.contains(&first) {
+        match tokens.find(|t| !t.starts_with('-')) {
+            Some(t) => t,
+            None => return false,
+        }
+    } else {
+        first
+    };
+    is_managed_script_path(path_token, worktree_root)
+}
+
 // ---------------------------------------------------------------------------
 // Command-slice extraction (Section 1)
 // ---------------------------------------------------------------------------
@@ -477,26 +556,120 @@ fn strip_discard_redirect(cmd: &str) -> Option<&str> {
         .map(str::trim_end)
 }
 
+/// Returns `true` when `tok` is strict shell-assignment syntax: `NAME=value`
+/// with a non-empty alphanumeric/underscore name. A value that merely
+/// contains `=` (e.g. a URL argument) never matches unless its own leading
+/// segment happens to look like a bare identifier followed by `=`.
+fn is_assignment_token(tok: &str) -> bool {
+    tok.split_once('=').is_some_and(|(k, _)| {
+        !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// Splits `s` (assumed free of leading whitespace) into its first
+/// whitespace-delimited token and the remainder — which may itself start
+/// with whitespace, since the split is on the position of the boundary, not
+/// past it. Returns `None` for an empty string.
+fn split_first_token(s: &str) -> Option<(&str, &str)> {
+    if s.is_empty() {
+        return None;
+    }
+    match s.find(char::is_whitespace) {
+        Some(idx) => Some((&s[..idx], &s[idx..])),
+        None => Some((s, "")),
+    }
+}
+
+/// Returns the remainder after a leading `verb` token followed by a
+/// whitespace boundary or end-of-string (so `envfoo` does not match `env`),
+/// or `None` when `s` does not start with that verb.
+fn strip_wrapper_verb<'a>(s: &'a str, verb: &str) -> Option<&'a str> {
+    let (tok, after) = split_first_token(s)?;
+    (tok == verb).then_some(after)
+}
+
+/// Strips a leading run of `NAME=value` assignments, then a leading `env`
+/// (together with its own assignments and `-i` / `-u NAME` options) or
+/// `nohup` wrapper, from `cmd`. Returns `None` when `cmd` carries no such
+/// prefix, so [`normalize_command`]'s fixpoint loop can detect it stopped
+/// changing.
+fn strip_leading_prefix(cmd: &str) -> Option<&str> {
+    let mut rest = cmd;
+    let mut changed = false;
+
+    // A run of leading `NAME=value` assignments.
+    loop {
+        let trimmed = rest.trim_start();
+        let Some((tok, after)) = split_first_token(trimmed) else {
+            break;
+        };
+        if !is_assignment_token(tok) {
+            break;
+        }
+        rest = after;
+        changed = true;
+    }
+
+    // A leading `env` wrapper (with its own assignments and `-i` / `-u NAME`
+    // options) or a leading `nohup` wrapper.
+    let trimmed = rest.trim_start();
+    if let Some(after_verb) = strip_wrapper_verb(trimmed, "env") {
+        rest = after_verb;
+        changed = true;
+        loop {
+            let t = rest.trim_start();
+            let Some((tok, after)) = split_first_token(t) else {
+                break;
+            };
+            if is_assignment_token(tok) || tok == "-i" {
+                rest = after;
+                continue;
+            }
+            if tok == "-u" {
+                let after_trim = after.trim_start();
+                if let Some((_name, after2)) = split_first_token(after_trim) {
+                    rest = after2;
+                    continue;
+                }
+            }
+            break;
+        }
+    } else if let Some(after_verb) = strip_wrapper_verb(trimmed, "nohup") {
+        rest = after_verb;
+        changed = true;
+    }
+
+    changed.then_some(rest)
+}
+
 /// Normalises a command slice for classification by removing the gate-reporting
 /// wrappers an agent appends to a command it is only observing the exit status
-/// of: a trailing `; echo …$?` / `; RC=$?` exit-code probe and a trailing
-/// `>/dev/null 2>&1` discard redirect.
+/// of: a trailing `; echo …$?` / `; RC=$?` exit-code probe, a trailing
+/// `>/dev/null 2>&1` discard redirect, and a leading run of `NAME=value`
+/// environment-variable assignments plus a leading `env` / `nohup` invocation
+/// wrapper (GP-02a) — the run-environment prefixes that varied on every dogfood
+/// invocation (`TMPDIR=… cargo test`, `GIT_PAW_ALLOW_LIVE_SESSION=1 cargo test`,
+/// `env FOO=bar …`, `nohup … &`) and so never accumulated a matching grant.
 ///
-/// The probe text differs on every run, so an un-normalised slice never matches
-/// a prefix allowlist entry and a routine gate command re-prompts forever. Only
-/// those two suffix forms are stripped — this is deliberately not a shell
-/// parser, and anything unrecognised is returned unchanged.
+/// The probe text and the assignment values differ on every run, so an
+/// un-normalised slice never matches a prefix allowlist entry and a routine
+/// gate command re-prompts forever. This is deliberately not a shell parser:
+/// only these specific, conservatively-recognised forms are stripped, and
+/// anything unrecognised is returned unchanged.
 ///
 /// Normalisation is a pure rewrite performed BEFORE any classification, so the
 /// danger-list ([`is_dangerous`]), the worktree-confinement rules, and the
 /// protected-path rule all run against the normalised command and stripping can
 /// never downgrade an escalation — `git push; echo $?` normalises to `git push`
-/// and still escalates.
+/// and still escalates, and `FOO=bar rm -rf /` normalises to `rm -rf /` and
+/// still escalates.
 #[must_use]
 pub fn normalize_command(slice: &str) -> String {
     let mut cmd = slice.trim();
     loop {
-        if let Some(head) = strip_exit_probe(cmd) {
+        if let Some(head) = strip_leading_prefix(cmd) {
+            cmd = head.trim_start();
+        } else if let Some(head) = strip_exit_probe(cmd) {
             cmd = head;
         } else if let Some(head) = strip_discard_redirect(cmd) {
             cmd = head;
@@ -1054,6 +1227,73 @@ pub fn is_protected_path_violation(
     slice_write_targets(slice)
         .iter()
         .any(|t| protected.matches_target(t, worktree_root))
+}
+
+// ---------------------------------------------------------------------------
+// `.git/`-write danger rule (GP-04b)
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when `path` resolves to a location strictly inside a
+/// `.git/` directory — a component named exactly `.git` followed by at least
+/// one further component, e.g. `.git/config`, `.git/info/exclude`,
+/// `.git/hooks/pre-commit`.
+///
+/// Resolution mirrors the worktree-boundary check: canonicalise via the
+/// deepest existing ancestor when possible ([`resolve_for_boundary`]),
+/// falling back to a lexical `.`/`..` collapse (fail-closed) so a target that
+/// cannot be canonicalized but syntactically reaches into `.git/` still
+/// matches. A relative `path` is resolved against `worktree_root` when known;
+/// with no root known it is matched against its own lexical form, so the
+/// rule still applies to the common relative-path case.
+fn is_inside_dot_git(path: &str, worktree_root: Option<&Path>) -> bool {
+    let cleaned = path
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'' || c == '`');
+    if cleaned.is_empty() {
+        return false;
+    }
+    let target = Path::new(cleaned);
+    let joined = if target.is_absolute() {
+        target.to_path_buf()
+    } else if let Some(root) = worktree_root {
+        root.join(target)
+    } else {
+        PathBuf::from(cleaned)
+    };
+    let resolved = resolve_for_boundary(&joined).unwrap_or_else(|| lexical_normalize(&joined));
+    let mut saw_git_dir = false;
+    for comp in resolved.components() {
+        if saw_git_dir {
+            return true;
+        }
+        if comp.as_os_str() == ".git" {
+            saw_git_dir = true;
+        }
+    }
+    false
+}
+
+/// Returns `true` when a filesystem prompt or its command slice targets a
+/// write inside a repository `.git/` directory — the danger-class rule of
+/// `approval-command-safety` (GP-04b). Callers evaluate this at the same
+/// precedence as the curated danger-list: a match is a terminal escalation,
+/// never auto-approved.
+///
+/// Read-only operations never match (only write targets are extracted via
+/// [`slice_write_targets`], mirroring [`is_protected_path_violation`]).
+/// Ordinary `git` subcommands (`git commit`, `git add`, …) are classified by
+/// the git-verb rules and are unaffected — `git` is not among the mutating
+/// verbs [`slice_write_targets`] extracts targets for.
+#[must_use]
+pub fn is_git_dir_write(captured: &str, slice: &str, worktree_root: Option<&Path>) -> bool {
+    if let Some(path) = extract_path_from_file_prompt(captured)
+        && is_inside_dot_git(&path, worktree_root)
+    {
+        return true;
+    }
+    slice_write_targets(slice)
+        .iter()
+        .any(|t| is_inside_dot_git(t, worktree_root))
 }
 
 // ---------------------------------------------------------------------------
@@ -2239,6 +2479,80 @@ Here is my plan:
         }
     }
 
+    // --- Section: `.git/`-write danger rule (GP-04b) -------------------------
+
+    /// Spec scenario "Append to .git/info/exclude escalates as danger".
+    #[test]
+    fn git_info_exclude_append_escalates_as_danger() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+        let captured =
+            "Bash command\n  echo '.git-paw/' >> .git/info/exclude\nDo you want to proceed?";
+        let slice = "echo '.git-paw/' >> .git/info/exclude";
+        assert!(is_git_dir_write(captured, slice, Some(tmp.path())));
+    }
+
+    /// Spec scenario "Write to .git/config escalates as danger".
+    #[test]
+    fn git_config_write_escalates_as_danger() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+        let target = tmp.path().join(".git").join("config");
+        let prompt = format!(
+            "Do you want to allow this write to {}?",
+            target.to_string_lossy()
+        );
+        assert!(is_git_dir_write(&prompt, "", Some(tmp.path())));
+    }
+
+    /// Spec scenario "Reading .git metadata is not matched by this rule".
+    #[test]
+    fn reading_git_config_is_not_matched() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+        assert!(!is_git_dir_write(
+            "Bash command\n  cat .git/config\nDo you want to proceed?",
+            "cat .git/config",
+            Some(tmp.path())
+        ));
+    }
+
+    /// A relative `.git/` target with no known worktree root is still caught
+    /// (fail-closed, matching the lexical fallback).
+    #[test]
+    fn git_dir_write_matches_without_a_worktree_root() {
+        assert!(is_git_dir_write("", "echo x >> .git/info/exclude", None));
+    }
+
+    /// Ordinary `git` subcommands (which target no `.git/`-internal file
+    /// path via the mutating-verb scan) are unaffected by this rule.
+    #[test]
+    fn ordinary_git_subcommands_are_unaffected() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+        for cmd in ["git commit -m wip", "git add .", "git status"] {
+            assert!(
+                !is_git_dir_write("", cmd, Some(tmp.path())),
+                "{cmd} must not match the .git/-write rule"
+            );
+        }
+    }
+
+    /// A helper to initialise a minimal git repo at `dir`, mirroring the
+    /// fixture used elsewhere in this crate for tests that need a real
+    /// `.git/` directory to canonicalize against.
+    fn init_git_repo(dir: &Path) {
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .status()
+                .expect("git command");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q", "-b", "main"]);
+    }
+
     // --- Section: exit-probe / discard-redirect normalization ---------------
 
     /// Spec scenario "A safe command with a trailing exit-code probe classifies
@@ -2309,5 +2623,134 @@ Here is my plan:
         ] {
             assert_eq!(normalize_command(unchanged), unchanged);
         }
+    }
+
+    // --- Section: leading assignment / env / nohup normalization (GP-02a) ---
+
+    /// Spec scenario "A leading VAR=value assignment is normalized away".
+    #[test]
+    fn normalize_strips_leading_assignment() {
+        assert_eq!(
+            normalize_command("TMPDIR=/tmp/x cargo test --lib"),
+            "cargo test --lib"
+        );
+    }
+
+    /// Spec scenario "Multiple leading assignments plus a trailing probe are
+    /// both normalized".
+    #[test]
+    fn normalize_strips_multiple_leading_assignments_and_trailing_probe() {
+        assert_eq!(
+            normalize_command(
+                "GIT_PAW_ALLOW_LIVE_SESSION=1 TMPDIR=/tmp/x cargo test; echo exit=$?"
+            ),
+            "cargo test"
+        );
+    }
+
+    /// Spec scenario "A leading env wrapper is normalized away".
+    #[test]
+    fn normalize_strips_leading_env_wrapper() {
+        assert_eq!(normalize_command("env FOO=bar cargo build"), "cargo build");
+    }
+
+    /// `env`'s own `-i` / `-u NAME` options are stripped along with its
+    /// assignments, per the requirement text.
+    #[test]
+    fn normalize_strips_env_options() {
+        assert_eq!(
+            normalize_command("env -i FOO=bar -u PATH cargo build"),
+            "cargo build"
+        );
+    }
+
+    /// Spec scenario "A leading nohup wrapper is normalized away".
+    #[test]
+    fn normalize_strips_leading_nohup_wrapper() {
+        assert_eq!(normalize_command("nohup just check"), "just check");
+    }
+
+    /// Spec scenario "Normalization does not rescue a danger command behind
+    /// assignments": stripping the leading prefix must not downgrade an
+    /// escalation.
+    #[test]
+    fn normalize_leading_prefix_does_not_rescue_a_danger_command() {
+        assert_eq!(normalize_command("FOO=bar rm -rf /"), "rm -rf /");
+        assert!(is_dangerous(&normalize_command("FOO=bar rm -rf /")));
+    }
+
+    /// A value that merely contains `=` (not a leading identifier) is never
+    /// mistaken for an assignment and stays part of the command.
+    #[test]
+    fn normalize_does_not_strip_non_assignment_equals() {
+        assert_eq!(
+            normalize_command("curl 'http://example.com/?a=b' -o out"),
+            "curl 'http://example.com/?a=b' -o out"
+        );
+    }
+
+    // --- Section: managed helper-script safe rule (GP-02b) ------------------
+
+    /// Spec scenario "A bundled broker.sh boot call classifies safe".
+    #[test]
+    fn managed_broker_script_invocation_is_safe() {
+        assert!(is_managed_script_invocation(
+            ".git-paw/scripts/broker.sh --agent feat-x status booting",
+            None
+        ));
+    }
+
+    /// Spec scenario "A bundled sweep.sh call classifies safe".
+    #[test]
+    fn managed_sweep_script_invocation_is_safe() {
+        assert!(is_managed_script_invocation(
+            ".git-paw/scripts/sweep.sh status-publish",
+            None
+        ));
+    }
+
+    /// The rule also covers `docs-fetch.sh` and interpreter-invoked forms.
+    #[test]
+    fn managed_docs_fetch_script_and_interpreter_invocation_are_safe() {
+        assert!(is_managed_script_invocation(
+            ".git-paw/scripts/docs-fetch.sh fetch foo",
+            None
+        ));
+        assert!(is_managed_script_invocation(
+            "bash .git-paw/scripts/broker.sh --agent feat-x status booting",
+            None
+        ));
+    }
+
+    /// Spec scenario "A managed-script invocation chained with a danger
+    /// command still escalates": the safe rule itself does not gate on
+    /// danger (that precedence lives in the caller), but the danger-list
+    /// match on the full slice must not be defeated by the managed-script
+    /// prefix.
+    #[test]
+    fn managed_script_chained_with_danger_command_still_escalates() {
+        let slice = ".git-paw/scripts/sweep.sh snapshot && rm -rf /";
+        assert!(is_dangerous(slice), "danger-list must match the full slice");
+    }
+
+    /// An arbitrary `.git-paw/` file that is not one of the three bundled
+    /// scripts does not classify safe merely for living under `.git-paw/`.
+    #[test]
+    fn non_script_git_paw_path_is_not_a_managed_script_invocation() {
+        assert!(!is_managed_script_invocation(
+            ".git-paw/config.toml --dump",
+            None
+        ));
+    }
+
+    /// A worktree-relative managed-script path resolves through
+    /// `is_managed_path` when a worktree root is known.
+    #[test]
+    fn managed_script_invocation_resolves_against_worktree_root() {
+        let tmp = TempDir::new().unwrap();
+        assert!(is_managed_script_invocation(
+            ".git-paw/scripts/broker.sh status booting",
+            Some(tmp.path())
+        ));
     }
 }

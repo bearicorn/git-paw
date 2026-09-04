@@ -587,6 +587,48 @@ fn resolve_submit_delay_ms(cli: &str, config: &git_paw::config::PawConfig) -> u6
         .unwrap_or(git_paw::DEFAULT_SUBMIT_DELAY_MS)
 }
 
+/// Gates a pane before boot-block injection via
+/// [`tmux::gate_pane_for_injection`] and fails loudly when the pane is
+/// blocked on an unanswered first-run acceptance dialog (GP-03b).
+///
+/// A [`tmux::ReadinessOutcome::DialogStuck`] pane SHALL NOT receive the boot
+/// block on top of an unresolved dialog — a stuck pane is never reported a
+/// healthy running agent — so this returns `Err` instead of injecting. Every
+/// other outcome (`Ready` or `FellBack`) proceeds exactly as before; the
+/// caller injects the prompt regardless.
+fn gate_pane_or_fail_on_dialog(
+    session_name: &str,
+    pane_index: usize,
+    cli_command: &str,
+) -> Result<(), PawError> {
+    dialog_stuck_result(
+        tmux::gate_pane_for_injection(session_name, pane_index, cli_command),
+        session_name,
+        pane_index,
+        cli_command,
+    )
+}
+
+/// The pure decision behind [`gate_pane_or_fail_on_dialog`]: `Err` exactly
+/// when `outcome` is [`tmux::ReadinessOutcome::DialogStuck`], `Ok(())`
+/// otherwise (`Ready` or `FellBack` proceed exactly as before). Split out so
+/// the loud-failure wiring is unit-testable without a live tmux pane.
+fn dialog_stuck_result(
+    outcome: tmux::ReadinessOutcome,
+    session_name: &str,
+    pane_index: usize,
+    cli_command: &str,
+) -> Result<(), PawError> {
+    if matches!(outcome, tmux::ReadinessOutcome::DialogStuck) {
+        return Err(PawError::TmuxError(format!(
+            "pane {pane_index} ({cli_command}) is blocked on an unanswered first-run \
+             acceptance dialog; attach with `tmux attach -t {session_name}` and resolve it \
+             manually, then retry"
+        )));
+    }
+    Ok(())
+}
+
 /// Inject and submit an initial prompt into a tmux pane.
 ///
 /// The boot block is injected literally, then — after `delay_ms` for a
@@ -1624,6 +1666,43 @@ mod tests {
             false,
             false
         ));
+    }
+
+    /// GP-03b: a pane stuck on an unanswered dialog fails the launch loudly
+    /// (`Err`) instead of proceeding to inject the boot block; every other
+    /// outcome proceeds exactly as before.
+    #[test]
+    fn dialog_stuck_result_fails_loudly_only_for_dialog_stuck() {
+        let err = dialog_stuck_result(
+            git_paw::tmux::ReadinessOutcome::DialogStuck,
+            "paw-proj",
+            2,
+            "claude --dangerously-skip-permissions",
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("pane 2"));
+        assert!(message.contains("acceptance dialog"));
+        assert!(message.contains("paw-proj"));
+
+        assert!(
+            dialog_stuck_result(
+                git_paw::tmux::ReadinessOutcome::Ready,
+                "paw-proj",
+                2,
+                "claude"
+            )
+            .is_ok()
+        );
+        assert!(
+            dialog_stuck_result(
+                git_paw::tmux::ReadinessOutcome::FellBack,
+                "paw-proj",
+                2,
+                "claude"
+            )
+            .is_ok()
+        );
     }
 
     #[test]

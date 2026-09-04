@@ -29,9 +29,10 @@ use crate::error::PawError;
 use super::approval_gate::PaneCapturer;
 use super::approve::{ApprovalRequest, KeyDispatcher, auto_approve_pane};
 use super::auto_approve::{
-    ProtectedPaths, detect_prompt_shape, extract_command_slice, is_dangerous, is_live_prompt,
-    is_protected_path_violation, is_safe_command, is_scratch_rm, is_worktree_dev_test_op,
-    is_worktree_file_op, is_worktree_git_op, normalize_command, select_option_index,
+    ProtectedPaths, detect_prompt_shape, extract_command_slice, is_dangerous, is_git_dir_write,
+    is_live_prompt, is_managed_script_invocation, is_protected_path_violation, is_safe_command,
+    is_scratch_rm, is_worktree_dev_test_op, is_worktree_file_op, is_worktree_git_op,
+    normalize_command, select_option_index,
 };
 use super::permission_prompt::{PermissionType, detect_permission_prompt};
 use super::stall::detect_stalled_agents;
@@ -311,6 +312,7 @@ where
     drive_outcomes(stalled, ctx, &cfg, &whitelist)
 }
 
+#[allow(clippy::too_many_lines)]
 fn drive_outcomes<R, I, D, Q, W>(
     stalled: Vec<String>,
     ctx: &mut PollContext<'_, R, I, D, Q, W>,
@@ -389,6 +391,24 @@ where
                 cfg.enabled,
                 option_index,
                 "scratch-rm",
+                PermissionType::SafeCommand,
+            ));
+            continue;
+        }
+
+        // GP-02b: an invocation of one of git-paw's own bundled helper
+        // scripts (`.git-paw/scripts/{broker,sweep,docs-fetch}.sh`) is safe
+        // by construction — git-paw authors these scripts and they perform
+        // only bounded coordination actions. Subject to the danger-list
+        // precedence evaluated above.
+        if is_managed_script_invocation(&slice, worktree_root.as_deref()) {
+            out.push(dispatch_approval(
+                ctx,
+                &agent_id,
+                pane_index,
+                cfg.enabled,
+                option_index,
+                "managed-script",
                 PermissionType::SafeCommand,
             ));
             continue;
@@ -514,16 +534,19 @@ where
     }
 }
 
-/// Terminal danger-precedence check: the curated danger-list plus the
-/// protected-path rule (`agent-memory-isolation`), evaluated before any
-/// whitelist or safe-by-pattern classification.
+/// Terminal danger-precedence check: the curated danger-list, the
+/// protected-path rule (`agent-memory-isolation`), and the `.git/`-write rule
+/// (GP-04b), evaluated before any whitelist or safe-by-pattern
+/// classification.
 fn is_terminal_danger(
     captured: &str,
     slice: &str,
     protected: &ProtectedPaths,
     worktree_root: Option<&Path>,
 ) -> bool {
-    is_dangerous(slice) || is_protected_path_violation(captured, slice, protected, worktree_root)
+    is_dangerous(slice)
+        || is_protected_path_violation(captured, slice, protected, worktree_root)
+        || is_git_dir_write(captured, slice, worktree_root)
 }
 
 fn first_whitelist_match(captured: &str, whitelist: &[String]) -> Option<String> {
@@ -793,6 +816,77 @@ mod tests {
                 assert_eq!(*kind, PermissionType::SafeCommand);
             }
             other => panic!("expected Approved scratch-rm, got {other:?}"),
+        }
+        assert!(!dispatcher.events.is_empty());
+        assert!(forwarder.forwards.borrow().is_empty());
+    }
+
+    /// GP-04b: a write into a repository `.git/` directory is a terminal
+    /// danger escalation, even though `echo` is a read-mostly whitelisted
+    /// verb.
+    #[test]
+    fn git_dir_write_escalates_despite_whitelist() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(tmp.path())
+            .status()
+            .expect("git init");
+        let root = tmp.path().to_path_buf();
+        let state = BrokerState::new(None);
+        insert_stalled(&state, "agent-gd", 600);
+        let cfg = AutoApproveConfig::default();
+        let resolver = |id: &str| if id == "agent-gd" { Some(6) } else { None };
+        let inspector = StubInspector {
+            kind: Some(PermissionType::Unknown),
+            captured: "Bash command\n  echo '.git-paw/' >> .git/info/exclude\nDo you want to \
+                       proceed?\nEsc to cancel"
+                .into(),
+        };
+        let worktree = move |id: &str| {
+            if id == "agent-gd" {
+                Some(root.clone())
+            } else {
+                None
+            }
+        };
+        let (out, dispatcher, forwarder) =
+            run_tick_with_worktree(&state, &cfg, &resolver, &inspector, &worktree);
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(out[0].1, TickOutcome::Forwarded { .. }),
+            "a .git/ write must escalate, got {:?}",
+            out[0].1
+        );
+        assert!(dispatcher.events.is_empty(), "no keystrokes for danger");
+        assert_eq!(forwarder.forwards.borrow().len(), 1);
+    }
+
+    /// GP-02b: an invocation of one of git-paw's own bundled helper scripts
+    /// is auto-approved.
+    #[test]
+    fn managed_script_invocation_is_auto_approved() {
+        let state = BrokerState::new(None);
+        insert_stalled(&state, "agent-m", 600);
+        let cfg = AutoApproveConfig::default();
+        let resolver = |_id: &str| Some(7);
+        let inspector = StubInspector {
+            kind: Some(PermissionType::Unknown),
+            captured: "Bash command\n  .git-paw/scripts/broker.sh --agent feat-x status \
+                       booting\nDo you want to proceed?\nEsc to cancel"
+                .into(),
+        };
+        let (out, dispatcher, forwarder) = run_tick(&state, &cfg, &resolver, &inspector);
+        assert_eq!(out.len(), 1);
+        match &out[0].1 {
+            TickOutcome::Approved {
+                matched_entry,
+                kind,
+            } => {
+                assert_eq!(matched_entry, "managed-script");
+                assert_eq!(*kind, PermissionType::SafeCommand);
+            }
+            other => panic!("expected Approved managed-script, got {other:?}"),
         }
         assert!(!dispatcher.events.is_empty());
         assert!(forwarder.forwards.borrow().is_empty());

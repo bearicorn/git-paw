@@ -32,7 +32,8 @@ use super::helpers::{
 };
 use crate::{
     AttachContext, SpecMode, UNATTENDED_ENV, apply_spec_mode, attach_agent,
-    resolve_submit_delay_ms, submit_prompt_to_pane, write_repo_discovery_file,
+    gate_pane_or_fail_on_dialog, resolve_submit_delay_ms, submit_prompt_to_pane,
+    write_repo_discovery_file,
 };
 
 /// Loads the repo config from the current working directory and resolves
@@ -748,17 +749,13 @@ pub(crate) fn cmd_supervisor(
     );
     let supervisor_prompt = format!("{supervisor_boot_block}\n\n{supervisor_framing}");
     let supervisor_delay = resolve_submit_delay_ms(&supervisor_cli, config);
-    let _ = tmux::gate_pane_for_injection(&tmux_session.name, 0, &supervisor_pane.cli_command);
+    gate_pane_or_fail_on_dialog(&tmux_session.name, 0, &supervisor_pane.cli_command)?;
     submit_prompt_to_pane(&tmux_session.name, 0, &supervisor_prompt, supervisor_delay);
 
     let agent_delay = resolve_submit_delay_ms(&agent_cli, config);
     for (idx, prompt) in agent_prompts.iter().enumerate() {
         let pane_idx = git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET + idx;
-        let _ = tmux::gate_pane_for_injection(
-            &tmux_session.name,
-            pane_idx,
-            &agent_panes[idx].cli_command,
-        );
+        gate_pane_or_fail_on_dialog(&tmux_session.name, pane_idx, &agent_panes[idx].cli_command)?;
         submit_prompt_to_pane(&tmux_session.name, pane_idx, prompt, agent_delay);
     }
 

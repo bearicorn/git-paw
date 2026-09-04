@@ -1,7 +1,7 @@
 use super::*;
 use crate::error::PawError;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 fn make_pane(branch: &str, worktree: &str, cli: &str) -> PaneSpec {
     PaneSpec {
@@ -2181,6 +2181,7 @@ fn gate_returns_ready_without_relaunch_when_marker_present() {
         || Some("welcome\n? for shortcuts".to_string()),
         || relaunches += 1,
         |_| {},
+        |_| {},
     );
     assert_eq!(outcome, ReadinessOutcome::Ready);
     assert_eq!(relaunches, 0, "a ready pane is never relaunched");
@@ -2193,6 +2194,7 @@ fn gate_relaunches_a_persistent_bare_shell_then_falls_back() {
         test_budget(),
         || Some("user@host:~$ ".to_string()),
         || relaunches += 1,
+        |_| {},
         |_| {},
     );
     assert_eq!(
@@ -2214,6 +2216,7 @@ fn gate_does_not_relaunch_an_unrecognised_cli() {
         test_budget(),
         || Some("custom-cli interactive session — type a command".to_string()),
         || relaunches += 1,
+        |_| {},
         |_| {},
     );
     assert_eq!(outcome, ReadinessOutcome::FellBack);
@@ -2242,12 +2245,138 @@ fn gate_becomes_ready_after_a_relaunch() {
         },
         || relaunches += 1,
         |_| {},
+        |_| {},
     );
     assert_eq!(outcome, ReadinessOutcome::Ready);
     assert_eq!(
         relaunches, 1,
         "the bare shell was relaunched once before going ready"
     );
+}
+
+// --- First-run acceptance/trust dialog (GP-03b) -----------------------------
+
+/// A Claude Code bypass-permissions acceptance dialog capture whose DEFAULT-
+/// highlighted option is `No, exit` (option 1) — the boot-exit failure mode
+/// GP-03 fixes. `Yes, I accept` is option 2.
+fn bypass_permissions_dialog() -> String {
+    "WARNING: Claude Code running in Bypass Permissions mode\n\
+     Are you sure you want to enable bypass permissions mode?\n\
+     \u{276f} 1. No, exit\n  \
+     2. Yes, I accept"
+        .to_string()
+}
+
+#[test]
+fn classify_recognises_bypass_permissions_dialog_and_selects_by_text() {
+    match classify_pane_readiness(&bypass_permissions_dialog()) {
+        PaneReadiness::Dialog(Some(digit)) => assert_eq!(
+            digit, 2,
+            "must select 'Yes, I accept' by text, not the defaulted option 1"
+        ),
+        other => panic!("expected Dialog(Some(2)), got {other:?}"),
+    }
+}
+
+#[test]
+fn classify_recognises_trust_folder_dialog() {
+    let cap = "Do you trust the files in this folder?\n\u{276f} 1. Yes, proceed\n  2. No, exit";
+    match classify_pane_readiness(cap) {
+        PaneReadiness::Dialog(Some(digit)) => assert_eq!(digit, 1),
+        other => panic!("expected Dialog(Some(1)), got {other:?}"),
+    }
+}
+
+#[test]
+fn classify_returns_dialog_none_when_affirmative_option_is_not_found() {
+    let cap = "WARNING: Claude Code running in Bypass Permissions mode\n\u{276f} 1. Maybe";
+    assert_eq!(classify_pane_readiness(cap), PaneReadiness::Dialog(None));
+}
+
+/// Spec scenario "First-run bypass acceptance dialog is answered, not
+/// relaunched": the gate answers the dialog (selecting the affirmative
+/// option by text) and, once the pane transitions to ready, returns `Ready`
+/// without ever relaunching the CLI into the dialog.
+#[test]
+fn gate_answers_dialog_and_becomes_ready_without_relaunch() {
+    let mut relaunches = 0;
+    let mut answers = Vec::new();
+    let mut polls = 0;
+    let outcome = gate_pane_generic(
+        test_budget(),
+        || {
+            polls += 1;
+            if polls > 1 {
+                Some("? for shortcuts".to_string())
+            } else {
+                Some(bypass_permissions_dialog())
+            }
+        },
+        || relaunches += 1,
+        |_| {},
+        |digit| answers.push(digit),
+    );
+    assert_eq!(outcome, ReadinessOutcome::Ready);
+    assert_eq!(answers, vec![2], "must answer with the affirmative digit");
+    assert_eq!(relaunches, 0, "a dialog must never be relaunched");
+}
+
+/// Spec scenario "A pane stuck on an acceptance dialog is not reported
+/// healthy": a dialog that is answered but never reaches `Ready` before the
+/// budget elapses returns `DialogStuck`, not `FellBack` — and is never
+/// relaunched.
+#[test]
+fn gate_reports_dialog_stuck_when_never_answered_ready() {
+    let mut relaunches = 0;
+    let mut answers = Vec::new();
+    let outcome = gate_pane_generic(
+        test_budget(),
+        || Some(bypass_permissions_dialog()),
+        || relaunches += 1,
+        |_| {},
+        |digit| answers.push(digit),
+    );
+    assert_eq!(outcome, ReadinessOutcome::DialogStuck);
+    assert_eq!(answers, vec![2], "answered exactly once, not on every poll");
+    assert_eq!(relaunches, 0, "a dialog must never be relaunched");
+}
+
+/// A dialog whose affirmative option cannot be located fails loudly
+/// immediately, without waiting out the budget or relaunching.
+#[test]
+fn gate_reports_dialog_stuck_immediately_when_digit_unresolvable() {
+    let mut relaunches = 0;
+    let mut answers: Vec<u8> = Vec::new();
+    let cap = "WARNING: Claude Code running in Bypass Permissions mode\n\u{276f} 1. Maybe";
+    let outcome = gate_pane_generic(
+        test_budget(),
+        || Some(cap.to_string()),
+        || relaunches += 1,
+        |_| {},
+        |digit| answers.push(digit),
+    );
+    assert_eq!(outcome, ReadinessOutcome::DialogStuck);
+    assert!(answers.is_empty(), "no digit to answer with");
+    assert_eq!(relaunches, 0);
+}
+
+/// Spec scenario "Unrecognised CLI acceptance dialog falls back to prior
+/// behaviour": content that matches no known dialog marker falls back to the
+/// existing indeterminate handling — `FellBack`, no relaunch, no answer.
+#[test]
+fn gate_falls_back_for_an_unrecognised_dialog() {
+    let mut relaunches = 0;
+    let mut answers: Vec<u8> = Vec::new();
+    let outcome = gate_pane_generic(
+        test_budget(),
+        || Some("custom-cli: accept the new terms? [y/N]".to_string()),
+        || relaunches += 1,
+        |_| {},
+        |digit| answers.push(digit),
+    );
+    assert_eq!(outcome, ReadinessOutcome::FellBack);
+    assert!(answers.is_empty());
+    assert_eq!(relaunches, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -2351,6 +2480,104 @@ fn session_liveness_distinguishes_alive_stale_and_indeterminate() {
     assert_eq!(
         session_liveness_with(&unspawnable, "paw-proj"),
         SessionLiveness::Indeterminate
+    );
+}
+
+// --- Agent-pane liveness probe (GP-03c) -------------------------------------
+
+/// A runner scripting `has-session` success and `list-panes` returning
+/// `panes` (already formatted as `"#{pane_index} #{pane_current_command}"`
+/// lines).
+fn runner_with_panes(panes: &str) -> FakeCommandRunner {
+    let panes = panes.to_string();
+    FakeCommandRunner::scripted(move |_program, args| {
+        if args.contains(&"list-panes") {
+            Ok(CommandOutput {
+                success: true,
+                code: Some(0),
+                stdout: panes.clone().into_bytes(),
+                stderr: Vec::new(),
+            })
+        } else {
+            Ok(CommandOutput {
+                success: true,
+                code: Some(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    })
+}
+
+#[test]
+fn has_live_agent_pane_true_when_an_agent_pane_runs_its_cli() {
+    let runner = runner_with_panes("0 bash\n1 node\n2 claude\n");
+    assert!(has_live_agent_pane_with(&runner, "paw-proj", 2));
+}
+
+#[test]
+fn has_live_agent_pane_false_when_every_agent_pane_reverted_to_a_shell() {
+    // Panes before the offset (supervisor/dashboard) are never consulted,
+    // even if they run a non-shell process.
+    let runner = runner_with_panes("0 bash\n1 node\n2 bash\n3 zsh\n");
+    assert!(!has_live_agent_pane_with(&runner, "paw-proj", 2));
+}
+
+#[test]
+fn has_live_agent_pane_false_when_list_panes_fails() {
+    let runner = FakeCommandRunner::failing("no server running");
+    assert!(!has_live_agent_pane_with(&runner, "paw-proj", 2));
+}
+
+/// Spec scenario "A session whose agent panes all exited reports Stopped"
+/// (via [`SessionLiveness::Stale`], past the launch grace period).
+#[test]
+fn session_liveness_for_reports_stale_when_all_agent_panes_are_bare_shells() {
+    let runner = runner_with_panes("0 bash\n1 node\n2 bash\n");
+    let now = SystemTime::now();
+    let created_at = now - Duration::from_secs(120);
+    assert_eq!(
+        session_liveness_for_with(&runner, "paw-proj", created_at, 2, now),
+        SessionLiveness::Stale
+    );
+}
+
+/// Spec scenario "A session with at least one live agent pane remains
+/// Active".
+#[test]
+fn session_liveness_for_reports_alive_when_an_agent_pane_is_live() {
+    let runner = runner_with_panes("0 bash\n1 node\n2 claude\n");
+    let now = SystemTime::now();
+    let created_at = now - Duration::from_secs(120);
+    assert_eq!(
+        session_liveness_for_with(&runner, "paw-proj", created_at, 2, now),
+        SessionLiveness::Alive
+    );
+}
+
+/// The probe tolerates the brief launch window: a just-created session with
+/// no live agent pane yet is still reported alive, so it never flaps to
+/// `Stale` before the CLI has had a chance to start.
+#[test]
+fn session_liveness_for_tolerates_the_launch_window() {
+    let runner = runner_with_panes("0 bash\n1 node\n2 bash\n");
+    let now = SystemTime::now();
+    let created_at = now - Duration::from_secs(2);
+    assert_eq!(
+        session_liveness_for_with(&runner, "paw-proj", created_at, 2, now),
+        SessionLiveness::Alive
+    );
+}
+
+/// A tmux session that does not exist at all stays `Stale` regardless of the
+/// agent-pane check (the base `has-session` probe still gates everything).
+#[test]
+fn session_liveness_for_reports_stale_when_the_session_does_not_exist() {
+    let runner = FakeCommandRunner::failing("can't find session");
+    let now = SystemTime::now();
+    assert_eq!(
+        session_liveness_for_with(&runner, "paw-proj", now, 2, now),
+        SessionLiveness::Stale
     );
 }
 

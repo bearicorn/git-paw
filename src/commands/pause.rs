@@ -29,7 +29,12 @@ pub(crate) fn cmd_pause() -> Result<(), PawError> {
     }
 
     // Effective status check: stopped sessions can't be paused.
-    let effective = existing.effective_status(|name| tmux::is_session_alive(name).unwrap_or(false));
+    let effective = existing.effective_status(|name| {
+        matches!(
+            tmux::session_liveness_for(name, existing.created_at, existing.agent_pane_offset()),
+            tmux::SessionLiveness::Alive
+        )
+    });
     if effective == SessionStatus::Stopped {
         println!(
             "Session '{}' is already stopped; pause has no effect.",

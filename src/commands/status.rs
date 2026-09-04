@@ -22,10 +22,18 @@ pub(crate) fn cmd_status(json: bool) -> Result<(), PawError> {
         return Ok(());
     };
 
-    // Single cheap liveness probe (spec: "Liveness probe is cheap"). The
-    // probe distinguishes a genuinely-absent tmux session (Stale) from a
-    // probe that could not run at all (Indeterminate → never reports stale).
-    let liveness = tmux::session_liveness(&existing.session_name);
+    // Liveness probe (spec: "Liveness probe is cheap"). The probe
+    // distinguishes a genuinely-absent tmux session (Stale) from a probe
+    // that could not run at all (Indeterminate → never reports stale), and
+    // additionally requires a live agent-pane CLI process once past the
+    // launch grace period (GP-03c) — a session whose panes all reverted to a
+    // bare shell is not reported healthy merely because the tmux session
+    // object still exists.
+    let liveness = tmux::session_liveness_for(
+        &existing.session_name,
+        existing.created_at,
+        existing.agent_pane_offset(),
+    );
     let display = session::DisplayStatus::from_receipt(&existing.status, liveness);
     let alive = matches!(liveness, tmux::SessionLiveness::Alive);
 
