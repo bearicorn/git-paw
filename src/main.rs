@@ -400,8 +400,12 @@ struct AttachContext<'a> {
     gate_commands: &'a git_paw::skills::GateCommands<'a>,
     /// Distinct spec backends in the session (for `{{SPEC_PATH_DOCTRINE}}`).
     session_backends: &'a [git_paw::specs::SpecBackendKind],
-    /// Inter-agent ownership rules block (`None` for the bare/no-rules case).
-    inter_agent_rules: Option<&'a str>,
+    /// Peer branches to build the inter-agent rules block from (`None` for the
+    /// bare/no-rules case). Held as the raw branch list rather than a
+    /// pre-rendered string so `attach_agent` can build a fresh block per
+    /// agent — `build_inter_agent_rules` interpolates each agent's own id
+    /// into the block, so the same string cannot be shared across agents.
+    inter_agent_rules_peers: Option<&'a [&'a str]>,
     /// Whether the broker git hooks enforce the strict branch guard.
     strict_guard: bool,
     /// Skip rebasing the branch onto the default branch on worktree create.
@@ -527,7 +531,9 @@ fn attach_agent(
         spec_content,
         owned_files,
         skill_content: rendered_skill,
-        inter_agent_rules: ctx.inter_agent_rules.map(str::to_string),
+        inter_agent_rules: ctx
+            .inter_agent_rules_peers
+            .map(|peers| git_paw::agents::build_inter_agent_rules(branch, peers)),
     };
     git_paw::agents::setup_worktree_agents_md(ctx.repo_root, &wt.path, &assignment)?;
 

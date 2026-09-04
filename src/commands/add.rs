@@ -177,7 +177,6 @@ pub(crate) fn cmd_add(
         .map(|w| w.branch.as_str())
         .collect();
     all_branches.push(branch.as_str());
-    let inter_agent_rules = git_paw::agents::build_inter_agent_rules(&all_branches);
     let worktree_runtime = config.worktree_runtime();
 
     let attach_ctx = AttachContext {
@@ -190,7 +189,7 @@ pub(crate) fn cmd_add(
         docs_fetch_template: docs_fetch_template.as_ref(),
         gate_commands: &gate_commands,
         session_backends: &session_backends,
-        inter_agent_rules: Some(inter_agent_rules.as_str()),
+        inter_agent_rules_peers: Some(&all_branches),
         strict_guard,
         no_rebase: false,
         placement: config.worktree_placement(),

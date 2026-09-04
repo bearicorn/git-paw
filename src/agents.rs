@@ -132,19 +132,25 @@ pub struct WorktreeAssignment {
     /// Optional rendered skill content to inject into the assignment section.
     pub skill_content: Option<String>,
     /// Optional inter-agent rules block (file ownership, never-push, proactive
-    /// status publishing, cherry-pick) injected by the supervisor. When `None`,
-    /// the generated section omits the `## Inter-Agent Rules` subsection
-    /// entirely so non-supervisor sessions are byte-identical to pre-supervisor
-    /// output.
+    /// status publishing, peer-dependency escalation) injected by the
+    /// supervisor. When `None`, the generated section omits the
+    /// `## Inter-Agent Rules` subsection entirely so non-supervisor sessions
+    /// are byte-identical to pre-supervisor output.
     pub inter_agent_rules: Option<String>,
 }
 
 /// Builds the standard inter-agent rules block that the supervisor injects
 /// into every coding agent's `AGENTS.md`.
 ///
+/// `own_branch` is this agent's own branch. It is slugified (via
+/// [`crate::broker::messages::slugify_branch`]) and interpolated directly
+/// into the *Watch peer status* bullet's poll URL, because
+/// `generate_worktree_section` copies the returned string verbatim and never
+/// renders `{{...}}` placeholders in it — unlike `skill_content`.
+///
 /// `branches` is the list of all peer branches in the session — used to make
 /// the file-ownership constraint explicit ("don't touch files owned by ...").
-pub fn build_inter_agent_rules(branches: &[&str]) -> String {
+pub fn build_inter_agent_rules(own_branch: &str, branches: &[&str]) -> String {
     let mut peers = String::new();
     for (i, b) in branches.iter().enumerate() {
         if i > 0 {
@@ -154,6 +160,7 @@ pub fn build_inter_agent_rules(branches: &[&str]) -> String {
         peers.push_str(b);
         peers.push('`');
     }
+    let own_id = crate::broker::messages::slugify_branch(own_branch);
 
     let mut out = String::new();
     out.push_str("These rules apply to every agent in this supervisor session. ");
@@ -168,11 +175,17 @@ pub fn build_inter_agent_rules(branches: &[&str]) -> String {
     out.push_str("publishes `agent.status` with `modified_files` for you whenever your git ");
     out.push_str("status changes. A `post-commit` hook publishes `agent.artifact` on each ");
     out.push_str("commit. You do not need to curl these yourself.\n");
-    out.push_str("- **Watch peer status.** Poll `/messages/{{BRANCH_ID}}` to see peer ");
-    out.push_str("`agent.artifact` messages so you detect conflicts before the supervisor does.\n");
-    out.push_str("- **Cherry-pick peer artifacts.** When you are blocked on a peer, publish ");
-    out.push_str("`agent.blocked` and cherry-pick their commit when their artifact arrives ");
-    out.push_str("in your inbox. Do not wait for the supervisor to merge.\n");
+    out.push_str("- **Watch peer status.** Poll `/messages/");
+    out.push_str(&own_id);
+    out.push_str("` to see peer `agent.artifact` messages so you detect conflicts before ");
+    out.push_str("the supervisor does.\n");
+    out.push_str("- **Escalate peer dependencies, don't graft their commits.** When you are ");
+    out.push_str("blocked on a peer, publish `agent.blocked` naming the peer and what you ");
+    out.push_str("need, then continue on unblocked work or wait. You MUST NOT graft a peer's ");
+    out.push_str("commit into your own branch: doing so duplicates a commit the supervisor ");
+    out.push_str("will later merge from the peer's own branch, leaving your branch divergent ");
+    out.push_str("and unmergeable. Once the peer's work lands on the base branch, take it on ");
+    out.push_str("via the `agent.advanced-main` discipline instead.\n");
     out.push_str("- **Match spec field names exactly.** When implementing a spec, use the ");
     out.push_str("exact field, function, and message names from the spec — do not rename ");
     out.push_str("them. The supervisor's spec audit will reject mismatched names.\n");
@@ -1810,6 +1823,17 @@ mod tests {
     }
 
     #[test]
+    fn worktree_section_inter_agent_rules_carries_no_unsubstituted_placeholder() {
+        let mut assignment = make_assignment(Some("Do the widget.\n"), Some(vec!["src/widget.rs"]));
+        assignment.inter_agent_rules = Some(build_inter_agent_rules(
+            "feat/widget",
+            &["feat/widget", "feat/other"],
+        ));
+        let section = generate_worktree_section(&assignment);
+        assert!(!section.contains("{{BRANCH_ID}}"));
+    }
+
+    #[test]
     fn worktree_section_inter_agent_rules_none_matches_pre_change() {
         // When inter_agent_rules is None, output must equal the pre-change baseline.
         let baseline = make_assignment(Some("Do.\n"), Some(vec!["src/main.rs"]));
@@ -1833,7 +1857,7 @@ mod tests {
 
     #[test]
     fn build_inter_agent_rules_contains_file_ownership() {
-        let rules = build_inter_agent_rules(&["feat/a", "feat/b"]);
+        let rules = build_inter_agent_rules("feat/self", &["feat/a", "feat/b"]);
         assert!(rules.contains("File ownership"));
         assert!(rules.contains("`feat/a`"));
         assert!(rules.contains("`feat/b`"));
@@ -1841,20 +1865,20 @@ mod tests {
 
     #[test]
     fn build_inter_agent_rules_contains_never_push() {
-        let rules = build_inter_agent_rules(&["feat/a"]);
+        let rules = build_inter_agent_rules("feat/self", &["feat/a"]);
         assert!(rules.contains("MUST NOT `git push`"));
     }
 
     #[test]
     fn build_inter_agent_rules_notes_automatic_status() {
-        let rules = build_inter_agent_rules(&["feat/a"]);
+        let rules = build_inter_agent_rules("feat/self", &["feat/a"]);
         assert!(rules.contains("Status publishing is automatic"));
         assert!(rules.contains("post-commit"));
     }
 
     #[test]
     fn build_inter_agent_rules_contains_match_spec() {
-        let rules = build_inter_agent_rules(&["feat/a"]);
+        let rules = build_inter_agent_rules("feat/self", &["feat/a"]);
         assert!(
             rules
                 .to_lowercase()
@@ -1863,19 +1887,36 @@ mod tests {
     }
 
     #[test]
-    fn build_inter_agent_rules_contains_cherry_pick_reference() {
-        let rules = build_inter_agent_rules(&["feat/a"]);
-        assert!(rules.to_lowercase().contains("cherry-pick"));
+    fn build_inter_agent_rules_escalates_peer_dependency_instead_of_cherry_pick() {
+        let rules = build_inter_agent_rules("feat/self", &["feat/a"]);
+        assert!(!rules.to_lowercase().contains("cherry-pick"));
+        assert!(rules.contains("agent.blocked"));
+        assert!(rules.to_lowercase().contains("agent.advanced-main"));
+    }
+
+    #[test]
+    fn build_inter_agent_rules_substitutes_own_branch_id() {
+        let rules = build_inter_agent_rules("feat/self", &["feat/a"]);
+        assert!(!rules.contains("{{BRANCH_ID}}"));
+        assert!(rules.contains("/messages/feat-self"));
     }
 
     // -----------------------------------------------------------------------
-    // Embedded coordination skill — proactive publishing + cherry-pick
+    // Embedded coordination skill — proactive publishing + peer dependencies
     // -----------------------------------------------------------------------
 
     #[test]
-    fn embedded_coordination_contains_cherry_pick() {
+    fn embedded_coordination_does_not_contain_cherry_pick() {
         let content = include_str!("../assets/agent-skills/coordination.md");
-        assert!(content.contains("git cherry-pick"));
+        assert!(!content.contains("git cherry-pick"));
+        assert!(!content.contains("Cherry-pick peer commits"));
+        assert!(content.contains("agent.blocked"));
+    }
+
+    #[test]
+    fn embedded_coordination_retains_supervisor_side_integration_language() {
+        let content = include_str!("../assets/agent-skills/coordination.md");
+        assert!(content.contains("supervisor cherry-picks and merges"));
     }
 
     #[test]

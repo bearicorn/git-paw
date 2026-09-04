@@ -1089,15 +1089,28 @@ mod tests {
     }
 
     #[test]
-    fn coordination_skill_contains_cherry_pick_instructions() {
+    fn coordination_skill_does_not_contain_cherry_pick_instructions() {
         let tmpl = resolve("coordination").unwrap();
         assert!(
-            tmpl.content.contains("git cherry-pick"),
-            "coordination skill should contain the literal 'git cherry-pick' command"
+            !tmpl.content.contains("git cherry-pick"),
+            "coordination skill must not contain the literal 'git cherry-pick' command"
         );
         assert!(
-            tmpl.content.contains("Cherry-pick peer commits"),
-            "coordination skill should contain a 'Cherry-pick peer commits' heading"
+            !tmpl.content.contains("Cherry-pick peer commits"),
+            "coordination skill must not contain a 'Cherry-pick peer commits' heading"
+        );
+    }
+
+    #[test]
+    fn coordination_skill_contains_peer_dependency_escalation_section() {
+        let tmpl = resolve("coordination").unwrap();
+        assert!(
+            tmpl.content.contains("When you depend on a peer's work"),
+            "coordination skill should contain a peer-dependency escalation section"
+        );
+        assert!(
+            tmpl.content.contains("agent.blocked"),
+            "peer-dependency section should direct the agent to publish agent.blocked"
         );
     }
 
