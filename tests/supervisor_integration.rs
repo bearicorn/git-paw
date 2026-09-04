@@ -382,7 +382,9 @@ agent_approval = "full-auto"
         "equal levels must keep the combined approval line, got:\n{stdout}"
     );
 
-    // agent_approval = "auto": both commands are bare.
+    // agent_approval = "auto": both commands resolve to the deterministic
+    // acceptEdits permission mode (GP-03a) — not bare, and never the
+    // full-auto skip-permissions flag.
     let (stdout, _stderr) = dry_run_with_config(
         r#"
 [supervisor]
@@ -392,12 +394,14 @@ agent_approval = "auto"
 "#,
     );
     assert!(
-        stdout.lines().any(|l| l.trim() == "Supervisor: claude"),
-        "supervisor command must be bare at auto, got:\n{stdout}"
+        stdout
+            .lines()
+            .any(|l| l.trim() == "Supervisor: claude --permission-mode acceptEdits"),
+        "supervisor command resolves to the deterministic acceptEdits mode at auto, got:\n{stdout}"
     );
     assert!(
         !stdout.contains("--dangerously-skip-permissions"),
-        "no command may carry flags at auto, got:\n{stdout}"
+        "no command may carry the full-auto flag at auto, got:\n{stdout}"
     );
 }
 

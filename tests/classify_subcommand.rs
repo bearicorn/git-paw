@@ -159,6 +159,7 @@ fn three_option(cmd: &str) -> String {
 /// unknown class: the printed `<class> <option>` matches the expectation AND
 /// the in-process classifier's verdict for the same capture.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn classify_matrix_matches_the_in_tool_classifier() {
     let fx = setup();
     let root = fx.root.clone();
@@ -230,6 +231,58 @@ fn classify_matrix_matches_the_in_tool_classifier() {
             None,
             "danger",
             1,
+        ),
+        (
+            // GP-02a parity: the leading-assignment/env/nohup normalization
+            // the classifier applies must agree between the CLI seam and the
+            // in-tool classifier.
+            "leading assignment prefix normalizes to the bare safe command",
+            three_option("TMPDIR=/tmp/x cargo test --lib"),
+            None,
+            "safe",
+            2,
+        ),
+        (
+            "leading env wrapper normalizes to the bare safe command",
+            two_option("env FOO=bar cargo build"),
+            None,
+            "safe",
+            1,
+        ),
+        (
+            "leading nohup wrapper does not rescue a danger command",
+            two_option("nohup git push --force origin main"),
+            None,
+            "danger",
+            1,
+        ),
+        (
+            // GP-02b parity: a bundled helper-script invocation is safe.
+            "managed helper-script invocation is safe",
+            two_option(".git-paw/scripts/broker.sh --agent feat-x status booting"),
+            None,
+            "safe",
+            1,
+        ),
+        (
+            "managed helper-script chained with a danger op still escalates",
+            two_option(".git-paw/scripts/sweep.sh snapshot && rm -rf /"),
+            None,
+            "danger",
+            1,
+        ),
+        (
+            // GP-04b parity: a write under `.git/` escalates even though
+            // `echo` is a read-mostly verb (which still keeps the read-mostly
+            // durable-option rule on the escalating verdict, exactly like the
+            // "danger command keeps the read-mostly durable-option rule" row
+            // above — only the auto-approver's danger-first precedence keeps
+            // it from ever being sent unattended).
+            "write under .git/ escalates as danger",
+            three_option("echo '.git-paw/' >> .git/info/exclude"),
+            Some(root.as_path()),
+            "danger",
+            2,
         ),
     ];
 

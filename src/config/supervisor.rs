@@ -882,7 +882,9 @@ impl AutoApproveConfig {
 /// This is the built-in-table step of [`resolve_approval_flags`]; prefer
 /// that function when a loaded config (and thus its `[clis.<name>]`
 /// overrides) is available. Rows verified against upstream CLI docs
-/// 2026-07-15.
+/// 2026-07-15; the Claude `Auto` row was confirmed against the live Claude
+/// Code `--permission-mode` enumeration (`default` / `acceptEdits` / `plan` /
+/// `bypassPermissions`) 2026-09-04.
 ///
 /// # Examples
 ///
@@ -892,6 +894,10 @@ impl AutoApproveConfig {
 /// assert_eq!(
 ///     approval_flags("claude", &ApprovalLevel::FullAuto),
 ///     "--dangerously-skip-permissions",
+/// );
+/// assert_eq!(
+///     approval_flags("claude", &ApprovalLevel::Auto),
+///     "--permission-mode acceptEdits",
 /// );
 /// assert_eq!(
 ///     approval_flags("codex", &ApprovalLevel::Auto),
@@ -905,6 +911,7 @@ impl AutoApproveConfig {
 pub fn approval_flags(cli: &str, level: &ApprovalLevel) -> &'static str {
     match (cli, level) {
         ("claude" | "agy", ApprovalLevel::FullAuto) => "--dangerously-skip-permissions",
+        ("claude", ApprovalLevel::Auto) => "--permission-mode acceptEdits",
         ("codex", ApprovalLevel::FullAuto) => "--dangerously-bypass-approvals-and-sandbox",
         ("codex", ApprovalLevel::Auto) => "--sandbox workspace-write",
         ("qwen", ApprovalLevel::FullAuto) => "--yolo",

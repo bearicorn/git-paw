@@ -18,6 +18,15 @@ tuning the knobs in `[supervisor.conflict]`).
 
 ## The Three Failure Shapes
 
+git-paw's own managed bookkeeping — everything under a worktree's
+`.git-paw/` directory (config, bundled scripts, session state) — is excluded
+from the overlap computation for **forward** and **in-flight** conflicts.
+Every worktree shares this untracked scaffolding, so its presence in
+`modified_files` is not evidence of a code conflict: two agents both
+reporting `.git-paw/config.toml` never fabricates a warning, while a genuine
+source overlap alongside it (`src/a.rs` present in both) still conflicts on
+the source path.
+
 ### Forward conflict
 
 Two agents publish `agent.intent` payloads whose `files` arrays overlap.

@@ -719,13 +719,20 @@ panes always resolve at `agent_approval`.
 
 | CLI | `full-auto` | `auto` |
 |-----|-------------|--------|
-| `claude` | `--dangerously-skip-permissions` | (none) |
+| `claude` | `--dangerously-skip-permissions` | `--permission-mode acceptEdits` |
 | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `--sandbox workspace-write` |
 | `agy` | `--dangerously-skip-permissions` | (none) |
 | `qwen` | `--yolo` | (none) |
 
 Any other CLI (or `manual` anywhere) resolves to no flags — use
 `approval_args` to supply native flags for CLIs not in the table.
+
+`auto` resolves to a deterministic flag wherever the CLI has a low-friction
+"accept edits" mode distinct from `manual` and from full bypass, rather than
+the empty string — an `auto` pane no longer silently inherits whatever
+default its CLI's config directory happens to carry. For Claude,
+`--permission-mode acceptEdits` auto-accepts file edits; shell commands still
+flow through the classifier / drive loop unchanged.
 
 **Gate-command templating.** The eight `*_command` keys feed the supervisor
 skill's five verification gates (testing, regression analysis, spec audit, doc
@@ -818,6 +825,27 @@ delegates to `git paw __classify`, which composes these same three sources
 from `.git-paw/config.toml` — so the helper and the in-tool auto-approver are
 the same classifier and cannot drift. See
 [Auto-approve classification](../user-guide/supervisor.md#auto-approve-classification).
+
+**`.git/` writes always escalate.** A filesystem write/edit/create prompt —
+or a shell write target — whose path resolves inside a repository `.git/`
+directory (`.git/config`, `.git/info/exclude`, `.git/hooks/…`) is a
+danger-class escalation at the same precedence as the curated danger-list,
+never auto-approved, even when the command's verb is otherwise whitelisted
+(`echo … >> .git/info/exclude` still escalates although `echo` is a
+read-mostly verb). This closes a gap where a supervisor sweep could
+auto-approve a mutation of git's own local configuration while "resolving" a
+false conflict. Reads never match, and ordinary `git` subcommands are
+unaffected — this rule only catches file-path writes.
+
+**git-paw's own managed helper scripts are always safe.** An invocation of
+one of git-paw's bundled coordination scripts —
+`.git-paw/scripts/{broker,sweep,docs-fetch}.sh`, invoked directly or via
+`bash …` — classifies safe regardless of the composed whitelist above.
+git-paw authors these scripts and they perform only bounded coordination
+actions (publishing status, polling the broker), so an unattended agent's
+boot-time call into one of them never needs to stall on a sweep waiting for a
+human. This is still subordinate to the danger-list: a chained danger
+operation (`sweep.sh snapshot && rm -rf /`) still escalates.
 
 > **Migration note (v0.11.0).** Earlier releases baked `cargo fmt`,
 > `cargo clippy`, `cargo test`, `cargo build`, `openspec`, and `just` into the

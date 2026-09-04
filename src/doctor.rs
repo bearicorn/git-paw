@@ -1323,7 +1323,11 @@ fn probe_hygiene(repo_root: &Path) -> HygieneProbe {
     let (stale_sessions, orphaned_worktrees) =
         match crate::session::find_session_for_repo(repo_root) {
             Ok(Some(session)) => {
-                let liveness = crate::tmux::session_liveness(&session.session_name);
+                let liveness = crate::tmux::session_liveness_for(
+                    &session.session_name,
+                    session.created_at,
+                    session.agent_pane_offset(),
+                );
                 let stale =
                     if crate::session::DisplayStatus::from_receipt(&session.status, liveness)
                         == crate::session::DisplayStatus::Stale

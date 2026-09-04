@@ -18,8 +18,8 @@ use git_paw::tmux;
 
 use super::helpers::{agent_pane_offset, bare_mode_unsupported, config_to_custom_defs};
 use crate::{
-    AttachContext, AttachedAgent, attach_agent, resolve_submit_delay_ms, submit_prompt_to_pane,
-    write_repo_discovery_file,
+    AttachContext, AttachedAgent, attach_agent, gate_pane_or_fail_on_dialog,
+    resolve_submit_delay_ms, submit_prompt_to_pane, write_repo_discovery_file,
 };
 
 /// `git paw add <branch>` — hot-attach a worktree + agent pane to a running
@@ -41,7 +41,12 @@ pub(crate) fn cmd_add(
         ));
     };
 
-    let effective = existing.effective_status(|n| tmux::is_session_alive(n).unwrap_or(false));
+    let effective = existing.effective_status(|n| {
+        matches!(
+            tmux::session_liveness_for(n, existing.created_at, existing.agent_pane_offset()),
+            tmux::SessionLiveness::Alive
+        )
+    });
     let paused = match effective {
         SessionStatus::Active => false,
         SessionStatus::Paused => true,
@@ -269,8 +274,7 @@ pub(crate) fn cmd_add(
         // start path (design D1, G1): poll the new pane for its CLI's
         // interactive marker — relaunching a still-bare shell, falling back to
         // injection after the budget — instead of a blind fixed sleep.
-        let _ =
-            tmux::gate_pane_for_injection(&updated.session_name, new_pane_idx, &pane.cli_command);
+        gate_pane_or_fail_on_dialog(&updated.session_name, new_pane_idx, &pane.cli_command)?;
         let delay = resolve_submit_delay_ms(&agent_cli, &config);
         submit_prompt_to_pane(&updated.session_name, new_pane_idx, &prompt, delay);
         println!(

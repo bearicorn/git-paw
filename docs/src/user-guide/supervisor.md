@@ -265,6 +265,54 @@ at launch and degrades the pane to flagless (`auto`) rather than failing —
 supply native flags for unlisted CLIs via
 [`[clis.<name>] approval_args`](../configuration/README.md#custom-clis).
 
+### `auto` resolves to a deterministic permission mode
+
+`agent_approval` (and `approval`) accept three levels: `manual`, `auto`, and
+`full-auto`. `full-auto` maps to the CLI's native skip-permissions flag (see
+above); `manual` appends no flags at all. Previously `auto` also appended no
+flags, so an `auto` pane silently inherited whatever default its CLI's config
+directory happened to carry — sometimes manual approval, sometimes something
+else, depending on machine state outside git-paw's control.
+
+`auto` now resolves to an explicit, deterministic flag per CLI wherever one
+exists: for Claude this is `--permission-mode acceptEdits` (file edits are
+auto-accepted; shell commands still flow through the classifier and drive
+loop exactly as before). Codex's `auto` already resolved to
+`--sandbox workspace-write`. A CLI with no such mode keeps the empty string
+and relies on the classifier / drive-loop approval path, or a
+[`[clis.<name>] approval_args`](../configuration/README.md#custom-clis)
+override.
+
+### Launch reliability: acceptance dialogs and dead-pane detection
+
+Two failure modes could previously leave an unattended wave silently dead at
+boot:
+
+- **First-run acceptance dialogs.** The first time a CLI launches with a
+  bypass-permissions flag against a config directory that has never accepted
+  it, some CLIs show a one-time confirmation dialog before their normal UI
+  appears — for example Claude Code's bypass-permissions dialog, which
+  **defaults its highlighted option to "No, exit"**. A pane launched
+  unattended into that dialog exited within seconds without git-paw noticing.
+  The launch-readiness gate now recognises this dialog (and a "trust this
+  folder?" prompt) as a distinct state and answers it by selecting the
+  affirmative option **by its text**, never by a hardcoded digit or a blind
+  `Enter` — so the default-to-exit trap is never sprung. A dialog the gate
+  cannot resolve fails the launch loudly instead of silently continuing; a
+  CLI whose dialog the gate does not recognise falls back to the prior
+  readiness/relaunch behaviour unchanged.
+- **Panes that reverted to a bare shell.** git-paw launches every pane as a
+  shell and `send-keys`s the CLI command into it. When a CLI process exits —
+  whether from an unanswered dialog, a crash, or any other reason — the pane
+  does not close; it reverts to its underlying interactive shell. `tmux
+  has-session` alone cannot tell a live wave from one where every agent's CLI
+  has quietly died, because the session (kept up by the supervisor/dashboard
+  panes) still exists. `git paw status` and `git paw doctor` now additionally
+  require at least one agent pane whose foreground process is not a bare
+  shell before reporting a session healthy, so a fully-dead wave is reported
+  `stale`/stopped rather than active. A session within its first ~30 seconds
+  is exempted from this check — the CLI needs a moment to start.
+
 ## Pane Layout and Labelling
 
 When you attach to a supervisor session, git-paw styles the tmux panes so the
@@ -508,15 +556,19 @@ The classifier reads the prompted **command slice** — the text between the
 surrounding narration. A supervisor that merely *mentions* `rm -rf /` in prose
 is never mistaken for a prompt to run it.
 
-The slice is then **normalised**: a trailing exit-code probe (`; echo …$?`,
-`; RC=$?`) and a trailing `>/dev/null 2>&1` discard redirect are stripped, so a
-routine gate command wrapped for reporting classifies as the bare command it is
-instead of being forced `Unknown` by text that differs on every run. Only those
-two suffix forms are removed — this is not a shell parser — and every rule
-below, danger-list included, runs against the **normalised** command, so a
-wrapper can never downgrade an escalation: `git push; echo $?` still escalates,
-and a redirect to a real device (`> /dev/sda`) is left in place for the
-`> /dev/` danger pattern to catch.
+The slice is then **normalised**: a leading run of `VAR=value` environment
+assignments and a leading `env` / `nohup` invocation wrapper are stripped,
+then a trailing exit-code probe (`; echo …$?`, `; RC=$?`) and a trailing
+`>/dev/null 2>&1` discard redirect, so a routine gate command wrapped for the
+run environment or for reporting classifies as the bare command it is instead
+of being forced `Unknown` by text that differs on every run (the dogfood
+prefixes `TMPDIR=… cargo test`, `GIT_PAW_ALLOW_LIVE_SESSION=1 cargo test`,
+`env FOO=bar …`, and `nohup … &` all classify the same as the bare command).
+This is not a shell parser — only these specific forms are stripped — and
+every rule below, danger-list included, runs against the **normalised**
+command, so a wrapper can never downgrade an escalation: `git push; echo $?`
+and `FOO=bar rm -rf /` both still escalate, and a redirect to a real device
+(`> /dev/sda`) is left in place for the `> /dev/` danger pattern to catch.
 
 ### Decision order
 
@@ -539,7 +591,17 @@ and a redirect to a real device (`> /dev/sda`) is left in place for the
    and raw `/dev/disk*`; Linux/WSL `/dev/sd*`, `/dev/nvme*`, `mkfs*`). A
    danger match always escalates to you — even when the verb is otherwise
    whitelisted (so `git push` escalates although `git` is a safe verb).
-3. **Protected paths (escalate wins).** Evaluated at the same precedence as
+3. **`.git/` writes (escalate wins).** Evaluated at the same precedence as
+   the danger-list: a filesystem write/edit/create prompt — or a shell write
+   target — whose path resolves inside a repository `.git/` directory (git's
+   own metadata: `.git/config`, `.git/info/exclude`, `.git/hooks/…`)
+   escalates as danger, never auto-approved. This closes a gap where a
+   supervisor sweep could auto-approve `echo '.git-paw/' >> .git/info/exclude`
+   while "resolving" a false conflict — silently mutating git's local
+   configuration, invisible to teammates. Reads never match, and ordinary
+   `git` subcommands (`git commit`, `git add`) are unaffected — this rule only
+   catches file-path writes.
+4. **Protected paths (escalate wins).** Evaluated at the same precedence as
    the danger-list: a filesystem write/edit/create prompt — or a shell write
    target (a `>` / `>>` redirect, `tee`, a `cp`/`mv`/`ln` destination,
    `touch`, `mkdir`, `rm`, `truncate`, in-place `sed -i`) — whose path
@@ -555,19 +617,27 @@ and a redirect to a real device (`> /dev/sda`) is left in place for the
    agent's own worktree is carved out — in-worktree writes are unaffected —
    and **reads never match** (`cat ~/.claude/settings.json` is decided by the
    other rules).
-4. **Scratch-path exception.** An `rm -rf` / `rm -fr` does *not* escalate when
+5. **Scratch-path exception.** An `rm -rf` / `rm -fr` does *not* escalate when
    **every** target is repo/OS scratch: `/tmp/paw-*`, `/private/tmp/paw-*`, a
    `$TMPDIR`-rooted `paw-*`, or any path under `.git-paw/tmp/`. This also covers
    `rm -rf "$VAR"` when `$VAR` resolves (via the captured environment or a
    preceding `VAR=…` assignment) to such a path. If a variable cannot be
    resolved, or **any** target lies outside the scratch set, the whole command
    escalates (fail-safe).
-5. **Worktree-confined `git add` / `git commit`.** These pre-approve when the
+6. **git-paw's own managed helper scripts.** An invocation of one of
+   git-paw's own bundled coordination scripts —
+   `.git-paw/scripts/{broker,sweep,docs-fetch}.sh`, invoked directly or via
+   `bash …` — classifies safe. git-paw authors these scripts and they perform
+   only bounded coordination actions (publishing status, polling the broker),
+   so an unattended agent's boot-time call into one of them never needs to
+   stall on a sweep. This is still subordinate to the danger-list above: a
+   chained danger operation (`sweep.sh snapshot && rm -rf /`) still escalates.
+7. **Worktree-confined `git add` / `git commit`.** These pre-approve when the
    agent's worktree resolves to a real directory (the same canonicalize-then-
    `starts_with` boundary check used for file edits), so an unattended agent can
    stage and commit its own work without stalling. `git push` is **not** covered
    — the danger-list escalates it.
-6. **Worktree-confined dev-test shapes.** `bash -n <script>`, non-recursive
+8. **Worktree-confined dev-test shapes.** `bash -n <script>`, non-recursive
    `chmod <mode> <path…>`, `mktemp` / `mktemp -d`, and interpreter runs of a
    worktree-resident script (`bash`, `sh`, `python3`, `python`, `node`
    followed by a worktree file) classify safe when **every** referenced path
@@ -577,7 +647,7 @@ and a redirect to a real device (`> /dev/sda`) is left in place for the
    These rules apply only to panes with a known worktree — the supervisor
    pane is unaffected. Interpreter runs are one-time approvals only (see the
    arbitrary-code policy below).
-7. **Composed command whitelist.** The whitelist is composed from the
+9. **Composed command whitelist.** The whitelist is composed from the
    stack-neutral read-mostly verbs (`curl`, `cat`, `ls`, `grep`, `rg`, `git`,
    `echo`, `sed`, `awk`, `find`, `wc`, `head`, `tail`, `jq`, `mkdir`, `touch`,
    `export`, `tmux`, `env`, plus `git commit` and the broker-localhost curl
@@ -586,7 +656,7 @@ and a redirect to a real device (`> /dev/sda`) is left in place for the
    Toolchain verbs are **not** built in — a `cargo test` prompt auto-approves
    only when the `rust` stack is declared. This is subordinate to the
    danger-list above.
-8. Anything else is **Unknown** and forwarded to you.
+10. Anything else is **Unknown** and forwarded to you.
 
 ### Re-confirm before send, and the pane 0 exclusion
 

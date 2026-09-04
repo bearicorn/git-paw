@@ -56,8 +56,12 @@ pub(crate) fn cmd_start(
         && let Some(existing) = &existing_session
         && !invalidate_if_stale(&repo_root, existing)?
     {
-        let effective =
-            existing.effective_status(|name| tmux::is_session_alive(name).unwrap_or(false));
+        let effective = existing.effective_status(|name| {
+            matches!(
+                tmux::session_liveness_for(name, existing.created_at, existing.agent_pane_offset()),
+                tmux::SessionLiveness::Alive
+            )
+        });
         match effective {
             SessionStatus::Paused => {
                 println!(
@@ -370,8 +374,12 @@ pub(crate) fn cmd_start_with_specs(
         && let Some(existing) = &existing_session
         && !invalidate_if_stale(&repo_root, existing)?
     {
-        let effective =
-            existing.effective_status(|name| tmux::is_session_alive(name).unwrap_or(false));
+        let effective = existing.effective_status(|name| {
+            matches!(
+                tmux::session_liveness_for(name, existing.created_at, existing.agent_pane_offset()),
+                tmux::SessionLiveness::Alive
+            )
+        });
         match effective {
             SessionStatus::Paused => {
                 println!(

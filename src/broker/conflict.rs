@@ -34,6 +34,7 @@
 //! detector-emitted feedback from human-typed supervisor feedback.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -42,6 +43,7 @@ use super::messages::{
     StatusPayload,
 };
 use super::{BrokerState, delivery};
+use crate::agents::is_managed_path;
 use crate::config::ConflictConfig;
 
 /// Detector-internal normalised form of one `files` entry.
@@ -367,6 +369,25 @@ fn classify_in_flight(
     }
 }
 
+/// Returns `true` when `path` is one of git-paw's own managed bookkeeping
+/// paths (config, bundled scripts, session state under `.git-paw/`) rather
+/// than genuine source — GP-04a. These are shared, untracked scaffolding
+/// git-paw itself writes into every worktree, so their presence in an
+/// agent's `git status` is not evidence of a code conflict and is excluded
+/// from the overlap computation in [`ConflictTracker::forward_overlaps`] and
+/// [`ConflictTracker::in_flight_overlaps`].
+///
+/// Delegates to [`crate::agents::is_managed_path`], the single source of
+/// truth for what counts as git-paw's managed subtree. Its `worktree_root`
+/// parameter is only consulted for the tracked-`AGENTS.md` special case,
+/// which the conflict tracker (a cross-agent, path-only view with no
+/// filesystem access) cannot evaluate — a placeholder is passed since
+/// `.git-paw/`-prefixed paths, the only ones this rule needs to catch, are
+/// matched purely syntactically and never touch it.
+fn is_managed_bookkeeping_path(path: &str) -> bool {
+    is_managed_path(Path::new("."), path)
+}
+
 /// Lex-ordered agent-id pair used as the dedup key for forward
 /// conflicts and as part of the in-flight-pair key.
 fn ordered_pair(a: &str, b: &str) -> (String, String) {
@@ -499,6 +520,10 @@ impl ConflictTracker {
     /// Returns every forward conflict between `x_id`'s intent and every other
     /// non-expired intent in the tracker.
     ///
+    /// git-paw's own managed bookkeeping paths (under `.git-paw/`) are
+    /// excluded from the shared-file set before conflicts are computed
+    /// (GP-04a) — see [`is_managed_bookkeeping_path`].
+    ///
     /// For each file shared by both intents:
     /// - If either side declared no regions (`None`), the file is a
     ///   file-level conflict (v0.5.0 fallback) — reported with empty
@@ -522,6 +547,7 @@ impl ConflictTracker {
                 .files
                 .keys()
                 .filter(|path| y.files.contains_key(*path))
+                .filter(|path| !is_managed_bookkeeping_path(path))
                 .collect();
             shared.sort();
             let mut file_conflicts = Vec::new();
@@ -561,6 +587,11 @@ impl ConflictTracker {
 
     /// Returns every `(min_id, max_id, file)` triple currently in the
     /// intersection of two agents' modified-file sets.
+    ///
+    /// git-paw's own managed bookkeeping paths are excluded from the
+    /// intersection (GP-04a) — see [`is_managed_bookkeeping_path`] — so a
+    /// shared untracked `.git-paw/` entry never fabricates an in-flight
+    /// conflict.
     #[must_use]
     pub fn in_flight_overlaps(&self) -> Vec<(String, String, String)> {
         let ids: Vec<&String> = self.current_files.keys().collect();
@@ -578,7 +609,11 @@ impl ConflictTracker {
                     continue;
                 }
                 let (lo, hi) = ordered_pair(a, b);
-                let mut files: Vec<String> = a_files.intersection(b_files).cloned().collect();
+                let mut files: Vec<String> = a_files
+                    .intersection(b_files)
+                    .filter(|f| !is_managed_bookkeeping_path(f))
+                    .cloned()
+                    .collect();
                 files.sort();
                 for f in files {
                     out.push((lo.clone(), hi.clone(), f));
@@ -1261,6 +1296,52 @@ mod tests {
         assert!(overlaps[0].files[0].regions.is_empty());
     }
 
+    /// GP-04a: git-paw's own managed bookkeeping (`.git-paw/`) never
+    /// fabricates a forward conflict, but a real source overlap alongside it
+    /// still conflicts on the source path only.
+    #[test]
+    fn tracker_forward_overlaps_excludes_managed_bookkeeping() {
+        let mut t = fresh();
+        let now = Instant::now();
+        t.insert_intent(
+            "feat-x",
+            nfi(&[".git-paw/config.toml"]),
+            "x".into(),
+            ttl_secs(60),
+            now,
+        );
+        t.insert_intent(
+            "feat-y",
+            nfi(&[".git-paw/config.toml"]),
+            "y".into(),
+            ttl_secs(60),
+            now,
+        );
+        assert!(
+            t.forward_overlaps("feat-x").is_empty(),
+            "a shared .git-paw/ path must not fabricate a forward conflict"
+        );
+
+        t.insert_intent(
+            "feat-x",
+            nfi(&["src/a.rs", ".git-paw/config.toml"]),
+            "x2".into(),
+            ttl_secs(60),
+            now,
+        );
+        t.insert_intent(
+            "feat-y",
+            nfi(&["src/a.rs", ".git-paw/config.toml"]),
+            "y2".into(),
+            ttl_secs(60),
+            now,
+        );
+        let overlaps = t.forward_overlaps("feat-x");
+        assert_eq!(overlaps.len(), 1);
+        assert_eq!(overlaps[0].files.len(), 1);
+        assert_eq!(overlaps[0].files[0].path, "src/a.rs");
+    }
+
     #[test]
     fn tracker_intent_pair_dedupe_is_ordered() {
         let mut t = fresh();
@@ -1288,6 +1369,33 @@ mod tests {
         let mut t = fresh();
         t.update_status("feat-x", files(&["src/a.rs", "src/b.rs"]));
         t.update_status("feat-y", files(&["src/a.rs"]));
+        let pairs = t.in_flight_overlaps();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(
+            pairs[0],
+            (
+                "feat-x".to_string(),
+                "feat-y".to_string(),
+                "src/a.rs".to_string()
+            )
+        );
+    }
+
+    /// GP-04a spec scenarios: a shared untracked `.git-paw/` path does not
+    /// fabricate an in-flight conflict, and a real source overlap alongside
+    /// it still conflicts on the source path only.
+    #[test]
+    fn tracker_in_flight_overlaps_excludes_managed_bookkeeping() {
+        let mut t = fresh();
+        t.update_status("feat-x", files(&[".git-paw/config.toml"]));
+        t.update_status("feat-y", files(&[".git-paw/config.toml"]));
+        assert!(
+            t.in_flight_overlaps().is_empty(),
+            "a shared .git-paw/ path must not fabricate an in-flight conflict"
+        );
+
+        t.update_status("feat-x", files(&["src/a.rs", ".git-paw/config.toml"]));
+        t.update_status("feat-y", files(&["src/a.rs", ".git-paw/config.toml"]));
         let pairs = t.in_flight_overlaps();
         assert_eq!(pairs.len(), 1);
         assert_eq!(

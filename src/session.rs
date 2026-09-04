@@ -243,6 +243,24 @@ impl Session {
     pub fn created_at_iso8601(&self) -> Option<String> {
         format_iso8601(self.created_at).ok()
     }
+
+    /// Index of the first coding-agent pane in this session's tmux window.
+    ///
+    /// Supervisor mode reserves pane 0 (supervisor) and pane 1 (dashboard),
+    /// so agents start at
+    /// [`SUPERVISOR_PANE_OFFSET`](crate::supervisor::layout::SUPERVISOR_PANE_OFFSET).
+    /// Bare mode places the dashboard at pane 0 when the broker is enabled
+    /// (agents at pane 1), or has no dashboard pane at all (agents at
+    /// pane 0). Used by the GP-03c agent-pane liveness probe
+    /// ([`crate::tmux::session_liveness_for`]) to know which panes are
+    /// coding-agent panes rather than supervisor/dashboard panes.
+    #[must_use]
+    pub fn agent_pane_offset(&self) -> usize {
+        match self.mode {
+            SessionMode::Supervisor => crate::supervisor::layout::SUPERVISOR_PANE_OFFSET,
+            SessionMode::Bare => usize::from(self.broker_port.is_some()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1034,6 +1052,34 @@ mod tests {
         let mut session = sample_session();
         session.status = SessionStatus::Paused;
         assert_eq!(session.effective_status(|_| false), SessionStatus::Stopped);
+    }
+
+    // -- agent_pane_offset --
+
+    #[test]
+    fn agent_pane_offset_supervisor_mode_is_the_layout_constant() {
+        let mut session = sample_session();
+        session.mode = SessionMode::Supervisor;
+        assert_eq!(
+            session.agent_pane_offset(),
+            crate::supervisor::layout::SUPERVISOR_PANE_OFFSET
+        );
+    }
+
+    #[test]
+    fn agent_pane_offset_bare_mode_with_broker_is_one() {
+        let mut session = sample_session();
+        session.mode = SessionMode::Bare;
+        session.broker_port = Some(9999);
+        assert_eq!(session.agent_pane_offset(), 1);
+    }
+
+    #[test]
+    fn agent_pane_offset_bare_mode_without_broker_is_zero() {
+        let mut session = sample_session();
+        session.mode = SessionMode::Bare;
+        session.broker_port = None;
+        assert_eq!(session.agent_pane_offset(), 0);
     }
 
     // -- dashboard_pane field --

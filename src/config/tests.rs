@@ -1933,12 +1933,18 @@ fn approval_flags_maps_each_cli_and_level() {
     // One row per built-in (cli, level) -> native-flag mapping. `Manual`
     // and unrecognised CLIs resolve to the empty string; `agy`
     // (Antigravity) shares Claude's flag; the retired `gemini` has no
-    // built-in row; `qwen` keeps `--yolo`.
+    // built-in row; `qwen` keeps `--yolo`; Claude's `Auto` resolves to an
+    // explicit `acceptEdits` permission mode rather than no flag.
     for (cli, level, expected) in [
         (
             "claude",
             ApprovalLevel::FullAuto,
             "--dangerously-skip-permissions",
+        ),
+        (
+            "claude",
+            ApprovalLevel::Auto,
+            "--permission-mode acceptEdits",
         ),
         ("codex", ApprovalLevel::Auto, "--sandbox workspace-write"),
         (

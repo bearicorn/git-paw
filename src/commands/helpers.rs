@@ -7,7 +7,7 @@ use git_paw::config::PawConfig;
 use git_paw::detect;
 use git_paw::error::PawError;
 use git_paw::interactive;
-use git_paw::session::{Session, SessionMode};
+use git_paw::session::Session;
 
 /// Convert the config's `[clis.*]` table into the detector's custom-CLI
 /// definitions so a configured CLI is resolvable on `PATH` at launch time.
@@ -99,17 +99,10 @@ fn expand_tilde(path: &str) -> std::path::PathBuf {
     }
 }
 
-/// Index of the first coding-agent pane in a session's tmux window.
-///
-/// Supervisor mode reserves pane 0 (supervisor) and pane 1 (dashboard), so
-/// agents start at [`SUPERVISOR_PANE_OFFSET`](git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET).
-/// Bare mode places the dashboard at pane 0 when the broker is enabled (agents
-/// at pane 1), or has no dashboard pane at all (agents at pane 0).
+/// Index of the first coding-agent pane in a session's tmux window. See
+/// [`Session::agent_pane_offset`].
 pub(crate) fn agent_pane_offset(session: &Session) -> usize {
-    match session.mode {
-        SessionMode::Supervisor => git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET,
-        SessionMode::Bare => usize::from(session.broker_port.is_some()),
-    }
+    session.agent_pane_offset()
 }
 
 /// Attaches `tmux pipe-pane` to each coding-agent pane so the session-logging

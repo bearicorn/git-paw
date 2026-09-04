@@ -11,6 +11,7 @@
 //! performs exactly what the previous inline `Command::new("tmux")` calls did.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use crate::command_runner::{CommandRunner, RealCommandRunner};
 use crate::error::PawError;
@@ -95,6 +96,116 @@ pub(crate) fn session_liveness_with(runner: &dyn CommandRunner, name: &str) -> S
         Ok(output) => classify_liveness(true, output.success),
         Err(_) => classify_liveness(false, false),
     }
+}
+
+/// Foreground-shell process names — a pane whose `#{pane_current_command}`
+/// is one of these has reverted to an interactive prompt (its launched CLI
+/// process exited), not a still-running agent. Used by
+/// [`has_live_agent_pane_with`] (GP-03c).
+const SHELL_COMMAND_NAMES: &[&str] = &["bash", "zsh", "sh", "dash", "fish", "ksh", "csh", "tcsh"];
+
+/// Grace period after a session's `created_at` during which
+/// [`session_liveness_for`] treats the session as alive purely from tmux
+/// session existence, without yet requiring a live agent-pane process — the
+/// CLI launched via `send-keys` needs a moment to start (GP-03c's "tolerate
+/// the launch window" requirement).
+const AGENT_LAUNCH_GRACE_PERIOD: Duration = Duration::from_secs(30);
+
+/// Session-liveness probe that additionally requires at least one live
+/// agent-pane CLI process once past the launch grace period (GP-03c).
+///
+/// `tmux has-session` alone is insufficient: git-paw launches every pane as a
+/// shell and `send-keys`s the CLI command into it, so a pane whose CLI
+/// process exits reverts to its underlying interactive shell rather than
+/// closing — the tmux session (kept up by the supervisor/dashboard panes)
+/// and every agent pane keep existing even after every agent's CLI has died
+/// (the full-auto boot-exit failure mode, where the first-run
+/// bypass-permissions dialog defaults to "No, exit" and every pane reverts to
+/// a bare shell within seconds). Checking each agent pane's CURRENT
+/// foreground command is what distinguishes a genuinely running agent from
+/// one that silently reverted to a shell prompt.
+///
+/// `agent_pane_offset` is the pane index of the first coding-agent pane (see
+/// `agent_pane_offset` in `commands::helpers`) — panes before it (supervisor,
+/// dashboard) are never consulted. A session that is otherwise alive but
+/// within [`AGENT_LAUNCH_GRACE_PERIOD`] of `created_at` is reported alive
+/// regardless, so a just-launched session (whose agent CLI has not yet had
+/// time to start) never flaps to not-alive.
+#[must_use]
+pub fn session_liveness_for(
+    name: &str,
+    created_at: SystemTime,
+    agent_pane_offset: usize,
+) -> SessionLiveness {
+    session_liveness_for_with(
+        &RealCommandRunner,
+        name,
+        created_at,
+        agent_pane_offset,
+        SystemTime::now(),
+    )
+}
+
+/// [`session_liveness_for`] against an injected runner and clock.
+pub(crate) fn session_liveness_for_with(
+    runner: &dyn CommandRunner,
+    name: &str,
+    created_at: SystemTime,
+    agent_pane_offset: usize,
+    now: SystemTime,
+) -> SessionLiveness {
+    let base = session_liveness_with(runner, name);
+    if base != SessionLiveness::Alive {
+        return base;
+    }
+    if now
+        .duration_since(created_at)
+        .is_ok_and(|age| age < AGENT_LAUNCH_GRACE_PERIOD)
+    {
+        return SessionLiveness::Alive;
+    }
+    if has_live_agent_pane_with(runner, name, agent_pane_offset) {
+        SessionLiveness::Alive
+    } else {
+        SessionLiveness::Stale
+    }
+}
+
+/// Returns `true` when at least one pane at or beyond `agent_pane_offset` has
+/// a foreground process other than a bare shell (GP-03c).
+pub(crate) fn has_live_agent_pane_with(
+    runner: &dyn CommandRunner,
+    session_name: &str,
+    agent_pane_offset: usize,
+) -> bool {
+    let Ok(output) = runner.run(
+        "tmux",
+        &[
+            "list-panes",
+            "-t",
+            session_name,
+            "-F",
+            "#{pane_index} #{pane_current_command}",
+        ],
+    ) else {
+        return false;
+    };
+    if !output.success {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        let Some((idx_str, command)) = line.split_once(' ') else {
+            continue;
+        };
+        let Ok(idx) = idx_str.parse::<usize>() else {
+            continue;
+        };
+        if idx >= agent_pane_offset && !SHELL_COMMAND_NAMES.contains(&command.trim()) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Resolve a unique session name, handling collisions with existing sessions.
