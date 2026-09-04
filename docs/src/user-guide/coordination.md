@@ -504,7 +504,7 @@ The bundled coordination skill defines the coding agent's terminal action as:
    `agent.artifact { status: "committed" }` with the committed file list. For
    code changes this is the canonical "done" signal.
 2. **A manual `agent.artifact { status: "done" }`** (rare). Used only for
-   code-less tasks or to announce named `exports` peers should cherry-pick.
+   code-less tasks or to announce named `exports` peers depend on.
 
 The skill is explicit that the coding agent SHALL NOT invoke
 `/opsx:verify <change-id>` or `/opsx:archive <change-id>` — **both are

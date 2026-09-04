@@ -572,9 +572,12 @@ pub(crate) fn cmd_supervisor(
         None
     };
 
-    // Build the inter-agent rules block for this session.
+    // Peer branches for the inter-agent rules block. Held as a slice rather
+    // than a pre-rendered string: `build_inter_agent_rules` interpolates each
+    // agent's own id into the block, so `attach_agent` builds a fresh one per
+    // agent from this shared list rather than every agent getting an
+    // identical, un-interpolatable string.
     let branch_refs: Vec<&str> = branches.iter().map(String::as_str).collect();
-    let inter_agent_rules = git_paw::agents::build_inter_agent_rules(&branch_refs);
 
     let repo_str = repo_root.to_string_lossy().to_string();
     let dashboard_command = dashboard_command();
@@ -625,7 +628,7 @@ pub(crate) fn cmd_supervisor(
         docs_fetch_template: docs_fetch_template.as_ref(),
         gate_commands: &gate_commands,
         session_backends: &session_backends,
-        inter_agent_rules: Some(inter_agent_rules.as_str()),
+        inter_agent_rules_peers: Some(&branch_refs),
         strict_guard,
         no_rebase,
         placement: config.worktree_placement(),

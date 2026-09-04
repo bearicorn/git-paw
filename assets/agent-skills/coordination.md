@@ -434,8 +434,8 @@ curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
 ### Report done with specific exports (optional)
 
 The post-commit hook already reports committed files. Publish `agent.artifact`
-manually only if you want to announce named exports (public API items) that peers
-should cherry-pick:
+manually only if you want to announce named exports (public API items) that
+peers depend on:
 
 ```bash
 curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
@@ -453,8 +453,8 @@ Your terminal action as a coding agent is one of two things:
    you do not need to publish anything extra.
 2. **A manual `agent.artifact { status: "done" }`** (rare). Use this only for
    code-less tasks (planning notes, exploration tasks, doc-only work handled
-   outside this worktree) or to announce named `exports` that peers should
-   cherry-pick.
+   outside this worktree) or to announce named `exports` that peers depend
+   on.
 
 That is it. Specifically, you SHALL NOT verify or archive the change yourself.
 **Both verification and archival are off-limits for the coding agent — they
@@ -512,19 +512,25 @@ is additionally asked to revert your archive commit. Commit your work, let the
 post-commit hook publish, and wait for the supervisor to verify and archive.
 
 <!-- opsx-role-gating:end -->
-### Cherry-pick peer commits
+### When you depend on a peer's work
 
-When a peer publishes an `agent.artifact` message that lists files or work you depend on,
-fetch the peer's worktree branch and cherry-pick the relevant commit into your branch
-rather than waiting for the supervisor to merge:
+When a peer publishes an `agent.artifact` message that lists files or work you depend
+on, treat it as a signal, not an instruction to graft the peer's commit. Publish
+`agent.blocked` naming the peer and what you need, then continue on unblocked work in
+your slice, or wait if none remains:
 
 ```bash
-git fetch origin <peer-branch>
-git cherry-pick <commit-sha>
+curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
+  -H "Content-Type: application/json" \
+  -d '{"type":"agent.blocked","agent_id":"{{BRANCH_ID}}","payload":{"needs":"<what you need>","from":"<peer-agent-id>"}}'
 ```
 
-After cherry-picking, run your tests. The watcher will pick up the new file state
-automatically.
+You MUST NOT cherry-pick a peer's commit into your own branch. Grafting it creates a
+second copy of a commit the supervisor will later merge from the peer's own branch,
+leaving your branch divergent and unmergeable — your work is discarded when that merge
+is attempted. Once the peer's work lands on the base branch, take it on through the
+`agent.advanced-main` discipline below (*When main advances*), which integrates peer
+work through the base branch instead of duplicating commits.
 
 ### When main advances
 
@@ -631,7 +637,7 @@ similar but are not interchangeable, and supervisors (both human and LLM) routin
 confuse them when composing payloads. Match the form to the context:
 
 - **Branch name** — the original git ref, e.g. `feat/no-supervisor-flag`. Used in
-  every git operation: `git checkout`, `git worktree`, `git push`, `git cherry-pick`,
+  every git operation: `git checkout`, `git worktree`, `git push`, `git rebase`,
   branch comparison, and so on. Slashes are preserved.
 - **`agent_id`** — the dashed slug, e.g. `feat-no-supervisor-flag`. Used in every
   `/publish` payload's top-level `agent_id` field, every `/messages/<id>` URL, and
