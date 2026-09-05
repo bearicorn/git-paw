@@ -181,6 +181,7 @@ Only add dependencies listed in the approved set:
 | Crate | Purpose |
 |-------|---------|
 | `clap` v4 | CLI parsing with derive |
+| `clap_complete` v4 | Shell completion script generation from the clap command (`git paw completions`) |
 | `dialoguer` | Interactive terminal prompts |
 | `console` | Terminal colors/styling |
 | `which` | PATH binary detection |

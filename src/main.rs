@@ -136,6 +136,7 @@ fn run(command: Command) -> Result<(), PawError> {
         Command::Stop { force } => commands::stop::cmd_stop(force),
         Command::Purge { force, stale } => cmd_purge(force, stale),
         Command::Status { json } => commands::status::cmd_status(json),
+        Command::Attach => commands::attach::cmd_attach(),
         Command::ListClis => commands::clis::cmd_list_clis(),
         Command::AddCli {
             name,
@@ -164,6 +165,7 @@ fn run(command: Command) -> Result<(), PawError> {
             git_paw::mcp::cmd_mcp(repo.as_deref(), log_file.as_deref())
         }
         Command::Doctor { json, live } => git_paw::doctor::run(json, live),
+        Command::Completions { shell } => commands::completions::cmd_completions(shell),
         Command::Selftest => git_paw::selftest::run(),
     }
 }

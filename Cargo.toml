@@ -13,6 +13,7 @@ include = ["src/**/*", "assets/**/*", "Cargo.toml", "/LICENSE", "/README.md"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 dialoguer = "0.12"
 console = "0.16.3"
 which = "8.0.2"

@@ -540,8 +540,8 @@ fn add_to_paused_session_holds_prompt_for_resume() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        stdout.contains("git paw resume") || stdout.contains("paused"),
-        "add to a paused session should report it will start on resume; stdout:\n{stdout}"
+        stdout.contains("paused"),
+        "add to a paused session should report it will start on `git paw start`; stdout:\n{stdout}"
     );
     // 1 agent -> supervisor + dashboard + a = 3 panes; the held add makes 4.
     assert_eq!(panes, 4, "paused add still creates the pane (3 -> 4)");

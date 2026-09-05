@@ -244,10 +244,12 @@ All examples below use `git paw`, but `git-paw` works identically.
 | `stop` | Kill the tmux session and CLIs; keep worktrees + state. |
 | `purge` | Remove the session, all worktrees, and state (`--force` to skip the prompt). |
 | `status` | Show session name, branches, CLIs, and state. |
+| `attach` | Reattach the terminal to the current repo's running session (v0.16.0+). |
 | `list-clis` / `add-cli` / `remove-cli` | Manage auto-detected and custom AI CLIs. |
 | `replay` | View session logs (`--list`, `--color`, `--session`). |
 | `mcp` | Read-only [MCP](https://modelcontextprotocol.io) server over stdio — no session or broker required (v0.7.0+). |
 | `doctor` | Read-only preflight diagnostics — grouped ✓/⚠/✗ checks with a remedy on each finding, `--json`, `--live` (v0.13.0+). |
+| `completions` | Print a bash/zsh/fish completion script to stdout (v0.16.0+). |
 
 Full flags, examples, and per-client MCP setup: **[CLI Reference](https://bearicorn.github.io/git-paw/cli-reference.html)**.
 

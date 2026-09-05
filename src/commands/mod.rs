@@ -9,7 +9,9 @@
 
 pub mod add;
 pub mod approvals;
+pub mod attach;
 pub mod clis;
+pub mod completions;
 pub mod helpers;
 pub mod pause;
 pub mod recover;
