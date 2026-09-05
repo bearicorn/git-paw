@@ -356,7 +356,34 @@ pub struct CorrectionConfig {
     /// suppress the flag, set it to or above `max_cycles`).
     #[serde(deserialize_with = "deserialize_escalate_after_cycles")]
     pub escalate_after_cycles: u32,
+    /// Gate names `.git-paw/scripts/sweep.sh feedback-gate` may stamp as a
+    /// `[<gate>]` prefix on an `agent.feedback` error line; only a tag naming
+    /// one of these counts as a failing gate verdict that starts a correction
+    /// cycle. Matching is case-insensitive.
+    ///
+    /// Default: git-paw's own five-gate framework plus `"scope"` —
+    /// `["testing", "regression", "spec audit", "doc audit", "security
+    /// audit", "scope"]` — reproducing the built-in verification vocabulary
+    /// exactly. A consumer whose review process names different gates lists
+    /// them here instead.
+    ///
+    /// Must be non-empty; an empty list is a config error (it would silently
+    /// disable the correction loop even with `auto_loopback = true` — to turn
+    /// the loop off set `auto_loopback = false` instead).
+    #[serde(deserialize_with = "deserialize_gate_tags")]
+    pub gate_tags: Vec<String>,
 }
+
+/// git-paw's own five-gate framework plus the `scope` tag — the default
+/// [`CorrectionConfig::gate_tags`] vocabulary.
+const DEFAULT_GATE_TAGS: &[&str] = &[
+    "testing",
+    "regression",
+    "spec audit",
+    "doc audit",
+    "security audit",
+    "scope",
+];
 
 /// Rejects a zero cycle count with an actionable message naming the field and
 /// the fix, mirroring the accepted-values message serde produces for an invalid
@@ -399,6 +426,24 @@ where
     )
 }
 
+/// `deserialize_with` shim for [`CorrectionConfig::gate_tags`]. Rejects an
+/// empty list — it would silently disable the correction loop even with
+/// `auto_loopback = true`.
+fn deserialize_gate_tags<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let tags = Vec::<String>::deserialize(deserializer)?;
+    if tags.is_empty() {
+        return Err(serde::de::Error::custom(
+            "[supervisor.correction] gate_tags must not be empty; it would silently disable the \
+             correction loop even with auto_loopback = true; to turn the loop off set \
+             auto_loopback = false instead",
+        ));
+    }
+    Ok(tags)
+}
+
 impl Default for CorrectionConfig {
     fn default() -> Self {
         Self {
@@ -406,6 +451,7 @@ impl Default for CorrectionConfig {
             max_cycles: Self::default_max_cycles(),
             on_exhausted: OnExhausted::default(),
             escalate_after_cycles: Self::default_escalate_after_cycles(),
+            gate_tags: Self::default_gate_tags(),
         }
     }
 }
@@ -417,6 +463,10 @@ impl CorrectionConfig {
 
     fn default_escalate_after_cycles() -> u32 {
         3
+    }
+
+    fn default_gate_tags() -> Vec<String> {
+        DEFAULT_GATE_TAGS.iter().map(|s| (*s).to_string()).collect()
     }
 }
 
@@ -1004,6 +1054,10 @@ mod tests {
         assert_eq!(supervisor.correction.max_cycles, 5);
         assert_eq!(supervisor.correction.on_exhausted, OnExhausted::Escalate);
         assert_eq!(supervisor.correction.escalate_after_cycles, 3);
+        assert_eq!(
+            supervisor.correction.gate_tags,
+            CorrectionConfig::default().gate_tags
+        );
     }
 
     /// Spec scenario "Fields parse to the resolved policy": explicit fields
@@ -1101,9 +1155,79 @@ mod tests {
             max_cycles: 7,
             on_exhausted: OnExhausted::Abandon,
             escalate_after_cycles: 2,
+            gate_tags: vec!["security".to_string(), "perf".to_string()],
         };
         let text = toml::to_string(&original).expect("serializes");
         let parsed: CorrectionConfig = toml::from_str(&text).expect("re-parses");
         assert_eq!(parsed, original);
+    }
+
+    /// Spec scenario "Table absent loads with defaults" (task 3.5): the
+    /// default gate vocabulary reproduces the current five-gate framework
+    /// plus `scope` exactly, so existing correction cycles keep recognising
+    /// the same tags after upgrading.
+    #[test]
+    fn default_gate_tags_reproduce_the_current_five_gate_vocabulary() {
+        assert_eq!(
+            CorrectionConfig::default().gate_tags,
+            vec![
+                "testing",
+                "regression",
+                "spec audit",
+                "doc audit",
+                "security audit",
+                "scope",
+            ]
+        );
+    }
+
+    /// Task 3.8: a config written before `gate_tags` existed (only
+    /// `auto_loopback` set) loads with the default vocabulary.
+    #[test]
+    fn pre_existing_config_without_gate_tags_loads_the_default_vocabulary() {
+        let supervisor = supervisor_from(
+            "[supervisor]\n\
+             enabled = true\n\
+             [supervisor.correction]\n\
+             auto_loopback = true\n",
+        );
+        assert_eq!(
+            supervisor.correction.gate_tags,
+            CorrectionConfig::default().gate_tags
+        );
+    }
+
+    /// Task 3.4/D2: an empty configured `gate_tags` is a config error rather
+    /// than a silent fallback — it would otherwise disable the correction
+    /// loop invisibly even with `auto_loopback = true`.
+    #[test]
+    fn empty_gate_tags_is_a_config_error() {
+        let err = toml::from_str::<PawConfig>(
+            "[supervisor]\n\
+             enabled = true\n\
+             [supervisor.correction]\n\
+             gate_tags = []\n",
+        )
+        .expect_err("an empty gate_tags list must not parse")
+        .to_string();
+        assert!(
+            err.contains("gate_tags")
+                && err.contains("must not be empty")
+                && err.contains("auto_loopback = false"),
+            "the error names the field and the remedy, got: {err}"
+        );
+    }
+
+    /// Task 3.6: a configured custom gate name round-trips through the
+    /// vocabulary a consumer would set for their own review process.
+    #[test]
+    fn custom_gate_tags_are_loaded_verbatim() {
+        let supervisor = supervisor_from(
+            "[supervisor]\n\
+             enabled = true\n\
+             [supervisor.correction]\n\
+             gate_tags = [\"lint\", \"perf-budget\"]\n",
+        );
+        assert_eq!(supervisor.correction.gate_tags, vec!["lint", "perf-budget"]);
     }
 }

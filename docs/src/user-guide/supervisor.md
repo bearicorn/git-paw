@@ -196,12 +196,15 @@ With `auto_loopback = true`, each poll the loop:
 
 1. **Watches for failing gate verdicts.** A gate failure arrives as an
    `agent.feedback` from the supervisor whose errors carry a `[<gate>]` tag
-   (`[testing]`, `[regression]`, `[spec audit]`, `[doc audit]`,
-   `[security audit]`, `[scope]`) — the shape
+   naming one of `gate_tags` (default: `[testing]`, `[regression]`,
+   `[spec audit]`, `[doc audit]`, `[security audit]`, `[scope]`) — the shape
    `.git-paw/scripts/sweep.sh feedback-gate` publishes. A passing gate
    publishes `agent.verified` instead, so only failures start a cycle. Other
    traffic on the same channel — conflict-detector warnings, peer feedback — is
-   never mistaken for a gate verdict.
+   never mistaken for a gate verdict. The tag vocabulary is configurable (see
+   [`gate_tags`](../configuration/README.md#correction-loop-tuning)) so a
+   review process with different gate names can still drive the loop; the
+   five-gate verification *framework* itself is unchanged.
 2. **Re-engages the worker's pane.** The branch's pane is resolved by
    `pane_current_path`, re-captured immediately before the send, and typed with
    the gate-tagged feedback plus a submitting `Enter` as a separate keystroke.

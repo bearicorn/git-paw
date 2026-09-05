@@ -1015,6 +1015,7 @@ auto_loopback = true       # default false — opt in to enable the loop
 max_cycles = 5
 on_exhausted = "escalate"  # "escalate" (default) | "abandon"
 escalate_after_cycles = 3
+gate_tags = ["testing", "regression", "spec audit", "doc audit", "security audit", "scope"]
 ```
 
 | Field | Default | Description |
@@ -1023,6 +1024,7 @@ escalate_after_cycles = 3
 | `max_cycles` | `5` | Verify↔fix rounds the loop drives for one branch before giving up and applying `on_exhausted`. A branch that passes its gate leaves the cycle early and its counter resets. Must be a positive integer — `0` is a config error; to turn the loop off set `auto_loopback = false`. |
 | `on_exhausted` | `"escalate"` | What to do with a branch that reaches `max_cycles`. `"escalate"` flags it to the orchestrator/human as unrecoverable; `"abandon"` marks it failed and leaves it un-corrected without an escalation. Neither re-engages the branch again. Any other value is a config error naming the accepted set. |
 | `escalate_after_cycles` | `3` | Cycle count at which a slow-converging worker is flagged **once**, as an early heads-up, while re-engagement continues to `max_cycles`. No distinct early flag is emitted when this is greater than or equal to `max_cycles`. Must be a positive integer — `0` is a config error; to suppress the flag, set it to `max_cycles` or higher. |
+| `gate_tags` | `["testing", "regression", "spec audit", "doc audit", "security audit", "scope"]` | Gate names recognised as a `[<gate>]` prefix on a supervisor `agent.feedback` error line; only a matching tag (case-insensitive) counts as a failing gate verdict that starts a correction cycle. The default reproduces git-paw's own five-gate framework plus `scope` exactly. A consumer whose review process names different gates lists them here instead — the correction *loop* itself is unaffected, only the tag vocabulary it recognises. Must be non-empty; an empty list is a config error (it would silently disable the loop even with `auto_loopback = true` — set `auto_loopback = false` instead). |
 
 The `[supervisor.correction]` table is fully optional. A v0.13.0 config with
 `[supervisor]` and no `[supervisor.correction]` loads cleanly with every field

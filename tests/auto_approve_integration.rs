@@ -127,7 +127,7 @@ fn safe_prompt_dispatches_keystrokes_against_real_tmux() {
     );
     assert!(captured.contains("cargo test"));
 
-    // Drive the auto-approver. The Cargo class is safe and live, so the gate
+    // Drive the auto-approver. The Git class is safe and live, so the gate
     // re-confirms the prompt via a fresh capture and dispatches the option
     // digit + Enter via send-keys.
     let capturer = TmuxPaneInspector;
@@ -139,7 +139,7 @@ fn safe_prompt_dispatches_keystrokes_against_real_tmux() {
         repo_root: repo.path(),
         pane_index: 2,
         agent_id: "feat-test",
-        kind: PermissionType::Cargo,
+        kind: PermissionType::Git,
         matched_entry: Some("cargo test"),
         live_prompt: true,
         option_index: 1,
@@ -228,7 +228,7 @@ fn disabled_config_is_noop_against_real_tmux() {
         repo_root: repo.path(),
         pane_index: 2,
         agent_id: "feat-test",
-        kind: PermissionType::Cargo,
+        kind: PermissionType::Git,
         matched_entry: Some("cargo test"),
         live_prompt: true,
         option_index: 1,

@@ -698,7 +698,7 @@ mod tests {
         };
         let resolver = |_id: &str| Some(1);
         let inspector = StubInspector {
-            kind: Some(PermissionType::Cargo),
+            kind: Some(PermissionType::Unknown),
             captured: "cargo test".into(),
         };
         let (out, dispatcher, _) = run_tick(&state, &cfg, &resolver, &inspector);
@@ -902,7 +902,7 @@ mod tests {
         let cfg = AutoApproveConfig::default();
         let resolver = |_id: &str| Some(1);
         let inspector = StubInspector {
-            kind: Some(PermissionType::Cargo),
+            kind: Some(PermissionType::Unknown),
             captured: "I plan to run cargo test soon\njust some narration".into(),
         };
         let (out, dispatcher, forwarder) = run_tick(&state, &cfg, &resolver, &inspector);
@@ -923,7 +923,7 @@ mod tests {
         let cfg = AutoApproveConfig::default();
         let resolver = |_id: &str| Some(1);
         let inspector = StubInspector {
-            kind: Some(PermissionType::Cargo),
+            kind: Some(PermissionType::Unknown),
             captured: "cargo test".into(),
         };
         let (out, dispatcher, _) = run_tick(&state, &cfg, &resolver, &inspector);
@@ -997,7 +997,7 @@ mod tests {
         };
         let resolver = |id: &str| if id == "agent-a" { Some(2) } else { None };
         let inspector = StubInspector {
-            kind: Some(PermissionType::Cargo),
+            kind: Some(PermissionType::Unknown),
             captured: "cargo test --workspace\nDo you want to proceed?\nEsc to cancel".into(),
         };
         let no_worktree = |_id: &str| None::<PathBuf>;

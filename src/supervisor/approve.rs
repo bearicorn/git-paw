@@ -301,7 +301,7 @@ mod tests {
         let fired = auto_approve_pane(
             &StubCapturer::live(),
             &mut rec,
-            req(repo.path(), true, PermissionType::Cargo, Some("cargo test")),
+            req(repo.path(), true, PermissionType::Git, Some("cargo test")),
         )
         .unwrap();
         assert!(fired, "should fire when enabled, safe, and live");
@@ -347,12 +347,7 @@ mod tests {
         let fired = auto_approve_pane(
             &StubCapturer::live(),
             &mut rec,
-            req(
-                repo.path(),
-                false,
-                PermissionType::Cargo,
-                Some("cargo test"),
-            ),
+            req(repo.path(), false, PermissionType::Git, Some("cargo test")),
         )
         .unwrap();
         assert!(!fired);
@@ -403,7 +398,7 @@ mod tests {
         let fired = auto_approve_pane(
             &StubCapturer::cleared(),
             &mut rec,
-            req(repo.path(), true, PermissionType::Cargo, Some("cargo test")),
+            req(repo.path(), true, PermissionType::Git, Some("cargo test")),
         )
         .unwrap();
         assert!(!fired, "cleared prompt must not fire");
@@ -532,7 +527,7 @@ mod tests {
             repo_root: repo.path(),
             pane_index: 2,
             agent_id: "feat-foo",
-            kind: PermissionType::Cargo,
+            kind: PermissionType::Git,
             matched_entry: Some("cargo test"),
             live_prompt: true,
             option_index: 1,

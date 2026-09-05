@@ -21,8 +21,6 @@ use std::process::Command;
 pub enum PermissionType {
     /// A `curl ...` command (typically broker traffic).
     Curl,
-    /// A `cargo ...` command (`fmt`, `clippy`, `test`, `build`).
-    Cargo,
     /// A `git ...` command (`commit`, `push`).
     Git,
     /// A filesystem write / edit / create whose target path resolves
@@ -95,12 +93,6 @@ pub fn classify_capture(captured: &str) -> Option<PermissionType> {
 fn classify_command_class(captured: &str) -> PermissionType {
     if captured.contains("curl") {
         PermissionType::Curl
-    } else if captured.contains("cargo fmt")
-        || captured.contains("cargo clippy")
-        || captured.contains("cargo test")
-        || captured.contains("cargo build")
-    {
-        PermissionType::Cargo
     } else if captured.contains("git commit") || captured.contains("git push") {
         PermissionType::Git
     } else {
@@ -123,9 +115,12 @@ mod tests {
     use super::*;
 
     /// One row per classifier rule: a captured pane carrying a known approval
-    /// marker routes to its command class (`Curl` / `Cargo` / `Git`), falls
-    /// through to `Unknown` for an unrecognised command, and classifies to
-    /// `None` when no marker is present at all.
+    /// marker routes to its command class (`Curl` / `Git`), falls through to
+    /// `Unknown` for an unrecognised command — including a build-tool
+    /// invocation such as `cargo test`, which this coarse classifier does not
+    /// special-case; the poll loop's safe-command classifier is what actually
+    /// decides auto-approval, so the toolchain verb carries no class of its
+    /// own here — and classifies to `None` when no marker is present at all.
     #[test]
     fn classify_capture_covers_each_command_class() {
         for (captured, expected) in [
@@ -135,16 +130,6 @@ mod tests {
                 Some(PermissionType::Curl),
             ),
             (
-                "do you want to proceed\nRunning cargo test --workspace",
-                Some(PermissionType::Cargo),
-            ),
-            ("[y/N] cargo fmt --all", Some(PermissionType::Cargo)),
-            (
-                "Allow this command: cargo clippy",
-                Some(PermissionType::Cargo),
-            ),
-            ("(y/n) cargo build --release", Some(PermissionType::Cargo)),
-            (
                 "git commit -m hi\nrequires approval",
                 Some(PermissionType::Git),
             ),
@@ -152,6 +137,11 @@ mod tests {
                 "git push origin main\nrequires approval",
                 Some(PermissionType::Git),
             ),
+            (
+                "do you want to proceed\nRunning cargo test --workspace",
+                Some(PermissionType::Unknown),
+            ),
+            ("[y/N] cargo fmt --all", Some(PermissionType::Unknown)),
             (
                 "rm -rf /tmp/foo\nrequires approval",
                 Some(PermissionType::Unknown),
@@ -199,12 +189,13 @@ mod tests {
             "Claude curl prompt with `requires approval [y/N]` must classify Curl"
         );
 
-        // Cargo: a `cargo test` invocation behind the same combined marker.
+        // Cargo: a `cargo test` invocation behind the same combined marker
+        // falls through to Unknown — no toolchain-specific class exists.
         let cargo_prompt = "Bash command:\ncargo test --workspace\nrequires approval [y/N]";
         assert_eq!(
             classify_capture(cargo_prompt),
-            Some(PermissionType::Cargo),
-            "Claude cargo prompt with combined markers must classify Cargo"
+            Some(PermissionType::Unknown),
+            "a build-tool command is not specially classified"
         );
 
         // Git: `git commit` behind the same combined marker.
