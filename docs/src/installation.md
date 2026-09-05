@@ -76,6 +76,30 @@ git-paw --help
 git paw --help
 ```
 
+## Shell Completions
+
+`git paw completions <shell>` prints a completion script to stdout, generated
+from the CLI definition. Install it through your shell's standard mechanism:
+
+**bash:**
+```bash
+git paw completions bash > /etc/bash_completion.d/git-paw
+# or, for a user-local install:
+git paw completions bash > ~/.local/share/bash-completion/completions/git-paw
+```
+
+**zsh:**
+```bash
+git paw completions zsh > "${fpath[1]}/_git-paw"
+```
+
+**fish:**
+```bash
+git paw completions fish > ~/.config/fish/completions/git-paw.fish
+```
+
+Open a new shell (or re-source your shell config) to pick up the completions.
+
 ## Platform Support
 
 | Platform | Support |

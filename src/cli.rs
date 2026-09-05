@@ -404,6 +404,20 @@ pub enum Command {
         json: bool,
     },
 
+    /// Reattach the current terminal to the running session for this repo
+    #[command(
+        about = "Reattach the current terminal to the running session for this repo",
+        long_about = "Reattaches the current terminal to the tmux session running for the \
+                      repository in the current directory, resolving the session the same \
+                      way `git paw status` does (by repository path). Equivalent to \
+                      `tmux attach -t paw-<project>`, without needing to know or type the \
+                      exact session name.\n\n\
+                      Exits with an actionable error when no session is running for this \
+                      repo — run `git paw start` to launch one.\n\n\
+                      Example:\n  git paw attach"
+    )]
+    Attach,
+
     /// List detected and custom AI CLIs
     #[command(
         about = "List detected and custom AI CLIs",
@@ -663,6 +677,23 @@ pub enum Command {
             help = "Also run the live session-lifecycle smoke check (slower; needs tmux)"
         )]
         live: bool,
+    },
+
+    /// Print a shell completion script to stdout
+    #[command(
+        about = "Print a shell completion script to stdout",
+        long_about = "Generates a completion script for the given shell from the clap command \
+                      definition and prints it to stdout, for installation through the \
+                      shell's standard completion mechanism.\n\n\
+                      Examples:\n  \
+                      git paw completions bash > /etc/bash_completion.d/git-paw\n  \
+                      git paw completions zsh > \"${fpath[1]}/_git-paw\"\n  \
+                      git paw completions fish > ~/.config/fish/completions/git-paw.fish"
+    )]
+    Completions {
+        /// Shell to generate the completion script for.
+        #[arg(value_enum, help = "Shell to generate completions for")]
+        shell: clap_complete::Shell,
     },
 
     /// Run an isolated end-to-end session-lifecycle smoke check (internal; the live arm of `doctor`)
@@ -1295,6 +1326,37 @@ mod tests {
         assert!(result.is_err(), "pause should reject unknown flags");
     }
 
+    // -- Attach subcommand --
+
+    #[test]
+    fn attach_parses() {
+        let cli = parse(&["attach"]);
+        assert!(matches!(cli.command.unwrap(), Command::Attach));
+    }
+
+    #[test]
+    fn attach_rejects_unknown_flags() {
+        let result = Cli::try_parse_from(["git-paw", "attach", "--anything"]);
+        assert!(result.is_err(), "attach should reject unknown flags");
+    }
+
+    #[test]
+    fn attach_help_describes_reattach_and_cross_references_start() {
+        let result = Cli::try_parse_from(["git-paw", "attach", "--help"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(
+            help.to_lowercase().contains("reattach"),
+            "attach --help should describe reattaching, got: {help}"
+        );
+        assert!(
+            help.contains("git paw start"),
+            "attach --help should cross-reference start, got: {help}"
+        );
+    }
+
     // -- Stop subcommand --
 
     /// One row per `git paw stop` invocation -> the parsed `force` flag.
@@ -1476,6 +1538,8 @@ mod tests {
             "replay",
             "approvals",
             "mcp",
+            "attach",
+            "completions",
         ] {
             assert!(
                 help.contains(anchor),
@@ -1865,6 +1929,51 @@ mod tests {
                 "doctor should reject {flag}"
             );
         }
+    }
+
+    // -- Completions subcommand --
+
+    #[test]
+    fn completions_parses_supported_shells() {
+        for (arg, expected) in [
+            ("bash", clap_complete::Shell::Bash),
+            ("zsh", clap_complete::Shell::Zsh),
+            ("fish", clap_complete::Shell::Fish),
+        ] {
+            match parse(&["completions", arg]).command.unwrap() {
+                Command::Completions { shell } => {
+                    assert_eq!(shell, expected, "arg: {arg:?}");
+                }
+                other => panic!("expected Completions for {arg:?}, got: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn completions_rejects_unsupported_shell() {
+        let result = Cli::try_parse_from(["git-paw", "completions", "not-a-shell"]);
+        assert!(
+            result.is_err(),
+            "completions should reject an unknown shell"
+        );
+    }
+
+    #[test]
+    fn completions_requires_a_shell_argument() {
+        let result = Cli::try_parse_from(["git-paw", "completions"]);
+        assert!(result.is_err(), "completions requires a shell argument");
+    }
+
+    // -- No `resume` subcommand --
+
+    #[test]
+    fn resume_is_rejected_as_unknown_subcommand() {
+        let result = Cli::try_parse_from(["git-paw", "resume"]);
+        assert!(result.is_err(), "resume must not be a valid subcommand");
+        assert_eq!(
+            result.unwrap_err().kind(),
+            clap::error::ErrorKind::InvalidSubcommand
+        );
     }
 
     // -- Selftest subcommand --

@@ -19,6 +19,7 @@ Commands:
   stop        Stop the session (kills tmux, keeps worktrees and state)
   purge       Remove everything (tmux session, worktrees, and state)
   status      Show session state for the current repo
+  attach      Reattach the current terminal to the running session for this repo
   list-clis   List detected and custom AI CLIs
   add-cli     Register a custom AI CLI
   remove-cli  Unregister a custom AI CLI
@@ -27,6 +28,7 @@ Commands:
   approvals   Report manually-approved command patterns for a session
   mcp         Run a read-only Model Context Protocol (MCP) server over stdio
   doctor      Diagnose the environment, configuration, and repository state
+  completions Print a shell completion script to stdout
   help        Print this message or the help of the given subcommand(s)
 
 Options:
@@ -339,6 +341,26 @@ git paw status
 git paw status --json
 ```
 
+## `git paw attach`
+
+Reattaches the current terminal to the tmux session running for the repository in the current directory, resolving the session the same way `git paw status` does (by repository path). Equivalent to `tmux attach -t paw-<project>`, without needing to know or type the exact session name.
+
+```
+Usage: git-paw attach
+
+Options:
+  -h, --help  Print help
+```
+
+Exits with an actionable error when no session is running for this repo — run `git paw start` to launch one.
+
+**Example:**
+```bash
+git paw attach
+```
+
+Note the distinction from session revival: `attach` reattaches to an already-running session; `git paw start` is what recovers a stopped/crashed session or launches a new one.
+
 ## `git paw list-clis`
 
 Shows all AI CLIs found on PATH (auto-detected) and any custom CLIs registered in your config.
@@ -572,6 +594,31 @@ git paw doctor --live
 ```
 
 See the [Doctor chapter](user-guide/doctor.md) for the full check catalogue.
+
+## `git paw completions`
+
+Generates a shell-completion script from the clap command definition and prints it to stdout, for installation through the shell's standard completion mechanism.
+
+```
+Usage: git-paw completions <SHELL>
+
+Arguments:
+  <SHELL>  Shell to generate completions for [possible values: bash, elvish, fish, powershell, zsh]
+
+Options:
+  -h, --help  Print help
+```
+
+An unsupported shell argument is rejected by clap with an actionable error naming the supported values.
+
+**Examples:**
+```bash
+git paw completions bash > /etc/bash_completion.d/git-paw
+git paw completions zsh > "${fpath[1]}/_git-paw"
+git paw completions fish > ~/.config/fish/completions/git-paw.fish
+```
+
+See [Installation](installation.md#shell-completions) for shell-specific setup.
 
 ## `git paw selftest`
 
