@@ -546,22 +546,6 @@ pub fn detect_completion(
 // Correction loop (`supervisor-correction-loop`)
 // ---------------------------------------------------------------------------
 
-/// Gate names `sweep.sh feedback-gate` stamps as a `[<gate>]` prefix onto each
-/// `agent.feedback` error line.
-///
-/// An error carrying one of these tags is a FAILING gate verdict — a passing
-/// gate publishes `agent.verified` instead, never feedback. Feedback from any
-/// other producer (the conflict detector's `[conflict-detector]`, the branch
-/// guard, a peer) is not a gate verdict and never starts a correction cycle.
-const GATE_TAGS: &[&str] = &[
-    "testing",
-    "regression",
-    "spec audit",
-    "doc audit",
-    "security audit",
-    "scope",
-];
-
 /// Escalation verdict label for a branch whose correction budget is spent.
 const CORRECTION_EXHAUSTED_VERDICT: &str = "correction-exhausted";
 
@@ -573,28 +557,28 @@ const CORRECTION_SLOW_VERDICT: &str = "correction-slow";
 /// `None` when the feedback is not a gate failure addressed to a branch.
 ///
 /// Only feedback published by the supervisor and tagged with one of
-/// [`GATE_TAGS`] counts; everything else on the shared `agent.feedback` channel
-/// passes through untouched.
+/// `gate_tags` (`[supervisor.correction] gate_tags`) counts; everything else
+/// on the shared `agent.feedback` channel passes through untouched.
 #[must_use]
-pub fn gate_failure(payload: &FeedbackPayload) -> Option<&'static str> {
+pub fn gate_failure(payload: &FeedbackPayload, gate_tags: &[String]) -> Option<String> {
     if payload.from != SUPERVISOR_AGENT_ID {
         return None;
     }
     payload
         .errors
         .iter()
-        .find_map(|error| bracketed_gate(error))
+        .find_map(|error| bracketed_gate(error, gate_tags))
 }
 
-/// Extracts an error line's leading `[<gate>]` tag when it names one of the
-/// supervisor's verification gates.
-fn bracketed_gate(error: &str) -> Option<&'static str> {
+/// Extracts an error line's leading `[<gate>]` tag when it names one of
+/// `gate_tags` (case-insensitive).
+fn bracketed_gate(error: &str, gate_tags: &[String]) -> Option<String> {
     let (name, _) = error.trim_start().strip_prefix('[')?.split_once(']')?;
     let name = name.trim();
-    GATE_TAGS
+    gate_tags
         .iter()
-        .copied()
         .find(|tag| name.eq_ignore_ascii_case(tag))
+        .cloned()
 }
 
 /// One branch's correction bookkeeping.
@@ -1192,7 +1176,13 @@ pub fn drive_loop(
         }
 
         // --- Observe newly published worker messages -------------------------
-        observe_worker_messages(ctx, &coding_ids, deps, &mut correction);
+        observe_worker_messages(
+            ctx,
+            &coding_ids,
+            deps,
+            &mut correction,
+            &config.correction.gate_tags,
+        );
 
         // --- Completion check ------------------------------------------------
         let latest_status = deps.status.fetch();
@@ -1297,6 +1287,7 @@ fn observe_worker_messages(
     coding_ids: &[String],
     deps: &mut DriveDeps<'_>,
     correction: &mut CorrectionState,
+    gate_tags: &[String],
 ) {
     for msg in deps.messages.poll_new() {
         let Some(agent_id) = coding_ids.iter().find(|id| *id == msg.agent_id()) else {
@@ -1304,10 +1295,10 @@ fn observe_worker_messages(
         };
         match &msg {
             BrokerMessage::Feedback { payload, .. } => {
-                if let Some(gate) = gate_failure(payload) {
+                if let Some(gate) = gate_failure(payload, gate_tags) {
                     correction.mark_gate_failure(
                         agent_id,
-                        reengagement_text(gate, &payload.errors.join("; ")),
+                        reengagement_text(&gate, &payload.errors.join("; ")),
                     );
                 }
             }
@@ -3589,18 +3580,23 @@ mod tests {
     /// and must never start a correction cycle.
     #[test]
     fn gate_failure_recognises_only_tagged_supervisor_feedback() {
+        let gate_tags = CorrectionConfig::default().gate_tags;
+
         let gate = FeedbackPayload {
             from: SUPERVISOR_AGENT_ID.to_string(),
             errors: vec!["[regression] 2 suites fail on main".to_string()],
         };
-        assert_eq!(gate_failure(&gate), Some("regression"));
+        assert_eq!(
+            gate_failure(&gate, &gate_tags),
+            Some("regression".to_string())
+        );
 
         let conflict = FeedbackPayload {
             from: SUPERVISOR_AGENT_ID.to_string(),
             errors: vec!["[conflict-detector] feat-b also claims src/foo.rs".to_string()],
         };
         assert_eq!(
-            gate_failure(&conflict),
+            gate_failure(&conflict, &gate_tags),
             None,
             "a conflict warning is not a gate verdict"
         );
@@ -3610,7 +3606,7 @@ mod tests {
             errors: vec!["[testing] your change broke my build".to_string()],
         };
         assert_eq!(
-            gate_failure(&from_peer),
+            gate_failure(&from_peer, &gate_tags),
             None,
             "only the supervisor publishes gate verdicts"
         );
@@ -3619,7 +3615,46 @@ mod tests {
             from: SUPERVISOR_AGENT_ID.to_string(),
             errors: vec!["please rebase onto main".to_string()],
         };
-        assert_eq!(gate_failure(&untagged), None);
+        assert_eq!(gate_failure(&untagged, &gate_tags), None);
+    }
+
+    /// Task 3.6/3.7: a configured custom gate vocabulary recognises its own
+    /// tags and starts a correction cycle, while a tag from the *default*
+    /// vocabulary that is no longer configured (and the conflict detector's
+    /// `[conflict-detector]` tag) stay non-gate producers.
+    #[test]
+    fn custom_gate_vocabulary_recognises_configured_tags_only() {
+        let gate_tags = vec!["lint".to_string(), "perf-budget".to_string()];
+
+        let custom_gate = FeedbackPayload {
+            from: SUPERVISOR_AGENT_ID.to_string(),
+            errors: vec!["[perf-budget] request latency regressed".to_string()],
+        };
+        assert_eq!(
+            gate_failure(&custom_gate, &gate_tags),
+            Some("perf-budget".to_string()),
+            "a configured custom gate name must be recognised"
+        );
+
+        let stale_default_tag = FeedbackPayload {
+            from: SUPERVISOR_AGENT_ID.to_string(),
+            errors: vec!["[testing] 2 suites fail on main".to_string()],
+        };
+        assert_eq!(
+            gate_failure(&stale_default_tag, &gate_tags),
+            None,
+            "a tag not in the configured vocabulary must not start a correction cycle"
+        );
+
+        let conflict = FeedbackPayload {
+            from: SUPERVISOR_AGENT_ID.to_string(),
+            errors: vec!["[conflict-detector] feat-b also claims src/foo.rs".to_string()],
+        };
+        assert_eq!(
+            gate_failure(&conflict, &gate_tags),
+            None,
+            "the conflict detector's tag is never a gate verdict, even with a custom vocabulary"
+        );
     }
 
     /// Task 2.4: repeated failures accumulate cycles, and a terminal PASS
