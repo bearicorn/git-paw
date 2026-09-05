@@ -173,6 +173,35 @@ and retry. (The guard can be disabled repo-wide via
 `[supervisor] strict_branch_guard = false`, but the post-commit detection
 still reports any mismatch to the supervisor.)
 
+### Worktree-environment orientation
+
+A fresh worktree can look broken in ways that are actually expected policy,
+not a misconfiguration. Recognise these conditions and adapt instead of
+burning budget diagnosing them:
+
+- **Install artifacts are gitignored.** Your worktree's per-stack install
+  artifacts (dependency directories, build/restore caches) are absent from
+  the checkout by design — they are gitignored, and an operator-configured
+  worktree `on_create` hook may already have provisioned them before your
+  CLI even started. The repo-root copy is not writable from your worktree,
+  so do **NOT** reach for it or symlink it in. If the artifacts are
+  genuinely missing, run your stack's install/restore step in your own
+  worktree — this is expected first-run setup, not something to diagnose
+  further.
+- **FS-confinement is policy, not a broken machine.** If your worktree is
+  FS-confined by an operator-configured sandbox, writes are permitted inside
+  your worktree (and the shared `.git`, your CLI's caches, `TMPDIR`) and
+  denied everywhere else (`$HOME`, the repo root, `.git/hooks` /
+  `.git/config` / `.git/info/exclude`). An `Operation not permitted` on a
+  path outside your worktree is the sandbox doing its job, not a fault — do
+  **NOT** probe it with `xattr` / `id` / `ls -lO@` / write-probes. Adapt
+  rather than probe: work inside your worktree instead.
+- **Some setuid binaries cannot exec under a sandbox.** `ps`, for example,
+  fails with `operation not permitted` because the kernel refuses to exec a
+  setuid-root binary inside a sandbox. This is expected and not fixable, and
+  it is not a symptom of anything else being wrong — everyday tools (`git`
+  and your stack's toolchain) keep working normally.
+
 ### Memory isolation — persistent artifacts live in your worktree
 
 Every persistent artifact you create — memory files, notes, scratch state,

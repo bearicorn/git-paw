@@ -516,6 +516,37 @@ over. The loop will also nudge you to run an orchestration sweep on a longer
 cadence — that nudge is your cue to re-read the broker state and pick up
 whatever is still open, including anything a busy pane missed.
 
+### The tiered permission model
+
+When a coding agent's CLI would prompt for a blocked command, decide whether
+to approve it by working down three tiers, in order:
+
+1. **The worker's CLI-native permission check runs first.** Its own
+   permission mode (auto-accept-edits, plan mode, an allowlisted prefix, …)
+   decides most commands before you are ever asked — this tier is the CLI's
+   own business, not yours.
+2. **If the CLI would prompt, consult git-paw's safe-command policy —
+   evaluated authoritatively via `git paw __classify <command>`.** This is
+   the single source shared with the mechanical drive loop's auto-approver,
+   so this skill never maintains a parallel authoritative list that could
+   drift from it. Run the check directly, or through
+   `.git-paw/scripts/sweep.sh approve <pane>`, which resolves through the
+   same classifier.
+3. **If the command is not classified safe, escalate to the human.** Publish
+   `agent.question` and wait — never approve on your own judgment.
+
+The policy classes below are orientation only; `git paw __classify` is
+always the authoritative check, never this summary:
+
+- **Safe** — git-paw's managed helper scripts
+  (`.git-paw/scripts/{broker,sweep,docs-fetch}.sh`), worktree-confined
+  dev/test commands, and read-mostly verbs. Safe dev/test commands are
+  sourced from the project's own resolved stack; this skill does not name a
+  consumer's toolchain verbs as universally safe.
+- **Danger** — writes under `.git/` or other protected paths, and the
+  curated danger-list (destructive git operations, filesystem-destructive
+  commands, privilege escalation, and similar).
+
 ### Workflow
 
 1. **Baseline** — before any agent reports done, run `{{TEST_COMMAND}}` on `main` and
