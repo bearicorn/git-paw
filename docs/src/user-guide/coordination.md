@@ -142,6 +142,30 @@ The boot block includes instructions for proper paste handling, particularly the
 - **Supervisor Visibility**: Questions and blockers surface to the dashboard promptly
 - **Audit Trail**: All boot operations are logged in the broker log
 
+## Worktree Environment
+
+A fresh worktree surfaces a few conditions that look broken but are actually
+expected policy. The bundled coordination skill briefs agents to recognise
+them and adapt rather than spend budget diagnosing a non-bug:
+
+- **Gitignored install artifacts.** Per-stack install artifacts (dependency
+  directories, build/restore caches) are absent from a fresh checkout by
+  design and may already be provisioned by an operator-configured worktree
+  `on_create` hook before the agent's CLI starts. Agents are told not to
+  reach for the repo-root copy or symlink it in, and to run their stack's
+  install step themselves only when the artifacts are genuinely missing.
+- **FS-confinement is policy, not a fault.** When a worktree is FS-confined
+  by an operator-configured sandbox, an `Operation not permitted` on a path
+  outside the worktree is the sandbox working as intended. Agents are told
+  to adapt rather than probe it (`xattr`, `id`, `ls -lO@`, write-probes) and
+  to keep working inside their worktree.
+- **Setuid binaries under a sandbox.** Some setuid-root system binaries —
+  `ps` is the canonical example — cannot exec inside a sandbox. This is
+  expected and not fixable, and does not indicate anything else is wrong.
+
+This orientation is stack-agnostic: it never names a specific
+package-manager invocation, referring instead to "the stack's install step."
+
 ## Memory Isolation
 
 Coding agents are briefed (via the bundled coordination skill) that their

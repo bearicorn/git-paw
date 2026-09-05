@@ -526,6 +526,31 @@ normalises a trailing `; echo …$?` / `; RC=$?` probe and a trailing
 own permission whitelisting is not, so a wrapped command still re-prompts the
 agent's CLI. Run them bare.
 
+## The tiered permission model
+
+The bundled supervisor skill teaches a three-tier model for deciding whether
+to approve a coding agent's blocked command:
+
+1. The worker's own CLI-native permission check runs first — most commands
+   never reach a prompt at all.
+2. If the CLI does prompt, the supervisor consults git-paw's safe-command
+   policy, evaluated authoritatively via the hidden `git paw __classify`
+   subcommand — the same classifier the mechanical drive loop's
+   auto-approver uses (see
+   [Auto-approve classification](#auto-approve-classification) below for the
+   full decision order). The skill summarises the policy classes for
+   orientation — safe (git-paw's managed helper scripts, worktree-confined
+   dev/test commands, read-mostly verbs) and danger (writes under `.git/` or
+   protected paths, the curated danger-list) — but never maintains its own
+   parallel allowlist that could drift from the classifier.
+3. Anything `git paw __classify` does not mark safe escalates to the human.
+
+The bundled skill (`assets/agent-skills/supervisor.md`, "The tiered
+permission model") is the authoritative source for the exact prose; this
+section only summarises it. See
+[Auto-approve classification](#auto-approve-classification) for the
+classifier's full, current decision order.
+
 ## Auto-approve classification
 
 When `[supervisor.auto_approve]` is enabled, the poll loop classifies each
