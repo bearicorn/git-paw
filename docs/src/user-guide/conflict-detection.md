@@ -108,6 +108,15 @@ path and the owning change. When
 supervisor inbox also receives a follow-up `agent.question` so a human
 can decide whether to override the boundary or block the work.
 
+**Exemption.** The shared spec-task-tracking artifact — the tasks file
+git-paw directs every agent to update with its own checkbox (a Spec Kit
+`specs/<feature>/tasks.md` or the OpenSpec `tasks.md`) — is exempt from
+ownership-violation detection. git-paw's own writeback protocol has every
+agent tick its own line in that single shared file, so a writeback there
+is expected coordination, not a collision. The exemption only covers that
+designated task-tracking artifact; ownership violations on source files
+are still reported.
+
 ## The `[conflict-detector]` Tag
 
 Every auto-emitted `agent.feedback` from the detector starts its `errors`

@@ -388,6 +388,20 @@ fn is_managed_bookkeeping_path(path: &str) -> bool {
     is_managed_path(Path::new("."), path)
 }
 
+/// Returns `true` when `path` is the shared spec-task-tracking artifact —
+/// the tasks file git-paw directs every agent to update with its own
+/// checkbox (a Spec Kit `specs/<feature>/tasks.md` or the `OpenSpec`
+/// `tasks.md`). git-paw's writeback protocol has every agent tick its own
+/// line in that single shared file, so a writeback there is expected
+/// coordination, not a collision, and is excluded from
+/// [`ConflictTracker::ownership_violations`]. Both spec backends name the
+/// file identically, so a filename match identifies it without needing the
+/// per-agent spec path or filesystem access; ownership detection on every
+/// other file, including a real source-file collision, is unaffected.
+fn is_shared_task_tracking_path(path: &str) -> bool {
+    Path::new(path).file_name().and_then(|f| f.to_str()) == Some("tasks.md")
+}
+
 /// Lex-ordered agent-id pair used as the dedup key for forward
 /// conflicts and as part of the in-flight-pair key.
 fn ordered_pair(a: &str, b: &str) -> (String, String) {
@@ -628,6 +642,11 @@ impl ConflictTracker {
     /// owner_y_id)` tuples — files in `x_id`'s `current_files` that lie
     /// outside `x_id`'s own intent (or `x_id` has no intent) and inside
     /// some other agent's active non-expired intent.
+    ///
+    /// The shared spec-task-tracking artifact (see
+    /// [`is_shared_task_tracking_path`]) is exempt: git-paw's own writeback
+    /// protocol has every agent tick its own line there, so a writeback is
+    /// expected coordination rather than a collision.
     #[must_use]
     pub fn ownership_violations(&self, x_id: &str) -> Vec<(String, String)> {
         let Some(x_files) = self.current_files.get(x_id) else {
@@ -638,6 +657,9 @@ impl ConflictTracker {
         let mut sorted_files: Vec<&String> = x_files.iter().collect();
         sorted_files.sort();
         for file in sorted_files {
+            if is_shared_task_tracking_path(file) {
+                continue;
+            }
             if x_intent.is_some_and(|r| r.claims_path(file)) {
                 continue;
             }
@@ -1465,6 +1487,21 @@ mod tests {
         assert!(t.ownership_violations("feat-y").is_empty());
     }
 
+    #[test]
+    fn tracker_ownership_violations_exempts_shared_tasks_file() {
+        let mut t = fresh();
+        let now = Instant::now();
+        t.insert_intent(
+            "feat-x",
+            nfi(&["specs/001/tasks.md"]),
+            "x".into(),
+            ttl_secs(60),
+            now,
+        );
+        t.update_status("feat-y", files(&["specs/001/tasks.md"]));
+        assert!(t.ownership_violations("feat-y").is_empty());
+    }
+
     // ====================================================================
     // Detector behavior tests (task 4)
     // ====================================================================
@@ -1909,6 +1946,42 @@ mod tests {
             &state,
             &mut t,
             &status_msg("feat-y", &["src/a.rs"]),
+            &cfg,
+            now,
+        );
+        assert!(supervisor_feedbacks_in_inbox(&state, "feat-y").is_empty());
+        assert!(supervisor_questions(&state).is_empty());
+    }
+
+    #[test]
+    fn detector_ownership_shared_tasks_file_no_violation() {
+        let state = fresh_state();
+        let mut t = ConflictTracker::new();
+        delivery::publish_message(&state, &status_msg("feat-x", &[]));
+        delivery::publish_message(&state, &status_msg("feat-y", &[]));
+        let now = Instant::now();
+        let cfg = ConflictConfig {
+            warn_on_intent_overlap: false,
+            ..ConflictConfig::default()
+        };
+        process_message(
+            &state,
+            &mut t,
+            &intent_msg("feat-x", &["specs/001/tasks.md"], "x", 600),
+            &cfg,
+            now,
+        );
+        process_message(
+            &state,
+            &mut t,
+            &intent_msg("feat-y", &["src/b.rs"], "y", 600),
+            &cfg,
+            now,
+        );
+        process_message(
+            &state,
+            &mut t,
+            &status_msg("feat-y", &["specs/001/tasks.md"]),
             &cfg,
             now,
         );
