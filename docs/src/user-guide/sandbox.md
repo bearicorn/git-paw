@@ -71,12 +71,22 @@ scoped set:
   (subpath (param "CLIHOME"))            ;; the CLI's own config/auth/cache
   (subpath (param "CARGOHOME"))          ;; toolchain cache (stack-specific)
   (regex #"^/private/tmp/claude-")       ;; the CLI's per-session temp/cwd
+  (subpath "/private/tmp")               ;; shell heredocs (zsh writes /private/tmp/zsh*)
   (literal "/dev/null") (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$"))
 ;; Close the git-persistence gap (see below):
 (deny file-write*
   (subpath (param "GITHOOKS"))
   (literal (param "GITCONFIG")))
 ```
+
+`/private/tmp` must be writable, not just `$TMPDIR` and the CLI's per-session
+prefix: `zsh` writes heredoc bodies to `/private/tmp/zsh*` while building the
+command it's about to run, so the standard multi-line commit idiom —
+`git commit -m "$(cat <<'EOF' … EOF)"` — hits `Operation not permitted`
+without this grant. `/private/tmp` is already world-writable and holds no
+secrets, so this is a write-only convenience grant; it does not change the
+read-confidentiality tiers below (see
+[Confidentiality hardening](#confidentiality-hardening)).
 
 ## Linux / WSL (`bwrap`)
 
@@ -104,6 +114,11 @@ exec bwrap \
 `bwrap` needs unprivileged user namespaces; some hardened kernels disable them —
 hence the `command -v bwrap` degrade line. `sandbox-exec` is deprecated but
 present on every macOS; both are pragmatic, not stable contracts.
+
+The `--bind "${TMPDIR:-/tmp}" "${TMPDIR:-/tmp}"` line already covers shell
+heredocs on Linux — `zsh` writes heredoc bodies under `$TMPDIR` (or `/tmp` when
+unset), and both are bound writable, so the `git commit -m "$(cat <<'EOF' …
+EOF)"` idiom works here without an extra grant.
 
 ## The writable set to get right
 

@@ -86,10 +86,12 @@ fn sandbox_chapter_covers_the_required_setup() {
             "PATH",         // launch-by-name requirement
             ".git/hooks",   // persistence gap
             ".git/config",
-            "Keychain",  // macOS credential refresh
-            "toolchain", // stack-specific caches
-            "~/.ssh",    // confidentiality: safe to deny
-            "does not",  // honest non-guarantee framing
+            "Keychain",     // macOS credential refresh
+            "toolchain",    // stack-specific caches
+            "~/.ssh",       // confidentiality: safe to deny
+            "does not",     // honest non-guarantee framing
+            "/private/tmp", // heredoc temp-dir grant
+            "heredoc",      // why the grant is required
         ],
     );
     assert!(
