@@ -325,9 +325,12 @@ fn attach_or_print_hint(session_name: &str) -> Result<(), PawError> {
 ///   no-pointer decision.)
 /// - `SpecBackendKind::Markdown` → read the sidecar (which carries the full
 ///   spec body), then locate sibling artifacts under `openspec/changes/<id>/`.
-/// - `SpecBackendKind::SpecKit` → falls through to the same sidecar pointer
-///   as `Markdown`. A `/speckit:apply`-style slash command may land later;
-///   this change does not pre-empt its shape.
+/// - `SpecBackendKind::SpecKit` → read the sidecar only. Unlike `Markdown`,
+///   the Spec Kit decomposition (`speckit::build_prompt`) already embeds the
+///   feature spec, implementation plan, and task phase inline, so there is
+///   no `openspec/changes/<id>/` (or any other) sibling directory to point
+///   at — naming one would send the agent down a path that does not exist
+///   under Spec Kit (speckit-spec-path-pointer).
 ///
 /// The match SHALL be exhaustive over `SpecBackendKind` (no `_ =>`
 /// catch-all); the Rust compiler forces a decision for any new variant.
@@ -343,9 +346,11 @@ fn attach_or_print_hint(session_name: &str) -> Result<(), PawError> {
 /// for the worktree before the resulting prompt is injected. The prompt's
 /// guidance is non-actionable if the sidecar is missing.
 ///
-/// When a spec is associated with the branch, the prompt includes the spec
-/// ID so the agent can locate sibling artifacts (proposal, design, specs,
-/// tasks) under `openspec/changes/<id>/`. When no spec is associated, the
+/// When a spec is associated with the branch, `OpenSpec` and `Markdown`
+/// entries embed the spec ID so the agent can locate sibling artifacts
+/// (proposal, design, specs, tasks) under `openspec/changes/<id>/`; `SpecKit`
+/// and `Superpowers` entries need no such pointer since their sidecar
+/// already carries the full assignment. When no spec is associated, the
 /// prompt is the default fallback that points only at the sidecar.
 pub(crate) fn build_task_prompt(spec_entry: Option<&git_paw::specs::SpecEntry>) -> String {
     use git_paw::agents::SIDECAR_REL_PATH;
@@ -357,12 +362,18 @@ pub(crate) fn build_task_prompt(spec_entry: Option<&git_paw::specs::SpecEntry>) 
                  coordination rules — then run /opsx:apply {id}.",
                 id = s.id,
             ),
-            SpecBackendKind::Markdown | SpecBackendKind::SpecKit => format!(
+            SpecBackendKind::Markdown => format!(
                 "Begin your assigned task. Read {SIDECAR_REL_PATH} first — it carries the \
                  project rules, your full spec, and your assignment. Additional artifacts \
                  (proposal, design, specs, tasks) live under openspec/changes/{id}/ — read \
                  them all before starting.",
                 id = s.id,
+            ),
+            SpecBackendKind::SpecKit => format!(
+                "Begin your assigned task. Read {SIDECAR_REL_PATH} first — it already \
+                 carries the project rules and your full Spec Kit assignment (feature \
+                 spec, implementation plan, and task phase) embedded inline; no other \
+                 artifact directory is needed to start."
             ),
             SpecBackendKind::Superpowers => format!(
                 "Begin your assigned task. Read {SIDECAR_REL_PATH} first — it carries the \
@@ -1915,6 +1926,33 @@ mod tests {
         assert!(
             !prompt.contains("## 1. Struct definitions"),
             "spec body's first heading MUST NOT leak into the prompt, got: {prompt}"
+        );
+    }
+
+    // Maps to scenario "Spec Kit doctrine names the Spec Kit spec location"
+    // from speckit-spec-path-pointer: the SpecKit arm of `build_task_prompt`
+    // must not equate SpecKit with the OpenSpec artifact layout the way the
+    // Markdown arm does.
+    #[test]
+    fn build_task_prompt_speckit_does_not_reference_openspec_changes_path() {
+        use git_paw::specs::{SpecBackendKind, SpecEntry};
+        let entry = SpecEntry {
+            id: "user-auth-T009".to_string(),
+            backend: SpecBackendKind::SpecKit,
+            branch: "task/x".to_string(),
+            cli: None,
+            prompt: String::new(),
+            owned_files: None,
+        };
+        let prompt = build_task_prompt(Some(&entry));
+        assert!(
+            prompt.contains(git_paw::agents::SIDECAR_REL_PATH),
+            "Spec Kit task prompt should still point at the sidecar, got: {prompt}"
+        );
+        assert!(
+            !prompt.contains("openspec/changes/"),
+            "Spec Kit task prompt must not direct the worker to the nonexistent \
+             openspec/changes/ path, got: {prompt}"
         );
     }
 

@@ -14,3 +14,13 @@ The rendered spec-path doctrine (the `SPEC_PATH_DOCTRINE` skill substitution) SH
 
 - **WHEN** the spec-path doctrine is rendered for an OpenSpec backend
 - **THEN** it SHALL still name the OpenSpec `openspec/changes/<change-name>/` path
+
+### Requirement: Spec Kit boot task-prompt does not point at the OpenSpec artifacts path
+
+The per-agent task prompt built by `build_task_prompt` for a `SpecBackendKind::SpecKit` entry SHALL NOT direct the worker to an `openspec/changes/<id>/` sibling directory — the Spec Kit decomposition already embeds the feature spec, implementation plan, and task phase inline in the sidecar, so no such directory exists to read. The `Markdown` backend's task prompt is unaffected.
+
+#### Scenario: Spec Kit task prompt does not reference the OpenSpec artifacts path
+
+- **WHEN** the per-agent task prompt is built for a `SpecBackendKind::SpecKit` entry
+- **THEN** it SHALL still point the agent at the gitignored sidecar
+- **AND** it SHALL NOT contain `openspec/changes/`
