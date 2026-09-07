@@ -28,15 +28,18 @@ cheap worker is the most likely to chase the dead path.
 
 ## Impact
 
-- **Code:** `src/skills.rs` `render_spec_path_doctrine` — add a `SpecBackendKind::SpecKit`
-  arm naming `specs/<feature>/` (or the sidecar). **`SpecBackendKind` variant-ripple
-  checklist applies** — this change is scoped to the doctrine rendering, but grep
+- **Code:** `src/skills.rs` `render_spec_path_doctrine` already names `.specify/specs/<feature>/`
+  for `SpecBackendKind::SpecKit` (pre-existing, unrelated to this change — task 1.1 is a
+  no-op confirmation). **`SpecBackendKind` variant-ripple checklist applies** — grepping
   `SpecBackendKind::SpecKit` across `src/` (`render_spec_path_doctrine`, `build_task_prompt`,
-  `mcp/query/specs.rs`, `backend_for_type` in `specs/mod.rs`) to confirm no other site
-  silently equates SpecKit with the OpenSpec path. No variant is added or removed.
-- **Enum-variant ripple:** touches `SpecBackendKind` match arms (doctrine only); no
-  variant set change.
-- **Backward compatibility:** OpenSpec / Markdown / Superpowers doctrine is unchanged;
-  additive SpecKit arm.
+  `mcp/query/specs.rs`, `backend_for_type` in `specs/mod.rs`) surfaced the actual bug in
+  `build_task_prompt` (`src/main.rs`): it grouped SpecKit with `Markdown` and claimed sibling
+  artifacts live under `openspec/changes/<id>/`, the nonexistent path this proposal's "Why"
+  describes. Fixed with a dedicated SpecKit arm pointing at the sidecar only. No variant is
+  added or removed.
+- **Enum-variant ripple:** touches `SpecBackendKind` match arms in both `render_spec_path_doctrine`
+  (unchanged) and `build_task_prompt` (new dedicated arm); no variant set change.
+- **Backward compatibility:** OpenSpec / Markdown / Superpowers doctrine and task prompts are
+  unchanged; additive SpecKit arm in `build_task_prompt`.
 - **Docs:** internal boot prompt — no user-facing doc; the doctrine test gains a SpecKit
   case.

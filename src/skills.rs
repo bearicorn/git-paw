@@ -3002,6 +3002,10 @@ mod tests {
             out.to_lowercase().contains("checklist"),
             "Spec Kit doctrine should reference the checklist convention; got: {out}"
         );
+        assert!(
+            !out.contains("openspec/changes/"),
+            "Spec Kit doctrine must not direct the worker to the nonexistent openspec/changes/ path; got: {out}"
+        );
     }
 
     #[test]
