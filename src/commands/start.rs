@@ -29,8 +29,9 @@ use super::helpers::{
 use super::recover::recover_session;
 use super::supervisor::cmd_supervisor;
 use crate::{
-    SpecMode, apply_spec_mode, attach_or_print_hint, invalidate_if_stale, resolve_submit_delay_ms,
-    submit_prompt_to_pane, write_repo_discovery_file,
+    SpecMode, apply_spec_mode, attach_or_print_hint, invalidate_if_stale,
+    reattach_active_session_or_refuse, resolve_submit_delay_ms, submit_prompt_to_pane,
+    write_repo_discovery_file,
 };
 
 /// Smart start: reattach if active, recover if stale, launch fresh if new.
@@ -71,8 +72,7 @@ pub(crate) fn cmd_start(
                 return restart_from_pause(&repo_root, existing);
             }
             SessionStatus::Active => {
-                println!("Reattaching to session '{}'...", existing.session_name);
-                return attach_or_print_hint(&existing.session_name);
+                return reattach_active_session_or_refuse(&existing.session_name);
             }
             SessionStatus::Stopped => {
                 println!("Recovering session '{}'...", existing.session_name);
@@ -389,8 +389,7 @@ pub(crate) fn cmd_start_with_specs(
                 return restart_from_pause(&repo_root, existing);
             }
             SessionStatus::Active => {
-                println!("Reattaching to session '{}'...", existing.session_name);
-                return attach_or_print_hint(&existing.session_name);
+                return reattach_active_session_or_refuse(&existing.session_name);
             }
             SessionStatus::Stopped => {
                 println!("Recovering session '{}'...", existing.session_name);
@@ -691,7 +690,7 @@ fn launch_spec_session(
 /// client. Skips worktree creation, CLI spawning, and boot-prompt
 /// injection — coding-agent panes are already running and retain their
 /// in-memory conversation state.
-fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result<(), PawError> {
+pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result<(), PawError> {
     tmux::ensure_tmux_installed()?;
 
     let dashboard_index = existing.dashboard_pane.unwrap_or(0);

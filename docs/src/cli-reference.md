@@ -71,7 +71,7 @@ git paw init
 
 ## `git paw start`
 
-Smart start: reattaches if a session is active, recovers if stopped/crashed, or launches a new interactive session.
+Smart start: reattaches if a session is active, recovers if stopped/crashed, or launches a new interactive session. Reattach is checked before anything else — including entering supervisor mode — so re-running `start` against a repository that already has a live session never forks a second, parallel one; see [Reattaching instead of forking](user-guide/session-lifecycle.md#reattaching-instead-of-forking).
 
 ```
 Usage: git-paw start [OPTIONS]

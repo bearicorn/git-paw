@@ -275,6 +275,15 @@ launches the dashboard pane and per-spec agent panes, and starts the supervisor
 CLI in your foreground terminal — same supervisor architecture as
 `--branches`-driven sessions, just with branches discovered from specs.
 
+The [CLI Resolution](#cli-resolution) chain above applies identically here —
+`--supervisor` never bypasses or alters it. In particular, `default_spec_cli`
+is honoured for a spec-driven worker pane exactly as it is without
+`--supervisor`, so a `[clis.<name>]` sandbox pinned via `default_spec_cli`
+cannot be silently swapped for a different CLI just because the launch went
+through the supervisor flow. `git paw doctor` also reports the effective
+spec-worker CLI and warns if a configured `default_spec_cli` is never
+actually reachable by any discovered spec — see [Doctor](doctor.md).
+
 ```bash
 # Spec-driven session with supervisor watching
 git paw start --from-all-specs --supervisor

@@ -34,8 +34,15 @@ fn tmux_available() -> bool {
 fn write_supervisor_specs_config(repo: &std::path::Path) {
     let paw_dir = repo.join(".git-paw");
     fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    // `default_spec_cli` is required (not just `default_cli`) so the branch
+    // lacking `paw_cli` resolves without an interactive prompt: since GP-10,
+    // `--supervisor --specs` threads the same 5-level chain the
+    // non-supervisor `--specs` path uses, and that chain's `default_cli`
+    // tier only pre-selects in the (PTY-only) picker rather than skipping it
+    // — see `cli_resolution_integration.rs`'s module docs.
     let config = r#"
 default_cli = "echo"
+default_spec_cli = "echo"
 
 [specs]
 type = "openspec"
@@ -44,6 +51,9 @@ dir = "specs"
 [supervisor]
 enabled = true
 cli = "echo"
+
+[clis.echo]
+command = "echo"
 "#;
     fs::write(paw_dir.join("config.toml"), config).expect("write config");
 }
