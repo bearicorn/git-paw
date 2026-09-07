@@ -232,6 +232,22 @@ pub struct SpecSystemProbe {
     pub scan_error: Option<String>,
 }
 
+/// Spec-driven CLI-resolution facts (GP-10): whether `default_spec_cli` is
+/// actually reachable by the discovered specs, independent of which command
+/// (`start --specs` or `--supervisor --specs`) launches them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpecCliProbe {
+    /// The configured `default_spec_cli`, if any.
+    pub configured_default_spec_cli: Option<String>,
+    /// Number of specs discovered (mirrors [`SpecSystemProbe::spec_count`]).
+    pub discovered_spec_count: usize,
+    /// The CLI each discovered spec would resolve to — its own `paw_cli`
+    /// override when set, else `default_spec_cli` (falling back to
+    /// `default_cli`) — deduplicated in first-seen order. Empty when no
+    /// specs are discovered.
+    pub resolved_clis: Vec<String>,
+}
+
 /// State of one bundled helper script on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptProbe {
@@ -340,6 +356,8 @@ pub struct Probes {
     pub config: ConfigProbe,
     /// Spec-system facts.
     pub spec_system: SpecSystemProbe,
+    /// Spec-driven CLI-resolution facts.
+    pub spec_cli: SpecCliProbe,
     /// Bundled-script facts.
     pub bundled_scripts: BundledScriptsProbe,
     /// Broker facts.
@@ -635,6 +653,63 @@ pub fn check_spec_system(probe: &SpecSystemProbe) -> Vec<CheckResult> {
     )]
 }
 
+/// Spec-worker CLI check (GP-10): surfaces the CLI spec-driven worker panes
+/// would resolve to, and warns when a configured `default_spec_cli` is never
+/// actually reachable by any discovered spec — the silent divergence that let
+/// `--supervisor --specs` launch an unexpected (potentially unsandboxed) CLI
+/// while doctor stayed green.
+///
+/// Degrades to informational rather than warning when there is nothing to
+/// verify against: no `default_spec_cli` configured, or no specs discovered.
+#[must_use]
+pub fn check_spec_cli(probe: &SpecCliProbe) -> CheckResult {
+    let Some(default_spec_cli) = &probe.configured_default_spec_cli else {
+        return CheckResult::ok(
+            GROUP_SPEC_SYSTEM,
+            "spec-worker CLI",
+            "no default_spec_cli configured — spec workers fall back to default_cli \
+             or the interactive picker",
+        );
+    };
+
+    if probe.discovered_spec_count == 0 {
+        return CheckResult::ok(
+            GROUP_SPEC_SYSTEM,
+            "spec-worker CLI",
+            format!(
+                "default_spec_cli = \"{default_spec_cli}\" (no specs discovered to verify against)"
+            ),
+        );
+    }
+
+    if probe
+        .resolved_clis
+        .iter()
+        .any(|cli| cli == default_spec_cli)
+    {
+        CheckResult::ok(
+            GROUP_SPEC_SYSTEM,
+            "spec-worker CLI",
+            format!(
+                "spec-driven worker panes resolve to \"{default_spec_cli}\", matching default_spec_cli"
+            ),
+        )
+    } else {
+        CheckResult::warn(
+            GROUP_SPEC_SYSTEM,
+            "spec-worker CLI",
+            format!(
+                "default_spec_cli = \"{default_spec_cli}\" is configured, but discovered specs \
+                 resolve to {} instead",
+                probe.resolved_clis.join(", ")
+            ),
+            "every discovered spec pins its own `paw_cli`, overriding default_spec_cli — \
+             confirm this is intentional, or drop the per-spec overrides so default_spec_cli \
+             applies",
+        )
+    }
+}
+
 /// Bundled-script checks: each helper present, executable, and matching the
 /// running binary's embedded copy, plus the Python 3 interpreter they need.
 #[must_use]
@@ -909,6 +984,7 @@ pub fn run_checks(probes: &Probes) -> Vec<CheckResult> {
     checks.extend(check_clis(&probes.clis));
     checks.extend(check_config(&probes.config));
     checks.extend(check_spec_system(&probes.spec_system));
+    checks.push(check_spec_cli(&probes.spec_cli));
     checks.extend(check_bundled_scripts(&probes.bundled_scripts));
     checks.extend(check_broker(&probes.broker));
     checks.extend(check_supervisor(&probes.supervisor));
@@ -1133,6 +1209,7 @@ fn collect_probes(repo_root: &Path, environment: EnvironmentProbe) -> Probes {
         clis: probe_clis(&config),
         config: config_probe,
         spec_system: probe_spec_system(&config, repo_root),
+        spec_cli: probe_spec_cli(&config, repo_root),
         bundled_scripts: probe_bundled_scripts(repo_root),
         broker: probe_broker(&config),
         supervisor: probe_supervisor(&config, repo_root),
@@ -1203,6 +1280,44 @@ fn probe_spec_system(config: &PawConfig, repo_root: &Path) -> SpecSystemProbe {
             spec_count: None,
             scan_error: Some(e.to_string()),
         },
+    }
+}
+
+/// Resolves the CLI each discovered spec would launch with — its own
+/// `paw_cli` when set, else `default_spec_cli` (falling back to
+/// `default_cli`) — mirroring the non-interactive tiers of the spec-driven
+/// resolution chain (`--cli` and the interactive picker do not apply to a
+/// passive `doctor` run). A scan failure or an unconfigured spec system
+/// yields no discovered specs, matching [`SpecSystemProbe`]'s behaviour.
+fn probe_spec_cli(config: &PawConfig, repo_root: &Path) -> SpecCliProbe {
+    let default = SpecCliProbe {
+        configured_default_spec_cli: config.default_spec_cli.clone(),
+        discovered_spec_count: 0,
+        resolved_clis: Vec::new(),
+    };
+    if crate::specs::resolved_spec_type(config, repo_root).is_none() {
+        return default;
+    }
+    let Ok(entries) = crate::specs::scan_specs(config, repo_root) else {
+        return default;
+    };
+    let fallback = config
+        .default_spec_cli
+        .clone()
+        .or_else(|| config.default_cli.clone());
+    let mut resolved_clis: Vec<String> = Vec::new();
+    for entry in &entries {
+        let Some(cli) = entry.cli.clone().or_else(|| fallback.clone()) else {
+            continue;
+        };
+        if !resolved_clis.contains(&cli) {
+            resolved_clis.push(cli);
+        }
+    }
+    SpecCliProbe {
+        discovered_spec_count: entries.len(),
+        resolved_clis,
+        ..default
     }
 }
 

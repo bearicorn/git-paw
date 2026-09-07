@@ -4,6 +4,30 @@ This chapter covers what `git paw start` does to your worktrees on each
 launch (or relaunch), and how to control its behaviour when the defaults
 don't fit.
 
+## Reattaching instead of forking
+
+Before creating anything, `git paw start` looks up whether the current
+repository already has a live session (matched by repository path, not by
+project/session name) and reattaches to it instead of launching a fresh
+one. This applies uniformly whether the session is a bare launch or a
+supervisor-mode one (`[supervisor] enabled = true` in config, or
+`--supervisor`) — a supervisor-enabled repo's bare `git paw start` still
+goes through the same guard before it ever reaches the supervisor
+auto-start flow.
+
+- **Interactively**, it attaches your terminal to the existing session —
+  identical to running `git paw attach`.
+- **Non-interactively** (no TTY — a script, a cron job, an automated
+  scanner), there is nothing to attach to. Rather than silently printing a
+  hint and exiting successfully — which an automated caller could mistake
+  for "a fresh session was launched" — `start` refuses with an actionable
+  error naming the live session and how to attach to it.
+
+The `-N` suffix (`paw-<project>-2`, `-3`, ...) is reserved for genuinely
+**distinct** repositories that happen to share a project name (their
+directory basename); it is never applied as a result of re-running `start`
+against a repository that already has a session running.
+
 ## Rebase on start
 
 Every `git paw start` rebases each existing agent branch onto the
@@ -30,10 +54,25 @@ Rebases that **don't** happen:
 - A brand-new branch (one git-paw creates via `git worktree add -b`
   during this launch) is not rebased. It's already at the current
   default-branch tip by construction.
-- If the repo has no `origin/HEAD` (a rare brand-new repo with no
-  remote), the rebase step errors out cleanly. Workaround: run with
-  `--no-rebase`, or push the default branch to `origin` and set
-  `origin/HEAD` first.
+
+### Resolving the default branch without `origin/HEAD`
+
+The rebase target is resolved by a single resolver shared by every launch
+path (`start`, `add`, and the rebase step itself), so `start` and a later
+resume can never disagree on which branch is "the default". It prefers
+`refs/remotes/origin/HEAD` (whatever your remote's default branch is —
+typically `main`); when that isn't set (a repository with local-only
+commits and no remote, or a remote whose HEAD was never configured), it
+falls back deterministically instead of aborting:
+
+1. A local `main` branch, if one exists.
+2. Otherwise a local `master` branch, if one exists.
+3. Otherwise the currently checked-out branch.
+
+This means a fresh launch and every subsequent resume resolve to the same
+default branch and neither aborts for a reason the other didn't hit —
+push the default branch to `origin` and run `git remote set-head origin
+<branch>` if you'd rather pin it explicitly than rely on the fallback.
 
 ## Opting out: `--no-rebase`
 

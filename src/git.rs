@@ -142,6 +142,15 @@ pub fn branch_slug(branch: &str) -> String {
 }
 
 /// Returns the name of the default branch (usually "main" or "master").
+///
+/// The single resolver every launch path (`start`, resume, `add`, and the
+/// rebase step) uses (GP-12), so none of them can disagree. Prefers
+/// `refs/remotes/origin/HEAD` when set; when it is absent — a repository
+/// with local commits but no configured remote HEAD — falls back
+/// deterministically instead of aborting: a local `main`, else a local
+/// `master`, else the checked-out branch. A launch that resolved a default
+/// branch once therefore resolves the same one on resume in the same
+/// repository state.
 pub fn default_branch(repo_root: &Path) -> Result<String, PawError> {
     default_branch_with(&RealCommandRunner, repo_root)
 }
@@ -159,21 +168,57 @@ pub(crate) fn default_branch_with(
         )
         .map_err(|e| PawError::BranchError(format!("failed to run git symbolic-ref: {e}")))?;
 
-    if !output.success {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(PawError::BranchError(format!(
-            "git symbolic-ref failed: {stderr}"
-        )));
+    if output.success {
+        let ref_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return match ref_name.strip_prefix("refs/remotes/origin/") {
+            Some(branch) => Ok(branch.to_string()),
+            None => Err(PawError::BranchError(format!(
+                "unexpected ref format: {ref_name}"
+            ))),
+        };
     }
 
-    let ref_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if let Some(branch) = ref_name.strip_prefix("refs/remotes/origin/") {
-        Ok(branch.to_string())
-    } else {
-        Err(PawError::BranchError(format!(
-            "unexpected ref format: {ref_name}"
-        )))
+    // origin/HEAD is not set. Fall back deterministically rather than
+    // aborting: a repository with local-only commits (no remote, or a
+    // remote whose HEAD was never configured) otherwise fails resume even
+    // though the first launch succeeded (GP-12).
+    if branch_exists_locally_with(runner, repo_root, "main")? {
+        return Ok("main".to_string());
     }
+    if branch_exists_locally_with(runner, repo_root, "master")? {
+        return Ok("master".to_string());
+    }
+    let checked_out = runner
+        .run("git", &["-C", &cwd, "symbolic-ref", "--short", "HEAD"])
+        .map_err(|e| PawError::BranchError(format!("failed to run git symbolic-ref: {e}")))?;
+    if checked_out.success {
+        let branch = String::from_utf8_lossy(&checked_out.stdout)
+            .trim()
+            .to_string();
+        if !branch.is_empty() {
+            return Ok(branch);
+        }
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(PawError::BranchError(format!(
+        "cannot resolve default branch: no origin/HEAD, no local main/master, \
+         and no checked-out branch ({stderr})"
+    )))
+}
+
+/// Whether `branch` exists as a local branch (`refs/heads/<branch>`).
+fn branch_exists_locally_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    branch: &str,
+) -> Result<bool, PawError> {
+    let cwd = repo_root.to_string_lossy();
+    let branch_ref = format!("refs/heads/{branch}");
+    let output = runner
+        .run("git", &["-C", &cwd, "rev-parse", "--verify", &branch_ref])
+        .map_err(|e| PawError::BranchError(format!("failed to run git rev-parse: {e}")))?;
+    Ok(output.success)
 }
 
 /// Returns the short name of the current branch (e.g., "main", "feat/add-auth").
@@ -1624,13 +1669,119 @@ mod tests {
                 matches!(&err, PawError::BranchError(m) if m.contains("unexpected ref format")),
                 "a ref outside refs/remotes/origin/ is not a default branch: {err:?}"
             );
+        }
 
+        #[test]
+        fn default_branch_still_honours_origin_head_when_present() {
+            // Scenario "origin/HEAD is still honoured when present": unchanged
+            // from prior behaviour — the fallback chain below is never consulted.
+            let fake = FakeCommandRunner::scripted(|_, args| match args {
+                [.., "symbolic-ref", "refs/remotes/origin/HEAD"] => {
+                    Ok(ok_with("refs/remotes/origin/main\n"))
+                }
+                _ => panic!("origin/HEAD present — no fallback call should run: {args:?}"),
+            });
+            assert_eq!(
+                super::super::default_branch_with(&fake, Path::new("/repo")).unwrap(),
+                "main"
+            );
+        }
+
+        #[test]
+        fn default_branch_falls_back_to_local_main_without_origin_head() {
+            // GP-12, scenario "Resolution succeeds without origin/HEAD": a
+            // repository with local commits and no configured remote HEAD
+            // resolves via the local `main` branch instead of aborting.
+            let fake = FakeCommandRunner::scripted(|_, args| match args {
+                [.., "symbolic-ref", "refs/remotes/origin/HEAD"] => Ok(fail_with(
+                    128,
+                    "fatal: ref refs/remotes/origin/HEAD is not a symbolic ref",
+                )),
+                [.., "rev-parse", "--verify", "refs/heads/main"] => Ok(ok_with("deadbeef\n")),
+                _ => panic!("unexpected call: {args:?}"),
+            });
+            assert_eq!(
+                super::super::default_branch_with(&fake, Path::new("/repo")).unwrap(),
+                "main"
+            );
+        }
+
+        #[test]
+        fn default_branch_resolves_identically_on_a_second_call_in_the_same_repo_state() {
+            // GP-12, scenario "First launch and resume resolve identically":
+            // a single resolver used by every launch path means two calls
+            // against the same repository state (first launch, then a later
+            // resume) can never disagree — proven here by calling it twice
+            // against the same origin/HEAD-absent state and asserting the
+            // same fallback branch both times, rather than the first call
+            // succeeding and a later one aborting.
+            let fake = FakeCommandRunner::scripted(|_, args| match args {
+                [.., "symbolic-ref", "refs/remotes/origin/HEAD"] => Ok(fail_with(
+                    128,
+                    "fatal: ref refs/remotes/origin/HEAD is not a symbolic ref",
+                )),
+                [.., "rev-parse", "--verify", "refs/heads/main"] => Ok(ok_with("deadbeef\n")),
+                _ => panic!("unexpected call: {args:?}"),
+            });
+            let first = super::super::default_branch_with(&fake, Path::new("/repo")).unwrap();
+            let second = super::super::default_branch_with(&fake, Path::new("/repo")).unwrap();
+            assert_eq!(first, "main");
+            assert_eq!(
+                first, second,
+                "a resume must resolve the same default branch as the first launch"
+            );
+        }
+
+        #[test]
+        fn default_branch_falls_back_to_local_master_when_main_is_absent() {
+            let fake = FakeCommandRunner::scripted(|_, args| match args {
+                [.., "symbolic-ref", "refs/remotes/origin/HEAD"] => {
+                    Ok(fail_with(128, "fatal: no origin/HEAD"))
+                }
+                [.., "rev-parse", "--verify", "refs/heads/main"] => {
+                    Ok(fail_with(128, "fatal: needed a single revision"))
+                }
+                [.., "rev-parse", "--verify", "refs/heads/master"] => Ok(ok_with("deadbeef\n")),
+                _ => panic!("unexpected call: {args:?}"),
+            });
+            assert_eq!(
+                super::super::default_branch_with(&fake, Path::new("/repo")).unwrap(),
+                "master"
+            );
+        }
+
+        #[test]
+        fn default_branch_falls_back_to_the_checked_out_branch_as_a_last_resort() {
+            let fake = FakeCommandRunner::scripted(|_, args| match args {
+                [.., "symbolic-ref", "refs/remotes/origin/HEAD"] => {
+                    Ok(fail_with(128, "fatal: no origin/HEAD"))
+                }
+                [
+                    ..,
+                    "rev-parse",
+                    "--verify",
+                    "refs/heads/main" | "refs/heads/master",
+                ] => Ok(fail_with(128, "fatal: needed a single revision")),
+                [.., "symbolic-ref", "--short", "HEAD"] => Ok(ok_with("feat/only-branch\n")),
+                _ => panic!("unexpected call: {args:?}"),
+            });
+            assert_eq!(
+                super::super::default_branch_with(&fake, Path::new("/repo")).unwrap(),
+                "feat/only-branch"
+            );
+        }
+
+        #[test]
+        fn default_branch_fails_when_no_fallback_resolves() {
+            // A detached HEAD with no local main/master and no origin/HEAD: the
+            // resolver has nothing left to try and reports it rather than
+            // returning an empty branch name.
             let no_head = FakeCommandRunner::failing(
                 "fatal: ref refs/remotes/origin/HEAD is not a symbolic ref",
             );
             let err = super::super::default_branch_with(&no_head, Path::new("/repo")).unwrap_err();
             assert!(
-                matches!(&err, PawError::BranchError(m) if m.contains("git symbolic-ref failed")),
+                matches!(&err, PawError::BranchError(m) if m.contains("cannot resolve default branch")),
                 "unexpected error: {err:?}"
             );
         }

@@ -57,6 +57,11 @@ fn every_non_ok_check_carries_a_remedy() {
             unknown_keys: vec!["bogus".into()],
         },
         spec_system: SpecSystemProbe::default(),
+        spec_cli: SpecCliProbe {
+            configured_default_spec_cli: Some("claude-oss".into()),
+            discovered_spec_count: 1,
+            resolved_clis: vec!["claude".into()],
+        },
         bundled_scripts: BundledScriptsProbe {
             scripts: vec![ScriptProbe {
                 name: "sweep.sh",
@@ -398,6 +403,58 @@ fn spec_system_check_grades_each_resolution_state() {
         scan_error: Some("specs directory does not exist".into()),
     });
     assert_eq!(named(&broken, "spec system").status, CheckStatus::Warn);
+}
+
+#[test]
+fn spec_cli_check_is_informational_without_a_configured_default_or_discovered_specs() {
+    let no_default = check_spec_cli(&SpecCliProbe {
+        configured_default_spec_cli: None,
+        discovered_spec_count: 3,
+        resolved_clis: vec!["claude".into()],
+    });
+    assert_eq!(no_default.status, CheckStatus::Ok);
+    assert!(no_default.remedy.is_none());
+
+    let no_specs = check_spec_cli(&SpecCliProbe {
+        configured_default_spec_cli: Some("claude-oss".into()),
+        discovered_spec_count: 0,
+        resolved_clis: Vec::new(),
+    });
+    assert_eq!(no_specs.status, CheckStatus::Ok);
+    assert!(no_specs.detail.contains("claude-oss"));
+}
+
+#[test]
+fn spec_cli_check_passes_when_default_spec_cli_is_reachable() {
+    // A spec without its own `paw_cli` resolves to `default_spec_cli`, so it
+    // appears in `resolved_clis` whenever at least one spec relies on the
+    // fallback — this is the common, healthy case.
+    let check = check_spec_cli(&SpecCliProbe {
+        configured_default_spec_cli: Some("claude-oss".into()),
+        discovered_spec_count: 2,
+        resolved_clis: vec!["claude-oss".into()],
+    });
+    assert_eq!(check.status, CheckStatus::Ok);
+    assert!(check.remedy.is_none());
+    assert!(check.detail.contains("claude-oss"));
+}
+
+#[test]
+fn spec_cli_check_warns_when_default_spec_cli_is_never_reached() {
+    // Every discovered spec pins its own `paw_cli` to something other than
+    // `default_spec_cli` — the configured default is dead config (GP-10: this
+    // is exactly the shape of the silent-divergence bug `--supervisor
+    // --specs` used to hit).
+    let check = check_spec_cli(&SpecCliProbe {
+        configured_default_spec_cli: Some("claude-oss".into()),
+        discovered_spec_count: 2,
+        resolved_clis: vec!["claude".into()],
+    });
+    assert_eq!(check.status, CheckStatus::Warn);
+    let remedy = check.remedy.as_deref().unwrap_or_default();
+    assert!(!remedy.trim().is_empty());
+    assert!(check.detail.contains("claude-oss"));
+    assert!(check.detail.contains("claude"));
 }
 
 // -- Bundled scripts ------------------------------------------------------

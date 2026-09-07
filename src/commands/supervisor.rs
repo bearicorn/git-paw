@@ -29,10 +29,12 @@ use git_paw::tmux;
 use super::helpers::{
     attach_session_logging, config_to_custom_defs, dashboard_command, to_interactive_cli,
 };
+use super::recover::recover_session;
+use super::start::restart_from_pause;
 use crate::{
     AttachContext, SpecMode, UNATTENDED_ENV, apply_spec_mode, attach_agent,
-    gate_pane_or_fail_on_dialog, resolve_submit_delay_ms, submit_prompt_to_pane,
-    write_repo_discovery_file,
+    gate_pane_or_fail_on_dialog, invalidate_if_stale, reattach_active_session_or_refuse,
+    resolve_submit_delay_ms, submit_prompt_to_pane, write_repo_discovery_file,
 };
 
 /// Loads the repo config from the current working directory and resolves
@@ -331,6 +333,42 @@ pub(crate) fn cmd_supervisor(
     no_rebase: bool,
     unattended: bool,
 ) -> Result<(), PawError> {
+    // Reattach guard (GP-13): a supervisor-enabled repo's `git paw start`
+    // dispatches straight here (see `resolve_dispatch_target`), bypassing
+    // `cmd_start`'s own existing-session check entirely. Without this, a
+    // re-invocation against a repository that already has a live session
+    // fell straight through to `resolve_session_name`, which — finding the
+    // base name already alive — forked a `-N`-suffixed parallel session
+    // instead of reattaching to the one already running.
+    let existing_session = session::find_session_for_repo(repo_root)?;
+    if !dry_run
+        && let Some(existing) = &existing_session
+        && !invalidate_if_stale(repo_root, existing)?
+    {
+        let effective = existing.effective_status(|name| {
+            matches!(
+                tmux::session_liveness_for(name, existing.created_at, existing.agent_pane_offset()),
+                tmux::SessionLiveness::Alive
+            )
+        });
+        match effective {
+            SessionStatus::Paused => {
+                println!(
+                    "Restarting paused session '{}' (broker + reattach)...",
+                    existing.session_name
+                );
+                return restart_from_pause(repo_root, existing);
+            }
+            SessionStatus::Active => {
+                return reattach_active_session_or_refuse(&existing.session_name);
+            }
+            SessionStatus::Stopped => {
+                println!("Recovering session '{}'...", existing.session_name);
+                return recover_session(repo_root, existing);
+            }
+        }
+    }
+
     // Fall back to a synthesized default when [supervisor] is absent.
     // `resolve_supervisor_mode` already prompts the user to opt in to
     // supervisor mode without forcing them to hand-author a [supervisor]
@@ -368,6 +406,13 @@ pub(crate) fn cmd_supervisor(
     //      subset / picker selection is honoured (the v0.6.0 dogfood fix).
     let mut spec_by_branch: std::collections::HashMap<String, git_paw::specs::SpecEntry> =
         std::collections::HashMap::new();
+    // Per-branch CLI resolved via the spec-driven 5-level priority chain
+    // (GP-10): populated only for spec-driven branches, so `--supervisor
+    // --specs` can no longer silently diverge from the non-supervisor
+    // `--specs` resolution (in particular, `default_spec_cli` is honoured
+    // instead of being bypassed by the `agent_cli` fallback below).
+    let mut spec_cli_overrides: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let branches: Vec<String> = if let Some(bs) = branches_flag {
         bs.to_vec()
     } else if matches!(spec_mode, SpecMode::None) {
@@ -402,6 +447,31 @@ pub(crate) fn cmd_supervisor(
                 "supervisor mode found no branches: pass --branches or define specs".to_string(),
             ));
         }
+
+        // Resolve the CLI per spec branch through the exact same chain
+        // `cmd_start_with_specs` uses (`interactive::resolve_cli_for_specs`):
+        // `--cli` > per-spec `paw_cli` > `default_spec_cli` > `default_cli`
+        // (picker) > full picker. Previously `--supervisor --specs` ignored
+        // this entirely and launched every worker with the single
+        // `agent_cli` fallback below — silently unsandboxed workers when
+        // `default_spec_cli` pinned a different CLI than `default_cli`.
+        let custom_defs = config_to_custom_defs(config);
+        let detected = detect::detect_clis(&custom_defs);
+        if detected.is_empty() {
+            return Err(PawError::NoCLIsFound);
+        }
+        let interactive_clis: Vec<interactive::CliInfo> =
+            detected.iter().map(to_interactive_cli).collect();
+        let prompter = interactive::TerminalPrompter;
+        let cli_mappings = interactive::resolve_cli_for_specs(
+            &specs,
+            cli_flag,
+            config,
+            &interactive_clis,
+            &prompter,
+        )?;
+        spec_cli_overrides.extend(cli_mappings);
+
         let mut out = Vec::with_capacity(specs.len());
         for spec in specs {
             out.push(spec.branch.clone());
@@ -421,9 +491,19 @@ pub(crate) fn cmd_supervisor(
     let supervisor_approval = supervisor_cfg
         .approval
         .unwrap_or(supervisor_cfg.agent_approval);
-    let agent_flags = config::resolve_approval_flags(&agent_cli, agent_approval, &config.clis);
     let supervisor_flags =
         resolve_supervisor_flags(&supervisor_cli, supervisor_approval, &config.clis);
+
+    // Resolves the CLI `branch` launches with: its spec-driven override when
+    // the priority chain resolved one (GP-10), else the session-wide
+    // `agent_cli` fallback (the `--branches` / bare-`--supervisor` path,
+    // which has no per-spec `paw_cli`/`default_spec_cli` to consult).
+    let effective_agent_cli = |branch: &str| -> String {
+        spec_cli_overrides
+            .get(branch)
+            .cloned()
+            .unwrap_or_else(|| agent_cli.clone())
+    };
 
     // Dry-run: print the plan and exit without touching the filesystem.
     if dry_run {
@@ -432,10 +512,20 @@ pub(crate) fn cmd_supervisor(
         } else {
             format!("{supervisor_cli} {supervisor_flags}")
         };
+        if let Some(existing) = &existing_session {
+            eprintln!(
+                "warning: session '{}' already exists — purge it before starting a new one\n",
+                existing.session_name
+            );
+        }
         println!("Dry run — supervisor session plan:\n");
         println!("  Session:    {session_name}");
         println!("  Supervisor: {supervisor_cmd}");
-        println!("  Agent CLI:  {agent_cli}");
+        if spec_cli_overrides.values().any(|cli| cli != &agent_cli) {
+            println!("  Agent CLI:  (resolved per branch, see below)");
+        } else {
+            println!("  Agent CLI:  {agent_cli}");
+        }
         if supervisor_approval == *agent_approval {
             println!("  Approval:   {agent_approval:?}");
         } else {
@@ -449,10 +539,12 @@ pub(crate) fn cmd_supervisor(
         println!();
         for branch in &branches {
             let wt = git::worktree_display_path(repo_root, branch, config.worktree_placement())?;
-            let cmd = if agent_flags.is_empty() {
-                agent_cli.clone()
+            let cli = effective_agent_cli(branch);
+            let flags = config::resolve_approval_flags(&cli, agent_approval, &config.clis);
+            let cmd = if flags.is_empty() {
+                cli
             } else {
-                format!("{agent_cli} {agent_flags}")
+                format!("{cli} {flags}")
             };
             println!("  {branch} \u{2192} {cmd} ({wt})");
         }
@@ -571,24 +663,33 @@ pub(crate) fn cmd_supervisor(
         .is_none_or(SupervisorConfig::strict_branch_guard);
     let gate_commands = supervisor_cfg.gate_commands();
     let worktree_runtime = config.worktree_runtime();
-    let attach_ctx = AttachContext {
-        repo_root,
-        project: &project,
-        broker_config: &broker_config,
-        agent_cli: &agent_cli,
-        agent_flags: &agent_flags,
-        coordination_template: coordination_template.as_ref(),
-        docs_fetch_template: docs_fetch_template.as_ref(),
-        gate_commands: &gate_commands,
-        session_backends: &session_backends,
-        inter_agent_rules_peers: Some(&branch_refs),
-        strict_guard,
-        no_rebase,
-        placement: config.worktree_placement(),
-        worktree_runtime: &worktree_runtime,
-    };
 
     for branch in &branches {
+        // Resolve this branch's own CLI (its spec-driven override, or the
+        // session-wide fallback) and its approval flags, then build a fresh
+        // context — a spec-driven session can launch a distinct CLI per
+        // branch (GP-10), so the context can no longer be shared verbatim
+        // across the loop.
+        let branch_cli = effective_agent_cli(branch);
+        let branch_flags =
+            config::resolve_approval_flags(&branch_cli, agent_approval, &config.clis);
+        let attach_ctx = AttachContext {
+            repo_root,
+            project: &project,
+            broker_config: &broker_config,
+            agent_cli: &branch_cli,
+            agent_flags: &branch_flags,
+            coordination_template: coordination_template.as_ref(),
+            docs_fetch_template: docs_fetch_template.as_ref(),
+            gate_commands: &gate_commands,
+            session_backends: &session_backends,
+            inter_agent_rules_peers: Some(&branch_refs),
+            strict_guard,
+            no_rebase,
+            placement: config.worktree_placement(),
+            worktree_runtime: &worktree_runtime,
+        };
+
         // Each agent takes the lowest slot not held by an already-attached
         // peer, so the port blocks in this session never overlap.
         let slot = git_paw::worktree_provision::allocate_slot(&worktree_entries);
@@ -707,8 +808,10 @@ pub(crate) fn cmd_supervisor(
     gate_pane_or_fail_on_dialog(&tmux_session.name, 0, &supervisor_pane.cli_command)?;
     submit_prompt_to_pane(&tmux_session.name, 0, &supervisor_prompt, supervisor_delay);
 
-    let agent_delay = resolve_submit_delay_ms(&agent_cli, config);
     for (idx, prompt) in agent_prompts.iter().enumerate() {
+        // Per-branch delay: a spec-driven session can resolve a distinct CLI
+        // per branch (GP-10), and each CLI's configured settle delay differs.
+        let agent_delay = resolve_submit_delay_ms(&effective_agent_cli(&branches[idx]), config);
         let pane_idx = git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET + idx;
         gate_pane_or_fail_on_dialog(&tmux_session.name, pane_idx, &agent_panes[idx].cli_command)?;
         submit_prompt_to_pane(&tmux_session.name, pane_idx, prompt, agent_delay);

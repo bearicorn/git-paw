@@ -305,6 +305,28 @@ fn attach_or_print_hint(session_name: &str) -> Result<(), PawError> {
     }
 }
 
+/// GP-13 reattach guard: called when a live session already exists for the
+/// repository, right before a fresh launch would otherwise reach
+/// `resolve_session_name` and fork a `-N`-suffixed parallel one.
+///
+/// Interactively, attaches to the existing session (identical to
+/// [`attach_or_print_hint`]'s interactive branch). Non-interactively there is
+/// no terminal to attach to, and silently printing a hint and exiting `Ok`
+/// would let an automated caller (a script, the drive loop, a scanner
+/// advancing a phase) believe a fresh launch happened when it did not — so
+/// this refuses with an actionable error instead.
+fn reattach_active_session_or_refuse(session_name: &str) -> Result<(), PawError> {
+    if !is_interactive_stdin() {
+        return Err(PawError::SessionError(format!(
+            "session '{session_name}' is already running for this repository. Re-running \
+             `git paw start` non-interactively would otherwise fork a second, parallel session. \
+             Attach from an interactive terminal, or run: tmux attach -t {session_name}"
+        )));
+    }
+    println!("Reattaching to session '{session_name}'...");
+    tmux::attach(session_name)
+}
+
 /// Builds the per-agent task prompt that gets appended to the supervisor-mode
 /// boot block before injection via `tmux send-keys`.
 ///
