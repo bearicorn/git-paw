@@ -13,7 +13,7 @@ use git_paw::error::PawError;
 use git_paw::session::{self, Session, SessionMode, SessionStatus};
 use git_paw::tmux;
 
-use super::helpers::{configured_settings_paths, dashboard_command};
+use super::helpers::dashboard_command;
 use super::supervisor::resolve_supervisor_flags;
 use crate::attach_or_print_hint;
 
@@ -44,63 +44,6 @@ pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<()
         .broker_port
         .zip(existing.broker_bind.as_ref())
         .map(|(port, bind)| format!("http://{bind}:{port}"));
-
-    if broker_url.is_some() {
-        // Re-populate the broker-helper allowlist when recovering — a
-        // re-attached session must carry the helper-path grant so the agents'
-        // first `broker.sh` invocation does not re-trigger a permission prompt.
-        let claude_settings = repo_root.join(".claude").join("settings.json");
-        if let Err(e) = git_paw::supervisor::curl_allowlist::setup_curl_allowlist(&claude_settings)
-        {
-            eprintln!("warning: failed to setup broker-helper allowlist: {e}");
-        }
-    }
-
-    // Re-seed the dev allowlist on recovery so re-attached sessions pick up
-    // preset updates. Only runs for supervisor mode with the feature enabled;
-    // broker status does not gate this (design D4).
-    if mode == SessionMode::Supervisor
-        && let Some(supervisor_cfg) = config.supervisor.as_ref()
-        && supervisor_cfg.common_dev_allowlist.enabled
-    {
-        for (path, err) in git_paw::supervisor::dev_allowlist::seed_supervisor_session(
-            &supervisor_cfg.common_dev_allowlist.stacks,
-            &supervisor_cfg.common_dev_allowlist.extra,
-            repo_root,
-            &configured_settings_paths(&config),
-        ) {
-            eprintln!(
-                "warning: failed to seed dev allowlist into {}: {err}",
-                path.display(),
-            );
-        }
-    }
-
-    // Re-seed every restored agent worktree's local allowlists (the same
-    // seeding `attach_agent` performs at start/add) so restored panes pick up
-    // preset updates before their CLIs boot. Gates mirror the repo-root
-    // re-seeds above; failures are non-fatal warnings.
-    let default_supervisor_cfg = SupervisorConfig::default();
-    let recovery_dev_allowlist = (mode == SessionMode::Supervisor).then(|| {
-        &config
-            .supervisor
-            .as_ref()
-            .unwrap_or(&default_supervisor_cfg)
-            .common_dev_allowlist
-    });
-    for wt in &existing.worktrees {
-        for (path, err) in git_paw::supervisor::worktree_allowlist::seed_worktree_allowlists(
-            &wt.worktree_path,
-            broker_url.is_some(),
-            config.docs_base_url.is_some(),
-            recovery_dev_allowlist,
-        ) {
-            eprintln!(
-                "warning: failed to seed agent-worktree allowlist for {}: {err}",
-                path.display()
-            );
-        }
-    }
 
     // Tear down any stale tmux session of this name before rebuilding so the
     // recovery starts from a clean `new-session`. A half-built session left

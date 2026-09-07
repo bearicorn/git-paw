@@ -28,16 +28,14 @@ pub struct CustomCli {
     /// Set per-CLI rather than hardcoded so the launcher stays CLI-agnostic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submit_delay_ms: Option<u64>,
-    /// Optional path to this CLI's claude-format settings file
-    /// (the file carrying `allowed_bash_prefixes`).
+    /// Optional path to this CLI's claude-format settings file.
     ///
-    /// When set and the broker is enabled, git-paw seeds the broker-curl
-    /// allowlist into this path too, so the CLI's boot-time broker `curl`
-    /// does not raise a permission prompt. Use for claude-family variants
-    /// that read a non-default config dir (e.g. a CLI reading
-    /// `~/.claude-oss/settings.json`). A leading `~` is expanded to the
-    /// home directory. Left unset, only the repo-local `.claude/settings.json`
-    /// is seeded.
+    /// git-paw does not write to this file. Its parent directory joins the
+    /// agent-memory-isolation protected-path set
+    /// ([`crate::supervisor::auto_approve::ProtectedPaths::derive`]), so a
+    /// claude-family variant reading a non-default config dir (e.g.
+    /// `~/.claude-oss/settings.json`) gets that directory protected too. A
+    /// leading `~` is expanded to the home directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings_path: Option<String>,
     /// Per-approval-level flag overrides, consulted BEFORE the built-in

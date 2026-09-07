@@ -578,6 +578,35 @@ fn custom_cli_approval_args_parses_and_round_trips() {
     assert_eq!(reloaded.clis, config.clis);
 }
 
+// --- CustomCli settings_path (remove-inert-permission-seeding D5:
+// `core-memory-isolation` keys off this field's parent directory, so it
+// must keep parsing and round-tripping independent of the removed
+// seeding). ---
+
+#[test]
+fn custom_cli_settings_path_parses_and_round_trips() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(
+        &path,
+        "[clis.claude-oss]\n\
+             command = \"claude-oss\"\n\
+             settings_path = \"~/.claude-oss/settings.json\"\n",
+    );
+
+    let config = load_config_file(&path).unwrap().unwrap();
+    let cli = config.clis.get("claude-oss").expect("claude-oss entry");
+    assert_eq!(
+        cli.settings_path.as_deref(),
+        Some("~/.claude-oss/settings.json")
+    );
+
+    let round_trip_path = tmp.path().join("round-trip.toml");
+    save_config_to(&round_trip_path, &config).unwrap();
+    let reloaded = load_config_file(&round_trip_path).unwrap().unwrap();
+    assert_eq!(reloaded.clis, config.clis);
+}
+
 #[test]
 fn custom_cli_without_approval_args_parses_unchanged() {
     // A pre-v0.11.0 [clis.<name>] entry — no approval_args key — must
@@ -1659,10 +1688,6 @@ fn generated_default_config_template_contains_common_dev_allowlist_section() {
     assert!(
         template.contains("[supervisor.common_dev_allowlist]"),
         "default template should document the new sub-table",
-    );
-    assert!(
-        template.contains("enabled = true"),
-        "template should show the enabled default",
     );
     assert!(
         template.contains("extra ="),

@@ -54,9 +54,9 @@ worktree branch. Run `.git-paw/scripts/broker.sh --help` for the full surface.
 agent-internal mechanism. A user-facing subcommand would surface in `--help`
 and produce confusing errors when run by a human (no broker, no session). A
 script under `.git-paw/scripts/` is unambiguously agent-internal, mirrors the
-supervisor's `sweep.sh`, and lets the launch path seed a single
-least-privilege allowlist grant for one stable path — see
-[Allowlist seeding](#allowlist-seeding).
+supervisor's `sweep.sh`, and gives git-paw's command classifier a single
+stable path to recognise — see
+[Prompt-free boot calls](#prompt-free-boot-calls).
 
 ## Boot-Prompt Injection
 
@@ -98,32 +98,27 @@ Agents are instructed to publish questions and wait for answers rather than gues
 
 **IMPORTANT**: The boot block explicitly instructs agents: "DO NOT CONTINUE UNTIL YOU RECEIVE AN ANSWER!"
 
-## Allowlist seeding
+## Prompt-free boot calls
 
-So an agent's first boot action never stalls on a permission prompt, the
-launch path seeds the agent CLI's allowlist
-(`.claude/settings.json::allowed_bash_prefixes`, plus any configured
-`[clis.<name>].settings_path`) with the **single stable helper path** —
-`.git-paw/scripts/broker.sh` (and the `bash .git-paw/scripts/broker.sh` form).
-This is least-privilege: it authorises exactly one script, not a host or all
-of `curl`, and it cannot drift with URL normalisation or curl flag order. No
-broad `curl *` grant is ever seeded. Seeding is idempotent and preserves any
-existing entries (including stale per-endpoint `curl` prefixes from older
-versions, which remain harmless).
+So an agent's first boot action never stalls on a permission prompt,
+prompt-free operation rests on two things — never on a settings file git-paw
+writes:
 
-The same grants also land **inside every agent worktree**: at `git paw start`,
-`git paw add`, and session recovery, git-paw merges the helper-path prefixes
-and the resolved [`[supervisor.common_dev_allowlist]`
-patterns](../configuration/README.md#common-dev-command-allowlist) into
-`<worktree>/.claude/settings.json`. A claude-format CLI resolves its project
-settings from its working directory — the agent's worktree — so the repo-root
-file alone never applied inside agent panes. With the per-worktree copy in
-place, agents no longer prompt on preset-safe commands (`git status`, `grep`,
-`find`, a declared stack's build/test verbs, …) — previously each variant
-stalled until someone approved it by hand. The seeded `.claude/` directory is
-kept out of version control through the worktree's own `info/exclude`, so an
-agent's `git add .` can never commit it and no tracked `.gitignore` is
-edited.
+- the agent CLI's own **resolved permission mode**, set via
+  `agent_approval` (see [Configuration →
+  Supervisor](../configuration/README.md#supervisor));
+- git-paw's **command classifier**, which recognises the bundled
+  `.git-paw/scripts/broker.sh` helper (and the `bash .git-paw/scripts/broker.sh`
+  form) by its **single stable path** — never a broad `curl *` rule and never
+  per-endpoint `curl` prefixes that could drift with URL normalisation or flag
+  order.
+
+git-paw does not write to any CLI's settings file for this — not the
+repo-root `.claude/settings.json`, not a per-worktree copy, and not a
+configured `[clis.<name>].settings_path`. Agents still do not prompt on
+preset-safe commands (`git status`, `grep`, `find`, a declared stack's
+build/test verbs, …) — the classifier and the resolved permission mode cover
+that without any file on disk.
 
 ### Boot Block Injection Modes
 
@@ -138,7 +133,7 @@ The boot block includes instructions for proper paste handling, particularly the
 
 - **Reliable Monitoring**: Agents self-report immediately on boot
 - **Consistent Behavior**: All agents follow the same coordination pattern
-- **No Permission Prompts**: The boot block calls the bundled `broker.sh` helper by its stable path, which the launch path allowlists once — the first broker call never stalls on a prompt
+- **No Permission Prompts**: The boot block calls the bundled `broker.sh` helper by its stable path, which git-paw's classifier recognises — the first broker call never stalls on a prompt
 - **Supervisor Visibility**: Questions and blockers surface to the dashboard promptly
 - **Audit Trail**: All boot operations are logged in the broker log
 

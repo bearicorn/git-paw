@@ -174,7 +174,7 @@ The loop is the pump; the supervisor pane is the brain. When a supervisor pane i
 
 For the end-to-end recipe — planning as a pre-step, writing task-level-concrete specs, and defining what "verified" means in your `AGENTS.md` so a fleet of cheaper workers succeeds under one smart orchestrator — see the [Tiered-Model Workflow](docs/src/user-guide/tiered-model-workflow.md) guide.
 
-In v0.5.0 supervisor mode also seeds a curated dev-command allowlist into `.claude/settings.json` on session start so common dev-loop commands (`cargo build`, `git commit`, `just`, `mdbook build`, `openspec validate`, ...) bypass per-prompt approval. Opt out with `[supervisor.common_dev_allowlist] enabled = false`; extend with `extra = [...]`.
+Supervisor mode also composes a curated dev-command allowlist into its own auto-approve whitelist so common dev-loop commands (`cargo build`, `git commit`, `just`, `mdbook build`, `openspec validate`, ...) bypass per-prompt approval — declare your stack with `[supervisor.common_dev_allowlist] stacks = ["rust"]`; extend with `extra = [...]`.
 
 `--no-supervisor` is the highest-precedence step in the supervisor-mode resolution chain — it wins over both `[supervisor] enabled = true` in config and any interactive prompt. It is mutually exclusive with `--supervisor`; passing both fails at parse time. `--force` only matters for spec-mode launches (`--from-all-specs` / `--specs`) and bypasses the warning when uncommitted spec changes are detected on disk.
 

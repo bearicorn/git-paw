@@ -29,11 +29,10 @@ This chapter covers git-paw's internal architecture: module structure, data flow
 │  ├── server.rs            ├── approve.rs          ├── openspec.rs│
 │  ├── messages.rs          ├── auto_approve.rs     ├── markdown.rs│
 │  ├── delivery.rs          ├── claim.rs            ├── speckit.rs │
-│  ├── conflict.rs          ├── curl_allowlist.rs   └── resolve.rs │
-│  ├── learnings.rs         ├── dev_allowlist.rs                   │
-│  ├── watcher.rs           ├── layout.rs                          │
-│  └── publish.rs           ├── permission_prompt.rs               │
-│                           ├── poll.rs                            │
+│  ├── conflict.rs          ├── dev_allowlist.rs     └── resolve.rs │
+│  ├── learnings.rs         ├── layout.rs                          │
+│  ├── watcher.rs           ├── permission_prompt.rs               │
+│  └── publish.rs           ├── poll.rs                            │
 │                           └── stall.rs                           │
 └───────────────────────────────────────────────────────────────────┘
 ```
@@ -59,7 +58,7 @@ This chapter covers git-paw's internal architecture: module structure, data flow
 | **Selftest** | `src/selftest.rs` | `git paw selftest`. Isolated end-to-end lifecycle smoke check (start → add → remove → stop) against a throwaway repo and a dummy CLI (`cat`) — private tmux socket, ephemeral broker port, isolated `HOME`, no LLM backend. The shipped form of the dogfood isolation recipe. |
 | **Logging** | `src/logging.rs` | Per-pane log capture via `tmux pipe-pane`. Files at `.git-paw/logs/<session>/<branch>.log`. |
 | **Broker** | `src/broker/` | HTTP coordination server (axum) with watcher + conflict detector + learnings subsystems. Detail below. |
-| **Supervisor** | `src/supervisor/` | Supervisor-mode subsystems (auto-approve, dev allowlist, stall sweeps, permission prompts, pane layout). Detail below. |
+| **Supervisor** | `src/supervisor/` | Supervisor-mode subsystems (auto-approve, dev-command presets, stall sweeps, permission prompts, pane layout). Detail below. |
 | **Specs** | `src/specs/` | Spec scanning. Three backends (`openspec`, `markdown`, `speckit`); `resolve.rs` is the dispatch entry point. |
 | **MCP** | `src/mcp/` | `git paw mcp`. Read-only Model Context Protocol server over stdio — exposes coordination, governance, specs, session, learnings, skills, git, and source-browsing state to MCP-aware clients. Runs standalone (no session/broker/supervisor). Detail below. |
 | **Coordination** | `src/coordination/` | User→agent coordination helpers (inventory + target validation) backing the `/agents` and `/tell` supervisor commands. Distinct from `src/broker/` peer-to-peer (agent↔agent) coordination. Detail below. |
@@ -105,8 +104,7 @@ format_agent_rows, …}` resolving from the parent module.
 | `src/supervisor/approve.rs` | Generic approval/feedback decision plumbing shared by the auto-approver. |
 | `src/supervisor/auto_approve.rs` | Safe-command auto-approver against stalled panes (`approval_level`, `safe_commands`, sweeps). |
 | `src/supervisor/claim.rs` | Exclusive per-pane approval claim. Every approver — the drive loop, the dashboard auto-approver, and the bundled `sweep.sh approve` in its own process — atomically creates `<repo>/.git-paw/tmp/approve-pane-<N>.claim` before sending a keystroke, so two can never both approve one pane. Non-blocking (a held pane is skipped, not waited on), released by RAII, and stealable once untouched past a 10s TTL so a hard-killed approver cannot wedge a pane. |
-| `src/supervisor/curl_allowlist.rs` | Seeds the least-privilege agent-broker helper path (`.git-paw/scripts/broker.sh`) into `.claude/settings.json::allowed_bash_prefixes` so the agent's first broker call never hits a permission prompt — a single stable path grant, not per-endpoint `curl` prefixes or a broad `curl *` rule. |
-| `src/supervisor/dev_allowlist.rs` | Seeds the curated `[supervisor.common_dev_allowlist]` preset (cargo / git / just / mdBook / OpenSpec) into `.claude/settings.json`. |
+| `src/supervisor/dev_allowlist.rs` | Curated `[supervisor.common_dev_allowlist]` preset data (cargo / git / just / mdBook / OpenSpec) composed into the supervisor's own auto-approve whitelist and rendered into the bundled supervisor skill's permission guidance. |
 | `src/supervisor/layout.rs` | Supervisor-as-pane tmux layout: pane 0 supervisor, pane 1 dashboard, agent panes 2 onwards in the bottom-row grid (row-height proportions documented below). |
 | `src/supervisor/permission_prompt.rs` | Pane classification for permission-prompt detection (`tmux capture-pane` parsing). |
 | `src/supervisor/poll.rs` | Stalled-pane polling loop driving the auto-approver. |

@@ -184,10 +184,11 @@ pub struct SupervisorConfig {
     pub learnings_config: LearningsConfig,
     /// Common dev-command allowlist configuration.
     ///
-    /// Controls whether the supervisor seeds a curated preset of
-    /// dev-loop prefix patterns (`cargo build`, `git commit`, ...) into
-    /// `.claude/settings.json::allowed_bash_prefixes` on session start.
-    /// See [`CommonDevAllowlistConfig`] for field semantics.
+    /// Declares a curated preset of dev-loop prefix patterns
+    /// (`cargo build`, `git commit`, ...) composed into the supervisor's
+    /// own auto-approve whitelist and rendered into the bundled supervisor
+    /// skill's permission guidance. See [`CommonDevAllowlistConfig`] for
+    /// field semantics.
     #[serde(default)]
     pub common_dev_allowlist: CommonDevAllowlistConfig,
     /// Whether the broker emits a `supervisor.verify-now` nudge to the
@@ -589,27 +590,28 @@ impl SupervisorConfig {
 ///
 /// The universal preset is a curated set of stack-neutral, repeatedly-
 /// prompted dev-loop commands (non-destructive git verbs plus read-only
-/// `find` / `grep` / `sed -n`) that the supervisor seeds into Claude's
-/// `allowed_bash_prefixes` so agents do not hit a permission prompt for
-/// each variant of these commands. Stack-specific grants are opt-in via
+/// `find` / `grep` / `sed -n`) composed into the supervisor's own
+/// auto-approve whitelist and rendered into the bundled supervisor skill's
+/// permission guidance, so agents do not hit a permission prompt for each
+/// variant of these commands. Stack-specific patterns are opt-in via
 /// `stacks` (named presets `rust` / `node` / `python` / `go`) and/or
 /// the free-form `extra` list. See `src/supervisor/dev_allowlist.rs`
-/// for the preset constants and the merge implementation.
+/// for the preset constants.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommonDevAllowlistConfig {
-    /// Whether the dev-allowlist seeder runs on supervisor start.
+    /// Parsed for config compatibility; has no effect.
     ///
-    /// Defaults to `true` — the v0.5.0 dogfood evidence makes the
-    /// feature most useful when on by default. Opt out with
-    /// `[supervisor.common_dev_allowlist] enabled = false`.
+    /// The preset's `stacks` / `extra` patterns are always composed into
+    /// the auto-approve whitelist and the rendered skill guidance
+    /// regardless of this flag.
     #[serde(default = "CommonDevAllowlistConfig::default_enabled")]
     pub enabled: bool,
     /// Named, curated stack presets the repository opts into.
     ///
     /// Each entry names a built-in stack preset (`rust` / `node` /
-    /// `python` / `go`) whose curated prefix bundle is seeded in
+    /// `python` / `go`) whose curated prefix bundle is composed in
     /// addition to the universal preset. Unknown names contribute
-    /// nothing. Defaults to empty — a fresh repo seeds only the
+    /// nothing. Defaults to empty — a fresh repo gets only the
     /// universal preset, never a toolchain it does not use. See
     /// `src/supervisor/dev_allowlist.rs::stack_preset`.
     #[serde(default)]
@@ -617,9 +619,9 @@ pub struct CommonDevAllowlistConfig {
     /// Additional project-specific prefix patterns appended to the
     /// built-in preset (and to any selected stack presets).
     ///
-    /// Each entry is a raw string consumed by Claude's prefix matcher;
-    /// the seeder does not validate the strings. Duplicates of preset
-    /// or stack entries are silently de-duplicated.
+    /// Each entry is a raw string consumed by the auto-approve matcher;
+    /// it is not validated. Duplicates of preset or stack entries are
+    /// silently de-duplicated.
     #[serde(default)]
     pub extra: Vec<String>,
 }

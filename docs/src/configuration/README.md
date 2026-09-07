@@ -484,12 +484,11 @@ command = "claude"
 # paste, then sends Enter separately. Default suits most CLIs; raise it
 # for a CLI whose large-paste handling needs longer before submit lands.
 submit_delay_ms = 1500
-# Path to this CLI's claude-format settings file (the one carrying
-# `allowed_bash_prefixes`). When set and the broker is enabled, git-paw
-# seeds the agent-broker helper-path grant (`.git-paw/scripts/broker.sh`)
-# into this path too, so the CLI's boot-time `broker.sh status booting` does
-# not raise a permission prompt. A leading `~` is expanded to the home
-# directory. Use for claude-family variants that read a non-default config dir.
+# Path to this CLI's claude-format settings file. git-paw does not write to
+# this file; its parent directory joins the agent-memory-isolation
+# protected-path set (below), so a variant reading a non-default config dir
+# gets that directory protected too. A leading `~` is expanded to the home
+# directory.
 settings_path = "~/.config/claude-variant/settings.json"
 # Per-approval-level flag overrides, consulted BEFORE git-paw's built-in
 # flag table when composing launch commands. Keys are the approval level
@@ -505,7 +504,7 @@ approval_args = { "full-auto" = "--dangerously-skip-permissions" }
 | `command` | yes | Command or path to the CLI binary. |
 | `display_name` | no | Human-readable name shown in prompts. |
 | `submit_delay_ms` | no | Boot-prompt settle delay (ms) before the submit `Enter`; per-CLI so the launcher stays CLI-agnostic. |
-| `settings_path` | no | Path to the CLI's claude-format settings file; the agent-broker helper-path grant (`.git-paw/scripts/broker.sh`) is seeded here so the boot-time `broker.sh` call doesn't prompt. |
+| `settings_path` | no | Path to the CLI's claude-format settings file. git-paw does not write to it; its parent directory joins the memory-isolation protected-path set. |
 | `approval_args` | no | Map from approval-level name (`"manual"`, `"auto"`, `"full-auto"`) to the flags appended to the launch command at that level. Consulted **before** the [built-in flag table](#supervisor); an unknown level key is rejected at config load with an error naming the key. |
 
 Every configured `settings_path` also feeds the **protected-path set** used
@@ -870,62 +869,50 @@ operation (`sweep.sh snapshot && rm -rf /`) still escalates.
 the resolved option digit + `Enter` (if safe) or publishes an `agent.question` to the supervisor inbox
 (if not).
 
-git-paw also seeds `.claude/settings.json::allowed_bash_prefixes` with the
-least-privilege path of the bundled agent-broker helper
-(`.git-paw/scripts/broker.sh`) so the agent's first broker call never hits a
-permission prompt. This is a single stable path grant — not per-endpoint
-`curl` prefixes and never a broad `curl *` rule — so it cannot drift with URL
-normalisation or flag order. Existing entries in that file are preserved.
-
-The helper grants are seeded into each **agent worktree's own**
-`<worktree>/.claude/settings.json` as well — at `git paw start`,
-`git paw add`, and session recovery, right where the helper scripts
-themselves are provisioned. A claude-format CLI resolves its project settings
-from its working directory (the worktree), so the repo-root file alone never
-reaches the agent panes. The broker/sweep grants follow the broker gate; the
-`docs-fetch.sh` grant follows the `docs_base_url` gate. The seeded `.claude/`
-directory is excluded via the worktree's own `info/exclude` (never a tracked
-`.gitignore`), so it cannot be committed by an agent's `git add .`.
+Prompt-free broker calls come from the CLI's own resolved permission mode
+(see `unattended-boot-hardening`) together with git-paw's command
+classifier, which recognises the bundled `.git-paw/scripts/{broker,sweep,
+docs-fetch}.sh` helpers by their stable path. No settings-file allowlist is
+written or required for this.
 
 ### Common dev-command allowlist
 
-On every supervisor session start, git-paw seeds a curated preset of dev-loop
-prefix patterns into `.claude/settings.json::allowed_bash_prefixes` so agents
-do not hit a permission prompt for each variant of `git commit`, `git diff`,
-`grep`, etc. The mechanism is the same one Claude uses for its "Yes, don't ask
-again" flow — but seeded up-front rather than approved one-by-one.
+`[supervisor.common_dev_allowlist]` declares a curated preset of dev-loop
+command prefixes. The declaration feeds two consumers:
 
-The same `stacks` / `extra` declaration also feeds the
-[auto-approve classifier whitelist](#auto-approve-safe-permission-prompts):
-one stack declaration drives both the CLI allowlist seeding and the
-supervisor's prompt classification, so the two never drift.
+- the [auto-approve classifier whitelist](#auto-approve-safe-permission-prompts),
+  so a declared stack's toolchain verbs (e.g. `cargo test` for
+  `stacks = ["rust"]`) auto-approve in a stalled agent pane;
+- the bundled supervisor skill's permission guidance, which renders the
+  resolved preset so the supervisor recognises the same patterns by eye.
 
-Each seeded value is a command **prefix** (a verb or verb + subcommand) that
-subsumes every argument variant — `git diff` covers `git diff --stat HEAD~1`,
-so a routine dev-loop command prompts at most once.
+One stack declaration drives both, so they never drift.
+
+Each listed value is a command **prefix** (a verb or verb + subcommand) that
+subsumes every argument variant — `git diff` covers `git diff --stat
+HEAD~1`.
 
 The preset is split into two tiers:
 
-- a **universal** set that is always seeded — stack-neutral commands safe in any
+- a **universal** set that always applies — stack-neutral commands safe in any
   repository regardless of language or toolchain;
 - **opt-in stack presets** (`rust` / `node` / `python` / `go`) plus a free-form
   `extra` list for everything tied to a particular toolchain. A bare project
-  inherits only the universal set and never a toolchain it does not use.
+  gets only the universal set and never a toolchain it does not use.
 
 ```toml
 [supervisor.common_dev_allowlist]
-enabled = true
 stacks = ["rust"]
 extra = ["just", "mdbook build", "openspec validate"]
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `enabled` | `true` | Master switch for the seeder. Set to `false` to skip seeding entirely. |
-| `stacks` | `[]` | Named, curated stack presets to opt into: `rust`, `node`, `python`, `go`. The seeder seeds the union of the universal preset, each selected stack, and `extra`. Unknown names contribute nothing. git-paw does **not** auto-detect your stack — selection is always explicit. |
+| `enabled` | `true` | Parsed for config compatibility; has no effect. The preset's `stacks` / `extra` patterns are always composed into the auto-approve whitelist and the rendered skill guidance regardless of this flag. |
+| `stacks` | `[]` | Named, curated stack presets to opt into: `rust`, `node`, `python`, `go`. Resolves to the union of the universal preset, each selected stack, and `extra`. Unknown names contribute nothing. git-paw does **not** auto-detect your stack — selection is always explicit. |
 | `extra` | `[]` | Additional project-specific prefix patterns appended to the universal preset and any selected stacks. |
 
-**Universal preset (always seeded):**
+**Universal preset (always applied):**
 
 - **Git (read)**: `git status`, `git log`, `git diff`, `git show`, `git fetch`
 - **Git (write, non-destructive)**: `git commit`, `git push`, `git pull`,
@@ -956,21 +943,10 @@ never validated).
 
 **Behaviour:**
 
-- Independent of broker status — non-broker supervisor sessions still benefit.
-- Idempotent: re-seeding on session re-attach never duplicates entries.
-- Non-fatal: write failures log a warning to stderr and session start continues.
-- Targets `<repo>/.claude/settings.json` always; also writes each configured
-  `[clis.<name>].settings_path` whose parent directory already exists (the
-  CLI-agnostic alt-config path — register a claude-family variant's settings
-  file there to have it seeded too) but never creates a missing directory.
-- Also merged into every **agent worktree's** `<worktree>/.claude/settings.json`
-  at `git paw start`, `git paw add`, and session recovery — a claude-format
-  CLI reads project settings from its working directory, so this is the copy
-  that actually applies inside agent panes. The seeded `.claude/` is kept out
-  of version control via the worktree-local `info/exclude`; no tracked
-  `.gitignore` is edited.
-- Entries persist after `git paw stop` — prune `.claude/settings.json` manually
-  if you want a clean slate.
+- Independent of broker status — non-broker supervisor sessions still benefit
+  from the auto-approve whitelist composition.
+- No file is written anywhere: the preset only feeds the in-process
+  auto-approve whitelist and the rendered skill guidance.
 
 ### Conflict detector tuning
 

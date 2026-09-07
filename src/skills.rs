@@ -1428,6 +1428,32 @@ mod tests {
         );
     }
 
+    // --- approval-command-safety: no seeded-allowlist attribution ---
+
+    /// `approval-command-safety` §"Prompt-free operation is attributed to the
+    /// permission mode and classifier": the supervisor skill's permission
+    /// guidance SHALL NOT credit a seeded settings-file allowlist for why an
+    /// agent's first broker call avoids a permission prompt, and SHALL
+    /// attribute it to the resolved permission mode and the classifier
+    /// instead.
+    #[test]
+    fn supervisor_skill_does_not_credit_seeded_allowlist_for_prompt_free_broker_calls() {
+        let tmpl = resolve("supervisor").unwrap();
+        assert!(
+            !tmpl.content.contains("allowed_bash_prefixes"),
+            "supervisor skill should not reference the removed allowed_bash_prefixes seeding key"
+        );
+        assert!(
+            !tmpl.content.to_lowercase().contains("seeded allowlist")
+                && !tmpl.content.to_lowercase().contains("seeds `.claude"),
+            "supervisor skill should not attribute prompt-free operation to a seeded allowlist"
+        );
+        assert!(
+            tmpl.content.contains("resolved permission mode"),
+            "supervisor skill should attribute prompt-free operation to the resolved permission mode"
+        );
+    }
+
     // --- supervisor-verify-scratch-dir: skill content ---
 
     /// `supervisor-verify-scratch-dir` §"Isolated verification worktrees use a

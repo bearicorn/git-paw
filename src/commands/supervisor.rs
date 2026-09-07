@@ -27,8 +27,7 @@ use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry}
 use git_paw::tmux;
 
 use super::helpers::{
-    attach_session_logging, config_to_custom_defs, configured_settings_paths, dashboard_command,
-    session_cli_settings_paths, to_interactive_cli,
+    attach_session_logging, config_to_custom_defs, dashboard_command, to_interactive_cli,
 };
 use crate::{
     AttachContext, SpecMode, UNATTENDED_ENV, apply_spec_mode, attach_agent,
@@ -467,52 +466,6 @@ pub(crate) fn cmd_supervisor(
     // Real launch.
     git::prune_worktrees(repo_root)?;
 
-    // Pre-populate `.claude/settings.json` with the least-privilege
-    // agent-broker helper-path grant so the coding agents do not hit an
-    // approval prompt when they invoke `.git-paw/scripts/broker.sh` on every
-    // broker round-trip. Failures are logged but non-fatal.
-    if broker_config.enabled {
-        let claude_settings = repo_root.join(".claude").join("settings.json");
-        if let Err(e) = git_paw::supervisor::curl_allowlist::setup_curl_allowlist(&claude_settings)
-        {
-            eprintln!("warning: failed to setup broker-helper allowlist: {e}");
-        }
-        // W15-6 (2026-05-31 dogfood): a custom CLI that reads a non-default
-        // claude-format settings file (e.g. one reading
-        // `~/.config/<variant>/settings.json`) needs the helper-path grant
-        // seeded there too, or its boot-time `broker.sh status booting` hits a
-        // permission prompt the auto-approve thread cannot clear before the
-        // agent registers (W15-7). The path is CONFIG-DRIVEN
-        // (`[clis.<name>].settings_path`), never a hardcoded CLI name — so
-        // this stays CLI-agnostic. Seed each distinct session CLI's
-        // configured settings file once.
-        for cli in session_cli_settings_paths(config, &supervisor_cli, &agent_cli) {
-            if let Err(e) = git_paw::supervisor::curl_allowlist::setup_curl_allowlist(&cli) {
-                eprintln!(
-                    "warning: failed to setup broker-helper allowlist at {}: {e}",
-                    cli.display()
-                );
-            }
-        }
-    }
-
-    // Seed the common dev-command allowlist preset. Independent of broker
-    // status (per design D4) — non-broker supervisor sessions also benefit
-    // from suppressed dev-loop prompts.
-    if supervisor_cfg.common_dev_allowlist.enabled {
-        for (path, err) in git_paw::supervisor::dev_allowlist::seed_supervisor_session(
-            &supervisor_cfg.common_dev_allowlist.stacks,
-            &supervisor_cfg.common_dev_allowlist.extra,
-            repo_root,
-            &configured_settings_paths(config),
-        ) {
-            eprintln!(
-                "warning: failed to seed dev allowlist into {}: {err}",
-                path.display(),
-            );
-        }
-    }
-
     // Collect the distinct spec backends for this session so the
     // supervisor skill can render `{{SPEC_PATH_DOCTRINE}}` per backend.
     // Empty when branches came from `--branches` (no spec scan) — the
@@ -632,7 +585,6 @@ pub(crate) fn cmd_supervisor(
         strict_guard,
         no_rebase,
         placement: config.worktree_placement(),
-        common_dev_allowlist: &supervisor_cfg.common_dev_allowlist,
         worktree_runtime: &worktree_runtime,
     };
 
