@@ -1039,15 +1039,13 @@ worktree_placement = "child"
 # on_exhausted = "escalate"  # one of: "escalate", "abandon"
 # escalate_after_cycles = 3
 
-# Common dev-command allowlist. When supervisor mode starts a session,
-# git-paw seeds .claude/settings.json::allowed_bash_prefixes with the
-# universal preset (non-destructive git verbs + find / grep / sed -n) so
-# agents do not hit a permission prompt for each variant. Opt into a
-# toolchain's curated grants with stacks (named presets: rust / node /
-# python / go); extend with project-specific prefixes via extra. Opt out
-# entirely by setting enabled = false.
+# Common dev-command allowlist. The universal preset (non-destructive git
+# verbs + find / grep / sed -n) is always composed into the supervisor's
+# auto-approve whitelist and its rendered skill guidance, so agents do not
+# hit a permission prompt for each variant. Opt into a toolchain's curated
+# patterns with stacks (named presets: rust / node / python / go); extend
+# with project-specific prefixes via extra.
 # [supervisor.common_dev_allowlist]
-# enabled = true
 # stacks = ["rust"]
 # extra = ["just", "mdbook build", "openspec validate"]
 

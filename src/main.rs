@@ -428,9 +428,6 @@ struct AttachContext<'a> {
     /// Resolved `[worktree]` runtime-provisioning config (env-file copies and
     /// port allocation). Inert when neither sub-table is configured.
     worktree_runtime: &'a git_paw::config::WorktreeConfig,
-    /// Resolved `[supervisor.common_dev_allowlist]` config for the
-    /// per-worktree allowlist seeding (gating + stacks + extra).
-    common_dev_allowlist: &'a git_paw::config::CommonDevAllowlistConfig,
 }
 
 /// Artifacts produced by attaching one agent's worktree: the tmux pane spec to
@@ -498,24 +495,6 @@ fn attach_agent(
         ctx.broker_config.enabled,
         ctx.docs_fetch_template.is_some(),
     )?;
-
-    // Seed the worktree-local allowlists next to the helper scripts they
-    // authorize: a claude-format CLI resolves project settings from its
-    // working directory (this worktree), so the repo-root seeding never
-    // applies inside the agent pane. Same gates as the script provisioning
-    // above plus `[supervisor.common_dev_allowlist]`; failures are non-fatal
-    // warnings, matching the repo-root seeding.
-    for (path, err) in git_paw::supervisor::worktree_allowlist::seed_worktree_allowlists(
-        &wt.path,
-        ctx.broker_config.enabled,
-        ctx.docs_fetch_template.is_some(),
-        Some(ctx.common_dev_allowlist),
-    ) {
-        eprintln!(
-            "warning: failed to seed agent-worktree allowlist for {}: {err}",
-            path.display()
-        );
-    }
 
     let render_tmpl = |tmpl: &git_paw::skills::SkillTemplate| {
         git_paw::skills::render(
@@ -2765,6 +2744,155 @@ mod supervisor_self_register_tests {
             .find(|e| e.agent_id == "supervisor")
             .expect("supervisor row appears in snapshot");
         assert_eq!(entry.status, "working");
+    }
+}
+
+#[cfg(test)]
+mod permission_seeding_removed_tests {
+    //! `approval-command-safety` — "No permission grants are seeded into
+    //! agent CLI settings files": `attach_agent` is the per-worktree
+    //! provisioning primitive shared by `git paw start` (`cmd_supervisor`)
+    //! and `git paw add`, and touches no tmux state — so it is exercised
+    //! directly here rather than through a full session launch. The
+    //! machinery that used to write a settings file / vendor directory
+    //! (`curl_allowlist`, `dev_allowlist::setup_dev_allowlist`,
+    //! `worktree_allowlist`) has been deleted; these tests pin the
+    //! resulting behaviour.
+
+    use std::path::Path;
+    use std::process::Command as StdCommand;
+
+    use tempfile::TempDir;
+
+    use git_paw::config::{BrokerConfig, WorktreeConfig, WorktreePlacement};
+    use git_paw::skills::GateCommands;
+
+    use super::{AttachContext, attach_agent};
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = StdCommand::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("git spawn");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn init_repo(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        git(dir, &["init", "-q", "-b", "main"]);
+        git(dir, &["config", "user.email", "test@test.com"]);
+        git(dir, &["config", "user.name", "Test"]);
+        std::fs::write(dir.join("README.md"), "# test").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "initial"]);
+    }
+
+    fn attach_ctx<'a>(
+        repo_root: &'a Path,
+        gate_commands: &'a GateCommands<'a>,
+        broker_config: &'a BrokerConfig,
+        worktree_runtime: &'a WorktreeConfig,
+    ) -> AttachContext<'a> {
+        AttachContext {
+            repo_root,
+            project: "test",
+            broker_config,
+            agent_cli: "claude",
+            agent_flags: "",
+            coordination_template: None,
+            docs_fetch_template: None,
+            gate_commands,
+            session_backends: &[],
+            inter_agent_rules_peers: None,
+            strict_guard: true,
+            no_rebase: true,
+            placement: WorktreePlacement::Sibling,
+            worktree_runtime,
+        }
+    }
+
+    /// Scenario "No vendor settings directory is created in a worktree": a
+    /// freshly attached worktree gets no `.claude/` directory and no
+    /// `.claude/` line in its worktree-local `info/exclude`.
+    #[test]
+    fn attach_agent_creates_no_claude_directory_or_exclude_entry() {
+        let sandbox = TempDir::new().unwrap();
+        let repo = sandbox.path().join("repo");
+        init_repo(&repo);
+
+        let gate_commands = GateCommands::default();
+        let broker_config = BrokerConfig::default();
+        let worktree_runtime = WorktreeConfig::default();
+        let ctx = attach_ctx(&repo, &gate_commands, &broker_config, &worktree_runtime);
+
+        let attached = attach_agent(&ctx, "feat-a", None, 0).expect("attach_agent succeeds");
+        let wt_path = attached.entry.worktree_path.clone();
+
+        assert!(
+            !wt_path.join(".claude").exists(),
+            "attach_agent must not create a .claude/ directory in the worktree"
+        );
+
+        let exclude_out = StdCommand::new("git")
+            .current_dir(&wt_path)
+            .args(["rev-parse", "--git-path", "info/exclude"])
+            .output()
+            .expect("git rev-parse --git-path info/exclude");
+        assert!(exclude_out.status.success());
+        let raw = String::from_utf8_lossy(&exclude_out.stdout)
+            .trim()
+            .to_string();
+        let exclude_path = if Path::new(&raw).is_absolute() {
+            std::path::PathBuf::from(raw)
+        } else {
+            wt_path.join(raw)
+        };
+        let exclude_contents = std::fs::read_to_string(&exclude_path).unwrap_or_default();
+        assert!(
+            !exclude_contents.lines().any(|l| l.trim() == ".claude/"),
+            "attach_agent must not add a .claude/ exclude entry; got: {exclude_contents:?}"
+        );
+    }
+
+    /// Scenario "Pre-existing settings files are left untouched": a settings
+    /// file that predates this change (or was hand-maintained by a user)
+    /// survives a session re-attach byte-identical.
+    #[test]
+    fn attach_agent_leaves_a_pre_existing_settings_file_byte_identical() {
+        let sandbox = TempDir::new().unwrap();
+        let repo = sandbox.path().join("repo");
+        init_repo(&repo);
+
+        let gate_commands = GateCommands::default();
+        let broker_config = BrokerConfig::default();
+        let worktree_runtime = WorktreeConfig::default();
+        let ctx = attach_ctx(&repo, &gate_commands, &broker_config, &worktree_runtime);
+
+        // First attach creates the worktree.
+        let attached = attach_agent(&ctx, "feat-b", None, 0).expect("first attach succeeds");
+        let wt_path = attached.entry.worktree_path.clone();
+
+        // A user (or a pre-removal git-paw) wrote a settings file by hand.
+        let settings_dir = wt_path.join(".claude");
+        std::fs::create_dir_all(&settings_dir).unwrap();
+        let settings = settings_dir.join("settings.json");
+        let sentinel = r#"{"allowed_bash_prefixes":["my-custom-tool"]}"#;
+        std::fs::write(&settings, sentinel).unwrap();
+
+        // Re-attach the SAME branch — `create_worktree` is idempotent for an
+        // existing worktree/branch pair, mirroring the recovery/resume path.
+        attach_agent(&ctx, "feat-b", None, 0).expect("second attach succeeds");
+
+        let after = std::fs::read_to_string(&settings).unwrap();
+        assert_eq!(
+            after, sentinel,
+            "a pre-existing settings file must be left byte-identical"
+        );
     }
 }
 

@@ -193,7 +193,6 @@ pub(crate) fn cmd_add(
         strict_guard,
         no_rebase: false,
         placement: config.worktree_placement(),
-        common_dev_allowlist: &supervisor_cfg.common_dev_allowlist,
         worktree_runtime: &worktree_runtime,
     };
 

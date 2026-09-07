@@ -368,9 +368,9 @@ The supervisor emits these phase-tagged statuses through the bundled
 label and `--detail '<json-object>'` carries the structured body, while the
 plain `status-publish <message>` form (no flags) publishes the v0.5.0 shape
 unchanged. The helper shapes the `agent.status` payload internally, so the
-supervisor never hand-rolls the JSON and the least-privilege by-path allowlist
-grant for `.git-paw/scripts/sweep.sh` covers every phase without a broad `curl`
-rule.
+supervisor never hand-rolls the JSON, and git-paw's classifier recognises
+`.git-paw/scripts/sweep.sh` by its stable path — covering every phase without
+a broad `curl` rule.
 
 The phases, with what each one means:
 
@@ -479,24 +479,16 @@ config schema and how the supervisor reads each doc.
 
 A bundled **universal** preset whitelists routine, stack-neutral dev commands
 so the supervisor stops escalating every `git commit`, `git push`, `git diff`,
-`grep`, or broker curl on `127.0.0.1`. The preset is on by default and ships
+`grep`, or broker curl on `127.0.0.1`. The preset always applies and ships
 with the launcher. Toolchain-specific commands (`cargo …`, `npm …`, `pytest`,
 `go …`) are **not** in the universal set — opt into them per stack.
 
-To opt out for a session, set:
+To pull in a toolchain's curated patterns, name its stack preset; to add
+anything not covered by a named stack (e.g. `just`, `nox`, a custom test
+runner), use the `extra` field:
 
 ```toml
 [supervisor.common_dev_allowlist]
-enabled = false
-```
-
-To seed a toolchain's curated grants, name its stack preset; to add anything
-not covered by a named stack (e.g. `just`, `nox`, a custom test runner), use
-the `extra` field:
-
-```toml
-[supervisor.common_dev_allowlist]
-enabled = true
 stacks = ["rust", "python"]
 extra = ["just check", "nox -s tests"]
 ```
@@ -506,10 +498,10 @@ captured command line, the same way the universal patterns are. See
 [Configuration](../configuration/README.md) for the named-preset contents and
 the full schema.
 
-The same declaration also feeds the auto-approve classifier below: the
-resolved universal + stack + `extra` patterns are folded into the classifier's
-whitelist, so declaring `stacks = ["rust"]` is what makes a `cargo test`
-prompt auto-approve. One declaration drives both systems — they cannot drift.
+The same declaration feeds two consumers: the auto-approve classifier's
+whitelist below (declaring `stacks = ["rust"]` is what makes a `cargo test`
+prompt auto-approve) and the bundled supervisor skill's rendered permission
+guidance. One declaration drives both — they cannot drift.
 
 ### Run dev commands bare — no exit-code-probe wrappers
 
@@ -520,7 +512,7 @@ that: the probe text varies per run, so the CLI's command-string permission
 whitelisting never matches the next invocation and the command re-prompts every
 time. The bundled supervisor and coordination skills instruct agents to run dev
 commands bare and read the exit status directly; keep your own commands to the
-same shape so a seeded prefix actually suppresses the prompt.
+same shape so a whitelisted prefix actually suppresses the prompt.
 
 git-paw's own classifier is forgiving about the two most common wrappers — it
 normalises a trailing `; echo …$?` / `; RC=$?` probe and a trailing
@@ -570,10 +562,13 @@ same implementation and cannot drift. `sweep.sh approve` resolves its option
 index the same way.
 
 `__classify` is read-only — it classifies a capture and sends no keystroke,
-contacts no broker, and writes no file — and the supervisor session's allowlist
-grants exactly that one subcommand (never a broad `git paw`). If the binary
-cannot be reached the helper **fails closed**: it reports the missing verdict
-and the prompt is escalated, never auto-approved.
+contacts no broker, and writes no file. Whether the supervisor's own CLI
+prompts for it depends on the supervisor pane's own resolved permission mode
+(see [Run the supervisor pane at native
+full-auto](#run-the-supervisor-pane-at-native-full-auto)) — git-paw grants
+this subcommand into no settings file. If the binary cannot be reached the
+helper **fails closed**: it reports the missing verdict and the prompt is
+escalated, never auto-approved.
 
 Prompt *detection* is the one part that stays in the helper: the live-prompt
 gate below runs in `sweep.sh` before any delegation, so a pane showing no live

@@ -346,8 +346,8 @@ code, different trailing output), so the CLI's command-string permission
 whitelisting never matches the next invocation — every run raises a
 fresh approval prompt and the loop stalls on the same safe command
 forever. A bare, prefix-matchable command is approved once and
-generalises across every later run, which is exactly what the seeded
-allowlist relies on.
+generalises across every later run, which is exactly what the CLI's own
+permission-prefix matching and git-paw's classifier rely on.
 
 This is about the *probe wrapper*, not about the exit status itself:
 keep observing and acting on whether a command succeeded or failed —
@@ -1550,9 +1550,10 @@ enabled = false
 or pick `approval_level = "off"`. The supervisor poll thread will not run and you will
 see every prompt manually as before.
 
-The first curl on the broker URL never trips a permission prompt because git-paw also
-seeds `.claude/settings.json::allowed_bash_prefixes` with the broker endpoints
-(`/publish`, `/status`, `/poll`, `/feedback`) when the session boots.
+The first broker call never trips a permission prompt because the agent's CLI runs under
+its own resolved permission mode and git-paw's command classifier recognises the bundled
+`.git-paw/scripts/broker.sh` / `sweep.sh` helpers by their stable path — no settings-file
+allowlist is seeded or required.
 
 ### Out-of-worktree write violations
 
@@ -1731,10 +1732,11 @@ and the structured body (one of the categories below):
 .git-paw/scripts/sweep.sh learn <category> "<one-sentence title>" '<body-json>'
 ```
 
-Routing through `sweep.sh learn` keeps the publish on the least-privilege
-by-path allowlist grant. A raw `curl …/publish` would force a broad `curl`
-grant (the G4 anti-pattern) and is error-prone — so the skill **MUST NOT**
-hand-roll a raw curl to emit an `agent.learning`; always use `sweep.sh learn`.
+Routing through `sweep.sh learn` keeps the publish on the helper's
+classifier-recognised stable path. A raw `curl …/publish` would force a broad
+`curl` grant (the G4 anti-pattern) and is error-prone — so the skill **MUST
+NOT** hand-roll a raw curl to emit an `agent.learning`; always use
+`sweep.sh learn`.
 
 #### The categories
 

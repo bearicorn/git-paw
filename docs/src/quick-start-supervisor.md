@@ -85,8 +85,7 @@ The full reference lives in [Configuration → Supervisor](configuration/README.
 | `[supervisor.auto_approve].enabled` | Master switch for git-paw's safe-prompt auto-dismisser. |
 | `[supervisor.auto_approve].safe_commands` | Project-specific command prefixes appended to the composed safe list. |
 | `[supervisor.auto_approve].approval_level` | `"off"`, `"conservative"`, or `"safe"` preset for the auto-approve whitelist. |
-| `[supervisor.common_dev_allowlist].enabled` | Seeds Claude's `allowed_bash_prefixes` with a curated preset of safe dev-loop commands on supervisor start. Default `true`. |
-| `[supervisor.common_dev_allowlist].stacks` | Named stack presets (`rust` / `node` / `python` / `go`) whose toolchain verbs are seeded AND folded into the auto-approve whitelist (e.g. `["rust"]` makes `cargo test` auto-approve). |
+| `[supervisor.common_dev_allowlist].stacks` | Named stack presets (`rust` / `node` / `python` / `go`) whose toolchain verbs are folded into the auto-approve whitelist and the rendered skill guidance (e.g. `["rust"]` makes `cargo test` auto-approve). |
 | `[supervisor.common_dev_allowlist].extra` | Project-specific prefix patterns appended to the built-in preset (e.g. `["pnpm test", "deno fmt"]`). Also folded into the auto-approve whitelist. |
 
 See [Configuration → Broker](configuration/README.md#broker) for `[broker]` settings and [Configuration → Dashboard](configuration/README.md#dashboard) if you want the live broker-message panel turned on.
