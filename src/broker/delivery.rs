@@ -59,6 +59,18 @@ fn upserts_roster(msg: &BrokerMessage) -> bool {
     )
 }
 
+/// Returns the `modified_files` list carried by `msg`, if the variant has
+/// one. Only `Status` and `Artifact` payloads report a file set; every other
+/// variant returns `None` so [`update_agent_record`] leaves the tracked set
+/// unchanged rather than clobbering it with an absent list.
+fn modified_files_of(msg: &BrokerMessage) -> Option<&Vec<String>> {
+    match msg {
+        BrokerMessage::Status { payload, .. } => Some(&payload.modified_files),
+        BrokerMessage::Artifact { payload, .. } => Some(&payload.modified_files),
+        _ => None,
+    }
+}
+
 /// Updates (or creates) the agent record and inbox for the message sender.
 fn update_agent_record(inner: &mut BrokerStateInner, msg: &BrokerMessage) {
     // Roster is populated only from status-publishing senders (W15-16). The
@@ -88,6 +100,7 @@ fn update_agent_record(inner: &mut BrokerStateInner, msg: &BrokerMessage) {
             last_seen: now,
             last_message: None,
             last_committed_at: None,
+            modified_files: Vec::new(),
         });
 
     // Make terminal states sticky: only update status if the new status is also terminal
@@ -112,6 +125,14 @@ fn update_agent_record(inner: &mut BrokerStateInner, msg: &BrokerMessage) {
 
     record.last_seen = now;
     record.last_message = Some(msg.clone());
+
+    // `supervisor-branch-refresh` gate 1 (design D1): track the latest
+    // modified-file set on its own field, separate from `last_message`,
+    // because a later `Blocked`/`Intent` message would otherwise overwrite
+    // `last_message` and make cleanliness undecidable from it alone.
+    if let Some(files) = modified_files_of(msg) {
+        record.modified_files.clone_from(files);
+    }
 
     // CLI is pre-filled authoritatively at launch — the supervisor from
     // `[supervisor].cli`/`default_cli` via `with_seeded_cli`, and each coding
@@ -455,6 +476,7 @@ pub fn agent_status_snapshot(state: &Arc<BrokerState>) -> Vec<AgentStatusEntry> 
                 last_seen_seconds: r.last_seen.elapsed().as_secs(),
                 last_seen: r.last_seen,
                 phase,
+                modified_files: r.modified_files.clone(),
             }
         })
         .collect();

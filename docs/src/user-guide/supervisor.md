@@ -1224,3 +1224,61 @@ does NOT merge any branch in the cycle. Instead, it publishes
 **Final summary.** When the loop completes, the supervisor publishes a
 final `agent.status` summarising which branches merged cleanly, which were
 skipped (and why), and any regressions encountered.
+
+## Branch refresh (opt-in)
+
+Over a long wave the supervisor merges peer after peer into the default
+branch while every other live worker keeps committing on the baseline it
+started from, so each branch drifts further from what it will eventually
+be merged into. The only *existing* recourse is worker-side and advisory —
+see [*When main advances*](#pane-driving-and-cross-worktree-git-disciplines)
+above — which correctly tells a worker holding uncommitted work not to
+auto-rebase, but means refresh only happens when a worker chooses to act.
+
+When `[supervisor] branch_refresh = true` is set, the supervisor's
+[unattended drive loop](#unattended-mode---unattended) instead performs the
+refresh itself, at a moment it can prove is safe: after a successful merge
+(`agent.advanced-main`), for a branch that is provably idle and clean. This
+is a supervisor operation, not a worker judgment call — the two disciplines
+do not conflict, because the supervisor acts only under exactly the
+condition (no uncommitted work) that makes the worker-side "do NOT
+auto-rebase" rule unnecessary.
+
+**Default off.** Rewriting a live agent's history is opt-in, permanently —
+set `[supervisor] branch_refresh = true` to enable it. With the field
+absent or `false`, post-merge behaviour is unchanged from every prior
+version.
+
+**Every live worker branch is checked after every merge**, and refreshed
+only when ALL of the following hold. Any single failure leaves the branch
+untouched — there is no partial or degraded attempt, and the skip is
+recorded, not retried or escalated:
+
+1. **Clean.** The worker's working tree has no uncommitted changes, per
+   the broker watcher's tracked `modified_files` — never a fresh probe, so
+   the supervisor and the watcher can never disagree about what "clean"
+   means.
+2. **Idle.** The worker's pane is not mid-response.
+3. **Claimed.** The supervisor holds the pane's exclusive approval claim
+   (the same TOCTOU guard approvals use), narrowing the race window
+   between the cleanliness check and the rebase.
+4. **Conflict-free.** A `git merge-tree` prediction shows the rebase would
+   not conflict — checked BEFORE the rebase starts, so the worktree never
+   enters an in-progress rebase state a live agent could observe. A
+   prediction that proves wrong once the rebase actually runs is recovered
+   with `git rebase --abort`, leaving the branch at its pre-rebase HEAD.
+5. **Behind.** The branch actually has commits to pull in; an already
+   current branch is left alone.
+
+A branch that has already passed the five-gate supervisor verification and
+awaits merge is never refreshed — it has been verified at its current
+base, and rewriting it would silently invalidate that verification.
+
+**Notification.** After a successful refresh the affected worker receives
+`agent.feedback` tagged `[branch-refresh]` (the same bracket-tag
+convention as `[conflict-detector]`) telling it HEAD moved, so it does not
+keep reasoning about file contents or commit SHAs from before the
+rewrite. This is deliberately NOT `agent.advanced-main` — that event means
+"the base moved" and the worker-side discipline above keys off that exact
+meaning; conflating it with "your own branch was rewritten" would corrupt
+that discipline.

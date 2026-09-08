@@ -97,12 +97,38 @@ poll an agent that is busy or dirty for a reason.
   mode of an unsafe automatic rebase (silently destroyed agent work) is far worse than
   the failure mode of a stale branch (a manual rebase at merge time).
 
-## Open Questions
+## Resolved Questions
 
-- Should refresh apply to **all** live worker branches on each merge, or only to those
-  whose declared intent overlaps the merged branch's files? The narrower rule rewrites
-  less history; the broader rule keeps the whole wave uniformly current. Resolve before
-  implementation.
-- Should a branch that fails its gates repeatedly across several merges escalate to the
-  supervisor as a signal worth a human look, or stay silent? Leaning silent — a busy
-  agent is normal, and a noisy detector is what made GP-18 invisible in the first place.
+**Refresh breadth: all live worker branches, not intent-overlap-scoped.** The
+post-merge hook lives in the unattended drive loop (`src/supervisor/drive.rs`),
+which already enumerates every live `AgentPane` each sweep but has no access to
+the broker-internal intent tracker (`src/broker/conflict.rs`'s `ConflictTracker`
+runs in the broker/dashboard process, reached only over HTTP with no query for
+"declared file regions by agent"). Scoping refresh to intent-overlap would mean
+either plumbing a new HTTP endpoint just for this feature or duplicating intent
+tracking outside the broker — real cost for a narrowing that only reduces *how
+much* history gets rewritten, not *whether* an unsafe rewrite can happen (the
+five preconditions already make that unreachable). All five gates apply
+per-branch regardless of breadth, so evaluating every live branch costs one
+extra gate-check per idle branch and skips (rather than mis-refreshes) any
+branch that is dirty, mid-response, unclaimed, conflicting, or already current.
+Decided: **every live worker branch is evaluated on each merge**; each is still
+independently gated, so a branch with no reason to refresh is simply a no-op,
+not a skipped opportunity.
+
+**Repeated skips do not escalate.** Confirmed silent, per task 4.7 and the
+`git-operations`/`supervisor-branch-refresh` spec's "Repeated skips do not
+escalate" scenario: a busy or dirty agent across several merges is normal
+operation, and escalating it would recreate the noisy-detector problem that
+made GP-18 invisible in the first place. The skip is recorded (for the
+dashboard/broker log) but never raised as an `agent.question`.
+
+**1.2 — no collision with the verified-branch exclusion.** The verified
+exclusion (gate 5 of the "All refresh preconditions are a conjunction"
+requirement) filters by the branch's own status (`"verified"`, meaning it
+passed the five-gate supervisor verification and is awaiting merge), which is
+orthogonal to breadth: every live branch is *considered*, and the verified
+ones are then excluded by their own status. Because the exclusion is a status
+predicate independent of which branches were considered, "evaluate all
+branches" and "never refresh a verified-awaiting-merge branch" cannot select
+the same branch for rewrite — the two rules compose rather than compete.

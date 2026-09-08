@@ -64,6 +64,17 @@ pub struct AgentRecord {
     /// re-publish `working` (within the configured TTL window). Transient —
     /// not serialized; reset only when overwritten by a newer committed event.
     pub last_committed_at: Option<Instant>,
+    /// The agent's most recently reported set of modified files, from the
+    /// last `Status` or `Artifact` message that carried one.
+    ///
+    /// Tracked separately from [`Self::last_message`] because that field is
+    /// overwritten by ANY roster-upserting message — a `Blocked` or `Intent`
+    /// message carries no file list, and letting it clobber the last known
+    /// set would make cleanliness undecidable. `supervisor-branch-refresh`'s
+    /// gate 1 reads this directly (design D1) rather than issuing a fresh
+    /// `git status` probe, so the supervisor and the watcher can never
+    /// disagree about whether a worktree is clean.
+    pub modified_files: Vec<String>,
 }
 
 /// JSON-serializable snapshot of an agent's status for the `/status` endpoint
@@ -86,6 +97,13 @@ pub struct AgentStatusEntry {
     /// `status_label()` when rendering the agent's row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    /// The agent's most recently reported modified-file set (see
+    /// [`AgentRecord::modified_files`]). Carried over `/status` so a caller
+    /// with only HTTP access — the unattended drive loop's post-merge branch
+    /// refresh — can read the watcher's cleanliness signal without a second
+    /// working-tree probe.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modified_files: Vec<String>,
 }
 
 /// Mutable broker state protected by an `RwLock`.

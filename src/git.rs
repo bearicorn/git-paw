@@ -304,7 +304,14 @@ fn find_worktree_for_branch_with(
     Ok(None)
 }
 
-/// Rebases `branch` onto the repo's default branch.
+/// Rebases `branch` onto the repo's default branch, running inside a live
+/// worktree if `branch` is checked out mid-session.
+///
+/// Called both from [`create_worktree_with`] at worktree-creation time and
+/// from [`rebase_branch_onto_default`] for a mid-session refresh of a branch
+/// already checked out in a running agent's worktree
+/// (`supervisor-branch-refresh`) — the same mechanics apply either way, only
+/// the caller and the moment differ.
 ///
 /// Runs the rebase inside the worktree where `branch` is currently checked out
 /// (the main repo or one of its sibling worktrees). If `branch` is not checked
@@ -313,12 +320,10 @@ fn find_worktree_for_branch_with(
 ///
 /// On rebase failure, runs `git rebase --abort` (best-effort), restores the
 /// main repo's HEAD if it was switched, and returns a `WorktreeError`
-/// containing git's stderr. The branch is left at its pre-rebase HEAD.
-///
-/// Private, and reached only from [`create_worktree_with`], which already
-/// carries a runner — so unlike the public entry points there is no no-runner
-/// wrapper to preserve.
-fn rebase_branch_onto_default_with(
+/// containing git's stderr. The branch is left at its pre-rebase HEAD. When
+/// `branch` is already at or ahead of the default branch, `git rebase` exits
+/// zero with no rewrite, which this function treats as success.
+pub(crate) fn rebase_branch_onto_default_with(
     runner: &dyn CommandRunner,
     repo_root: &Path,
     branch: &str,
@@ -367,6 +372,143 @@ fn rebase_branch_onto_default_with(
     }
 
     Ok(())
+}
+
+/// Mid-session rebase of a live worker branch onto the repo's default branch
+/// (`supervisor-branch-refresh`).
+///
+/// Separate from `create_worktree`'s creation-time `rebase_onto_main`, which
+/// runs once when a worktree is (re)created. This entry point is called
+/// against a branch already checked out in a **live, running** worktree — the
+/// supervisor invokes it after a successful merge into the default branch,
+/// once every refresh precondition (clean working tree, idle pane, held pane
+/// claim, conflict-free prediction, branch behind the default) has passed.
+///
+/// Delegates entirely to [`rebase_branch_onto_default_with`], so it shares
+/// every mechanic already covered there: the rebase runs inside the worktree
+/// where `branch` is checked out, a non-zero exit triggers `git rebase
+/// --abort` and returns an error leaving the branch at its pre-rebase HEAD,
+/// and a branch already at or ahead of the default branch is a successful
+/// no-op. `create_worktree`'s own contract (ordering relative to the
+/// existence check, idempotent resume behaviour) is untouched by this
+/// addition.
+///
+/// # Errors
+/// Returns [`PawError::WorktreeError`] if the rebase fails (see above) or the
+/// default branch cannot be resolved.
+pub(crate) fn rebase_branch_onto_default(repo_root: &Path, branch: &str) -> Result<(), PawError> {
+    rebase_branch_onto_default_with(&RealCommandRunner, repo_root, branch)
+}
+
+/// Predicts whether rebasing `branch` onto `default_branch` would conflict,
+/// WITHOUT starting a rebase or touching any worktree (`supervisor-branch-
+/// refresh` D2).
+///
+/// Runs `git merge-tree --write-tree <default_branch> <branch>` in
+/// `repo_root` — a pure ref-to-ref simulation that needs no checkout and
+/// leaves every worktree untouched. Git resolves the merge base itself; a
+/// non-zero exit means the simulated merge produced conflicts, which this
+/// function reports as a predicted conflict so the caller can skip the branch
+/// before the worktree ever enters an in-progress rebase state that a live
+/// agent could observe.
+///
+/// The prediction is a heuristic, not a guarantee: a rebase replays each of
+/// `branch`'s commits individually against `default_branch`, which can differ
+/// from merging the two tips in one step when interacting changes span
+/// multiple commits. [`rebase_branch_onto_default_with`]'s `git rebase
+/// --abort` recovery remains the backstop for a clean prediction that proves
+/// wrong once the rebase actually runs.
+///
+/// # Errors
+/// Returns [`PawError::WorktreeError`] only if `git merge-tree` cannot be
+/// spawned at all (e.g. `git` missing from `PATH`).
+pub(crate) fn predict_rebase_conflict_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    branch: &str,
+    default_branch: &str,
+) -> Result<bool, PawError> {
+    let cwd = repo_root.to_string_lossy();
+    let output = runner
+        .run(
+            "git",
+            &[
+                "-C",
+                &cwd,
+                "merge-tree",
+                "--write-tree",
+                default_branch,
+                branch,
+            ],
+        )
+        .map_err(|e| PawError::WorktreeError(format!("failed to run git merge-tree: {e}")))?;
+    Ok(!output.success)
+}
+
+/// [`predict_rebase_conflict_with`] against [`RealCommandRunner`].
+pub(crate) fn predict_rebase_conflict(
+    repo_root: &Path,
+    branch: &str,
+    default_branch: &str,
+) -> Result<bool, PawError> {
+    predict_rebase_conflict_with(&RealCommandRunner, repo_root, branch, default_branch)
+}
+
+/// Whether `branch` is behind `default_branch` — i.e. `default_branch` has
+/// commits `branch` does not — the last of the five refresh preconditions
+/// (`supervisor-branch-refresh`).
+///
+/// Implemented as `git merge-base --is-ancestor <default_branch> <branch>`:
+/// exit `0` means `default_branch` is fully contained in `branch`'s history
+/// (already current, not behind); exit `1` means it is not (behind, or
+/// diverged — either way the refresh is warranted). Any other exit (a bad
+/// ref, a corrupt object) is surfaced as an error rather than guessed at, so
+/// an unresolvable comparison skips the branch instead of assuming either
+/// answer.
+///
+/// # Errors
+/// Returns [`PawError::WorktreeError`] if `git merge-base` cannot be spawned,
+/// or exits with a code other than `0` or `1`.
+pub(crate) fn branch_is_behind_default_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    branch: &str,
+    default_branch: &str,
+) -> Result<bool, PawError> {
+    let cwd = repo_root.to_string_lossy();
+    let output = runner
+        .run(
+            "git",
+            &[
+                "-C",
+                &cwd,
+                "merge-base",
+                "--is-ancestor",
+                default_branch,
+                branch,
+            ],
+        )
+        .map_err(|e| PawError::WorktreeError(format!("failed to run git merge-base: {e}")))?;
+    match output.code {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(PawError::WorktreeError(format!(
+                "git merge-base --is-ancestor could not compare {branch} against \
+                 {default_branch}: {stderr}"
+            )))
+        }
+    }
+}
+
+/// [`branch_is_behind_default_with`] against [`RealCommandRunner`].
+pub(crate) fn branch_is_behind_default(
+    repo_root: &Path,
+    branch: &str,
+    default_branch: &str,
+) -> Result<bool, PawError> {
+    branch_is_behind_default_with(&RealCommandRunner, repo_root, branch, default_branch)
 }
 
 /// Resolves the absolute worktree directory path for `branch` under the
@@ -2118,6 +2260,201 @@ mod tests {
                 vec!["-C", "/wt/feat-x", "rebase", "main"],
             ];
             assert_eq!(argv_sequence(&fake), expected);
+        }
+
+        /// `supervisor-branch-refresh` task 2.2/2.4: a mid-session rebase of a
+        /// branch already at or ahead of the default branch is a successful
+        /// no-op — `git rebase` exits zero and nothing is rewritten.
+        #[test]
+        fn rebase_onto_default_mid_session_already_current_is_a_successful_noop() {
+            let fake = FakeCommandRunner::scripted(|_, args| match args {
+                [.., "symbolic-ref", "refs/remotes/origin/HEAD"] => {
+                    Ok(ok_with("refs/remotes/origin/main\n"))
+                }
+                [.., "worktree", "list", "--porcelain"] => Ok(ok_with(
+                    "worktree /repo\nbranch refs/heads/main\n\nworktree /wt/feat-x\nbranch refs/heads/feat/x\n\n",
+                )),
+                // `git rebase` against an already-current branch reports
+                // "Current branch feat/x is up to date." on stdout and exits 0.
+                [.., "rebase", "main"] => Ok(ok_with("Current branch feat/x is up to date.\n")),
+                _ => Ok(ok_with("")),
+            });
+
+            super::super::rebase_branch_onto_default_with(&fake, Path::new("/repo"), "feat/x")
+                .expect("an already-current rebase must succeed as a no-op");
+        }
+
+        /// Task 2.1: the mid-session public entry point
+        /// ([`rebase_branch_onto_default`]) delegates to the same mechanics as
+        /// the creation-time path against a real repo, via [`RealCommandRunner`].
+        #[test]
+        fn rebase_branch_onto_default_delegates_to_the_with_variant() {
+            let r = super::setup_rebase_repo();
+            let before = super::head_sha(r.path(), "feat/example");
+            super::super::rebase_branch_onto_default(r.path(), "feat/example")
+                .expect("already-current mid-session rebase succeeds");
+            let after = super::head_sha(r.path(), "feat/example");
+            assert_eq!(
+                before, after,
+                "feat/example already contains main; the public entry point must be a no-op"
+            );
+        }
+
+        // === Conflict prediction (task 3) ===================================
+
+        #[test]
+        fn predict_rebase_conflict_runs_merge_tree_without_touching_the_worktree() {
+            let fake = FakeCommandRunner::scripted(|_, _| Ok(ok_with("deadbeef\n")));
+            let predicted = super::super::predict_rebase_conflict_with(
+                &fake,
+                Path::new("/repo"),
+                "feat/x",
+                "main",
+            )
+            .expect("merge-tree runs");
+            assert!(
+                !predicted,
+                "a clean merge-tree exit must predict no conflict"
+            );
+            assert_eq!(
+                argv_sequence(&fake),
+                vec![vec![
+                    "-C",
+                    "/repo",
+                    "merge-tree",
+                    "--write-tree",
+                    "main",
+                    "feat/x",
+                ]],
+                "must invoke merge-tree by ref name only — no checkout, no rebase"
+            );
+        }
+
+        #[test]
+        fn predict_rebase_conflict_reports_true_on_a_nonzero_exit() {
+            let fake = FakeCommandRunner::scripted(|_, _| {
+                Ok(fail_with(1, "CONFLICT (content): Merge conflict in a.txt"))
+            });
+            let predicted = super::super::predict_rebase_conflict_with(
+                &fake,
+                Path::new("/repo"),
+                "feat/x",
+                "main",
+            )
+            .expect("merge-tree runs");
+            assert!(
+                predicted,
+                "a conflicting merge-tree exit must predict a conflict"
+            );
+        }
+
+        /// Task 3.2 (real repo): a branch predicted to conflict is skipped by
+        /// the prediction alone — [`predict_rebase_conflict`] never starts a
+        /// rebase, so the worktree never enters an in-progress rebase state.
+        #[test]
+        fn predict_rebase_conflict_true_for_a_real_diverging_pair() {
+            let r = super::setup_rebase_repo();
+            super::run_git(r.path(), &["checkout", "feat/example"]);
+            std::fs::write(r.path().join("a.txt"), "feat-version\n").unwrap();
+            super::run_git(r.path(), &["add", "."]);
+            super::run_git(r.path(), &["commit", "-m", "feat edit"]);
+            super::run_git(r.path(), &["checkout", "main"]);
+            std::fs::write(r.path().join("a.txt"), "main-version\n").unwrap();
+            super::run_git(r.path(), &["add", "."]);
+            super::run_git(r.path(), &["commit", "-m", "main edit"]);
+
+            let predicted = super::super::predict_rebase_conflict(r.path(), "feat/example", "main")
+                .expect("merge-tree runs against a real repo");
+            assert!(
+                predicted,
+                "diverging edits to the same line must predict a conflict"
+            );
+
+            // The worktree the branch would rebase in was never touched: no
+            // rebase state, no working-tree changes.
+            let status = super::capture_git(r.path(), &["status", "--porcelain"]);
+            assert!(
+                status.is_empty(),
+                "prediction alone must leave the worktree clean: {status}"
+            );
+        }
+
+        #[test]
+        fn predict_rebase_conflict_false_for_a_real_clean_pair() {
+            let r = super::setup_rebase_repo();
+            super::advance_main(r.path(), 2);
+            let predicted = super::super::predict_rebase_conflict(r.path(), "feat/example", "main")
+                .expect("merge-tree runs against a real repo");
+            assert!(
+                !predicted,
+                "feat/example behind main with no overlapping edits must predict clean"
+            );
+        }
+
+        // === Behind-default gate (task 4.4 data source) =====================
+
+        #[test]
+        fn branch_is_behind_default_true_when_default_is_not_an_ancestor() {
+            let fake = FakeCommandRunner::scripted(|_, _| Ok(fail_with(1, "")));
+            let behind = super::super::branch_is_behind_default_with(
+                &fake,
+                Path::new("/repo"),
+                "feat/x",
+                "main",
+            )
+            .expect("is-ancestor runs");
+            assert!(behind, "exit 1 (not an ancestor) means behind or diverged");
+        }
+
+        #[test]
+        fn branch_is_behind_default_false_when_default_is_an_ancestor() {
+            let fake = FakeCommandRunner::scripted(|_, _| Ok(ok_with("")));
+            let behind = super::super::branch_is_behind_default_with(
+                &fake,
+                Path::new("/repo"),
+                "feat/x",
+                "main",
+            )
+            .expect("is-ancestor runs");
+            assert!(
+                !behind,
+                "exit 0 (default IS an ancestor) means already current"
+            );
+        }
+
+        #[test]
+        fn branch_is_behind_default_errors_on_an_unresolvable_comparison() {
+            let fake = FakeCommandRunner::scripted(|_, _| {
+                Ok(fail_with(128, "fatal: not a valid object name main"))
+            });
+            let err = super::super::branch_is_behind_default_with(
+                &fake,
+                Path::new("/repo"),
+                "feat/x",
+                "main",
+            )
+            .unwrap_err();
+            assert!(matches!(err, PawError::WorktreeError(_)));
+        }
+
+        #[test]
+        fn branch_is_behind_default_true_for_a_real_repo_behind_main() {
+            let r = super::setup_rebase_repo();
+            super::advance_main(r.path(), 1);
+            let behind = super::super::branch_is_behind_default(r.path(), "feat/example", "main")
+                .expect("is-ancestor runs against a real repo");
+            assert!(behind, "feat/example is missing main's newest commit");
+        }
+
+        #[test]
+        fn branch_is_behind_default_false_for_a_real_repo_already_current() {
+            let r = super::setup_rebase_repo();
+            let behind = super::super::branch_is_behind_default(r.path(), "feat/example", "main")
+                .expect("is-ancestor runs against a real repo");
+            assert!(
+                !behind,
+                "feat/example already contains all of main's commits"
+            );
         }
 
         #[test]

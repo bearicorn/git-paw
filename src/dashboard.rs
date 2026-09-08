@@ -619,6 +619,7 @@ mod tests {
             last_seen: Instant::now(),
             last_seen_seconds: 0,
             phase: None,
+            modified_files: Vec::new(),
         }
     }
 

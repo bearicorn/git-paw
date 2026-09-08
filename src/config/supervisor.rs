@@ -291,6 +291,20 @@ pub struct SupervisorConfig {
     /// config written before the table existed behaves exactly as it did.
     #[serde(default)]
     pub correction: CorrectionConfig,
+    /// Opt-in for supervisor-side mid-session branch refresh: rebasing an
+    /// idle, clean worker branch onto the default branch after a successful
+    /// merge (`supervisor-branch-refresh`).
+    ///
+    /// `None` — every config written before this capability existed, and the
+    /// documented default — resolves to `false` via
+    /// [`Self::branch_refresh_enabled`]: a live agent's branch is never
+    /// rewritten unless this is explicitly set to `true`. Even when enabled,
+    /// a refresh only ever happens after a successful merge and only for a
+    /// branch that passes every precondition gate (clean, idle, claimed,
+    /// conflict-free, behind the default, not already verified and awaiting
+    /// merge) — see the `supervisor-branch-refresh` capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_refresh: Option<bool>,
 }
 
 /// Action applied to a branch that has exhausted its correction-cycle budget
@@ -583,6 +597,14 @@ impl SupervisorConfig {
     #[must_use]
     pub fn verify_on_commit_nudge_enabled(&self) -> bool {
         self.verify_on_commit_nudge.unwrap_or(true)
+    }
+
+    /// Resolves whether supervisor-side mid-session branch refresh is
+    /// enabled. Defaults to `false` — rewriting a live agent's branch history
+    /// happens only on explicit opt-in.
+    #[must_use]
+    pub fn branch_refresh_enabled(&self) -> bool {
+        self.branch_refresh.unwrap_or(false)
     }
 }
 
@@ -1231,5 +1253,56 @@ mod tests {
              gate_tags = [\"lint\", \"perf-budget\"]\n",
         );
         assert_eq!(supervisor.correction.gate_tags, vec!["lint", "perf-budget"]);
+    }
+
+    // === `supervisor-branch-refresh` opt-in field (task 7) ==================
+
+    /// Task 7.2: a config written before this capability existed (no
+    /// `branch_refresh` field at all) loads without error and resolves the
+    /// capability to disabled.
+    #[test]
+    fn absent_branch_refresh_field_loads_and_resolves_disabled() {
+        let supervisor = supervisor_from(
+            "[supervisor]\n\
+             enabled = true\n\
+             cli = \"claude\"\n",
+        );
+        assert_eq!(supervisor.branch_refresh, None);
+        assert!(
+            !supervisor.branch_refresh_enabled(),
+            "branch refresh must default to disabled"
+        );
+    }
+
+    #[test]
+    fn branch_refresh_true_is_loaded_and_resolves_enabled() {
+        let supervisor = supervisor_from(
+            "[supervisor]\n\
+             enabled = true\n\
+             branch_refresh = true\n",
+        );
+        assert!(supervisor.branch_refresh_enabled());
+    }
+
+    #[test]
+    fn branch_refresh_false_is_loaded_and_resolves_disabled() {
+        let supervisor = supervisor_from(
+            "[supervisor]\n\
+             enabled = true\n\
+             branch_refresh = false\n",
+        );
+        assert!(!supervisor.branch_refresh_enabled());
+    }
+
+    /// The field is skipped when `None`, so a written-out default config
+    /// stays byte-for-byte free of a capability the user never opted into.
+    #[test]
+    fn absent_branch_refresh_is_not_serialized() {
+        let supervisor = SupervisorConfig::default();
+        let toml_out = toml::to_string(&supervisor).expect("serializes");
+        assert!(
+            !toml_out.contains("branch_refresh"),
+            "an unset branch_refresh must not appear in serialized output: {toml_out}"
+        );
     }
 }

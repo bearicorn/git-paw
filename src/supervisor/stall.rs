@@ -58,6 +58,7 @@ mod tests {
                     },
                 }),
                 last_committed_at: None,
+                modified_files: Vec::new(),
             },
         );
     }
