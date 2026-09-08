@@ -134,7 +134,11 @@ fn run(command: Command) -> Result<(), PawError> {
         } => commands::remove::cmd_remove(&branch, keep_worktree, force),
         Command::Pause => commands::pause::cmd_pause(),
         Command::Stop { force } => commands::stop::cmd_stop(force),
-        Command::Purge { force, stale } => cmd_purge(force, stale),
+        Command::Purge {
+            force,
+            stale,
+            all_repos,
+        } => cmd_purge(force, stale, all_repos),
         Command::Status { json } => commands::status::cmd_status(json),
         Command::Attach => commands::attach::cmd_attach(),
         Command::ListClis => commands::clis::cmd_list_clis(),
@@ -1150,13 +1154,15 @@ enum PurgeOutcome {
 
 /// Removes everything: tmux session, worktrees, and state.
 ///
-/// With `stale = true`, purges only sessions whose tmux session is gone (a
-/// stale receipt) across the whole machine, leaving live sessions untouched.
-/// `--force` is redundant in that combination (a stale entry is never
-/// prompted for) — passing both behaves identically to `--stale` alone.
-fn cmd_purge(force: bool, stale: bool) -> Result<(), PawError> {
+/// With `stale = true`, purges only stale sessions (receipt claims active but
+/// the tmux session is gone), scoped to the current repository by default;
+/// `all_repos = true` (only meaningful with `stale`) broadens the sweep to
+/// every repository on the machine. Live sessions are always left untouched.
+/// `--force` is redundant in the `--stale` combination (a stale entry is
+/// never prompted for) — passing both behaves identically to `--stale` alone.
+fn cmd_purge(force: bool, stale: bool, all_repos: bool) -> Result<(), PawError> {
     if stale {
-        return cmd_purge_stale();
+        return cmd_purge_stale(all_repos);
     }
 
     let cwd = std::env::current_dir()
@@ -1247,21 +1253,38 @@ fn invalidate_if_stale(repo_root: &Path, existing: &Session) -> Result<bool, Paw
 }
 
 /// Purges only stale sessions (receipt claims active but the tmux session is
-/// gone) across the whole machine. Live sessions are left untouched.
+/// gone), scoped to the current repository by default; `all_repos = true`
+/// broadens the sweep to every repository on the machine. Live sessions are
+/// always left untouched.
 ///
 /// Stale is defined exactly as [`session::DisplayStatus::Stale`]: an `active`
 /// receipt whose `tmux has-session` probe returns
 /// [`tmux::SessionLiveness::Stale`]. Stopped receipts (intentionally stopped)
 /// and sessions on a host with no tmux binary (Indeterminate probe) are NOT
-/// touched. Exits 0 with a "nothing to purge" message when no stale receipt
-/// exists.
-fn cmd_purge_stale() -> Result<(), PawError> {
+/// touched — the fail-safe guarantee: a receipt is purged only when the probe
+/// positively confirms staleness, never on a live or indeterminate liveness
+/// read. Exits 0 with a "nothing to purge" message when no stale receipt is
+/// in scope.
+fn cmd_purge_stale(all_repos: bool) -> Result<(), PawError> {
     let sessions_dir = session::session_state_dir()?;
     let all = session::load_all_sessions_in(&sessions_dir)?;
+
+    let repo_root = if all_repos {
+        None
+    } else {
+        let cwd = std::env::current_dir()
+            .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
+        Some(git::validate_repo(&cwd)?)
+    };
 
     let stale: Vec<session::Session> = all
         .into_iter()
         .filter(|s| {
+            if let Some(root) = &repo_root
+                && !session::session_belongs_to_repo(s, root)
+            {
+                return false;
+            }
             let liveness = tmux::session_liveness(&s.session_name);
             session::DisplayStatus::from_receipt(&s.status, liveness)
                 == session::DisplayStatus::Stale

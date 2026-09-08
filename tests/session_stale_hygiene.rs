@@ -11,6 +11,8 @@
 //! so the probe returns non-zero without ever creating or touching a real tmux
 //! session — the run is socket-isolated.
 
+mod helpers;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
@@ -80,6 +82,13 @@ fn receipt(session_name: &str, repo_path: &Path, status: SessionStatus) -> Sessi
 /// `Math.random`-style flakiness by deriving from the test's repo path.
 fn dead_name(tag: &str) -> String {
     format!("paw-stale-hygiene-{tag}-doesnotexist")
+}
+
+fn tmux_available() -> bool {
+    StdCommand::new("tmux")
+        .arg("-V")
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 // ---------------------------------------------------------------------------
@@ -320,5 +329,254 @@ fn purge_stale_with_force_is_well_defined() {
     assert!(
         sdir.join(format!("{stopped_name}.json")).exists(),
         "--force must NOT widen --stale to purge the non-stale (stopped) receipt"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// purge --stale — repository scope (purge-stale-repo-scope)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn purge_stale_default_scope_leaves_other_repo_stale_session_intact() {
+    let home = TempDir::new().expect("home");
+    let repo_a = TempDir::new().expect("repo a");
+    let repo_b = TempDir::new().expect("repo b");
+    init_git_repo(repo_a.path());
+    init_git_repo(repo_b.path());
+
+    let sdir = sessions_dir_for_home(home.path());
+    fs::create_dir_all(&sdir).expect("create sessions dir");
+
+    let stale_a = dead_name("scope-a");
+    let stale_b = dead_name("scope-b");
+    git_paw::session::save_session_in(
+        &receipt(&stale_a, repo_a.path(), SessionStatus::Active),
+        &sdir,
+    )
+    .expect("save repo a stale receipt");
+    git_paw::session::save_session_in(
+        &receipt(&stale_b, repo_b.path(), SessionStatus::Active),
+        &sdir,
+    )
+    .expect("save repo b stale receipt");
+
+    let out = cmd()
+        .current_dir(repo_a.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .args(["purge", "--stale"])
+        .output()
+        .expect("purge --stale");
+    assert!(out.status.success(), "purge --stale should exit 0");
+
+    assert!(
+        !sdir.join(format!("{stale_a}.json")).exists(),
+        "the current repository's stale receipt should be purged"
+    );
+    assert!(
+        sdir.join(format!("{stale_b}.json")).exists(),
+        "a different repository's stale receipt must NOT be touched by the default scope"
+    );
+}
+
+#[test]
+fn purge_stale_all_repos_sweeps_every_repository() {
+    let home = TempDir::new().expect("home");
+    let repo_a = TempDir::new().expect("repo a");
+    let repo_b = TempDir::new().expect("repo b");
+    init_git_repo(repo_a.path());
+    init_git_repo(repo_b.path());
+
+    let sdir = sessions_dir_for_home(home.path());
+    fs::create_dir_all(&sdir).expect("create sessions dir");
+
+    let stale_a = dead_name("allrepos-a");
+    let stale_b = dead_name("allrepos-b");
+    git_paw::session::save_session_in(
+        &receipt(&stale_a, repo_a.path(), SessionStatus::Active),
+        &sdir,
+    )
+    .expect("save repo a stale receipt");
+    git_paw::session::save_session_in(
+        &receipt(&stale_b, repo_b.path(), SessionStatus::Active),
+        &sdir,
+    )
+    .expect("save repo b stale receipt");
+
+    let out = cmd()
+        .current_dir(repo_a.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .args(["purge", "--stale", "--all-repos"])
+        .output()
+        .expect("purge --stale --all-repos");
+    assert!(
+        out.status.success(),
+        "purge --stale --all-repos should exit 0"
+    );
+
+    assert!(
+        !sdir.join(format!("{stale_a}.json")).exists(),
+        "the current repository's stale receipt should be purged under --all-repos"
+    );
+    assert!(
+        !sdir.join(format!("{stale_b}.json")).exists(),
+        "another repository's stale receipt should also be purged under --all-repos"
+    );
+}
+
+#[test]
+fn purge_all_repos_without_stale_is_rejected_by_the_binary() {
+    let home = TempDir::new().expect("home");
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+
+    let out = cmd()
+        .current_dir(repo.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .args(["purge", "--all-repos"])
+        .output()
+        .expect("purge --all-repos");
+    assert!(
+        !out.status.success(),
+        "--all-repos without --stale should be rejected"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// purge --stale — fail-safe live guarantee (purge-stale-repo-scope)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn purge_stale_never_purges_a_live_session_in_the_current_repository() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tmux_env = helpers::tmux_test_env();
+
+    let session_name = "paw-stale-hygiene-live-current-e2e-test";
+    let mut new_session = StdCommand::new("tmux");
+    new_session.args(["new-session", "-d", "-s", session_name]);
+    let created = tmux_env
+        .apply(&mut new_session)
+        .status()
+        .expect("tmux new-session");
+    assert!(created.success(), "failed to create the test tmux session");
+
+    let home = TempDir::new().expect("home");
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+
+    let sdir = sessions_dir_for_home(home.path());
+    fs::create_dir_all(&sdir).expect("create sessions dir");
+    git_paw::session::save_session_in(
+        &receipt(session_name, repo.path(), SessionStatus::Active),
+        &sdir,
+    )
+    .expect("save live receipt");
+
+    let mut purge = cmd();
+    tmux_env.apply_assert(&mut purge);
+    let out = purge
+        .current_dir(repo.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .args(["purge", "--stale"])
+        .output()
+        .expect("purge --stale");
+
+    let mut kill = StdCommand::new("tmux");
+    kill.args(["kill-session", "-t", session_name]);
+    let _ = tmux_env.apply(&mut kill).output();
+
+    assert!(out.status.success(), "purge --stale should exit 0");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("No stale sessions to purge"),
+        "a live session in scope is not stale, so nothing should be purged;\n{stdout}"
+    );
+    assert!(
+        sdir.join(format!("{session_name}.json")).exists(),
+        "a live session's receipt must never be purged by --stale"
+    );
+}
+
+#[test]
+fn purge_stale_all_repos_never_purges_a_live_session_in_another_repository() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tmux_env = helpers::tmux_test_env();
+
+    let session_name = "paw-stale-hygiene-live-other-e2e-test";
+    let mut new_session = StdCommand::new("tmux");
+    new_session.args(["new-session", "-d", "-s", session_name]);
+    let created = tmux_env
+        .apply(&mut new_session)
+        .status()
+        .expect("tmux new-session");
+    assert!(created.success(), "failed to create the test tmux session");
+
+    let home = TempDir::new().expect("home");
+    let repo_a = TempDir::new().expect("repo a (stale)");
+    let repo_b = TempDir::new().expect("repo b (live)");
+    init_git_repo(repo_a.path());
+    init_git_repo(repo_b.path());
+
+    let sdir = sessions_dir_for_home(home.path());
+    fs::create_dir_all(&sdir).expect("create sessions dir");
+
+    let stale_name = dead_name("allrepos-live-guard");
+    git_paw::session::save_session_in(
+        &receipt(&stale_name, repo_a.path(), SessionStatus::Active),
+        &sdir,
+    )
+    .expect("save repo a stale receipt");
+    git_paw::session::save_session_in(
+        &receipt(session_name, repo_b.path(), SessionStatus::Active),
+        &sdir,
+    )
+    .expect("save repo b live receipt");
+
+    let mut purge = cmd();
+    tmux_env.apply_assert(&mut purge);
+    let out = purge
+        .current_dir(repo_a.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .args(["purge", "--stale", "--all-repos"])
+        .output()
+        .expect("purge --stale --all-repos");
+
+    let mut has_session = StdCommand::new("tmux");
+    has_session.args(["has-session", "-t", session_name]);
+    let still_alive = tmux_env
+        .apply(&mut has_session)
+        .status()
+        .expect("tmux has-session")
+        .success();
+
+    let mut kill = StdCommand::new("tmux");
+    kill.args(["kill-session", "-t", session_name]);
+    let _ = tmux_env.apply(&mut kill).output();
+
+    assert!(
+        out.status.success(),
+        "purge --stale --all-repos should exit 0"
+    );
+    assert!(
+        !sdir.join(format!("{stale_name}.json")).exists(),
+        "the other repository's stale receipt should still be purged"
+    );
+    assert!(
+        sdir.join(format!("{session_name}.json")).exists(),
+        "a live session's receipt must never be purged, even under --all-repos"
+    );
+    assert!(
+        still_alive,
+        "a live session's tmux session must never be killed by --stale --all-repos"
     );
 }
