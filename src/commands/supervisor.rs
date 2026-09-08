@@ -922,6 +922,7 @@ fn drive_unattended_loop(
                 .display()
                 .to_string()
         }),
+        branch_refresh_enabled: supervisor_cfg.branch_refresh_enabled(),
     };
 
     drive::run_drive_loop(session_name, repo_root, &agents, options)?;

@@ -294,6 +294,7 @@ fn test_dashboard_renders_observation_sections() {
             last_seen_seconds: 0,
             last_seen: now,
             phase: None,
+            modified_files: Vec::new(),
         },
         AgentStatusEntry {
             agent_id: "feat-db".to_string(),
@@ -302,6 +303,7 @@ fn test_dashboard_renders_observation_sections() {
             last_seen_seconds: 10,
             last_seen: now,
             phase: None,
+            modified_files: Vec::new(),
         },
     ];
     let rows = format_agent_rows(&agents, now);

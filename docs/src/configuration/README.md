@@ -686,6 +686,7 @@ manual_approvals_log = true
 no_progress_window_seconds = 1500
 context_bloat_threshold_k = 250
 blocked_on_supervisor_window_seconds = 900
+branch_refresh = false
 ```
 
 | Field | Default | Description |
@@ -708,6 +709,7 @@ blocked_on_supervisor_window_seconds = 900
 | `no_progress_window_seconds` | `1500` (~25 min) | Read by `.git-paw/scripts/sweep.sh`: an agent is flagged `no-progress` when BOTH its completed-task-checkbox count AND its branch commit count stay unchanged for this many seconds. Set longer to tolerate long build/research steps, shorter to nudge sooner. Omitted → the documented default |
 | `context_bloat_threshold_k` | `250` (thousand tokens) | Read by `.git-paw/scripts/sweep.sh`: when an agent's pane shows a `/clear to save <N>k tokens` hint whose `N` meets or exceeds this value, the agent is proactively flagged `context-bloat` so the supervisor can pre-empt the eventual freeze. Omitted → the documented default |
 | `blocked_on_supervisor_window_seconds` | `900` (~15 min) | Read by `.git-paw/scripts/sweep.sh`: an agent whose latest unanswered `agent.blocked` names the supervisor as the blocker is flagged `blocked-on-supervisor` once it has waited longer than this window, forcing the supervisor to answer. Omitted → the documented default |
+| `branch_refresh` | `false` | When `true`, the [unattended drive loop](../user-guide/supervisor.md#unattended-mode---unattended) rebases an idle, clean worker branch onto the default branch after a successful merge — see [Branch refresh](../user-guide/supervisor.md#branch-refresh-opt-in) for the full precondition gate list. Default off: history is rewritten under a live agent only on explicit opt-in |
 
 **Approval flag resolution.** When composing a pane's launch command, git-paw
 resolves the permission flags for a `(CLI, level)` pair in order: (1) the

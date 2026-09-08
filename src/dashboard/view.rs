@@ -424,6 +424,7 @@ mod tests {
                 last_seen: now.checked_sub(Duration::from_secs(10)).unwrap(),
                 last_seen_seconds: 10,
                 phase: None,
+                modified_files: Vec::new(),
             },
             AgentStatusEntry {
                 agent_id: "feat-b".to_string(),
@@ -432,6 +433,7 @@ mod tests {
                 last_seen: now.checked_sub(Duration::from_mins(1)).unwrap(),
                 last_seen_seconds: 60,
                 phase: None,
+                modified_files: Vec::new(),
             },
             AgentStatusEntry {
                 agent_id: "feat-c".to_string(),
@@ -440,6 +442,7 @@ mod tests {
                 last_seen: now.checked_sub(Duration::from_mins(5)).unwrap(),
                 last_seen_seconds: 300,
                 phase: None,
+                modified_files: Vec::new(),
             },
         ];
         let rows = format_agent_rows(&agents, now);
@@ -459,6 +462,7 @@ mod tests {
             last_seen: now.checked_sub(Duration::from_mins(3)).unwrap(),
             last_seen_seconds: 180,
             phase: None,
+            modified_files: Vec::new(),
         }];
         let rows = format_agent_rows(&agents, now);
         assert_eq!(rows.len(), 1);
@@ -478,6 +482,7 @@ mod tests {
                 last_seen: now.checked_sub(Duration::from_mins(1)).unwrap(),
                 last_seen_seconds: 60,
                 phase: None,
+                modified_files: Vec::new(),
             },
             AgentStatusEntry {
                 agent_id: "feat-working".to_string(),
@@ -486,6 +491,7 @@ mod tests {
                 last_seen: now.checked_sub(Duration::from_secs(30)).unwrap(),
                 last_seen_seconds: 30,
                 phase: None,
+                modified_files: Vec::new(),
             },
         ];
         let rows = format_agent_rows(&agents, now);
@@ -526,6 +532,7 @@ mod tests {
             last_seen: now.checked_sub(Duration::from_mins(3)).unwrap(),
             last_seen_seconds: 180,
             phase: None,
+            modified_files: Vec::new(),
         }];
         let rows = format_agent_rows(&agents, now);
         assert_eq!(rows.len(), 1);
@@ -558,6 +565,7 @@ mod tests {
                 last_seen: now,
                 last_seen_seconds: 0,
                 phase: Some("watching".to_string()),
+                modified_files: Vec::new(),
             },
             AgentStatusEntry {
                 agent_id: "feat-a".to_string(),
@@ -566,6 +574,7 @@ mod tests {
                 last_seen: now,
                 last_seen_seconds: 0,
                 phase: None,
+                modified_files: Vec::new(),
             },
             AgentStatusEntry {
                 agent_id: "feat-b".to_string(),
@@ -574,6 +583,7 @@ mod tests {
                 last_seen: now,
                 last_seen_seconds: 0,
                 phase: None,
+                modified_files: Vec::new(),
             },
         ];
         let rows = format_agent_rows(&agents, now);
@@ -598,6 +608,7 @@ mod tests {
             last_seen: now,
             last_seen_seconds: 0,
             phase: None,
+            modified_files: Vec::new(),
         }];
         let rows = format_agent_rows(&agents, now);
         assert_eq!(rows.len(), 1);
@@ -717,6 +728,7 @@ mod tests {
             last_seen: now,
             last_seen_seconds: 0,
             phase: Some("merging".to_string()),
+            modified_files: Vec::new(),
         }];
         let rows = format_agent_rows(&agents, now);
         assert_eq!(rows.len(), 1);
@@ -742,6 +754,7 @@ mod tests {
             last_seen: now,
             last_seen_seconds: 0,
             phase: None,
+            modified_files: Vec::new(),
         }];
         let rows = format_agent_rows(&agents, now);
         assert!(
@@ -765,6 +778,7 @@ mod tests {
             last_seen: Instant::now(),
             last_seen_seconds: 0,
             phase: phase.map(str::to_string),
+            modified_files: Vec::new(),
         }
     }
 

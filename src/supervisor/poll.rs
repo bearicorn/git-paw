@@ -220,6 +220,14 @@ pub struct AgentStatusRow {
     /// broker. Empty when the broker has no CLI on record for the agent.
     #[serde(default)]
     pub cli: String,
+    /// The agent's most recently reported modified-file set (the broker
+    /// watcher's tracked cleanliness signal). Empty when the broker has none
+    /// on record, or the field is absent from an older broker response.
+    /// Consumed by `supervisor-branch-refresh`'s cleanliness gate (design
+    /// D1) so a caller with only HTTP `/status` access never needs a second
+    /// working-tree probe.
+    #[serde(default)]
+    pub modified_files: Vec<String>,
 }
 
 /// Fetches the broker `/status` endpoint and returns the agent summary.
@@ -647,6 +655,7 @@ mod tests {
                     },
                 }),
                 last_committed_at: None,
+                modified_files: Vec::new(),
             },
         );
     }
@@ -955,6 +964,7 @@ mod tests {
             status: status.to_string(),
             last_seen_seconds,
             cli: String::new(),
+            modified_files: Vec::new(),
         }
     }
 

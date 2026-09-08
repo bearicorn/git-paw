@@ -1255,6 +1255,7 @@ fn supervisor_round_trips_through_save_and_load() {
             blocked_on_supervisor_window_seconds: None,
             tell: TellConfig::default(),
             correction: CorrectionConfig::default(),
+            branch_refresh: None,
         }),
         ..Default::default()
     };

@@ -1020,6 +1020,38 @@ pub trait LearningSink {
     fn record(&mut self, category: &str, title: &str, body: &str);
 }
 
+/// Performs the git-level actions of `supervisor-branch-refresh`: the two
+/// gate inputs that require shelling out to git (conflict prediction,
+/// behind-default), the rebase itself, and the post-refresh worker
+/// notification. Abstracted so the whole orchestration
+/// ([`refresh_branches_after_merge`]) is testable without a real git
+/// repository or broker.
+///
+/// Every method takes the worktree path rather than a branch name: the
+/// caller ([`AgentPane`]) tracks worktree paths, not branch names, and the
+/// production implementation resolves the currently-checked-out branch from
+/// the worktree itself ([`crate::git::current_branch`]) — the same source of
+/// truth `git` itself would use, rather than a name that could drift from
+/// what is actually checked out.
+pub trait BranchRefresher {
+    /// Whether rebasing the branch checked out in `worktree_path` onto
+    /// `default_branch` is predicted to conflict (`git merge-tree`). An
+    /// unresolvable comparison (branch name or prediction failure) is
+    /// reported as a conflict — the safe default for an unreadable gate.
+    fn predict_conflict(&self, worktree_path: &Path, default_branch: &str) -> bool;
+    /// Whether the branch checked out in `worktree_path` is behind
+    /// `default_branch`. An unresolvable comparison is reported as NOT
+    /// behind — the safe default for an unreadable gate (no rebase is
+    /// attempted).
+    fn is_behind(&self, worktree_path: &Path, default_branch: &str) -> bool;
+    /// Rebases the branch checked out in `worktree_path` onto the default
+    /// branch.
+    fn rebase(&mut self, worktree_path: &Path) -> Result<(), PawError>;
+    /// Notifies `agent_id` that its branch HEAD was rewritten by a
+    /// successful refresh.
+    fn notify(&mut self, agent_id: &str, default_branch: &str);
+}
+
 /// Bundled dependencies for [`drive_loop`].
 pub struct DriveDeps<'a> {
     /// Enumerates panes each sweep.
@@ -1038,6 +1070,8 @@ pub struct DriveDeps<'a> {
     pub alerts: &'a mut dyn AlertSink,
     /// Records learnings.
     pub learnings: &'a mut dyn LearningSink,
+    /// Performs branch-refresh git actions and worker notification.
+    pub refresher: &'a mut dyn BranchRefresher,
 }
 
 /// Tuning knobs for [`drive_loop`].
@@ -1069,6 +1103,10 @@ pub struct DriveConfig {
     pub broker_log_hint: Option<String>,
     /// Learnings file pointer for the summary.
     pub learnings_hint: Option<String>,
+    /// Whether `supervisor-branch-refresh` is enabled
+    /// (`[supervisor] branch_refresh`). Default-off: a live agent's branch is
+    /// rewritten only on explicit opt-in.
+    pub branch_refresh_enabled: bool,
 }
 
 impl Default for DriveConfig {
@@ -1085,6 +1123,7 @@ impl Default for DriveConfig {
             learnings_enabled: false,
             broker_log_hint: None,
             learnings_hint: None,
+            branch_refresh_enabled: false,
         }
     }
 }
@@ -1114,6 +1153,7 @@ impl Default for DriveConfig {
 /// `agent.status` (W15-7). The loop never treats a feedback→fix→re-verify cycle
 /// as stuck — there is no cycle counter, only the completion and heartbeat exit
 /// conditions.
+#[allow(clippy::too_many_lines)]
 pub fn drive_loop(
     session: &str,
     repo_root: &Path,
@@ -1176,7 +1216,7 @@ pub fn drive_loop(
         }
 
         // --- Observe newly published worker messages -------------------------
-        observe_worker_messages(
+        let merged_bases = observe_worker_messages(
             ctx,
             &coding_ids,
             deps,
@@ -1189,6 +1229,18 @@ pub fn drive_loop(
         // A branch that reached a terminal PASS leaves the correction cycle,
         // so an unrelated later failure starts from a fresh budget.
         correction.clear_completed(&latest_status);
+
+        // --- Branch refresh (post-merge, opt-in) ------------------------------
+        trigger_branch_refresh(
+            config.branch_refresh_enabled,
+            ctx,
+            agents,
+            &pane_by_agent,
+            &latest_status,
+            &merged_bases,
+            deps,
+        );
+
         if detect_completion(&latest_status, &coding_ids).is_some() {
             let outcome = if escalations.is_empty() {
                 DriveOutcome::Completed
@@ -1282,14 +1334,30 @@ const MERGE_CANDIDATE_STATUSES: &[&str] = &["committed", "done"];
 /// the loop its own tail — injecting each escalation twice and, worse, once per
 /// message it generated. Handing off is fire-and-forget throughout: no arm blocks
 /// the wave on the orchestrator's response.
+/// Returns the default-branch name (`payload.base`) of every
+/// `agent.advanced-main` event observed this sweep, in publish order.
+///
+/// `AdvancedMain`'s sender identity is the payload's `from` field (typically
+/// `"supervisor"`), never a coding agent's id, so it is handled here as a
+/// dedicated match arm BEFORE the `coding_ids`-gated dispatch below — that
+/// gate exists to keep the loop's own escalations from feeding back into
+/// themselves (see the arm-by-arm doc above) and would otherwise silently
+/// drop every merge event. This is the drive loop's post-merge trigger for
+/// `supervisor-branch-refresh` (design D4): refresh is evaluated only in
+/// reaction to an observed merge, never on a timer.
 fn observe_worker_messages(
     ctx: SweepContext<'_>,
     coding_ids: &[String],
     deps: &mut DriveDeps<'_>,
     correction: &mut CorrectionState,
     gate_tags: &[String],
-) {
+) -> Vec<String> {
+    let mut merged_bases = Vec::new();
     for msg in deps.messages.poll_new() {
+        if let BrokerMessage::AdvancedMain { payload } = &msg {
+            merged_bases.push(payload.base.clone());
+            continue;
+        }
         let Some(agent_id) = coding_ids.iter().find(|id| *id == msg.agent_id()) else {
             continue;
         };
@@ -1317,6 +1385,93 @@ fn observe_worker_messages(
                 }
             }
             _ => {}
+        }
+    }
+    merged_bases
+}
+
+/// Runs [`refresh_branches_after_merge`] once per merge event observed this
+/// sweep, but only when `enabled`. Factored out of [`drive_loop`] purely to
+/// keep that function's own body short; the enablement check and the
+/// no-timer guarantee (design D4 — `merged_bases` is non-empty only when an
+/// `agent.advanced-main` event was actually observed this sweep) live here.
+#[allow(clippy::too_many_arguments)]
+fn trigger_branch_refresh(
+    enabled: bool,
+    ctx: SweepContext<'_>,
+    agents: &[AgentPane],
+    pane_by_agent: &HashMap<String, usize>,
+    latest_status: &[AgentStatusRow],
+    merged_bases: &[String],
+    deps: &mut DriveDeps<'_>,
+) {
+    if !enabled {
+        return;
+    }
+    for base in merged_bases {
+        refresh_branches_after_merge(ctx, agents, pane_by_agent, latest_status, base, deps);
+    }
+}
+
+/// Evaluates the `supervisor-branch-refresh` preconditions for every live
+/// worker branch after a successful merge onto `base`, and rebases +
+/// notifies each branch that passes every gate.
+///
+/// Called only when [`DriveConfig::branch_refresh_enabled`] is `true`, and
+/// only from [`drive_loop`] in reaction to an observed
+/// `agent.advanced-main` event — never on a timer (design D4). Every branch
+/// is evaluated independently as a strict conjunction (task 4.6): a branch
+/// that fails any single gate is left untouched, with no partial or
+/// degraded attempt, and the skip is neither retried within this merge event
+/// nor escalated to the supervisor inbox (task 4.7) — it is simply not
+/// acted on, and the next merge re-evaluates it.
+fn refresh_branches_after_merge(
+    ctx: SweepContext<'_>,
+    agents: &[AgentPane],
+    pane_by_agent: &HashMap<String, usize>,
+    latest_status: &[AgentStatusRow],
+    base: &str,
+    deps: &mut DriveDeps<'_>,
+) {
+    for agent in agents {
+        // No live pane this sweep (booted but not yet resolved, or the pane
+        // closed) — nothing to capture or claim, so nothing to evaluate.
+        let Some(&pane_index) = pane_by_agent.get(&agent.agent_id) else {
+            continue;
+        };
+        let status_row = latest_status.iter().find(|r| r.agent_id == agent.agent_id);
+        // An agent with no status row on record is unresolved, not
+        // affirmatively clean — the safe default is to skip it, matching
+        // every other "cannot determine" case in this conjunction.
+        let clean = status_row.is_some_and(|r| r.modified_files.is_empty());
+        let verified_awaiting_merge = status_row.is_some_and(|r| r.status == "verified");
+
+        let capture = deps.capturer.capture(ctx.session, pane_index);
+        let mid_response = pane_is_mid_response(&capture);
+
+        // Holding the claim through the rebase call (it is dropped at the end
+        // of this iteration) narrows the window between the cleanliness
+        // check and the rebase (design's disclosed residual risk).
+        let claim = PaneClaim::try_acquire(ctx.repo_root, pane_index);
+        let claim_held = claim.is_some();
+
+        let predicted_conflict = deps.refresher.predict_conflict(&agent.worktree_path, base);
+        let behind_default = deps.refresher.is_behind(&agent.worktree_path, base);
+
+        let gates = super::branch_refresh::RefreshPreconditions {
+            verified_awaiting_merge,
+            clean,
+            mid_response,
+            claim_held,
+            predicted_conflict,
+            behind_default,
+        };
+        if gates.evaluate().is_err() {
+            continue;
+        }
+
+        if deps.refresher.rebase(&agent.worktree_path).is_ok() {
+            deps.refresher.notify(&agent.agent_id, base);
         }
     }
 }
@@ -2099,6 +2254,64 @@ impl LearningSink for SweepLearningSink {
     }
 }
 
+/// Production [`BranchRefresher`]: resolves each worktree's checked-out
+/// branch via [`crate::git::current_branch`] and delegates the git-level
+/// gate inputs and the rebase itself to `crate::git`'s
+/// `supervisor-branch-refresh` entry points. Notification publishes a
+/// `[branch-refresh]`-tagged `agent.feedback` over the broker HTTP API.
+struct GitBranchRefresher {
+    repo_root: PathBuf,
+    broker_url: Option<String>,
+}
+
+impl BranchRefresher for GitBranchRefresher {
+    fn predict_conflict(&self, worktree_path: &Path, default_branch: &str) -> bool {
+        // An unresolvable branch name or prediction failure is reported as a
+        // conflict — the safe default that skips the branch rather than
+        // guessing it is clean.
+        crate::git::current_branch(worktree_path)
+            .ok()
+            .and_then(|branch| {
+                crate::git::predict_rebase_conflict(&self.repo_root, &branch, default_branch).ok()
+            })
+            .unwrap_or(true)
+    }
+
+    fn is_behind(&self, worktree_path: &Path, default_branch: &str) -> bool {
+        // An unresolvable comparison is reported as NOT behind — the safe
+        // default that skips the branch rather than guessing a rebase is due.
+        crate::git::current_branch(worktree_path)
+            .ok()
+            .and_then(|branch| {
+                crate::git::branch_is_behind_default(&self.repo_root, &branch, default_branch).ok()
+            })
+            .unwrap_or(false)
+    }
+
+    fn rebase(&mut self, worktree_path: &Path) -> Result<(), PawError> {
+        let branch = crate::git::current_branch(worktree_path)?;
+        crate::git::rebase_branch_onto_default(&self.repo_root, &branch)
+    }
+
+    fn notify(&mut self, agent_id: &str, default_branch: &str) {
+        let Some(url) = &self.broker_url else {
+            return;
+        };
+        let msg = crate::broker::messages::BrokerMessage::Feedback {
+            agent_id: agent_id.to_string(),
+            payload: crate::broker::messages::FeedbackPayload {
+                from: SUPERVISOR_AGENT_ID.to_string(),
+                errors: vec![super::branch_refresh::refreshed_notification_text(
+                    default_branch,
+                )],
+            },
+        };
+        if let Err(e) = crate::broker::publish::publish_to_broker_http(url, &msg) {
+            eprintln!("drive: failed to publish branch-refresh notification for {agent_id}: {e}");
+        }
+    }
+}
+
 /// Inputs for [`run_drive_loop`] beyond the session name, repo root, and agent
 /// roster — bundled so the production entry point stays under the
 /// argument-count lint and so `cmd_supervisor` builds them in one place.
@@ -2121,6 +2334,9 @@ pub struct DriveRunOptions {
     pub broker_log_hint: Option<String>,
     /// Learnings-file pointer for the exit summary.
     pub learnings_hint: Option<String>,
+    /// Whether `supervisor-branch-refresh` is enabled
+    /// (`[supervisor] branch_refresh`). Default-off.
+    pub branch_refresh_enabled: bool,
 }
 
 /// Runs the unattended drive loop with production dependencies, prints the exit
@@ -2149,6 +2365,7 @@ pub fn run_drive_loop(
         learnings_enabled,
         broker_log_hint,
         learnings_hint,
+        branch_refresh_enabled,
     } = options;
 
     let enumerator = TmuxPaneEnumerator;
@@ -2162,10 +2379,16 @@ pub fn run_drive_loop(
         cursor: std::cell::Cell::new(0),
     };
     let clock = SystemClock;
-    let mut alerts = BrokerAlertSink { broker_url };
+    let mut alerts = BrokerAlertSink {
+        broker_url: broker_url.clone(),
+    };
     let mut learnings = SweepLearningSink {
         repo_root: repo_root.to_path_buf(),
         seen: std::collections::HashSet::new(),
+    };
+    let mut refresher = GitBranchRefresher {
+        repo_root: repo_root.to_path_buf(),
+        broker_url,
     };
 
     let config = DriveConfig {
@@ -2188,6 +2411,7 @@ pub fn run_drive_loop(
         learnings_enabled,
         broker_log_hint,
         learnings_hint,
+        branch_refresh_enabled,
         ..DriveConfig::default()
     };
 
@@ -2200,6 +2424,7 @@ pub fn run_drive_loop(
         clock: &clock,
         alerts: &mut alerts,
         learnings: &mut learnings,
+        refresher: &mut refresher,
     };
 
     let summary = drive_loop(session, repo_root, agents, &mut deps, &config);
@@ -2412,6 +2637,58 @@ mod tests {
         }
     }
 
+    /// Scripted, call-recording [`BranchRefresher`] fake.
+    ///
+    /// `predict_conflict`/`is_behind` default to "conflict-free and behind"
+    /// (the all-gates-pass shape) so a test only needs to override what it
+    /// cares about via [`Self::with_conflict`] / [`Self::with_not_behind`].
+    /// Every `rebase`/`notify` call is recorded so a test can assert the
+    /// orchestration never invoked them when a gate should have skipped the
+    /// branch.
+    #[derive(Default)]
+    struct RecordingRefresher {
+        conflicting: std::collections::HashSet<PathBuf>,
+        not_behind: std::collections::HashSet<PathBuf>,
+        rebase_should_fail: bool,
+        rebase_calls: Vec<PathBuf>,
+        notify_calls: Vec<(String, String)>,
+    }
+    impl RecordingRefresher {
+        fn with_conflict(mut self, worktree_path: &Path) -> Self {
+            self.conflicting.insert(worktree_path.to_path_buf());
+            self
+        }
+        fn with_not_behind(mut self, worktree_path: &Path) -> Self {
+            self.not_behind.insert(worktree_path.to_path_buf());
+            self
+        }
+        fn with_failing_rebase(mut self) -> Self {
+            self.rebase_should_fail = true;
+            self
+        }
+    }
+    impl BranchRefresher for RecordingRefresher {
+        fn predict_conflict(&self, worktree_path: &Path, _default_branch: &str) -> bool {
+            self.conflicting.contains(worktree_path)
+        }
+        fn is_behind(&self, worktree_path: &Path, _default_branch: &str) -> bool {
+            !self.not_behind.contains(worktree_path)
+        }
+        fn rebase(&mut self, worktree_path: &Path) -> Result<(), PawError> {
+            self.rebase_calls.push(worktree_path.to_path_buf());
+            if self.rebase_should_fail {
+                return Err(PawError::WorktreeError(
+                    "scripted rebase failure".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        fn notify(&mut self, agent_id: &str, default_branch: &str) {
+            self.notify_calls
+                .push((agent_id.to_string(), default_branch.to_string()));
+        }
+    }
+
     /// Serves a scripted sequence of newly-published broker messages — one
     /// batch per poll iteration, empty once the script is exhausted (mirroring
     /// a real observer, which only ever returns messages published *since* the
@@ -2443,6 +2720,7 @@ mod tests {
             status: status.to_string(),
             last_seen_seconds: 0,
             cli: String::new(),
+            modified_files: Vec::new(),
         }
     }
 
@@ -2451,6 +2729,15 @@ mod tests {
     fn row_with_cli(agent: &str, status: &str, cli: &str) -> AgentStatusRow {
         AgentStatusRow {
             cli: cli.to_string(),
+            ..row(agent, status)
+        }
+    }
+
+    /// A `/status` row that also carries a modified-file set, for the
+    /// branch-refresh cleanliness gate.
+    fn row_with_modified_files(agent: &str, status: &str, files: &[&str]) -> AgentStatusRow {
+        AgentStatusRow {
+            modified_files: files.iter().map(|f| (*f).to_string()).collect(),
             ..row(agent, status)
         }
     }
@@ -2815,6 +3102,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -2825,6 +3113,7 @@ mod tests {
             clock: &clock,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            refresher: &mut refresher,
         };
         let config = DriveConfig {
             whitelist: vec!["cargo test".to_string()],
@@ -2900,6 +3189,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -2910,6 +3200,7 @@ mod tests {
             clock: &clock,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            refresher: &mut refresher,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -3102,6 +3393,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -3112,6 +3404,7 @@ mod tests {
             clock: &clock,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            refresher: &mut refresher,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -3161,6 +3454,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -3171,6 +3465,7 @@ mod tests {
             clock: &clock,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            refresher: &mut refresher,
         };
         let config = DriveConfig {
             whitelist: vec!["cargo test".to_string()],
@@ -3234,6 +3529,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -3244,6 +3540,7 @@ mod tests {
             clock: &clock,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            refresher: &mut refresher,
         };
         let config = DriveConfig {
             whitelist: vec!["cargo test".to_string()],
@@ -3312,6 +3609,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -3322,6 +3620,7 @@ mod tests {
             clock: &clock,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            refresher: &mut refresher,
         };
         let config = DriveConfig {
             whitelist: vec!["cargo build".to_string()],
@@ -3367,6 +3666,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -3377,6 +3677,7 @@ mod tests {
             clock: &clock,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            refresher: &mut refresher,
         };
         let config = DriveConfig {
             whitelist: vec!["cargo test".to_string()],
@@ -3409,6 +3710,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -3419,6 +3721,7 @@ mod tests {
             clock: &clock,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            refresher: &mut refresher,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -3454,6 +3757,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -3464,6 +3768,7 @@ mod tests {
             clock: &clock,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            refresher: &mut refresher,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -3501,6 +3806,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -3511,6 +3817,7 @@ mod tests {
             clock: &clock,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            refresher: &mut refresher,
         };
         let config = DriveConfig {
             whitelist: vec!["cargo test".to_string()],
@@ -3549,6 +3856,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -3559,6 +3867,7 @@ mod tests {
             clock: &clock,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            refresher: &mut refresher,
         };
         let config = DriveConfig {
             whitelist: vec!["cargo test".to_string()],
@@ -3718,6 +4027,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
@@ -3727,6 +4037,7 @@ mod tests {
             clock: &clock,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            refresher: &mut refresher,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -3857,6 +4168,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
@@ -3866,6 +4178,7 @@ mod tests {
             clock: &clock,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            refresher: &mut refresher,
         };
         // `DriveConfig::default()` carries `CorrectionConfig::default()`, i.e.
         // `auto_loopback = false` — the absent-table resolution.
@@ -3911,6 +4224,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
@@ -3920,6 +4234,7 @@ mod tests {
             clock: &clock,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            refresher: &mut refresher,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -3967,6 +4282,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
         let summary = {
             let mut deps = DriveDeps {
                 enumerator: &enumerator,
@@ -3977,6 +4293,7 @@ mod tests {
                 clock: &clock,
                 alerts: &mut alerts,
                 learnings: &mut learnings,
+                refresher: &mut refresher,
             };
             let config = DriveConfig {
                 poll_interval: Duration::from_secs(1),
@@ -4187,6 +4504,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
@@ -4196,6 +4514,7 @@ mod tests {
             clock: &clock,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            refresher: &mut refresher,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -4241,6 +4560,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -4251,6 +4571,7 @@ mod tests {
             clock: &clock,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            refresher: &mut refresher,
         };
         let config = DriveConfig {
             whitelist: vec!["cargo test".to_string()],
@@ -4319,6 +4640,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
             capturer: &capturer,
@@ -4328,6 +4650,7 @@ mod tests {
             clock: &clock,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            refresher: &mut refresher,
         };
         drive_loop_in_tmp("paw-test", agents, &mut deps, config);
         (dispatcher, alerts)
@@ -4587,6 +4910,472 @@ mod tests {
                 dispatcher.literal_sends
             );
         }
+    }
+
+    // === `supervisor-branch-refresh`: post-merge trigger + gates (group 5/6) ===
+
+    /// Builds an `agent.advanced-main` event with `base` as the default
+    /// branch — the drive loop's only trigger for evaluating branch refresh
+    /// (design D4).
+    fn advanced_main(base: &str) -> BrokerMessage {
+        BrokerMessage::AdvancedMain {
+            payload: crate::broker::messages::AdvancedMainPayload {
+                from: SUPERVISOR_AGENT_ID.to_string(),
+                merged_branch: "feat/other".to_string(),
+                new_main_sha: "abcdef123456".to_string(),
+                base: base.to_string(),
+                merged_at: chrono::Utc::now(),
+                summary: None,
+            },
+        }
+    }
+
+    fn one_agent_at(worktree: &str) -> Vec<AgentPane> {
+        vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from(worktree),
+        }]
+    }
+
+    /// Bundles a single-agent branch-refresh scenario so each test only
+    /// states what differs: the pane capture, the two status ticks, the
+    /// observed messages, and whether the capability is enabled.
+    #[allow(clippy::too_many_arguments)]
+    fn run_branch_refresh_scenario(
+        capture: &str,
+        first_tick_status: Vec<AgentStatusRow>,
+        messages_batches: Vec<Vec<BrokerMessage>>,
+        branch_refresh_enabled: bool,
+        refresher: RecordingRefresher,
+    ) -> RecordingRefresher {
+        let agents = one_agent_at("/repo-feat-a");
+        let enumerator = FakeEnumerator {
+            panes: vec![PaneInfo {
+                pane_index: 2,
+                pane_current_path: "/repo-feat-a".to_string(),
+            }],
+        };
+        let capturer = FakeCapturer::new(&[(2, capture)]);
+        let mut dispatcher = RecordingDispatcher::default();
+        let status = ScriptedStatus::new(vec![first_tick_status, vec![row("supervisor", "done")]]);
+        let messages = ScriptedMessages::new(messages_batches);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut refresher = refresher;
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            refresher: &mut refresher,
+        };
+        let config = DriveConfig {
+            poll_interval: Duration::from_secs(1),
+            heartbeat: Duration::from_hours(1),
+            branch_refresh_enabled,
+            ..DriveConfig::default()
+        };
+        drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
+        refresher
+    }
+
+    /// Spec scenario "Clean, idle, claimed, conflict-free, behind branch is
+    /// refreshed": every gate passes, so the branch is rebased and the
+    /// worker is notified with the distinguishing tag — never
+    /// `agent.advanced-main` (tasks 6.1/6.3).
+    #[test]
+    fn branch_refresh_happy_path_rebases_and_notifies() {
+        let refresher = run_branch_refresh_scenario(
+            IDLE_PANE,
+            vec![row_with_modified_files("feat-a", "working", &[])],
+            vec![vec![advanced_main("main")]],
+            true,
+            RecordingRefresher::default(),
+        );
+        assert_eq!(
+            refresher.rebase_calls,
+            vec![PathBuf::from("/repo-feat-a")],
+            "the passing branch must be rebased exactly once"
+        );
+        assert_eq!(
+            refresher.notify_calls,
+            vec![("feat-a".to_string(), "main".to_string())],
+            "the worker must be notified with the merge's base branch"
+        );
+    }
+
+    /// Task 6.1/6.3, at the message-shape level: the notification text
+    /// carries the `[branch-refresh]` tag and is delivered as `agent.feedback`
+    /// (via [`GitBranchRefresher::notify`]'s production wiring), never as
+    /// `agent.advanced-main` — asserted directly against the text builder
+    /// the production notifier calls.
+    #[test]
+    fn branch_refresh_notification_is_tagged_feedback_not_advanced_main() {
+        let text = super::super::branch_refresh::refreshed_notification_text("main");
+        assert!(text.starts_with(super::super::branch_refresh::BRANCH_REFRESH_TAG));
+        // The text is plugged into a `BrokerMessage::Feedback`, not
+        // `BrokerMessage::AdvancedMain` — see `GitBranchRefresher::notify`.
+        let msg = BrokerMessage::Feedback {
+            agent_id: "feat-a".to_string(),
+            payload: crate::broker::messages::FeedbackPayload {
+                from: SUPERVISOR_AGENT_ID.to_string(),
+                errors: vec![text],
+            },
+        };
+        assert!(!matches!(msg, BrokerMessage::AdvancedMain { .. }));
+    }
+
+    /// Spec scenario "No refresh without a merge": with the capability
+    /// enabled but no `agent.advanced-main` ever observed, no branch is
+    /// rebased even as several sweeps pass (task 5.2).
+    #[test]
+    fn branch_refresh_never_fires_without_an_observed_merge() {
+        let refresher = run_branch_refresh_scenario(
+            IDLE_PANE,
+            vec![row_with_modified_files("feat-a", "working", &[])],
+            Vec::new(), // ScriptedMessages::new(vec![]) — never any messages
+            true,
+            RecordingRefresher::default(),
+        );
+        assert!(
+            refresher.rebase_calls.is_empty(),
+            "no merge was observed; the branch must never be rebased"
+        );
+        assert!(refresher.notify_calls.is_empty());
+    }
+
+    /// Spec scenario "Refresh disabled by default" / task 7.3: with the
+    /// capability disabled, an observed merge event is a complete no-op —
+    /// behaviour identical to before the capability existed.
+    #[test]
+    fn branch_refresh_disabled_ignores_an_observed_merge() {
+        let refresher = run_branch_refresh_scenario(
+            IDLE_PANE,
+            vec![row_with_modified_files("feat-a", "working", &[])],
+            vec![vec![advanced_main("main")]],
+            false, // branch_refresh_enabled
+            RecordingRefresher::default(),
+        );
+        assert!(
+            refresher.rebase_calls.is_empty(),
+            "disabled means byte-identical to pre-capability behaviour: no rebase"
+        );
+        assert!(refresher.notify_calls.is_empty());
+    }
+
+    /// Spec scenario "Dirty working tree is never rebased".
+    #[test]
+    fn branch_refresh_skips_a_dirty_worker() {
+        let refresher = run_branch_refresh_scenario(
+            IDLE_PANE,
+            vec![row_with_modified_files(
+                "feat-a",
+                "working",
+                &["src/lib.rs"],
+            )],
+            vec![vec![advanced_main("main")]],
+            true,
+            RecordingRefresher::default(),
+        );
+        assert!(
+            refresher.rebase_calls.is_empty(),
+            "a worker with uncommitted changes must never be rebased"
+        );
+    }
+
+    /// Spec scenario "Mid-response pane is not rebased".
+    #[test]
+    fn branch_refresh_skips_a_mid_response_pane() {
+        let refresher = run_branch_refresh_scenario(
+            MID_RESPONSE_PANE,
+            vec![row_with_modified_files("feat-a", "working", &[])],
+            vec![vec![advanced_main("main")]],
+            true,
+            RecordingRefresher::default(),
+        );
+        assert!(
+            refresher.rebase_calls.is_empty(),
+            "a mid-response worker must never be rebased"
+        );
+    }
+
+    /// Task 3.2 at the orchestration level: a branch predicted to conflict is
+    /// skipped and the rebase entry point is never invoked.
+    #[test]
+    fn branch_refresh_skips_a_predicted_conflict() {
+        let refresher = run_branch_refresh_scenario(
+            IDLE_PANE,
+            vec![row_with_modified_files("feat-a", "working", &[])],
+            vec![vec![advanced_main("main")]],
+            true,
+            RecordingRefresher::default().with_conflict(Path::new("/repo-feat-a")),
+        );
+        assert!(
+            refresher.rebase_calls.is_empty(),
+            "a predicted conflict must never invoke the rebase entry point"
+        );
+    }
+
+    /// Spec scenario "Branch already current is not rebased".
+    #[test]
+    fn branch_refresh_skips_a_branch_already_current() {
+        let refresher = run_branch_refresh_scenario(
+            IDLE_PANE,
+            vec![row_with_modified_files("feat-a", "working", &[])],
+            vec![vec![advanced_main("main")]],
+            true,
+            RecordingRefresher::default().with_not_behind(Path::new("/repo-feat-a")),
+        );
+        assert!(
+            refresher.rebase_calls.is_empty(),
+            "a branch already current must never be rebased"
+        );
+    }
+
+    /// Spec scenario "Verified branch is excluded from refresh".
+    #[test]
+    fn branch_refresh_skips_a_verified_awaiting_merge_branch() {
+        let refresher = run_branch_refresh_scenario(
+            IDLE_PANE,
+            vec![row_with_modified_files("feat-a", "verified", &[])],
+            vec![vec![advanced_main("main")]],
+            true,
+            RecordingRefresher::default(),
+        );
+        assert!(
+            refresher.rebase_calls.is_empty(),
+            "a verified-awaiting-merge branch must never be refreshed"
+        );
+    }
+
+    /// A rebase that fails once invoked must never notify the worker —
+    /// notification only follows a SUCCESSFUL refresh.
+    #[test]
+    fn branch_refresh_does_not_notify_on_a_failed_rebase() {
+        let refresher = run_branch_refresh_scenario(
+            IDLE_PANE,
+            vec![row_with_modified_files("feat-a", "working", &[])],
+            vec![vec![advanced_main("main")]],
+            true,
+            RecordingRefresher::default().with_failing_rebase(),
+        );
+        assert_eq!(refresher.rebase_calls.len(), 1, "the rebase was attempted");
+        assert!(
+            refresher.notify_calls.is_empty(),
+            "a failed rebase must not notify the worker"
+        );
+    }
+
+    // === Task 8: cross-module E2E against a REAL git repo (real worktrees, ===
+    // === real rebase; only tmux/pane capture are faked) ======================
+
+    fn run_real_git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("run git command");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn capture_real_git(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("run git command");
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Builds a real repo on `main` at one commit, with `feat/example`
+    /// branched off it, then advances `main` by one more commit — so
+    /// `feat/example` is genuinely behind. No `origin` remote: a single local
+    /// repo resolves its default branch via the local-`main` fallback
+    /// ([`crate::git::default_branch`]).
+    fn real_repo_with_a_behind_branch() -> tempfile::TempDir {
+        let sandbox = tempfile::tempdir().expect("tempdir");
+        let repo_root = sandbox.path();
+        run_real_git(repo_root, &["init", "-q", "-b", "main"]);
+        run_real_git(repo_root, &["config", "user.email", "test@test.com"]);
+        run_real_git(repo_root, &["config", "user.name", "Test"]);
+        std::fs::write(repo_root.join("a.txt"), "one\n").unwrap();
+        run_real_git(repo_root, &["add", "."]);
+        run_real_git(repo_root, &["commit", "-q", "-m", "init"]);
+        run_real_git(repo_root, &["branch", "feat/example"]);
+        std::fs::write(repo_root.join("main-only.txt"), "x\n").unwrap();
+        run_real_git(repo_root, &["add", "."]);
+        run_real_git(repo_root, &["commit", "-q", "-m", "main advances"]);
+        sandbox
+    }
+
+    /// Task 8.1: a real, end-to-end pass through the orchestration function
+    /// against a real git repo — a real worktree for a behind branch is
+    /// actually rebased onto main, with only the tmux pane capture faked
+    /// (idle, so gate 2 passes) and the pane claim taken for real against the
+    /// repo's own `.git-paw/tmp/`.
+    #[test]
+    fn branch_refresh_end_to_end_rebases_a_real_worktree() {
+        let sandbox = real_repo_with_a_behind_branch();
+        let repo_root = sandbox.path().to_path_buf();
+        let creation = crate::git::create_worktree(
+            &repo_root,
+            "feat/example",
+            false,
+            crate::config::WorktreePlacement::Sibling,
+        )
+        .expect("create a real worktree for feat/example");
+        let worktree_path = creation.path;
+
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: worktree_path.clone(),
+        }];
+        let mut pane_by_agent = HashMap::new();
+        pane_by_agent.insert("feat-a".to_string(), 2usize);
+        let latest_status = vec![row_with_modified_files("feat-a", "working", &[])];
+        let ctx = SweepContext {
+            session: "paw-test",
+            repo_root: &repo_root,
+            orchestrator: None,
+        };
+
+        let enumerator = FakeEnumerator { panes: vec![] };
+        let capturer = FakeCapturer::new(&[(2, IDLE_PANE)]);
+        let mut dispatcher = RecordingDispatcher::default();
+        let status = ScriptedStatus::new(vec![]);
+        let messages = ScriptedMessages::none();
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut refresher = GitBranchRefresher {
+            repo_root: repo_root.clone(),
+            broker_url: None,
+        };
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            refresher: &mut refresher,
+        };
+
+        refresh_branches_after_merge(
+            ctx,
+            &agents,
+            &pane_by_agent,
+            &latest_status,
+            "main",
+            &mut deps,
+        );
+
+        let main_head = capture_real_git(&repo_root, &["rev-parse", "main"]);
+        let feat_head = capture_real_git(&worktree_path, &["rev-parse", "feat/example"]);
+        assert_eq!(
+            main_head, feat_head,
+            "feat/example must be rebased onto main's latest commit"
+        );
+    }
+
+    /// Task 8.2: a dirty worker is skipped and its uncommitted changes are
+    /// PROVABLY untouched afterwards — real file content, real git status,
+    /// checked after the orchestration function runs against a real repo.
+    #[test]
+    fn branch_refresh_end_to_end_leaves_a_dirty_worktree_provably_untouched() {
+        let sandbox = real_repo_with_a_behind_branch();
+        let repo_root = sandbox.path().to_path_buf();
+        let creation = crate::git::create_worktree(
+            &repo_root,
+            "feat/example",
+            false,
+            crate::config::WorktreePlacement::Sibling,
+        )
+        .expect("create a real worktree for feat/example");
+        let worktree_path = creation.path;
+
+        // The agent has uncommitted work: an edited tracked file.
+        let uncommitted_content = "uncommitted local edit\n";
+        std::fs::write(worktree_path.join("a.txt"), uncommitted_content).unwrap();
+
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: worktree_path.clone(),
+        }];
+        let mut pane_by_agent = HashMap::new();
+        pane_by_agent.insert("feat-a".to_string(), 2usize);
+        // Cleanliness gate reads the watcher's tracked modified_files, which
+        // reports the dirty file — the same signal a real watcher would have
+        // published.
+        let latest_status = vec![row_with_modified_files("feat-a", "working", &["a.txt"])];
+        let ctx = SweepContext {
+            session: "paw-test",
+            repo_root: &repo_root,
+            orchestrator: None,
+        };
+
+        let enumerator = FakeEnumerator { panes: vec![] };
+        let capturer = FakeCapturer::new(&[(2, IDLE_PANE)]);
+        let mut dispatcher = RecordingDispatcher::default();
+        let status = ScriptedStatus::new(vec![]);
+        let messages = ScriptedMessages::none();
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut refresher = GitBranchRefresher {
+            repo_root: repo_root.clone(),
+            broker_url: None,
+        };
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            refresher: &mut refresher,
+        };
+
+        let pre_head = capture_real_git(&worktree_path, &["rev-parse", "feat/example"]);
+        refresh_branches_after_merge(
+            ctx,
+            &agents,
+            &pane_by_agent,
+            &latest_status,
+            "main",
+            &mut deps,
+        );
+        let post_head = capture_real_git(&worktree_path, &["rev-parse", "feat/example"]);
+
+        assert_eq!(
+            pre_head, post_head,
+            "a dirty worker's branch must never be rewritten"
+        );
+        let on_disk = std::fs::read_to_string(worktree_path.join("a.txt")).unwrap();
+        assert_eq!(
+            on_disk, uncommitted_content,
+            "the uncommitted edit must be provably untouched"
+        );
+        let status = capture_real_git(&worktree_path, &["status", "--porcelain"]);
+        assert!(
+            !status.is_empty(),
+            "the worktree must still show the same uncommitted change, not a clean tree"
+        );
     }
 
     /// The loop publishes its OWN escalations as `agent.question` from the
