@@ -291,22 +291,32 @@ Nuclear option: kills the tmux session, removes all worktrees, and deletes sessi
 Usage: git-paw purge [OPTIONS]
 
 Options:
-      --force  Skip confirmation prompt
-      --stale  Purge only stale sessions (receipt claims active but tmux is gone)
-  -h, --help   Print help
+      --force       Skip confirmation prompt
+      --stale       Purge only stale sessions (receipt claims active but tmux is gone); live sessions untouched
+      --all-repos   With --stale, sweep every repository's stale receipts instead of just the current one
+  -h, --help        Print help
 ```
 
 `--stale` purges only sessions whose tmux session no longer exists (a stale
-receipt) across the whole machine, leaving genuinely live sessions untouched —
-safe to run from cleanup scripts. When nothing is stale it exits `0` with a
+receipt). By default the sweep is **scoped to the current repository** — it
+never touches a stale receipt belonging to a different repository. Pass
+`--all-repos` to broaden the sweep to every repository's stale receipts on
+the machine (meaningful only together with `--stale`; used alone it is
+rejected with an error). When nothing is stale in scope it exits `0` with a
 "No stale sessions to purge." message. Pairing `--stale` with `--force` is a
 no-op (`--force` is redundant since a stale entry is never prompted for).
+
+In every case the live guarantee is fail-safe: a session that is live per the
+liveness probe — or whose liveness cannot be positively confirmed (e.g. the
+`tmux` binary is unavailable) — is never purged by `--stale`, in the current
+repository or any other.
 
 **Examples:**
 ```bash
 git paw purge
 git paw purge --force
-git paw purge --stale
+git paw purge --stale               # current repository only
+git paw purge --stale --all-repos   # every repository on the machine
 ```
 
 ## `git paw status`

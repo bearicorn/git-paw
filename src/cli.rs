@@ -369,8 +369,11 @@ pub enum Command {
                       Use --stale to purge only sessions whose tmux session is gone (a stale \
                       receipt). Live sessions are left untouched, so --stale is safe in cleanup \
                       scripts. Pairing --stale with --force is a no-op (--force is redundant on \
-                      a stale entry).\n\n\
-                      Examples:\n  git paw purge\n  git paw purge --force\n  git paw purge --stale"
+                      a stale entry). --stale defaults to the current repository; pass \
+                      --all-repos to sweep stale receipts across every repository on the \
+                      machine (still never touches a live session).\n\n\
+                      Examples:\n  git paw purge\n  git paw purge --force\n  \
+                      git paw purge --stale\n  git paw purge --stale --all-repos"
     )]
     Purge {
         /// Skip confirmation prompt.
@@ -383,6 +386,14 @@ pub enum Command {
                     live sessions untouched"
         )]
         stale: bool,
+        /// Broaden --stale from the current repository to every repository on the machine.
+        #[arg(
+            long = "all-repos",
+            requires = "stale",
+            help = "With --stale, sweep every repository's stale receipts instead of just \
+                    the current one"
+        )]
+        all_repos: bool,
     },
 
     /// Show session state for the current repo
@@ -1373,23 +1384,44 @@ mod tests {
     // -- Purge subcommand --
 
     /// One row per `git paw purge` flag-combo -> the parsed `force` / `stale`
-    /// flags (each of the four combinations).
+    /// / `all_repos` flags.
     #[test]
     fn purge_flag_combinations_parse() {
-        for (args, expected_force, expected_stale) in [
-            (vec!["purge"], false, false),
-            (vec!["purge", "--force"], true, false),
-            (vec!["purge", "--stale"], false, true),
-            (vec!["purge", "--stale", "--force"], true, true),
+        for (args, expected_force, expected_stale, expected_all_repos) in [
+            (vec!["purge"], false, false, false),
+            (vec!["purge", "--force"], true, false, false),
+            (vec!["purge", "--stale"], false, true, false),
+            (vec!["purge", "--stale", "--force"], true, true, false),
+            (vec!["purge", "--stale", "--all-repos"], false, true, true),
+            (
+                vec!["purge", "--stale", "--all-repos", "--force"],
+                true,
+                true,
+                true,
+            ),
         ] {
             match parse(&args).command.unwrap() {
-                Command::Purge { force, stale } => {
+                Command::Purge {
+                    force,
+                    stale,
+                    all_repos,
+                } => {
                     assert_eq!(force, expected_force, "force for {args:?}");
                     assert_eq!(stale, expected_stale, "stale for {args:?}");
+                    assert_eq!(all_repos, expected_all_repos, "all_repos for {args:?}");
                 }
                 other => panic!("expected Purge, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn purge_all_repos_without_stale_is_rejected() {
+        let result = Cli::try_parse_from(["git-paw", "purge", "--all-repos"]);
+        assert!(
+            result.is_err(),
+            "--all-repos requires --stale and should be rejected without it"
+        );
     }
 
     // -- Status subcommand --

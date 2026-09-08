@@ -351,9 +351,7 @@ pub fn find_session_for_repo_in(repo_path: &Path, dir: &Path) -> Result<Option<S
     // (e.g. `/var/...` resolving to `/private/var/...`, or a `..` segment) still
     // resolves to its session. Falls back to the raw path when canonicalization
     // fails (e.g. the repo directory no longer exists).
-    let want_canonical = repo_path
-        .canonicalize()
-        .unwrap_or_else(|_| repo_path.to_path_buf());
+    let want_canonical = canonical_or_raw(repo_path);
 
     for entry in entries {
         let entry =
@@ -373,16 +371,27 @@ pub fn find_session_for_repo_in(repo_path: &Path, dir: &Path) -> Result<Option<S
             Err(_) => continue, // skip malformed files
         };
 
-        let session_canonical = session
-            .repo_path
-            .canonicalize()
-            .unwrap_or_else(|_| session.repo_path.clone());
-        if session_canonical == want_canonical {
+        if canonical_or_raw(&session.repo_path) == want_canonical {
             return Ok(Some(session));
         }
     }
 
     Ok(None)
+}
+
+/// Canonicalises a path for repo-identity comparison, falling back to the raw
+/// path when canonicalization fails (e.g. the directory no longer exists).
+fn canonical_or_raw(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Whether `session` belongs to the repository at `repo_root`, comparing
+/// canonicalized paths the same way [`find_session_for_repo_in`] resolves a
+/// session by repository path. Used by `purge --stale` to scope the default
+/// sweep to the current repository.
+#[must_use]
+pub fn session_belongs_to_repo(session: &Session, repo_root: &Path) -> bool {
+    canonical_or_raw(&session.repo_path) == canonical_or_raw(repo_root)
 }
 
 /// Loads every session receipt in the given directory.
