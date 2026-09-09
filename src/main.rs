@@ -15,7 +15,7 @@ use git_paw::broker;
 #[cfg(test)]
 use git_paw::broker::publish::build_status_message;
 use git_paw::cli::{Cli, Command, SpecsFormat};
-use git_paw::config::{self, SupervisorConfig};
+use git_paw::config::{self, SupervisorConfig, resolve_submit_delay_ms};
 use git_paw::error::PawError;
 use git_paw::git;
 use git_paw::interactive;
@@ -595,24 +595,6 @@ fn attach_agent(
             runtime_slot: provisioned.runtime_slot,
         },
     })
-}
-
-/// Resolve the boot-prompt settle delay (ms) for `cli` from config,
-/// falling back to [`git_paw::DEFAULT_SUBMIT_DELAY_MS`].
-///
-/// `cli` may carry flags (e.g. `"mycli --foo"`); the lookup keys on the
-/// leading binary token. The delay is config-driven, never a hardcoded
-/// CLI-name table, so the launcher stays CLI-agnostic — a CLI whose
-/// large-paste handling needs more time sets `[clis.<name>].submit_delay_ms`
-/// rather than requiring a code change (W15-1, 2026-05-31 dogfood).
-#[must_use]
-fn resolve_submit_delay_ms(cli: &str, config: &git_paw::config::PawConfig) -> u64 {
-    let base = cli.split_whitespace().next().unwrap_or(cli);
-    config
-        .clis
-        .get(base)
-        .and_then(|c| c.submit_delay_ms)
-        .unwrap_or(git_paw::DEFAULT_SUBMIT_DELAY_MS)
 }
 
 /// Gates a pane before boot-block injection via
@@ -2946,85 +2928,5 @@ mod permission_seeding_removed_tests {
             after, sentinel,
             "a pre-existing settings file must be left byte-identical"
         );
-    }
-}
-
-#[cfg(test)]
-mod submit_delay_tests {
-    //! `claude-oss-launch-v0-6-x` / `cli-submit-profile`: the boot-prompt
-    //! settle delay is CONFIG-DRIVEN with a CLI-agnostic default — no
-    //! hardcoded CLI-name table (W15-1, agnostic rework).
-
-    use std::collections::HashMap;
-
-    use git_paw::config::{CustomCli, PawConfig};
-
-    use super::resolve_submit_delay_ms;
-
-    fn config_with(cli: &str, submit_delay_ms: Option<u64>) -> PawConfig {
-        let mut clis = HashMap::new();
-        clis.insert(
-            cli.to_string(),
-            CustomCli {
-                command: cli.to_string(),
-                display_name: None,
-                submit_delay_ms,
-                settings_path: None,
-                approval_args: HashMap::new(),
-            },
-        );
-        PawConfig {
-            clis,
-            ..PawConfig::default()
-        }
-    }
-
-    #[test]
-    fn unknown_or_unconfigured_cli_uses_agnostic_default() {
-        let cfg = PawConfig::default();
-        assert_eq!(
-            resolve_submit_delay_ms("any-cli", &cfg),
-            git_paw::DEFAULT_SUBMIT_DELAY_MS,
-        );
-    }
-
-    #[test]
-    fn custom_cli_submit_delay_override_is_honoured() {
-        let cfg = config_with("mycli", Some(2500));
-        assert_eq!(resolve_submit_delay_ms("mycli", &cfg), 2500);
-    }
-
-    #[test]
-    fn custom_cli_without_override_falls_back_to_default() {
-        let cfg = config_with("mycli", None);
-        assert_eq!(
-            resolve_submit_delay_ms("mycli", &cfg),
-            git_paw::DEFAULT_SUBMIT_DELAY_MS,
-        );
-    }
-
-    #[test]
-    fn lookup_keys_on_the_binary_not_the_flags() {
-        // A `cli` value may carry flags (e.g. "mycli --foo"); the lookup
-        // keys on the leading binary token.
-        let cfg = config_with("mycli", Some(2500));
-        assert_eq!(
-            resolve_submit_delay_ms("mycli --dangerously-skip-permissions", &cfg),
-            2500,
-        );
-    }
-
-    #[test]
-    fn no_cli_name_is_hardcoded_in_the_resolver() {
-        // The agnostic contract: with an empty config, EVERY cli id —
-        // including former-hardcoded names — resolves to the same default.
-        let cfg = PawConfig::default();
-        for cli in ["claude", "claude-oss", "gemini", "codex", "whatever"] {
-            assert_eq!(
-                resolve_submit_delay_ms(cli, &cfg),
-                git_paw::DEFAULT_SUBMIT_DELAY_MS,
-                "{cli} must use the agnostic default, not a hardcoded value"
-            );
-        }
     }
 }

@@ -3612,3 +3612,71 @@ fn worktree_runtime_repo_overrides_global() {
     let config = load_config_from(&global_path, &repo_root).unwrap();
     assert_eq!(config.worktree_runtime().ports.unwrap().base, 5000);
 }
+
+// --- resolve_submit_delay_ms behavior ---
+//
+// `claude-oss-launch-v0-6-x` / `cli-submit-profile`: the settle delay is
+// CONFIG-DRIVEN with a CLI-agnostic default — no hardcoded CLI-name table
+// (W15-1, agnostic rework).
+
+fn clis_with_submit_delay(cli: &str, submit_delay_ms: Option<u64>) -> HashMap<String, CustomCli> {
+    let mut clis = HashMap::new();
+    clis.insert(
+        cli.to_string(),
+        CustomCli {
+            command: cli.to_string(),
+            display_name: None,
+            submit_delay_ms,
+            settings_path: None,
+            approval_args: HashMap::new(),
+        },
+    );
+    clis
+}
+
+#[test]
+fn unknown_or_unconfigured_cli_uses_agnostic_default() {
+    assert_eq!(
+        resolve_submit_delay_ms("any-cli", &HashMap::new()),
+        crate::DEFAULT_SUBMIT_DELAY_MS,
+    );
+}
+
+#[test]
+fn custom_cli_submit_delay_override_is_honoured() {
+    let clis = clis_with_submit_delay("mycli", Some(2500));
+    assert_eq!(resolve_submit_delay_ms("mycli", &clis), 2500);
+}
+
+#[test]
+fn custom_cli_without_override_falls_back_to_default() {
+    let clis = clis_with_submit_delay("mycli", None);
+    assert_eq!(
+        resolve_submit_delay_ms("mycli", &clis),
+        crate::DEFAULT_SUBMIT_DELAY_MS,
+    );
+}
+
+#[test]
+fn lookup_keys_on_the_binary_not_the_flags() {
+    // A `cli` value may carry flags (e.g. "mycli --foo"); the lookup keys on
+    // the leading binary token.
+    let clis = clis_with_submit_delay("mycli", Some(2500));
+    assert_eq!(
+        resolve_submit_delay_ms("mycli --dangerously-skip-permissions", &clis),
+        2500,
+    );
+}
+
+#[test]
+fn no_cli_name_is_hardcoded_in_the_resolver() {
+    // The agnostic contract: with an empty map, EVERY cli id — including
+    // former-hardcoded names — resolves to the same default.
+    for cli in ["claude", "claude-oss", "gemini", "codex", "whatever"] {
+        assert_eq!(
+            resolve_submit_delay_ms(cli, &HashMap::new()),
+            crate::DEFAULT_SUBMIT_DELAY_MS,
+            "{cli} must use the agnostic default, not a hardcoded value"
+        );
+    }
+}

@@ -24,7 +24,8 @@ mod tests;
 
 pub use broker::{BrokerConfig, WatcherConfig};
 pub use cli::{
-    CustomCli, Preset, add_custom_cli, add_custom_cli_to, remove_custom_cli, remove_custom_cli_from,
+    CustomCli, Preset, add_custom_cli, add_custom_cli_to, remove_custom_cli,
+    remove_custom_cli_from, resolve_submit_delay_ms,
 };
 pub use dashboard::{BrokerLogConfig, DashboardConfig};
 pub use layout::LayoutConfig;

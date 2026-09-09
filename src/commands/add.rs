@@ -280,7 +280,7 @@ pub(crate) fn cmd_add(
         // interactive marker — relaunching a still-bare shell, falling back to
         // injection after the budget — instead of a blind fixed sleep.
         gate_pane_or_fail_on_dialog(&updated.session_name, new_pane_idx, &pane.cli_command)?;
-        let delay = resolve_submit_delay_ms(&agent_cli, &config);
+        let delay = resolve_submit_delay_ms(&agent_cli, &config.clis);
         submit_prompt_to_pane(&updated.session_name, new_pane_idx, &prompt, delay);
         println!(
             "Added '{branch}' to session '{}' (pane {new_pane_idx}).",
