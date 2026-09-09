@@ -9,7 +9,9 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use crate::broker::messages::{BrokerMessage, StatusPayload};
+use crate::broker::messages::{
+    ArtifactPayload, BlockedPayload, BrokerMessage, QuestionPayload, StatusPayload,
+};
 use crate::error::PawError;
 
 /// Builds an `agent.status` broker message with the given fields.
@@ -44,6 +46,47 @@ pub fn build_status_message(
             phase: None,
             detail: None,
             activity: None,
+        },
+    }
+}
+
+/// Builds an `agent.artifact` broker message, matching the `broker.sh
+/// artifact` shape exactly (`status` is always `"done"` — the code-less DONE
+/// fallback; the post-commit-hook path never goes through this helper).
+pub fn build_artifact_message(
+    agent_id: &str,
+    exports: Vec<String>,
+    modified_files: Vec<String>,
+) -> BrokerMessage {
+    BrokerMessage::Artifact {
+        agent_id: agent_id.to_string(),
+        payload: ArtifactPayload {
+            status: "done".to_string(),
+            exports,
+            modified_files,
+        },
+    }
+}
+
+/// Builds an `agent.blocked` broker message, matching the `broker.sh
+/// blocked <needs> <from>` shape exactly.
+pub fn build_blocked_message(agent_id: &str, needs: &str, from: &str) -> BrokerMessage {
+    BrokerMessage::Blocked {
+        agent_id: agent_id.to_string(),
+        payload: BlockedPayload {
+            needs: needs.to_string(),
+            from: from.to_string(),
+        },
+    }
+}
+
+/// Builds an `agent.question` broker message, matching the `broker.sh
+/// question <text>` shape exactly.
+pub fn build_question_message(agent_id: &str, question: &str) -> BrokerMessage {
+    BrokerMessage::Question {
+        agent_id: agent_id.to_string(),
+        payload: QuestionPayload {
+            question: question.to_string(),
         },
     }
 }
@@ -278,6 +321,38 @@ pub fn fetch_log_over_http(broker_url: &str) -> Result<Vec<BrokerMessage>, PawEr
 mod tests {
     use super::*;
 
+    /// `mcp-agent-publish` scenario "Rejected message does not corrupt the
+    /// protocol stream": a broker that responds with a non-202 status (the
+    /// shape of a rejection) surfaces as an `Err`, not a panic — the shared
+    /// path every MCP publish tool routes through.
+    #[test]
+    fn publish_to_broker_http_returns_err_on_non_202_without_panicking() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let body = "bad request";
+                let response = format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        let msg = build_status_message("feat-x", "working", None, None);
+        let result = publish_to_broker_http(&format!("http://{addr}"), &msg);
+        assert!(
+            result.is_err(),
+            "a rejected (non-202) response must surface as an error, not panic"
+        );
+        server.join().unwrap();
+    }
+
     #[test]
     fn build_status_message_with_explicit_cli_populates_cli_field() {
         let msg = build_status_message(
@@ -381,5 +456,42 @@ mod tests {
             !json.contains("\"phase\""),
             "phase key must be omitted from JSON when None; got {json}"
         );
+    }
+
+    #[test]
+    fn build_artifact_message_matches_broker_sh_shape() {
+        let msg = build_artifact_message(
+            "feat-x",
+            vec!["foo".to_string()],
+            vec!["src/lib.rs".to_string()],
+        );
+        let BrokerMessage::Artifact { agent_id, payload } = msg else {
+            panic!("expected BrokerMessage::Artifact");
+        };
+        assert_eq!(agent_id, "feat-x");
+        assert_eq!(payload.status, "done");
+        assert_eq!(payload.exports, vec!["foo".to_string()]);
+        assert_eq!(payload.modified_files, vec!["src/lib.rs".to_string()]);
+    }
+
+    #[test]
+    fn build_blocked_message_matches_broker_sh_shape() {
+        let msg = build_blocked_message("feat-x", "peer review", "feat-y");
+        let BrokerMessage::Blocked { agent_id, payload } = msg else {
+            panic!("expected BrokerMessage::Blocked");
+        };
+        assert_eq!(agent_id, "feat-x");
+        assert_eq!(payload.needs, "peer review");
+        assert_eq!(payload.from, "feat-y");
+    }
+
+    #[test]
+    fn build_question_message_matches_broker_sh_shape() {
+        let msg = build_question_message("feat-x", "should I proceed?");
+        let BrokerMessage::Question { agent_id, payload } = msg else {
+            panic!("expected BrokerMessage::Question");
+        };
+        assert_eq!(agent_id, "feat-x");
+        assert_eq!(payload.question, "should I proceed?");
     }
 }
