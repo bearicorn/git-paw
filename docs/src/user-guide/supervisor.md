@@ -70,17 +70,42 @@ The loop keeps polling until one of:
 2. **Stuck / bloat** — the stuck-detection signal fires.
 3. **Heartbeat** — about 25 minutes elapse with no completion, so you are
    re-engaged with a status summary rather than the loop running forever.
+4. **Session torn down** — the loop's own session instance is purged, stopped,
+   or replaced (see [Session-instance lifecycle](#session-instance-lifecycle)
+   below).
 
 On exit it prints a summary: the outcome (`completed` /
-`escalated-for-review` / `stuck` / `heartbeat`), each agent's final state, the
-deduped list of prompts escalated for human review, and pointers to the broker
-log and captured learnings. Because there is no human to hand-write findings,
-the loop self-captures qualitative learnings during the run and once more at
-wind-down.
+`escalated-for-review` / `stuck` / `heartbeat` / `session-torn-down`), each
+agent's **resolved** final state, the deduped list of prompts escalated for
+human review, and pointers to the broker log and captured learnings. Because
+there is no human to hand-write findings, the loop self-captures qualitative
+learnings during the run and once more at wind-down.
+
+Each agent's final state is resolved from the most-progressed lifecycle phase
+ever observed for it during the run — not simply the last `/status` row — so a
+generic `working` heartbeat published after a `verified`/`done` artifact event
+can never make a finished worker look unfinished in the summary. A completed
+wave also gets a wave-level roll-up line (e.g. `2/2 branches merged`), which
+covers the case where an individual agent's own resolution stayed sparse (its
+only signal was the supervisor's own verdict, never its own terminal status).
 
 For an unattended session the in-process loop is the **sole** approver: the
 dashboard subprocess's auto-approve thread is disabled so two approvers never
 race on the same pane.
+
+### Session-instance lifecycle
+
+The loop binds to the *specific session instance* it began driving — not just
+the session name — using the session receipt's creation timestamp as a
+durable instance token. Every tick re-reads the receipt and compares it before
+acting: if the receipt is gone, its `created_at` no longer matches (a new
+session of the same name was started after a `purge`), or its status is now
+`stopped`, the loop exits immediately — without sweeping panes or sending any
+keystrokes — rather than continuing to drive whatever now occupies that
+session name. This is what makes `purge`/`stop` safe to run against a session
+still being driven unattended: the old loop notices on its very next poll and
+gets out of the way instead of approving prompts in a session it no longer
+owns.
 
 ```bash
 # Drive every discovered spec to completion, unattended

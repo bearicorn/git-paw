@@ -688,13 +688,16 @@ fn submit_prompt_to_pane(session_name: &str, pane_idx: usize, prompt: &str, dela
 /// and the tmux `pane_index`. `pane_offset` is the index of the first coding
 /// agent pane — `SUPERVISOR_PANE_OFFSET` for the supervisor layout, or
 /// `1`/`0` for the bare layout depending on whether the dashboard pane is
-/// present. Best-effort: a write failure is surfaced as a warning and does
-/// not abort the launch, since the global receipt remains the source of truth.
+/// present. `orchestrator` records the supervisor pane's own entry — `None`
+/// for a bare-mode session, which has no orchestrator pane. Best-effort: a
+/// write failure is surfaced as a warning and does not abort the launch,
+/// since the global receipt remains the source of truth.
 fn write_repo_discovery_file(
     repo_root: &Path,
     session_name: &str,
     worktrees: &[WorktreeEntry],
     pane_offset: usize,
+    orchestrator: Option<session::RepoOrchestratorEntry>,
 ) {
     let agents = worktrees
         .iter()
@@ -709,6 +712,7 @@ fn write_repo_discovery_file(
     let file = session::RepoSessionFile {
         session_name: session_name.to_string(),
         agents,
+        orchestrator,
     };
     if let Err(e) = session::write_repo_session_file(repo_root, &file) {
         eprintln!("warning: failed to write per-repo session discovery file: {e}");

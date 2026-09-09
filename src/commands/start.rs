@@ -350,6 +350,7 @@ pub(crate) fn cmd_start(
         &tmux_session.name,
         &state.worktrees,
         pane_offset,
+        None, // bare-mode session: no orchestrator pane
     );
 
     // Attach (or print hint when stdin is non-TTY).

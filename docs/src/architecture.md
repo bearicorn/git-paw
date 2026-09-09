@@ -245,7 +245,11 @@ unknown keys):
       "cli": "claude",
       "pane_index": 2
     }
-  ]
+  ],
+  "orchestrator": {
+    "cli": "fable",
+    "pane_index": 0
+  }
 }
 ```
 
@@ -254,6 +258,15 @@ agent's tmux pane within the session window. When the file is absent (e.g. a
 supervisor attached to a pre-existing `paw-*` session), `sweep.sh` falls back to
 resolving the session name from `$TMUX` / `tmux display-message -p '#S'`, so the
 file never needs to be hand-authored.
+
+`orchestrator` records the supervisor pane's own entry — distinct from the
+coding-agent roster in `agents`, so tooling can see the full tiered-model
+split (e.g. a `fable`-tier orchestrator driving `sonnet` workers). It is
+present only for a supervisor-mode session; a bare-mode session (no
+orchestrator pane) and a file written before this field existed both omit it.
+The field is additive and back-compatible: it deserializes with
+`#[serde(default)]`, so an older file loads unchanged, and `sweep.sh` — which
+reads `agents` and `session_name` by name — ignores it.
 
 ## Broker Architecture
 
