@@ -208,10 +208,12 @@ sender for roster purposes.
 
 When the `agent.answer` you publish replies to an asking peer's
 `agent.question`, you MUST ALSO send the answer text to that agent's pane via
-`tmux send-keys`:
+`tmux send-keys` — the text, then a SEPARATE `Enter` (never a single combined
+text+Enter, which can land the answer in a paste buffer unsubmitted):
 
 ```bash
-tmux send-keys -t paw-{{PROJECT_NAME}}:0.<pane-index> "<answer>" Enter
+tmux send-keys -t paw-{{PROJECT_NAME}}:0.<pane-index> "<answer>"
+tmux send-keys -t paw-{{PROJECT_NAME}}:0.<pane-index> Enter
 ```
 
 Rationale: **agents do not poll their inbox** while blocked at a prompt. The
@@ -223,11 +225,12 @@ access will let agents consume `agent.answer` directly and remove the
 dual-write step.
 
 If the answer text is long enough to trigger a paste-buffer indicator (e.g.
-`Pasted text #N` on Claude Code), follow the existing paste-buffer follow-up
-step under stall detection: after the `tmux send-keys` of the answer, inspect
-the pane and send a follow-up `Enter` keystroke to submit the buffered
-content. See the paste-buffer indicator sub-case under **Stall detection** for
-the full indicator list and heuristic fallback.
+`Pasted text #N` on Claude Code), or the follow-up `Enter` above did not
+submit it, recover the stuck line: inspect the pane, then clear it (`C-u`),
+re-send the answer text, and `Enter` again — a lone `Enter` / `C-m` against a
+stale input line is a no-op.
+See the paste-buffer indicator sub-case under **Stall detection** for the
+full indicator list and heuristic fallback.
 
 ### Resolve pane to agent via pane_current_path
 
@@ -559,7 +562,7 @@ always the authoritative check, never this summary:
 
    | Pane state | Indicator examples | Action |
    |---|---|---|
-   | **Paste-buffer** | `Pasted text #N`, long buffered text in input area without rendered LLM response | `tmux send-keys -t paw-{{PROJECT_NAME}}:0.__FILL_IN_PANE_INDEX__ Enter` to submit |
+   | **Paste-buffer** | `Pasted text #N`, long buffered text in input area without rendered LLM response | Clear (`C-u`), re-type the intended text, `Enter` (see the sub-case below); a lone `Enter` is a no-op |
    | **Permission prompt** | `This command requires approval`, `Do you want to proceed?`, `❯ 1. Yes` | Classify the pending command and act per the safe-command policy below |
    | **Working** | `esc to interrupt`, `Boondoggling…`, spinner glyphs | Leave alone |
    | **Idle** | `? for shortcuts`, blank prompt with no recent activity | Investigate; agent may have crashed or never started |
@@ -629,9 +632,11 @@ always the authoritative check, never this summary:
       ```
     - If the agent is stuck on a permission prompt: approve it (`.git-paw/scripts/sweep.sh approve __FILL_IN_PANE_INDEX__`) or send guidance.
     - **Paste-buffer recovery** — if the pane shows a paste-buffer indicator
-      (the CLI has buffered long pasted content but never submitted it), send
-      a single `Enter` keystroke to the pane to submit. This applies both in
-      the stall-detection loop AND proactively at launch (step 1.5 above) —
+      (the CLI has buffered long pasted content, or a directive you already
+      sent, but never submitted it), recover by clearing the stale input line
+      and re-typing — **a lone `Enter` / `C-m` is a no-op against a stale
+      input line and does NOT submit it.** This applies both in the
+      stall-detection loop AND proactively at launch (step 1.5 above) —
       coding-agent boot prompts are often long enough on paste-aware CLIs to
       land in a paste buffer immediately, so don't wait for the 5-minute
       stall threshold. Known indicators are illustrative, not exhaustive —
@@ -643,15 +648,20 @@ always the authoritative check, never this summary:
         input area without a follow-up response (no rendered LLM output, no
         in-progress thinking indicator), attempt the recovery even if the
         literal indicator pattern is unfamiliar
-      Recovery action:
+      Recovery action — clear (`C-u`), re-type the intended text (the boot
+      prompt at launch, or whatever directive you last sent that pane), then
+      submit with a SEPARATE `Enter`:
       ```
-      .git-paw/scripts/sweep.sh capture __FILL_IN_PANE_INDEX__   # inspect first
+      .git-paw/scripts/sweep.sh capture __FILL_IN_PANE_INDEX__   # inspect first — confirm the indicator and note the intended text
+      tmux send-keys -t paw-{{PROJECT_NAME}}:0.__FILL_IN_PANE_INDEX__ C-u
+      tmux send-keys -t paw-{{PROJECT_NAME}}:0.__FILL_IN_PANE_INDEX__ "__FILL_IN_INTENDED_TEXT__"
       tmux send-keys -t paw-{{PROJECT_NAME}}:0.__FILL_IN_PANE_INDEX__ Enter
       ```
-      The Enter keystroke is **safe-by-default**: on a non-paste-aware CLI or
-      a misclassified pane it is a no-op or produces a single benign blank
-      prompt. No harm in trying when the heuristic suggests a paste-buffer
-      stall.
+      The clear-and-retype recovery is **safe-by-default**: on a
+      non-paste-aware CLI or a misclassified pane it either reproduces the
+      intended input or leaves a benign empty prompt — never worse than the
+      stuck state you started from. No harm in trying when the heuristic
+      suggests a paste-buffer stall.
 3.5 **Escalate ambiguity** — if a spec is unclear, if two agents disagree, or if a regression cannot be attributed to a single agent, publish `agent.question` with your specific question, then stop and wait for human guidance.
 
 3.6 **Commit-cadence nudge** — on each sweep, check each agent's uncommitted
@@ -1309,12 +1319,16 @@ multi-line block). Then:
      ```
    - **send-keys mode** — inject the prompt directly into the target's pane.
      Resolve the pane index from the inventory first and confirm it is **not
-     pane 0** (your own pane). If the prompt is long enough to land in a paste
-     buffer (`Pasted text #N`), follow the paste-buffer double-Enter pattern
-     (send the text, then a follow-up `Enter`):
+     pane 0** (your own pane). Send the text, then a SEPARATE `Enter` (never a
+     single combined text+Enter):
      ```bash
-     tmux send-keys -t paw-{{PROJECT_NAME}}:0.__FILL_IN_PANE_INDEX__ "__FILL_IN_USER_PROMPT__" Enter
+     tmux send-keys -t paw-{{PROJECT_NAME}}:0.__FILL_IN_PANE_INDEX__ "__FILL_IN_USER_PROMPT__"
+     tmux send-keys -t paw-{{PROJECT_NAME}}:0.__FILL_IN_PANE_INDEX__ Enter
      ```
+     If the prompt is long enough to land in a paste buffer (`Pasted text
+     #N`), or the follow-up `Enter` did not submit it, follow the
+     paste-buffer recovery (`C-u`, re-type, `Enter`) under **Stall
+     detection** — a lone `Enter` is a no-op against a stale input line.
 4. **Acknowledge** in your own pane what you did — which agent, which delivery
    mode, and a short echo of the prompt.
 5. **Record the routing decision** (when `[supervisor] learnings = true`).

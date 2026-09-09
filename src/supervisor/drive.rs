@@ -50,7 +50,7 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::broker::messages::{BrokerMessage, FeedbackPayload};
-use crate::config::{CorrectionConfig, OnExhausted};
+use crate::config::{CorrectionConfig, CustomCli, OnExhausted, resolve_submit_delay_ms};
 use crate::error::PawError;
 use crate::session::{self, SessionStatus};
 
@@ -1150,6 +1150,14 @@ pub struct DriveConfig {
     /// (`[supervisor] branch_refresh`). Default-off: a live agent's branch is
     /// rewritten only on explicit opt-in.
     pub branch_refresh_enabled: bool,
+    /// `[clis.<name>]` table, consulted by [`resolve_submit_delay_ms`] to
+    /// resolve the per-CLI nudge settle delay (`drive-loop-actuator-robustness`,
+    /// GP-15) — the same resolver the boot-prompt injection path uses.
+    pub clis: HashMap<String, CustomCli>,
+    /// CLI running in the orchestrator's pane (pane 0), used to resolve its
+    /// nudge settle delay. Empty when unknown, which resolves to
+    /// [`crate::DEFAULT_SUBMIT_DELAY_MS`] via [`resolve_submit_delay_ms`].
+    pub supervisor_cli: String,
 }
 
 impl Default for DriveConfig {
@@ -1167,6 +1175,8 @@ impl Default for DriveConfig {
             broker_log_hint: None,
             learnings_hint: None,
             branch_refresh_enabled: false,
+            clis: HashMap::new(),
+            supervisor_cli: String::new(),
         }
     }
 }
@@ -1229,6 +1239,12 @@ pub fn drive_loop(
     // Nudge timer starts at the loop's start, so the first orchestration nudge
     // lands one full cadence in rather than on the opening tick.
     let mut last_orchestration_nudge = start;
+    // The orchestrator's nudge settle delay never changes mid-run, so it is
+    // resolved once here rather than on every tick.
+    let orchestrator_settle_delay = Duration::from_millis(resolve_submit_delay_ms(
+        &config.supervisor_cli,
+        &config.clis,
+    ));
 
     // The loop is an expression that breaks with the terminal `(outcome,
     // latest_status)`: every exit path assigns both, so there are no
@@ -1249,6 +1265,7 @@ pub fn drive_loop(
             session,
             repo_root,
             orchestrator: orchestrator_pane_index(&panes, agents),
+            orchestrator_settle_delay,
         };
         let mut pane_by_agent: HashMap<String, usize> = HashMap::new();
         for pane in panes {
@@ -1273,16 +1290,10 @@ pub fn drive_loop(
             }
         }
 
-        // --- Observe newly published worker messages -------------------------
-        let merged_bases = observe_worker_messages(
-            ctx,
-            &coding_ids,
-            deps,
-            &mut correction,
-            &config.correction.gate_tags,
-        );
-
-        // --- Completion check ------------------------------------------------
+        // --- Fetch status once this tick, BEFORE dispatching any nudge -------
+        // (GP-16): the freshest possible completion signal gates every nudge
+        // dispatched below, including `observe_worker_messages`' hand-offs,
+        // which used to run on a stale (pre-fetch) view.
         let latest_status = deps.status.fetch();
         // A branch that reached a terminal PASS leaves the correction cycle,
         // so an unrelated later failure starts from a fresh budget.
@@ -1303,6 +1314,22 @@ pub fn drive_loop(
                 .or_insert(phase);
         }
 
+        // Wind-down guard (GP-16): once this tick's own fetch shows the wave
+        // complete, the loop is about to exit — no nudge is dispatched below,
+        // on this tick or any later one (there is no later one; the loop
+        // breaks at the bottom of this same tick).
+        let winding_down = detect_completion(&latest_status, &coding_ids).is_some();
+
+        // --- Observe newly published worker messages -------------------------
+        let merged_bases = observe_worker_messages(
+            ctx,
+            &coding_ids,
+            deps,
+            &mut correction,
+            &config.correction.gate_tags,
+            winding_down,
+        );
+
         // --- Branch refresh (post-merge, opt-in) ------------------------------
         trigger_branch_refresh(
             config.branch_refresh_enabled,
@@ -1314,7 +1341,7 @@ pub fn drive_loop(
             deps,
         );
 
-        if detect_completion(&latest_status, &coding_ids).is_some() {
+        if winding_down {
             let outcome = if escalations.is_empty() {
                 DriveOutcome::Completed
             } else {
@@ -1329,10 +1356,10 @@ pub fn drive_loop(
             && deps.clock.now().duration_since(last_orchestration_nudge)
                 >= config.orchestration_nudge_interval
             // Suppressed while the orchestrator is mid-response: the timer is
-            // advanced only on a delivered nudge, so a busy orchestrator has its
-            // nudge deferred to the next tick rather than skipped for a whole
-            // cadence.
-            && hand_to_orchestrator(deps, session, pane_index, &orchestration_nudge_text())
+            // advanced only on a dispatched nudge, so a busy orchestrator has
+            // its nudge deferred to the next tick rather than skipped for a
+            // whole cadence.
+            && hand_to_orchestrator(deps, ctx, pane_index, &orchestration_nudge_text())
         {
             last_orchestration_nudge = deps.clock.now();
         }
@@ -1422,6 +1449,17 @@ const MERGE_CANDIDATE_STATUSES: &[&str] = &["committed", "done"];
 /// the loop its own tail — injecting each escalation twice and, worse, once per
 /// message it generated. Handing off is fire-and-forget throughout: no arm blocks
 /// the wave on the orchestrator's response.
+///
+/// `winding_down` (GP-16) suppresses only the hand-off keystrokes (the
+/// `Question`/`Artifact` arms) once this tick's own status fetch has already
+/// shown the wave complete — the loop is about to exit and typing a fresh
+/// task prompt into the orchestrator's pane on the way out would just leave
+/// unsubmitted text behind. The `Feedback` bookkeeping and the
+/// `AdvancedMain` merge-base collection below are unaffected: neither sends a
+/// keystroke, and both stay useful even on the final tick (a correction
+/// record left pending is harmless once the wave is done, and a merge base
+/// observed on the final tick is still a real merge that happened).
+///
 /// Returns the default-branch name (`payload.base`) of every
 /// `agent.advanced-main` event observed this sweep, in publish order.
 ///
@@ -1439,6 +1477,7 @@ fn observe_worker_messages(
     deps: &mut DriveDeps<'_>,
     correction: &mut CorrectionState,
     gate_tags: &[String],
+    winding_down: bool,
 ) -> Vec<String> {
     let mut merged_bases = Vec::new();
     for msg in deps.messages.poll_new() {
@@ -1459,17 +1498,18 @@ fn observe_worker_messages(
                 }
             }
             BrokerMessage::Question { payload, .. } => {
-                if let Some(pane_index) = ctx.orchestrator {
+                if !winding_down && let Some(pane_index) = ctx.orchestrator {
                     let text = question_handoff_text(agent_id, &payload.question);
-                    hand_to_orchestrator(deps, ctx.session, pane_index, &text);
+                    hand_to_orchestrator(deps, ctx, pane_index, &text);
                 }
             }
             BrokerMessage::Artifact { payload, .. } => {
-                if let Some(pane_index) = ctx.orchestrator
+                if !winding_down
+                    && let Some(pane_index) = ctx.orchestrator
                     && WorkerPhase::from_status(&payload.status).is_merge_candidate()
                 {
                     let text = merge_handoff_text(agent_id, &payload.status);
-                    hand_to_orchestrator(deps, ctx.session, pane_index, &text);
+                    hand_to_orchestrator(deps, ctx, pane_index, &text);
                 }
             }
             _ => {}
@@ -1579,6 +1619,10 @@ struct SweepContext<'a> {
     /// Orchestrator (supervisor CLI) pane index, or `None` when the session has
     /// no supervisor pane — the broker-only fallback.
     orchestrator: Option<usize>,
+    /// The orchestrator pane's resolved per-CLI nudge settle delay
+    /// ([`resolve_submit_delay_ms`]), bundled here so every
+    /// [`hand_to_orchestrator`] call site resolves it from one place.
+    orchestrator_settle_delay: Duration,
 }
 
 /// Records `escalation` on the broker — **uniformly**, whether or not an
@@ -1593,7 +1637,7 @@ struct SweepContext<'a> {
 fn record_escalation(deps: &mut DriveDeps<'_>, ctx: SweepContext<'_>, escalation: &Escalation) {
     deps.alerts.escalate(escalation);
     if let Some(pane_index) = ctx.orchestrator {
-        hand_to_orchestrator(deps, ctx.session, pane_index, &escalation.handoff_text());
+        hand_to_orchestrator(deps, ctx, pane_index, &escalation.handoff_text());
     }
 }
 
@@ -1745,18 +1789,34 @@ fn run_correction_pass(
         if is_finished_worker(pass.status, &agent_id) {
             continue;
         }
-        match send_reengagement(
-            deps.capturer,
-            deps.dispatcher,
+        // The worker's own broker-reported CLI resolves its nudge settle
+        // delay ([`resolve_submit_delay_ms`]) — an agent with no status row
+        // yet (booted but not published) falls back to the config-driven
+        // agnostic default via an empty CLI name.
+        let cli = pass
+            .status
+            .iter()
+            .find(|r| r.agent_id == agent_id)
+            .map_or("", |r| r.cli.as_str());
+        let settle_delay = Duration::from_millis(resolve_submit_delay_ms(cli, &config.clis));
+        let sent = match send_reengagement(
+            deps,
+            pass.ctx.repo_root,
             pass.ctx.session,
             pane_index,
+            &agent_id,
             &feedback,
+            settle_delay,
         ) {
-            Ok(true) => {}
-            // The worker moved on between the sweep and the send (TOCTOU) or
-            // the dispatch failed: leave the correction pending for the next
-            // sweep and do NOT spend a cycle.
-            Ok(false) | Err(_) => continue,
+            Ok(outcome) => outcome.was_sent(),
+            Err(_) => false,
+        };
+        if !sent {
+            // The worker moved on between the sweep and the send (TOCTOU), the
+            // pane's claim was held by another approver, or the dispatch
+            // failed: leave the correction pending for the next sweep and do
+            // NOT spend a cycle.
+            continue;
         }
         let cycles = pass.correction.record_reengagement(&agent_id);
         // One-time early heads-up for a slow-converging worker, emitted only
@@ -1885,65 +1945,155 @@ fn send_approval(
     Ok(true)
 }
 
+/// Bounded number of clear (`C-u`) + re-type + `Enter` recovery attempts
+/// [`send_nudge`] makes after the initial send's follow-up `Enter` fails to
+/// submit (GP-15). Sized to give a genuinely paste-aware CLI a couple of
+/// chances to settle while still failing fast — an escalation, not an
+/// unbounded retry loop — on a pane that is truly wedged.
+const NUDGE_RECOVERY_ATTEMPTS: u8 = 2;
+
+/// Escalation verdict label for a nudge whose text was still sitting
+/// unsubmitted on a pane's input line after every recovery attempt (GP-15).
+const NUDGE_WEDGED_VERDICT: &str = "nudge-wedged";
+
+/// Outcome of a guarded nudge send ([`send_nudge`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NudgeOutcome {
+    /// Another approver held the pane's claim, or `ready` rejected the fresh
+    /// capture — no keystrokes went out.
+    Skipped,
+    /// The text was verified submitted, either on the first `Enter` or after
+    /// a bounded number of clear+re-type+Enter recovery attempts.
+    Delivered,
+    /// Keystrokes went out but the text was still sitting on the input line
+    /// after every recovery attempt; escalated to the broker for review.
+    Wedged,
+}
+
+impl NudgeOutcome {
+    /// Whether any keystroke was actually dispatched to the pane — `true` for
+    /// both [`Self::Delivered`] and [`Self::Wedged`], since a caller tracking
+    /// "did we act on this pane" (e.g. the orchestration-nudge cadence timer,
+    /// or the correction loop's cycle count) cares about dispatch, not
+    /// confirmed submission.
+    fn was_sent(self) -> bool {
+        matches!(self, NudgeOutcome::Delivered | NudgeOutcome::Wedged)
+    }
+}
+
 /// Re-engages a gate-failed worker by typing `text` into its pane, gated on a
 /// fresh re-confirm capture taken immediately before the send.
 ///
-/// Returns `Ok(true)` when the keystrokes were sent, `Ok(false)` when the
-/// optimistic re-confirm rejected the send. The guard mirrors the approval
-/// path's: a pane whose tail now shows a LIVE permission prompt is mid-action
-/// rather than blocked awaiting correction, and free text typed there would
-/// land in the prompt instead of the input box — so nothing is sent and the
-/// correction stays pending for the next sweep.
-///
-/// The two keystrokes follow [`nudge_keystrokes`]' shape and its D6 discipline
-/// — the text first, the submitting `Enter` as a SEPARATE keystroke — but they
-/// take different dispatch paths deliberately. The text is supervisor feedback
-/// git-paw did not choose word-by-word, so it goes out **literally**
-/// ([`KeyDispatcher::send_text`], `send-keys -l`) and no token inside it can be
-/// resolved through tmux's key table; `Enter` goes out as a key NAME so it
-/// submits rather than typing five characters.
+/// The guard mirrors the approval path's: a pane whose tail now shows a LIVE
+/// permission prompt is mid-action rather than blocked awaiting correction,
+/// and free text typed there would land in the prompt instead of the input
+/// box — so nothing is sent and the correction stays pending for the next
+/// sweep. See [`send_nudge`] for the settle-delay, verify, and recovery
+/// behaviour.
 fn send_reengagement(
-    capturer: &dyn PaneCapture,
-    dispatcher: &mut dyn KeyDispatcher,
+    deps: &mut DriveDeps<'_>,
+    repo_root: &Path,
     session: &str,
     pane_index: usize,
+    agent_id: &str,
     text: &str,
-) -> Result<bool, PawError> {
-    send_nudge(capturer, dispatcher, session, pane_index, text, |capture| {
-        !live_prompt_in_tail(capture)
-    })
+    settle_delay: Duration,
+) -> Result<NudgeOutcome, PawError> {
+    send_nudge(
+        deps,
+        repo_root,
+        session,
+        pane_index,
+        agent_id,
+        text,
+        settle_delay,
+        |capture| !live_prompt_in_tail(capture),
+    )
 }
 
-/// Types `text` into `pane_index` followed by a separate submitting `Enter`,
-/// gated on a fresh capture taken immediately before the send satisfying
-/// `ready`.
+/// Types `text` into `pane_index`, verifies it submitted, and recovers a
+/// stale input line — the drive loop's only actuator, made reliable (GP-15).
 ///
-/// Returns `Ok(true)` when the keystrokes went out and `Ok(false)` when `ready`
-/// rejected the fresh capture — the TOCTOU guard every free-text path shares, so
-/// no caller can skip it. Callers differ only in how strict `ready` is: the
-/// worker re-engagement needs the pane merely to be free of a live permission
+/// Gated on a fresh capture taken immediately before the send satisfying
+/// `ready` — the TOCTOU guard every free-text path shares, so no caller can
+/// skip it. Callers differ only in how strict `ready` is: the worker
+/// re-engagement needs the pane merely to be free of a live permission
 /// prompt, while an orchestrator hand-off additionally requires it not to be
 /// mid-response ([`orchestrator_ready`]).
+///
+/// The whole operation — initial send through every recovery attempt — runs
+/// under `pane_index`'s exclusive [`PaneClaim`], so a `C-u` this function
+/// sends is always clearing a line THIS call itself just typed, never
+/// agent-authored input another approver is mid-way through (task 1.3): a
+/// pane already claimed by a concurrent approver is skipped this tick
+/// ([`NudgeOutcome::Skipped`]) rather than waited on, matching every other
+/// claim-gated send in this module.
+///
+/// The send-verify-recover sequence:
+/// 1. Send the text ([`KeyDispatcher::send_text`], literal), wait
+///    `settle_delay` (the per-CLI settle delay [`resolve_submit_delay_ms`]
+///    resolves, the same resolver the boot prompt uses), then send a
+///    SEPARATE `Enter` — never a single combined text+Enter.
+/// 2. Capture the pane and check whether `text` is still sitting on the input
+///    box ([`input_box_text`]). If it is not, the nudge is
+///    [`NudgeOutcome::Delivered`].
+/// 3. Otherwise recover: clear the line (`C-u`), re-send the text, wait
+///    `settle_delay`, send `Enter` again — up to [`NUDGE_RECOVERY_ATTEMPTS`]
+///    times. A bare second `Enter` alone is a proven no-op against a stale
+///    input line, so recovery always re-establishes the input rather than
+///    repeating just the `Enter`.
+/// 4. A pane still showing the text after every attempt is
+///    [`NudgeOutcome::Wedged`] — escalated to the broker
+///    ([`AlertSink::escalate`]) rather than retried further.
+#[allow(clippy::too_many_arguments)]
 fn send_nudge(
-    capturer: &dyn PaneCapture,
-    dispatcher: &mut dyn KeyDispatcher,
+    deps: &mut DriveDeps<'_>,
+    repo_root: &Path,
     session: &str,
     pane_index: usize,
+    agent_id: &str,
     text: &str,
+    settle_delay: Duration,
     ready: impl Fn(&str) -> bool,
-) -> Result<bool, PawError> {
-    let capture = capturer.capture(session, pane_index);
+) -> Result<NudgeOutcome, PawError> {
+    let Some(_claim) = PaneClaim::try_acquire(repo_root, pane_index) else {
+        return Ok(NudgeOutcome::Skipped); // another approver owns this pane — skip, never wait
+    };
+    let capture = deps.capturer.capture(session, pane_index);
     if !ready(&capture) {
-        return Ok(false);
+        return Ok(NudgeOutcome::Skipped);
     }
+
     let [body, submit] = nudge_keystrokes(text);
-    dispatcher
-        .send_text(session, pane_index, &body)
-        .map_err(|e| PawError::TmuxError(format!("send-keys -l failed: {e}")))?;
-    dispatcher
-        .send_key(session, pane_index, &submit)
-        .map_err(|e| PawError::TmuxError(format!("send-keys {submit} failed: {e}")))?;
-    Ok(true)
+    for attempt in 0..=NUDGE_RECOVERY_ATTEMPTS {
+        if attempt > 0 {
+            // Recovery: clear the stale line THIS call put there (never
+            // reached on agent-authored input — the claim above is what
+            // makes that guarantee hold) before re-typing.
+            deps.dispatcher
+                .send_key(session, pane_index, "C-u")
+                .map_err(|e| PawError::TmuxError(format!("send-keys C-u failed: {e}")))?;
+        }
+        deps.dispatcher
+            .send_text(session, pane_index, &body)
+            .map_err(|e| PawError::TmuxError(format!("send-keys -l failed: {e}")))?;
+        deps.clock.sleep(settle_delay);
+        deps.dispatcher
+            .send_key(session, pane_index, &submit)
+            .map_err(|e| PawError::TmuxError(format!("send-keys {submit} failed: {e}")))?;
+
+        let verify = deps.capturer.capture(session, pane_index);
+        if input_box_text(&verify).as_deref() != Some(text) {
+            return Ok(NudgeOutcome::Delivered);
+        }
+    }
+
+    deps.alerts.escalate(&Escalation {
+        agent_id: agent_id.to_string(),
+        verdict: NUDGE_WEDGED_VERDICT.to_string(),
+        command: one_line_capped(text),
+    });
+    Ok(NudgeOutcome::Wedged)
 }
 
 /// Extracts the text sitting in a pane's input box, or `None` when the capture
@@ -2047,29 +2197,33 @@ fn orchestrator_ready(capture: &str) -> bool {
 }
 
 /// Injects `text` into the orchestrator's pane as a task prompt, returning
-/// whether it was actually delivered.
+/// whether any keystroke was actually dispatched.
 ///
-/// Fire-and-forget by design: a refusal (the pane was busy) or a dispatch
-/// failure is swallowed, because the broker record is the durable channel and the
-/// injection is only the trigger. Nothing here blocks the wave — the loop moves
-/// straight on, and the next orchestration nudge re-triggers the orchestrator
-/// anyway. The returned flag lets a *cadenced* caller distinguish "delivered" from
-/// "suppressed" so it can retry rather than swallow the whole interval.
+/// Fire-and-forget by design: a refusal (the pane was busy), a dispatch
+/// failure, or a wedged pane (escalated by [`send_nudge`] itself) is
+/// swallowed here, because the broker record is the durable channel and the
+/// injection is only the trigger. Nothing here blocks the wave — the loop
+/// moves straight on, and the next orchestration nudge re-triggers the
+/// orchestrator anyway. The returned flag lets a *cadenced* caller
+/// distinguish "dispatched" from "suppressed" so it can retry rather than
+/// swallow the whole interval.
 fn hand_to_orchestrator(
     deps: &mut DriveDeps<'_>,
-    session: &str,
+    ctx: SweepContext<'_>,
     pane_index: usize,
     text: &str,
 ) -> bool {
     send_nudge(
-        deps.capturer,
-        deps.dispatcher,
-        session,
+        deps,
+        ctx.repo_root,
+        ctx.session,
         pane_index,
+        SUPERVISOR_AGENT_ID,
         text,
+        ctx.orchestrator_settle_delay,
         orchestrator_ready,
     )
-    .unwrap_or(false)
+    .is_ok_and(NudgeOutcome::was_sent)
 }
 
 /// Builds the keystroke sequence for a *nudge* — free text the loop wants a
@@ -2481,6 +2635,13 @@ pub struct DriveRunOptions {
     /// [`SessionInstanceGuard`] binds to (GP-06), so the loop can tell its own
     /// session instance apart from a later, unrelated same-named one.
     pub session_created_at: SystemTime,
+    /// `[clis.<name>]` table, for [`resolve_submit_delay_ms`] on the nudge
+    /// path (`drive-loop-actuator-robustness`, GP-15) — the same resolver the
+    /// boot-prompt injection path uses.
+    pub clis: HashMap<String, CustomCli>,
+    /// CLI running in the orchestrator's pane (pane 0), for its nudge settle
+    /// delay. Empty when unknown.
+    pub supervisor_cli: String,
 }
 
 /// Runs the unattended drive loop with production dependencies, prints the exit
@@ -2511,6 +2672,8 @@ pub fn run_drive_loop(
         learnings_hint,
         branch_refresh_enabled,
         session_created_at,
+        clis,
+        supervisor_cli,
     } = options;
 
     let instance = FileSessionInstanceGuard {
@@ -2563,6 +2726,8 @@ pub fn run_drive_loop(
         broker_log_hint,
         learnings_hint,
         branch_refresh_enabled,
+        clis,
+        supervisor_cli,
         ..DriveConfig::default()
     };
 
@@ -2922,6 +3087,35 @@ mod tests {
             cli: cli.to_string(),
             ..row(agent, status)
         }
+    }
+
+    /// A `[clis]` table pinning every CLI name this test file's status-row
+    /// fixtures use — the empty string ([`row`], and [`DriveConfig::default`]'s
+    /// `supervisor_cli`) and `"claude"` ([`row_with_cli`]) — to a zero nudge
+    /// settle delay.
+    ///
+    /// [`send_nudge`] now spends `deps.clock.sleep(settle_delay)` on every
+    /// dispatch (GP-15), and [`FakeClock::sleep`] advances the loop's own
+    /// notion of elapsed time. A cadence- or cycle-count-sensitive test that
+    /// does not care about settle-delay timing wires this in so a
+    /// re-engagement or orchestrator hand-off costs no simulated time,
+    /// preserving the tick/round arithmetic it was written against.
+    fn zero_settle_delay_clis() -> HashMap<String, CustomCli> {
+        ["", "claude"]
+            .into_iter()
+            .map(|cli| {
+                (
+                    cli.to_string(),
+                    CustomCli {
+                        command: cli.to_string(),
+                        display_name: None,
+                        submit_delay_ms: Some(0),
+                        settings_path: None,
+                        approval_args: HashMap::new(),
+                    },
+                )
+            })
+            .collect()
     }
 
     /// A `/status` row that also carries a modified-file set, for the
@@ -4509,9 +4703,36 @@ mod tests {
     fn reengagement_text_is_never_interpreted_as_a_tmux_key_name() {
         let mut dispatcher = RecordingDispatcher::default();
         let capturer = FakeCapturer::new(&[(2, "standing by...\n$ ")]);
-        let sent = send_reengagement(&capturer, &mut dispatcher, "paw-test", 2, "C-c")
-            .expect("dispatch succeeds");
-        assert!(sent);
+        let enumerator = FakeEnumerator { panes: vec![] };
+        let status = ScriptedStatus::new(vec![]);
+        let messages = ScriptedMessages::none();
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            refresher: &mut refresher,
+        };
+        let repo = tempfile::tempdir().expect("temp repo root");
+        let outcome = send_reengagement(
+            &mut deps,
+            repo.path(),
+            "paw-test",
+            2,
+            "feat-a",
+            "C-c",
+            Duration::ZERO,
+        )
+        .expect("dispatch succeeds");
+        assert_eq!(outcome, NudgeOutcome::Delivered);
         assert_eq!(
             dispatcher.literal_sends,
             vec![(2, "C-c".to_string())],
@@ -4522,6 +4743,133 @@ mod tests {
             vec![(2, "C-c".to_string()), (2, "Enter".to_string())],
             "text then a SEPARATE Enter (D6)"
         );
+    }
+
+    // --- nudge settle delay + verify-then-recover (GP-15) -------------------
+
+    /// Runs [`send_reengagement`] against pane 2 with `capturer` and
+    /// `settle_delay`, returning the outcome, the recorded dispatcher, the
+    /// recorded alerts, and how much simulated clock time elapsed.
+    fn call_send_reengagement(
+        capturer: &dyn PaneCapture,
+        text: &str,
+        settle_delay: Duration,
+    ) -> (NudgeOutcome, RecordingDispatcher, RecordingAlerts, Duration) {
+        let mut dispatcher = RecordingDispatcher::default();
+        let enumerator = FakeEnumerator { panes: vec![] };
+        let status = ScriptedStatus::new(vec![]);
+        let messages = ScriptedMessages::none();
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
+        let before = clock.now();
+        let repo = tempfile::tempdir().expect("temp repo root");
+        let outcome = {
+            let mut deps = DriveDeps {
+                enumerator: &enumerator,
+                capturer,
+                dispatcher: &mut dispatcher,
+                status: &status,
+                messages: &messages,
+                clock: &clock,
+                alerts: &mut alerts,
+                learnings: &mut learnings,
+                refresher: &mut refresher,
+            };
+            send_reengagement(
+                &mut deps,
+                repo.path(),
+                "paw-test",
+                2,
+                "feat-a",
+                text,
+                settle_delay,
+            )
+            .expect("dispatch succeeds")
+        };
+        let elapsed = clock.now().duration_since(before);
+        (outcome, dispatcher, alerts, elapsed)
+    }
+
+    /// Spec scenario "Nudge applies the per-CLI settle delay between text and
+    /// Enter": the loop sleeps the settle delay between sending the text and
+    /// the submitting `Enter`, never relying on a single combined text+Enter.
+    #[test]
+    fn nudge_waits_the_settle_delay_before_enter() {
+        let capturer = FakeCapturer::new(&[(2, "standing by...\n$ ")]);
+        let settle_delay = Duration::from_millis(750);
+        let (outcome, dispatcher, _alerts, elapsed) =
+            call_send_reengagement(&capturer, "please continue", settle_delay);
+        assert_eq!(outcome, NudgeOutcome::Delivered);
+        assert!(
+            elapsed >= settle_delay,
+            "expected at least the settle delay ({settle_delay:?}) to elapse \
+             between the text send and Enter, got {elapsed:?}"
+        );
+        assert_eq!(
+            dispatcher.events,
+            vec![(2, "please continue".to_string()), (2, "Enter".to_string())],
+            "text then a separate Enter, with the settle delay slept in between"
+        );
+    }
+
+    /// Spec scenario "A stale input line is recovered with clear + re-type +
+    /// Enter": a nudge whose text is still on the pane's input line after the
+    /// follow-up `Enter` is recovered by clearing the line (`C-u`),
+    /// re-sending the text, and sending `Enter` again — never just a second
+    /// `Enter`.
+    #[test]
+    fn stale_input_line_triggers_clear_retype_enter_recovery() {
+        let stuck = idle_input_box("please continue");
+        // Ready-check sees an idle pane; the post-Enter verify sees the text
+        // still stuck on the input line; the post-recovery verify sees it
+        // cleared.
+        let capturer = SequencedCapturer::new(&[IDLE_PANE, &stuck, IDLE_PANE]);
+        let (outcome, dispatcher, alerts, _elapsed) =
+            call_send_reengagement(&capturer, "please continue", Duration::ZERO);
+        assert_eq!(outcome, NudgeOutcome::Delivered);
+        assert_eq!(
+            dispatcher.events,
+            vec![
+                (2, "please continue".to_string()),
+                (2, "Enter".to_string()),
+                (2, "C-u".to_string()),
+                (2, "please continue".to_string()),
+                (2, "Enter".to_string()),
+            ],
+            "a stale line is recovered by clearing (C-u), re-typing, then \
+             Enter — never just a second Enter"
+        );
+        assert!(
+            alerts.escalations.is_empty(),
+            "recovered on the first attempt — no escalation"
+        );
+    }
+
+    /// Spec: "a bare `Enter`/`C-m` alone SHALL NOT be treated as sufficient
+    /// recovery" — a pane whose input line never clears, no matter how many
+    /// clear+re-type+Enter rounds are sent, is reported
+    /// [`NudgeOutcome::Wedged`] (never misreported as delivered) and
+    /// escalated to the broker, after a bounded number of recovery attempts.
+    #[test]
+    fn a_persistently_stale_line_is_reported_wedged_and_escalated() {
+        let stuck = idle_input_box("please continue");
+        let capturer = SequencedCapturer::new(&[IDLE_PANE, &stuck, &stuck, &stuck]);
+        let (outcome, dispatcher, alerts, _elapsed) =
+            call_send_reengagement(&capturer, "please continue", Duration::ZERO);
+        assert_eq!(outcome, NudgeOutcome::Wedged);
+        let expected_len = 2 + usize::from(NUDGE_RECOVERY_ATTEMPTS) * 3;
+        assert_eq!(
+            dispatcher.events.len(),
+            expected_len,
+            "bounded recovery: one initial send + {NUDGE_RECOVERY_ATTEMPTS} \
+             clear+retype+Enter rounds, events were {:?}",
+            dispatcher.events
+        );
+        assert_eq!(alerts.escalations.len(), 1, "escalated exactly once");
+        assert_eq!(alerts.escalations[0].verdict, NUDGE_WEDGED_VERDICT);
+        assert_eq!(alerts.escalations[0].agent_id, "feat-a");
     }
 
     /// Spec scenario "Disabled loopback preserves today's behavior": with
@@ -4675,10 +5023,14 @@ mod tests {
             let config = DriveConfig {
                 poll_interval: Duration::from_secs(1),
                 // Exits after `rounds` sweeps: the fake clock advances one
-                // interval (plus a tick) per sleep.
+                // interval (plus a tick) per sleep. `feat-a`'s empty CLI is
+                // pinned to a zero settle delay so a re-engagement's send
+                // costs no simulated time either, keeping the round count
+                // exact.
                 heartbeat: Duration::from_secs(rounds as u64 - 1),
                 correction,
                 learnings_enabled,
+                clis: zero_settle_delay_clis(),
                 ..DriveConfig::default()
             };
             drive_loop_in_tmp("paw-test", &agents, &mut deps, &config)
@@ -5220,6 +5572,86 @@ mod tests {
         );
     }
 
+    // --- wind-down suppresses nudge dispatch (GP-16) ------------------------
+
+    /// Spec scenario "No nudge is sent after wind-down begins": a `Question`
+    /// message that arrives on the SAME tick the wave's own status fetch
+    /// already shows it complete is never handed to the orchestrator — the
+    /// loop's wind-down state is checked before dispatching a hand-off, not
+    /// just before the cadenced orchestration nudge.
+    #[test]
+    fn no_hand_off_is_dispatched_on_the_tick_the_wave_completes() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+        }];
+        let question = BrokerMessage::Question {
+            agent_id: "feat-a".to_string(),
+            payload: crate::broker::messages::QuestionPayload {
+                question: "which wins?".to_string(),
+            },
+        };
+        let (dispatcher, _) = run_loop(
+            &agents,
+            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
+            &[(0, IDLE_PANE), (2, IDLE_PANE)],
+            // A single tick: the status fetch already shows the wave
+            // complete (a supervisor verdict) at the same moment the
+            // Question message is observed.
+            vec![vec![row("supervisor", "done")]],
+            &ScriptedMessages::new(vec![vec![question]]),
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                ..DriveConfig::default()
+            },
+        );
+        assert!(
+            dispatcher.events.is_empty(),
+            "no nudge keystrokes on the tick the wave completes; events were {:?}",
+            dispatcher.events
+        );
+    }
+
+    /// Spec scenario "Wind-down does not re-accumulate unsubmitted text": a
+    /// gate failure observed on the same tick the wave completes leaves a
+    /// pending correction that the correction pass never gets a chance to
+    /// dispatch — the loop breaks before it runs, so the worker's idle pane
+    /// gains no re-engagement text on its way out.
+    #[test]
+    fn a_pending_correction_is_not_dispatched_once_the_wave_completes() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+        }];
+        let (dispatcher, _) = run_loop(
+            &agents,
+            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
+            &[(0, IDLE_PANE), (2, IDLE_PANE)],
+            vec![vec![row("supervisor", "done")]],
+            &ScriptedMessages::new(vec![vec![gate_feedback(
+                "feat-a",
+                "testing",
+                "still failing",
+            )]]),
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                correction: CorrectionConfig {
+                    auto_loopback: true,
+                    ..CorrectionConfig::default()
+                },
+                ..DriveConfig::default()
+            },
+        );
+        assert!(
+            dispatcher.events.is_empty(),
+            "no re-engagement keystrokes once the wave completes on the same \
+             tick the gate failure was observed; events were {:?}",
+            dispatcher.events
+        );
+    }
+
     /// A worker `agent.artifact` at `agent_status`, for the merge-decision arm.
     fn artifact(agent_status: &str) -> BrokerMessage {
         BrokerMessage::Artifact {
@@ -5625,6 +6057,7 @@ mod tests {
             session: "paw-test",
             repo_root: &repo_root,
             orchestrator: None,
+            orchestrator_settle_delay: Duration::ZERO,
         };
 
         let enumerator = FakeEnumerator { panes: vec![] };
@@ -5702,6 +6135,7 @@ mod tests {
             session: "paw-test",
             repo_root: &repo_root,
             orchestrator: None,
+            orchestrator_settle_delay: Duration::ZERO,
         };
 
         let enumerator = FakeEnumerator { panes: vec![] };

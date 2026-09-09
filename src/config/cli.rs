@@ -124,3 +124,29 @@ pub fn remove_custom_cli_from(config_path: &Path, name: &str) -> Result<(), PawE
 
     save_config_to(config_path, &config)
 }
+
+/// Resolve the per-CLI settle delay (ms) for `cli` from `clis`, falling back
+/// to [`crate::DEFAULT_SUBMIT_DELAY_MS`].
+///
+/// `cli` may carry flags (e.g. `"mycli --foo"`); the lookup keys on the
+/// leading binary token. The delay is config-driven, never a hardcoded
+/// CLI-name table, so callers stay CLI-agnostic — a CLI whose large-paste
+/// handling needs more time sets `[clis.<name>].submit_delay_ms` rather than
+/// requiring a code change (W15-1, 2026-05-31 dogfood).
+///
+/// Takes the CLI map directly (rather than a whole [`super::PawConfig`]) so a caller
+/// that only carries the CLI table — like the drive loop's `DriveConfig`
+/// (`drive-loop-actuator-robustness`) — can resolve a delay without
+/// depending on the full config type. Shared by the boot-prompt injection
+/// path and the drive loop's nudge path so both settle on the same delay for
+/// a given CLI rather than each carrying its own copy.
+#[must_use]
+pub fn resolve_submit_delay_ms<S: std::hash::BuildHasher>(
+    cli: &str,
+    clis: &HashMap<String, CustomCli, S>,
+) -> u64 {
+    let base = cli.split_whitespace().next().unwrap_or(cli);
+    clis.get(base)
+        .and_then(|c| c.submit_delay_ms)
+        .unwrap_or(crate::DEFAULT_SUBMIT_DELAY_MS)
+}

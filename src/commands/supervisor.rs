@@ -811,14 +811,15 @@ pub(crate) fn cmd_supervisor(
         skill = git_paw::agents::SIDECAR_REL_PATH,
     );
     let supervisor_prompt = format!("{supervisor_boot_block}\n\n{supervisor_framing}");
-    let supervisor_delay = resolve_submit_delay_ms(&supervisor_cli, config);
+    let supervisor_delay = resolve_submit_delay_ms(&supervisor_cli, &config.clis);
     gate_pane_or_fail_on_dialog(&tmux_session.name, 0, &supervisor_pane.cli_command)?;
     submit_prompt_to_pane(&tmux_session.name, 0, &supervisor_prompt, supervisor_delay);
 
     for (idx, prompt) in agent_prompts.iter().enumerate() {
         // Per-branch delay: a spec-driven session can resolve a distinct CLI
         // per branch (GP-10), and each CLI's configured settle delay differs.
-        let agent_delay = resolve_submit_delay_ms(&effective_agent_cli(&branches[idx]), config);
+        let agent_delay =
+            resolve_submit_delay_ms(&effective_agent_cli(&branches[idx]), &config.clis);
         let pane_idx = git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET + idx;
         gate_pane_or_fail_on_dialog(&tmux_session.name, pane_idx, &agent_panes[idx].cli_command)?;
         submit_prompt_to_pane(&tmux_session.name, pane_idx, prompt, agent_delay);
@@ -916,13 +917,13 @@ fn drive_unattended_loop(
         .unwrap_or_default()
         .resolved();
 
-    // Protected-path set for the operator config/memory danger rule
-    // (`agent-memory-isolation`); config parse problems degrade to the
+    // Loaded once and reused: the operator config/memory danger rule's
+    // protected-path derivation, and the `[clis]` table the nudge path
+    // resolves its settle delay from. Config parse problems degrade to the
     // defaults-only derivation rather than aborting the loop.
-    let protected_paths = git_paw::supervisor::auto_approve::ProtectedPaths::derive(
-        &config::load_config(repo_root, None).unwrap_or_default(),
-        Some(repo_root),
-    );
+    let loaded_config = config::load_config(repo_root, None).unwrap_or_default();
+    let protected_paths =
+        git_paw::supervisor::auto_approve::ProtectedPaths::derive(&loaded_config, Some(repo_root));
 
     let options = DriveRunOptions {
         broker_url: broker_config.enabled.then(|| broker_config.url()),
@@ -944,6 +945,12 @@ fn drive_unattended_loop(
         }),
         branch_refresh_enabled: supervisor_cfg.branch_refresh_enabled(),
         session_created_at,
+        clis: loaded_config.clis.clone(),
+        supervisor_cli: supervisor_cfg
+            .cli
+            .clone()
+            .or_else(|| loaded_config.default_cli.clone())
+            .unwrap_or_default(),
     };
 
     drive::run_drive_loop(session_name, repo_root, &agents, options)?;

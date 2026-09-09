@@ -156,6 +156,29 @@ Three properties make this safe to run unattended:
   landing in the middle of the supervisor's own turn would pollute its context,
   so it is deferred instead.
 
+**A nudge is sent reliably, not fired and forgotten.** Typing text into a pane
+and immediately following it with `Enter` is not enough: on a paste-aware CLI
+the text can land in a paste buffer, and a bare follow-up `Enter` against a
+stale input line is a proven no-op — it does not submit anything. So every
+nudge — the orchestration nudge below, a hand-off, and a worker re-engagement
+alike — sends the text, waits the CLI's configured settle delay (the same
+`[clis.<name>].submit_delay_ms` the boot prompt uses), then sends `Enter` as
+a separate keystroke and verifies via a fresh `capture-pane` that the text is
+no longer sitting on the input line. A line still showing the text is
+recovered by clearing it (`Ctrl-U`), re-typing, and sending `Enter` again, up
+to a bounded number of attempts; a pane still wedged after that is escalated
+for human review rather than retried forever. The whole send — the first
+attempt through every recovery attempt — runs under the target pane's
+exclusive claim (see "One approver per pane, enforced" below), so a recovery
+only ever clears a line the loop itself just put there, never text a worker
+agent typed.
+
+**No nudge is sent once the loop is winding down.** The wind-down/exit state
+is checked before dispatching any nudge on a tick, not just before the
+cadenced orchestration nudge — so a message observed on the same tick the
+wave completes is never handed to the supervisor's pane, and a worker's idle
+pane gains no further unsubmitted text on the loop's way out.
+
 **Orchestration nudge.** Some orchestration work has no triggering event at all —
 reconsidering spawn order, resequencing merges, revisiting a blocked worker. On a
 cadence of about five minutes (20× the approval tick, so the fast sweep is

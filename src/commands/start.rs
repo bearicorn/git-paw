@@ -772,7 +772,7 @@ pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result
         let config = config::load_config(repo_root, None)?;
         for (idx, wt) in updated.worktrees.iter_mut().enumerate() {
             if let Some(pending) = wt.pending_boot_prompt.take() {
-                let delay = resolve_submit_delay_ms(&wt.cli, &config);
+                let delay = resolve_submit_delay_ms(&wt.cli, &config.clis);
                 submit_prompt_to_pane(&session_name, offset + idx, &pending, delay);
             }
         }

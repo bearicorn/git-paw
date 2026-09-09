@@ -2356,11 +2356,19 @@ mod tests {
         );
         assert!(
             window.contains("tmux send-keys"),
-            "paste-buffer recovery should reference tmux send-keys for the Enter recovery"
+            "paste-buffer recovery should reference tmux send-keys for the recovery"
+        );
+        assert!(
+            window.contains("C-u"),
+            "paste-buffer recovery should clear the stale input line with C-u before re-typing"
+        );
+        assert!(
+            window.to_lowercase().contains("re-typ"),
+            "paste-buffer recovery should instruct re-typing the intended text after clearing"
         );
         assert!(
             window.contains("Enter"),
-            "paste-buffer recovery should specify Enter as the recovery keystroke"
+            "paste-buffer recovery should specify Enter as the submitting keystroke"
         );
     }
 
@@ -2443,13 +2451,55 @@ mod tests {
             .expect("paste-buffer recovery sub-case heading should be present");
         let window_end = (start + 2200).min(lowered.len());
         let window = &lowered[start..window_end];
-        let safe_phrasing = window.contains("safe-by-default")
-            || window.contains("safe by default")
-            || window.contains("no-op")
-            || window.contains("no harm");
+        let safe_phrasing =
+            window.contains("safe-by-default") || window.contains("safe by default");
         assert!(
             safe_phrasing,
-            "paste-buffer recovery should explicitly note the Enter is safe-by-default / no-op / no harm"
+            "paste-buffer recovery should explicitly note the clear-and-retype recovery is safe-by-default"
+        );
+    }
+
+    /// A lone `Enter` / `C-m` is a proven no-op against a stale input line —
+    /// the corrected recovery doctrine (`drive-loop-actuator-robustness`,
+    /// GP-15) states this explicitly so a supervisor acting by hand does not
+    /// fall back to the disproven single-Enter recovery.
+    #[test]
+    fn supervisor_skill_states_a_lone_enter_is_a_no_op() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        let start = lowered
+            .find("paste-buffer recovery")
+            .or_else(|| lowered.find("paste buffer recovery"))
+            .expect("paste-buffer recovery sub-case heading should be present");
+        let window_end = (start + 2200).min(lowered.len());
+        let window = &lowered[start..window_end];
+        assert!(
+            window.contains("no-op") && (window.contains("enter") || window.contains("c-m")),
+            "paste-buffer recovery should state that a lone Enter / C-m is a no-op against a stale input line"
+        );
+    }
+
+    /// Spec scenario "Supervisor skill instructs proactive paste-buffer
+    /// recovery at launch": the paste-buffer recovery sub-case itself (not
+    /// just the launch-sweep section it cross-references) states it applies
+    /// proactively at launch, with the rationale.
+    #[test]
+    fn supervisor_skill_paste_buffer_recovery_applies_at_launch() {
+        let tmpl = resolve("supervisor").unwrap();
+        let lowered = tmpl.content.to_lowercase();
+        let start = lowered
+            .find("paste-buffer recovery")
+            .or_else(|| lowered.find("paste buffer recovery"))
+            .expect("paste-buffer recovery sub-case heading should be present");
+        let window_end = (start + 2200).min(lowered.len());
+        let window = &lowered[start..window_end];
+        assert!(
+            window.contains("proactively at launch"),
+            "paste-buffer recovery sub-case should state it applies proactively at launch"
+        );
+        assert!(
+            window.contains("stall threshold"),
+            "paste-buffer recovery sub-case should explain why it does not wait for the stall threshold"
         );
     }
 
