@@ -1,6 +1,6 @@
 # MCP Server
 
-`git paw mcp` runs a read-only [Model Context Protocol](https://modelcontextprotocol.io)
+`git paw mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io)
 (MCP) server over **stdio**, so any MCP-aware client — Claude Desktop, Cursor,
 ChatGPT Desktop, Windsurf, VS Code MCP extensions — can query a repository's
 state without an active git-paw session.
@@ -19,16 +19,26 @@ read-only tools:
 - **Source/Files** — browse the local working tree, read a file, and search
   code contents (gitignored paths excluded; reads confined to the repo root)
 
-The server is **standalone**: it does not need a tmux session, broker, or
-supervisor. When a data source is unavailable (no broker, no session, no
-governance config) tools return well-formed empty/null results rather than
-errors — so the client always gets an unambiguous answer.
+Alongside those, the server exposes exactly one **write** category — see
+[Publish tools](#publish-tools) below.
 
-> **Read-only in v0.7.0.** There are no write tools (no creating specs,
-> controlling sessions, or delivering feedback) — those are planned for a later
-> release. The server also **never invokes an agent CLI** (`claude`, `gemini`,
-> …) as an inference backend; every result comes from files, git, and broker
-> state.
+The server is **standalone**: it does not need a tmux session, broker, or
+supervisor for the read-only categories (the publish tools do need a reachable
+broker — see below). When a data source is unavailable (no broker, no
+session, no governance config) read tools return well-formed empty/null
+results rather than errors — so the client always gets an unambiguous answer.
+
+> **Read/write boundary.** Every tool category except **Publish tools** is
+> read-only, deterministically sourced from files, git, and broker state —
+> there is no file write, git mutation, or config write anywhere on this
+> server, in any category. Publish tools are the sole exception: a bounded,
+> agent-scoped set of exactly four tools (the same four events the bundled
+> `broker.sh` helper covers), each publishing only as the calling agent. There
+> is no generic "publish anything" tool, and the supervisor authority verbs
+> (`agent.verified`, `agent.feedback`) are not exposed — see
+> [Publish tools](#publish-tools) for why. The server also **never invokes an
+> agent CLI** (`claude`, `codex`, …) as an inference backend; every result
+> comes from files, git, and broker state.
 
 ## How it works
 
@@ -207,7 +217,8 @@ VS Code (1.102+) supports MCP servers. It is workspace-aware, so bare
 
 ## Tool reference
 
-All tools are read-only. Collection results are empty (`[]`) and single-record
+Every category below is read-only except **Publish tools**. For the
+read-only categories, collection results are empty (`[]`) and single-record
 results are `null` when the underlying data is unavailable. Governance tools
 return a protocol error only when a **configured** document path exists but
 cannot be read.
@@ -308,3 +319,43 @@ Both default to unset, in which case `get_readme` returns `null`, `list_docs`
 returns an empty list, and `get_doc` returns `null` — identical to the
 pre-v0.7.0 surface. `list_docs` walks the `docs` directory recursively for
 `*.md` files; the relative paths it returns feed directly back into `get_doc`.
+
+### Publish tools
+
+The only write category. Four tools, one per agent boot event, each
+publishing the same message the bundled [`broker.sh`
+helper](coordination.md#broker-helper) does — this is the [MCP tool form of
+the boot block](coordination.md#mcp-tool-form) for a CLI that speaks MCP.
+
+| Tool | Input | Result |
+|------|-------|--------|
+| `publish_status` | `{ message }` | `{ published: true }` — `agent.status` (`status:"working"`, the message, `modified_files:[]`) |
+| `publish_artifact` | `{ exports?, modified_files? }` | `{ published: true }` — `agent.artifact` (`status:"done"`) — the code-less DONE fallback; a task that produces a commit reports via the post-commit hook instead |
+| `publish_blocked` | `{ needs, from }` | `{ published: true }` — `agent.blocked` with dependency info |
+| `publish_question` | `{ question }` | `{ published: true }` — `agent.question`, routed to the supervisor inbox |
+
+Three properties are structural, not incidental:
+
+- **Bounded, not generic.** These are four distinct tool definitions, not one
+  `publish(type, payload)` tool. A message type is never an accepted
+  parameter, so the set of things a client can publish cannot grow by passing
+  a new string — it can only grow by this server shipping a new tool.
+- **Agent-scoped identity.** No publish tool accepts an `agent_id` parameter.
+  Each derives the publishing agent id from the calling session's own
+  resolved worktree branch (the same conversion the `broker.sh poll`/`status`
+  path uses), so a session can only ever publish as itself — it cannot
+  attribute a message to a different agent.
+- **The supervisor authority verbs are absent, deliberately.**
+  `agent.verified` is what authorises a branch to be merged; `agent.feedback`
+  is the supervisor's corrective channel. Neither is exposed here, and neither
+  ever will be as a "just one more tool" addition — a coding agent able to
+  call `publish_verified`-shaped tool could self-verify its own work and
+  bypass the five-gate framework entirely, which is the single most valuable
+  thing an agent could do to escape supervision. Keeping this off the surface
+  is the point, not an oversight to eventually fill in.
+
+Publish tools need a **reachable broker** — unlike the read-only categories,
+there is no meaningful "empty" result for a publish that did not happen. When
+no session is active, or the broker is unreachable, or it rejects the
+message, the tool returns an MCP-level error and the server keeps running;
+nothing is ever written to stdout outside the JSON-RPC protocol stream.

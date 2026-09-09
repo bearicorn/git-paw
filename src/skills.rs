@@ -372,6 +372,23 @@ fn slugify_branch(branch: &str) -> String {
     crate::broker::messages::slugify_branch(branch)
 }
 
+/// CLI names known to speak MCP (Model Context Protocol) well enough to
+/// receive the MCP tool form of the boot block (capability `mcp-agent-
+/// publish`). An unrecognized name — including any custom `[clis.<name>]`
+/// entry this list has no opinion on — is treated as non-MCP (design D4): a
+/// boot block naming tools a CLI cannot call would strand the agent at t=0,
+/// so the safe default is the helper-script form.
+const MCP_CAPABLE_CLIS: &[&str] = &["claude", "codex", "cursor", "agy"];
+
+/// Returns whether `cli_name` is known to speak MCP. See
+/// [`MCP_CAPABLE_CLIS`]. `cli_name` may carry trailing flags (e.g. `"claude
+/// --foo"`); only the leading binary name is matched.
+#[must_use]
+pub fn cli_speaks_mcp(cli_name: &str) -> bool {
+    let leading = cli_name.split_whitespace().next().unwrap_or(cli_name);
+    MCP_CAPABLE_CLIS.contains(&leading)
+}
+
 /// Builds the standardized boot instruction block for agent initialization.
 ///
 /// The boot block contains instructions for four essential runtime events:
@@ -387,14 +404,23 @@ fn slugify_branch(branch: &str) -> String {
 ///   stability and any future broker-URL placeholder; the boot block no
 ///   longer inlines the URL — each event calls `.git-paw/scripts/broker.sh`
 ///   (the `agent-broker-helper` capability), which discovers the URL itself.
+/// * `mcp_capable` - Whether the target CLI speaks MCP (see
+///   [`cli_speaks_mcp`]). `true` renders the four events as MCP publish
+///   tool invocations (capability `mcp-agent-publish`); `false` — the safe
+///   default for a non-MCP or unrecognized CLI (design D4) — renders the
+///   `broker.sh` helper form.
 ///
 /// # Returns
 ///
 /// A string containing the complete boot instruction block with the
-/// `{{BRANCH_ID}}` placeholder pre-expanded so each `broker.sh` invocation
-/// carries the agent's literal id.
-pub fn build_boot_block(branch_id: &str, broker_url: &str) -> String {
-    let template = include_str!("../assets/boot-block-template.md");
+/// `{{BRANCH_ID}}` placeholder pre-expanded so each invocation carries the
+/// agent's literal id.
+pub fn build_boot_block(branch_id: &str, broker_url: &str, mcp_capable: bool) -> String {
+    let template = if mcp_capable {
+        include_str!("../assets/boot-block-mcp-template.md")
+    } else {
+        include_str!("../assets/boot-block-template.md")
+    };
     let slugified_branch = slugify_branch(branch_id);
 
     template
@@ -4111,7 +4137,7 @@ mod tests {
     // Boot block function tests
     #[test]
     fn boot_block_contains_all_four_essential_events() {
-        let block = build_boot_block("feat/errors", "http://localhost:9119");
+        let block = build_boot_block("feat/errors", "http://localhost:9119", false);
         assert!(
             block.contains("### 1. REGISTER"),
             "Missing REGISTER section"
@@ -4129,7 +4155,7 @@ mod tests {
     /// fallback still publishes `agent.artifact { status: "done" }`.
     #[test]
     fn boot_block_all_four_events_call_helper_no_raw_curl() {
-        let block = build_boot_block("feat/test", "http://127.0.0.1:9119");
+        let block = build_boot_block("feat/test", "http://127.0.0.1:9119", false);
 
         // No raw broker curl anywhere.
         assert!(
@@ -4166,9 +4192,93 @@ mod tests {
         );
     }
 
+    /// `boot-block` scenario "MCP-capable CLI receives the tool form": the
+    /// four events are expressed as MCP publish tool invocations, not
+    /// `broker.sh` calls.
+    #[test]
+    fn boot_block_mcp_form_calls_publish_tools_no_helper_script() {
+        let block = build_boot_block("feat/test", "http://127.0.0.1:9119", true);
+
+        assert!(
+            !block.contains(".git-paw/scripts/broker.sh --agent feat-test status"),
+            "MCP form must not call the broker.sh helper for REGISTER"
+        );
+        assert!(
+            !block.contains(".git-paw/scripts/broker.sh --agent feat-test artifact"),
+            "MCP form must not call the broker.sh helper for DONE"
+        );
+        assert!(
+            !block.contains(".git-paw/scripts/broker.sh --agent feat-test blocked"),
+            "MCP form must not call the broker.sh helper for BLOCKED"
+        );
+        assert!(
+            !block.contains(".git-paw/scripts/broker.sh --agent feat-test question"),
+            "MCP form must not call the broker.sh helper for QUESTION"
+        );
+
+        assert!(
+            block.contains("publish_status"),
+            "REGISTER event should call the publish_status MCP tool"
+        );
+        assert!(
+            block.contains("publish_artifact"),
+            "DONE-fallback event should call the publish_artifact MCP tool"
+        );
+        assert!(
+            block.contains("publish_blocked"),
+            "BLOCKED event should call the publish_blocked MCP tool"
+        );
+        assert!(
+            block.contains("publish_question"),
+            "QUESTION event should call the publish_question MCP tool"
+        );
+    }
+
+    /// `boot-block` scenarios "Non-MCP CLI receives the helper form" and
+    /// "Unknown MCP support falls back to the helper form": both collapse to
+    /// `mcp_capable: false` at the render layer — [`cli_speaks_mcp`] is what
+    /// tells them apart at the call site, and an unrecognized name resolves
+    /// to `false` there (design D4).
+    #[test]
+    fn cli_speaks_mcp_known_clis_true_unknown_clis_false() {
+        for known in ["claude", "codex", "cursor", "agy"] {
+            assert!(cli_speaks_mcp(known), "{known} should be MCP-capable");
+        }
+        for unknown in ["aider", "vibe", "some-custom-cli", ""] {
+            assert!(
+                !cli_speaks_mcp(unknown),
+                "{unknown:?} is not known MCP-capable and must default to false (D4)"
+            );
+        }
+        // Trailing flags don't defeat the match on the leading binary name.
+        assert!(cli_speaks_mcp("claude --dangerously-skip-permissions"));
+    }
+
+    /// `boot-block` scenario "Both forms carry the same four events": the
+    /// MCP form and the helper form cover exactly register/done/blocked/
+    /// question — neither adds nor omits an event relative to the other.
+    #[test]
+    fn boot_block_both_forms_cover_the_same_four_events() {
+        let helper_form = build_boot_block("feat/test", "http://127.0.0.1:9119", false);
+        let mcp_form = build_boot_block("feat/test", "http://127.0.0.1:9119", true);
+
+        for section in [
+            "### 1. REGISTER",
+            "### 2. DONE",
+            "### 3. BLOCKED",
+            "### 4. QUESTION",
+        ] {
+            assert!(
+                helper_form.contains(section),
+                "helper form missing {section}"
+            );
+            assert!(mcp_form.contains(section), "MCP form missing {section}");
+        }
+    }
+
     #[test]
     fn boot_block_substitutes_branch_id_placeholder() {
-        let block = build_boot_block("Feature/HTTP_Broker", "http://localhost:9119");
+        let block = build_boot_block("Feature/HTTP_Broker", "http://localhost:9119", false);
         assert!(
             block.contains("feature-http_broker"),
             "Branch ID not properly slugified"
@@ -4181,7 +4291,7 @@ mod tests {
 
     #[test]
     fn boot_block_uses_helper_not_raw_broker_url() {
-        let block = build_boot_block("feat/x", "http://127.0.0.1:9119");
+        let block = build_boot_block("feat/x", "http://127.0.0.1:9119", false);
         // The broker URL and JSON shaping now live inside the helper, so the
         // boot block must not inline a raw broker `curl` for any event.
         assert!(
@@ -4200,7 +4310,7 @@ mod tests {
 
     #[test]
     fn boot_block_contains_paste_handling_instructions() {
-        let block = build_boot_block("feat/x", "http://localhost:9119");
+        let block = build_boot_block("feat/x", "http://localhost:9119", false);
         assert!(
             block.contains("PASTE HANDLING"),
             "Missing paste handling section"
@@ -4217,7 +4327,7 @@ mod tests {
 
     #[test]
     fn boot_block_question_section_emphasizes_waiting() {
-        let block = build_boot_block("feat/x", "http://localhost:9119");
+        let block = build_boot_block("feat/x", "http://localhost:9119", false);
         assert!(
             block.contains("DO NOT CONTINUE UNTIL YOU RECEIVE AN ANSWER!"),
             "Missing wait emphasis"
@@ -4230,14 +4340,18 @@ mod tests {
 
     #[test]
     fn boot_block_is_deterministic() {
-        let a = build_boot_block("feat/x", "http://localhost:9119");
-        let b = build_boot_block("feat/x", "http://localhost:9119");
+        let a = build_boot_block("feat/x", "http://localhost:9119", false);
+        let b = build_boot_block("feat/x", "http://localhost:9119", false);
         assert_eq!(a, b, "Boot block generation should be deterministic");
     }
 
     #[test]
     fn boot_block_handles_complex_branch_names() {
-        let block = build_boot_block("fix/topological-cycle-fallback", "http://localhost:9119");
+        let block = build_boot_block(
+            "fix/topological-cycle-fallback",
+            "http://localhost:9119",
+            false,
+        );
         assert!(
             block.contains("fix-topological-cycle-fallback"),
             "Complex branch name not properly slugified"
@@ -4246,7 +4360,7 @@ mod tests {
 
     #[test]
     fn boot_block_contains_pre_expanded_helper_invocations() {
-        let block = build_boot_block("feat/test", "http://127.0.0.1:9119");
+        let block = build_boot_block("feat/test", "http://127.0.0.1:9119", false);
 
         // Each event calls the helper with the pre-expanded branch id.
         assert!(
@@ -4276,7 +4390,7 @@ mod tests {
 
     #[test]
     fn boot_block_done_section_leads_with_commit_instruction() {
-        let block = build_boot_block("feat/test", "http://127.0.0.1:9119");
+        let block = build_boot_block("feat/test", "http://127.0.0.1:9119", false);
         let done_body = done_section_body(&block);
 
         let commit_idx = done_body
@@ -4296,7 +4410,7 @@ mod tests {
 
     #[test]
     fn boot_block_done_section_names_committed_status_published_by_hook() {
-        let block = build_boot_block("feat/test", "http://127.0.0.1:9119");
+        let block = build_boot_block("feat/test", "http://127.0.0.1:9119", false);
         let done_body = done_section_body(&block);
 
         assert!(
@@ -4312,7 +4426,7 @@ mod tests {
 
     #[test]
     fn boot_block_done_section_scopes_manual_done_to_code_less_tasks() {
-        let block = build_boot_block("feat/test", "http://127.0.0.1:9119");
+        let block = build_boot_block("feat/test", "http://127.0.0.1:9119", false);
         let done_body = done_section_body(&block);
 
         let hits = ["docs-only", "planning", "exploration"]
@@ -4328,7 +4442,7 @@ mod tests {
 
     #[test]
     fn boot_block_done_section_warns_against_manual_done_with_uncommitted_changes() {
-        let block = build_boot_block("feat/test", "http://127.0.0.1:9119");
+        let block = build_boot_block("feat/test", "http://127.0.0.1:9119", false);
         let done_body = done_section_body(&block);
 
         assert!(
@@ -4347,7 +4461,7 @@ mod tests {
 
     #[test]
     fn boot_block_done_section_retains_manual_done_helper() {
-        let block = build_boot_block("feat/test", "http://127.0.0.1:9119");
+        let block = build_boot_block("feat/test", "http://127.0.0.1:9119", false);
         let done_body = done_section_body(&block);
 
         // The manual fallback is now a copy-pasteable broker.sh artifact

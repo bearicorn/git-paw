@@ -19,8 +19,11 @@ use crate::mcp::{RepoContext, logging};
 pub struct GitPawMcpServer {
     /// Resolved repository context.
     pub(crate) ctx: RepoContext,
-    /// Combined router across all five tool categories.
-    tool_router: ToolRouter<Self>,
+    /// Combined router across all tool categories. `pub(crate)` so registry-
+    /// inspection tests (the `mcp-agent-publish` security boundary: no
+    /// generic publish tool, no `agent_id` parameter, no authority-verb
+    /// tools) can enumerate it from outside this module.
+    pub(crate) tool_router: ToolRouter<Self>,
 }
 
 impl GitPawMcpServer {
@@ -34,7 +37,8 @@ impl GitPawMcpServer {
             + Self::session_router()
             + Self::git_router()
             + Self::docs_router()
-            + Self::source_router();
+            + Self::source_router()
+            + Self::publish_router();
         Self { ctx, tool_router }
     }
 }
@@ -57,11 +61,14 @@ impl ServerHandler for GitPawMcpServer {
         info.server_info.name.clone_from(&self.ctx.server_name);
         info.server_info.version = env!("CARGO_PKG_VERSION").to_string();
         info.instructions = Some(
-            "Read-only git-paw repository state over MCP: coordination intents/conflicts, \
-             governance docs, specs and tasks, session status and learnings, agent skills, \
-             git context, and source browsing (list_files, read_file, search_code over the \
-             local working tree). Tools return empty/null results (not errors) when their data \
-             source is unavailable."
+            "git-paw repository state over MCP: coordination intents/conflicts, governance docs, \
+             specs and tasks, session status and learnings, agent skills, git context, and source \
+             browsing (list_files, read_file, search_code over the local working tree) are all \
+             read-only and return empty/null results (not errors) when their data source is \
+             unavailable. The one write surface is a bounded, agent-scoped publish category \
+             covering exactly the four agent boot events (publish_status, publish_artifact, \
+             publish_blocked, publish_question) — each publishes as the calling agent only. \
+             Supervisor authority verbs (agent.verified, agent.feedback) are not exposed."
                 .to_string(),
         );
         info
@@ -205,10 +212,171 @@ mod tests {
             "list_files",
             "read_file",
             "search_code",
+            "publish_status",
+            "publish_artifact",
+            "publish_blocked",
+            "publish_question",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),
                 "tool {expected} should be registered; have: {names:?}"
+            );
+        }
+    }
+
+    /// The complete, closed set of tool names this server may ever
+    /// advertise. `mcp-agent-publish` D2 requires the publish surface stay a
+    /// FIXED set of four narrow tools; the guarantee only holds if the
+    /// *whole* registry is closed, so this list covers every tool, read-only
+    /// or not. Adding, renaming, or removing any tool must touch this list —
+    /// deliberately, since that touch is the review speed bump the bounded-
+    /// surface argument depends on (design "Risks / Trade-offs").
+    const ALL_ALLOWED_TOOL_NAMES: &[&str] = &[
+        // coordination (read-only)
+        "get_intents",
+        "get_intent",
+        "get_conflicts",
+        // governance (read-only)
+        "get_dod",
+        "get_constitution",
+        "get_adrs",
+        "get_adr",
+        "get_test_strategy",
+        "get_security_checklist",
+        "check_dod",
+        // project: specs/tasks/skills (read-only)
+        "get_specs",
+        "get_spec",
+        "get_tasks",
+        "get_task",
+        "get_skill",
+        "get_dependency_graph",
+        // session state (read-only)
+        "get_session_status",
+        "get_session_summary",
+        "get_learnings",
+        // git context (read-only)
+        "get_branches",
+        "get_recent_commits",
+        "get_diff",
+        // docs (read-only)
+        "get_readme",
+        "list_docs",
+        "get_doc",
+        // source browsing (read-only)
+        "list_files",
+        "read_file",
+        "search_code",
+        // mcp-agent-publish: the ONLY write category — bounded to exactly
+        // the four agent boot events, agent-scoped, authority verbs absent.
+        "publish_status",
+        "publish_artifact",
+        "publish_blocked",
+        "publish_question",
+    ];
+
+    /// `mcp-server` scenario "No file or git mutation is exposed" + `mcp-
+    /// agent-publish` scenario "No generic publish tool exists": the
+    /// registry is exactly the closed allowlist above — nothing more,
+    /// nothing less. A stray extra tool (mutating or not) fails this test
+    /// immediately, forcing a conscious update rather than a silent drift.
+    #[test]
+    fn registry_is_exactly_the_closed_allowlist() {
+        let server = GitPawMcpServer::new(ctx());
+        let names: std::collections::BTreeSet<String> = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        let allowed: std::collections::BTreeSet<String> = ALL_ALLOWED_TOOL_NAMES
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        assert_eq!(
+            names, allowed,
+            "the tool registry drifted from the closed allowlist — any addition or removal \
+             must be a deliberate edit to ALL_ALLOWED_TOOL_NAMES, not an incidental one"
+        );
+    }
+
+    /// `mcp-agent-publish` scenarios "No generic publish tool exists", "No
+    /// verified publish tool", "No feedback publish tool", and "Agent id is
+    /// derived, not supplied": adversarially inspect every advertised tool's
+    /// name and parameter schema, not just the four publish tools by name.
+    #[test]
+    fn no_generic_publish_or_authority_verb_tool_is_advertised() {
+        let server = GitPawMcpServer::new(ctx());
+        for tool in server.tool_router.list_all() {
+            assert_ne!(
+                tool.name, "publish",
+                "a generic publish(type, payload) tool must never exist (D2)"
+            );
+            assert!(
+                !tool.name.to_lowercase().contains("verified"),
+                "no tool may publish agent.verified (D1): {}",
+                tool.name
+            );
+            assert!(
+                !tool.name.to_lowercase().contains("feedback"),
+                "no tool may publish agent.feedback (D1): {}",
+                tool.name
+            );
+            // Inspect the schema's declared *properties* (parameter names),
+            // not the raw JSON text — the schema's own `"type"` keyword
+            // (`"type":"object"`/`"array"`/…) appears on every tool and must
+            // not be confused with a parameter literally named `type`.
+            let props = tool
+                .input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object);
+            let has_property = |name: &str| props.is_some_and(|p| p.contains_key(name));
+            assert!(
+                !has_property("agent_id"),
+                "{} schema must not accept an agent_id parameter (D3): {:?}",
+                tool.name,
+                tool.input_schema
+            );
+            if tool.name.starts_with("publish_") {
+                assert!(
+                    !has_property("type") && !has_property("message_type"),
+                    "{} schema must not accept a generic message-type parameter (D2): {:?}",
+                    tool.name,
+                    tool.input_schema
+                );
+            }
+        }
+    }
+
+    /// `mcp-agent-publish` scenario "Agent cannot self-verify via MCP": even
+    /// granting the strongest available capability (calling every advertised
+    /// tool), there is no tool call sequence that publishes an
+    /// `agent.verified` message — the verb simply is not on the surface.
+    #[test]
+    fn agent_cannot_self_verify_because_no_tool_publishes_it() {
+        let server = GitPawMcpServer::new(ctx());
+        let names: Vec<String> = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        let publish_tools: Vec<&String> =
+            names.iter().filter(|n| n.starts_with("publish_")).collect();
+        assert_eq!(
+            publish_tools.len(),
+            4,
+            "exactly four publish tools should exist; have: {publish_tools:?}"
+        );
+        for allowed in [
+            "publish_status",
+            "publish_artifact",
+            "publish_blocked",
+            "publish_question",
+        ] {
+            assert!(
+                publish_tools.iter().any(|n| n.as_str() == allowed),
+                "expected publish tool {allowed} missing from the bounded set"
             );
         }
     }

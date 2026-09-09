@@ -98,6 +98,23 @@ Agents are instructed to publish questions and wait for answers rather than gues
 
 **IMPORTANT**: The boot block explicitly instructs agents: "DO NOT CONTINUE UNTIL YOU RECEIVE AN ANSWER!"
 
+### MCP tool form
+
+The four events above are the `broker.sh` helper form. For a CLI known to
+speak MCP (Model Context Protocol) — currently Claude Code, Codex, Cursor,
+and Antigravity (`agy`) — the boot block instead expresses each event as an
+invocation of the matching [MCP publish tool](mcp.md#publish-tools):
+`publish_status`, `publish_artifact`, `publish_blocked`, `publish_question`.
+The events, their meanings, and their ordering are identical between the two
+forms; only the invocation mechanism differs, and each MCP publish tool
+resolves the publishing agent id from the session's own worktree branch
+automatically — the boot block never needs to pass one.
+
+An unrecognized or unknown-capability CLI always gets the `broker.sh` form.
+This is the safe default: a boot block naming tools a CLI cannot call would
+strand the agent at the very first step, so git-paw only switches to the MCP
+form when it is confident the target CLI can act on it.
+
 ## Prompt-free boot calls
 
 So an agent's first boot action never stalls on a permission prompt,

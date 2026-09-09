@@ -794,8 +794,11 @@ pub(crate) fn cmd_supervisor(
     // (see assets/agent-skills/supervisor.md). Sending more than one Enter
     // at launch risks accidentally accepting a follow-on permission prompt
     // on fast CLIs and is intentionally avoided.
-    let supervisor_boot_block =
-        git_paw::skills::build_boot_block("supervisor", &broker_config.url());
+    let supervisor_boot_block = git_paw::skills::build_boot_block(
+        "supervisor",
+        &broker_config.url(),
+        git_paw::skills::cli_speaks_mcp(&supervisor_cli),
+    );
     let supervisor_framing = format!(
         "Begin observing the spec implementation session. Your skill \
          ({skill}) describes your role — read it, then start the autonomous loop. The user \

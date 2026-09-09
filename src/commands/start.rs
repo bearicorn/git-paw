@@ -303,9 +303,13 @@ pub(crate) fn cmd_start(
     // call shape (literal mode, no trailing Enter, `-l` before `-t`) has a
     // single source of truth that tests can verify directly.
     if broker_config.enabled {
-        for (idx, (branch, _)) in selection.mappings.iter().enumerate() {
+        for (idx, (branch, cli)) in selection.mappings.iter().enumerate() {
             let pane_idx = if broker_config.enabled { idx + 1 } else { idx };
-            let boot_block = git_paw::skills::build_boot_block(branch, &broker_config.url());
+            let boot_block = git_paw::skills::build_boot_block(
+                branch,
+                &broker_config.url(),
+                git_paw::skills::cli_speaks_mcp(cli),
+            );
 
             let args =
                 git_paw::tmux::build_boot_inject_args(&tmux_session.name, pane_idx, &boot_block);
@@ -649,9 +653,13 @@ fn launch_spec_session(
     // was missing this in v0.4 — fixes dogfood D4 in `from-specs-launch-fixes`).
     if broker_config.enabled {
         let pane_offset = usize::from(broker_config.enabled);
-        for (idx, (branch, _)) in mappings.iter().enumerate() {
+        for (idx, (branch, cli)) in mappings.iter().enumerate() {
             let pane_idx = idx + pane_offset;
-            let boot_block = git_paw::skills::build_boot_block(branch, &broker_config.url());
+            let boot_block = git_paw::skills::build_boot_block(
+                branch,
+                &broker_config.url(),
+                git_paw::skills::cli_speaks_mcp(cli),
+            );
             let args =
                 git_paw::tmux::build_boot_inject_args(&tmux_session.name, pane_idx, &boot_block);
             let _ = std::process::Command::new("tmux").args(&args).status();

@@ -572,7 +572,11 @@ fn attach_agent(
         format!("{} {}", ctx.agent_cli, ctx.agent_flags)
     };
 
-    let boot_block = git_paw::skills::build_boot_block(branch, &ctx.broker_config.url());
+    let boot_block = git_paw::skills::build_boot_block(
+        branch,
+        &ctx.broker_config.url(),
+        git_paw::skills::cli_speaks_mcp(ctx.agent_cli),
+    );
     let task_prompt = build_task_prompt(spec_entry);
 
     Ok(AttachedAgent {
@@ -1988,7 +1992,7 @@ mod tests {
     #[test]
     fn supervisor_pane_prompt_starts_with_boot_block() {
         let broker_url = "http://127.0.0.1:9119";
-        let boot_block = git_paw::skills::build_boot_block("supervisor", broker_url);
+        let boot_block = git_paw::skills::build_boot_block("supervisor", broker_url, false);
         let supervisor_framing = "Begin observing the spec implementation session. Your skill (.git-paw/AGENTS.local.md) describes \
              your role — read it, then start the autonomous loop. The user can type questions or \
              directives directly into your pane; handle them per the 'When the user types in your \
