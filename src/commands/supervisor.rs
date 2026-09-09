@@ -775,6 +775,10 @@ pub(crate) fn cmd_supervisor(
         &tmux_session.name,
         &state.worktrees,
         git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET,
+        Some(session::RepoOrchestratorEntry {
+            cli: supervisor_cli.clone(),
+            pane_index: 0,
+        }),
     );
 
     // Inject the initial prompt into the supervisor pane (index 0) and each
@@ -890,6 +894,19 @@ fn drive_unattended_loop(
         })
         .collect();
 
+    // The session-instance guard (GP-06) compares against what
+    // `find_session_for_repo` reads back from disk, which round-trips
+    // `created_at` through a whole-seconds ISO 8601 string (the field's
+    // serializer is frozen — see AGENTS.md). Binding to the in-memory
+    // `state.created_at` (sub-second `SystemTime::now()`) would almost never
+    // equal that truncated value and make the loop see its own session as
+    // torn down on the very first tick, so re-read the just-saved session to
+    // bind to the same truncated value the guard will later compare against.
+    let session_created_at = session::find_session_for_repo(repo_root)
+        .ok()
+        .flatten()
+        .map_or(state.created_at, |s| s.created_at);
+
     // The classifier the loop consumes mirrors the dashboard poll loop's
     // resolved whitelist + worktree-write policy so unattended and attended
     // sessions auto-approve the same set.
@@ -926,6 +943,7 @@ fn drive_unattended_loop(
                 .to_string()
         }),
         branch_refresh_enabled: supervisor_cfg.branch_refresh_enabled(),
+        session_created_at,
     };
 
     drive::run_drive_loop(session_name, repo_root, &agents, options)?;

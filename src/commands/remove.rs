@@ -154,11 +154,18 @@ pub(crate) fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Resu
     let mut updated = existing.clone();
     updated.worktrees.remove(pos);
     session::save_session(&updated)?;
+    // The orchestrator pane does not change when a coding agent is detached —
+    // carry the existing entry (if any) forward unchanged.
+    let orchestrator = session::read_repo_session_file(&repo_root, &updated.session_name)
+        .ok()
+        .flatten()
+        .and_then(|f| f.orchestrator);
     write_repo_discovery_file(
         &repo_root,
         &updated.session_name,
         &updated.worktrees,
         offset,
+        orchestrator,
     );
 
     println!(

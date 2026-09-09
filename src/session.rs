@@ -472,6 +472,21 @@ pub struct RepoAgentEntry {
     pub pane_index: usize,
 }
 
+/// The orchestrator (supervisor) pane entry in a supervisor-mode session's
+/// discovery file (`session-state`).
+///
+/// Distinct from [`RepoAgentEntry`]: the orchestrator drives the wave rather
+/// than doing the coding work, and its tier is often different (e.g. a
+/// `fable`-tier orchestrator driving `sonnet` workers).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoOrchestratorEntry {
+    /// The AI CLI running in the orchestrator's pane.
+    pub cli: String,
+    /// The orchestrator's tmux pane index within the session window (`0` in
+    /// the supervisor layout).
+    pub pane_index: usize,
+}
+
 /// The per-repo discovery document written to
 /// `<repo>/.git-paw/sessions/<session_name>.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -480,6 +495,13 @@ pub struct RepoSessionFile {
     pub session_name: String,
     /// The coding-agent roster for the session.
     pub agents: Vec<RepoAgentEntry>,
+    /// The supervisor/orchestrator pane, present only for a supervisor-mode
+    /// session. Additive (`session-state`): `#[serde(default)]` so a file
+    /// written before this field existed, or a bare-mode session (which has
+    /// no orchestrator pane), loads with this absent, and `sweep.sh` — which
+    /// enumerates `agents` by name — ignores the extra key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestrator: Option<RepoOrchestratorEntry>,
 }
 
 /// Returns the per-repo sessions directory: `<repo>/.git-paw/sessions/`.
@@ -518,6 +540,32 @@ pub fn write_repo_session_file(repo_root: &Path, file: &RepoSessionFile) -> Resu
         PawError::SessionError(format!("failed to rename per-repo session temp file: {e}"))
     })?;
     Ok(())
+}
+
+/// Reads the per-repo discovery file for a session, or `None` when it does
+/// not exist.
+///
+/// Used by `add`/`remove` to carry the existing `orchestrator` entry forward
+/// unchanged when they rewrite the roster (the orchestrator pane does not
+/// change when a coding agent is added or removed).
+pub fn read_repo_session_file(
+    repo_root: &Path,
+    session_name: &str,
+) -> Result<Option<RepoSessionFile>, PawError> {
+    let path = repo_session_path(repo_root, session_name);
+    let contents = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(PawError::SessionError(format!(
+                "failed to read per-repo session file: {e}"
+            )));
+        }
+    };
+    let file: RepoSessionFile = serde_json::from_str(&contents).map_err(|e| {
+        PawError::SessionError(format!("failed to parse per-repo session file: {e}"))
+    })?;
+    Ok(Some(file))
 }
 
 /// Removes the per-repo discovery file for a session. Idempotent — a missing
@@ -1325,6 +1373,7 @@ mod tests {
                     pane_index: 3,
                 },
             ],
+            orchestrator: None,
         }
     }
 
@@ -1372,5 +1421,58 @@ mod tests {
             !path.exists(),
             "discovery file should be removed by purge path"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Orchestrator pane entry (unattended-wave-lifecycle, task 3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn orchestrator_entry_is_recorded_distinct_from_agents() {
+        let repo = TempDir::new().expect("repo");
+        let mut file = sample_repo_file();
+        file.orchestrator = Some(RepoOrchestratorEntry {
+            cli: "fable".to_string(),
+            pane_index: 0,
+        });
+        write_repo_session_file(repo.path(), &file).expect("write");
+
+        let path = repo_session_path(repo.path(), "paw-my-project");
+        let raw = fs::read_to_string(&path).expect("read");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("json");
+
+        assert_eq!(parsed["orchestrator"]["cli"], "fable");
+        assert_eq!(parsed["orchestrator"]["pane_index"], 0);
+        // Distinct from the coding-agent roster: sweep.sh's `.agents[]` walk
+        // (a `dict.get("agents", [])`) is unaffected by the sibling key.
+        let agents = parsed["agents"].as_array().expect("agents array");
+        assert_eq!(agents.len(), 2, "orchestrator does not alter the roster");
+
+        let loaded = read_repo_session_file(repo.path(), "paw-my-project")
+            .expect("read")
+            .expect("file present");
+        assert_eq!(
+            loaded.orchestrator,
+            Some(RepoOrchestratorEntry {
+                cli: "fable".to_string(),
+                pane_index: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn repo_session_file_without_orchestrator_loads() {
+        // A file written before this field existed (or a bare-mode session,
+        // which never had an orchestrator pane).
+        let raw = r#"{"session_name":"paw-legacy","agents":[]}"#;
+        let file: RepoSessionFile = serde_json::from_str(raw).expect("legacy file must load");
+        assert!(file.orchestrator.is_none());
+    }
+
+    #[test]
+    fn read_repo_session_file_returns_none_when_missing() {
+        let repo = TempDir::new().expect("repo");
+        let result = read_repo_session_file(repo.path(), "paw-missing").expect("no error");
+        assert!(result.is_none());
     }
 }

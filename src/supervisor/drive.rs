@@ -47,11 +47,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::broker::messages::{BrokerMessage, FeedbackPayload};
 use crate::config::{CorrectionConfig, OnExhausted};
 use crate::error::PawError;
+use crate::session::{self, SessionStatus};
 
 use super::approval_gate::{approval_dedup_key, live_prompt_in_tail};
 use super::approve::{KeyDispatcher, TmuxKeyDispatcher, approval_keystrokes};
@@ -488,6 +489,23 @@ impl WorkerPhase {
     fn is_merge_candidate(self) -> bool {
         MERGE_CANDIDATE_STATUSES.contains(&self.as_status())
     }
+
+    /// How far along the worker's lifecycle this phase represents, used to
+    /// track the most-progressed phase ever observed for an agent (GP-05).
+    ///
+    /// [`WorkerPhase::Working`], [`WorkerPhase::Idle`], [`WorkerPhase::Blocked`],
+    /// and [`WorkerPhase::Other`] are all "still going" (rank 0);
+    /// [`WorkerPhase::Committed`] is closer to done (rank 1); the two terminal
+    /// phases, [`WorkerPhase::Verified`] and [`WorkerPhase::Done`], share the
+    /// top rank (2) — a resolved worker is never displayed as regressing back
+    /// to a lower phase because of a later generic heartbeat.
+    fn rank(self) -> u8 {
+        match self {
+            Self::Working | Self::Idle | Self::Blocked | Self::Other => 0,
+            Self::Committed => 1,
+            Self::Verified | Self::Done => 2,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -864,6 +882,10 @@ pub enum DriveOutcome {
     Stuck,
     /// The heartbeat elapsed without completion.
     Heartbeat,
+    /// The loop's bound session instance was purged, stopped, or replaced by a
+    /// new same-named session (GP-06) — it exits without acting on the new
+    /// session's panes.
+    SessionTornDown,
 }
 
 impl DriveOutcome {
@@ -875,6 +897,7 @@ impl DriveOutcome {
             DriveOutcome::EscalatedForReview => "escalated-for-review",
             DriveOutcome::Stuck => "stuck",
             DriveOutcome::Heartbeat => "heartbeat",
+            DriveOutcome::SessionTornDown => "session-torn-down",
         }
     }
 }
@@ -894,6 +917,10 @@ pub struct DriveSummary {
     pub broker_log_hint: Option<String>,
     /// Pointer to the captured learnings file, if known.
     pub learnings_hint: Option<String>,
+    /// Wave-level "N/M branches merged" line, present for a [`DriveOutcome::Completed`]
+    /// wave (GP-05) — the fallback the per-agent list has when its own
+    /// resolution is sparse or unavailable, and a useful roll-up otherwise.
+    pub merged_summary: Option<String>,
 }
 
 impl DriveSummary {
@@ -910,6 +937,9 @@ impl DriveSummary {
             "Unattended drive loop exited: {}",
             self.outcome.label()
         );
+        if let Some(merged) = &self.merged_summary {
+            let _ = writeln!(out, "{merged}");
+        }
 
         out.push_str("\nPer-agent final state:\n");
         if self.agent_states.is_empty() {
@@ -1052,6 +1082,19 @@ pub trait BranchRefresher {
     fn notify(&mut self, agent_id: &str, default_branch: &str);
 }
 
+/// Checks whether the drive loop's bound session instance is still the live,
+/// active one (GP-06) — not purged, stopped, or replaced by a newer
+/// same-named session.
+///
+/// Implementations compare a durable instance token captured at loop start
+/// (the session's start receipt / creation timestamp) against the live
+/// session record on disk, re-read on every call so a mid-run teardown is
+/// caught on the very next tick.
+pub trait SessionInstanceGuard {
+    /// Returns `true` when the bound session instance is still current.
+    fn is_current(&self) -> bool;
+}
+
 /// Bundled dependencies for [`drive_loop`].
 pub struct DriveDeps<'a> {
     /// Enumerates panes each sweep.
@@ -1153,6 +1196,11 @@ impl Default for DriveConfig {
 /// `agent.status` (W15-7). The loop never treats a feedback→fix→re-verify cycle
 /// as stuck — there is no cycle counter, only the completion and heartbeat exit
 /// conditions.
+///
+/// Before acting on a tick, `instance` is checked (GP-06): once the loop's
+/// bound session instance is purged, stopped, or replaced by a newer
+/// same-named session, the loop exits immediately, without sweeping or
+/// sending any keystrokes to whatever now owns that session name.
 #[allow(clippy::too_many_lines)]
 pub fn drive_loop(
     session: &str,
@@ -1160,6 +1208,7 @@ pub fn drive_loop(
     agents: &[AgentPane],
     deps: &mut DriveDeps<'_>,
     config: &DriveConfig,
+    instance: &dyn SessionInstanceGuard,
 ) -> DriveSummary {
     let coding_ids: Vec<String> = agents.iter().map(|a| a.agent_id.clone()).collect();
     let worktree_by_id: HashMap<String, PathBuf> = agents
@@ -1171,6 +1220,10 @@ pub fn drive_loop(
     let mut escalations: Vec<Escalation> = Vec::new();
     let mut correction = CorrectionState::new();
     let mut exhausted: Vec<ExhaustedBranch> = Vec::new();
+    // Highest-progressed `WorkerPhase` ever observed per agent (GP-05), so a
+    // generic `working` heartbeat republished after a `verified`/`done`
+    // artifact event can never regress the exit summary's resolved state.
+    let mut resolved_phase: HashMap<String, WorkerPhase> = HashMap::new();
 
     let start = deps.clock.now();
     // Nudge timer starts at the loop's start, so the first orchestration nudge
@@ -1181,6 +1234,11 @@ pub fn drive_loop(
     // latest_status)`: every exit path assigns both, so there are no
     // pre-initialised placeholders to leave dead.
     let (outcome, latest_status) = loop {
+        // --- Session-instance check (GP-06), before any action this tick -----
+        if !instance.is_current() {
+            break (DriveOutcome::SessionTornDown, Vec::new());
+        }
+
         // --- Sweep every pane (pane-keyed, explicit per-pane capture) --------
         // The pane list is bound before the sweep because the orchestrator's
         // presence is read from it: pane presence IS the orchestrator signal,
@@ -1229,6 +1287,21 @@ pub fn drive_loop(
         // A branch that reached a terminal PASS leaves the correction cycle,
         // so an unrelated later failure starts from a fresh budget.
         correction.clear_completed(&latest_status);
+
+        // Track the most-progressed phase ever seen per agent (GP-05): only
+        // ever raises the recorded phase, never lowers it, so a later generic
+        // `working` heartbeat cannot erase an earlier `verified`/`done` signal.
+        for row in &latest_status {
+            let phase = WorkerPhase::from_status(&row.status);
+            resolved_phase
+                .entry(row.agent_id.clone())
+                .and_modify(|best| {
+                    if phase.rank() > best.rank() {
+                        *best = phase;
+                    }
+                })
+                .or_insert(phase);
+        }
 
         // --- Branch refresh (post-merge, opt-in) ------------------------------
         trigger_branch_refresh(
@@ -1292,13 +1365,28 @@ pub fn drive_loop(
         );
     }
 
+    // Wave-level "N/M branches merged" line (GP-05): printed for a completed
+    // wave in addition to the per-agent list — the fallback when a specific
+    // agent's own resolution stayed sparse (e.g. its only signal was the
+    // supervisor's own verdict, never its own `verified`/`done` status), and a
+    // useful roll-up otherwise.
+    let merged_summary =
+        (outcome == DriveOutcome::Completed && !coding_ids.is_empty()).then(|| {
+            let merged = coding_ids
+                .iter()
+                .filter(|id| resolved_phase.get(*id).is_some_and(|p| p.rank() == 2))
+                .count();
+            format!("{merged}/{} branches merged", coding_ids.len())
+        });
+
     DriveSummary {
         outcome,
-        agent_states: agent_states_from_status(&latest_status),
+        agent_states: resolved_agent_states(&coding_ids, &latest_status, &resolved_phase),
         escalations,
         exhausted,
         broker_log_hint: config.broker_log_hint.clone(),
         learnings_hint: config.learnings_hint.clone(),
+        merged_summary,
     }
 }
 
@@ -2015,10 +2103,35 @@ fn duration_from_env_ms(key: &str, default: Duration) -> Duration {
         .map_or(default, Duration::from_millis)
 }
 
-/// Builds the per-agent final-state list from a `/status` snapshot.
-fn agent_states_from_status(rows: &[AgentStatusRow]) -> Vec<(String, String)> {
-    rows.iter()
-        .map(|r| (r.agent_id.clone(), r.status.clone()))
+/// Builds the per-agent final-state list, preferring each agent's resolved
+/// terminal phase over the final `/status` snapshot's literal status when the
+/// resolved phase outranks it (GP-05).
+///
+/// A `/status` snapshot alone can go stale: a generic `working` heartbeat
+/// republished after a `verified`/`done` artifact event overwrites the
+/// broker's on-record status for that agent, so reading only the latest
+/// snapshot can misreport a finished worker as still working. `resolved`
+/// tracks the best phase ever observed across the whole run, so it wins
+/// whenever it is more progressed than the literal snapshot row; otherwise the
+/// literal row's raw status string is kept verbatim (preserving any
+/// unrecognized/future status text). An agent absent from both falls back to
+/// `"unknown"`.
+fn resolved_agent_states(
+    coding_ids: &[String],
+    latest_status: &[AgentStatusRow],
+    resolved: &HashMap<String, WorkerPhase>,
+) -> Vec<(String, String)> {
+    coding_ids
+        .iter()
+        .map(|id| {
+            let literal = latest_status.iter().find(|r| &r.agent_id == id);
+            let literal_rank = literal.map_or(0, |r| WorkerPhase::from_status(&r.status).rank());
+            let status = match resolved.get(id) {
+                Some(phase) if phase.rank() > literal_rank => phase.as_status().to_string(),
+                _ => literal.map_or_else(|| "unknown".to_string(), |r| r.status.clone()),
+            };
+            (id.clone(), status)
+        })
         .collect()
 }
 
@@ -2067,6 +2180,33 @@ fn winddown_learning_body(outcome: DriveOutcome, escalations: &[Escalation]) -> 
 // ---------------------------------------------------------------------------
 // Production wiring
 // ---------------------------------------------------------------------------
+
+/// Production [`SessionInstanceGuard`]: re-reads the global session receipt
+/// for `repo_root` on every call and compares it against the instance bound
+/// at loop start (GP-06).
+struct FileSessionInstanceGuard {
+    /// Repository root the session receipt is looked up by.
+    repo_root: PathBuf,
+    /// The tmux session name the loop is bound to.
+    session_name: String,
+    /// The receipt's creation timestamp when the loop started — the durable
+    /// instance token. A receipt for the same repo with a different
+    /// `created_at` is a newer, unrelated session of the same name.
+    bound_created_at: SystemTime,
+}
+
+impl SessionInstanceGuard for FileSessionInstanceGuard {
+    fn is_current(&self) -> bool {
+        match session::find_session_for_repo(&self.repo_root) {
+            Ok(Some(s)) => {
+                s.session_name == self.session_name
+                    && s.created_at == self.bound_created_at
+                    && s.status != SessionStatus::Stopped
+            }
+            _ => false,
+        }
+    }
+}
 
 /// Production [`PaneEnumerator`]: `tmux list-panes -t <session> -F ...`.
 struct TmuxPaneEnumerator;
@@ -2337,6 +2477,10 @@ pub struct DriveRunOptions {
     /// Whether `supervisor-branch-refresh` is enabled
     /// (`[supervisor] branch_refresh`). Default-off.
     pub branch_refresh_enabled: bool,
+    /// The session receipt's creation timestamp — the durable instance token
+    /// [`SessionInstanceGuard`] binds to (GP-06), so the loop can tell its own
+    /// session instance apart from a later, unrelated same-named one.
+    pub session_created_at: SystemTime,
 }
 
 /// Runs the unattended drive loop with production dependencies, prints the exit
@@ -2366,7 +2510,14 @@ pub fn run_drive_loop(
         broker_log_hint,
         learnings_hint,
         branch_refresh_enabled,
+        session_created_at,
     } = options;
+
+    let instance = FileSessionInstanceGuard {
+        repo_root: repo_root.to_path_buf(),
+        session_name: session.to_string(),
+        bound_created_at: session_created_at,
+    };
 
     let enumerator = TmuxPaneEnumerator;
     let capturer = TmuxPaneCapture;
@@ -2427,7 +2578,7 @@ pub fn run_drive_loop(
         refresher: &mut refresher,
     };
 
-    let summary = drive_loop(session, repo_root, agents, &mut deps, &config);
+    let summary = drive_loop(session, repo_root, agents, &mut deps, &config, &instance);
     println!("{}", summary.render());
     Ok(summary)
 }
@@ -2450,7 +2601,47 @@ mod tests {
         config: &DriveConfig,
     ) -> DriveSummary {
         let repo = tempfile::tempdir().expect("temp repo root");
-        drive_loop(session, repo.path(), agents, deps, config)
+        drive_loop(
+            session,
+            repo.path(),
+            agents,
+            deps,
+            config,
+            &AlwaysCurrentGuard,
+        )
+    }
+
+    /// A [`SessionInstanceGuard`] that never reports its instance torn down —
+    /// the default for every test that is not itself exercising GP-06.
+    struct AlwaysCurrentGuard;
+    impl SessionInstanceGuard for AlwaysCurrentGuard {
+        fn is_current(&self) -> bool {
+            true
+        }
+    }
+
+    /// A [`SessionInstanceGuard`] fake that reports current for the first `n`
+    /// calls, then torn down forever after — models a session
+    /// purged/stopped/replaced partway through the loop's run (GP-06).
+    struct TornDownAfter {
+        remaining_true: Cell<u32>,
+    }
+    impl TornDownAfter {
+        fn new(n: u32) -> Self {
+            Self {
+                remaining_true: Cell::new(n),
+            }
+        }
+    }
+    impl SessionInstanceGuard for TornDownAfter {
+        fn is_current(&self) -> bool {
+            let n = self.remaining_true.get();
+            if n == 0 {
+                return false;
+            }
+            self.remaining_true.set(n - 1);
+            true
+        }
     }
 
     // --- Fakes --------------------------------------------------------------
@@ -3303,6 +3494,7 @@ mod tests {
             exhausted: Vec::new(),
             broker_log_hint: Some("/tmp/broker.log".to_string()),
             learnings_hint: Some(".git-paw/session-learnings.md".to_string()),
+            merged_summary: None,
         };
         let text = summary.render();
         assert!(text.contains("escalated-for-review"), "states outcome");
@@ -3313,6 +3505,184 @@ mod tests {
             text.contains(".git-paw/session-learnings.md"),
             "learnings pointer"
         );
+    }
+
+    // --- GP-05: exit summary resolves terminal state (unattended-wave-lifecycle) --
+
+    #[test]
+    fn completed_wave_resolves_terminal_state_not_working() {
+        let agents = vec![
+            AgentPane {
+                agent_id: "feat-a".to_string(),
+                worktree_path: PathBuf::from("/repo-feat-a"),
+            },
+            AgentPane {
+                agent_id: "feat-b".to_string(),
+                worktree_path: PathBuf::from("/repo-feat-b"),
+            },
+        ];
+        let enumerator = FakeEnumerator { panes: vec![] };
+        let capturer = FakeCapturer::new(&[]);
+        let mut dispatcher = RecordingDispatcher::default();
+        // Tick 1: feat-a reaches its terminal artifact, feat-b is only
+        // committed (awaiting merge) — no completion yet either way. Tick 2:
+        // the supervisor's own verdict fires completion, but feat-a's row has
+        // since regressed to a generic `working` heartbeat while feat-b's own
+        // row only now catches up to `verified`. The literal snapshot at exit
+        // alone would misreport feat-a as still working.
+        let status = ScriptedStatus::new(vec![
+            vec![row("feat-a", "verified"), row("feat-b", "committed")],
+            vec![
+                row("supervisor", "done"),
+                row("feat-a", "working"),
+                row("feat-b", "verified"),
+            ],
+        ]);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
+        let messages = ScriptedMessages::none();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            refresher: &mut refresher,
+        };
+        let config = DriveConfig {
+            poll_interval: Duration::from_millis(0),
+            heartbeat: Duration::from_hours(1),
+            ..DriveConfig::default()
+        };
+
+        let summary = drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
+
+        assert_eq!(summary.outcome, DriveOutcome::Completed);
+        assert!(
+            summary.agent_states.iter().all(|(_, s)| s != "working"),
+            "resolved state must never regress to working: {:?}",
+            summary.agent_states
+        );
+        assert!(
+            summary
+                .agent_states
+                .contains(&("feat-a".to_string(), "verified".to_string())),
+            "feat-a resolves to its earlier terminal artifact: {:?}",
+            summary.agent_states
+        );
+        assert!(summary.escalations.is_empty());
+        let text = summary.render();
+        assert!(
+            text.contains("2/2 branches merged"),
+            "wave-level outcome line: {text}"
+        );
+    }
+
+    // --- GP-06: drive loop bound to a session instance (unattended-wave-lifecycle) --
+
+    #[test]
+    fn instance_torn_down_stops_the_loop_before_the_next_sweep() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+        }];
+        let enumerator = FakeEnumerator {
+            panes: vec![PaneInfo {
+                pane_index: 1,
+                pane_current_path: "/repo-feat-a".to_string(),
+            }],
+        };
+        let capturer = FakeCapturer::new(&[(1, &live_safe_capture("cargo test"))]);
+        let mut dispatcher = RecordingDispatcher::default();
+        // Never completes on its own — the instance teardown is what ends it.
+        let status = ScriptedStatus::new(vec![vec![row("feat-a", "working")]]);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
+        let messages = ScriptedMessages::none();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            refresher: &mut refresher,
+        };
+        let config = DriveConfig {
+            whitelist: vec!["cargo test".to_string()],
+            poll_interval: Duration::from_millis(0),
+            heartbeat: Duration::from_hours(1),
+            ..DriveConfig::default()
+        };
+        // Current for tick 1 (the approval happens), torn down from tick 2 on
+        // — modelling a purge/stop, or replacement by a new same-named
+        // session, partway through the run.
+        let instance = TornDownAfter::new(1);
+
+        let repo = tempfile::tempdir().expect("temp repo root");
+        let summary = drive_loop(
+            "paw-test",
+            repo.path(),
+            &agents,
+            &mut deps,
+            &config,
+            &instance,
+        );
+
+        assert_eq!(summary.outcome, DriveOutcome::SessionTornDown);
+        assert_eq!(
+            dispatcher.events,
+            vec![(1, "1".to_string()), (1, "Enter".to_string())],
+            "only the first (pre-teardown) sweep's approval is sent — the loop \
+             must never act on a subsequently-created same-named session's panes"
+        );
+    }
+
+    #[test]
+    fn instance_guard_true_lets_a_live_session_keep_driving() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+        }];
+        let enumerator = FakeEnumerator { panes: vec![] };
+        let capturer = FakeCapturer::new(&[]);
+        let mut dispatcher = RecordingDispatcher::default();
+        let status = ScriptedStatus::new(vec![vec![row("feat-a", "verified")]]);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
+        let messages = ScriptedMessages::none();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            refresher: &mut refresher,
+        };
+        let config = DriveConfig {
+            heartbeat: Duration::from_hours(1),
+            ..DriveConfig::default()
+        };
+
+        // `drive_loop_in_tmp` binds an always-current guard, so a live session
+        // instance completes exactly as it did before GP-06.
+        let summary = drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
+
+        assert_eq!(summary.outcome, DriveOutcome::Completed);
     }
 
     // --- parse_list_panes (task 3.4) ---------------------------------------
@@ -3556,7 +3926,14 @@ mod tests {
         std::fs::create_dir_all(claimed.parent().expect("claim parent")).expect("mk tmp dir");
         std::fs::write(&claimed, "").expect("write foreign claim");
 
-        drive_loop("paw-test", repo.path(), &agents, &mut deps, &config);
+        drive_loop(
+            "paw-test",
+            repo.path(),
+            &agents,
+            &mut deps,
+            &config,
+            &AlwaysCurrentGuard,
+        );
 
         assert_eq!(
             dispatcher.events,
