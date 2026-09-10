@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+use crate::config::claude_prompt_profile;
 use crate::error::PawError;
 
 /// Best-effort detected interaction mode of an agent's CLI pane.
@@ -240,20 +241,24 @@ pub fn join_inventory<S: std::hash::BuildHasher>(
 /// [`Mode::Interactive`]; anything else is [`Mode::Unknown`]. The signal set
 /// is illustrative, not exhaustive — when in doubt the result is `Unknown`
 /// and consumers fall back to the safe delivery mode.
+///
+/// Sources its markers from the embedded Claude Code profile's
+/// `mode_accept_edits_markers` / `mode_interactive_markers`
+/// (`cli-prompt-profiles` capability) rather than compiled literals.
 #[must_use]
 pub fn detect_mode(pane_title: &str, capture: &str) -> Mode {
     let hay = format!("{pane_title}\n{capture}").to_lowercase();
-    if hay.contains("accept edits")
-        || hay.contains("accept-edits")
-        || hay.contains("bypass permissions")
+    let profile = claude_prompt_profile();
+    if profile
+        .mode_accept_edits_markers
+        .iter()
+        .any(|m| hay.contains(m.as_str()))
     {
         Mode::AcceptEdits
-    } else if hay.contains("? for shortcuts")
-        || hay.contains("do you want to proceed")
-        || hay.contains("do you want to allow")
-        || hay.contains("(y/n)")
-        || hay.contains("[y/n]")
-        || hay.contains("❯ 1. yes")
+    } else if profile
+        .mode_interactive_markers
+        .iter()
+        .any(|m| hay.contains(m.as_str()))
     {
         Mode::Interactive
     } else {

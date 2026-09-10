@@ -39,6 +39,7 @@ fn config_with_cli_settings(name: &str, settings: &Path) -> PawConfig {
             submit_delay_ms: None,
             settings_path: Some(settings.to_string_lossy().into_owned()),
             approval_args: HashMap::new(),
+            prompt_profile: None,
         },
     );
     config

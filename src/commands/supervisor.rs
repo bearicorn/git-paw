@@ -163,6 +163,10 @@ pub(crate) struct AutoApproveWiring {
     /// Repository root, from which each pane's exclusive approval claim path is
     /// built (`supervisor-unattended-operation`).
     pub(crate) repo_root: std::path::PathBuf,
+    /// Resolved prompt-shape profile (`cli-prompt-profiles` capability) for
+    /// this session's CLI, consulted by the poll loop's approval-marker
+    /// detection.
+    pub(crate) profile: config::CliPromptProfile,
 }
 
 /// Spawns a background thread that periodically polls the broker `/status`
@@ -192,6 +196,7 @@ pub(crate) fn spawn_auto_approve_thread(
         recorder,
         protected_paths,
         repo_root,
+        profile,
     } = wiring;
     let cfg = config?.resolved();
     if !cfg.enabled {
@@ -288,6 +293,7 @@ pub(crate) fn spawn_auto_approve_thread(
                 worktree_resolver: &worktree_resolver,
                 protected_paths: &protected_paths,
                 broker_url: Some(&broker_url),
+                profile: &profile,
             };
             let _ = tick_from_status(&rows, &mut ctx);
         }
@@ -812,7 +818,12 @@ pub(crate) fn cmd_supervisor(
     );
     let supervisor_prompt = format!("{supervisor_boot_block}\n\n{supervisor_framing}");
     let supervisor_delay = resolve_submit_delay_ms(&supervisor_cli, &config.clis);
-    gate_pane_or_fail_on_dialog(&tmux_session.name, 0, &supervisor_pane.cli_command)?;
+    gate_pane_or_fail_on_dialog(
+        &tmux_session.name,
+        0,
+        &supervisor_pane.cli_command,
+        &config.clis,
+    )?;
     submit_prompt_to_pane(&tmux_session.name, 0, &supervisor_prompt, supervisor_delay);
 
     for (idx, prompt) in agent_prompts.iter().enumerate() {
@@ -821,7 +832,12 @@ pub(crate) fn cmd_supervisor(
         let agent_delay =
             resolve_submit_delay_ms(&effective_agent_cli(&branches[idx]), &config.clis);
         let pane_idx = git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET + idx;
-        gate_pane_or_fail_on_dialog(&tmux_session.name, pane_idx, &agent_panes[idx].cli_command)?;
+        gate_pane_or_fail_on_dialog(
+            &tmux_session.name,
+            pane_idx,
+            &agent_panes[idx].cli_command,
+            &config.clis,
+        )?;
         submit_prompt_to_pane(&tmux_session.name, pane_idx, prompt, agent_delay);
     }
 

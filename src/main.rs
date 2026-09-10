@@ -153,6 +153,7 @@ fn run(command: Command) -> Result<(), PawError> {
             worktree_root,
             resolve_option,
         } => cmd_classify(worktree_root.as_deref(), resolve_option),
+        Command::PromptProfile { cli, field } => cmd_prompt_profile(cli.as_deref(), &field),
         Command::Init => git_paw::init::run_init(),
         Command::Replay {
             branch,
@@ -606,13 +607,14 @@ fn attach_agent(
 /// healthy running agent — so this returns `Err` instead of injecting. Every
 /// other outcome (`Ready` or `FellBack`) proceeds exactly as before; the
 /// caller injects the prompt regardless.
-fn gate_pane_or_fail_on_dialog(
+fn gate_pane_or_fail_on_dialog<S: std::hash::BuildHasher>(
     session_name: &str,
     pane_index: usize,
     cli_command: &str,
+    clis: &std::collections::HashMap<String, config::CustomCli, S>,
 ) -> Result<(), PawError> {
     dialog_stuck_result(
-        tmux::gate_pane_for_injection(session_name, pane_index, cli_command),
+        tmux::gate_pane_for_injection(session_name, pane_index, cli_command, clis),
         session_name,
         pane_index,
         cli_command,
@@ -806,6 +808,82 @@ fn cmd_classify(worktree_root: Option<&Path>, resolve_option: bool) -> Result<()
     } else {
         println!("{} {option_index}", verdict.label());
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Command: __prompt-profile
+// ---------------------------------------------------------------------------
+
+/// Regex-escapes `marker` so it can be joined into an extended-regex
+/// alternation without its literal characters (parentheses, brackets, …)
+/// being read as regex syntax.
+fn escape_for_regex_alternation(marker: &str) -> String {
+    let mut escaped = String::with_capacity(marker.len());
+    for c in marker.chars() {
+        if ".^$*+?()[]{}|\\".contains(c) {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
+/// Prints one resolved [`config::CliPromptProfile`] field for the bundled
+/// `sweep.sh` helper (internal command): a marker-list field prints as a
+/// regex-escaped `|`-joined alternation (ready for `grep -E`); a pattern
+/// field prints its raw regex source.
+///
+/// Resolves the profile for `cli` (falling back to `[supervisor].cli`, then
+/// `default_cli`, matching how the boot-prompt flags resolve the session
+/// CLI) against the config loaded from the CURRENT WORKING DIRECTORY — MUST
+/// be invoked from inside the target repository, as `sweep.sh` does.
+///
+/// `cli-prompt-profiles` capability: this is the single source `sweep.sh`
+/// reads instead of carrying its own copies of the markers/regexes.
+fn cmd_prompt_profile(cli: Option<&str>, field: &str) -> Result<(), PawError> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
+    let repo_root = git::validate_repo(&cwd)?;
+    let config = config::load_config(&repo_root, None).unwrap_or_default();
+    let resolved_cli = cli
+        .map(str::to_string)
+        .or_else(|| config.supervisor.as_ref().and_then(|s| s.cli.clone()))
+        .or_else(|| config.default_cli.clone())
+        .unwrap_or_default();
+    let profile = config::resolve_prompt_profile(&resolved_cli, &config.clis);
+
+    let marker_alternation = |markers: &[String]| {
+        markers
+            .iter()
+            .map(|m| escape_for_regex_alternation(m))
+            .collect::<Vec<_>>()
+            .join("|")
+    };
+
+    let value = match field {
+        "readiness_markers" => marker_alternation(&profile.readiness_markers),
+        "approval_markers" => marker_alternation(&profile.approval_markers),
+        "live_prompt_markers" => marker_alternation(&profile.live_prompt_markers),
+        "mid_response_markers" => marker_alternation(&profile.mid_response_markers),
+        "prompt_boilerplate_markers" => marker_alternation(&profile.prompt_boilerplate_markers),
+        "command_header_markers" => marker_alternation(&profile.command_header_markers),
+        "mode_accept_edits_markers" => marker_alternation(&profile.mode_accept_edits_markers),
+        "mode_interactive_markers" => marker_alternation(&profile.mode_interactive_markers),
+        "stream_error_markers" => marker_alternation(&profile.stream_error_markers),
+        "input_sigils" => marker_alternation(&profile.input_sigils),
+        "file_prompt_pattern" => profile.file_prompt_pattern.clone(),
+        "option_line_pattern" => profile.option_line_pattern.clone(),
+        "broad_grant_marker" => escape_for_regex_alternation(&profile.broad_grant_marker),
+        "context_bloat_pattern" => profile.context_bloat_pattern.clone(),
+        "paste_buffer_pattern" => profile.paste_buffer_pattern.clone(),
+        other => {
+            return Err(PawError::SessionError(format!(
+                "unknown prompt-profile field '{other}'"
+            )));
+        }
+    };
+    println!("{value}");
     Ok(())
 }
 
@@ -1095,6 +1173,14 @@ fn cmd_dashboard() -> Result<(), PawError> {
                 &config,
                 Some(&sess.repo_path),
             );
+            // Resolved once before the thread spawns, matching how the
+            // supervisor's own CLI is resolved (`[supervisor].cli` >
+            // `default_cli`) — the same order the boot-prompt flags use.
+            let session_cli = supervisor
+                .and_then(|s| s.cli.clone())
+                .or_else(|| config.default_cli.clone())
+                .unwrap_or_default();
+            let profile = config::resolve_prompt_profile(&session_cli, &config.clis);
             commands::supervisor::spawn_auto_approve_thread(
                 sess.session_name.clone(),
                 broker_config.url(),
@@ -1108,6 +1194,7 @@ fn cmd_dashboard() -> Result<(), PawError> {
                     recorder,
                     protected_paths,
                     repo_root: sess.repo_path.clone(),
+                    profile,
                 },
             )
         });

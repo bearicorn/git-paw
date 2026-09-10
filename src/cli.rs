@@ -535,6 +535,36 @@ pub enum Command {
         resolve_option: bool,
     },
 
+    /// Internal: print one resolved CLI prompt-shape profile field
+    #[command(
+        hide = true,
+        name = "__prompt-profile",
+        about = "Internal: print one resolved CLI prompt-shape profile field",
+        long_about = "Internal subcommand used by the bundled sweep.sh helper to read prompt-\
+                      shape marker data from the same resolved profile the compiled detectors \
+                      use, so the shell and Rust views of a prompt cannot drift (cli-prompt-\
+                      profiles capability, D3).\n\n\
+                      Prints ONE line for --field: a marker-list field is printed as an \
+                      extended-regex alternation (each marker regex-escaped, joined by `|`); \
+                      a pattern field is printed as its raw regex source. Resolves the profile \
+                      for --cli (falling back to [supervisor].cli, then default_cli, then the \
+                      embedded Claude Code default) against the config loaded from the CURRENT \
+                      WORKING DIRECTORY. Not intended for direct invocation."
+    )]
+    PromptProfile {
+        /// CLI name to resolve the profile for (defaults to the configured session CLI).
+        #[arg(
+            long,
+            value_name = "NAME",
+            help = "CLI name to resolve the profile for"
+        )]
+        cli: Option<String>,
+
+        /// Profile field to print (e.g. `approval_markers`, `option_line_pattern`).
+        #[arg(long, value_name = "FIELD", help = "Profile field to print")]
+        field: String,
+    },
+
     /// View captured session logs
     #[command(
         about = "View captured session logs",
@@ -1588,7 +1618,7 @@ mod tests {
         let help = Cli::try_parse_from(["git-paw", "--help"])
             .unwrap_err()
             .to_string();
-        for hidden in ["__dashboard", "__classify", "selftest"] {
+        for hidden in ["__dashboard", "__classify", "__prompt-profile", "selftest"] {
             assert!(
                 !help.contains(hidden),
                 "root --help must not surface internal subcommand {hidden:?}; got: {help}"
@@ -1606,7 +1636,12 @@ mod tests {
     /// and CI.
     #[test]
     fn hidden_subcommands_remain_invocable() {
-        for args in [vec!["selftest"], vec!["__dashboard"], vec!["__classify"]] {
+        for args in [
+            vec!["selftest"],
+            vec!["__dashboard"],
+            vec!["__classify"],
+            vec!["__prompt-profile", "--field", "approval_markers"],
+        ] {
             assert!(
                 Cli::try_parse_from(std::iter::once("git-paw").chain(args.iter().copied())).is_ok(),
                 "hidden subcommand {args:?} should still parse"

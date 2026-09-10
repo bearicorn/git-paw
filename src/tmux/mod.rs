@@ -19,8 +19,8 @@ pub use command::{
 };
 pub use layout::{agent_row_widths, rebalance_agent_rows};
 pub use readiness::{
-    CLI_READY_MARKERS, PaneReadiness, ReadinessBudget, ReadinessOutcome, classify_pane_readiness,
-    gate_pane_for_injection,
+    PaneReadiness, ReadinessBudget, ReadinessOutcome, classify_pane_readiness,
+    classify_pane_readiness_with_profile, gate_pane_for_injection,
 };
 pub use session::{
     SessionLiveness, agents_without_live_pane, attach, detach_client, ensure_tmux_installed,

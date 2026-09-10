@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::PawError;
 
+use super::prompt_profile::CliPromptProfileOverride;
 use super::{global_config_path, load_config_file, save_config_to};
 
 /// A custom CLI definition from config.
@@ -49,6 +50,16 @@ pub struct CustomCli {
     /// keys are rejected at config load with an error naming the key.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub approval_args: HashMap<String, String>,
+    /// Per-field prompt-shape overrides, consulted BEFORE the embedded
+    /// Claude Code default by [`super::resolve_prompt_profile`].
+    ///
+    /// A `[clis.<name>].prompt_profile` table with any subset of fields is
+    /// valid — every field left unset falls back to the embedded default
+    /// rather than resolving empty (D2 in the `cli-prompt-profiles`
+    /// capability). This describes how the CLI's terminal *looks* only; it
+    /// carries no permission decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_profile: Option<CliPromptProfileOverride>,
 }
 
 /// A named preset defining branches and a CLI to use.
@@ -99,6 +110,7 @@ pub fn add_custom_cli_to(
             submit_delay_ms: None,
             settings_path: None,
             approval_args: HashMap::new(),
+            prompt_profile: None,
         },
     );
 

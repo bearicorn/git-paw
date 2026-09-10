@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::claude_prompt_profile;
 use crate::error::PawError;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -2173,11 +2174,47 @@ fn classify_distinguishes_ready_bareshell_indeterminate() {
     );
 }
 
+/// `cli-prompt-profiles` capability, "Detection uses the pane's CLI profile":
+/// a CLI with a `[clis.<name>].prompt_profile` override readiness marker is
+/// gated on THAT marker, not Claude's, and does not match Claude's markers.
+#[test]
+fn gate_pane_for_injection_uses_the_resolved_cli_profile() {
+    let mut clis: std::collections::HashMap<String, crate::config::CustomCli> =
+        std::collections::HashMap::new();
+    clis.insert(
+        "mycli".to_string(),
+        crate::config::CustomCli {
+            command: "mycli".to_string(),
+            display_name: None,
+            submit_delay_ms: None,
+            settings_path: None,
+            approval_args: std::collections::HashMap::new(),
+            prompt_profile: Some(crate::config::CliPromptProfileOverride {
+                readiness_markers: Some(vec!["mycli-ready>".to_string()]),
+                ..Default::default()
+            }),
+        },
+    );
+    let profile = crate::config::resolve_prompt_profile("mycli", &clis);
+
+    // Claude's own readiness marker never matches the overridden profile.
+    assert_eq!(
+        classify_pane_readiness_with_profile("? for shortcuts", &profile),
+        PaneReadiness::Indeterminate
+    );
+    // The CLI's own configured marker does.
+    assert_eq!(
+        classify_pane_readiness_with_profile("mycli-ready> ", &profile),
+        PaneReadiness::Ready
+    );
+}
+
 #[test]
 fn gate_returns_ready_without_relaunch_when_marker_present() {
     let mut relaunches = 0;
     let outcome = gate_pane_generic(
         test_budget(),
+        claude_prompt_profile(),
         || Some("welcome\n? for shortcuts".to_string()),
         || relaunches += 1,
         |_| {},
@@ -2192,6 +2229,7 @@ fn gate_relaunches_a_persistent_bare_shell_then_falls_back() {
     let mut relaunches = 0;
     let outcome = gate_pane_generic(
         test_budget(),
+        claude_prompt_profile(),
         || Some("user@host:~$ ".to_string()),
         || relaunches += 1,
         |_| {},
@@ -2214,6 +2252,7 @@ fn gate_does_not_relaunch_an_unrecognised_cli() {
     // Content that is neither a known marker nor an obvious shell prompt.
     let outcome = gate_pane_generic(
         test_budget(),
+        claude_prompt_profile(),
         || Some("custom-cli interactive session — type a command".to_string()),
         || relaunches += 1,
         |_| {},
@@ -2232,6 +2271,7 @@ fn gate_becomes_ready_after_a_relaunch() {
     let mut relaunches = 0;
     let outcome = gate_pane_generic(
         test_budget(),
+        claude_prompt_profile(),
         || {
             captures += 1;
             // Bare shell until the relaunch fires (~4 captures for the
@@ -2304,6 +2344,7 @@ fn gate_answers_dialog_and_becomes_ready_without_relaunch() {
     let mut polls = 0;
     let outcome = gate_pane_generic(
         test_budget(),
+        claude_prompt_profile(),
         || {
             polls += 1;
             if polls > 1 {
@@ -2331,6 +2372,7 @@ fn gate_reports_dialog_stuck_when_never_answered_ready() {
     let mut answers = Vec::new();
     let outcome = gate_pane_generic(
         test_budget(),
+        claude_prompt_profile(),
         || Some(bypass_permissions_dialog()),
         || relaunches += 1,
         |_| {},
@@ -2350,6 +2392,7 @@ fn gate_reports_dialog_stuck_immediately_when_digit_unresolvable() {
     let cap = "WARNING: Claude Code running in Bypass Permissions mode\n\u{276f} 1. Maybe";
     let outcome = gate_pane_generic(
         test_budget(),
+        claude_prompt_profile(),
         || Some(cap.to_string()),
         || relaunches += 1,
         |_| {},
@@ -2369,6 +2412,7 @@ fn gate_falls_back_for_an_unrecognised_dialog() {
     let mut answers: Vec<u8> = Vec::new();
     let outcome = gate_pane_generic(
         test_budget(),
+        claude_prompt_profile(),
         || Some("custom-cli: accept the new terms? [y/N]".to_string()),
         || relaunches += 1,
         |_| {},

@@ -3,31 +3,15 @@
 //! Classifies a captured pane as ready / bare-shell / indeterminate and polls
 //! (with a bounded relaunch budget) before boot-block injection.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::command_runner::{CommandRunner, RealCommandRunner};
+use crate::config::{CliPromptProfile, CustomCli, claude_prompt_profile, resolve_prompt_profile};
 
 // ---------------------------------------------------------------------------
 // Launch-readiness gate (design D1, G1)
 // ---------------------------------------------------------------------------
-
-/// Substrings that positively identify a launched agent CLI's interactive
-/// ready state, as opposed to a bare shell prompt. Conservative phrase matches
-/// drawn from the agent CLIs git-paw supports — a bare shell that merely echoed
-/// a failed command never contains any of these, so a match means the CLI's UI
-/// is up and the boot block is safe to inject.
-///
-/// Extend this when a new agent CLI surfaces a different ready banner. An
-/// unrecognised CLI whose UI matches nothing here falls back to fixed-budget
-/// injection (never worse than the prior fixed-sleep launch).
-pub const CLI_READY_MARKERS: &[&str] = &[
-    "? for shortcuts",
-    "? for help",
-    "Welcome to Claude Code",
-    "esc to interrupt",
-    "Bypassing Permissions",
-    "│ >",
-];
 
 /// Identifies a first-run acceptance/trust dialog (GP-03b) by a heading/body
 /// substring, paired with the case-insensitive substring of its affirmative
@@ -186,10 +170,30 @@ fn looks_like_bare_shell(captured: &str) -> bool {
     }
 }
 
-/// Classify a captured pane's content for the readiness gate.
+/// Classify a captured pane's content for the readiness gate against the
+/// embedded Claude Code profile ([`claude_prompt_profile`]) — byte-identical
+/// to the behaviour before per-CLI prompt-shape profiles existed.
+///
+/// Prefer [`classify_pane_readiness_with_profile`] when the pane's CLI has a
+/// resolved profile available.
 #[must_use]
 pub fn classify_pane_readiness(captured: &str) -> PaneReadiness {
-    if CLI_READY_MARKERS.iter().any(|m| captured.contains(m)) {
+    classify_pane_readiness_with_profile(captured, claude_prompt_profile())
+}
+
+/// Classify a captured pane's content for the readiness gate, using
+/// `profile`'s readiness markers (`cli-prompt-profiles` capability) rather
+/// than a compiled constant.
+#[must_use]
+pub fn classify_pane_readiness_with_profile(
+    captured: &str,
+    profile: &CliPromptProfile,
+) -> PaneReadiness {
+    if profile
+        .readiness_markers
+        .iter()
+        .any(|m| captured.contains(m.as_str()))
+    {
         return PaneReadiness::Ready;
     }
     if let Some(marker) = DIALOG_MARKERS.iter().find(|d| captured.contains(d.heading)) {
@@ -221,6 +225,7 @@ pub fn classify_pane_readiness(captured: &str) -> PaneReadiness {
 /// injection.
 pub(crate) fn gate_pane_generic<C, R, S, A>(
     budget: ReadinessBudget,
+    profile: &CliPromptProfile,
     mut capture: C,
     mut relaunch: R,
     mut sleep: S,
@@ -237,7 +242,7 @@ where
         let mut answered = false;
         loop {
             let captured = capture().unwrap_or_default();
-            match classify_pane_readiness(&captured) {
+            match classify_pane_readiness_with_profile(&captured, profile) {
                 PaneReadiness::Ready => return ReadinessOutcome::Ready,
                 PaneReadiness::Dialog(None) => return ReadinessOutcome::DialogStuck,
                 PaneReadiness::Dialog(Some(digit)) if !answered => {
@@ -259,7 +264,8 @@ where
         }
         // Attempt timed out. Relaunch only when the pane is positively a bare
         // shell AND a relaunch attempt remains; otherwise fall back.
-        let final_state = classify_pane_readiness(&capture().unwrap_or_default());
+        let final_state =
+            classify_pane_readiness_with_profile(&capture().unwrap_or_default(), profile);
         if final_state == PaneReadiness::BareShell && attempt < budget.relaunch_attempts {
             relaunch();
         } else {
@@ -283,14 +289,22 @@ where
 /// its affirmative option (see [`DIALOG_MARKERS`]); see
 /// [`ReadinessOutcome::DialogStuck`] for what the caller must do when it
 /// cannot be resolved.
+///
+/// The readiness markers used are resolved for `cli_command` via
+/// [`resolve_prompt_profile`] against `clis` (`cli-prompt-profiles`
+/// capability): a CLI with a configured `[clis.<name>].prompt_profile`
+/// override is gated on its own readiness markers rather than Claude's.
 #[must_use]
-pub fn gate_pane_for_injection(
+pub fn gate_pane_for_injection<S: std::hash::BuildHasher>(
     session_name: &str,
     pane_index: usize,
     cli_command: &str,
+    clis: &HashMap<String, CustomCli, S>,
 ) -> ReadinessOutcome {
+    let profile = resolve_prompt_profile(cli_command, clis);
     gate_pane_generic(
         ReadinessBudget::default(),
+        &profile,
         || crate::supervisor::permission_prompt::capture_pane(session_name, pane_index),
         || relaunch_cli_into_pane(&RealCommandRunner, session_name, pane_index, cli_command),
         std::thread::sleep,

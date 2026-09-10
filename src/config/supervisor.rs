@@ -1026,6 +1026,7 @@ pub fn approval_flags(cli: &str, level: &ApprovalLevel) -> &'static str {
 ///             "full-auto".to_string(),
 ///             "--my-custom-flag".to_string(),
 ///         )]),
+///         prompt_profile: None,
 ///     },
 /// );
 /// assert_eq!(

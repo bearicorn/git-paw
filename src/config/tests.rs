@@ -524,6 +524,7 @@ fn config_survives_save_and_load() {
                 submit_delay_ms: None,
                 settings_path: None,
                 approval_args: HashMap::new(),
+                prompt_profile: None,
             },
         )]),
         presets: HashMap::from([(
@@ -628,6 +629,7 @@ fn custom_cli_empty_approval_args_omitted_on_serialize() {
         submit_delay_ms: None,
         settings_path: None,
         approval_args: HashMap::new(),
+        prompt_profile: None,
     };
     let serialized = toml::to_string_pretty(&cli).unwrap();
     assert!(
@@ -2009,6 +2011,7 @@ fn cli_with_approval_args(command: &str, args: &[(&str, &str)]) -> CustomCli {
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect(),
+        prompt_profile: None,
     }
 }
 
@@ -3629,6 +3632,7 @@ fn clis_with_submit_delay(cli: &str, submit_delay_ms: Option<u64>) -> HashMap<St
             submit_delay_ms,
             settings_path: None,
             approval_args: HashMap::new(),
+            prompt_profile: None,
         },
     );
     clis

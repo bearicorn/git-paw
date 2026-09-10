@@ -39,3 +39,16 @@ If a custom CLI has the same binary name as a detected one, the custom definitio
 ## Missing CLIs
 
 If a custom CLI's command cannot be found (the binary doesn't exist at the specified path and isn't on PATH), it is excluded from the selection list with a warning. This prevents launching sessions that would immediately fail.
+
+## Prompt-shape detection
+
+The list above is git-paw's *binary* detection — it says which CLIs it can
+launch. Separately, the supervisor and auto-approve detectors recognise a
+launched CLI's terminal surface (its ready banner, permission-prompt
+wording, and so on) via a **prompt-shape profile**. git-paw ships only the
+Claude Code profile, embedded in the binary; no other CLI in the table above
+has a shipped profile, because a guessed one would misdetect confidently
+rather than falling back visibly. Every CLI — listed or custom — resolves
+the embedded Claude default for any field it has no profile override for.
+See [CLI Prompt-Shape Profiles](user-guide/cli-prompt-profiles.md) for the
+field reference and how to author one.

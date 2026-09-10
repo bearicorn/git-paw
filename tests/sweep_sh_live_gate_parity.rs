@@ -9,12 +9,21 @@
 //! non-live capture prints `no-op (not live)`, anything else means the gate
 //! saw a live prompt. The suite needs no tmux and no broker — `classify`
 //! reads the capture from stdin.
+//!
+//! `cli-prompt-profiles` capability (D3): since `LIVE_PROMPT_MARKERS_REGEX` /
+//! `LIVE_PROMPT_OPTION_REGEX` are now sourced from `git paw __prompt-profile`
+//! rather than a hand-copied literal, `sweep_sees_live` puts the freshly
+//! built binary on `PATH` — the fixture agreement below is no longer "two
+//! independently maintained copies happen to match", it is "the shell
+//! subprocess reads the same embedded profile the in-process Rust gate
+//! does". `one_source_is_read_by_both_consumers` pins that directly.
 
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command as StdCommand, Stdio};
 
+use git_paw::config::claude_prompt_profile;
 use git_paw::supervisor::auto_approve::is_live_prompt;
 use tempfile::TempDir;
 
@@ -51,13 +60,29 @@ fn install_sweep(repo: &Path) -> std::path::PathBuf {
     dst
 }
 
+/// Directory holding the freshly built binary, prepended to the child's
+/// `PATH` so `git paw __prompt-profile` (and `__classify`) resolve to THIS
+/// build rather than falling back to sweep.sh's hardcoded defaults.
+fn built_bin_dir() -> std::path::PathBuf {
+    assert_cmd::cargo::cargo_bin("git-paw")
+        .parent()
+        .expect("built binary has a parent dir")
+        .to_path_buf()
+}
+
 /// Runs the shell half of the live-prompt gate on `capture`: pipes it into
 /// `sweep.sh classify` and returns whether the helper saw a LIVE prompt.
 fn sweep_sees_live(repo: &Path, sweep: &Path, capture: &str) -> bool {
+    let path = format!(
+        "{}:{}",
+        built_bin_dir().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     let mut child = StdCommand::new("bash")
         .arg(sweep)
         .arg("classify")
         .current_dir(repo)
+        .env("PATH", path)
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .stdin(Stdio::piped())
@@ -136,6 +161,34 @@ fn sweep_sh_parses_under_bash_n() {
         out.status.success(),
         "bash -n must accept sweep.sh: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `cli-prompt-profiles` capability, requirement "Rust and the supervisor
+/// helper script read one source": `git paw __prompt-profile` (invoked by
+/// `sweep.sh` via `discover_prompt_profile_field`) prints the SAME
+/// `live_prompt_markers` the in-process Rust gate resolves from
+/// `claude_prompt_profile()` — not a second, independently maintained copy.
+/// Neither default marker needs regex escaping, so a plain `|`-split
+/// round-trips exactly.
+#[test]
+fn one_source_is_read_by_both_consumers() {
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+
+    let out = StdCommand::new(assert_cmd::cargo::cargo_bin("git-paw"))
+        .args(["__prompt-profile", "--field", "live_prompt_markers"])
+        .current_dir(repo.path())
+        .output()
+        .expect("run __prompt-profile");
+    assert!(out.status.success(), "{:?}", out.stderr);
+    let printed = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let shell_markers: Vec<String> = printed.split('|').map(str::to_string).collect();
+
+    assert_eq!(
+        shell_markers,
+        claude_prompt_profile().live_prompt_markers,
+        "sweep.sh's subprocess call must surface the exact in-process profile data"
     );
 }
 
