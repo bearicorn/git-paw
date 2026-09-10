@@ -78,6 +78,17 @@ test(session): add recovery round-trip test
 - Every public item needs a `///` doc comment
 - Every module needs a `//!` module doc comment
 
+### Where agent-facing text lives
+
+Instructions, rules, directives, framing text and task-prompt scaffolding that an agent reads —
+in its boot prompt, sidecar, or skill content — belong in a bundled asset under `assets/`
+(`include_str!`'d at compile time), never assembled from a Rust `push_str!`/`format!` call.
+Compiled code keeps the *assembly*: placeholder substitution, conditional inclusion, per-backend
+selection, dedupe, and region gating. Assets are what the no-language-leak audit
+(`tests/lang_agnostic_skill_audit.rs`) can see; prose compiled into a `&str` literal is invisible
+to it, which is exactly how a git-paw-specific assumption once leaked into every consumer's
+session. See the `export-agnosticism` dev skill for the full export-surface inventory.
+
 ### Testing Conventions
 
 Every integration test in `tests/` that spawns `tmux` — directly via

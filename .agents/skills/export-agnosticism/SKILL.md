@@ -29,14 +29,24 @@ export.
 ## Export-surface inventory — check EVERY one
 
 - **Skills** — `assets/agent-skills/{coordination,supervisor,docs-fetch}.md`.
+- **Agent-facing prose assets** — instructions, rules, directives, framing text and task-prompt
+  scaffolding injected into an agent's sidecar, boot prompt, or skill content, authored in bundled
+  assets rather than assembled from compiled string literals: `assets/inter-agent-rules.md`,
+  `assets/governance-section-header.md`, `assets/supervisor-framing.md`,
+  `assets/spec-path-doctrine/*.md`, `assets/boot-task-prompts/*.md`, `assets/task-prompts/**/*.md`.
+  Compiled code keeps the assembly around them (placeholder substitution, conditional inclusion,
+  per-backend selection, dedupe, region gating) — only the sentences live in the asset.
 - **Scripts & mirrored logic (code)** — `assets/scripts/{sweep,broker,docs-fetch}.sh`, including
   the auto-approve **classifier** logic mirrored into `sweep.sh`.
 - **Init default config** — the `.git-paw/config.toml` that `git paw init` generates.
 - **Allowlists / classifier presets** — the dev-command-allowlist preset, the `auto_approve`
-  safe-command classifier, the curl / broker-helper allowlist seeding.
+  safe-command classifier, the curl / broker-helper allowlist seeding. `render_dev_allowlist_preset`
+  stays compiled — it is generated *from* the allowlist constant so the documented preset cannot
+  drift from what is actually auto-approved; do not move it to a hand-editable asset.
 - **Injected artifacts** — the pane **boot block**, the marker-delimited git-paw section injected
-  into the consumer's `AGENTS.md`, **git hooks** (post-commit / pre-push), CLI `settings.json`
-  allowlist seeding.
+  into the consumer's `AGENTS.md`, **git hooks** (post-commit / pre-push / pre-commit, script
+  bodies bundled at `assets/hooks/*.sh` — the installation mechanism itself stays compiled), CLI
+  `settings.json` allowlist seeding.
 - **Templates** — `{{VAR}}` placeholders (`{{TEST_COMMAND}}`, `{{BRANCH_ID}}`,
   `{{GIT_PAW_BROKER_URL}}`, …) that pull consumer specifics from config rather than inlining them.
 
@@ -61,7 +71,11 @@ export.
 ## How it's enforced — and the standing rule
 
 - `tests/lang_agnostic_skill_audit.rs` — forbidden stack tokens + Conventional-Commits-prefix leak
-  in the rendered skills (with `<!-- allowlist-prose -->` stripping).
+  in the rendered skills (with `<!-- allowlist-prose -->` stripping), extended to cover every
+  bundled agent-facing prose asset (not only the supervisor/coordination skills) and to forbid
+  vendor product names/paths (e.g. `Claude Code`, `.claude/`) outside an `<!-- allowlist-prose -->`
+  span — the mechanism that keeps a deliberate CLI enumeration legal without making vendor naming
+  an accident.
 - The `auto_approve` classifier stack-neutrality guard (`src/supervisor/auto_approve.rs`) + its
   `sweep.sh` parity tests.
 - The generated-default-config "all commented / multi-stack" test (`src/config.rs`).

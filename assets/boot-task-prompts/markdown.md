@@ -1,0 +1,1 @@
+Begin your assigned task. Read {{SIDECAR_REL_PATH}} first — it carries the project rules, your full spec, and your assignment. Additional artifacts (proposal, design, specs, tasks) live under openspec/changes/{{SPEC_ID}}/ — read them all before starting.

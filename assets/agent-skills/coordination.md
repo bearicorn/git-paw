@@ -214,9 +214,10 @@ persist belongs anywhere else on the machine.
 - home-level CLI configuration directories (your own CLI's config/settings
   directory under the operator's home, and any other tool's equivalent),
   including any per-project memory files stored beneath them;
-- the host repository's `.claude/` and `.git-paw/` directories — supervisor
-  territory that configures the whole session, even though an embedded
-  worktree may physically sit beneath them.
+- the host repository's CLI-specific control directory (whatever hidden
+  folder your own CLI uses for repo-level state) and `.git-paw/` —
+  supervisor territory that configures the whole session, even though an
+  embedded worktree may physically sit beneath them.
 
 These locations belong to the OPERATOR, not to you. Writing there mutates
 state shared across sessions and agents: a memory file you overwrite is the

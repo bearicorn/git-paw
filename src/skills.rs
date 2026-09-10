@@ -43,6 +43,19 @@ const SUPERVISOR_DEFAULT: &str = include_str!("../assets/agent-skills/supervisor
 /// The embedded docs-fetch skill, compiled into the binary.
 const DOCS_FETCH_DEFAULT: &str = include_str!("../assets/agent-skills/docs-fetch.md");
 
+/// Per-backend `{{SPEC_PATH_DOCTRINE}}` sentences, compiled into the binary.
+/// See [`render_spec_path_doctrine`] for the assembly (dedupe + multi-backend
+/// join) that stays compiled around these.
+const SPEC_DOCTRINE_OPENSPEC: &str = include_str!("../assets/spec-path-doctrine/openspec.md");
+const SPEC_DOCTRINE_SPECKIT: &str = include_str!("../assets/spec-path-doctrine/speckit.md");
+const SPEC_DOCTRINE_MARKDOWN: &str = include_str!("../assets/spec-path-doctrine/markdown.md");
+const SPEC_DOCTRINE_SUPERPOWERS: &str = include_str!("../assets/spec-path-doctrine/superpowers.md");
+
+/// The governance section heading + intro sentence, compiled into the
+/// binary. See [`governance_section_paths`] for the bullet-list assembly
+/// that stays compiled around this.
+const GOVERNANCE_SECTION_HEADER: &str = include_str!("../assets/governance-section-header.md");
+
 /// Indicates where a resolved skill's content originated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Source {
@@ -428,45 +441,32 @@ pub fn build_boot_block(branch_id: &str, broker_url: &str, mcp_capable: bool) ->
         .replace("{{GIT_PAW_BROKER_URL}}", broker_url)
 }
 
-/// Boot-context directive appended to the supervisor's skill content when a
-/// session is `--unattended` — an in-process drive loop is the sole approver of
-/// classifier-safe permission prompts. It tells the supervisor to consume the
-/// loop's escalations rather than blanket-approving, upholding the disjoint-set
-/// approval model (see the `supervisor-loop-escalation-tiering` spec), and that
-/// the loop hands judgment calls to this pane actively rather than parking them
-/// in an inbox (see `supervisor-autonomous-orchestrator`).
-const DRIVE_LOOP_DIRECTIVE: &str = "## Unattended: a drive loop is running\n\n\
-An in-process drive loop is auto-approving classifier-safe permission prompts on \
-every pane this session. It owns mechanical approval of safe prompts — do NOT \
-blanket-sweep-and-approve them yourself, or you will race the loop.\n\n\
-The loop is the pump; you are the brain. It does not merely park what it cannot \
-decide — it types each judgment call straight into THIS pane and moves on \
-without waiting for you, and it nudges you to run an orchestration sweep on a \
-longer cadence. A task prompt arriving here with no human behind it is the loop \
-handing you work; see **Judgment calls handed to you** for the four kinds and \
-how to decide each.\n\n\
-Your approval role this session is escalation-driven, in this order each cycle:\n\n\
-1. **Drain the loop's escalations first.** Prompts the loop could not classify \
-safe are injected here AND recorded as review items in your broker inbox — the \
-inbox is the backstop for anything that arrived while this pane was busy. Reason \
-about each and either approve the specific escalated pane \
-(`.git-paw/scripts/sweep.sh approve <pane>`) or publish feedback — before \
-anything else, so blocked agents unblock fastest.\n\
-2. **Then run your normal sweep** — verification, merge, conflict handling, \
-detect-stuck, and status — as usual, but WITHOUT blanket-approving safe prompts \
-(the loop owns those).";
+/// Marker opening the drive-loop directive region inside the bundled
+/// supervisor skill template.
+pub(crate) const DRIVE_LOOP_REGION_BEGIN: &str = "<!-- drive-loop-directive:begin -->";
+/// Marker closing the drive-loop directive region inside the bundled
+/// supervisor skill template.
+pub(crate) const DRIVE_LOOP_REGION_END: &str = "<!-- drive-loop-directive:end -->";
 
-/// Appends the drive-loop coordination directive ([`DRIVE_LOOP_DIRECTIVE`]) to
-/// the supervisor's boot content when `unattended` is true; otherwise returns
-/// `supervisor_md` unchanged (attended: the supervisor is the sole approver and
-/// performs the full sweep + approve).
+/// Resolves the drive-loop directive region ([`DRIVE_LOOP_REGION_BEGIN`] /
+/// [`DRIVE_LOOP_REGION_END`]) already present in the supervisor skill's own
+/// content when `unattended` is true — an in-process drive loop is the sole
+/// approver of classifier-safe permission prompts, so the region tells the
+/// supervisor to consume the loop's escalations rather than blanket-approving
+/// (see the `supervisor-loop-escalation-tiering` spec), and that the loop
+/// hands judgment calls to this pane actively rather than parking them in an
+/// inbox (see `supervisor-autonomous-orchestrator`). When `unattended` is
+/// `false` the region is stripped (attended: the supervisor is the sole
+/// approver and performs the full sweep + approve, stated unconditionally
+/// elsewhere in the skill).
 #[must_use]
-pub fn with_drive_loop_directive(supervisor_md: String, unattended: bool) -> String {
-    if unattended {
-        format!("{supervisor_md}\n\n{DRIVE_LOOP_DIRECTIVE}")
-    } else {
-        supervisor_md
-    }
+pub fn with_drive_loop_directive(supervisor_md: &str, unattended: bool) -> String {
+    render_opsx_regions(
+        supervisor_md,
+        unattended,
+        DRIVE_LOOP_REGION_BEGIN,
+        DRIVE_LOOP_REGION_END,
+    )
 }
 
 /// Borrowed view of the seven gate-command templates substituted by
@@ -655,7 +655,7 @@ pub fn render(
     let opsx_active = backends
         .iter()
         .any(|b| matches!(b, crate::specs::SpecBackendKind::OpenSpec));
-    output = render_opsx_regions(&output, opsx_active);
+    output = render_opsx_regions(&output, opsx_active, OPSX_REGION_BEGIN, OPSX_REGION_END);
 
     // Warn about any remaining {{...}} placeholders that were not consumed,
     // except `{{CHANGE_ID}}` which is whitelisted (see comment above).
@@ -704,28 +704,31 @@ pub(crate) const OPSX_REGION_BEGIN: &str = "<!-- opsx-role-gating:begin -->";
 /// Marker closing an opsx role-gating region in a bundled skill template.
 pub(crate) const OPSX_REGION_END: &str = "<!-- opsx-role-gating:end -->";
 
-/// Resolves the opsx role-gating regions delimited by [`OPSX_REGION_BEGIN`] /
-/// [`OPSX_REGION_END`] in a rendered skill.
+/// Resolves a marker-delimited region in a bundled skill template, keeping or
+/// stripping its body depending on `keep`. Callers pass the marker pair for
+/// the region they mean to resolve — [`OPSX_REGION_BEGIN`]/[`OPSX_REGION_END`]
+/// for the opsx role-gating regions, [`DRIVE_LOOP_REGION_BEGIN`]/
+/// [`DRIVE_LOOP_REGION_END`] for the supervisor's drive-loop directive — so a
+/// single mechanism serves every gated region without a new one per marker
+/// pair (D3).
 ///
-/// The marker lines are always dropped. When `keep` is `true` (the session's
-/// resolved spec engine is `OpenSpec`) the region body is retained; when `false`
-/// (speckit / markdown / no engine) the body is stripped along with the
-/// markers, so the `/opsx:` forbidden-command sections never render under a
-/// non-OpenSpec engine. Operates line-wise so a region that is left unclosed
-/// degrades gracefully (the trailing lines are simply kept or dropped per the
-/// current region state at end-of-input).
+/// The marker lines are always dropped. When `keep` is `true` the region body
+/// is retained; when `false` the body is stripped along with the markers.
+/// Operates line-wise so a region that is left unclosed degrades gracefully
+/// (the trailing lines are simply kept or dropped per the current region
+/// state at end-of-input).
 #[must_use]
-pub(crate) fn render_opsx_regions(input: &str, keep: bool) -> String {
+pub(crate) fn render_opsx_regions(input: &str, keep: bool, begin: &str, end: &str) -> String {
     let has_trailing_newline = input.ends_with('\n');
     let mut kept: Vec<&str> = Vec::new();
     let mut in_region = false;
     for line in input.split('\n') {
         let trimmed = line.trim();
-        if trimmed == OPSX_REGION_BEGIN {
+        if trimmed == begin {
             in_region = true;
             continue;
         }
-        if trimmed == OPSX_REGION_END {
+        if trimmed == end {
             in_region = false;
             continue;
         }
@@ -821,24 +824,10 @@ pub fn render_spec_path_doctrine(backends: &[crate::specs::SpecBackendKind]) -> 
 
     let per_backend = |kind: SpecBackendKind| -> &'static str {
         match kind {
-            SpecBackendKind::OpenSpec => {
-                "OpenSpec specs live under `openspec/changes/<change-name>/{proposal,specs,tasks}.md` \
-                 with archived deltas merged into `openspec/specs/`; run `openspec validate <change-name> --strict` \
-                 to verify a change."
-            }
-            SpecBackendKind::SpecKit => {
-                "Spec Kit specs live under `.specify/specs/<feature>/{spec,plan,tasks}.md` \
-                 and use the Spec Kit checklist convention; mark `- [ ]` tasks complete as each one lands."
-            }
-            SpecBackendKind::Markdown => {
-                "Markdown specs are flat `.md` files with `paw_status: pending` frontmatter; \
-                 the format has no per-artifact workflow — the file itself is the contract."
-            }
-            SpecBackendKind::Superpowers => {
-                "Superpowers plans are flat files under `docs/superpowers/plans/*.md` \
-                 (obra/superpowers writing-plans documents); work each plan's `### Task N` steps \
-                 in order and flip `- [ ]` to `- [x]` in the plan file as each step lands."
-            }
+            SpecBackendKind::OpenSpec => SPEC_DOCTRINE_OPENSPEC,
+            SpecBackendKind::SpecKit => SPEC_DOCTRINE_SPECKIT,
+            SpecBackendKind::Markdown => SPEC_DOCTRINE_MARKDOWN,
+            SpecBackendKind::Superpowers => SPEC_DOCTRINE_SUPERPOWERS,
         }
     };
 
@@ -900,10 +889,7 @@ pub fn governance_section_paths(
     }
 
     let mut out = String::with_capacity(192);
-    out.push_str("## Governance documents\n");
-    out.push('\n');
-    out.push_str("The supervisor consults these documents during spec audit.\n");
-    out.push('\n');
+    out.push_str(GOVERNANCE_SECTION_HEADER);
     for (name, path) in GOVERNANCE_CANONICAL_NAMES.iter().zip(bullets.iter()) {
         if let Some(p) = path {
             use std::fmt::Write as _;
@@ -920,6 +906,62 @@ pub fn governance_section_paths(
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    // Byte-identical safety net (D1 / task 1.3): each per-backend spec-path
+    // doctrine sentence, relocated from a compiled match arm into its own
+    // asset, must render exactly as before.
+    #[test]
+    fn spec_path_doctrine_sentences_are_byte_identical_to_ground_truth() {
+        use crate::specs::SpecBackendKind;
+        assert_eq!(
+            render_spec_path_doctrine(&[SpecBackendKind::OpenSpec]),
+            "OpenSpec specs live under `openspec/changes/<change-name>/{proposal,specs,tasks}.md` \
+             with archived deltas merged into `openspec/specs/`; run `openspec validate <change-name> --strict` \
+             to verify a change."
+        );
+        assert_eq!(
+            render_spec_path_doctrine(&[SpecBackendKind::SpecKit]),
+            "Spec Kit specs live under `.specify/specs/<feature>/{spec,plan,tasks}.md` \
+             and use the Spec Kit checklist convention; mark `- [ ]` tasks complete as each one lands."
+        );
+        assert_eq!(
+            render_spec_path_doctrine(&[SpecBackendKind::Markdown]),
+            "Markdown specs are flat `.md` files with `paw_status: pending` frontmatter; \
+             the format has no per-artifact workflow — the file itself is the contract."
+        );
+        assert_eq!(
+            render_spec_path_doctrine(&[SpecBackendKind::Superpowers]),
+            "Superpowers plans are flat files under `docs/superpowers/plans/*.md` \
+             (obra/superpowers writing-plans documents); work each plan's `### Task N` steps \
+             in order and flip `- [ ]` to `- [x]` in the plan file as each step lands."
+        );
+    }
+
+    // Byte-identical safety net (D1 / task 1.3): the governance section
+    // header, relocated from compiled `push_str` calls into an asset, must
+    // render exactly as before; the bullet loop stays compiled.
+    #[test]
+    fn governance_section_header_is_byte_identical_to_ground_truth() {
+        let out = governance_section_paths(
+            Some(Path::new("docs/adr")),
+            Some(Path::new("docs/test-strategy.md")),
+            Some(Path::new("docs/security.md")),
+            Some(Path::new("AGENTS.md")),
+            Some(Path::new(".specify/memory/constitution.md")),
+        );
+        assert_eq!(
+            out,
+            "## Governance documents\n\
+             \n\
+             The supervisor consults these documents during spec audit.\n\
+             \n\
+             - adr: docs/adr\n\
+             - test_strategy: docs/test-strategy.md\n\
+             - security: docs/security.md\n\
+             - dod: AGENTS.md\n\
+             - constitution: .specify/memory/constitution.md\n"
+        );
+    }
 
     // 9.2: Embedded coordination skill is reachable without any user files
     #[test]
@@ -1318,8 +1360,10 @@ mod tests {
             "section must declare operator configuration directories off-limits"
         );
         assert!(
-            section.contains(".claude/") && section.contains(".git-paw/"),
-            "section must name the repo-root control directories"
+            section.contains("CLI-specific control directory") && section.contains(".git-paw/"),
+            "section must name the repo-root control directories generically, without \
+             naming a specific vendor CLI (core-lang-agnostic: vendor product names are \
+             forbidden outside an allowed span)"
         );
         assert!(
             section.contains("agent.question") && lowered.contains("wait"),
@@ -1329,8 +1373,9 @@ mod tests {
 
     /// `agent-memory-isolation` scenario "Guidance names no spec engine or CLI
     /// product": the memory-isolation section is engine- and CLI-agnostic
-    /// (export policy) — the claude-format `.claude/` directory name is the
-    /// one documented default and not a product reference.
+    /// (export policy). The section no longer names `.claude/` specifically —
+    /// it describes the repo-root control directory generically (D5: vendor
+    /// product names/paths are forbidden outside an allowed span).
     #[test]
     fn memory_isolation_section_is_engine_and_cli_agnostic() {
         let tmpl = resolve("coordination").unwrap();
@@ -1397,7 +1442,8 @@ mod tests {
     fn supervisor_skill_defers_safe_approvals_to_drive_loop() {
         let tmpl = resolve("supervisor").unwrap();
         assert!(
-            tmpl.content.contains("do NOT blanket-approve safe"),
+            tmpl.content
+                .contains("do NOT blanket-sweep-and-approve them yourself"),
             "supervisor skill must forbid blanket-approving safe prompts when a drive loop runs"
         );
         assert!(
@@ -3041,6 +3087,48 @@ mod tests {
         }
     }
 
+    // Task 4.2 / core-lang-agnostic spec scenario "Constant-derived prose
+    // stays compiled" (D2): a hand-editable asset here would let the
+    // documented allowlist drift from what is actually auto-approved — a
+    // security regression dressed as a refactor. Static-source guard,
+    // mirroring `build_task_prompt_is_deterministic_and_io_free` in main.rs:
+    // the function body must contain no `include_str!` — every sentence it
+    // renders is generated fresh from the `DEV_ALLOWLIST_PRESET` constant.
+    #[test]
+    fn dev_allowlist_preset_is_not_asset_sourced() {
+        let src = include_str!("skills.rs");
+        let needle = "pub fn render_dev_allowlist_preset";
+        let start = src
+            .find(needle)
+            .unwrap_or_else(|| panic!("render_dev_allowlist_preset signature not found"));
+        let body_start = src[start..].find('{').map_or_else(
+            || panic!("opening brace not found after signature"),
+            |o| start + o,
+        );
+        let mut depth: i32 = 0;
+        let mut end = body_start;
+        for (i, ch) in src[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = body_start + i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(end > body_start, "did not find closing brace");
+        let body = &src[body_start..end];
+        assert!(
+            !body.contains("include_str!"),
+            "render_dev_allowlist_preset must generate its prose from the compiled \
+             DEV_ALLOWLIST_PRESET constant, not a bundled asset; body:\n{body}"
+        );
+    }
+
     #[test]
     fn dev_allowlist_preset_groups_by_first_word() {
         // `git status` and `git log` share `git`; the rendered prose
@@ -4158,29 +4246,66 @@ mod tests {
     // Drive-loop directive (supervisor boot-context injection when unattended)
     #[test]
     fn drive_loop_directive_present_when_unattended() {
-        let out = with_drive_loop_directive("BASE SKILL".to_string(), true);
+        let input = format!(
+            "BASE SKILL\n{DRIVE_LOOP_REGION_BEGIN}\na drive loop is running, do NOT \
+             blanket-approve, Drain the loop's escalations\n{DRIVE_LOOP_REGION_END}\nTAIL"
+        );
+        let out = with_drive_loop_directive(&input, true);
         assert!(out.contains("BASE SKILL"), "base content preserved");
+        assert!(out.contains("TAIL"), "trailing content preserved");
         assert!(
             out.contains("a drive loop is running"),
             "unattended boot context announces the drive loop; got:\n{out}"
         );
         assert!(
-            out.contains("do NOT") && out.contains("blanket"),
-            "directive forbids blanket-approving safe prompts"
-        );
-        assert!(
-            out.to_lowercase().contains("escalation")
-                || out.contains("Drain the loop's escalations"),
-            "directive tells the supervisor to consume escalations first"
+            !out.contains(DRIVE_LOOP_REGION_BEGIN) && !out.contains(DRIVE_LOOP_REGION_END),
+            "region markers themselves are always dropped"
         );
     }
 
     #[test]
     fn drive_loop_directive_absent_when_attended() {
-        let out = with_drive_loop_directive("BASE SKILL".to_string(), false);
+        let input = format!(
+            "BASE SKILL\n{DRIVE_LOOP_REGION_BEGIN}\na drive loop is running\n{DRIVE_LOOP_REGION_END}\nTAIL"
+        );
+        let out = with_drive_loop_directive(&input, false);
         assert_eq!(
-            out, "BASE SKILL",
-            "attended: content unchanged, no directive"
+            out, "BASE SKILL\nTAIL",
+            "attended: region stripped, surrounding content unchanged"
+        );
+    }
+
+    // Byte-identical safety net (D1 / task 1.3): the bundled supervisor
+    // skill's drive-loop-directive region, once kept for an unattended
+    // session, carries this exact text — unchanged by the region's
+    // relocation from a compiled Rust constant into the asset itself.
+    #[test]
+    fn drive_loop_directive_region_is_byte_identical_to_ground_truth() {
+        const EXPECTED: &str = "## Unattended: a drive loop is running\n\
+\n\
+An in-process drive loop is auto-approving classifier-safe permission prompts on every pane this session. It owns mechanical approval of safe prompts — do NOT blanket-sweep-and-approve them yourself, or you will race the loop.\n\
+\n\
+The loop is the pump; you are the brain. It does not merely park what it cannot decide — it types each judgment call straight into THIS pane and moves on without waiting for you, and it nudges you to run an orchestration sweep on a longer cadence. A task prompt arriving here with no human behind it is the loop handing you work; see **Judgment calls handed to you** for the four kinds and how to decide each.\n\
+\n\
+Your approval role this session is escalation-driven, in this order each cycle:\n\
+\n\
+1. **Drain the loop's escalations first.** Prompts the loop could not classify safe are injected here AND recorded as review items in your broker inbox — the inbox is the backstop for anything that arrived while this pane was busy. Reason about each and either approve the specific escalated pane (`.git-paw/scripts/sweep.sh approve <pane>`) or publish feedback — before anything else, so blocked agents unblock fastest.\n\
+2. **Then run your normal sweep** — verification, merge, conflict handling, detect-stuck, and status — as usual, but WITHOUT blanket-approving safe prompts (the loop owns those).";
+
+        let tmpl = resolve("supervisor").unwrap();
+        let rendered = render(
+            &tmpl,
+            "supervisor",
+            "http://localhost:9119",
+            "proj",
+            &GateCommands::default(),
+            &[],
+        );
+        let out = with_drive_loop_directive(&rendered, true);
+        assert!(
+            out.contains(EXPECTED),
+            "drive-loop-directive region must render byte-identical to the \
+             pre-relocation DRIVE_LOOP_DIRECTIVE constant; got:\n{out}"
         );
     }
 
@@ -6176,11 +6301,25 @@ mod tests {
     #[test]
     fn render_opsx_regions_strips_body_when_not_kept() {
         let input = "before\n<!-- opsx-role-gating:begin -->\nSECRET\n<!-- opsx-role-gating:end -->\nafter\n";
-        let kept = render_opsx_regions(input, true);
+        let kept = render_opsx_regions(input, true, OPSX_REGION_BEGIN, OPSX_REGION_END);
         assert!(kept.contains("SECRET"));
         assert!(!kept.contains("opsx-role-gating:begin"));
-        let stripped = render_opsx_regions(input, false);
+        let stripped = render_opsx_regions(input, false, OPSX_REGION_BEGIN, OPSX_REGION_END);
         assert!(!stripped.contains("SECRET"));
+        assert!(stripped.contains("before") && stripped.contains("after"));
+    }
+
+    #[test]
+    fn render_opsx_regions_supports_a_distinct_marker_pair() {
+        // The same mechanism resolves the drive-loop-directive region using
+        // its own marker pair, independent of the opsx markers (D3).
+        let input = "before\n<!-- drive-loop-directive:begin -->\nDIRECTIVE\n<!-- drive-loop-directive:end -->\nafter\n";
+        let kept = render_opsx_regions(input, true, DRIVE_LOOP_REGION_BEGIN, DRIVE_LOOP_REGION_END);
+        assert!(kept.contains("DIRECTIVE"));
+        assert!(!kept.contains("drive-loop-directive:begin"));
+        let stripped =
+            render_opsx_regions(input, false, DRIVE_LOOP_REGION_BEGIN, DRIVE_LOOP_REGION_END);
+        assert!(!stripped.contains("DIRECTIVE"));
         assert!(stripped.contains("before") && stripped.contains("after"));
     }
 

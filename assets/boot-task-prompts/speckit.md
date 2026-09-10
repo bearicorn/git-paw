@@ -1,0 +1,1 @@
+Begin your assigned task. Read {{SIDECAR_REL_PATH}} first — it already carries the project rules and your full Spec Kit assignment (feature spec, implementation plan, and task phase) embedded inline; no other artifact directory is needed to start.

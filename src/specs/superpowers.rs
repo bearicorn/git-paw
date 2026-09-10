@@ -19,6 +19,15 @@ use crate::error::PawError;
 /// Default directory holding superpowers plan files.
 pub(crate) const PLANS_DIR: &str = "docs/superpowers/plans";
 
+/// Bundled static prose for [`Plan::build_prompt`] — the section headings and
+/// the execution/writeback sentence. Assembly (goal/architecture/tech-stack
+/// conditional inclusion and the tasks-body passthrough) stays compiled.
+const PLAN_CONTEXT_HEADING: &str =
+    include_str!("../../assets/task-prompts/superpowers/plan-context-heading.md");
+const YOUR_TASKS_HEADING: &str =
+    include_str!("../../assets/task-prompts/superpowers/your-tasks-heading.md");
+const EXECUTION_SECTION: &str = include_str!("../../assets/task-prompts/superpowers/execution.md");
+
 /// Backend for the flat-file superpowers plan format.
 #[derive(Debug)]
 pub struct SuperpowersBackend;
@@ -118,7 +127,7 @@ impl Plan {
     fn build_prompt(&self) -> String {
         let mut sections: Vec<String> = Vec::new();
 
-        let mut ctx_parts: Vec<String> = vec!["## Plan Context".to_string()];
+        let mut ctx_parts: Vec<String> = vec![PLAN_CONTEXT_HEADING.to_string()];
         if let Some(g) = &self.goal {
             ctx_parts.push(format!("**Goal:** {g}"));
         }
@@ -130,14 +139,12 @@ impl Plan {
         }
         sections.push(ctx_parts.join("\n\n"));
 
-        sections.push(format!("## Your Tasks\n\n{}", self.tasks_body.trim_end()));
+        sections.push(format!(
+            "{YOUR_TASKS_HEADING}\n\n{}",
+            self.tasks_body.trim_end()
+        ));
 
-        sections.push(
-            "## Execution\n\nWork the steps in order. As you complete each step, flip its \
-             `- [ ]` to `- [x]` in the plan file (mid-flight writeback). Publish `agent.done` \
-             only when every step in the plan shows `- [x]`."
-                .to_string(),
-        );
+        sections.push(EXECUTION_SECTION.to_string());
 
         sections.join("\n\n---\n\n")
     }
@@ -346,6 +353,54 @@ Run: `cargo test auth`\n\n\
             "flip writeback described"
         );
         assert!(prompt.contains("agent.done"), "completion signal described");
+    }
+
+    // Byte-identical safety net (D1 / task 1.3): the task-prompt section
+    // scaffolding (headings, execution/writeback sentence), relocated from
+    // compiled string literals into bundled assets, must render exactly as
+    // before.
+    #[test]
+    fn build_prompt_is_byte_identical_to_ground_truth() {
+        let plan = parse_plan("add-auth", PLAN);
+        let prompt = plan.build_prompt();
+        assert_eq!(
+            prompt,
+            "## Plan Context\n\
+             \n\
+             **Goal:** Add token auth to the API\n\
+             \n\
+             **Architecture:** Middleware validates a bearer token\n\
+             \n\
+             **Tech Stack:** Rust, axum\n\
+             \n\
+             ---\n\
+             \n\
+             ## Your Tasks\n\
+             \n\
+             ### Task 1: Validation\n\
+             \n\
+             **Files:**\n\
+             - Create: `src/auth.rs`\n\
+             - Test: `tests/auth.rs`\n\
+             \n\
+             - [ ] **Step 1: Write the failing test**\n\
+             \n\
+             ```rust\n\
+             assert!(false);\n\
+             ```\n\
+             \n\
+             Run: `cargo test auth`\n\
+             \n\
+             - [x] **Step 2: Scaffold module**\n\
+             \n\
+             ---\n\
+             \n\
+             ## Execution\n\
+             \n\
+             Work the steps in order. As you complete each step, flip its `- [ ]` to `- [x]` in \
+             the plan file (mid-flight writeback). Publish `agent.done` only when every step in \
+             the plan shows `- [x]`."
+        );
     }
 
     #[test]

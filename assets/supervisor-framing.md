@@ -1,0 +1,1 @@
+Begin observing the spec implementation session. Your skill ({{SIDECAR_REL_PATH}}) describes your role — read it, then start the autonomous loop. The user can type questions or directives directly into your pane; handle them per the 'When the user types in your pane' section of your skill.

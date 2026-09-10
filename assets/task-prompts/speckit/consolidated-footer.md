@@ -1,0 +1,1 @@
+Work through these tasks sequentially in the order listed. After completing each task, flip its `- [ ]` checkbox to `- [x]` in this worktree's `tasks.md`. You may commit the writeback alongside the task's code change or as a separate commit. Publish `agent.done` only when every task above shows `- [x]` in `tasks.md`.

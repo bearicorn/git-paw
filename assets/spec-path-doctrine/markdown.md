@@ -1,0 +1,1 @@
+Markdown specs are flat `.md` files with `paw_status: pending` frontmatter; the format has no per-artifact workflow — the file itself is the contract.

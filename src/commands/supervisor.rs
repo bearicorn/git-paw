@@ -327,6 +327,36 @@ pub(crate) fn resolve_supervisor_flags(
     flags
 }
 
+/// Bundled template for [`build_supervisor_framing`], carrying the
+/// `{{SIDECAR_REL_PATH}}` substitution placeholder.
+const SUPERVISOR_FRAMING_TEMPLATE: &str = include_str!("../../assets/supervisor-framing.md");
+
+/// Builds the framing sentence appended to the supervisor pane's boot block,
+/// introducing the supervisor skill and pointing at the "When the user types
+/// in your pane" section for interactive directives.
+fn build_supervisor_framing() -> String {
+    SUPERVISOR_FRAMING_TEMPLATE.replace("{{SIDECAR_REL_PATH}}", git_paw::agents::SIDECAR_REL_PATH)
+}
+
+#[cfg(test)]
+mod supervisor_framing_tests {
+    use super::build_supervisor_framing;
+
+    // Byte-identical safety net (D1 / task 1.3): the supervisor framing
+    // sentence, relocated from a compiled `format!` call into an asset, must
+    // render exactly as before.
+    #[test]
+    fn supervisor_framing_is_byte_identical_to_ground_truth() {
+        assert_eq!(
+            build_supervisor_framing(),
+            "Begin observing the spec implementation session. Your skill \
+             (.git-paw/AGENTS.local.md) describes your role — read it, then start the autonomous loop. The user \
+             can type questions or directives directly into your pane; handle them per the 'When \
+             the user types in your pane' section of your skill."
+        );
+    }
+}
+
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(crate) fn cmd_supervisor(
     repo_root: &Path,
@@ -599,7 +629,7 @@ pub(crate) fn cmd_supervisor(
         // supervisor consumes the loop's escalations instead of blanket-approving
         // (supervisor-loop-escalation-tiering).
         skill_content: Some(git_paw::skills::with_drive_loop_directive(
-            supervisor_md,
+            &supervisor_md,
             unattended,
         )),
         inter_agent_rules: None,
@@ -809,13 +839,7 @@ pub(crate) fn cmd_supervisor(
         &broker_config.url(),
         git_paw::skills::cli_speaks_mcp(&supervisor_cli),
     );
-    let supervisor_framing = format!(
-        "Begin observing the spec implementation session. Your skill \
-         ({skill}) describes your role — read it, then start the autonomous loop. The user \
-         can type questions or directives directly into your pane; handle them per the 'When \
-         the user types in your pane' section of your skill.",
-        skill = git_paw::agents::SIDECAR_REL_PATH,
-    );
+    let supervisor_framing = build_supervisor_framing();
     let supervisor_prompt = format!("{supervisor_boot_block}\n\n{supervisor_framing}");
     let supervisor_delay = resolve_submit_delay_ms(&supervisor_cli, &config.clis);
     gate_pane_or_fail_on_dialog(

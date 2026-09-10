@@ -1,0 +1,1 @@
+Read {{SIDECAR_REL_PATH}} first — it carries your assignment and coordination rules — then run /opsx:apply {{SPEC_ID}}.

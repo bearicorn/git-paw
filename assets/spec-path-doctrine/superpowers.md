@@ -1,0 +1,1 @@
+Superpowers plans are flat files under `docs/superpowers/plans/*.md` (obra/superpowers writing-plans documents); work each plan's `### Task N` steps in order and flip `- [ ]` to `- [x]` in the plan file as each step lands.
