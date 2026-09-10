@@ -34,12 +34,12 @@
 //! reuse the existing `agent.status` (`phase: "stuck-on-prompt"`) and
 //! `agent.question` variants.
 
+use crate::config::claude_prompt_profile;
 use crate::error::PawError;
 use crate::supervisor::approve::KeyDispatcher;
 use crate::supervisor::auto_approve::{
     extract_command_slice, is_live_prompt, live_prompt_markers_at_tail,
 };
-use crate::supervisor::permission_prompt::APPROVAL_MARKERS;
 
 /// Pane index reserved for the supervisor's own CLI. The blind send-keys gate
 /// never types into it under any classification; clearing pane 0's own prompt
@@ -52,14 +52,23 @@ pub const SUPERVISOR_PANE_INDEX: usize = 0;
 /// Delegates to the Live-prompt gate's structural check
 /// ([`is_live_prompt`] — option glyphs / `Do you want to …` / `Esc to
 /// cancel`, tail-anchored over a window wide enough to span a full
-/// multi-option prompt block), extended with the [`APPROVAL_MARKERS`] set so
-/// the re-confirm also recognises other agent CLIs' prompt wordings
-/// (`requires approval`, `(y/n)`, …) that `permission-detection` accepts. A
-/// marker found only in scrollback above the tail is treated as *not live* —
-/// that is a prompt already answered and scrolled away.
+/// multi-option prompt block), extended with the embedded Claude Code
+/// profile's approval markers so the re-confirm also recognises other agent
+/// CLIs' prompt wordings (`requires approval`, `(y/n)`, …) that
+/// `permission-detection` accepts. A marker found only in scrollback above
+/// the tail is treated as *not live* — that is a prompt already answered and
+/// scrolled away.
 #[must_use]
 pub fn live_prompt_in_tail(capture: &str) -> bool {
-    is_live_prompt(capture) || live_prompt_markers_at_tail(capture, APPROVAL_MARKERS)
+    is_live_prompt(capture)
+        || live_prompt_markers_at_tail(
+            capture,
+            &claude_prompt_profile()
+                .approval_markers
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        )
 }
 
 /// Abstraction over "capture the current text of a pane", so the gate's

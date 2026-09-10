@@ -240,33 +240,49 @@ TEST_COMMAND=$(discover_test_command)
 # stuck agent produces exactly one synthetic publish per detection window.
 STUCK_THRESHOLD_SECONDS=30
 STUCK_DEDUP_WINDOW_SECONDS=300
-STUCK_MARKERS_REGEX='Do you want to proceed|Do you want to allow|requires approval|Allow this command|\(y/n\)|\[y/N\]'
+# Sourced from the resolved CLI prompt-shape profile (cli-prompt-profiles
+# capability, D3) via `git paw __prompt-profile`, so this and the compiled
+# Rust detector cannot drift; the literal here is only the fallback used when
+# the binary is not resolvable. See discover_prompt_profile_field in
+# _paw_common.sh.
+STUCK_MARKERS_REGEX=$(discover_prompt_profile_field approval_markers \
+  'Do you want to proceed|Do you want to allow|requires approval|Allow this command|\(y/n\)|\[y/N\]')
 STUCK_DEDUP_FILE="${PAW_DIR}/.sweep-stuck-dedup"
 
 # Live-prompt structural markers (approve-send gate). Textual markers of a
 # LIVE permission prompt, matched case-insensitively; numbered option lines
 # (`1.` / `2)`) anchor a multi-option prompt whose question sits above the
-# 4-line tail (block window: last 15 non-blank lines). Kept in lockstep with
-# the Rust gate in src/supervisor/auto_approve.rs (LIVE_PROMPT_FOOTER /
-# LIVE_PROMPT_PROCEED / LIVE_PROMPT_TAIL / LIVE_PROMPT_BLOCK) so `approve`
-# and `classify` agree with the in-tool auto-approver on what "live" means.
-LIVE_PROMPT_MARKERS_REGEX='do you want to|esc to cancel'
+# 4-line tail (block window: last 15 non-blank lines). Sourced from the
+# resolved profile so `approve` / `classify` agree with the in-tool
+# auto-approver (src/supervisor/auto_approve.rs) on what "live" means.
+LIVE_PROMPT_MARKERS_REGEX=$(discover_prompt_profile_field live_prompt_markers \
+  'do you want to|esc to cancel')
 # A numbered option line once its leading TUI decoration (box-drawing glyphs,
-# bullets, the selection caret) is skipped — mirrors strip_decoration +
-# is_option_line in src/supervisor/auto_approve.rs.
-LIVE_PROMPT_OPTION_REGEX='^[[:space:]│─╭╮╰╯├┤┐└┘┌⎿❯●•*·]*[0-9][.)]'
+# bullets, the selection caret) is skipped. The decoration class is a
+# terminal-rendering detail shared by every CLI, not vendor prompt shape, so
+# it stays here; the digit/punctuation shape itself comes from the resolved
+# profile's option_line_pattern (mirrors strip_decoration + is_option_line in
+# src/supervisor/auto_approve.rs).
+_option_line_digit=$(discover_prompt_profile_field option_line_pattern '^[0-9][.)]')
+LIVE_PROMPT_OPTION_REGEX="^[[:space:]│─╭╮╰╯├┤┐└┘┌⎿❯●•*·]*${_option_line_digit#^}"
+unset _option_line_digit
 
 # --- Additional stuck shapes: stream-timeout, context-bloat, no-progress -----
 # A coding agent's CLI API call can fail mid-stream (transport error / timeout)
 # and sit dead with no permission marker present; and its context can bloat past
 # the point where the CLI surfaces a `/clear to save <N>k tokens` hint. Both are
-# pane-text markers kept in named regexes next to STUCK_MARKERS_REGEX so a
-# CLI-string tweak is a one-line edit. The patterns are deliberately generic
-# (multiple symptom phrasings) rather than one CLI's exact string.
-STREAM_TIMEOUT_MARKERS_REGEX='Request timed out|Request timeout|stream error|stream timed out|stream disconnected|transport error|Connection error|error streaming'
+# pane-text markers sourced from the resolved profile, same as
+# STUCK_MARKERS_REGEX above.
+STREAM_TIMEOUT_MARKERS_REGEX=$(discover_prompt_profile_field stream_error_markers \
+  'Request timed out|Request timeout|stream error|stream timed out|stream disconnected|transport error|Connection error|error streaming')
 # Group 2 captures N (thousands of tokens) from a `/clear to save <N>k tokens`
 # (or `/compact ...`) hint; the leading slash is optional for CLI variants.
-CONTEXT_BLOAT_MARKER_REGEX='/?(clear|compact) to save ([0-9]+)k tokens'
+CONTEXT_BLOAT_MARKER_REGEX=$(discover_prompt_profile_field context_bloat_pattern \
+  '/?(clear|compact) to save ([0-9]+)k tokens')
+# A paste-aware CLI's own "N lines pasted" acknowledgement, e.g. `Pasted text
+# #1`; also sourced from the resolved profile.
+PASTE_BUFFER_MARKER_REGEX=$(discover_prompt_profile_field paste_buffer_pattern \
+  'Pasted text #[0-9]')
 # No-progress heartbeat snapshot: one line per agent,
 # `agent<TAB>checkbox_count<TAB>commit_count<TAB>timestamp`.
 SWEEP_PROGRESS_FILE="${PAW_DIR}/.sweep-progress"
@@ -890,6 +906,7 @@ stuck_eval() {
   fi
   AGENT="${agent}" LAST_SEEN="${last_seen}" THRESHOLD="${STUCK_THRESHOLD_SECONDS}" \
     MARKERS="${STUCK_MARKERS_REGEX}" STREAM_MARKERS="${STREAM_TIMEOUT_MARKERS_REGEX}" \
+    PASTE_MARKER="${PASTE_BUFFER_MARKER_REGEX}" \
     BLOAT_MARKER="${CONTEXT_BLOAT_MARKER_REGEX}" BLOAT_THRESHOLD_K="${CONTEXT_BLOAT_THRESHOLD_K}" \
     NO_PROGRESS_WINDOW="${NO_PROGRESS_WINDOW_SECONDS}" BLOCKED_WINDOW="${BLOCKED_ON_SUPERVISOR_WINDOW_SECONDS}" \
     PROGRESS="${SWEEP_PROGRESS_FILE}" CHECKBOX="${checkbox}" COMMIT="${commit}" BLOCKED_AGE="${blocked_age}" \
@@ -903,6 +920,7 @@ last_seen = int(os.environ.get("LAST_SEEN") or 0)
 threshold = int(os.environ["THRESHOLD"])
 markers = os.environ["MARKERS"]
 stream_markers = os.environ.get("STREAM_MARKERS", "")
+paste_marker = os.environ.get("PASTE_MARKER", r"Pasted text #[0-9]")
 bloat_marker = os.environ.get("BLOAT_MARKER", "")
 bloat_threshold_k = int(os.environ.get("BLOAT_THRESHOLD_K") or 0)
 no_progress_window = int(os.environ.get("NO_PROGRESS_WINDOW") or 0)
@@ -1032,7 +1050,7 @@ if stream_markers and re.search(stream_markers, cap):
 # 2. Permission / paste-buffer marker → stuck-on-prompt (existing path).
 #    Paste-buffer is checked first so its more specific marker wins.
 variant = None
-if re.search(r"Pasted text #[0-9]", cap):
+if re.search(paste_marker, cap):
     variant = "paste-buffer"
 elif re.search(markers, cap):
     variant = "permission"

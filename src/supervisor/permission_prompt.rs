@@ -12,6 +12,8 @@
 
 use std::process::Command;
 
+use crate::config::{CliPromptProfile, claude_prompt_profile};
+
 /// Coarse classification of a detected permission prompt.
 ///
 /// The auto-approver consults this to decide whether to send the
@@ -42,21 +44,6 @@ pub enum PermissionType {
     Unknown,
 }
 
-/// Pane-content substrings that indicate the agent CLI is waiting for an
-/// approval decision.
-///
-/// Conservative by design — exact phrase matches keep false positives low.
-/// Add a new marker when a new agent CLI surfaces a different prompt
-/// wording.
-pub const APPROVAL_MARKERS: &[&str] = &[
-    "requires approval",
-    "do you want to proceed",
-    "do you want to allow",
-    "(y/n)",
-    "[y/N]",
-    "Allow this command",
-];
-
 /// Captures the content of pane `pane_index` in `session` via
 /// `tmux capture-pane -p -t <session>:<pane>`.
 ///
@@ -80,11 +67,32 @@ pub fn capture_pane(session: &str, pane_index: usize) -> Option<String> {
 /// Scans `captured` for a known approval marker and returns the prompt's
 /// classification, or `None` when no marker is present.
 ///
+/// Sources its markers from the embedded Claude Code profile
+/// ([`claude_prompt_profile`]) — byte-identical to the behaviour before
+/// per-CLI prompt-shape profiles existed. Prefer
+/// [`classify_capture_with_profile`] when the pane's CLI has a resolved
+/// profile available.
+///
 /// Pure function — exposed separately from [`detect_permission_prompt`] so
 /// unit tests can drive it without touching tmux.
 #[must_use]
 pub fn classify_capture(captured: &str) -> Option<PermissionType> {
-    if !APPROVAL_MARKERS.iter().any(|m| captured.contains(m)) {
+    classify_capture_with_profile(captured, claude_prompt_profile())
+}
+
+/// Scans `captured` for a known approval marker from `profile`'s approval
+/// markers (`cli-prompt-profiles` capability) and returns the prompt's
+/// classification, or `None` when no marker is present.
+#[must_use]
+pub fn classify_capture_with_profile(
+    captured: &str,
+    profile: &CliPromptProfile,
+) -> Option<PermissionType> {
+    if !profile
+        .approval_markers
+        .iter()
+        .any(|m| captured.contains(m.as_str()))
+    {
         return None;
     }
     Some(classify_command_class(captured))
@@ -103,11 +111,26 @@ fn classify_command_class(captured: &str) -> PermissionType {
 /// Captures the pane and classifies it.
 ///
 /// Combines [`capture_pane`] and [`classify_capture`]. Returns `None` when
-/// either the capture fails or no approval marker is present.
+/// either the capture fails or no approval marker is present. Sources its
+/// markers from the embedded Claude Code profile; prefer
+/// [`detect_permission_prompt_with_profile`] when the pane's CLI has a
+/// resolved profile available.
 #[must_use]
 pub fn detect_permission_prompt(session: &str, pane_index: usize) -> Option<PermissionType> {
+    detect_permission_prompt_with_profile(session, pane_index, claude_prompt_profile())
+}
+
+/// Captures the pane and classifies it against `profile`'s approval markers
+/// (`cli-prompt-profiles` capability). Returns `None` when either the
+/// capture fails or no approval marker is present.
+#[must_use]
+pub fn detect_permission_prompt_with_profile(
+    session: &str,
+    pane_index: usize,
+    profile: &CliPromptProfile,
+) -> Option<PermissionType> {
     let content = capture_pane(session, pane_index)?;
-    classify_capture(&content)
+    classify_capture_with_profile(&content, profile)
 }
 
 #[cfg(test)]

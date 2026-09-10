@@ -16,6 +16,7 @@ mod broker;
 mod cli;
 mod dashboard;
 mod layout;
+mod prompt_profile;
 mod specs;
 mod supervisor;
 
@@ -29,6 +30,9 @@ pub use cli::{
 };
 pub use dashboard::{BrokerLogConfig, DashboardConfig};
 pub use layout::LayoutConfig;
+pub use prompt_profile::{
+    CliPromptProfile, CliPromptProfileOverride, claude_prompt_profile, resolve_prompt_profile,
+};
 pub use specs::SpecsConfig;
 pub use supervisor::{
     ApprovalLevel, ApprovalLevelPreset, AutoApproveConfig, BrokerPublish, CommonDevAllowlistConfig,

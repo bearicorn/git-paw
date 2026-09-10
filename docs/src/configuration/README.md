@@ -497,6 +497,12 @@ settings_path = "~/.config/claude-variant/settings.json"
 # built-in table row gets native permission flags (e.g. full-auto for a
 # claude-oss variant). Unknown level keys fail the config load.
 approval_args = { "full-auto" = "--dangerously-skip-permissions" }
+
+# Per-field overrides of the CLI's terminal-shape markers (readiness
+# banner, approval-prompt wording, …), consulted before the embedded
+# Claude Code default. See "CLI Prompt-Shape Profiles" in the user guide.
+[clis.claude-variant.prompt_profile]
+approval_markers = ["proceed? (y/n)"]
 ```
 
 | Field | Required | Purpose |
@@ -506,6 +512,7 @@ approval_args = { "full-auto" = "--dangerously-skip-permissions" }
 | `submit_delay_ms` | no | Boot-prompt settle delay (ms) before the submit `Enter`; per-CLI so the launcher stays CLI-agnostic. |
 | `settings_path` | no | Path to the CLI's claude-format settings file. git-paw does not write to it; its parent directory joins the memory-isolation protected-path set. |
 | `approval_args` | no | Map from approval-level name (`"manual"`, `"auto"`, `"full-auto"`) to the flags appended to the launch command at that level. Consulted **before** the [built-in flag table](#supervisor); an unknown level key is rejected at config load with an error naming the key. |
+| `prompt_profile` | no | Per-field overrides of the CLI's terminal-shape markers, consulted before the embedded Claude Code default. Carries no permission policy — see [CLI Prompt-Shape Profiles](../user-guide/cli-prompt-profiles.md). |
 
 Every configured `settings_path` also feeds the **protected-path set** used
 by the auto-approve classifier's memory-isolation rule: the file's parent

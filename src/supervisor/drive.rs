@@ -50,7 +50,9 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::broker::messages::{BrokerMessage, FeedbackPayload};
-use crate::config::{CorrectionConfig, CustomCli, OnExhausted, resolve_submit_delay_ms};
+use crate::config::{
+    CorrectionConfig, CustomCli, OnExhausted, claude_prompt_profile, resolve_submit_delay_ms,
+};
 use crate::error::PawError;
 use crate::session::{self, SessionStatus};
 
@@ -2100,17 +2102,22 @@ fn send_nudge(
 /// shows no input box or the box is empty.
 ///
 /// The input box is the bordered line carrying the CLI's prompt sigil (`│ > …`)
-/// — the same landmark [`crate::tmux::readiness::CLI_READY_MARKERS`] uses to
-/// recognise a launched CLI. The LAST such line wins, because a pane's live
+/// — the same landmark the embedded Claude Code profile's readiness markers
+/// (`crate::config::claude_prompt_profile`) use to recognise a launched CLI.
+/// The LAST such line wins, because a pane's live
 /// input box is always its most recent one. A numbered option line is never
 /// read as buffered input, so a boxed prompt option cannot be mistaken for a
 /// stranded directive.
+///
+/// The sigil set comes from the embedded profile's `input_sigils`
+/// (`cli-prompt-profiles` capability) rather than a compiled constant.
 fn input_box_text(capture: &str) -> Option<String> {
+    let sigils = &claude_prompt_profile().input_sigils;
     let text = capture.lines().rev().find_map(|raw| {
         let inner = raw.trim().strip_prefix('│')?.trim_end_matches('│').trim();
-        let text = inner
-            .strip_prefix('>')
-            .or_else(|| inner.strip_prefix('❯'))?
+        let text = sigils
+            .iter()
+            .find_map(|sigil| inner.strip_prefix(sigil.as_str()))?
             .trim();
         Some(text.to_string())
     })?;
@@ -2166,21 +2173,20 @@ fn submit_buffered_input(
     Ok(true)
 }
 
-/// Capture markers that identify a pane actively producing a response — the CLI
-/// is mid-turn with its interrupt footer showing, rather than sitting at its
-/// input box.
+/// Whether `capture` shows a pane mid-response — the CLI is mid-turn with its
+/// interrupt footer showing, rather than sitting at its input box.
 ///
-/// The set is deliberately conservative: an unrecognised CLI matches nothing and
-/// is treated as idle, which at worst reproduces the injection behaviour of a
-/// pane whose state the loop cannot read.
-const MID_RESPONSE_MARKERS: &[&str] = &["esc to interrupt", "ctrl+c to interrupt"];
-
-/// Whether `capture` shows a pane mid-response (see [`MID_RESPONSE_MARKERS`]).
+/// Sources its markers from the embedded Claude Code profile's
+/// `mid_response_markers` (`cli-prompt-profiles` capability) rather than a
+/// compiled constant. The set is deliberately conservative: an unrecognised
+/// CLI matches nothing and is treated as idle, which at worst reproduces the
+/// injection behaviour of a pane whose state the loop cannot read.
 fn pane_is_mid_response(capture: &str) -> bool {
     let lowered = capture.to_ascii_lowercase();
-    MID_RESPONSE_MARKERS
+    claude_prompt_profile()
+        .mid_response_markers
         .iter()
-        .any(|marker| lowered.contains(marker))
+        .any(|marker| lowered.contains(marker.as_str()))
 }
 
 /// Whether the orchestrator's pane is ready to receive an injected task.
@@ -3112,6 +3118,7 @@ mod tests {
                         submit_delay_ms: Some(0),
                         settings_path: None,
                         approval_args: HashMap::new(),
+                        prompt_profile: None,
                     },
                 )
             })
@@ -3231,6 +3238,7 @@ mod tests {
                         .to_string_lossy()
                         .into_owned(),
                 ),
+                prompt_profile: None,
             },
         );
         let protected = ProtectedPaths::derive(&config, None);

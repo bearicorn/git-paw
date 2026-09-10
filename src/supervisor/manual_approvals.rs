@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::broker::learnings::{CATEGORY_PERMISSION_PATTERN, LearningRecord};
 use crate::broker::messages::BrokerMessage;
+use crate::config::claude_prompt_profile;
 
 /// One manual-approval log entry — the in-memory shape of a single JSONL line.
 ///
@@ -311,24 +312,19 @@ pub fn aggregate(jsonl_path: &Path) -> std::io::Result<Vec<AggregatedApproval>> 
 // Pattern extraction from captured pane text
 // ---------------------------------------------------------------------------
 
-/// Lower-cased substrings that mark a captured line as prompt boilerplate
-/// (the question / choices) rather than the command awaiting a decision.
-const PROMPT_BOILERPLATE: &[&str] = &[
-    "requires approval",
-    "do you want",
-    "bash command",
-    "allow this command",
-    "[y/n]",
-    "(y/n)",
-    "press ",
-    "esc to",
-    "1. yes",
-    "2. no",
-    "❯",
-];
-
+/// Whether `lower` (a lower-cased line) reads as prompt boilerplate (the
+/// question / choices) rather than the command awaiting a decision.
+///
+/// Sources its markers from the embedded Claude Code profile's
+/// `prompt_boilerplate_markers` (`cli-prompt-profiles` capability) rather
+/// than a compiled constant.
 fn is_prompt_boilerplate(lower: &str) -> bool {
-    PROMPT_BOILERPLATE.iter().any(|n| lower.contains(n)) || lower == "yes" || lower == "no"
+    claude_prompt_profile()
+        .prompt_boilerplate_markers
+        .iter()
+        .any(|n| lower.contains(n.as_str()))
+        || lower == "yes"
+        || lower == "no"
 }
 
 /// Returns `true` when `text` reads as a command (or a file-operation target

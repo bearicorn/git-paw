@@ -28,6 +28,7 @@
   - [MCP Server](user-guide/mcp.md)
   - [Doctor](user-guide/doctor.md)
     - [Selftest (internal)](user-guide/selftest.md)
+  - [CLI Prompt-Shape Profiles](user-guide/cli-prompt-profiles.md)
 - [Configuration](configuration/README.md)
 - [Supported AI CLIs](supported-clis.md)
 - [CLI Reference](cli-reference.md)

@@ -19,6 +19,7 @@
 #   repo_root                                  git top-level, empty when none
 #   discover_broker_url                        [broker] bind + port
 #   discover_docs_base_url                     top-level docs_base_url
+#   discover_prompt_profile_field <f> <def>    resolved CLI prompt-shape profile field
 #   slugify <branch>                           broker agent_id slug rules
 
 # Name used in this file's diagnostics. Each helper sets it before sourcing;
@@ -155,6 +156,26 @@ else:
     print(url if url else default)
 PY
 )" "${CONFIG_TOML}"
+}
+
+# Resolves one CLI prompt-shape profile field via `git paw __prompt-profile`
+# (cli-prompt-profiles capability, D3) — the single source of prompt-shape
+# literals shared with the compiled detectors, so the shell and Rust views of
+# a prompt cannot drift. A marker-list field prints as a `grep -E`-ready
+# alternation (each marker regex-escaped); a pattern field prints its raw
+# regex source.
+#
+# Falls back to `default` when `git paw` is not resolvable on PATH, exits
+# non-zero, or prints nothing (e.g. outside a recognised repo) — a helper
+# script must never block on the binary being present.
+discover_prompt_profile_field() {
+  local field=$1 default=$2 val
+  val=$(git paw __prompt-profile --field "${field}" 2>/dev/null)
+  if [[ -z "${val}" ]]; then
+    printf '%s\n' "${default}"
+  else
+    printf '%s\n' "${val}"
+  fi
 }
 
 # Slugify a branch name the same way the broker does (lowercase, non

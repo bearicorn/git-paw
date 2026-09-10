@@ -23,7 +23,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::broker::BrokerState;
-use crate::config::{AutoApproveConfig, CommonDevAllowlistConfig};
+use crate::config::{AutoApproveConfig, CliPromptProfile, CommonDevAllowlistConfig};
 use crate::error::PawError;
 
 use super::approval_gate::PaneCapturer;
@@ -109,6 +109,24 @@ pub trait PaneInspector: PaneCapturer {
     /// Captures the pane and returns the classification, or `None` when
     /// no approval marker is present.
     fn inspect(&self, session: &str, pane_index: usize) -> Option<PermissionType>;
+
+    /// Captures the pane and returns the classification using `profile`'s
+    /// approval markers (`cli-prompt-profiles` capability) rather than the
+    /// embedded Claude Code default.
+    ///
+    /// Default implementation delegates to [`Self::inspect`] (ignoring
+    /// `profile`), so an existing implementor needs no change to keep
+    /// compiling; [`TmuxPaneInspector`] overrides it to resolve the pane's
+    /// actual CLI profile.
+    fn inspect_with_profile(
+        &self,
+        session: &str,
+        pane_index: usize,
+        profile: &CliPromptProfile,
+    ) -> Option<PermissionType> {
+        let _ = profile;
+        self.inspect(session, pane_index)
+    }
 }
 
 /// Production [`PaneInspector`] backed by `tmux capture-pane`.
@@ -123,6 +141,17 @@ impl PaneCapturer for TmuxPaneInspector {
 impl PaneInspector for TmuxPaneInspector {
     fn inspect(&self, session: &str, pane_index: usize) -> Option<PermissionType> {
         detect_permission_prompt(session, pane_index)
+    }
+
+    fn inspect_with_profile(
+        &self,
+        session: &str,
+        pane_index: usize,
+        profile: &CliPromptProfile,
+    ) -> Option<PermissionType> {
+        super::permission_prompt::detect_permission_prompt_with_profile(
+            session, pane_index, profile,
+        )
     }
 }
 
@@ -179,6 +208,10 @@ where
     pub protected_paths: &'a ProtectedPaths,
     /// Optional broker URL for audit-log publishing.
     pub broker_url: Option<&'a str>,
+    /// Resolved prompt-shape profile (`cli-prompt-profiles` capability)
+    /// consulted by [`PaneInspector::inspect_with_profile`] for approval-marker
+    /// detection.
+    pub profile: &'a CliPromptProfile,
 }
 
 /// Runs one tick of the auto-approve poll loop and returns the outcome
@@ -339,7 +372,10 @@ where
         let Some(pane_index) = ctx.resolver.pane_index_for(&agent_id) else {
             continue;
         };
-        let Some(kind) = ctx.inspector.inspect(ctx.session, pane_index) else {
+        let Some(kind) = ctx
+            .inspector
+            .inspect_with_profile(ctx.session, pane_index, ctx.profile)
+        else {
             out.push((agent_id, TickOutcome::NoPrompt));
             continue;
         };
@@ -604,6 +640,36 @@ mod tests {
         }
     }
 
+    /// Records the profile it was invoked with, so a test can assert
+    /// `poll_tick` threads `ctx.profile` through to the inspector rather than
+    /// always resolving the embedded Claude default
+    /// (`cli-prompt-profiles` capability, "Detection uses the pane's CLI
+    /// profile").
+    struct ProfileRecordingInspector {
+        kind: Option<PermissionType>,
+        captured: String,
+        seen_profiles: RefCell<Vec<CliPromptProfile>>,
+    }
+    impl PaneCapturer for ProfileRecordingInspector {
+        fn capture(&self, _session: &str, _pane_index: usize) -> String {
+            self.captured.clone()
+        }
+    }
+    impl PaneInspector for ProfileRecordingInspector {
+        fn inspect(&self, _session: &str, _pane_index: usize) -> Option<PermissionType> {
+            self.kind
+        }
+        fn inspect_with_profile(
+            &self,
+            _session: &str,
+            _pane_index: usize,
+            profile: &CliPromptProfile,
+        ) -> Option<PermissionType> {
+            self.seen_profiles.borrow_mut().push(profile.clone());
+            self.kind
+        }
+    }
+
     struct RecordingDispatcher {
         events: Vec<(String, usize, String)>,
     }
@@ -691,6 +757,7 @@ mod tests {
                 worktree_resolver: &no_worktree,
                 protected_paths: &protected,
                 broker_url: None,
+                profile: crate::config::claude_prompt_profile(),
             };
             poll_tick(&mut ctx)
         };
@@ -747,6 +814,68 @@ mod tests {
             .collect();
         assert_eq!(keys, vec!["1", "Enter"]);
         assert!(forwarder.forwards.borrow().is_empty());
+    }
+
+    /// `cli-prompt-profiles` capability, "Detection uses the pane's CLI
+    /// profile": `poll_tick` passes `ctx.profile` through to the inspector's
+    /// `inspect_with_profile`, rather than always resolving the embedded
+    /// Claude default.
+    #[test]
+    fn poll_tick_threads_the_configured_profile_to_the_inspector() {
+        let state = BrokerState::new(None);
+        insert_stalled(&state, "agent-a", 600);
+        let cfg = AutoApproveConfig::default();
+        let resolver = |id: &str| if id == "agent-a" { Some(2) } else { None };
+        let inspector = ProfileRecordingInspector {
+            kind: None,
+            captured: String::new(),
+            seen_profiles: RefCell::new(Vec::new()),
+        };
+
+        let mut clis: std::collections::HashMap<String, crate::config::CustomCli> =
+            std::collections::HashMap::new();
+        clis.insert(
+            "mycli".to_string(),
+            crate::config::CustomCli {
+                command: "mycli".to_string(),
+                display_name: None,
+                submit_delay_ms: None,
+                settings_path: None,
+                approval_args: std::collections::HashMap::new(),
+                prompt_profile: Some(crate::config::CliPromptProfileOverride {
+                    approval_markers: Some(vec!["mycli waiting".to_string()]),
+                    ..Default::default()
+                }),
+            },
+        );
+        let profile = crate::config::resolve_prompt_profile("mycli", &clis);
+
+        let no_worktree = |_id: &str| None::<PathBuf>;
+        let dev_allowlist = CommonDevAllowlistConfig::default();
+        let protected = ProtectedPaths::default();
+        let repo = claim_root();
+        let mut dispatcher = RecordingDispatcher { events: vec![] };
+        let mut forwarder = RecordingForwarder::default();
+        let mut ctx = PollContext {
+            state: Some(&state),
+            session: "paw-x",
+            repo_root: repo.path(),
+            config: &cfg,
+            dev_allowlist: &dev_allowlist,
+            resolver: &resolver,
+            inspector: &inspector,
+            dispatcher: &mut dispatcher,
+            forwarder: &mut forwarder,
+            worktree_resolver: &no_worktree,
+            protected_paths: &protected,
+            broker_url: None,
+            profile: &profile,
+        };
+        let _ = poll_tick(&mut ctx);
+
+        let seen = inspector.seen_profiles.borrow();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].approval_markers, vec!["mycli waiting".to_string()]);
     }
 
     #[test]
@@ -1029,6 +1158,7 @@ mod tests {
                 worktree_resolver: &no_worktree,
                 protected_paths: &protected,
                 broker_url: None,
+                profile: crate::config::claude_prompt_profile(),
             };
             tick_from_status(&rows, &mut ctx)
         };
@@ -1078,6 +1208,7 @@ mod tests {
                 worktree_resolver,
                 protected_paths: &protected,
                 broker_url: None,
+                profile: crate::config::claude_prompt_profile(),
             };
             poll_tick(&mut ctx)
         };
@@ -1277,6 +1408,7 @@ mod tests {
                         .to_string_lossy()
                         .into_owned(),
                 ),
+                prompt_profile: None,
             },
         );
         ProtectedPaths::derive(&config, None)
@@ -1317,6 +1449,7 @@ mod tests {
                 worktree_resolver,
                 protected_paths: protected,
                 broker_url: None,
+                profile: crate::config::claude_prompt_profile(),
             };
             poll_tick(&mut ctx)
         };

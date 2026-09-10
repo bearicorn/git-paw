@@ -19,6 +19,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 
 use crate::agents::is_managed_path;
+use crate::config::claude_prompt_profile;
 
 /// Read-mostly command verbs eligible for auto-approval.
 ///
@@ -115,13 +116,14 @@ pub fn is_safe_command(captured: &str, whitelist: &[String]) -> bool {
 /// `"Do you want to make this edit to <path>?"`. The capture group runs to
 /// the end of the line (minus a trailing `?`), so the path may contain
 /// spaces. Matching is case-insensitive.
+///
+/// Sourced from the embedded Claude Code profile's `file_prompt_pattern`
+/// (`cli-prompt-profiles` capability) rather than a compiled literal.
 fn file_prompt_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(
-            r"(?i)(?:allow this write to|allow this edit to|make this edit to|write to|create file|edit file|write file)\s+(?:the file\s+)?(.+?)\s*\??\s*$",
-        )
-        .expect("static file-prompt regex is valid")
+        Regex::new(&claude_prompt_profile().file_prompt_pattern)
+            .expect("embedded file-prompt pattern is valid")
     })
 }
 
@@ -453,26 +455,55 @@ fn strip_decoration(line: &str) -> &str {
     .trim_end()
 }
 
+/// Compiled regex for the embedded profile's `option_line_pattern`
+/// (`cli-prompt-profiles` capability), matching a numbered option line
+/// (`1. …`, `2) …`) once leading whitespace is trimmed.
+fn option_line_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(&claude_prompt_profile().option_line_pattern)
+            .expect("embedded option-line pattern is valid")
+    })
+}
+
 /// Returns `true` when a cleaned line is a numbered option (`1. …`, `2) …`).
 fn is_option_line(line: &str) -> bool {
-    let mut chars = line.trim_start().chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_digit()) && matches!(chars.next(), Some('.' | ')'))
+    option_line_regex().is_match(line.trim_start())
 }
 
 /// Returns `true` when a cleaned line marks the end of the command block —
 /// the confirmation question, an approval marker, or the option list.
+///
+/// The confirmation-question and approval-marker checks source their
+/// literals from the embedded Claude Code profile's `live_prompt_markers`
+/// and `approval_markers` (`cli-prompt-profiles` capability).
 fn is_confirmation_boundary(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
-    lower.starts_with("do you want to")
-        || lower.contains("requires approval")
-        || lower.contains("[y/n]")
-        || lower.contains("(y/n)")
+    let profile = claude_prompt_profile();
+    profile
+        .live_prompt_markers
+        .iter()
+        .any(|m| lower.starts_with(m.as_str()))
+        || profile
+            .approval_markers
+            .iter()
+            .any(|m| lower.contains(&m.to_ascii_lowercase()))
         || is_option_line(line)
 }
 
 /// Returns `true` when a cleaned line is a `Bash command` prompt header.
+///
+/// Sources its literal from the embedded profile's `command_header_markers`
+/// (`cli-prompt-profiles` capability) — a header-style marker is one that
+/// does NOT end in `(` (an inline-embedding marker like `Bash(`, handled
+/// separately by [`extract_command_slice`]'s inline form).
 fn is_bash_command_header(line: &str) -> bool {
-    line.to_ascii_lowercase().starts_with("bash command")
+    let lower = line.to_ascii_lowercase();
+    claude_prompt_profile()
+        .command_header_markers
+        .iter()
+        .filter(|m| !m.ends_with('('))
+        .any(|m| lower.starts_with(&m.to_ascii_lowercase()))
 }
 
 /// Extracts the prompted command slice from a pane capture: the command text
@@ -487,13 +518,22 @@ fn is_bash_command_header(line: &str) -> bool {
 /// confirmation question. Returns `None` when no recognised header is present.
 #[must_use]
 pub fn extract_command_slice(capture: &str) -> Option<String> {
+    let inline_markers: Vec<&str> = claude_prompt_profile()
+        .command_header_markers
+        .iter()
+        .filter(|m| m.ends_with('('))
+        .map(String::as_str)
+        .collect();
     let lines: Vec<&str> = capture.lines().collect();
     for (idx, raw) in lines.iter().enumerate().rev() {
         let line = strip_decoration(raw);
 
         // Inline `Bash(<cmd>)` form.
-        if let Some(start) = line.find("Bash(") {
-            let after = &line[start + "Bash(".len()..];
+        if let Some((start, marker)) = inline_markers
+            .iter()
+            .find_map(|m| line.find(m).map(|start| (start, *m)))
+        {
+            let after = &line[start + marker.len()..];
             if let Some(end) = after.rfind(')') {
                 let cmd = after[..end].trim();
                 if !cmd.is_empty() {
@@ -1300,17 +1340,6 @@ pub fn is_git_dir_write(captured: &str, slice: &str, worktree_root: Option<&Path
 // Live-prompt gate (Section 6)
 // ---------------------------------------------------------------------------
 
-/// Footer marker of an active, foreground permission prompt (`Esc to cancel`).
-///
-/// Exported so the bundled `sweep.sh` helper's mirror
-/// (`LIVE_PROMPT_MARKERS_REGEX`) can be asserted against the Rust gate.
-pub const LIVE_PROMPT_FOOTER: &str = "esc to cancel";
-
-/// Confirmation-question marker of a permission prompt. The shared prefix
-/// covers every documented wording (`Do you want to proceed?`, `Do you want
-/// to allow this write to …?`, `Do you want to make this edit to …?`).
-pub const LIVE_PROMPT_PROCEED: &str = "do you want to";
-
 /// Trailing non-blank lines that must ANCHOR the prompt: a textual marker or
 /// a numbered option line must sit within this window for the capture to be
 /// live. Output printed after an answered prompt evicts it from the anchor,
@@ -1364,9 +1393,17 @@ pub fn live_prompt_markers_at_tail(capture: &str, textual_markers: &[&str]) -> b
 /// narrating about a pane, or an earlier prompt that has scrolled away, will
 /// not have the markers in the live window and so cannot trip a phantom
 /// approval.
+///
+/// Sources its markers from the embedded Claude Code profile's
+/// `live_prompt_markers` (`cli-prompt-profiles` capability).
 #[must_use]
 pub fn is_live_prompt(capture: &str) -> bool {
-    live_prompt_markers_at_tail(capture, &[LIVE_PROMPT_FOOTER, LIVE_PROMPT_PROCEED])
+    let markers: Vec<&str> = claude_prompt_profile()
+        .live_prompt_markers
+        .iter()
+        .map(String::as_str)
+        .collect();
+    live_prompt_markers_at_tail(capture, &markers)
 }
 
 // ---------------------------------------------------------------------------
@@ -1386,12 +1423,19 @@ pub enum PromptShape {
 /// Detects the prompt shape: [`PromptShape::ThreeOption`] when a permanent
 /// broad-grant option (a "don't ask again" choice) is present, otherwise
 /// [`PromptShape::TwoOption`].
+///
+/// Sources its marker from the embedded Claude Code profile's
+/// `broad_grant_marker` (`cli-prompt-profiles` capability).
 #[must_use]
 pub fn detect_prompt_shape(capture: &str) -> PromptShape {
     let lower = capture.to_ascii_lowercase();
+    let marker = claude_prompt_profile()
+        .broad_grant_marker
+        .to_ascii_lowercase();
     // Match both the ASCII apostrophe and the Unicode right-single-quote that
     // some terminals render.
-    if lower.contains("don't ask again") || lower.contains("don\u{2019}t ask again") {
+    let unicode_apostrophe = marker.replace('\'', "\u{2019}");
+    if lower.contains(&marker) || lower.contains(&unicode_apostrophe) {
         PromptShape::ThreeOption
     } else {
         PromptShape::TwoOption
@@ -2055,6 +2099,7 @@ Do you want to proceed?";
                 submit_delay_ms: None,
                 settings_path: Some("/opt/myvariant-home/settings.json".to_string()),
                 approval_args: std::collections::HashMap::new(),
+                prompt_profile: None,
             },
         );
         let set = ProtectedPaths::derive(&config, None);
