@@ -152,14 +152,25 @@ The drive loop SHALL resolve each pane to its agent by matching the pane's `pane
 
 ### Requirement: send-keys nudges send a follow-up Enter
 
-When the drive loop sends a nudge to a pane (any text intended to be submitted), it SHALL send the text and then a SEPARATE `Enter` keystroke, because on paste-aware CLIs the first `Enter` buffers the input rather than submitting it.
+When the drive loop sends a nudge to a pane (any text intended to be submitted), it SHALL submit it reliably rather than relying on a single combined text+Enter or a single follow-up `Enter` — because on paste-aware CLIs the text frequently lands in a paste buffer or on a stale input line that a bare `Enter` / `C-m` does not submit. The nudge path SHALL:
 
-#### Scenario: Nudge submits with a separate follow-up Enter
+1. Send the text, then apply the per-CLI settle delay (`[clis.<name>].submit_delay_ms`, the same resolver the boot prompt uses, falling back to the agnostic default), then send a separate `Enter`.
+2. Verify submission by capturing the pane after the `Enter`; if the nudge text is still present on the input line, perform a robust recovery — clear the input line (`C-u`), re-send the text, then `Enter` — up to a bounded number of attempts.
+3. Never assume a single combined text+Enter, or a lone follow-up `Enter` against a stale line, submits the nudge.
+
+#### Scenario: Nudge applies the per-CLI settle delay between text and Enter
 
 - **GIVEN** the drive loop nudges a pane with submittable text
 - **WHEN** the keystrokes are dispatched
-- **THEN** the loop SHALL send the text, then a separate `Enter` keystroke
+- **THEN** the loop SHALL send the text, wait the per-CLI settle delay, then send a separate `Enter`
 - **AND** SHALL NOT rely on a single combined text+Enter to submit the nudge
+
+#### Scenario: A stale input line is recovered with clear + re-type + Enter
+
+- **GIVEN** a nudge whose text remains on the pane's input line after the follow-up `Enter`
+- **WHEN** the loop verifies submission via `capture-pane` and finds the text still present
+- **THEN** it SHALL clear the input line (`C-u`), re-send the text, and send `Enter`, up to a bounded number of attempts
+- **AND** a bare `Enter` / `C-m` alone SHALL NOT be treated as sufficient recovery
 
 ### Requirement: Escalation of risky and unknown prompts is non-blocking
 
@@ -254,7 +265,7 @@ When the drive loop has run for approximately 25 minutes without reaching a comp
 
 ### Requirement: Exit summary
 
-On exit the drive loop SHALL print a human-readable summary that states the outcome (completed / escalated-for-review / stuck / heartbeat), the per-agent final state, the deduped list of escalated prompts awaiting human review, and a pointer to the broker log and captured learnings.
+On exit the drive loop SHALL print a human-readable summary that states the overall outcome (completed / escalated-for-review / stuck / heartbeat), each agent's RESOLVED final state, the deduped list of escalated prompts awaiting human review, and a pointer to the broker log and captured learnings. Each agent's final state SHALL be resolved from terminal artifacts — a verified and/or merged branch, using the `WorkerPhase` lifecycle — rather than the agent's last broker-recorded `agent.status`, so a wave whose branches were all verified and merged is not reported as still "working." When per-agent terminal resolution is unavailable, the summary SHALL still print a wave-level outcome line (e.g. "N/M branches merged").
 
 #### Scenario: Summary reports outcome and escalations
 
@@ -263,6 +274,13 @@ On exit the drive loop SHALL print a human-readable summary that states the outc
 - **THEN** the summary SHALL state the overall outcome
 - **AND** SHALL list the per-agent final state
 - **AND** SHALL include the escalated prompt awaiting human review
+
+#### Scenario: A completed wave is not reported as working
+
+- **GIVEN** a drive loop exiting after every branch was verified and merged
+- **WHEN** the summary is printed
+- **THEN** no agent's final state SHALL read `working`
+- **AND** the summary SHALL report the wave as completed (e.g. an "N/M branches merged" outcome line)
 
 ### Requirement: The drive loop self-captures qualitative learnings
 
@@ -388,4 +406,37 @@ shell) so a crashed or interrupted approver does not permanently wedge a pane.
 - **WHEN** the approval attempt returns
 - **THEN** pane N's claim SHALL be released so a later approver can acquire it
 - **AND** an approver that panics/errors mid-send SHALL NOT leave pane N permanently claimed
+
+### Requirement: The drive loop is bound to a specific session instance
+
+The drive loop SHALL bind to the specific session instance it began driving — identified by a stable instance token (e.g. the session's start receipt, PID, or start-timestamp), not merely the session name — and SHALL stop acting once that instance is purged, stopped, or replaced by a newer session of the same name. A drive loop whose bound session instance no longer exists SHALL exit rather than continue sweeping the session name, so it never sends approvals or nudges to a subsequently-created same-named session's panes.
+
+#### Scenario: A purged session's drive loop does not drive the next same-named session
+
+- **GIVEN** a running unattended drive loop bound to session `paw-x`
+- **WHEN** `paw-x` is purged (or stopped) and a new `paw-x` session is later started
+- **THEN** the original drive loop SHALL NOT send approvals or nudges to the new session's panes
+- **AND** the original drive loop SHALL exit once its bound session instance is gone
+
+#### Scenario: The loop keeps driving its own live session
+
+- **GIVEN** a running drive loop bound to session `paw-x` that is still alive
+- **WHEN** the loop ticks
+- **THEN** it SHALL continue driving `paw-x` normally
+
+### Requirement: The drive loop stops nudging panes during wind-down
+
+The drive loop SHALL stop sending pane nudges once it has entered its exit / wind-down state (wave complete, stopped, or bound session gone) — it SHALL NOT continue typing nudge text into idle agent panes during or after wind-down. No nudge SHALL be dispatched on a sweep after the loop has decided to exit, so agents are not left with unsubmitted nudge text re-accumulating in their input lines after the loop is gone.
+
+#### Scenario: No nudge is sent after wind-down begins
+
+- **GIVEN** a drive loop that has entered its exit / wind-down state
+- **WHEN** a subsequent sweep would otherwise nudge an idle pane
+- **THEN** no nudge keystrokes SHALL be dispatched to any pane
+
+#### Scenario: Wind-down does not re-accumulate unsubmitted text
+
+- **GIVEN** idle agent panes at the moment the drive loop winds down
+- **WHEN** the loop completes its exit
+- **THEN** it SHALL NOT have appended further nudge text to any idle pane's input line during wind-down
 

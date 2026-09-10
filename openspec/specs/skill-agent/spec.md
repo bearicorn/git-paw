@@ -2,7 +2,6 @@
 
 ## Purpose
 Defines the embedded coordination and supervisor skill templates git-paw injects into agents, their resolution order (user override then embedded default), and the placeholder-rendering contract. This gives coding agents their broker coordination discipline (intent, heartbeats, stash hygiene, cherry-pick) and gives the supervisor its verification, merge-orchestration, permission-sweep, and user-interaction procedures, all as project-agnostic bundled content. It also adds a "Context budget" section to the bundled coordination skill teaching agents when to compact, clear, or summarise (with a residual-budget heuristic and commit-before-compact discipline), and gives the supervisor a configurable token threshold so `sweep.sh` can proactively flag context-bloated agents via a synthetic `agent.status` before they freeze.
-
 ## Requirements
 ### Requirement: Embedded coordination skill
 
@@ -12,7 +11,7 @@ The embedded `coordination.md` skill content SHALL reflect the v0.5 state in whi
 2. Include a note explaining that git-paw automatically publishes the agent's working status when the agent edits files and automatically publishes an `agent.artifact` when the agent runs `git commit`. The note SHALL state that agents only need to publish manually if they are blocked, want to announce explicit exports, or are signalling intent.
 3. Retain the `agent.blocked` curl example as an opt-in operation for blocked agents.
 4. Retain the `agent.artifact` curl example with `exports`, documented as the manual escape hatch when the agent wants to advertise specific exports beyond what the post-commit hook captures automatically.
-5. Include a `### Cherry-pick peer commits` section that gives the exact `git cherry-pick` command an agent should run when a peer's `agent.artifact` arrives in the agent's inbox.
+5. Include a `### When you depend on a peer's work` section (or equivalent heading) that instructs the agent, when a peer's `agent.artifact` arrives naming work the agent depends on, to publish `agent.blocked` naming the peer and what it needs, then continue on unblocked work or wait. The section SHALL state that the agent MUST NOT cherry-pick a peer's commit into its own branch, and SHALL explain why: grafting a peer commit creates a second copy of a commit the supervisor will later merge from the peer's own branch, leaving the agent's branch divergent and unmergeable. The section SHALL direct the agent to the `agent.advanced-main` discipline as the supported way to take on peer work once that work has landed on the base branch. The embedded content SHALL NOT contain the substring `git cherry-pick`.
 6. Include a `### Messages you may receive` section that documents the two supervisor-originated message variants:
    - `agent.verified` — the agent's work has been verified by the supervisor. No action required.
    - `agent.feedback` — the agent's work has issues. The `errors` field lists problems to fix; the agent SHALL address them and re-publish `agent.artifact`.
@@ -50,11 +49,25 @@ The embedded `coordination.md` skill content SHALL reflect the v0.5 state in whi
 - **THEN** it contains a `curl` example for publishing `agent.blocked`
 - **AND** it contains a `curl` example for publishing `agent.artifact`
 
-#### Scenario: Coordination skill contains cherry-pick instructions
+#### Scenario: Coordination skill directs peer dependencies to escalation, not cherry-pick
 
 - **WHEN** the embedded coordination skill is inspected
-- **THEN** it contains the substring `git cherry-pick`
-- **AND** the cherry-pick guidance is reachable under a `Cherry-pick peer commits` heading or equivalent
+- **THEN** it does NOT contain the substring `git cherry-pick`
+- **AND** it does NOT contain a `Cherry-pick peer commits` heading
+- **AND** it contains guidance directing an agent that depends on a peer's work to publish `agent.blocked` naming the peer and what it needs
+
+#### Scenario: Coordination skill explains why grafting a peer commit is unsafe
+
+- **WHEN** the embedded coordination skill's peer-dependency section is inspected
+- **THEN** it states that the agent MUST NOT cherry-pick a peer's commit into its own branch
+- **AND** it explains that doing so duplicates a commit the supervisor will later merge from the peer's own branch, leaving the agent's branch divergent and unmergeable
+- **AND** it directs the agent to the `agent.advanced-main` discipline for taking on peer work after it lands on the base branch
+
+#### Scenario: Coordination skill retains supervisor-side integration language
+
+- **WHEN** the embedded coordination skill's terminal-action guidance is inspected
+- **THEN** it still describes the supervisor as the party that integrates the agent's branch onto the release line
+- **AND** the removal of agent-side cherry-pick guidance does NOT remove the statement that verification and archival belong to the supervisor
 
 #### Scenario: Coordination skill documents verification and feedback messages
 
@@ -396,15 +409,15 @@ The embedded supervisor skill SHALL ALSO include a "Verify accept-edits commits 
 
 ### Requirement: Supervisor skill — paste-buffer recovery in stall detection
 
-The embedded `supervisor.md` skill SHALL include a paste-buffer recovery sub-case under its existing stall-detection section. The sub-case SHALL instruct the supervisor agent that when a peer agent's `last_seen` has not advanced (or, at launch time, before any heartbeat has arrived) AND a `tmux capture-pane` of that peer's pane shows a paste-buffer indicator, the supervisor SHALL send a recovery `tmux send-keys -t <target> Enter` to submit the buffered content.
+The embedded `supervisor.md` skill SHALL include a paste-buffer recovery sub-case under its existing stall-detection section. The sub-case SHALL instruct the supervisor agent that when a peer agent's `last_seen` has not advanced (or, at launch time, before any heartbeat has arrived) AND a `tmux capture-pane` of that peer's pane shows a paste-buffer indicator or the intended text sitting unsubmitted on the input line, the supervisor SHALL recover by clearing the pane's input line (`tmux send-keys -t <target> C-u`), re-typing the intended text, then sending `Enter` — because a bare `Enter` / `C-m` against a stale input line is a no-op that does not submit the buffered or stale content.
 
 The sub-case SHALL:
 
 1. Identify itself as an additional stall-detection case alongside the existing "idle prompt → likely done" and "thinking/waiting → prompt to self-report" cases.
 2. List at least one known paste-buffer indicator pattern. The list SHALL include Claude Code's `Pasted text #N` (where `N` is a number) and SHALL be presented as illustrative-not-exhaustive so the supervisor agent can apply judgment to indicators on other CLIs.
-3. Specify the recovery action as `tmux send-keys -t <pane> Enter` (a single Enter keystroke to the stuck pane).
-4. State that the recovery action is safe-by-default — on a non-paste-aware CLI or a misclassified pane, the extra Enter either produces a benign blank prompt or is ignored.
-5. Frame indicator detection as lenient: if a pane shows long buffered text in the input area without a follow-up response, the supervisor SHOULD attempt the recovery even if the literal indicator string is not on the listed-patterns list.
+3. Specify the recovery action as clearing the stuck pane's input line (`tmux send-keys -t <pane> C-u`), re-typing the intended text, then `Enter` — and SHALL state that a lone `Enter` / `C-m` against a stale input line is a no-op that does not submit.
+4. State that the recovery is safe-by-default — on a non-paste-aware CLI or a misclassified pane, clearing the line and re-typing either reproduces the intended input or leaves a benign prompt.
+5. Frame indicator detection as lenient: if a pane shows long buffered or unsubmitted text in the input area without a follow-up response, the supervisor SHOULD attempt the recovery even if the literal indicator string is not on the listed-patterns list.
 6. State that paste-buffer recovery SHALL also be applied **proactively at launch time** — the supervisor agent SHALL NOT wait for the `last_seen`-based stall threshold before inspecting agent panes for paste-buffer state. Coding-agent boot prompts are frequently long enough on paste-aware CLIs (e.g. Claude Code v2.1.x) to land in a paste buffer immediately, and waiting 30+ seconds for stall detection wastes the agents' productive time.
 
 #### Scenario: Supervisor skill mentions paste-buffer recovery
@@ -417,12 +430,12 @@ The sub-case SHALL:
 - **WHEN** the paste-buffer recovery sub-case is inspected
 - **THEN** it mentions Claude Code's `Pasted text #N` indicator pattern (or substantively equivalent text)
 
-#### Scenario: Supervisor skill specifies the recovery action
+#### Scenario: Supervisor skill specifies the corrected recovery action
 
 - **WHEN** the paste-buffer recovery sub-case is inspected
 - **THEN** it instructs the supervisor agent to use `tmux capture-pane` to inspect the suspected pane
-- **AND** it instructs the supervisor agent to send `tmux send-keys -t <pane> Enter` to recover
-- **AND** it states that the Enter keystroke is safe-by-default (no-op or benign blank prompt on non-paste-aware CLIs)
+- **AND** it instructs the supervisor agent to recover by clearing the input line (`C-u`), re-typing the intended text, then sending `Enter`
+- **AND** it states that a lone `Enter` / `C-m` against a stale input line is a no-op, and that the clear-and-retype recovery is safe-by-default on non-paste-aware CLIs
 
 #### Scenario: Supervisor skill frames indicator detection as lenient
 
@@ -1443,3 +1456,42 @@ The user-guide coordination chapter SHALL include a section that mirrors the bun
 - **THEN** the content SHALL contain a heading approximately "Workflow phases" or "Before you start editing" or substantively equivalent
 - **AND** the section SHALL describe `agent.intent` publishing as the pre-edit step
 - **AND** SHALL describe re-publishing on scope growth as the mid-edit rule
+
+### Requirement: Coordination skill — worktree environment orientation
+
+The embedded coordination skill SHALL include a worktree-environment orientation section so a worker does not burn budget investigating expected-policy conditions in a fresh, possibly FS-confined worktree. In stack-agnostic terms it SHALL cover:
+
+- **Install artifacts.** A fresh worktree's per-stack install artifacts (dependency directories, build/restore caches) are gitignored — absent from the checkout — and may already be provisioned by an operator-configured worktree `on_create` hook before the CLI starts. The repo-root copy is not writable by the worker, so the worker SHALL NOT reach for it or symlink it; if the artifacts are genuinely missing, the worker SHALL run its stack's install/restore step in its own worktree — expected setup, not a misconfiguration to diagnose.
+- **FS-confinement is policy.** If the worktree is FS-confined by an operator-configured sandbox, writes are permitted inside the worktree (and shared `.git`, the CLI's caches, `TMPDIR`) and denied elsewhere (`$HOME`, the repo root, `.git/hooks` / `.git/config` / `.git/info/exclude`). An `Operation not permitted` on a path outside the worktree is policy, not a broken machine, and the worker SHALL NOT investigate it with `xattr` / `id` / `ls -lO@` / write-probes — it SHALL adapt and work inside its worktree.
+- **setuid binaries under a sandbox.** Some setuid-root system binaries cannot exec inside a sandbox — e.g. `ps` fails with `operation not permitted` because the kernel refuses to exec a setuid binary in a sandbox. This is expected, not fixable, and not a symptom of anything else; everyday tools (`git` and the stack's toolchain) work normally.
+
+The section SHALL NOT hard-code any stack's install command or artifact names (per the export-agnosticism principle); stack-specific steps SHALL be phrased generically (e.g. "your stack's install step") or sourced from the resolved stack. git-paw's own surface (the `on_create` hook, the sandbox, `.git-paw/` paths) MAY be named.
+
+#### Scenario: The coordination skill teaches worktree-environment orientation
+
+- **WHEN** the coordination skill is rendered
+- **THEN** it SHALL state that an `Operation not permitted` outside the worktree is policy, not a fault, and direct the worker to adapt rather than probe (e.g. with `xattr` / `ls -lO@`)
+- **AND** it SHALL note that fresh-worktree install artifacts are gitignored (possibly provisioned by an `on_create` hook) and to run the stack's install step if genuinely missing
+- **AND** it SHALL note that a setuid binary such as `ps` cannot exec under a sandbox and that this is expected
+
+#### Scenario: The orientation section is stack-agnostic
+
+- **WHEN** the rendered coordination skill's worktree-environment section is inspected
+- **THEN** it SHALL NOT contain a hard-coded stack package-manager command or artifact name (it SHALL refer to "your stack's install step" rather than a specific package-manager invocation), so it passes the export-agnosticism conformance audit
+
+### Requirement: Supervisor skill — tiered permission model and safe-command policy
+
+The embedded supervisor skill SHALL document the tiered permission model the supervisor applies when deciding whether a worker's blocked command may be approved: (1) the worker's CLI-native permission check runs first; (2) if the CLI would prompt, the supervisor consults git-paw's safe-command policy, evaluated authoritatively via `git paw __classify <command>` — the single source shared with the mechanical drive loop, so the skill never maintains a parallel authoritative list that could drift; (3) if the command is not classified safe, the supervisor escalates to the human. The skill SHALL summarise the policy classes as orientation — safe (git-paw's managed helper scripts, worktree-confined dev/test commands, read-mostly verbs) and danger (writes under `.git/` or protected paths, the curated danger-list) — while directing the supervisor to `git paw __classify` as the authoritative check. The skill SHALL be stack-agnostic: it SHALL NOT enumerate a consumer's toolchain verbs as universally safe; safe dev/test commands are sourced from the resolved stack.
+
+#### Scenario: The supervisor skill documents the tiered permission ladder
+
+- **WHEN** the supervisor skill is rendered
+- **THEN** it SHALL describe the order — CLI-native permission check, then git-paw's safe-command classification via `git paw __classify`, then escalation to the human
+- **AND** it SHALL direct the supervisor to use `git paw __classify` as the authoritative safe-command check
+
+#### Scenario: The safe-command policy is single-sourced and stack-agnostic
+
+- **WHEN** the rendered supervisor skill's permission section is inspected
+- **THEN** it SHALL direct the supervisor to `git paw __classify` rather than a hand-maintained authoritative allowlist
+- **AND** it SHALL NOT hard-code a consumer's stack toolchain verbs as universally safe
+

@@ -529,3 +529,58 @@ directory (the dry run stays read-only).
 - **WHEN** the dry-run preview computes a child-placement worktree path
 - **THEN** no worktree directory or `.git-paw/worktrees/` entry is created on disk
 
+### Requirement: Launch gate handles a first-run permission/trust acceptance dialog
+
+The readiness gate SHALL, when the launch-readiness poll observes a pane presenting
+a first-run acceptance dialog for its CLI — a one-time bypass-permissions
+confirmation (e.g. the dialog Claude Code shows the first time
+`--dangerously-skip-permissions` runs against a config directory that never accepted
+it) or a "trust this folder?" prompt — either answer the dialog to reach the
+interactive ready state, or fail the launch loudly. It SHALL NOT treat the dialog as a bare shell and relaunch
+(which would re-open the dialog), and SHALL NOT treat it as ready and inject the
+boot block on top of it. A pane left blocked on an unanswered acceptance dialog
+SHALL NOT be reported as a healthy, running agent. Dialog detection SHALL be
+per-CLI and conservative: a CLI whose acceptance dialog the gate does not recognise
+SHALL fall back to the existing readiness / relaunch / fixed-budget behaviour, so
+launch is never worse than before.
+
+#### Scenario: First-run bypass acceptance dialog is answered, not relaunched
+
+- **GIVEN** an agent pane launched with a full-auto bypass flag against a config directory that has never accepted bypass, showing the first-run acceptance dialog
+- **WHEN** the readiness gate polls the pane
+- **THEN** the gate SHALL answer the acceptance dialog (or fail the launch loudly) rather than relaunching the CLI into the dialog
+
+#### Scenario: A pane stuck on an acceptance dialog is not reported healthy
+
+- **GIVEN** an agent pane blocked on an unanswered first-run acceptance dialog after the launch budget elapses
+- **WHEN** launch completes
+- **THEN** the pane SHALL NOT be reported as a healthy running agent (the launch fails loudly or the pane's dead/blocked state is surfaced)
+
+#### Scenario: Unrecognised CLI acceptance dialog falls back to prior behaviour
+
+- **GIVEN** a custom CLI whose first-run dialog the gate does not recognise
+- **WHEN** the readiness budget elapses
+- **THEN** the gate SHALL fall back to the existing readiness / relaunch / fixed-budget injection behaviour
+
+### Requirement: Start reattaches to an existing live session instead of forking
+
+`git paw start` SHALL reattach to the repository's existing live session rather than creating a numerically-suffixed parallel session (`paw-<project>-2`) when that repository already has a live session (resolved by repository path, per `session-state` find-by-repository). The `-N` collision suffix SHALL be reserved for genuinely distinct sessions (e.g. two different repositories that share a project name), not a re-invocation of `start` against the same repository's running session. In a non-interactive context where reattaching is not possible, `start` SHALL refuse with an actionable error (or require an explicit opt-in flag) rather than silently forking a parallel wave.
+
+#### Scenario: Re-start of a repo with a live session reattaches
+
+- **GIVEN** a repository with a live session `paw-x`
+- **WHEN** the user runs `git paw start` again in that repository (interactive)
+- **THEN** the system SHALL reattach to `paw-x` and SHALL NOT create `paw-x-2`
+
+#### Scenario: A distinct repository sharing a name still gets its own session
+
+- **GIVEN** a live session `paw-x` belonging to a different repository
+- **WHEN** `git paw start` runs in a second repository whose project name is also `x`
+- **THEN** the system SHALL resolve a distinct session name (`paw-x-2`) for the second repository
+
+#### Scenario: Non-interactive re-start refuses rather than forking
+
+- **GIVEN** a repository with a live session and a non-interactive (non-TTY) invocation
+- **WHEN** `git paw start` runs again in that repository
+- **THEN** the system SHALL refuse with an actionable error (or require an explicit opt-in flag) rather than silently creating a suffixed parallel session
+

@@ -12,7 +12,6 @@ existing custom-CLI seam that confines an agent's writes to its worktree.
 git-paw neither invokes nor ships a sandbox profile — the sandbox is the user's
 own local config — but `git paw doctor` reports backend availability and points
 at this posture.
-
 ## Requirements
 ### Requirement: Consolidated security disclaimer and trust-model posture
 
@@ -75,4 +74,19 @@ the reader adapts to their CLI, OS, and stack.
 #### Scenario: Confidentiality hardening tiers are documented
 - **WHEN** the docs present the example profile
 - **THEN** they explain that the default write-integrity profile does not restrict reads, and offer read-hardening options — a blocklist of secret paths (e.g. `~/.ssh`, cloud credentials) and a stronger deny-home-then-allowlist approach — noting which host paths the agent legitimately needs and that a worktree-only worker does not require `~/.ssh`
+
+### Requirement: The documented sandbox profile permits shell heredoc temp files
+
+The documented FS-scoped sandbox profile SHALL grant write access to the shell's temporary directory used for heredocs — `/private/tmp` on macOS (`sandbox-exec`) and the bound `TMPDIR`/`/tmp` on Linux (`bwrap`) — so the standard `git commit -m "$(cat <<'EOF' … EOF)"` heredoc idiom works under the sandbox. A profile that grants only `$TMPDIR` and the CLI's per-session temp path is insufficient, because `zsh` writes heredoc bodies under `/private/tmp/zsh*`; denying that path breaks every heredoc-based commit. The FS-scoped sandbox chapter SHALL document this grant and state why it is required.
+
+#### Scenario: The sandbox chapter documents the heredoc temp-dir grant
+
+- **WHEN** the FS-scoped sandbox chapter is inspected
+- **THEN** its example macOS profile SHALL grant write access to `/private/tmp`
+- **AND** the chapter SHALL note that this grant is required for shell heredocs (so the standard `git commit -m "$(cat <<'EOF')"` idiom works)
+
+#### Scenario: The Linux profile binds the shell temp dir writable
+
+- **WHEN** the FS-scoped sandbox chapter's Linux `bwrap` example is inspected
+- **THEN** it SHALL bind the shell temporary directory (`TMPDIR`/`/tmp`) writable, so heredocs work under `bwrap` as well
 

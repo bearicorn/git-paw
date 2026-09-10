@@ -140,7 +140,7 @@ The system SHALL provide a flag-resolution function that maps a CLI name and app
 | CLI | Level | Flags |
 |---|---|---|
 | `"claude"` | `FullAuto` | `"--dangerously-skip-permissions"` |
-| `"claude"` | `Auto` | `""` |
+| `"claude"` | `Auto` | `"--permission-mode acceptEdits"` |
 | `"claude"` | `Manual` | `""` |
 | `"codex"` | `FullAuto` | `"--dangerously-bypass-approvals-and-sandbox"` |
 | `"codex"` | `Auto` | `"--sandbox workspace-write"` |
@@ -151,7 +151,9 @@ The system SHALL provide a flag-resolution function that maps a CLI name and app
 
 3. **Fallback**: any CLI/level pair not covered above resolves to `""` (no flags).
 
-The built-in rows SHALL be verified against each CLI's upstream documentation at implementation time; a row whose upstream flag has changed SHALL be corrected via spec amendment before the change lands.
+The `Auto` level SHALL resolve to a deterministic per-CLI flag rather than the empty string wherever the CLI provides a low-friction "accept edits" mode distinct from `Manual` and from full bypass, so an `Auto` pane does not silently inherit whatever default the CLI's config directory happens to carry. For Claude this is `--permission-mode acceptEdits` (auto-accept file edits; other command approvals still flow through the classifier / drive loop). Codex's `Auto` already resolves to `--sandbox workspace-write`. A CLI with no such mode keeps `""` and relies on the per-CLI `approval_args` override plus the classifier / drive-loop approval path.
+
+The built-in rows SHALL be verified against each CLI's upstream documentation at implementation time; a row whose upstream flag has changed SHALL be corrected via spec amendment before the change lands. In particular, the Claude `Auto` value SHALL be confirmed against the live Claude Code `--permission-mode` enumeration (`default` / `acceptEdits` / `plan` / `bypassPermissions`) so that `Auto` maps to a real, deterministic mode rather than an unrecognised token.
 
 > `agy` is the Antigravity CLI, which replaces the retired Gemini CLI. Antigravity's
 > full-auto / no-confirmation mode uses `--dangerously-skip-permissions` (the same flag
@@ -165,6 +167,11 @@ The built-in rows SHALL be verified against each CLI's upstream documentation at
 
 - **WHEN** flags are resolved for `("claude", FullAuto)` with no config override
 - **THEN** the result is `"--dangerously-skip-permissions"`
+
+#### Scenario: Claude with auto returns an explicit accept-edits permission mode
+
+- **WHEN** flags are resolved for `("claude", Auto)` with no config override
+- **THEN** the result is `"--permission-mode acceptEdits"` (a deterministic mode, not the empty string)
 
 #### Scenario: Codex with auto returns workspace-write sandbox flag
 

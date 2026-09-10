@@ -105,6 +105,7 @@ have no user-guide chapter: the spec itself is their documentation.
 - [`cli-parsing`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/cli-parsing/spec.md) — the clap v4 CLI: all subcommands, flags, and argument validation, defaulting to `start` when no subcommand is given.
 - [`cli-resolution`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/cli-resolution/spec.md) — detects AI coding CLIs on PATH, merges user-defined custom CLIs, and resolves which CLI each branch uses via a priority chain.
 - [`cli-interactive-selection`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/cli-interactive-selection/spec.md) — interactive prompts for choosing branches and CLIs (uniform or per-branch), with logic separated from UI via the `Prompter` trait.
+- [`cli-prompt-profiles`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/cli-prompt-profiles/spec.md) — per-CLI prompt-shape profiles: the readiness/approval/mid-response/mode markers and command-header, file-prompt and option-line forms describing how one CLI's terminal surface looks — appearance only, never permission policy — with the Claude Code profile embedded as the per-field default and shared as the single source of prompt-shape literals for the compiled code and the supervisor helper script.
 
 ### code-
 
@@ -155,6 +156,7 @@ have no user-guide chapter: the spec itself is their documentation.
 - [`supervisor-learnings`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-learnings/spec.md) — an opt-in, broker-internal aggregator that derives deterministic and qualitative learning signals into `.git-paw/session-learnings.md` (and the `agent.learning` broker variant), performing no telemetry.
 - [`supervisor-correction-loop`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-correction-loop/spec.md) — the optional `[supervisor.correction]` self-healing loop that re-engages a gate-failed worker's pane with the gate feedback, bounds retries by a per-branch cycle count, and applies an escalate-or-abandon policy when the budget is exhausted.
 - [`supervisor-autonomous-orchestrator`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-autonomous-orchestrator/spec.md) — the pump-to-brain layer: when a supervisor pane is present, the unattended loop injects each judgment call (risky prompt, `agent.question`, merge decision, non-converging branch) into that pane and nudges its orchestration sweep, instead of parking them in an unread inbox; with no supervisor pane nothing is injected.
+- [`supervisor-branch-refresh`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/supervisor-branch-refresh/spec.md) — opt-in, default-off post-merge rebase of a live worker branch onto the default branch, gated on a conjunction of safety preconditions (clean per the watcher, idle, claimed, predicted conflict-free, behind), with conflict prediction, failed-rebase abort-and-restore, exclusion of verified-awaiting-merge branches, and a HEAD-moved notification that is never `agent.advanced-main`.
 
 ### approval-
 
@@ -174,6 +176,7 @@ have no user-guide chapter: the spec itself is their documentation.
 
 - [`mcp-server`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/mcp-server/spec.md) — `git paw mcp` runs a stdio JSON-RPC MCP server exposing read-only, deterministically-sourced tools over a resolved repo/worktree root.
 - [`mcp-agent-docs`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/mcp-agent-docs/spec.md) — makes the docs site machine-consumable (`llms.txt`, sitemap, robots, per-page metadata) and bundles a path-allowlisted `docs-fetch` helper and skill.
+- [`mcp-agent-publish`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/mcp-agent-publish/spec.md) — the agent→broker write path over MCP: a fixed set of publish tools for the four agent boot events (status, artifact, blocked, question), wire-identical to the shell helper, acting as the calling agent only (derived `agent_id`, no impersonation) and excluding the supervisor authority verbs so an agent cannot self-verify.
 
 ### skill-
 

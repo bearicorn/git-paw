@@ -2,7 +2,6 @@
 
 ## Purpose
 Inject and manage a marker-delimited git-paw section in AGENTS.md files, supporting detection, generation, replacement, and file-level injection of git-paw configuration content for AI coding CLIs, and generate and write per-worktree AGENTS.md files that combine the root repository's AGENTS.md content with worktree-specific assignment sections containing branch, CLI, spec content, and file ownership information, while excluding generated files from git tracking.
-
 ## Requirements
 ### Requirement: Detect existing git-paw section
 
@@ -110,7 +109,7 @@ When appending a section to existing content, the system SHALL ensure proper spa
 
 The `WorktreeAssignment` struct SHALL support an optional `inter_agent_rules: Option<String>` field. When provided, the system SHALL append a `## Inter-Agent Rules` subsection inside the git-paw markers after the skill content (or after the assignment if no skill content is present).
 
-The inter-agent rules section SHALL be rendered verbatim from the `inter_agent_rules` string. The supervisor populates this field with rules about file ownership, commit behavior, status publishing requirements, and cherry-pick instructions.
+The inter-agent rules section SHALL be rendered verbatim from the `inter_agent_rules` string. The supervisor populates this field with rules about file ownership, commit behavior, status publishing requirements, and peer-dependency escalation. The rules SHALL NOT instruct an agent to cherry-pick a peer's commit into its own branch.
 
 When `inter_agent_rules` is `None`, the generated section SHALL be identical to the pre-supervisor output. No `## Inter-Agent Rules` section SHALL appear.
 
@@ -148,6 +147,20 @@ When `inter_agent_rules` is `None`, the generated section SHALL be identical to 
 - **GIVEN** the supervisor provides standard inter-agent rules
 - **WHEN** the rules are inspected
 - **THEN** they SHALL state that agents MUST match spec field names exactly
+
+#### Scenario: Inter-agent rules escalate peer dependencies instead of cherry-picking
+
+- **GIVEN** the supervisor provides standard inter-agent rules
+- **WHEN** the rules are inspected
+- **THEN** they SHALL instruct an agent blocked on a peer to publish `agent.blocked` naming the peer and what it needs
+- **AND** they SHALL NOT instruct the agent to cherry-pick a peer's commit into its own branch
+- **AND** they SHALL NOT contain the substring `cherry-pick`
+
+#### Scenario: Rendered rules carry no unsubstituted placeholder
+
+- **GIVEN** the supervisor provides standard inter-agent rules
+- **WHEN** `generate_worktree_section()` renders them into the assignment section
+- **THEN** the rendered section SHALL NOT contain an unsubstituted `{{BRANCH_ID}}` placeholder
 
 ### Requirement: Combine root content with worktree assignment
 
@@ -214,3 +227,4 @@ The system SHALL add the sidecar path to the worktree's ignore set BEFORE writin
 - **WHEN** `setup_worktree_agents_md()` runs to completion
 - **THEN** the sidecar exclude entry SHALL have been registered before the sidecar file was written
 - **AND** a `git status --porcelain` run in the worktree immediately after setup SHALL NOT report the sidecar instruction file as an untracked or modified entry
+
