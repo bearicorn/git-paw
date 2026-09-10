@@ -370,6 +370,19 @@ Handled by cargo-dist. Config: `[workspace.metadata.dist]` in `Cargo.toml`.
   (`dist-workspace.toml` lists only `publish-jobs = ["homebrew"]`). The
   maintainer runs `cargo publish` locally after the tag — see step 7 below.
 
+### Curating the release history
+
+A feature branch built by dogfood carries a messy history — many `--no-ff`
+per-change merges plus per-section/fixup and up-front spec commits. Before
+cutting the release, curate it into clean changelog-worthy commits (one
+conventional commit per change): follow the `release-history-curation` agent
+skill (`.agents/skills/release-history-curation/SKILL.md`) — map the
+first-parent backbone, reshape to one commit per change via a
+content-preserving `read-tree` replay (the agent harness has no
+`git rebase -i`), gate on an empty `git diff <old-tip> <new-tip>`, and verify
+each commit builds. Repo-local dev skill; conformance guarded by
+`tests/agent_skills_conform.rs`.
+
 ### Cutting a release
 
 The release flow assumes **every OpenSpec change for this release has
