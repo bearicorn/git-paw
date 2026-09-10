@@ -1,0 +1,1 @@
+Begin your assigned task. Read {{SIDECAR_REL_PATH}} first — it carries the project rules and your full superpowers plan (goal, tasks, exact file paths, and per-step verification commands). Work the steps in order and flip `- [ ]` to `- [x]` in the plan as each one lands.

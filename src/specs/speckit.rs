@@ -372,6 +372,23 @@ pub(crate) fn decompose_feature(feature: &Feature) -> Vec<SpecEntry> {
 /// Boot-prompt delimiter between sections.
 const SECTION_DELIM: &str = "\n\n---\n\n";
 
+/// Bundled static prose for [`build_prompt`] and [`your_task_section`] — the
+/// section headings and advisory/writeback sentences. Assembly (conditional
+/// inclusion, the checklist loop, the task list, and the phase/id
+/// substitution) stays compiled.
+const FEATURE_CONTEXT_HEADING: &str =
+    include_str!("../../assets/task-prompts/speckit/feature-context-heading.md");
+const IMPLEMENTATION_PLAN_HEADING: &str =
+    include_str!("../../assets/task-prompts/speckit/implementation-plan-heading.md");
+const VALIDATION_CRITERIA: &str =
+    include_str!("../../assets/task-prompts/speckit/validation-criteria.md");
+const YOUR_TASK_HEADING: &str =
+    include_str!("../../assets/task-prompts/speckit/your-task-heading.md");
+const CONSOLIDATED_INTRO: &str =
+    include_str!("../../assets/task-prompts/speckit/consolidated-intro.md");
+const CONSOLIDATED_FOOTER: &str =
+    include_str!("../../assets/task-prompts/speckit/consolidated-footer.md");
+
 /// Builds the boot-prompt content for a Spec Kit `SpecEntry`.
 ///
 /// Sections in order, separated by `\n\n---\n\n`:
@@ -388,23 +405,19 @@ pub(crate) fn build_prompt(feature: &Feature, kind: &EntryKind<'_>) -> String {
     if let Some(spec) = feature.spec_md.as_deref() {
         let trimmed = spec.trim();
         if !trimmed.is_empty() {
-            sections.push(format!("## Feature Context\n\n{trimmed}"));
+            sections.push(format!("{FEATURE_CONTEXT_HEADING}\n\n{trimmed}"));
         }
     }
 
     if let Some(plan) = feature.plan_md.as_deref() {
         let trimmed = plan.trim();
         if !trimmed.is_empty() {
-            sections.push(format!("## Implementation Plan\n\n{trimmed}"));
+            sections.push(format!("{IMPLEMENTATION_PLAN_HEADING}\n\n{trimmed}"));
         }
     }
 
     if !feature.checklists.is_empty() {
-        let mut section = String::from(
-            "## Validation Criteria (advisory)\n\n\
-             The following checklists are advisory context for this release \
-             (full enforcement is planned for v1.0.0).",
-        );
+        let mut section = VALIDATION_CRITERIA.to_string();
         for (name, content) in &feature.checklists {
             let _ = write!(section, "\n\n### {name}\n\n{}", content.trim());
         }
@@ -417,7 +430,7 @@ pub(crate) fn build_prompt(feature: &Feature, kind: &EntryKind<'_>) -> String {
 }
 
 fn your_task_section(kind: &EntryKind<'_>) -> String {
-    let mut out = String::from("## Your Task\n\n");
+    let mut out = format!("{YOUR_TASK_HEADING}\n\n");
     match kind {
         EntryKind::Single { task } => {
             let id = &task.id;
@@ -429,23 +442,17 @@ fn your_task_section(kind: &EntryKind<'_>) -> String {
             phase_number,
             phase_name,
         } => {
-            let _ = writeln!(
-                out,
-                "Phase {phase_number} ({phase_name}). Complete the following tasks in order:"
-            );
+            let intro = CONSOLIDATED_INTRO
+                .replace("{{PHASE_NUMBER}}", &phase_number.to_string())
+                .replace("{{PHASE_NAME}}", phase_name);
+            let _ = writeln!(out, "{intro}");
             for task in tasks {
                 let id = &task.id;
                 let desc = &task.description;
                 let _ = write!(out, "\n- {id} — {desc}");
             }
-            out.push_str(
-                "\n\nWork through these tasks sequentially in the order listed. \
-                 After completing each task, flip its `- [ ]` checkbox to \
-                 `- [x]` in this worktree's `tasks.md`. You may commit the \
-                 writeback alongside the task's code change or as a separate \
-                 commit. Publish `agent.done` only when every task above \
-                 shows `- [x]` in `tasks.md`.",
-            );
+            out.push_str("\n\n");
+            out.push_str(CONSOLIDATED_FOOTER);
         }
     }
     out
@@ -832,6 +839,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    // Byte-identical safety net (D1 / task 1.3): the task-prompt section
+    // scaffolding (headings, advisory sentence, writeback footer), relocated
+    // from compiled string literals into bundled assets, must render exactly
+    // as before; `parse_tasks_md`, phase grouping and `[P]` detection stay
+    // compiled and are exercised unchanged by this fixture.
+    #[test]
+    fn build_prompt_is_byte_identical_to_ground_truth() {
+        let feat = feature_fixture("003-user-list", "## Phase 2: Build\n- [ ] T001 one\n");
+        let phase = current_phase(&feat.phases).unwrap();
+
+        let single_prompt = build_prompt(
+            &feat,
+            &EntryKind::Single {
+                task: &phase.tasks[0],
+            },
+        );
+        assert_eq!(
+            single_prompt,
+            "## Feature Context\n\nSPEC\n\n---\n\n## Implementation Plan\n\nPLAN\n\n---\n\n## Your Task\n\nT001 — one"
+        );
+
+        let consolidated_prompt = build_prompt(
+            &feat,
+            &EntryKind::Consolidated {
+                tasks: phase.tasks.iter().collect(),
+                phase_number: phase.number,
+                phase_name: &phase.name,
+            },
+        );
+        assert_eq!(
+            consolidated_prompt,
+            "## Feature Context\n\nSPEC\n\n---\n\n## Implementation Plan\n\nPLAN\n\n---\n\n## Your Task\n\n\
+             Phase 2 (Build). Complete the following tasks in order:\n\n- T001 — one\n\n\
+             Work through these tasks sequentially in the order listed. After completing each task, \
+             flip its `- [ ]` checkbox to `- [x]` in this worktree's `tasks.md`. You may commit the \
+             writeback alongside the task's code change or as a separate commit. Publish `agent.done` \
+             only when every task above shows `- [x]` in `tasks.md`."
+        );
     }
 
     // --- build_prompt ---

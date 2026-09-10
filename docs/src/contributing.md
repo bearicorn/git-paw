@@ -72,6 +72,18 @@ Tests are organized as:
 - **No panics:** No `unwrap()` or `expect()` in non-test `src/` code
 - **Documentation:** `//!` module-level doc comments, `///` on all public items
 
+## Where agent-facing text lives
+
+Instructions, rules, directives, framing text and task-prompt scaffolding that an agent reads —
+in its boot prompt, sidecar, or skill content — belong in a bundled asset under `assets/`
+(embedded at compile time via `include_str!`), never assembled from a Rust `push_str!`/`format!`
+call. Compiled code keeps the *assembly*: placeholder substitution, conditional inclusion,
+per-backend selection, dedupe, and region gating. Assets are what the no-language-leak audit
+(`tests/lang_agnostic_skill_audit.rs`) can see; prose compiled into a `&str` literal is invisible
+to it, which is exactly how a git-paw-specific assumption once leaked into every consumer's
+session. See the `export-agnosticism` dev skill (`.agents/skills/export-agnosticism/`) for the
+full export-surface inventory.
+
 ## Commit Format
 
 This project uses [Conventional Commits](https://www.conventionalcommits.org/):

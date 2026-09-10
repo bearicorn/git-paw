@@ -1,0 +1,1 @@
+OpenSpec specs live under `openspec/changes/<change-name>/{proposal,specs,tasks}.md` with archived deltas merged into `openspec/specs/`; run `openspec validate <change-name> --strict` to verify a change.

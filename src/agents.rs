@@ -139,6 +139,10 @@ pub struct WorktreeAssignment {
     pub inter_agent_rules: Option<String>,
 }
 
+/// Bundled template for [`build_inter_agent_rules`], carrying the
+/// `{{PEERS}}` and `{{OWN_ID}}` substitution placeholders.
+const INTER_AGENT_RULES_TEMPLATE: &str = include_str!("../assets/inter-agent-rules.md");
+
 /// Builds the standard inter-agent rules block that the supervisor injects
 /// into every coding agent's `AGENTS.md`.
 ///
@@ -162,34 +166,9 @@ pub fn build_inter_agent_rules(own_branch: &str, branches: &[&str]) -> String {
     }
     let own_id = crate::broker::messages::slugify_branch(own_branch);
 
-    let mut out = String::new();
-    out.push_str("These rules apply to every agent in this supervisor session. ");
-    out.push_str("Violating them blocks the supervisor's verification step.\n\n");
-    out.push_str("- **File ownership is exclusive.** You MUST NOT edit files owned by ");
-    out.push_str("other agents. Peers in this session: ");
-    out.push_str(&peers);
-    out.push_str(". Stay inside your declared file ownership list.\n");
-    out.push_str("- **Commit, never push.** You MUST commit to your worktree branch and ");
-    out.push_str("MUST NOT `git push` to any remote. The supervisor merges branches.\n");
-    out.push_str("- **Status publishing is automatic.** git-paw watches your worktree and ");
-    out.push_str("publishes `agent.status` with `modified_files` for you whenever your git ");
-    out.push_str("status changes. A `post-commit` hook publishes `agent.artifact` on each ");
-    out.push_str("commit. You do not need to curl these yourself.\n");
-    out.push_str("- **Watch peer status.** Poll `/messages/");
-    out.push_str(&own_id);
-    out.push_str("` to see peer `agent.artifact` messages so you detect conflicts before ");
-    out.push_str("the supervisor does.\n");
-    out.push_str("- **Escalate peer dependencies, don't graft their commits.** When you are ");
-    out.push_str("blocked on a peer, publish `agent.blocked` naming the peer and what you ");
-    out.push_str("need, then continue on unblocked work or wait. You MUST NOT graft a peer's ");
-    out.push_str("commit into your own branch: doing so duplicates a commit the supervisor ");
-    out.push_str("will later merge from the peer's own branch, leaving your branch divergent ");
-    out.push_str("and unmergeable. Once the peer's work lands on the base branch, take it on ");
-    out.push_str("via the `agent.advanced-main` discipline instead.\n");
-    out.push_str("- **Match spec field names exactly.** When implementing a spec, use the ");
-    out.push_str("exact field, function, and message names from the spec — do not rename ");
-    out.push_str("them. The supervisor's spec audit will reject mismatched names.\n");
-    out
+    INTER_AGENT_RULES_TEMPLATE
+        .replace("{{PEERS}}", &peers)
+        .replace("{{OWN_ID}}", &own_id)
 }
 
 /// Generates a marker-delimited assignment section for a worktree's AGENTS.md.
@@ -504,41 +483,7 @@ pub fn update_agent_marker(
 /// per-worktree gitdir when the hook runs, so the dispatcher reads the right
 /// file for whichever worktree just committed.
 fn build_post_commit_dispatcher_hook() -> String {
-    format!(
-        "#!/bin/sh\n\
-         {HOOK_START_MARKER}\n\
-         # Dispatcher: reads the per-worktree paw-agent-id marker and publishes\n\
-         # agent.artifact to the git-paw broker. Resolve the gitdir via\n\
-         # rev-parse with a GIT_DIR fallback (git does not always export it).\n\
-         PAW_GD=\"${{GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}}\"\n\
-         if [ -n \"$PAW_GD\" ] && [ -f \"$PAW_GD/paw-agent-id\" ]; then\n\
-             . \"$PAW_GD/paw-agent-id\"\n\
-             FILES=$(git diff HEAD~1 --name-only 2>/dev/null | awk '{{printf \"%s\\\"%s\\\"\", (NR>1?\",\":\"\"), $0}}')\n\
-             curl -s -X POST \"$PAW_BROKER_URL/publish\" \\\n\
-                 -H 'Content-Type: application/json' \\\n\
-                 -d \"{{\\\"type\\\":\\\"agent.artifact\\\",\\\"agent_id\\\":\\\"$PAW_AGENT_ID\\\",\\\"payload\\\":{{\\\"status\\\":\\\"committed\\\",\\\"exports\\\":[],\\\"modified_files\\\":[$FILES]}}}}\" \\\n\
-                 >/dev/null 2>&1 || true\n\
-             # Branch-mismatch detection (detection without enforcement — fires\n\
-             # regardless of PAW_STRICT_BRANCH_GUARD; the pre-commit hook owns\n\
-             # blocking). Publishes agent.feedback + an agent.learning record\n\
-             # (category permission_pattern) identifying the contamination.\n\
-             if [ -n \"$PAW_EXPECTED_BRANCH\" ]; then\n\
-                 PAW_CUR=$(git symbolic-ref --short HEAD 2>/dev/null)\n\
-                 if [ -n \"$PAW_CUR\" ] && [ \"$PAW_CUR\" != \"$PAW_EXPECTED_BRANCH\" ]; then\n\
-                     PAW_SHA=$(git rev-parse HEAD 2>/dev/null)\n\
-                     curl -s -X POST \"$PAW_BROKER_URL/publish\" \\\n\
-                         -H 'Content-Type: application/json' \\\n\
-                         -d \"{{\\\"type\\\":\\\"agent.feedback\\\",\\\"agent_id\\\":\\\"$PAW_AGENT_ID\\\",\\\"payload\\\":{{\\\"from\\\":\\\"branch-guard\\\",\\\"errors\\\":[\\\"commit $PAW_SHA advanced '$PAW_CUR' but this worktree is for '$PAW_EXPECTED_BRANCH'; cherry-pick onto '$PAW_EXPECTED_BRANCH' and reset '$PAW_CUR'\\\"]}}}}\" \\\n\
-                         >/dev/null 2>&1 || true\n\
-                     curl -s -X POST \"$PAW_BROKER_URL/publish\" \\\n\
-                         -H 'Content-Type: application/json' \\\n\
-                         -d \"{{\\\"type\\\":\\\"agent.learning\\\",\\\"agent_id\\\":\\\"$PAW_AGENT_ID\\\",\\\"payload\\\":{{\\\"category\\\":\\\"permission_pattern\\\",\\\"body\\\":\\\"cross-worktree contamination: commit $PAW_SHA landed on '$PAW_CUR' instead of expected '$PAW_EXPECTED_BRANCH'\\\"}}}}\" \\\n\
-                         >/dev/null 2>&1 || true\n\
-                 fi\n\
-             fi\n\
-         fi\n\
-         {HOOK_END_MARKER}\n"
-    )
+    include_str!("../assets/hooks/post-commit.sh").to_string()
 }
 
 fn build_pre_push_hook() -> String {
@@ -547,16 +492,8 @@ fn build_pre_push_hook() -> String {
     // installs into the common gitdir (shared with the main repo and all
     // linked worktrees), so without this gate the hook would also block
     // legitimate pushes from the main repo. Mirror the post-commit
-    // dispatcher's gate at line 388 so behaviour is consistent.
-    format!(
-        "#!/bin/sh\n\
-         {HOOK_START_MARKER}\n\
-         if [ -n \"$GIT_DIR\" ] && [ -f \"$GIT_DIR/paw-agent-id\" ]; then\n\
-         echo 'error: git-paw agents must not push. The supervisor handles merges.' >&2\n\
-         exit 1\n\
-         fi\n\
-         {HOOK_END_MARKER}\n"
-    )
+    // dispatcher's gate above so behaviour is consistent.
+    include_str!("../assets/hooks/pre-push.sh").to_string()
 }
 
 /// Builds the `pre-commit` branch-guard hook.
@@ -571,29 +508,7 @@ fn build_pre_push_hook() -> String {
 /// Gated on the marker's presence so non-agent checkouts (the main repo)
 /// committing through the shared hooks dir are never blocked.
 fn build_pre_commit_branch_guard_hook() -> String {
-    format!(
-        "#!/bin/sh\n\
-         {HOOK_START_MARKER}\n\
-         # Branch guard: refuse a commit that would advance a branch other than\n\
-         # the one this worktree was created for (cross-worktree contamination).\n\
-         # git does not reliably export GIT_DIR to pre-commit, so resolve the\n\
-         # per-worktree gitdir via rev-parse with a GIT_DIR fallback.\n\
-         PAW_GD=\"${{GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}}\"\n\
-         if [ -n \"$PAW_GD\" ] && [ -f \"$PAW_GD/paw-agent-id\" ]; then\n\
-             . \"$PAW_GD/paw-agent-id\"\n\
-             if [ -n \"$PAW_EXPECTED_BRANCH\" ] && [ \"$PAW_STRICT_BRANCH_GUARD\" != \"false\" ]; then\n\
-                 PAW_CUR=$(git symbolic-ref --short HEAD 2>/dev/null)\n\
-                 if [ -n \"$PAW_CUR\" ] && [ \"$PAW_CUR\" != \"$PAW_EXPECTED_BRANCH\" ]; then\n\
-                     echo \"error: git-paw branch guard refused this commit\" >&2\n\
-                     echo \"  HEAD is on '$PAW_CUR' but this worktree is for '$PAW_EXPECTED_BRANCH'.\" >&2\n\
-                     echo \"  The commit would advance the wrong branch. Switch back to '$PAW_EXPECTED_BRANCH'\" >&2\n\
-                     echo \"  (or set [supervisor] strict_branch_guard = false to override).\" >&2\n\
-                     exit 1\n\
-                 fi\n\
-             fi\n\
-         fi\n\
-         {HOOK_END_MARKER}\n"
-    )
+    include_str!("../assets/hooks/pre-commit.sh").to_string()
 }
 
 /// Chains `new_body` onto `existing`, preserving the existing content.
@@ -910,6 +825,86 @@ pub fn remove_session_boot_block(repo_root: &Path) -> Result<(), PawError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Byte-identical safety net (D1 / task 1.3): the inter-agent rules block
+    // and the three git hook bodies, relocated from compiled `push_str`/
+    // `format!` calls into bundled assets, must render exactly as before.
+    #[test]
+    fn inter_agent_rules_is_byte_identical_to_ground_truth() {
+        let out = build_inter_agent_rules("feat/example", &["feat/a", "feat/b"]);
+        assert_eq!(
+            out,
+            "These rules apply to every agent in this supervisor session. Violating them blocks the supervisor's verification step.\n\
+             \n\
+             - **File ownership is exclusive.** You MUST NOT edit files owned by other agents. Peers in this session: `feat/a`, `feat/b`. Stay inside your declared file ownership list.\n\
+             - **Commit, never push.** You MUST commit to your worktree branch and MUST NOT `git push` to any remote. The supervisor merges branches.\n\
+             - **Status publishing is automatic.** git-paw watches your worktree and publishes `agent.status` with `modified_files` for you whenever your git status changes. A `post-commit` hook publishes `agent.artifact` on each commit. You do not need to curl these yourself.\n\
+             - **Watch peer status.** Poll `/messages/feat-example` to see peer `agent.artifact` messages so you detect conflicts before the supervisor does.\n\
+             - **Escalate peer dependencies, don't graft their commits.** When you are blocked on a peer, publish `agent.blocked` naming the peer and what you need, then continue on unblocked work or wait. You MUST NOT graft a peer's commit into your own branch: doing so duplicates a commit the supervisor will later merge from the peer's own branch, leaving your branch divergent and unmergeable. Once the peer's work lands on the base branch, take it on via the `agent.advanced-main` discipline instead.\n\
+             - **Match spec field names exactly.** When implementing a spec, use the exact field, function, and message names from the spec — do not rename them. The supervisor's spec audit will reject mismatched names.\n"
+        );
+    }
+
+    #[test]
+    fn post_commit_hook_is_byte_identical_to_ground_truth() {
+        let out = build_post_commit_dispatcher_hook();
+        assert!(out.starts_with("#!/bin/sh\n# >>> git-paw managed hook >>>\n"));
+        assert!(out.ends_with("fi\n# <<< git-paw managed hook <<<\n"));
+        assert!(out.contains("PAW_GD=\"${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}\""));
+        assert!(out.contains(
+            "-d \"{\\\"type\\\":\\\"agent.artifact\\\",\\\"agent_id\\\":\\\"$PAW_AGENT_ID\\\",\\\"payload\\\":{\\\"status\\\":\\\"committed\\\",\\\"exports\\\":[],\\\"modified_files\\\":[$FILES]}}\" \\"
+        ));
+        assert!(out.contains(
+            "-d \"{\\\"type\\\":\\\"agent.feedback\\\",\\\"agent_id\\\":\\\"$PAW_AGENT_ID\\\",\\\"payload\\\":{\\\"from\\\":\\\"branch-guard\\\""
+        ));
+        assert!(out.contains(
+            "-d \"{\\\"type\\\":\\\"agent.learning\\\",\\\"agent_id\\\":\\\"$PAW_AGENT_ID\\\",\\\"payload\\\":{\\\"category\\\":\\\"permission_pattern\\\""
+        ));
+    }
+
+    #[test]
+    fn pre_push_hook_is_byte_identical_to_ground_truth() {
+        let out = build_pre_push_hook();
+        assert_eq!(
+            out,
+            "#!/bin/sh\n\
+             # >>> git-paw managed hook >>>\n\
+             if [ -n \"$GIT_DIR\" ] && [ -f \"$GIT_DIR/paw-agent-id\" ]; then\n\
+             echo 'error: git-paw agents must not push. The supervisor handles merges.' >&2\n\
+             exit 1\n\
+             fi\n\
+             # <<< git-paw managed hook <<<\n"
+        );
+    }
+
+    #[test]
+    fn pre_commit_hook_is_byte_identical_to_ground_truth() {
+        let out = build_pre_commit_branch_guard_hook();
+        assert_eq!(
+            out,
+            "#!/bin/sh\n\
+             # >>> git-paw managed hook >>>\n\
+             # Branch guard: refuse a commit that would advance a branch other than\n\
+             # the one this worktree was created for (cross-worktree contamination).\n\
+             # git does not reliably export GIT_DIR to pre-commit, so resolve the\n\
+             # per-worktree gitdir via rev-parse with a GIT_DIR fallback.\n\
+             PAW_GD=\"${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}\"\n\
+             if [ -n \"$PAW_GD\" ] && [ -f \"$PAW_GD/paw-agent-id\" ]; then\n\
+             . \"$PAW_GD/paw-agent-id\"\n\
+             if [ -n \"$PAW_EXPECTED_BRANCH\" ] && [ \"$PAW_STRICT_BRANCH_GUARD\" != \"false\" ]; then\n\
+             PAW_CUR=$(git symbolic-ref --short HEAD 2>/dev/null)\n\
+             if [ -n \"$PAW_CUR\" ] && [ \"$PAW_CUR\" != \"$PAW_EXPECTED_BRANCH\" ]; then\n\
+             echo \"error: git-paw branch guard refused this commit\" >&2\n\
+             echo \"  HEAD is on '$PAW_CUR' but this worktree is for '$PAW_EXPECTED_BRANCH'.\" >&2\n\
+             echo \"  The commit would advance the wrong branch. Switch back to '$PAW_EXPECTED_BRANCH'\" >&2\n\
+             echo \"  (or set [supervisor] strict_branch_guard = false to override).\" >&2\n\
+             exit 1\n\
+             fi\n\
+             fi\n\
+             fi\n\
+             # <<< git-paw managed hook <<<\n"
+        );
+    }
 
     /// Test helper: generates a sample marker-delimited section for testing injection logic.
     fn sample_section() -> String {

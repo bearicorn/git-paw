@@ -1,0 +1,1 @@
+Read {{SIDECAR_REL_PATH}} first for your assignment, then begin your assigned task.

@@ -379,39 +379,31 @@ fn reattach_active_session_or_refuse(session_name: &str) -> Result<(), PawError>
 /// and `Superpowers` entries need no such pointer since their sidecar
 /// already carries the full assignment. When no spec is associated, the
 /// prompt is the default fallback that points only at the sidecar.
+/// Bundled per-backend templates for [`build_task_prompt`], carrying the
+/// `{{SIDECAR_REL_PATH}}` placeholder and, where the backend needs it, the
+/// `{{SPEC_ID}}` placeholder.
+const TASK_PROMPT_NO_SPEC: &str = include_str!("../assets/boot-task-prompts/no-spec.md");
+const TASK_PROMPT_OPENSPEC: &str = include_str!("../assets/boot-task-prompts/openspec.md");
+const TASK_PROMPT_MARKDOWN: &str = include_str!("../assets/boot-task-prompts/markdown.md");
+const TASK_PROMPT_SPECKIT: &str = include_str!("../assets/boot-task-prompts/speckit.md");
+const TASK_PROMPT_SUPERPOWERS: &str = include_str!("../assets/boot-task-prompts/superpowers.md");
+
 pub(crate) fn build_task_prompt(spec_entry: Option<&git_paw::specs::SpecEntry>) -> String {
     use git_paw::agents::SIDECAR_REL_PATH;
     use git_paw::specs::SpecBackendKind;
     match spec_entry {
-        Some(s) => match s.backend {
-            SpecBackendKind::OpenSpec => format!(
-                "Read {SIDECAR_REL_PATH} first — it carries your assignment and \
-                 coordination rules — then run /opsx:apply {id}.",
-                id = s.id,
-            ),
-            SpecBackendKind::Markdown => format!(
-                "Begin your assigned task. Read {SIDECAR_REL_PATH} first — it carries the \
-                 project rules, your full spec, and your assignment. Additional artifacts \
-                 (proposal, design, specs, tasks) live under openspec/changes/{id}/ — read \
-                 them all before starting.",
-                id = s.id,
-            ),
-            SpecBackendKind::SpecKit => format!(
-                "Begin your assigned task. Read {SIDECAR_REL_PATH} first — it already \
-                 carries the project rules and your full Spec Kit assignment (feature \
-                 spec, implementation plan, and task phase) embedded inline; no other \
-                 artifact directory is needed to start."
-            ),
-            SpecBackendKind::Superpowers => format!(
-                "Begin your assigned task. Read {SIDECAR_REL_PATH} first — it carries the \
-                 project rules and your full superpowers plan (goal, tasks, exact file \
-                 paths, and per-step verification commands). Work the steps in order and \
-                 flip `- [ ]` to `- [x]` in the plan as each one lands."
-            ),
-        },
-        None => format!(
-            "Read {SIDECAR_REL_PATH} first for your assignment, then begin your assigned task."
-        ),
+        Some(s) => {
+            let template = match s.backend {
+                SpecBackendKind::OpenSpec => TASK_PROMPT_OPENSPEC,
+                SpecBackendKind::Markdown => TASK_PROMPT_MARKDOWN,
+                SpecBackendKind::SpecKit => TASK_PROMPT_SPECKIT,
+                SpecBackendKind::Superpowers => TASK_PROMPT_SUPERPOWERS,
+            };
+            template
+                .replace("{{SIDECAR_REL_PATH}}", SIDECAR_REL_PATH)
+                .replace("{{SPEC_ID}}", &s.id)
+        }
+        None => TASK_PROMPT_NO_SPEC.replace("{{SIDECAR_REL_PATH}}", SIDECAR_REL_PATH),
     }
 }
 
@@ -1635,6 +1627,48 @@ mod tests {
     use std::path::PathBuf;
     use std::time::UNIX_EPOCH;
     use tempfile::TempDir;
+
+    // Byte-identical safety net (D1 / task 1.3): each per-backend boot-prompt
+    // framing sentence, relocated from a compiled match arm into its own
+    // asset, must render exactly as before.
+    #[test]
+    fn build_task_prompt_per_backend_is_byte_identical_to_ground_truth() {
+        use git_paw::specs::{SpecBackendKind, SpecEntry};
+        let mk = |backend: SpecBackendKind| SpecEntry {
+            id: "my-change".to_string(),
+            backend,
+            branch: "feat/my-change".to_string(),
+            cli: None,
+            prompt: String::new(),
+            owned_files: None,
+        };
+        assert_eq!(
+            build_task_prompt(Some(&mk(SpecBackendKind::OpenSpec))),
+            "Read .git-paw/AGENTS.local.md first — it carries your assignment and \
+             coordination rules — then run /opsx:apply my-change."
+        );
+        assert_eq!(
+            build_task_prompt(Some(&mk(SpecBackendKind::Markdown))),
+            "Begin your assigned task. Read .git-paw/AGENTS.local.md first — it carries the \
+             project rules, your full spec, and your assignment. Additional artifacts \
+             (proposal, design, specs, tasks) live under openspec/changes/my-change/ — read \
+             them all before starting."
+        );
+        assert_eq!(
+            build_task_prompt(Some(&mk(SpecBackendKind::SpecKit))),
+            "Begin your assigned task. Read .git-paw/AGENTS.local.md first — it already \
+             carries the project rules and your full Spec Kit assignment (feature \
+             spec, implementation plan, and task phase) embedded inline; no other \
+             artifact directory is needed to start."
+        );
+        assert_eq!(
+            build_task_prompt(Some(&mk(SpecBackendKind::Superpowers))),
+            "Begin your assigned task. Read .git-paw/AGENTS.local.md first — it carries the \
+             project rules and your full superpowers plan (goal, tasks, exact file \
+             paths, and per-step verification commands). Work the steps in order and \
+             flip `- [ ]` to `- [x]` in the plan as each one lands."
+        );
+    }
 
     // -----------------------------------------------------------------------
     // resolve_dispatch_target — pure routing for the `start` subcommand

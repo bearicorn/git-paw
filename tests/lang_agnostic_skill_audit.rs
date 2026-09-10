@@ -19,8 +19,19 @@ use git_paw::specs::SpecBackendKind;
 /// `Requirement: No language-leak audit` spec.
 ///
 /// The list is the spec-mandated minimum; the audit can be tightened
-/// over time without changing this file's contract.
-const FORBIDDEN_TOKENS: &[&str] = &["cargo", "rustdoc", ".rs:", "Cargo.toml", "rustc"];
+/// over time without changing this file's contract. `Claude Code` and
+/// `.claude/` are vendor product names/paths (D5): a bundled asset may name
+/// a specific CLI only inside an `<!-- allowlist-prose -->` span, so naming
+/// a vendor is a deliberate, reviewable act rather than an accident.
+const FORBIDDEN_TOKENS: &[&str] = &[
+    "cargo",
+    "rustdoc",
+    ".rs:",
+    "Cargo.toml",
+    "rustc",
+    "Claude Code",
+    ".claude/",
+];
 
 /// Renders the embedded supervisor skill against `backends` and a
 /// representative gate-command config. All gate fields are `None` so
@@ -485,4 +496,92 @@ fn commit_convention_audit_catches_a_hardcoded_prefix_regression() {
         "commit-convention audit must fail when a bundled skill hardcodes a \
          Conventional-Commits prefix as the commit-message format",
     );
+}
+
+// ---------------------------------------------------------------------------
+// compiled-prose-to-assets: every bundled asset carrying agent-facing prose
+// is in the audited set (task 5.1), not only the supervisor skill, and the
+// forbidden list now includes vendor product names/paths (task 5.2, D5).
+// ---------------------------------------------------------------------------
+
+/// Every bundled asset carrying agent-facing prose that the no-leak audit
+/// covers, beyond the rendered supervisor/coordination skills already
+/// audited above. Includes the prose relocated out of compiled Rust by
+/// `compiled-prose-to-assets` and the hook bodies (`git-hook-injection`
+/// scenario "Hook assets are covered by the export audit").
+const AUDITED_PROSE_ASSETS: &[&str] = &[
+    "assets/agent-skills/docs-fetch.md",
+    "assets/boot-block-template.md",
+    "assets/boot-block-mcp-template.md",
+    "assets/inter-agent-rules.md",
+    "assets/governance-section-header.md",
+    "assets/supervisor-framing.md",
+    "assets/spec-path-doctrine/openspec.md",
+    "assets/spec-path-doctrine/speckit.md",
+    "assets/spec-path-doctrine/markdown.md",
+    "assets/spec-path-doctrine/superpowers.md",
+    "assets/boot-task-prompts/no-spec.md",
+    "assets/boot-task-prompts/openspec.md",
+    "assets/boot-task-prompts/markdown.md",
+    "assets/boot-task-prompts/speckit.md",
+    "assets/boot-task-prompts/superpowers.md",
+    "assets/task-prompts/speckit/feature-context-heading.md",
+    "assets/task-prompts/speckit/implementation-plan-heading.md",
+    "assets/task-prompts/speckit/validation-criteria.md",
+    "assets/task-prompts/speckit/your-task-heading.md",
+    "assets/task-prompts/speckit/consolidated-intro.md",
+    "assets/task-prompts/speckit/consolidated-footer.md",
+    "assets/task-prompts/superpowers/plan-context-heading.md",
+    "assets/task-prompts/superpowers/your-tasks-heading.md",
+    "assets/task-prompts/superpowers/execution.md",
+    "assets/hooks/post-commit.sh",
+    "assets/hooks/pre-push.sh",
+    "assets/hooks/pre-commit.sh",
+];
+
+#[test]
+fn audit_covers_every_relocated_prose_asset() {
+    use std::fs;
+    for path in AUDITED_PROSE_ASSETS {
+        let content =
+            fs::read_to_string(path).unwrap_or_else(|e| panic!("{path} must be readable: {e}"));
+        assert_no_forbidden_tokens(&content, path);
+    }
+}
+
+/// Scenario "Audit catches a vendor product-name leak": a bundled asset
+/// edited to add a vendor product name outside an allowed span fails the
+/// audit and identifies the offending name plus its location (task 5.4).
+#[test]
+fn audit_catches_a_vendor_product_name_leak() {
+    let with_leak = "Read your assignment, then open Claude Code and begin.".to_string();
+    let result = std::panic::catch_unwind(|| {
+        assert_no_forbidden_tokens(&with_leak, "regression-test");
+    });
+    assert!(
+        result.is_err(),
+        "no-leak audit must fail when a vendor product name appears outside an allowed span",
+    );
+
+    let with_path_leak = "State lives under the repo's .claude/ directory.".to_string();
+    let result = std::panic::catch_unwind(|| {
+        assert_no_forbidden_tokens(&with_path_leak, "regression-test");
+    });
+    assert!(
+        result.is_err(),
+        "no-leak audit must fail when a vendor-specific path appears outside an allowed span",
+    );
+}
+
+/// Scenario "Allowed span permits a deliberate CLI enumeration": the
+/// paste-buffer indicator list in the supervisor skill names `Claude Code`
+/// inside an `<!-- allowlist-prose -->` span, so it must not fail the audit.
+#[test]
+fn allowed_span_permits_the_paste_buffer_cli_enumeration() {
+    let rendered = render_supervisor_for(&[SpecBackendKind::OpenSpec]);
+    assert!(
+        rendered.contains("Claude Code"),
+        "supervisor skill should still name Claude Code inside its allowed CLI enumeration"
+    );
+    assert_no_forbidden_tokens(&rendered, "supervisor-paste-buffer-enumeration");
 }

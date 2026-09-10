@@ -1,0 +1,1 @@
+Spec Kit specs live under `.specify/specs/<feature>/{spec,plan,tasks}.md` and use the Spec Kit checklist convention; mark `- [ ]` tasks complete as each one lands.

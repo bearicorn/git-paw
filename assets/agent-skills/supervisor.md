@@ -224,11 +224,10 @@ text arrives in its pane. This workaround is transitional — MCP-mediated inbox
 access will let agents consume `agent.answer` directly and remove the
 dual-write step.
 
-If the answer text is long enough to trigger a paste-buffer indicator (e.g.
-`Pasted text #N` on Claude Code), or the follow-up `Enter` above did not
-submit it, recover the stuck line: inspect the pane, then clear it (`C-u`),
-re-send the answer text, and `Enter` again — a lone `Enter` / `C-m` against a
-stale input line is a no-op.
+If the answer text is long enough to trigger a paste-buffer indicator, or the
+follow-up `Enter` above did not submit it, recover the stuck line: inspect
+the pane, then clear it (`C-u`), re-send the answer text, and `Enter` again
+— a lone `Enter` / `C-m` against a stale input line is a no-op.
 See the paste-buffer indicator sub-case under **Stall detection** for the
 full indicator list and heuristic fallback.
 
@@ -300,22 +299,21 @@ your own input and interrupts the command you are mid-way through running.
 `sweep.sh` targets agent panes by design; when you send keys directly,
 always pass an explicit agent pane index and confirm it is not 0.
 
-**When a drive loop is running (unattended), do NOT blanket-approve safe
-prompts by sweeping.** An in-process drive loop already auto-approves
-classifier-safe prompts on every pane; if you also sweep-and-approve them you
-race it — the approval digit can land as literal pane text. Your boot context
-tells you when a drive loop is running. In that mode, each cycle:
+By default (an attended session), you are the sole approver: sweep and
+approve classifier-safe prompts yourself, as usual.
 
-1. **Drain the loop's escalations first.** The prompts the loop could not
-   classify safe arrive as review items in your inbox. Reason about each and
-   either approve the specific escalated pane
-   (`.git-paw/scripts/sweep.sh approve <pane>`) or publish feedback — before
-   anything else, so blocked agents unblock fastest.
-2. **Then run your normal sweep** — verify, merge, conflicts, detect-stuck,
-   status — but WITHOUT approving safe prompts (the loop owns those).
+<!-- drive-loop-directive:begin -->
+## Unattended: a drive loop is running
 
-When NO drive loop is running (an attended session), you are the sole approver:
-sweep and approve classifier-safe prompts yourself, as usual.
+An in-process drive loop is auto-approving classifier-safe permission prompts on every pane this session. It owns mechanical approval of safe prompts — do NOT blanket-sweep-and-approve them yourself, or you will race the loop.
+
+The loop is the pump; you are the brain. It does not merely park what it cannot decide — it types each judgment call straight into THIS pane and moves on without waiting for you, and it nudges you to run an orchestration sweep on a longer cadence. A task prompt arriving here with no human behind it is the loop handing you work; see **Judgment calls handed to you** for the four kinds and how to decide each.
+
+Your approval role this session is escalation-driven, in this order each cycle:
+
+1. **Drain the loop's escalations first.** Prompts the loop could not classify safe are injected here AND recorded as review items in your broker inbox — the inbox is the backstop for anything that arrived while this pane was busy. Reason about each and either approve the specific escalated pane (`.git-paw/scripts/sweep.sh approve <pane>`) or publish feedback — before anything else, so blocked agents unblock fastest.
+2. **Then run your normal sweep** — verification, merge, conflict handling, detect-stuck, and status — as usual, but WITHOUT blanket-approving safe prompts (the loop owns those).
+<!-- drive-loop-directive:end -->
 
 ### Cross-worktree git — `git -C <path>`, never `cd <path> && git`
 
@@ -640,8 +638,8 @@ always the authoritative check, never this summary:
       coding-agent boot prompts are often long enough on paste-aware CLIs to
       land in a paste buffer immediately, so don't wait for the 5-minute
       stall threshold. Known indicators are illustrative, not exhaustive —
-      apply judgment:
-      - Claude Code: `Pasted text #N` (where `N` is a number, e.g. `Pasted text #1`)
+      apply judgment (a deliberate, reviewable enumeration of known CLIs):
+      - <!-- allowlist-prose -->Claude Code: `Pasted text #N` (where `N` is a number, e.g. `Pasted text #1`)<!-- /allowlist-prose -->
       - Other CLIs: variants like `Multiline input`, `[paste]`, or any other
         text suggesting the input area holds buffered content awaiting submit
       - **Heuristic fallback**: if a pane shows long buffered text in the
@@ -1088,10 +1086,10 @@ it as a finding, not a distinct failure type.
 
 ### Verify accept-edits commits before merge
 
-Claude Code's `⏵⏵ accept edits` mode (and equivalent auto-accept modes on other
-CLIs) silently applies file edits without re-prompting once enabled. The supervisor
-loses real-time visibility into what the agent is editing — every edit lands on disk
-before any verification step runs. The fix is post-hoc: when you receive an
+Some CLIs offer an auto-accept editing mode that silently applies file edits
+without re-prompting once enabled. The supervisor loses real-time visibility
+into what the agent is editing — every edit lands on disk before any
+verification step runs. The fix is post-hoc: when you receive an
 `agent.artifact` event from such an agent, cross-reference its `modified_files`
 against the change's expected file set before publishing `agent.verified`.
 
@@ -1577,7 +1575,7 @@ An observed **out-of-worktree write attempt** by a coding agent is a
 - a **danger-class escalation on the protected-path rule** — the classifier
   flags a write targeting operator config/memory territory (home-level CLI
   config dirs, their per-project memory subtrees, or the repo-root
-  `.claude/` / `.git-paw/` control dirs); or
+  CLI-specific control directory / `.git-paw/` control dirs); or
 - **any other sighting** of such a write — a pane narrating an edit to an
   operator config file, a diff touching paths outside the agent's worktree,
   a stray artifact appearing in the repo-root control dirs.
