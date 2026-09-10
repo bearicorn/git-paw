@@ -5,7 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.15.0] - 2026-08-31
+## [0.16.0] - 2026-09-10
+
+### Features
+
+- *(config)* Add per-CLI prompt-shape profiles
+- *(mcp)* Add an agent boot-event publish tool
+- *(supervisor)* Refresh the integration branch before verification
+- *(skills)* Export worker-guidance skills for permissions and worktree orientation
+- *(cli)* Add attach subcommand and shell completions
+- *(supervisor,session)* Harden unattended boot to first tool call
+
+### Bug Fixes
+
+- *(merge-loop)* Make drive-loop nudges submit reliably and stop at wind-down
+- *(merge-loop)* Resolve the wave exit summary and bind the drive loop to its session
+- *(session)* Scope purge --stale to the current repo
+- *(session)* Honor default_spec_cli, resolve origin/HEAD, and reattach on start
+- *(supervisor)* Stop seeding inert command allowlists into cli settings
+- *(specs)* Point Spec Kit agents at their spec path in the boot prompt
+- *(broker)* Exempt shared task-list edits from ownership-conflict detection
+- *(user-guide)* Allow /private/tmp in the sandbox profile so heredocs work
+- *(agents)* Stop leaking git-paw's own conventions into exported runtime prose
+- *(merge-loop)* Stop instructing peers to cherry-pick each other's branches
+
+### Refactor
+
+- *(skills)* Move compiled export prose into assets
+
+### Documentation
+
+- *(agents)* Add the release-history-curation dev skill
+- *(specs)* Spec v0.16.0 unattended-boot and friction-killers changes
+## [0.15.0] - 2026-09-02
 
 ### Features
 
@@ -357,6 +389,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 - Add CLI tool for parallel AI coding sessions across git worktrees
+[0.16.0]: https://github.com/bearicorn/git-paw/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/bearicorn/git-paw/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/bearicorn/git-paw/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/bearicorn/git-paw/compare/v0.12.0...v0.13.0
