@@ -311,7 +311,7 @@ The system SHALL detect agent CLI permission prompts by capturing pane output an
 
 ### Requirement: Prompt class identification
 
-The detector SHALL classify each detected prompt into one of a fixed set of permission types so callers can decide whether to auto-approve.
+The detector SHALL classify each detected prompt into one of a fixed set of permission types so callers can decide whether to auto-approve. The set SHALL NOT include a class defined by a specific language toolchain's build commands. Toolchain-specific verbs, where they are relevant to a safety decision, SHALL be sourced from the resolved stack preset rather than hard-coded into the classifier, so the detector stays stack-neutral for every consumer.
 
 #### Scenario: Curl prompts classified as Curl
 
@@ -319,18 +319,24 @@ The detector SHALL classify each detected prompt into one of a fixed set of perm
 - **WHEN** classification runs
 - **THEN** the result SHALL be `PermissionType::Curl`
 
-#### Scenario: Cargo prompts classified as Cargo
-
-- **GIVEN** captured pane content containing an approval marker and one of `cargo fmt`, `cargo clippy`, `cargo test`, or `cargo build`
-- **WHEN** classification runs
-- **THEN** the result SHALL be `PermissionType::Cargo`
-
 #### Scenario: Unknown prompts classified as Unknown
 
 - **GIVEN** captured pane content containing an approval marker but no recognised command class
 - **WHEN** classification runs
 - **THEN** the result SHALL be `PermissionType::Unknown`
 - **AND** auto-approval SHALL NOT be triggered for `Unknown`
+
+#### Scenario: No toolchain-specific permission class exists
+
+- **WHEN** the set of permission types is inspected
+- **THEN** it SHALL NOT contain a class defined by a specific language toolchain's build commands
+
+#### Scenario: Build-tool prompt is not specially classified
+
+- **GIVEN** captured pane content containing an approval marker and a language build-tool invocation
+- **WHEN** classification runs
+- **THEN** it SHALL NOT be assigned a toolchain-specific class
+- **AND** the auto-approval decision SHALL be made by the safe-command classifier, whose behaviour is unchanged
 
 ### Requirement: Capture is rate-limited
 
@@ -347,58 +353,6 @@ The detector SHALL NOT capture pane output more often than necessary to avoid lo
 - **GIVEN** an agent whose status is `working` but whose `last_seen` is older than the configured stall threshold
 - **WHEN** the supervisor's poll loop runs
 - **THEN** detection SHALL call `tmux capture-pane` for that pane exactly once per poll tick
-
-### Requirement: Curl allowlist setup
-
-The system SHALL automatically create and configure an allowlist during
-session startup to prevent permission prompts for broker communication.
-The seeded grant SHALL be the single stable path of the bundled
-agent-broker helper (`.git-paw/scripts/broker.sh`, the
-`agent-broker-helper` capability) — a least-privilege, path-based grant.
-The system SHALL NOT seed a broad `curl *` grant, and SHALL NOT depend
-on per-endpoint `curl <broker-url><endpoint>` prefixes for the agent's
-boot-time broker interactions.
-
-#### Scenario: Allowlist created on session start
-
-- **GIVEN** supervisor mode session with broker enabled
-- **WHEN** `cmd_supervisor()` starts the session
-- **THEN** an allowlist SHALL be created
-- **AND** it SHALL grant the agent-broker helper path
-
-#### Scenario: Allowlist grants the helper path, not broad curl
-
-- **GIVEN** broker URL `http://127.0.0.1:9119`
-- **WHEN** the allowlist is created
-- **THEN** it SHALL contain a prefix authorising
-  `.git-paw/scripts/broker.sh`
-- **AND** it SHALL NOT contain a `curl *` (broad curl) grant
-
-#### Scenario: Helper grant removes the boot-publish dead-stall
-
-- **GIVEN** an agent whose first boot action publishes its register
-  status via `.git-paw/scripts/broker.sh status booting`
-- **WHEN** the agent runs that boot action with the helper-path grant
-  seeded
-- **THEN** no permission prompt SHALL appear
-- **AND** the agent SHALL register with the broker without stalling
-
-### Requirement: Allowlist file format
-
-The system SHALL write the curl allowlist to the appropriate agent CLI configuration file with the correct format.
-
-#### Scenario: Allowlist written to Claude settings
-
-- **GIVEN** Claude CLI is used as supervisor
-- **WHEN** allowlist is created
-- **THEN** it SHALL be written to `.claude/settings.json`
-- **AND** use the `allowed_bash_prefixes` format
-
-#### Scenario: Allowlist format is valid JSON
-
-- **WHEN** allowlist file is created
-- **THEN** it SHALL be valid JSON
-- **AND** contain an `allowed_bash_prefixes` array
 
 ### Requirement: Allowlist prevents permission prompts
 
@@ -996,4 +950,188 @@ The system SHALL provide a hidden `git paw __classify` subcommand that runs the 
 
 - **WHEN** `git paw --help` is inspected
 - **THEN** `__classify` SHALL NOT appear as a listed subcommand
+
+### Requirement: Classifier normalizes leading assignment and wrapper prefixes before matching
+
+The safe-command classifier SHALL strip a run of leading `NAME=value`
+environment-variable assignments and leading `env` / `nohup` invocation wrappers
+from a command before prefix-matching it against the allowlist, so that an
+otherwise-safe command is not forced `unknown` merely because it was prefixed for
+the run environment. Normalization SHALL remove: zero or more leading `NAME=value`
+assignments (shell assignment syntax, values optionally quoted); a leading `env`
+wrapper together with any `NAME=value` assignments and `-i` / `-u NAME` options it
+carries; and a leading `nohup` wrapper. It SHALL then classify the remaining verb.
+This normalization SHALL compose with the existing trailing exit-code-probe /
+redirect normalization. The danger-list, worktree-confinement, config-path, and
+`.git/`-write rules SHALL be applied to the fully normalized command exactly as
+before — normalization SHALL NOT weaken any escalation.
+
+#### Scenario: A leading VAR=value assignment is normalized away
+
+- **GIVEN** the command `TMPDIR=/tmp/x cargo test --lib`
+- **WHEN** the classifier evaluates it
+- **THEN** it SHALL classify the same as bare `cargo test --lib`
+
+#### Scenario: Multiple leading assignments plus a trailing probe are both normalized
+
+- **GIVEN** the command `GIT_PAW_ALLOW_LIVE_SESSION=1 TMPDIR=/tmp/x cargo test; echo exit=$?`
+- **WHEN** the classifier evaluates it
+- **THEN** it SHALL classify the same as bare `cargo test`
+
+#### Scenario: A leading env wrapper is normalized away
+
+- **GIVEN** the command `env FOO=bar cargo build`
+- **WHEN** the classifier evaluates it
+- **THEN** it SHALL classify the same as bare `cargo build`
+
+#### Scenario: A leading nohup wrapper is normalized away
+
+- **GIVEN** the command `nohup just check`
+- **WHEN** the classifier evaluates it
+- **THEN** it SHALL classify the same as bare `just check`
+
+#### Scenario: Normalization does not rescue a danger command behind assignments
+
+- **GIVEN** a danger-listed command prefixed with an assignment (e.g. `FOO=bar rm -rf /`)
+- **WHEN** the classifier evaluates it
+- **THEN** it SHALL still escalate as danger — stripping the leading prefix SHALL NOT downgrade it
+
+### Requirement: git-paw managed helper-script invocations classify as safe
+
+The classifier SHALL classify as safe a command whose normalized leading verb
+resolves to one of git-paw's own managed helper scripts under `.git-paw/scripts/`
+(`broker.sh`, `sweep.sh`, `docs-fetch.sh`), because git-paw authors these scripts
+and they perform only bounded coordination actions. The match SHALL be on the managed-script path (as
+identified by `is_managed_path`), whether invoked directly (`.git-paw/scripts/broker.sh …`)
+or via an interpreter (`bash .git-paw/scripts/broker.sh …`). This rule SHALL be
+subject to danger-list precedence: a slice that chains a managed-script invocation
+with a danger-class operation SHALL still escalate as danger.
+
+#### Scenario: A bundled broker.sh boot call classifies safe
+
+- **GIVEN** the command `.git-paw/scripts/broker.sh --agent feat-x status booting`
+- **WHEN** the classifier evaluates it
+- **THEN** it SHALL classify as safe (no escalation)
+
+#### Scenario: A bundled sweep.sh call classifies safe
+
+- **GIVEN** the command `.git-paw/scripts/sweep.sh status-publish`
+- **WHEN** the classifier evaluates it
+- **THEN** it SHALL classify as safe
+
+#### Scenario: A managed-script invocation chained with a danger command still escalates
+
+- **GIVEN** the command `.git-paw/scripts/sweep.sh snapshot && rm -rf /`
+- **WHEN** the classifier evaluates it
+- **THEN** it SHALL escalate as danger
+
+### Requirement: Writes under a repository `.git/` directory escalate as danger
+
+The classifier SHALL classify as a danger-class escalation — terminal, never
+auto-approved, with the same precedence as the curated danger-list — any filesystem
+prompt (write / edit / create / delete) or shell command slice that targets a path
+resolving inside a repository `.git/` directory (git's own metadata, including
+`.git/info/exclude`, `.git/config`, and `.git/hooks/`).
+Read-only operations SHALL NOT match this rule. This prevents an agent, or an
+auto-approval sweep, from silently mutating git's local configuration — invisible
+to teammates and able to subvert the repository's committed ignore/hook scoping.
+Target paths SHALL be canonicalized before matching, with the same fail-closed
+posture as the worktree boundary check (a path that cannot be canonicalized but
+syntactically reaches into a `.git/` directory SHALL be treated as matching). This
+rule targets file-path writes; ordinary `git` subcommands are classified by the
+git-verb rules and are unaffected.
+
+#### Scenario: Append to .git/info/exclude escalates as danger
+
+- **GIVEN** a prompt whose command slice is `echo '.git-paw/' >> .git/info/exclude`
+- **WHEN** the classifier runs
+- **THEN** the verdict SHALL be a danger-class escalation
+- **AND** no auto-approval keystrokes SHALL ever be dispatched for it
+
+#### Scenario: Write to .git/config escalates as danger
+
+- **GIVEN** a prompt to write `<worktree>/.git/config`
+- **WHEN** the classifier runs
+- **THEN** the verdict SHALL be a danger-class escalation
+
+#### Scenario: Reading .git metadata is not matched by this rule
+
+- **GIVEN** a prompt whose command slice is `cat .git/config`
+- **WHEN** the classifier runs
+- **THEN** this rule SHALL NOT match (other classification rules decide the verdict)
+
+### Requirement: No permission grants are seeded into agent CLI settings files
+
+The system SHALL NOT write permission grants into any agent CLI's settings file, SHALL NOT create a vendor-specific settings directory inside a worktree, and SHALL NOT add a version-control exclusion entry for such a directory. Prompt-free agent operation is provided by the CLI's own resolved permission mode together with git-paw's command classifier, which recognises the bundled helper scripts by their stable paths.
+
+#### Scenario: No settings file is written at session start
+
+- **GIVEN** a session starting with any agent CLI
+- **WHEN** the session initialises
+- **THEN** no permission grants SHALL be written into that CLI's settings file
+
+#### Scenario: No vendor settings directory is created in a worktree
+
+- **GIVEN** a worktree provisioned for any agent CLI
+- **WHEN** the worktree is provisioned
+- **THEN** no vendor-specific settings directory SHALL be created inside it
+- **AND** no version-control exclusion entry SHALL be added for such a directory
+
+#### Scenario: Pre-existing settings files are left untouched
+
+- **GIVEN** a settings file that a previous version of git-paw wrote
+- **WHEN** a session starts
+- **THEN** that file SHALL be left byte-identical
+- **AND** it SHALL NOT be deleted
+
+### Requirement: Prompt-free operation is attributed to the permission mode and classifier
+
+Documentation and bundled guidance SHALL attribute prompt-free agent operation to the CLI's resolved permission mode and git-paw's command classifier, and SHALL NOT attribute it to a seeded settings-file allowlist.
+
+#### Scenario: Supervisor guidance does not credit a seeded allowlist
+
+- **WHEN** the bundled supervisor skill's permission guidance is inspected
+- **THEN** it SHALL NOT state that a seeded settings-file allowlist is why an agent's first broker call avoids a permission prompt
+- **AND** it SHALL attribute prompt-free operation to the resolved permission mode and the classifier
+
+### Requirement: Settings path remains available to memory isolation
+
+Removing permission seeding SHALL NOT remove or alter the use of a CLI's configured settings path for memory isolation. The parent directory of a configured settings path SHALL continue to participate in the memory-isolation set.
+
+#### Scenario: Memory isolation still uses the settings path parent
+
+- **GIVEN** a configured CLI with a settings path
+- **WHEN** the memory-isolation set is computed
+- **THEN** the parent directory of that settings path SHALL still be included
+
+#### Scenario: Settings path still parses and round-trips
+
+- **WHEN** a configuration declaring a CLI settings path is loaded and re-serialized
+- **THEN** the settings path SHALL be preserved
+
+### Requirement: Prompt markers are sourced from the resolved CLI profile
+
+Permission-prompt detection SHALL obtain its approval markers, command-header form, file-prompt pattern, option-line form and broad-grant marker from the prompt-shape profile resolved for the CLI running in the pane being inspected, rather than from constants compiled into the detector. When no profile is configured for that CLI, the embedded default SHALL resolve, so detection outcomes are unchanged from before profiles existed.
+
+This changes only where the literals come from. The detection algorithm, the permission-type classification outcomes, the capture rate limiting, and every safety gate SHALL be unaffected.
+
+#### Scenario: Detection uses the pane's CLI profile
+
+- **GIVEN** a pane running a CLI with a configured prompt-shape profile
+- **WHEN** permission-prompt detection runs against that pane
+- **THEN** the markers used SHALL come from that CLI's resolved profile
+
+#### Scenario: Unconfigured CLI detects as before
+
+- **GIVEN** a pane running a CLI with no configured profile
+- **WHEN** permission-prompt detection runs against that pane
+- **THEN** the embedded default markers SHALL be used
+- **AND** the detection outcome SHALL match the outcome before profiles were introduced
+
+#### Scenario: Safety gates unaffected by profile sourcing
+
+- **GIVEN** any resolved profile
+- **WHEN** a captured prompt is classified
+- **THEN** the danger determination, protected-path rules, worktree-boundary rules and broad-grant eligibility SHALL be evaluated from compiled logic
+- **AND** SHALL NOT be influenced by profile content
 

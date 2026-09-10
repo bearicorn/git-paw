@@ -338,3 +338,57 @@ Test: `git::tests::create_worktree_at_correct_path`
 
 Test: `git::tests::create_worktree_errors_on_checked_out_branch`
 
+### Requirement: Default-branch resolution is single-source and tolerant of a missing origin/HEAD
+
+The system SHALL resolve the repository's default branch through a single resolver used by every launch path (initial `start`, resume, `add`, and the rebase step), so no two paths can disagree. When `refs/remotes/origin/HEAD` is not set — e.g. a repository with local commits but no configured remote HEAD — the resolver SHALL fall back deterministically (a local `main`, else a local `master`, else the checked-out branch via `git symbolic-ref --short HEAD`) rather than aborting. A launch that succeeded initially SHALL therefore also succeed on resume in the same repository state.
+
+#### Scenario: Resolution succeeds without origin/HEAD
+
+- **GIVEN** a repository with local commits and no `refs/remotes/origin/HEAD` set
+- **WHEN** the default branch is resolved
+- **THEN** it SHALL return a valid local default branch (via the fallback) rather than aborting with an error
+
+#### Scenario: First launch and resume resolve identically
+
+- **GIVEN** a repository whose first `git paw start` resolved a default branch
+- **WHEN** the session is later resumed (a second `git paw start`) in the same repository state
+- **THEN** the resume SHALL resolve the same default branch through the same resolver and SHALL NOT fail where the first launch succeeded
+
+#### Scenario: origin/HEAD is still honoured when present
+
+- **GIVEN** a repository with `refs/remotes/origin/HEAD` pointing at `origin/main`
+- **WHEN** the default branch is resolved
+- **THEN** it SHALL return `main` (the configured remote HEAD), unchanged from prior behaviour
+
+### Requirement: Mid-session rebase of a live worker branch
+
+The system SHALL provide a rebase entry point that rebases a named branch onto the repository's default branch while that branch is checked out in a live worktree, separate from `create_worktree`'s creation-time `rebase_onto_main` path. The entry point SHALL run the rebase inside the worktree where the branch is currently checked out. On a non-zero `git rebase` exit it SHALL invoke `git rebase --abort` and return an error, leaving the branch at its pre-rebase HEAD. When the branch is already at or ahead of the default branch, `git rebase` exits zero with no rewrite and the entry point SHALL treat that as success.
+
+The creation-time contract of `create_worktree` (including its `rebase_onto_main` parameter, its ordering relative to the existence check, and its idempotent resume behaviour) SHALL be unchanged by this addition.
+
+#### Scenario: Rebase runs in the worktree holding the branch
+
+- **GIVEN** a branch checked out in a live worktree
+- **WHEN** the mid-session rebase entry point is invoked for that branch
+- **THEN** the rebase SHALL be run inside that worktree
+
+#### Scenario: Failed mid-session rebase aborts and restores
+
+- **GIVEN** a mid-session rebase that exits non-zero
+- **WHEN** the failure is detected
+- **THEN** `git rebase --abort` SHALL be invoked
+- **AND** the branch SHALL be left at its pre-rebase HEAD
+- **AND** an error SHALL be returned
+
+#### Scenario: Branch already current is a successful no-op
+
+- **GIVEN** a branch already at or ahead of the default branch
+- **WHEN** the mid-session rebase entry point is invoked for that branch
+- **THEN** it SHALL return success
+- **AND** the branch SHALL NOT be rewritten
+
+#### Scenario: Creation-time rebase contract is unaffected
+
+- **WHEN** `create_worktree()` is called with `rebase_onto_main = true` for an existing branch
+- **THEN** its behaviour SHALL be identical to the behaviour before the mid-session entry point was added
+

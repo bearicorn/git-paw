@@ -3,12 +3,12 @@
 ## Purpose
 
 This capability defines the standardized boot-instruction block injected into each agent and the shared machinery that renders it. It covers the block's format and content (exactly four runtime events — register, done, blocked, question — expressed as `broker.sh` helper invocations, commit-first task completion with a code-less manual-done fallback, and paste-handling guidance), `{{VARIABLE_NAME}}` template substitution with branch-ID slugification and full pre-expansion at render time, and the shared pure `build_boot_block(branch_id, broker_url) -> String` helper in `src/skills.rs` that every launch path uses to assemble the identical block. It also covers every injection path by which the rendered boot block reaches an agent pane: supervisor-mode prepending of the boot block (and, when configured, governance-documents and drive-loop coordination sections) to each pane-bound agent's prompt, manual (non-supervisor) mode pre-fill of the boot block into each pane's input line without sending Enter, and boot-block parity for the bare `git paw start --from-specs` launch path (`--from-all-specs` is the canonical flag and `--from-specs` a deprecated alias retained for backward compatibility, scheduled for removal at v1.0.0).
-
 ## Requirements
-
 ### Requirement: Standard boot block format
 
-The system SHALL provide a standardized boot instruction block that contains exactly four essential runtime events: register, done, blocked, and question. The boot block SHALL use a consistent format with clear section headers and pre-expanded curl commands.
+The system SHALL provide a standardized boot instruction block that contains exactly four essential runtime events: register, done, blocked, and question. The boot block SHALL use a consistent format with clear section headers and a pre-expanded invocation for each event.
+
+Each of the four events SHALL be expressed either as an invocation of the bundled broker helper script or, when the target CLI speaks MCP, as an invocation of the corresponding MCP publish tool. The set of events, their names, and their meanings SHALL be identical in both forms; only the invocation mechanism differs. When the target CLI's MCP support is unknown or absent, the helper-script form SHALL be used.
 
 #### Scenario: Boot block contains all four essential events
 
@@ -25,19 +25,44 @@ The system SHALL provide a standardized boot instruction block that contains exa
 - **THEN** it SHALL use the format:
   ```
   ## BOOT INSTRUCTIONS - DO NOT REMOVE
-  
+
   1. REGISTER: <instructions>
-     <pre-expanded curl command>
-  
+     <pre-expanded invocation>
+
   2. DONE: <instructions>
-     <pre-expanded curl command>
-  
+     <pre-expanded invocation>
+
   3. BLOCKED: <instructions>
-     <pre-expanded curl command>
-  
+     <pre-expanded invocation>
+
   4. QUESTION: <instructions>
-     <pre-expanded curl command>
+     <pre-expanded invocation>
   ```
+- **AND** each `<pre-expanded invocation>` SHALL be either a bundled broker helper invocation or an MCP publish tool invocation, per the target CLI
+
+#### Scenario: MCP-capable CLI receives the tool form
+
+- **GIVEN** a target CLI that speaks MCP
+- **WHEN** the boot block is rendered for that CLI
+- **THEN** the four events SHALL be expressed as MCP publish tool invocations
+
+#### Scenario: Non-MCP CLI receives the helper form
+
+- **GIVEN** a target CLI that does not speak MCP
+- **WHEN** the boot block is rendered for that CLI
+- **THEN** the four events SHALL be expressed as bundled broker helper invocations
+
+#### Scenario: Unknown MCP support falls back to the helper form
+
+- **GIVEN** a target CLI whose MCP support is not known
+- **WHEN** the boot block is rendered for that CLI
+- **THEN** the helper-script form SHALL be used
+
+#### Scenario: Both forms carry the same four events
+
+- **WHEN** the MCP form and the helper form of the boot block are compared
+- **THEN** both SHALL cover exactly register, done, blocked, and question
+- **AND** neither SHALL add or omit an event relative to the other
 
 ### Requirement: Boot block content requirements
 
@@ -474,3 +499,4 @@ artifact target.
 - **WHEN** `docs/src/user-guide/agents-md.md` is inspected
 - **THEN** it states that AGENTS.md is the source of truth for the spec body
 - **AND** it states that the supervisor-mode boot prompt points at AGENTS.md and `openspec/changes/<id>/`
+

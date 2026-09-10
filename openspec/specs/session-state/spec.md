@@ -462,34 +462,39 @@ before proceeding with the requested launch.
 
 ### Requirement: purge --stale flag
 
-`git paw purge` SHALL accept a `--stale` flag. When passed,
-the system SHALL purge only sessions whose receipt is stale
-per the probe. Live sessions SHALL be untouched. The flag is
-additive to existing `--force`.
+`git paw purge` SHALL accept a `--stale` flag. When passed, the system SHALL purge only sessions whose receipt is stale per the liveness probe, and by default SHALL scope the sweep to the CURRENT repository — it SHALL NOT purge or touch a session belonging to any other repository. A machine-wide sweep of stale receipts across all repositories SHALL require the explicit `--all-repos` flag. In every case the guarantee is fail-safe: a session that is live per the probe — or whose liveness cannot be positively confirmed — SHALL NEVER be purged by `--stale`, in the current repository or any other. The flag is additive to existing `--force`.
 
-#### Scenario: --stale purges only stale entries
+#### Scenario: --stale is scoped to the current repository by default
 
-- **GIVEN** two sessions on the machine — one active, one
-  stale
-- **WHEN** the user runs `git paw purge --stale`
-- **THEN** the stale session's worktrees + branches +
-  receipt SHALL be purged, and the active session SHALL
-  remain intact
+- **GIVEN** a stale session belonging to the current repository AND a stale session belonging to a different repository
+- **WHEN** the user runs `git paw purge --stale` (without `--all-repos`)
+- **THEN** only the current repository's stale session's worktrees + branches + receipt SHALL be purged
+- **AND** the other repository's session SHALL NOT be touched
+
+#### Scenario: --stale never purges a live or liveness-indeterminate session
+
+- **GIVEN** a live session (in the current or another repository), or a session whose liveness cannot be positively confirmed
+- **WHEN** the user runs `git paw purge --stale` (with or without `--all-repos`)
+- **THEN** that session SHALL NOT be purged
+
+#### Scenario: --all-repos sweeps stale receipts across repositories
+
+- **GIVEN** stale sessions belonging to multiple repositories
+- **WHEN** the user runs `git paw purge --stale --all-repos`
+- **THEN** every repository's stale session SHALL be purged
+- **AND** every live session SHALL remain intact
 
 #### Scenario: --stale with nothing stale exits cleanly
 
-- **GIVEN** no stale receipts on the machine
+- **GIVEN** no stale receipts in scope
 - **WHEN** the user runs `git paw purge --stale`
-- **THEN** the command SHALL exit 0 with a "nothing to
-  purge" message, and SHALL NOT touch any active session
+- **THEN** the command SHALL exit 0 with a "nothing to purge" message, and SHALL NOT touch any active session
 
 #### Scenario: --stale + --force is well-defined
 
-- **GIVEN** a stale receipt
+- **GIVEN** a stale receipt in the current repository
 - **WHEN** the user runs `git paw purge --stale --force`
-- **THEN** the system SHALL behave equivalently to
-  `--stale` alone (the `--force` flag is redundant in this
-  combination; explicitly documented as a no-op pairing)
+- **THEN** the system SHALL behave equivalently to `--stale` alone (the `--force` flag is redundant in this combination; explicitly documented as a no-op pairing)
 
 ### Requirement: Liveness probe is cheap
 
@@ -721,4 +726,47 @@ case.
 - **GIVEN** a session registered at a repository path that does not exist on disk
 - **WHEN** it is looked up by that same (non-existent) path
 - **THEN** the session SHALL still be found via the raw-path fallback
+
+### Requirement: Liveness reflects dead agent panes, not just session existence
+
+The tmux-liveness probe that feeds `effective_status` SHALL report a session as not
+alive when the tmux session object still exists but its agent panes' CLI processes
+have all exited (the `is_tmux_alive` input becomes false) — so a session whose panes
+died shortly after launch is reported `Stopped`, not `Active`. Liveness SHALL NOT be
+satisfied by the mere existence of the named tmux session; it SHALL require at
+least one live agent pane (a pane whose launched CLI process is still running). This
+ensures `git paw status` and `git paw doctor` never report a session healthy after
+its panes have all died (the full-auto boot-exit failure mode). The probe SHALL
+tolerate the brief launch window in which panes are still starting their CLIs (it
+SHALL NOT flap a just-launched session to `Stopped`).
+
+#### Scenario: A session whose agent panes all exited reports Stopped
+
+- **GIVEN** a session recorded `Active` whose tmux session object still exists but all agent panes' CLI processes have exited
+- **WHEN** its effective status is resolved via the liveness probe
+- **THEN** the liveness probe SHALL report the session not alive
+- **AND** the effective status SHALL be `Stopped` (not `Active`)
+
+#### Scenario: A session with at least one live agent pane remains Active
+
+- **GIVEN** a session recorded `Active` with at least one agent pane whose CLI process is still running
+- **WHEN** its effective status is resolved
+- **THEN** the liveness probe SHALL report the session alive
+- **AND** the effective status SHALL be `Active`
+
+### Requirement: Session file records the orchestrator pane
+
+The per-repo session JSON SHALL record the supervisor/orchestrator pane (pane 0) and its resolved CLI as a distinct entry (or a dedicated `supervisor` field), in addition to the coding-agent entries, so tooling and the operator can see the full roster and the tiered-model split (e.g. a `fable`-tier orchestrator driving `sonnet` workers) from the state file. The field SHALL be additive and back-compatible: it SHALL use `#[serde(default)]` so older session files load unchanged, and the bundled `sweep.sh` SHALL continue to work against the file (it ignores the extra field).
+
+#### Scenario: The orchestrator pane appears in the session file
+
+- **GIVEN** a supervisor-mode session started with a `fable` orchestrator and `sonnet` workers
+- **WHEN** the per-repo session JSON is written
+- **THEN** it SHALL record the orchestrator pane (pane 0) with its resolved CLI, distinct from the coding-agent entries
+
+#### Scenario: Older session files without the orchestrator entry still load
+
+- **GIVEN** a session file written before this change (no orchestrator entry)
+- **WHEN** it is loaded
+- **THEN** it SHALL load without error (the orchestrator field defaults to absent)
 

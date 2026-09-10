@@ -1040,3 +1040,64 @@ table SHALL include (at minimum) `--cli`, `--branches`,
 
 - **WHEN** the start-flag table in `docs/src/cli-reference.md` is inspected
 - **THEN** it contains the substring `--force`
+
+### Requirement: Attach subcommand
+
+The `attach` subcommand SHALL reattach the current terminal to the running tmux session for the current repository, resolving the session by the repository path (as `status` does) and invoking the tmux attach path. When no session exists for the repository, or the session is not alive, it SHALL exit with an actionable error naming that no session is running and how to start one. This provides a first-class `git paw attach` in place of the raw `tmux attach -t paw-<project>`.
+
+#### Scenario: Attach reattaches to the repository's running session
+
+- **GIVEN** a running session for the current repository
+- **WHEN** the user runs `git paw attach`
+- **THEN** the system SHALL attach the terminal to that session
+
+#### Scenario: Attach with no running session errors actionably
+
+- **GIVEN** no running session exists for the current repository
+- **WHEN** the user runs `git paw attach`
+- **THEN** the system SHALL exit with an error stating no session is running and how to start one
+
+### Requirement: Completions subcommand
+
+The `completions` subcommand SHALL print a shell-completion script for a requested shell (bash, zsh, fish) to stdout, generated from the clap command definition, so a user can install completions through their shell's standard mechanism. A missing or unsupported shell argument SHALL produce an actionable error.
+
+#### Scenario: Completions prints a script for a supported shell
+
+- **WHEN** the user runs `git paw completions bash`
+- **THEN** the system SHALL print a bash completion script to stdout and exit successfully
+
+#### Scenario: Completions rejects an unsupported shell
+
+- **WHEN** the user runs `git paw completions <unsupported>`
+- **THEN** the system SHALL exit with an actionable error naming the supported shells
+
+### Requirement: No `resume` subcommand; reattach is `attach`, revival is `start`
+
+The CLI SHALL NOT provide a `resume` subcommand. Reattaching the current terminal to a running session SHALL be `git paw attach`; reviving a paused or stopped session SHALL remain `git paw start`. The documentation (CLI reference, README, user guide) SHALL NOT reference a `git paw resume` command.
+
+#### Scenario: `git paw resume` is not a valid subcommand
+
+- **WHEN** the user runs `git paw resume`
+- **THEN** the system SHALL reject it as an unknown subcommand
+
+#### Scenario: Docs do not reference a resume command
+
+- **WHEN** the CLI reference and user guide are inspected
+- **THEN** they SHALL NOT reference a `git paw resume` command; reattach is documented as `git paw attach` and session revival as `git paw start`
+
+### Requirement: Purge --all-repos flag for a machine-wide stale sweep
+
+`git paw purge` SHALL accept an `--all-repos` flag that broadens the `--stale` sweep from the current repository (the default) to every repository with a receipt on the machine. `--all-repos` SHALL be meaningful only in combination with `--stale`; used without `--stale` it SHALL be rejected with an actionable error (or treated as inert) per the CLI's flag rules. The machine-wide sweep SHALL still only ever purge stale receipts and SHALL never purge a live session.
+
+#### Scenario: --all-repos requires --stale
+
+- **WHEN** the user runs `git paw purge --all-repos` without `--stale`
+- **THEN** the CLI SHALL reject the combination with an actionable error (or treat `--all-repos` as inert), per the flag rules
+
+#### Scenario: --stale --all-repos broadens the sweep
+
+- **GIVEN** stale receipts in multiple repositories
+- **WHEN** the user runs `git paw purge --stale --all-repos`
+- **THEN** the sweep SHALL cover every repository's stale receipts
+- **AND** live sessions SHALL remain intact
+

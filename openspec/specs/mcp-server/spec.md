@@ -2,7 +2,6 @@
 
 ## Purpose
 A `git paw mcp` subcommand that runs a stdio JSON-RPC MCP server exposing read-only, deterministically-sourced tools (never invoking an agent CLI as an inference backend) over a resolved repository/worktree root — advertising a schema-carrying tool registry and git-paw server identity, keeping stdout reserved for protocol frames with logging on stderr, and distinguishing graceful empty/null degradation from hard errors on malformed configuration — together with the read-only tool set it advertises: coordination (intents/conflicts), governance docs, project knowledge (specs/tasks/skills), session state, git context, documentation, and source/file tools, each with a JSON Schema and deterministic, path-confined reads that degrade gracefully to empty arrays or null when their data source is absent and refuse path traversal or gitignored reads outside the repository/docs roots.
-
 ## Requirements
 ### Requirement: MCP server subcommand
 
@@ -631,3 +630,28 @@ The system SHALL expose read-only MCP tools for browsing and reading the reposit
 
 - **WHEN** the MCP client calls `search_code({ "query": "a-string-that-appears-nowhere" })`
 - **THEN** the response SHALL be an empty match list (not a transport error)
+
+### Requirement: The server exposes a bounded write surface alongside read-only tools
+
+The MCP server SHALL NOT be exclusively read-only. It SHALL advertise a bounded, agent-scoped publish category covering the four agent boot events, alongside its read-only tool categories. Every tool category other than that publish set SHALL remain read-only and deterministically sourced.
+
+The write surface SHALL be bounded by construction: a fixed set of tools, each publishing as the calling agent only, with the supervisor authority verbs excluded. The server SHALL NOT expose file writes, git mutations, configuration writes, or any other state change beyond publishing those four broker events.
+
+#### Scenario: Publish category coexists with read-only categories
+
+- **WHEN** the tool registry is inspected
+- **THEN** it SHALL contain the bounded publish category
+- **AND** every other advertised category SHALL perform reads only
+
+#### Scenario: No file or git mutation is exposed
+
+- **WHEN** the tool registry is inspected
+- **THEN** it SHALL NOT contain a tool that writes a file, mutates git state, or writes configuration
+
+#### Scenario: Read-only guarantees of other categories are preserved
+
+- **GIVEN** the coordination, governance, project-knowledge, session-state, git-context, documentation, and source/file categories
+- **WHEN** any of their tools is invoked
+- **THEN** it SHALL perform deterministic reads only
+- **AND** SHALL NOT mutate repository or broker state
+

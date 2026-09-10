@@ -2,9 +2,7 @@
 
 ## Purpose
 Detect available AI coding CLI binaries by scanning PATH for known names and merging with user-defined custom CLIs from configuration, providing a unified, deduplicated, sorted list, and resolve which CLI to use for each spec-driven branch using a multi-level priority chain that considers command-line flags, per-spec overrides, config defaults, and interactive selection, prompting the user at most once. It also covers reliable boot-block submission and CLI-pane launch hardening: injecting the prompt text literally and then sending `Enter` as a separate keystroke after a settle delay resolved per CLI from `[clis.<name>].submit_delay_ms` (with a single CLI-agnostic default and no hardcoded CLI names), clearing the shell input line before the launch command, suppressing known auto-update/confirmation prompts in the launched pane's environment, and verifying the CLI started within a bounded window and retrying the launch once on failure — so a fresh supervisor session boots and all agents self-register unattended.
-
 ## Requirements
-
 ### Requirement: Auto-detect known AI CLIs on PATH
 
 The system SHALL scan PATH for the known CLI binaries: `claude`, `codex`, `agy`, `aider`, `vibe`, `qwen`, `amp`, `opencode`, `cline`, `droid`, `pi`, `junie`, `cursor`, `copilot`, `cn`, `kilo`, and `kimi`.
@@ -127,10 +125,9 @@ The `CliSource` enum SHALL display as `"detected"` or `"custom"`.
 
 Test: `detect::tests::cli_source_display_format`
 
-
 ### Requirement: CLI resolution chain for spec-driven launches
 
-The system SHALL resolve which CLI to use for each spec-driven branch using a 5-level priority chain, from highest to lowest priority.
+The system SHALL resolve which CLI to use for each spec-driven branch using a 5-level priority chain, from highest to lowest priority. This chain SHALL apply identically to non-supervisor and supervisor-mode spec-driven launches — the `--supervisor` flag SHALL NOT bypass or alter it. In particular, `default_spec_cli` SHALL be honoured for spec branches lacking a `paw_cli` override even when `--supervisor` is combined with `--specs`, so supervisor-mode workers are never silently launched with a different (e.g. unsandboxed) CLI than configured.
 
 #### Scenario: --cli flag overrides everything
 - **WHEN** `--cli claude` is passed and specs have various `paw_cli` values
@@ -151,6 +148,10 @@ The system SHALL resolve which CLI to use for each spec-driven branch using a 5-
 #### Scenario: No defaults — full picker
 - **WHEN** no `--cli` flag, no `paw_cli`, no `default_spec_cli`, and no `default_cli`
 - **THEN** the CLI picker SHALL be shown with no pre-selection
+
+#### Scenario: default_spec_cli is honoured under --supervisor --specs
+- **WHEN** `git paw start --supervisor --specs a,b` runs with no `--cli`, specs `a` and `b` having no `paw_cli`, and `default_spec_cli = "claude-oss"` in config
+- **THEN** the `a` and `b` worktree panes SHALL launch the `"claude-oss"` CLI (not a fallback or default CLI), identical to the non-supervisor `--specs` resolution
 
 ### Requirement: Mixed resolution across specs
 
@@ -353,3 +354,4 @@ table of 7 entries SHALL be expanded to include `opencode`,
 - **THEN** it contains the substring `opencode`
 - **AND** it contains the substring `cline`
 - **AND** it contains the substring `droid`
+

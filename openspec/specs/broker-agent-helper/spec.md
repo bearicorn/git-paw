@@ -2,7 +2,6 @@
 
 ## Purpose
 Provides bundled shell helpers (`broker.sh` for agents, `sweep.sh` for the supervisor) that wrap every agent→broker interaction — status, artifact, blocked, question, intent, poll, and the supervisor status/verified/feedback-gate verbs — so no participant hand-rolls a raw `curl …/publish`. The helpers discover the broker URL from config, shape all JSON internally, and are provisioned into each agent worktree at start/add time. The bundled `sweep.sh` helper additionally detects stuck-agent shapes from live pane capture plus broker heartbeats — stuck-on-prompt (including paste-buffer), no-progress, and blocked-on-supervisor — and publishes deduplicated synthetic `agent.status` messages, while gating its `approve <pane>` subcommand to re-confirm a live prompt before sending keys and to refuse pane 0; the supervisor skill names the helper as the canonical mechanism and forbids inline-bash reinvention.
-
 ## Requirements
 ### Requirement: Bundled agent-broker helper script
 
@@ -68,6 +67,10 @@ Because the bundled helpers cover the full `agent.status` surface (`phase` +
 `detail`), the bundled supervisor and coordination skills SHALL route every
 broker `agent.status` publish through the helper and SHALL NOT contain a raw
 `curl …/publish` example whose body is an `agent.status`.
+
+Each helper SHALL be invocable at a single stable path, so that the command
+classifier can recognise it by that path. The absence of a broad `curl *`
+grant SHALL NOT depend on any seeded settings-file allowlist.
 
 #### Scenario: status publishes agent.status
 
@@ -144,12 +147,13 @@ broker `agent.status` publish through the helper and SHALL NOT contain a raw
 
 #### Scenario: rich status-publish needs no broad curl grant
 
-- **GIVEN** the supervisor's permission allowlist seeded with the by-path
-  grant for `.git-paw/scripts/sweep.sh`
+- **GIVEN** a supervisor invoking the bundled helper at its stable path
+  `.git-paw/scripts/sweep.sh`
 - **WHEN** the supervisor publishes a phase-tagged `agent.status` via
   `sweep.sh status-publish --phase <p> --detail '<obj>' "<msg>"`
-- **THEN** the invocation SHALL be covered by the existing by-path grant
+- **THEN** the invocation SHALL be recognisable by that stable helper path
 - **AND** no broad `curl *` grant SHALL be required to publish the status
+- **AND** the guarantee SHALL NOT depend on a seeded settings-file allowlist
 
 ### Requirement: Helper poll subcommand
 

@@ -2,7 +2,6 @@
 
 ## Purpose
 A broker-internal detector, active only in supervisor mode, that tracks agent intents and modified-file sets to flag three classes of coordination conflict — forward (overlapping intents), in-flight (concurrent edits to the same file), and ownership violations (editing files claimed by another agent) — auto-emitting `agent.feedback` to the involved agents and escalating unresolved collisions to the supervisor inbox. It further extends `agent.intent` file entries with optional sub-file `regions` (function, class, block, or line range) so the detector can distinguish disjoint edits within a shared file from true collisions, falling back to file-level detection whenever regions are omitted to preserve v0.5.0 safety.
-
 ## Requirements
 ### Requirement: Conflict detector lifecycle
 
@@ -510,3 +509,47 @@ User Guide group.
 
 - **WHEN** `docs/src/user-guide/conflict-detection.md` is inspected
 - **THEN** it states that `agent.question` escalations are routed to the supervisor inbox
+
+### Requirement: git-paw managed bookkeeping is excluded from conflict overlap
+
+The detector SHALL exclude git-paw's own managed bookkeeping paths (files under a
+worktree's `.git-paw/` directory, as identified by `is_managed_path`) from each
+agent's modified-file set before computing the modified-file overlap between any two
+agents, for both forward-conflict and in-flight conflict detection.
+These paths are shared, untracked scaffolding that git-paw itself writes into every
+worktree (config, scripts, session state), so their presence in `git status` is not
+evidence of a code conflict. Excluding them SHALL NOT affect overlap detection on
+genuine source paths.
+
+#### Scenario: A shared untracked .git-paw/ path does not fabricate a conflict
+
+- **GIVEN** a running detector and `feat-x` reports `modified_files = [".git-paw/config.toml"]`
+- **WHEN** `feat-y` publishes `agent.status` with `modified_files = [".git-paw/config.toml"]`
+- **THEN** no `agent.feedback` whose error text contains `in-flight conflict` SHALL be emitted for `.git-paw/config.toml`
+- **AND** no conflict SHALL be tracked for that path
+
+#### Scenario: A real source overlap still conflicts when .git-paw/ is also present
+
+- **GIVEN** `feat-x` reports `modified_files = ["src/a.rs", ".git-paw/config.toml"]`
+- **WHEN** `feat-y` publishes `agent.status` with `modified_files = ["src/a.rs", ".git-paw/config.toml"]`
+- **THEN** an `agent.feedback` whose error text contains `in-flight conflict` and `src/a.rs` SHALL be emitted
+- **AND** no conflict SHALL be tracked for `.git-paw/config.toml`
+
+### Requirement: Shared spec-task-tracking artifact is exempt from ownership violations
+
+The detector SHALL exempt the shared spec-task-tracking artifact — the tasks file git-paw directs every agent to update with its own checkbox (e.g. a Spec Kit `specs/<feature>/tasks.md` or the OpenSpec `tasks.md`) — from ownership-violation detection, because git-paw's own workflow instructs every agent to write its own line in that single shared file, so a writeback there is expected coordination rather than a collision. The exemption SHALL apply only to the designated task-tracking artifact; ownership violations on genuine source files SHALL still be reported, so a real collision buried among task-file writebacks is not masked.
+
+#### Scenario: A writeback to the shared tasks file is not an ownership violation
+
+- **GIVEN** `feat-x` has an active intent for the shared task-tracking file `specs/001/tasks.md`
+- **AND** `feat-y` has an active intent for `["src/b.rs"]`
+- **WHEN** `feat-y` publishes `agent.status` with `modified_files = ["specs/001/tasks.md"]` (ticking its own checkbox)
+- **THEN** no `agent.feedback` containing `ownership violation` SHALL be emitted for `specs/001/tasks.md`
+
+#### Scenario: A real source-file ownership violation is still reported
+
+- **GIVEN** `feat-x` has an active intent for `["src/a.rs"]`
+- **AND** `feat-y` has an active intent for `["src/b.rs"]`
+- **WHEN** `feat-y` publishes `agent.status` with `modified_files = ["src/a.rs"]`
+- **THEN** an `agent.feedback` whose error text contains `[conflict-detector] ownership violation`, `src/a.rs`, and `feat-x` SHALL still be emitted
+
