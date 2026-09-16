@@ -92,6 +92,8 @@ fn sandbox_chapter_covers_the_required_setup() {
             "does not",     // honest non-guarantee framing
             "/private/tmp", // heredoc temp-dir grant
             "heredoc",      // why the grant is required
+            "setuid",       // setuid exec refusal
+            "/bin/ps",      // the concrete setuid binary an agent reaches for
         ],
     );
     assert!(
