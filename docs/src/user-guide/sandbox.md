@@ -88,6 +88,30 @@ secrets, so this is a write-only convenience grant; it does not change the
 read-confidentiality tiers below (see
 [Confidentiality hardening](#confidentiality-hardening)).
 
+### What breaks under the sandbox
+
+Some failures aren't a missing write grant — they're the kernel refusing to
+`exec` at all, and no profile rule fixes them:
+
+**Setuid/setgid binaries cannot exec under `sandbox-exec`.** `/bin/ps` and
+`/usr/bin/top` are setuid root on macOS. Seatbelt refuses to exec a setuid
+binary inside *any* profile, even the most permissive one:
+
+```
+$ sandbox-exec -p '(version 1)(allow default)' /bin/ps -o pid= -p $$
+sandbox-exec: execvp() of '/bin/ps' failed: Operation not permitted
+```
+
+An agent running `ps` inside a wrapped CLI typically only sees a bare
+`operation not permitted: ps` — the same wording the sandbox uses for a
+denied write. Don't chase it with a write grant: it isn't one, and no
+`(allow …)` rule fixes it. Use `pgrep` instead — it works under the same
+profile because it isn't setuid.
+
+The bundled worker-orientation skill already tells agents this, so both
+surfaces agree; an agent that hits it should adapt (use `pgrep`) rather than
+probe or widen the profile.
+
 ## Linux / WSL (`bwrap`)
 
 ```sh
@@ -118,7 +142,11 @@ present on every macOS; both are pragmatic, not stable contracts.
 The `--bind "${TMPDIR:-/tmp}" "${TMPDIR:-/tmp}"` line already covers shell
 heredocs on Linux — `zsh` writes heredoc bodies under `$TMPDIR` (or `/tmp` when
 unset), and both are bound writable, so the `git commit -m "$(cat <<'EOF' …
-EOF)"` idiom works here without an extra grant.
+EOF)"` idiom works here without an extra grant. `ps` is not setuid on Linux
+and works fine here — see [What breaks under the
+sandbox](#what-breaks-under-the-sandbox) for why it fails on macOS instead.
+`bwrap` itself sets `no_new_privs`, so even a setuid binary that did run
+inside it would run without its elevated privileges.
 
 ## The writable set to get right
 
