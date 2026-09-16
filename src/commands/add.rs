@@ -194,6 +194,7 @@ pub(crate) fn cmd_add(
         no_rebase: false,
         placement: config.worktree_placement(),
         worktree_runtime: &worktree_runtime,
+        clis: &config.clis,
     };
 
     // 4.6 Reuse create_worktree + attach_agent to build the new pane's setup.

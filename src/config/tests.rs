@@ -525,6 +525,8 @@ fn config_survives_save_and_load() {
                 settings_path: None,
                 approval_args: HashMap::new(),
                 prompt_profile: None,
+                session_id_args: None,
+                resume_args: None,
             },
         )]),
         presets: HashMap::from([(
@@ -630,6 +632,8 @@ fn custom_cli_empty_approval_args_omitted_on_serialize() {
         settings_path: None,
         approval_args: HashMap::new(),
         prompt_profile: None,
+        session_id_args: None,
+        resume_args: None,
     };
     let serialized = toml::to_string_pretty(&cli).unwrap();
     assert!(
@@ -2012,6 +2016,8 @@ fn cli_with_approval_args(command: &str, args: &[(&str, &str)]) -> CustomCli {
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect(),
         prompt_profile: None,
+        session_id_args: None,
+        resume_args: None,
     }
 }
 
@@ -2064,6 +2070,98 @@ fn resolve_approval_flags_unknown_cli_no_override_is_empty() {
     assert_eq!(
         resolve_approval_flags("some-agent", &ApprovalLevel::FullAuto, &clis),
         ""
+    );
+}
+
+// --- resolve_session_id_args / resolve_resume_args (override → built-in → None) ---
+
+fn cli_with_session_templates(
+    command: &str,
+    session_id_args: Option<&str>,
+    resume_args: Option<&str>,
+) -> CustomCli {
+    CustomCli {
+        command: command.into(),
+        display_name: None,
+        submit_delay_ms: None,
+        settings_path: None,
+        approval_args: HashMap::new(),
+        prompt_profile: None,
+        session_id_args: session_id_args.map(String::from),
+        resume_args: resume_args.map(String::from),
+    }
+}
+
+/// Spec scenario "Claude resolves the built-in templates".
+#[test]
+fn claude_resolves_the_built_in_session_templates() {
+    let clis = HashMap::new();
+    assert_eq!(
+        resolve_session_id_args("claude", "abc-123", &clis).as_deref(),
+        Some("--session-id abc-123")
+    );
+    assert_eq!(
+        resolve_resume_args("claude", "abc-123", &clis).as_deref(),
+        Some("--resume abc-123")
+    );
+}
+
+/// Spec scenario "Override wins over the built-in row".
+#[test]
+fn session_template_override_wins_over_built_in_row() {
+    let clis = HashMap::from([(
+        "claude".to_string(),
+        cli_with_session_templates("claude", None, Some("--continue-session {{SESSION_ID}}")),
+    )]);
+    assert_eq!(
+        resolve_resume_args("claude", "abc-123", &clis).as_deref(),
+        Some("--continue-session abc-123")
+    );
+}
+
+/// Spec scenario "Unknown CLI resolves no template".
+#[test]
+fn unknown_cli_resolves_no_session_template() {
+    let clis = HashMap::new();
+    assert_eq!(resolve_session_id_args("my-agent", "abc-123", &clis), None);
+    assert_eq!(resolve_resume_args("my-agent", "abc-123", &clis), None);
+}
+
+/// Spec scenario "Template without the placeholder is rejected".
+#[test]
+fn session_id_args_template_without_placeholder_is_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(
+        &path,
+        "[clis.my-agent]\n\
+             command = \"my-agent\"\n\
+             session_id_args = \"--session\"\n",
+    );
+
+    let err = load_config_file(&path).unwrap_err();
+    assert!(
+        err.to_string().contains("session_id_args"),
+        "error should name the invalid key, got: {err}"
+    );
+}
+
+/// Same rejection applies to `resume_args`.
+#[test]
+fn resume_args_template_without_placeholder_is_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(
+        &path,
+        "[clis.my-agent]\n\
+             command = \"my-agent\"\n\
+             resume_args = \"--resume\"\n",
+    );
+
+    let err = load_config_file(&path).unwrap_err();
+    assert!(
+        err.to_string().contains("resume_args"),
+        "error should name the invalid key, got: {err}"
     );
 }
 
@@ -3633,6 +3731,8 @@ fn clis_with_submit_delay(cli: &str, submit_delay_ms: Option<u64>) -> HashMap<St
             settings_path: None,
             approval_args: HashMap::new(),
             prompt_profile: None,
+            session_id_args: None,
+            resume_args: None,
         },
     );
     clis

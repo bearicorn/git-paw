@@ -154,6 +154,16 @@ If you're debugging a launch and want to know whether the rebase
 modified anything, `git rev-parse <branch>` from the main repo before
 and after `git paw start` will show the SHA change (or lack thereof).
 
+## Cold recovery resumes worker context
+
+When `git paw start` recovers a stopped session — or relaunches a
+worker whose pane died (a crash, an accidental `tmux kill-pane`, a
+machine sleep that tore the tmux server down) — a CLI that supports
+it is relaunched with its prior conversation context restored instead
+of starting cold. See [Per-CLI cold resume](pause.md#per-cli-cold-resume)
+for the mechanism (session-id assignment at launch, resume on
+recovery) and which CLIs it covers today.
+
 ## Adding and removing branches mid-session
 
 Before v0.6.0 the branch set was frozen at `git paw start` time: changing

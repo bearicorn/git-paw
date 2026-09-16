@@ -40,6 +40,8 @@ fn config_with_cli_settings(name: &str, settings: &Path) -> PawConfig {
             settings_path: Some(settings.to_string_lossy().into_owned()),
             approval_args: HashMap::new(),
             prompt_profile: None,
+            session_id_args: None,
+            resume_args: None,
         },
     );
     config

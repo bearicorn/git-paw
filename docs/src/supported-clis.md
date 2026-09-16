@@ -2,15 +2,25 @@
 
 git-paw auto-detects these AI coding CLIs on your PATH:
 
-| CLI | Binary | Description | Install |
-|-----|--------|-------------|---------|
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude` | Anthropic's AI coding assistant | `npm i -g @anthropic-ai/claude-code` |
-| [Codex](https://github.com/openai/codex) | `codex` | OpenAI's coding agent | `npm i -g @openai/codex` |
-| Antigravity CLI | `agy` | Google's agentic coding CLI (replaces the retired Gemini CLI) | See project docs |
-| [Aider](https://aider.chat) | `aider` | AI pair programming in the terminal | `pip install aider-chat` |
-| [Vibe](https://docs.mistral.ai/capabilities/vibe/) | `vibe` | Mistral AI's coding CLI | See project docs |
-| [Qwen](https://github.com/QwenLM) | `qwen` | Alibaba's Qwen coding CLI | See project docs |
-| [Amp](https://ampcode.com) | `amp` | Sourcegraph's AI coding agent | See project docs |
+| CLI | Binary | Description | Install | Cold resume |
+|-----|--------|-------------|---------|-------------|
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude` | Anthropic's AI coding assistant | `npm i -g @anthropic-ai/claude-code` | Yes (built-in) |
+| [Codex](https://github.com/openai/codex) | `codex` | OpenAI's coding agent | `npm i -g @openai/codex` | No |
+| Antigravity CLI | `agy` | Google's agentic coding CLI (replaces the retired Gemini CLI) | See project docs | No |
+| [Aider](https://aider.chat) | `aider` | AI pair programming in the terminal | `pip install aider-chat` | No |
+| [Vibe](https://docs.mistral.ai/capabilities/vibe/) | `vibe` | Mistral AI's coding CLI | See project docs | No |
+| [Qwen](https://github.com/QwenLM) | `qwen` | Alibaba's Qwen coding CLI | See project docs | No |
+| [Amp](https://ampcode.com) | `amp` | Sourcegraph's AI coding agent | See project docs | No |
+
+"Cold resume" means git-paw can restore the CLI's prior conversation
+when recovering a stopped session or relaunching a dead pane, rather
+than starting it fresh — see [Per-CLI cold
+resume](user-guide/pause.md#per-cli-cold-resume). A "No" here reflects
+the CLI having no known session-assignment/resume flags, not a defect
+in it; add `session_id_args` / `resume_args` to a `[clis.<name>]`
+override (see [Custom CLIs](configuration/README.md#custom-clis)) to
+enable resume for a CLI that supports it but isn't in git-paw's
+built-in table yet.
 
 ## How Detection Works
 

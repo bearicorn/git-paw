@@ -278,6 +278,7 @@ pub(crate) fn cmd_start(
             branch_created: wt.branch_created,
             pending_boot_prompt: None,
             runtime_slot: provisioned.runtime_slot,
+            cli_session_id: None,
         });
     }
 
@@ -631,6 +632,7 @@ fn launch_spec_session(
             branch_created: wt.branch_created,
             pending_boot_prompt: None,
             runtime_slot: provisioned.runtime_slot,
+            cli_session_id: None,
         });
     }
 

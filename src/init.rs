@@ -1438,6 +1438,7 @@ test_command = "just check"
             branch_created: true,
             pending_boot_prompt: None,
             runtime_slot: None,
+            cli_session_id: None,
         }
     }
 

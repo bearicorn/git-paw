@@ -379,6 +379,8 @@ mod tests {
                     approval_markers: Some(vec!["waiting for go-ahead".to_string()]),
                     ..Default::default()
                 }),
+                session_id_args: None,
+                resume_args: None,
             },
         );
         let resolved = resolve_prompt_profile("mycli", &clis);
@@ -417,6 +419,8 @@ mod tests {
                     readiness_markers: Some(vec!["ready>".to_string()]),
                     ..Default::default()
                 }),
+                session_id_args: None,
+                resume_args: None,
             },
         );
         assert_eq!(
@@ -440,6 +444,8 @@ mod tests {
                     broad_grant_marker: Some("never ask again".to_string()),
                     ..Default::default()
                 }),
+                session_id_args: None,
+                resume_args: None,
             },
         );
         assert_eq!(

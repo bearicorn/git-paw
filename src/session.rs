@@ -172,6 +172,17 @@ pub struct WorktreeEntry {
     /// prior versions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_slot: Option<u16>,
+
+    /// The worker CLI's assigned session/conversation identifier, when the
+    /// CLI resolved a `session_id_args` template at launch
+    /// (`worker-session-id-capture`).
+    ///
+    /// `None` when the CLI has no assignment template (unchanged launch),
+    /// and on every session file written before this field existed. Omitted
+    /// from JSON when `None`, so an entry without an id serializes
+    /// byte-identically to before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_session_id: Option<String>,
 }
 
 /// Persisted session state for a git-paw session.
@@ -749,6 +760,7 @@ mod tests {
                     branch_created: false,
                     pending_boot_prompt: None,
                     runtime_slot: None,
+                    cli_session_id: None,
                 },
                 WorktreeEntry {
                     branch: "fix/api".to_string(),
@@ -757,6 +769,7 @@ mod tests {
                     branch_created: false,
                     pending_boot_prompt: None,
                     runtime_slot: None,
+                    cli_session_id: None,
                 },
                 WorktreeEntry {
                     branch: "feature/logging".to_string(),
@@ -765,6 +778,7 @@ mod tests {
                     branch_created: false,
                     pending_boot_prompt: None,
                     runtime_slot: None,
+                    cli_session_id: None,
                 },
             ],
             broker_port: None,
@@ -881,6 +895,67 @@ mod tests {
         assert!(
             !written.contains("runtime_slot"),
             "absent slot must not be serialized; got:\n{written}"
+        );
+    }
+
+    // -- cli_session_id: additive optional field (worker-session-id-capture) --
+
+    /// Spec scenario "Assigned id round-trips".
+    #[test]
+    fn saved_session_round_trips_cli_session_id_intact() {
+        let dir = TempDir::new().unwrap();
+        let mut session = sample_session();
+        session.worktrees[0].cli_session_id = Some("3f2c1a90-aaaa-4bbb-8ccc-1234567890ab".into());
+        save_session_in(&session, dir.path()).unwrap();
+
+        let loaded = load_session_from("paw-my-project", dir.path())
+            .unwrap()
+            .expect("session should exist");
+
+        assert_eq!(
+            loaded.worktrees[0].cli_session_id.as_deref(),
+            Some("3f2c1a90-aaaa-4bbb-8ccc-1234567890ab")
+        );
+    }
+
+    /// Spec scenario "Older session files load with None".
+    #[test]
+    fn state_file_without_cli_session_id_loads_with_none() {
+        // A state file written before the field existed must still load, with
+        // every worktree reporting no assigned session id.
+        let dir = TempDir::new().unwrap();
+        let json = r#"{
+            "session_name": "paw-legacy",
+            "repo_path": "/Users/test/code/legacy",
+            "project_name": "legacy",
+            "created_at": "2024-03-23T13:20:00Z",
+            "status": "active",
+            "worktrees": [
+                {
+                    "branch": "feature/auth",
+                    "worktree_path": "/Users/test/code/legacy-feature-auth",
+                    "cli": "claude",
+                    "branch_created": false
+                }
+            ]
+        }"#;
+        std::fs::write(dir.path().join("paw-legacy.json"), json).unwrap();
+
+        let loaded = load_session_from("paw-legacy", dir.path())
+            .unwrap()
+            .expect("legacy session should load");
+        assert_eq!(loaded.worktrees[0].cli_session_id, None);
+    }
+
+    /// Spec scenario "Entry without an id serializes as before".
+    #[test]
+    fn absent_cli_session_id_is_omitted_from_serialized_state() {
+        let dir = TempDir::new().unwrap();
+        save_session_in(&sample_session(), dir.path()).unwrap();
+        let written = std::fs::read_to_string(dir.path().join("paw-my-project.json")).unwrap();
+        assert!(
+            !written.contains("cli_session_id"),
+            "absent id must not be serialized; got:\n{written}"
         );
     }
 

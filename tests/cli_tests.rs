@@ -291,6 +291,7 @@ fn make_session_with_worktree(
             branch_created: wt.branch_created,
             pending_boot_prompt: None,
             runtime_slot: None,
+            cli_session_id: None,
         }],
         broker_port: None,
         broker_bind: None,

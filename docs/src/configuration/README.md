@@ -497,6 +497,15 @@ settings_path = "~/.config/claude-variant/settings.json"
 # built-in table row gets native permission flags (e.g. full-auto for a
 # claude-oss variant). Unknown level keys fail the config load.
 approval_args = { "full-auto" = "--dangerously-skip-permissions" }
+# Templates for assigning and resuming a worker CLI's own session identity.
+# Each MUST contain the {{SESSION_ID}} placeholder; a template lacking it is
+# rejected at config load, naming the key. Resolution is override → built-in
+# → none, same order as approval_args. The built-in table covers `claude`
+# (`--session-id {{SESSION_ID}}` / `--resume {{SESSION_ID}}`); a CLI without
+# a built-in row and without these overrides launches unchanged (no id
+# assigned, no resume on recovery).
+session_id_args = "--session-id {{SESSION_ID}}"
+resume_args = "--resume {{SESSION_ID}}"
 
 # Per-field overrides of the CLI's terminal-shape markers (readiness
 # banner, approval-prompt wording, …), consulted before the embedded
@@ -512,6 +521,8 @@ approval_markers = ["proceed? (y/n)"]
 | `submit_delay_ms` | no | Boot-prompt settle delay (ms) before the submit `Enter`; per-CLI so the launcher stays CLI-agnostic. |
 | `settings_path` | no | Path to the CLI's claude-format settings file. git-paw does not write to it; its parent directory joins the memory-isolation protected-path set. |
 | `approval_args` | no | Map from approval-level name (`"manual"`, `"auto"`, `"full-auto"`) to the flags appended to the launch command at that level. Consulted **before** the [built-in flag table](#supervisor); an unknown level key is rejected at config load with an error naming the key. |
+| `session_id_args` | no | Template (containing `{{SESSION_ID}}`) for the flag(s) that assign a fresh session identifier at launch. Consulted **before** the built-in table (`claude` only); a CLI resolving neither launches unchanged, with no id recorded. |
+| `resume_args` | no | Template (containing `{{SESSION_ID}}`) for the flag(s) that resume a previously assigned session. Appended on recovery when the worktree's recorded id and this CLI's resolved template are both present; a template omitting the placeholder is rejected at config load. |
 | `prompt_profile` | no | Per-field overrides of the CLI's terminal-shape markers, consulted before the embedded Claude Code default. Carries no permission policy — see [CLI Prompt-Shape Profiles](../user-guide/cli-prompt-profiles.md). |
 
 Every configured `settings_path` also feeds the **protected-path set** used

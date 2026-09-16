@@ -3119,6 +3119,8 @@ mod tests {
                         settings_path: None,
                         approval_args: HashMap::new(),
                         prompt_profile: None,
+                        session_id_args: None,
+                        resume_args: None,
                     },
                 )
             })
@@ -3239,6 +3241,8 @@ mod tests {
                         .into_owned(),
                 ),
                 prompt_profile: None,
+                session_id_args: None,
+                resume_args: None,
             },
         );
         let protected = ProtectedPaths::derive(&config, None);

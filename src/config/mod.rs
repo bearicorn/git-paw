@@ -36,8 +36,9 @@ pub use prompt_profile::{
 pub use specs::SpecsConfig;
 pub use supervisor::{
     ApprovalLevel, ApprovalLevelPreset, AutoApproveConfig, BrokerPublish, CommonDevAllowlistConfig,
-    ConflictConfig, CorrectionConfig, LearningsConfig, OnExhausted, SupervisorConfig, TellConfig,
-    TellMode, approval_flags, resolve_approval_flags,
+    ConflictConfig, CorrectionConfig, LearningsConfig, OnExhausted, SESSION_ID_PLACEHOLDER,
+    SupervisorConfig, TellConfig, TellMode, approval_flags, resolve_approval_flags,
+    resolve_resume_args, resolve_session_id_args,
 };
 
 /// Governance document paths.
@@ -657,6 +658,7 @@ pub(crate) fn load_config_file(path: &Path) -> Result<Option<PawConfig>, PawErro
             let config: PawConfig = toml::from_str(&contents)
                 .map_err(|e| PawError::ConfigError(format!("{}: {e}", path.display())))?;
             validate_approval_args(&config, path)?;
+            validate_session_templates(&config, path)?;
             for warning in worktree_runtime_warnings(&config) {
                 eprintln!("warning: {}: {warning}", path.display());
             }
@@ -680,6 +682,31 @@ fn validate_approval_args(config: &PawConfig, path: &Path) -> Result<(), PawErro
                 return Err(PawError::ConfigError(format!(
                     "{}: [clis.{name}] approval_args has invalid level key '{key}' \
                      (expected one of: \"manual\", \"auto\", \"full-auto\")",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Rejects `[clis.<name>].session_id_args` / `.resume_args` templates that
+/// omit the `{{SESSION_ID}}` placeholder.
+///
+/// A template without the placeholder would still launch the CLI, silently
+/// missing the substitution the whole feature depends on — so a typo'd or
+/// hand-written template fails the load, naming the bad key (design D2).
+fn validate_session_templates(config: &PawConfig, path: &Path) -> Result<(), PawError> {
+    for (name, cli) in &config.clis {
+        for (key, template) in [
+            ("session_id_args", &cli.session_id_args),
+            ("resume_args", &cli.resume_args),
+        ] {
+            if let Some(template) = template
+                && !template.contains(supervisor::SESSION_ID_PLACEHOLDER)
+            {
+                return Err(PawError::ConfigError(format!(
+                    "{}: [clis.{name}] {key} is missing the {{{{SESSION_ID}}}} placeholder",
                     path.display()
                 )));
             }
@@ -1087,6 +1114,12 @@ worktree_placement = "child"
 # [clis.my-agent]
 # command = "/usr/local/bin/my-agent"
 # display_name = "My Agent"
+#
+# Templates for assigning/resuming this CLI's own session id at launch and
+# recovery. Each MUST contain {{SESSION_ID}}; omit both to launch unchanged
+# (git-paw's built-in table already covers "claude").
+# session_id_args = "--session-id {{SESSION_ID}}"
+# resume_args = "--resume {{SESSION_ID}}"
 
 # Named presets for quick launches.
 # [presets.my-preset]
