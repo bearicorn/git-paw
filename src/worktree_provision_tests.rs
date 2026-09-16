@@ -11,6 +11,7 @@ fn entry(branch: &str, slot: Option<u16>) -> WorktreeEntry {
         branch_created: false,
         pending_boot_prompt: None,
         runtime_slot: slot,
+        cli_session_id: None,
     }
 }
 

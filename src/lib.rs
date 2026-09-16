@@ -44,6 +44,7 @@ pub mod lock;
 pub mod logging;
 pub mod mcp;
 pub mod opsx;
+pub mod random;
 pub mod replay;
 pub mod selftest;
 pub mod session;

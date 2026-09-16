@@ -447,6 +447,10 @@ struct AttachContext<'a> {
     /// Resolved `[worktree]` runtime-provisioning config (env-file copies and
     /// port allocation). Inert when neither sub-table is configured.
     worktree_runtime: &'a git_paw::config::WorktreeConfig,
+    /// The full `[clis.<name>]` table, consulted by
+    /// [`config::resolve_session_id_args`] to decide whether `agent_cli`
+    /// gets a fresh session id at launch (`worker-session-id-capture`).
+    clis: &'a std::collections::HashMap<String, config::CustomCli>,
 }
 
 /// Artifacts produced by attaching one agent's worktree: the tmux pane spec to
@@ -559,11 +563,31 @@ fn attach_agent(
         )?;
     }
 
-    let cli_command = if ctx.agent_flags.is_empty() {
-        ctx.agent_cli.to_string()
+    // Assign a fresh session id when this CLI resolves a `session_id_args`
+    // template — generated (and thus persisted) before the CLI ever starts,
+    // so recovery can resume it even if the pane dies moments later
+    // (worker-session-id-capture design D1). Appended after the approval
+    // flags, mirroring how those are appended after the bare CLI command.
+    let has_session_id_template =
+        config::resolve_session_id_args(ctx.agent_cli, "probe", ctx.clis).is_some();
+    let cli_session_id = if has_session_id_template {
+        Some(git_paw::random::generate_uuid_v4()?)
     } else {
-        format!("{} {}", ctx.agent_cli, ctx.agent_flags)
+        None
     };
+    let session_id_args = cli_session_id
+        .as_deref()
+        .and_then(|id| config::resolve_session_id_args(ctx.agent_cli, id, ctx.clis));
+
+    let mut cli_command = ctx.agent_cli.to_string();
+    if !ctx.agent_flags.is_empty() {
+        cli_command.push(' ');
+        cli_command.push_str(ctx.agent_flags);
+    }
+    if let Some(args) = &session_id_args {
+        cli_command.push(' ');
+        cli_command.push_str(args);
+    }
 
     let boot_block = git_paw::skills::build_boot_block(
         branch,
@@ -586,6 +610,7 @@ fn attach_agent(
             branch_created: wt.branch_created,
             pending_boot_prompt: None,
             runtime_slot: provisioned.runtime_slot,
+            cli_session_id,
         },
     })
 }
@@ -2454,6 +2479,7 @@ mod tests {
                 branch_created: wt.branch_created,
                 pending_boot_prompt: None,
                 runtime_slot: None,
+                cli_session_id: None,
             }],
             broker_port: None,
             broker_bind: None,
@@ -2920,7 +2946,7 @@ mod permission_seeding_removed_tests {
 
     use tempfile::TempDir;
 
-    use git_paw::config::{BrokerConfig, WorktreeConfig, WorktreePlacement};
+    use git_paw::config::{BrokerConfig, CustomCli, WorktreeConfig, WorktreePlacement};
     use git_paw::skills::GateCommands;
 
     use super::{AttachContext, attach_agent};
@@ -2953,6 +2979,7 @@ mod permission_seeding_removed_tests {
         gate_commands: &'a GateCommands<'a>,
         broker_config: &'a BrokerConfig,
         worktree_runtime: &'a WorktreeConfig,
+        clis: &'a std::collections::HashMap<String, CustomCli>,
     ) -> AttachContext<'a> {
         AttachContext {
             repo_root,
@@ -2969,6 +2996,7 @@ mod permission_seeding_removed_tests {
             no_rebase: true,
             placement: WorktreePlacement::Sibling,
             worktree_runtime,
+            clis,
         }
     }
 
@@ -2984,7 +3012,14 @@ mod permission_seeding_removed_tests {
         let gate_commands = GateCommands::default();
         let broker_config = BrokerConfig::default();
         let worktree_runtime = WorktreeConfig::default();
-        let ctx = attach_ctx(&repo, &gate_commands, &broker_config, &worktree_runtime);
+        let clis = std::collections::HashMap::new();
+        let ctx = attach_ctx(
+            &repo,
+            &gate_commands,
+            &broker_config,
+            &worktree_runtime,
+            &clis,
+        );
 
         let attached = attach_agent(&ctx, "feat-a", None, 0).expect("attach_agent succeeds");
         let wt_path = attached.entry.worktree_path.clone();
@@ -3027,7 +3062,14 @@ mod permission_seeding_removed_tests {
         let gate_commands = GateCommands::default();
         let broker_config = BrokerConfig::default();
         let worktree_runtime = WorktreeConfig::default();
-        let ctx = attach_ctx(&repo, &gate_commands, &broker_config, &worktree_runtime);
+        let clis = std::collections::HashMap::new();
+        let ctx = attach_ctx(
+            &repo,
+            &gate_commands,
+            &broker_config,
+            &worktree_runtime,
+            &clis,
+        );
 
         // First attach creates the worktree.
         let attached = attach_agent(&ctx, "feat-b", None, 0).expect("first attach succeeds");
@@ -3048,6 +3090,174 @@ mod permission_seeding_removed_tests {
         assert_eq!(
             after, sentinel,
             "a pre-existing settings file must be left byte-identical"
+        );
+    }
+
+    /// Asserts `id` matches the v4 UUID shape
+    /// (`xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx`).
+    fn assert_v4_uuid_shape(id: &str) {
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12],
+            "not a v4 UUID shape: {id}"
+        );
+        assert!(parts[2].starts_with('4'), "version nibble must be 4: {id}");
+    }
+
+    /// Spec scenario "Claude worker is launched with an assigned id"
+    /// (`worker-session-id-capture`).
+    #[test]
+    fn attach_agent_assigns_a_claude_worker_a_session_id() {
+        let sandbox = TempDir::new().unwrap();
+        let repo = sandbox.path().join("repo");
+        init_repo(&repo);
+
+        let gate_commands = GateCommands::default();
+        let broker_config = BrokerConfig::default();
+        let worktree_runtime = WorktreeConfig::default();
+        let clis = std::collections::HashMap::new();
+        let ctx = attach_ctx(
+            &repo,
+            &gate_commands,
+            &broker_config,
+            &worktree_runtime,
+            &clis,
+        );
+
+        let attached = attach_agent(&ctx, "feat-x", None, 0).expect("attach_agent succeeds");
+
+        let id = attached
+            .entry
+            .cli_session_id
+            .as_deref()
+            .expect("cli_session_id is assigned for claude");
+        assert_v4_uuid_shape(id);
+        assert!(
+            attached
+                .pane
+                .cli_command
+                .contains(&format!("--session-id {id}")),
+            "pane command should carry --session-id <id>, got: {}",
+            attached.pane.cli_command
+        );
+    }
+
+    /// Spec scenario "Each worker gets a distinct id".
+    #[test]
+    fn attach_agent_assigns_distinct_ids_to_each_worker() {
+        let sandbox = TempDir::new().unwrap();
+        let repo = sandbox.path().join("repo");
+        init_repo(&repo);
+
+        let gate_commands = GateCommands::default();
+        let broker_config = BrokerConfig::default();
+        let worktree_runtime = WorktreeConfig::default();
+        let clis = std::collections::HashMap::new();
+        let ctx = attach_ctx(
+            &repo,
+            &gate_commands,
+            &broker_config,
+            &worktree_runtime,
+            &clis,
+        );
+
+        let ids: Vec<String> = ["feat-1", "feat-2", "feat-3"]
+            .iter()
+            .map(|branch| {
+                attach_agent(&ctx, branch, None, 0)
+                    .expect("attach_agent succeeds")
+                    .entry
+                    .cli_session_id
+                    .expect("cli_session_id is assigned")
+            })
+            .collect();
+
+        let unique: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), 3, "each worker must get a distinct id");
+    }
+
+    /// Spec scenario "CLI without an assignment template launches unchanged".
+    #[test]
+    fn attach_agent_leaves_a_cli_without_a_template_unchanged() {
+        let sandbox = TempDir::new().unwrap();
+        let repo = sandbox.path().join("repo");
+        init_repo(&repo);
+
+        let gate_commands = GateCommands::default();
+        let broker_config = BrokerConfig::default();
+        let worktree_runtime = WorktreeConfig::default();
+        let clis = std::collections::HashMap::new();
+        let ctx = AttachContext {
+            repo_root: &repo,
+            project: "test",
+            broker_config: &broker_config,
+            agent_cli: "codex",
+            agent_flags: "",
+            coordination_template: None,
+            docs_fetch_template: None,
+            gate_commands: &gate_commands,
+            session_backends: &[],
+            inter_agent_rules_peers: None,
+            strict_guard: true,
+            no_rebase: true,
+            placement: WorktreePlacement::Sibling,
+            worktree_runtime: &worktree_runtime,
+            clis: &clis,
+        };
+
+        let attached = attach_agent(&ctx, "feat-codex", None, 0).expect("attach_agent succeeds");
+
+        assert_eq!(attached.pane.cli_command, "codex");
+        assert_eq!(attached.entry.cli_session_id, None);
+    }
+
+    /// Spec scenario "Assignment follows approval flags".
+    #[test]
+    fn attach_agent_appends_session_id_after_approval_flags() {
+        let sandbox = TempDir::new().unwrap();
+        let repo = sandbox.path().join("repo");
+        init_repo(&repo);
+
+        let gate_commands = GateCommands::default();
+        let broker_config = BrokerConfig::default();
+        let worktree_runtime = WorktreeConfig::default();
+        let clis = std::collections::HashMap::new();
+        let ctx = AttachContext {
+            repo_root: &repo,
+            project: "test",
+            broker_config: &broker_config,
+            agent_cli: "claude",
+            agent_flags: "--dangerously-skip-permissions",
+            coordination_template: None,
+            docs_fetch_template: None,
+            gate_commands: &gate_commands,
+            session_backends: &[],
+            inter_agent_rules_peers: None,
+            strict_guard: true,
+            no_rebase: true,
+            placement: WorktreePlacement::Sibling,
+            worktree_runtime: &worktree_runtime,
+            clis: &clis,
+        };
+
+        let attached =
+            attach_agent(&ctx, "feat-full-auto", None, 0).expect("attach_agent succeeds");
+
+        let flags_pos = attached
+            .pane
+            .cli_command
+            .find("--dangerously-skip-permissions")
+            .expect("approval flag present");
+        let session_pos = attached
+            .pane
+            .cli_command
+            .find("--session-id")
+            .expect("session-id flag present");
+        assert!(
+            flags_pos < session_pos,
+            "--dangerously-skip-permissions must precede --session-id, got: {}",
+            attached.pane.cli_command
         );
     }
 }

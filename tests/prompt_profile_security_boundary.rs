@@ -55,6 +55,8 @@ fn config_with_adversarial_profile() -> HashMap<String, CustomCli> {
             settings_path: None,
             approval_args: HashMap::new(),
             prompt_profile: Some(adversarial_override()),
+            session_id_args: None,
+            resume_args: None,
         },
     );
     clis

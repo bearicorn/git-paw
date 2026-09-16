@@ -345,6 +345,18 @@ receipt is invalidated automatically before launching) or `git paw purge --stale
 to clear it. The `--json` output's `status` field carries the matching lowercase
 value (`active`, `paused`, `stopped`, or `stale`).
 
+Each entry in `--json`'s `worktrees` array carries:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `branch` | string | The agent's branch name. |
+| `cli` | string | The CLI id assigned to this worktree. |
+| `worktree_path` | string | Absolute path to the worktree. |
+| `cli_session_id` | string or `null` | The session identifier git-paw assigned this worker's CLI at launch, or `null` when the CLI has no assignment template. Resume it by hand with the CLI's own resume flag (e.g. `claude --resume <id>`), or let `git paw start` do it automatically on recovery. |
+
+The human-readable table (no `--json`) never shows `cli_session_id` — it is
+operator/tooling data surfaced only in JSON.
+
 **Example:**
 ```bash
 git paw status

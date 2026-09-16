@@ -724,6 +724,7 @@ pub(crate) fn cmd_supervisor(
             no_rebase,
             placement: config.worktree_placement(),
             worktree_runtime: &worktree_runtime,
+            clis: &config.clis,
         };
 
         // Each agent takes the lowest slot not held by an already-attached

@@ -2193,6 +2193,8 @@ fn gate_pane_for_injection_uses_the_resolved_cli_profile() {
                 readiness_markers: Some(vec!["mycli-ready>".to_string()]),
                 ..Default::default()
             }),
+            session_id_args: None,
+            resume_args: None,
         },
     );
     let profile = crate::config::resolve_prompt_profile("mycli", &clis);

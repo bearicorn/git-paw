@@ -2100,6 +2100,8 @@ Do you want to proceed?";
                 settings_path: Some("/opt/myvariant-home/settings.json".to_string()),
                 approval_args: std::collections::HashMap::new(),
                 prompt_profile: None,
+                session_id_args: None,
+                resume_args: None,
             },
         );
         let set = ProtectedPaths::derive(&config, None);

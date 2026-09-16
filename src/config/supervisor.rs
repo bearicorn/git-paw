@@ -1049,6 +1049,105 @@ pub fn resolve_approval_flags<S: std::hash::BuildHasher>(
     approval_flags(cli, level).to_string()
 }
 
+/// The placeholder every `session_id_args` / `resume_args` template must
+/// contain, substituted with the assigned/recorded session id at render
+/// time.
+pub const SESSION_ID_PLACEHOLDER: &str = "{{SESSION_ID}}";
+
+/// Built-in `session_id_args` template for `cli`, or `None` if the CLI has
+/// no known flag for assigning a session id at launch.
+///
+/// Verified against the Claude Code CLI's `--session-id <uuid>` flag
+/// 2026-09-15 (`worker-session-id-capture` task 1.2).
+#[must_use]
+fn built_in_session_id_args(cli: &str) -> Option<&'static str> {
+    match cli {
+        "claude" => Some("--session-id {{SESSION_ID}}"),
+        _ => None,
+    }
+}
+
+/// Built-in `resume_args` template for `cli`, or `None` if the CLI has no
+/// known flag for resuming a previously assigned session.
+///
+/// Verified against the Claude Code CLI's `--resume <uuid>` flag
+/// 2026-09-15 (`worker-session-id-capture` task 1.2).
+#[must_use]
+fn built_in_resume_args(cli: &str) -> Option<&'static str> {
+    match cli {
+        "claude" => Some("--resume {{SESSION_ID}}"),
+        _ => None,
+    }
+}
+
+/// Resolves the session-id-assignment template for `cli`, consulting (in
+/// order): the per-CLI `[clis.<name>].session_id_args` override, the
+/// built-in [`built_in_session_id_args`] table, then `None` (no template —
+/// the CLI is not assigned an id).
+///
+/// When a template resolves, `id` is substituted for
+/// [`SESSION_ID_PLACEHOLDER`] and the rendered string returned.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::HashMap;
+/// use git_paw::config::{resolve_session_id_args, CustomCli};
+///
+/// let clis: HashMap<String, CustomCli> = HashMap::new();
+/// assert_eq!(
+///     resolve_session_id_args("claude", "abc-123", &clis).as_deref(),
+///     Some("--session-id abc-123"),
+/// );
+/// assert_eq!(resolve_session_id_args("codex", "abc-123", &clis), None);
+/// ```
+#[must_use]
+pub fn resolve_session_id_args<S: std::hash::BuildHasher>(
+    cli: &str,
+    id: &str,
+    clis: &HashMap<String, CustomCli, S>,
+) -> Option<String> {
+    let template = clis
+        .get(cli)
+        .and_then(|c| c.session_id_args.as_deref())
+        .or_else(|| built_in_session_id_args(cli))?;
+    Some(template.replace(SESSION_ID_PLACEHOLDER, id))
+}
+
+/// Resolves the session-resume template for `cli`, consulting (in order):
+/// the per-CLI `[clis.<name>].resume_args` override, the built-in
+/// [`built_in_resume_args`] table, then `None` (no template — the CLI
+/// cannot be resumed).
+///
+/// When a template resolves, `id` is substituted for
+/// [`SESSION_ID_PLACEHOLDER`] and the rendered string returned.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::HashMap;
+/// use git_paw::config::{resolve_resume_args, CustomCli};
+///
+/// let clis: HashMap<String, CustomCli> = HashMap::new();
+/// assert_eq!(
+///     resolve_resume_args("claude", "abc-123", &clis).as_deref(),
+///     Some("--resume abc-123"),
+/// );
+/// assert_eq!(resolve_resume_args("codex", "abc-123", &clis), None);
+/// ```
+#[must_use]
+pub fn resolve_resume_args<S: std::hash::BuildHasher>(
+    cli: &str,
+    id: &str,
+    clis: &HashMap<String, CustomCli, S>,
+) -> Option<String> {
+    let template = clis
+        .get(cli)
+        .and_then(|c| c.resume_args.as_deref())
+        .or_else(|| built_in_resume_args(cli))?;
+    Some(template.replace(SESSION_ID_PLACEHOLDER, id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -46,6 +46,7 @@ pub(crate) fn cmd_status(json: bool) -> Result<(), PawError> {
                     "branch": e.branch,
                     "cli": e.cli,
                     "worktree_path": e.worktree_path,
+                    "cli_session_id": e.cli_session_id,
                 })
             })
             .collect();

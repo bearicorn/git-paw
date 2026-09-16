@@ -60,6 +60,24 @@ pub struct CustomCli {
     /// carries no permission decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_profile: Option<CliPromptProfileOverride>,
+    /// Template for the flag(s) that assign a fresh session identifier at
+    /// launch, consulted BEFORE the built-in table by
+    /// [`super::resolve_session_id_args`].
+    ///
+    /// MUST contain the `{{SESSION_ID}}` placeholder; a template lacking it
+    /// is rejected at config load, naming the key. Mirrors the shape and
+    /// resolution order of [`Self::approval_args`] — see
+    /// `worker-session-id-capture` design D2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id_args: Option<String>,
+    /// Template for the flag(s) that resume a previously assigned session,
+    /// consulted BEFORE the built-in table by
+    /// [`super::resolve_resume_args`].
+    ///
+    /// MUST contain the `{{SESSION_ID}}` placeholder; a template lacking it
+    /// is rejected at config load, naming the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_args: Option<String>,
 }
 
 /// A named preset defining branches and a CLI to use.
@@ -111,6 +129,8 @@ pub fn add_custom_cli_to(
             settings_path: None,
             approval_args: HashMap::new(),
             prompt_profile: None,
+            session_id_args: None,
+            resume_args: None,
         },
     );
 

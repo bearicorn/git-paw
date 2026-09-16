@@ -6,16 +6,39 @@
 //! cluster, R2d) and `attach_or_print_hint` remains in `main.rs`; both are
 //! referenced here across module boundaries.
 
+use std::collections::HashMap;
 use std::path::Path;
 
-use git_paw::config::{self, PawConfig, SupervisorConfig};
+use git_paw::config::{self, CustomCli, PawConfig, SupervisorConfig};
 use git_paw::error::PawError;
-use git_paw::session::{self, Session, SessionMode, SessionStatus};
+use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry};
 use git_paw::tmux;
 
 use super::helpers::dashboard_command;
 use super::supervisor::resolve_supervisor_flags;
 use crate::attach_or_print_hint;
+
+/// Builds the recovery-time CLI launch command for `entry`: the bare CLI id
+/// unchanged, unless the entry carries an assigned `cli_session_id` AND its
+/// CLI resolves a `resume_args` template — in which case the rendered resume
+/// arguments are appended, restoring the worker's conversation context
+/// (`worker-session-id-capture` design D4).
+///
+/// Recovery never fails because a resume template is absent: an entry
+/// without an id, or a CLI without a resume template, launches exactly as it
+/// did before this change.
+fn cli_command_for_recovery<S: std::hash::BuildHasher>(
+    entry: &WorktreeEntry,
+    clis: &HashMap<String, CustomCli, S>,
+) -> String {
+    let Some(id) = entry.cli_session_id.as_deref() else {
+        return entry.cli.clone();
+    };
+    match config::resolve_resume_args(&entry.cli, id, clis) {
+        Some(args) => format!("{} {args}", entry.cli),
+        None => entry.cli.clone(),
+    }
+}
 
 /// Recovers a stopped/stale session by recreating the tmux session from saved state.
 pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<(), PawError> {
@@ -70,6 +93,7 @@ pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<()
             broker_url.as_deref(),
             mouse,
             config.border_affordances_enabled(),
+            &config.clis,
         )?,
     };
     tmux_session.execute()?;
@@ -85,12 +109,13 @@ pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<()
 
 /// Rebuild a bare-mode (non-supervisor) session: dashboard at pane 0 (when
 /// broker enabled), coding agents at pane 1+.
-fn recover_bare_session(
+fn recover_bare_session<S: std::hash::BuildHasher>(
     repo_root: &Path,
     existing: &Session,
     broker_url: Option<&str>,
     mouse: bool,
     border_affordances: bool,
+    clis: &HashMap<String, CustomCli, S>,
 ) -> Result<tmux::TmuxSession, PawError> {
     let mut builder = tmux::TmuxSessionBuilder::new(&existing.project_name)
         .session_name(existing.session_name.clone())
@@ -111,7 +136,7 @@ fn recover_bare_session(
         builder = builder.add_pane(tmux::PaneSpec {
             branch: entry.branch.clone(),
             worktree: entry.worktree_path.to_string_lossy().to_string(),
-            cli_command: entry.cli.clone(),
+            cli_command: cli_command_for_recovery(entry, clis),
         });
     }
 
@@ -177,7 +202,7 @@ fn recover_supervisor_session(
         .map(|entry| tmux::PaneSpec {
             branch: entry.branch.clone(),
             worktree: entry.worktree_path.to_string_lossy().to_string(),
-            cli_command: entry.cli.clone(),
+            cli_command: cli_command_for_recovery(entry, &config.clis),
         })
         .collect();
 
@@ -196,4 +221,49 @@ fn recover_supervisor_session(
         config.border_affordances_enabled(),
         &env_vars,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn entry(cli: &str, cli_session_id: Option<&str>) -> WorktreeEntry {
+        WorktreeEntry {
+            branch: "feat/x".to_string(),
+            worktree_path: PathBuf::from("/tmp/wt-feat-x"),
+            cli: cli.to_string(),
+            branch_created: false,
+            pending_boot_prompt: None,
+            runtime_slot: None,
+            cli_session_id: cli_session_id.map(String::from),
+        }
+    }
+
+    /// Spec scenario "Recovered Claude worker is resumed".
+    #[test]
+    fn recovered_claude_worker_command_carries_resume_args() {
+        let e = entry("claude", Some("3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"));
+        let clis = HashMap::new();
+        assert_eq!(
+            cli_command_for_recovery(&e, &clis),
+            "claude --resume 3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"
+        );
+    }
+
+    /// Spec scenario "Entry without an id launches fresh".
+    #[test]
+    fn entry_without_an_id_launches_fresh() {
+        let e = entry("claude", None);
+        let clis = HashMap::new();
+        assert_eq!(cli_command_for_recovery(&e, &clis), "claude");
+    }
+
+    /// Spec scenario "CLI without a resume template launches fresh".
+    #[test]
+    fn cli_without_a_resume_template_launches_fresh() {
+        let e = entry("my-agent", Some("3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"));
+        let clis = HashMap::new();
+        assert_eq!(cli_command_for_recovery(&e, &clis), "my-agent");
+    }
 }

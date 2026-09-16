@@ -94,13 +94,30 @@ the normal cold-recovery path (fresh CLI spawn).
 - Pausing with no session for the current repo prints
   "No active session for this repo." and exits 0.
 
-## Future: per-CLI cold resume (drift 61)
+## Per-CLI cold resume
 
-For CLIs that support `--continue` / `--resume` (Claude Code, etc.),
-v1.0.0 will extend the cold-recovery path so `git paw start` after a
-`stop` can also restore conversation context — by spawning the CLI
-with the resume flag. That solves the long-break case without
-holding RAM, complementing pause for the short-break case.
+Stop's cold-recovery path (and a dead-pane relaunch during any
+`git paw start`) restores conversation context too, for CLIs that
+support it. At launch git-paw assigns each worker a fresh session
+identifier and passes it on the CLI's own launch command (Claude
+Code's `--session-id <uuid>`), then records it in the session state.
+When that worktree is later recovered, git-paw relaunches its CLI
+with the matching resume flag (`--resume <uuid>` for Claude Code)
+instead of a bare launch — the worker picks up its prior conversation
+instead of starting cold.
+
+This solves the long-break case without holding RAM, complementing
+pause for the short-break case: `stop` releases the CLI processes,
+and the next `start` brings their conversations back rather than
+only their worktrees.
+
+A worktree whose CLI has no known resume flag (no built-in row and no
+`[clis.<name>].resume_args` override) launches fresh exactly as
+before — nothing about cold recovery changes for it. See
+[`session_id_args` / `resume_args`](../configuration/README.md#custom-clis)
+to add resume support for a CLI git-paw doesn't know about, and
+[`git paw status --json`](../cli-reference.md) to read a worker's
+assigned id (e.g. to resume it by hand outside git-paw).
 
 ## See also
 

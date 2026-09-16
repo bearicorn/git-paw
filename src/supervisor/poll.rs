@@ -846,6 +846,8 @@ mod tests {
                     approval_markers: Some(vec!["mycli waiting".to_string()]),
                     ..Default::default()
                 }),
+                session_id_args: None,
+                resume_args: None,
             },
         );
         let profile = crate::config::resolve_prompt_profile("mycli", &clis);
@@ -1409,6 +1411,8 @@ mod tests {
                         .into_owned(),
                 ),
                 prompt_profile: None,
+                session_id_args: None,
+                resume_args: None,
             },
         );
         ProtectedPaths::derive(&config, None)
