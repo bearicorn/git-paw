@@ -75,6 +75,8 @@ use tempfile::TempDir;
 
 use git_paw::broker::messages::{ArtifactPayload, BrokerMessage};
 use git_paw::broker::publish::publish_to_broker_http;
+use git_paw::config::WorktreePlacement;
+use git_paw::git::worktree_path_for;
 use git_paw::supervisor::poll::fetch_status_over_http;
 
 mod helpers;
@@ -163,6 +165,34 @@ fn plain_dummy() -> &'static str {
     "cat"
 }
 
+/// Writes an executable dummy CLI that continuously reprints `marker_line` —
+/// plain output, no prompt, no options — simulating a CLI that has stopped
+/// serving anything but a rate-limit / login-loss status line
+/// (`drive-loop-exit-summary-truth`).
+fn write_marker_dummy(dir: &Path, name: &str, marker_line: &str) -> PathBuf {
+    let path = dir.join(name);
+    // Double-quoted, not single-quoted: `marker_line` (e.g. "You've hit your
+    // session limit") carries an apostrophe that would otherwise desync the
+    // shell's quoting.
+    let script = format!(
+        "#!/usr/bin/env bash\n\
+         # Test dummy CLI: reprint a plain status line forever; ignore stdin.\n\
+         while true; do\n\
+         \x20 printf '%s\\n' \"{marker_line}\"\n\
+         \x20 sleep 0.4\n\
+         done\n"
+    );
+    fs::write(&path, script).expect("write marker dummy");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path).expect("stat dummy").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("chmod dummy");
+    }
+    path
+}
+
 /// Writes a `.git-paw/config.toml` wiring the broker port and the supervisor +
 /// default CLIs. `supervisor_cli` / `agent_cli` are command strings (absolute
 /// script paths or `cat`).
@@ -248,6 +278,32 @@ fn wait_for_status(url: &str, agent: &str, want_status: &str, budget: Duration) 
         }
         std::thread::sleep(Duration::from_millis(150));
     }
+}
+
+/// Polls until `path` exists, or the budget elapses.
+fn wait_for_path(path: &Path, budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    loop {
+        if path.exists() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Commits an empty commit in `worktree` — content-free, since only ancestry
+/// (not the diff) matters to the ref-derived merge check
+/// (`drive-loop-exit-summary-truth`).
+fn commit_ahead(worktree: &Path, message: &str) {
+    let status = StdCommand::new("git")
+        .current_dir(worktree)
+        .args(["commit", "--allow-empty", "-m", message])
+        .status()
+        .expect("git commit --allow-empty");
+    assert!(status.success(), "commit_ahead must succeed");
 }
 
 /// Publishes a terminal `agent.artifact { status }` for `agent` — the broker
@@ -544,5 +600,191 @@ fn unattended_approves_supervisor_pane_zero_safe_prompt() {
     assert!(
         status.success(),
         "unattended run should exit 0; stdout:\n{stdout}"
+    );
+}
+
+/// `drive-loop-exit-summary-truth`, GP-05/GP-20 fix: a worker publishes `done`
+/// with a commit that never made it into the default branch — the exact
+/// 0.16.0 dogfood shape. The summary must read `escalated-for-review` /
+/// `0/1 branches merged` with an `[unmerged]` entry, and the process still
+/// exits `0` (an unmerged branch is a review item, not a process failure).
+#[test]
+#[serial]
+fn unattended_reports_escalated_for_review_when_branch_unmerged() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let home = TempDir::new().expect("home dir");
+    let out = TempDir::new().expect("out dir");
+    let port = pick_broker_port();
+    let url = format!("http://127.0.0.1:{port}");
+
+    // Neither pane needs a live prompt: completion comes from the worker's
+    // own broker status, and the merge truth comes from git.
+    write_config(tr.path(), port, plain_dummy(), plain_dummy());
+
+    let (mut child, stdout_path) = spawn_unattended(
+        tr.path(),
+        home.path(),
+        tmux_env.socket_dir(),
+        out.path(),
+        "feat/alpha",
+        "400",
+        "120000", // long heartbeat: completion, not heartbeat, ends the run
+    );
+
+    assert!(
+        wait_for_broker(&url, Duration::from_secs(20)),
+        "broker should come up on the ephemeral port"
+    );
+    let worktree = worktree_path_for(tr.path(), "feat/alpha", WorktreePlacement::Sibling)
+        .expect("derive the sibling worktree path");
+    assert!(
+        wait_for_path(&worktree, Duration::from_secs(20)),
+        "the agent's worktree should be created"
+    );
+    // The worker's branch gets a commit that never reaches the default
+    // branch — nothing in this test ever merges it.
+    commit_ahead(&worktree, "unmerged work");
+    publish_terminal(&url, "feat-alpha", "done");
+
+    let status = wait_child(&mut child, Duration::from_secs(30));
+    let stdout = read_to_string(&stdout_path);
+    kill_session(tmux_env.socket_dir(), &stdout);
+
+    let status = status.unwrap_or_else(|| panic!("child did not exit; stdout:\n{stdout}"));
+    assert!(
+        status.success(),
+        "an unmerged branch is a review item, not a process failure; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Unattended drive loop exited: escalated-for-review"),
+        "a finished-but-unmerged wave must never read completed; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("0/1 branches merged"),
+        "the roll-up must be ref-derived, not phase-derived; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("[unmerged]"),
+        "the unmerged branch must be listed as an escalation; stdout:\n{stdout}"
+    );
+}
+
+/// The all-merged counterpart: the same worker commit, fast-forwarded into
+/// the default branch before completion, reports `completed` / `1/1 branches
+/// merged`.
+#[test]
+#[serial]
+fn unattended_reports_completed_when_branch_is_merged() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let home = TempDir::new().expect("home dir");
+    let out = TempDir::new().expect("out dir");
+    let port = pick_broker_port();
+    let url = format!("http://127.0.0.1:{port}");
+
+    write_config(tr.path(), port, plain_dummy(), plain_dummy());
+
+    let (mut child, stdout_path) = spawn_unattended(
+        tr.path(),
+        home.path(),
+        tmux_env.socket_dir(),
+        out.path(),
+        "feat/alpha",
+        "400",
+        "120000",
+    );
+
+    assert!(
+        wait_for_broker(&url, Duration::from_secs(20)),
+        "broker should come up on the ephemeral port"
+    );
+    let worktree = worktree_path_for(tr.path(), "feat/alpha", WorktreePlacement::Sibling)
+        .expect("derive the sibling worktree path");
+    assert!(
+        wait_for_path(&worktree, Duration::from_secs(20)),
+        "the agent's worktree should be created"
+    );
+    commit_ahead(&worktree, "work that gets merged");
+    // Fast-forward the default branch to include it, at the repo root (main
+    // stays checked out there; the worktree owns `feat/alpha` separately).
+    let ff = StdCommand::new("git")
+        .current_dir(tr.path())
+        .args(["merge", "--ff-only", "feat/alpha"])
+        .status()
+        .expect("fast-forward main onto feat/alpha");
+    assert!(ff.success(), "fast-forward must succeed");
+    publish_terminal(&url, "feat-alpha", "done");
+
+    let status = wait_child(&mut child, Duration::from_secs(30));
+    let stdout = read_to_string(&stdout_path);
+    kill_session(tmux_env.socket_dir(), &stdout);
+
+    let status = status.unwrap_or_else(|| panic!("child did not exit; stdout:\n{stdout}"));
+    assert!(
+        status.success(),
+        "unattended run should exit 0; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Unattended drive loop exited: completed"),
+        "stdout:\n{stdout}"
+    );
+    assert!(stdout.contains("1/1 branches merged"), "stdout:\n{stdout}");
+}
+
+/// The orchestrator pane's CLI has stopped serving anything but a
+/// session-limit status line: the loop must exit at once with
+/// `cli-unavailable` and a non-zero status — the one exit-status change in
+/// this release (D4).
+#[test]
+#[serial]
+fn unattended_exits_non_zero_on_orchestrator_cli_unavailable() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let home = TempDir::new().expect("home dir");
+    let out = TempDir::new().expect("out dir");
+    let port = pick_broker_port();
+
+    let marker = write_marker_dummy(tr.path(), "dummy_limit.sh", "You've hit your session limit");
+    write_config(tr.path(), port, &marker.to_string_lossy(), plain_dummy());
+
+    let (mut child, stdout_path) = spawn_unattended(
+        tr.path(),
+        home.path(),
+        tmux_env.socket_dir(),
+        out.path(),
+        "feat/alpha",
+        "400",
+        "120000", // long heartbeat: the marker, not the heartbeat, ends the run
+    );
+
+    let status = wait_child(&mut child, Duration::from_secs(30));
+    let stdout = read_to_string(&stdout_path);
+    kill_session(tmux_env.socket_dir(), &stdout);
+
+    let status = status.unwrap_or_else(|| panic!("child did not exit; stdout:\n{stdout}"));
+    assert!(
+        !status.success(),
+        "a cli-unavailable exit must be non-zero; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Unattended drive loop exited: cli-unavailable"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("You've hit your session limit"),
+        "the summary should quote the matching line; stdout:\n{stdout}"
     );
 }

@@ -1027,6 +1027,8 @@ pub fn approval_flags(cli: &str, level: &ApprovalLevel) -> &'static str {
 ///             "--my-custom-flag".to_string(),
 ///         )]),
 ///         prompt_profile: None,
+///         session_id_args: None,
+///         resume_args: None,
 ///     },
 /// );
 /// assert_eq!(
