@@ -73,21 +73,59 @@ The loop keeps polling until one of:
 4. **Session torn down** — the loop's own session instance is purged, stopped,
    or replaced (see [Session-instance lifecycle](#session-instance-lifecycle)
    below).
+5. **CLI unavailable** — the orchestrator pane's CLI has stopped serving
+   anything but a usage/session-limit or expired/missing-login status line
+   (see [CLI unavailability](#cli-unavailability) below).
 
 On exit it prints a summary: the outcome (`completed` /
-`escalated-for-review` / `stuck` / `heartbeat` / `session-torn-down`), each
-agent's **resolved** final state, the deduped list of prompts escalated for
-human review, and pointers to the broker log and captured learnings. Because
-there is no human to hand-write findings, the loop self-captures qualitative
+`escalated-for-review` / `stuck` / `heartbeat` / `session-torn-down` /
+`cli-unavailable`), each agent's **resolved** final state and its
+merged/unmerged status, the deduped list of prompts escalated for human
+review, and pointers to the broker log and captured learnings. Because there
+is no human to hand-write findings, the loop self-captures qualitative
 learnings during the run and once more at wind-down.
 
 Each agent's final state is resolved from the most-progressed lifecycle phase
 ever observed for it during the run — not simply the last `/status` row — so a
 generic `working` heartbeat published after a `verified`/`done` artifact event
-can never make a finished worker look unfinished in the summary. A completed
-wave also gets a wave-level roll-up line (e.g. `2/2 branches merged`), which
-covers the case where an individual agent's own resolution stayed sparse (its
-only signal was the supervisor's own verdict, never its own terminal status).
+can never make a finished worker look unfinished in the summary.
+
+**The merged/unmerged roll-up is ref-derived, never inferred from a worker's
+reported status.** A worker reaching `verified`/`done` says nothing about
+whether its branch ever reached the default branch — reporting a wave
+`completed` on the strength of worker status alone was the failure mode a
+0.16.0 external dogfood surfaced: the summary read `completed`, `2/2 branches
+merged`, zero escalations, while `main` was unchanged and both branches were
+still ahead. At exit the loop asks git directly, once per coding branch,
+whether the branch tip is an ancestor of the default branch
+(`git merge-base --is-ancestor`); a comparison git cannot make (a deleted
+branch, a bad ref) counts as **unmerged** — the fail-safe direction, since this
+summary is the input to a destructive `git paw purge`. The wave-level roll-up
+line (e.g. `2/2 branches merged`) and each agent's own line (`<agent>: <phase>
+· merged` / `<agent>: <phase> · unmerged (N ahead of <default>, tip <sha>)`)
+both come from this same ref check, and print for every outcome with coding
+agents — a `heartbeat` exit gets the same truth, not only a `completed` one.
+**`completed` now implies every branch is merged.** A wave that finishes with
+any branch unmerged reads `escalated-for-review` instead, with one
+`[unmerged]` escalation entry per unmerged branch, so "Escalations awaiting
+human review" can no longer read `0` while work sits un-integrated — check
+this list, not just the outcome word, before running `purge`.
+
+### CLI unavailability
+
+A rate-limited or logged-out CLI in the **orchestrator's own pane** is a loud,
+explicit, non-success exit — not a silent idle pane the loop waits out for up
+to 25 minutes. Each poll, every pane's capture tail is also scanned for a
+CLI-unavailability marker (a usage/session-limit phrase, or a
+login-loss phrase such as an expired/missing credential). A match on the
+orchestrator pane ends the loop immediately with outcome `cli-unavailable`;
+the summary names the pane and quotes the matching line, and the
+`--unattended` process **exits non-zero** — the one outcome whose exit status
+differs from every outcome that predates this behaviour. Nothing is killed:
+the tmux session and worker panes are left running for you to attach to or
+resume later. A match on a coding-agent pane instead becomes a deduped
+`cli-unavailable` escalation and the loop keeps driving the rest of the wave —
+that worker's branch will show as unmerged in the exit summary regardless.
 
 For an unattended session the in-process loop is the **sole** approver: the
 dashboard subprocess's auto-approve thread is disabled so two approvers never

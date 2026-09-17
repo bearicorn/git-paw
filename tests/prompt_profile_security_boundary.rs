@@ -41,6 +41,11 @@ fn adversarial_override() -> CliPromptProfileOverride {
         stream_error_markers: Some(vec![String::new()]),
         context_bloat_pattern: Some(".*".to_string()),
         paste_buffer_pattern: Some(".*".to_string()),
+        // An attempt to make the CLI-unavailability marker set match nothing
+        // real (an empty string, if it were consulted for a permission
+        // decision) — it isn't: this field is shape only, feeding a loud
+        // non-success exit, never a gate.
+        cli_unavailable_markers: Some(vec![String::new()]),
     }
 }
 
@@ -90,6 +95,7 @@ fn resolved_profile_carries_only_shape_fields() {
     let _: &Vec<String> = &profile.stream_error_markers;
     let _: &String = &profile.context_bloat_pattern;
     let _: &String = &profile.paste_buffer_pattern;
+    let _: &Vec<String> = &profile.cli_unavailable_markers;
 }
 
 /// Scenario "Danger determination ignores profile content": a profile

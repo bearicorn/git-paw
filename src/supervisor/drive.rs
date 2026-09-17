@@ -59,10 +59,11 @@ use crate::session::{self, SessionStatus};
 use super::approval_gate::{approval_dedup_key, live_prompt_in_tail};
 use super::approve::{KeyDispatcher, TmuxKeyDispatcher, approval_keystrokes};
 use super::auto_approve::{
-    ProtectedPaths, detect_prompt_shape, extract_command_slice, extract_path_from_file_prompt,
-    is_dangerous, is_git_dir_write, is_live_prompt, is_managed_script_invocation,
-    is_protected_path_violation, is_safe_command, is_scratch_rm, is_worktree_dev_test_op,
-    is_worktree_file_op, is_worktree_git_op, normalize_command, select_option_index,
+    LIVE_PROMPT_TAIL, ProtectedPaths, detect_prompt_shape, extract_command_slice,
+    extract_path_from_file_prompt, is_dangerous, is_git_dir_write, is_live_prompt,
+    is_managed_script_invocation, is_protected_path_violation, is_safe_command, is_scratch_rm,
+    is_worktree_dev_test_op, is_worktree_file_op, is_worktree_git_op, normalize_command,
+    select_option_index,
 };
 use super::claim::PaneClaim;
 use super::poll::{AgentStatusRow, fetch_status_over_http};
@@ -112,6 +113,9 @@ pub struct AgentPane {
     pub agent_id: String,
     /// Absolute worktree root the agent's pane runs in (`pane_current_path`).
     pub worktree_path: PathBuf,
+    /// The agent's git branch name, used at exit to ask git whether the
+    /// branch is merged into the default branch (`drive-loop-exit-summary-truth`).
+    pub branch: String,
 }
 
 /// The role a swept pane resolves to.
@@ -888,6 +892,12 @@ pub enum DriveOutcome {
     /// new same-named session (GP-06) — it exits without acting on the new
     /// session's panes.
     SessionTornDown,
+    /// The orchestrator pane's CLI has stopped serving — a usage/session
+    /// limit or an expired/missing login — detected via the resolved
+    /// profile's `cli_unavailable_markers` (`drive-loop-exit-summary-truth`,
+    /// D4). An explicit, loud, non-success exit: with the brain gone,
+    /// continuing to approve worker prompts is not progress.
+    CliUnavailable,
 }
 
 impl DriveOutcome {
@@ -900,6 +910,7 @@ impl DriveOutcome {
             DriveOutcome::Stuck => "stuck",
             DriveOutcome::Heartbeat => "heartbeat",
             DriveOutcome::SessionTornDown => "session-torn-down",
+            DriveOutcome::CliUnavailable => "cli-unavailable",
         }
     }
 }
@@ -1097,6 +1108,31 @@ pub trait SessionInstanceGuard {
     fn is_current(&self) -> bool;
 }
 
+/// The ref-derived merge truth for one coding branch, resolved at exit
+/// (`drive-loop-exit-summary-truth`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeState {
+    /// Whether the branch tip is an ancestor of the default branch.
+    pub merged: bool,
+    /// Commits on the branch not on the default branch (0 when `merged`).
+    pub ahead: usize,
+    /// The branch's short tip SHA.
+    pub tip: String,
+}
+
+/// Answers the exit-summary merge question for one branch by asking git —
+/// never loop state (D1). Injected on [`DriveDeps`] so [`drive_loop`] stays
+/// testable without a real repository.
+pub trait MergeCheck {
+    /// Resolves `branch`'s merge state against the default branch.
+    ///
+    /// # Errors
+    /// Returns an error when the comparison cannot be made (a deleted
+    /// branch, a bad ref). Callers must treat an `Err` as **unmerged** — the
+    /// fail-safe direction (D2) — never as an unknown to be skipped.
+    fn merge_state(&self, branch: &str) -> Result<MergeState, PawError>;
+}
+
 /// Bundled dependencies for [`drive_loop`].
 pub struct DriveDeps<'a> {
     /// Enumerates panes each sweep.
@@ -1111,6 +1147,8 @@ pub struct DriveDeps<'a> {
     pub messages: &'a dyn MessageObserver,
     /// The clock.
     pub clock: &'a dyn Clock,
+    /// Resolves the ref-derived merge truth for the exit summary.
+    pub merge_check: &'a dyn MergeCheck,
     /// Publishes alerts.
     pub alerts: &'a mut dyn AlertSink,
     /// Records learnings.
@@ -1160,6 +1198,10 @@ pub struct DriveConfig {
     /// nudge settle delay. Empty when unknown, which resolves to
     /// [`crate::DEFAULT_SUBMIT_DELAY_MS`] via [`resolve_submit_delay_ms`].
     pub supervisor_cli: String,
+    /// The repository's default branch name, resolved once via
+    /// [`crate::git::default_branch`] — used only to label the ref-derived
+    /// merged/unmerged text in the exit summary (`drive-loop-exit-summary-truth`).
+    pub default_branch: String,
 }
 
 impl Default for DriveConfig {
@@ -1179,6 +1221,7 @@ impl Default for DriveConfig {
             branch_refresh_enabled: false,
             clis: HashMap::new(),
             supervisor_cli: String::new(),
+            default_branch: String::new(),
         }
     }
 }
@@ -1251,7 +1294,7 @@ pub fn drive_loop(
     // The loop is an expression that breaks with the terminal `(outcome,
     // latest_status)`: every exit path assigns both, so there are no
     // pre-initialised placeholders to leave dead.
-    let (outcome, latest_status) = loop {
+    let (outcome, latest_status) = 'drive: loop {
         // --- Session-instance check (GP-06), before any action this tick -----
         if !instance.is_current() {
             break (DriveOutcome::SessionTornDown, Vec::new());
@@ -1279,7 +1322,7 @@ pub fn drive_loop(
             pane_by_agent.insert(agent_id.clone(), pane.pane_index);
 
             let worktree_root = worktree_by_id.get(&agent_id).map(PathBuf::as_path);
-            if let Some(escalation) = sweep_pane(
+            match sweep_pane(
                 ctx,
                 &pane,
                 &agent_id,
@@ -1288,7 +1331,20 @@ pub fn drive_loop(
                 config,
                 &mut dedup,
             ) {
-                escalations.push(escalation);
+                PaneSweepOutcome::None => {}
+                PaneSweepOutcome::Escalated(escalation) => escalations.push(escalation),
+                PaneSweepOutcome::OrchestratorCliUnavailable(line) => {
+                    // The brain is gone: exit at once rather than continue
+                    // blindly approving worker prompts (D4). The quoted line
+                    // reaches the summary through the escalation list, the
+                    // same as every other detail the summary renders.
+                    escalations.push(Escalation {
+                        agent_id: agent_id.clone(),
+                        verdict: "cli-unavailable".to_string(),
+                        command: line,
+                    });
+                    break 'drive (DriveOutcome::CliUnavailable, Vec::new());
+                }
             }
         }
 
@@ -1384,6 +1440,58 @@ pub fn drive_loop(
 
         deps.clock.sleep(config.poll_interval);
     };
+    let mut outcome = outcome;
+
+    // --- Ref-derived merge truth (drive-loop-exit-summary-truth, D1) --------
+    // Merged-ness is answered by git, once per coding branch, never by loop
+    // or phase state: a worker reaching `verified`/`done` says nothing about
+    // whether its branch ever reached the default branch. A comparison git
+    // cannot make (a deleted branch, a bad ref) counts as unmerged — the
+    // fail-safe direction (D2), because this summary is the input to a
+    // destructive `purge`.
+    let merge_results: HashMap<String, Result<MergeState, PawError>> = agents
+        .iter()
+        .map(|a| (a.agent_id.clone(), deps.merge_check.merge_state(&a.branch)))
+        .collect();
+
+    // A wave the loop reported finished (`Completed` / `EscalatedForReview` —
+    // the two outcomes the `winding_down` break above produces) is only ever
+    // `Completed` when every branch is actually merged (D3). An unmerged
+    // branch becomes a `[unmerged]` escalation entry, pushed directly onto
+    // `escalations` — never via `record_escalation`, both because the loop's
+    // sweep context no longer exists here and because nothing may be typed
+    // into a pane during wind-down (GP-16).
+    if matches!(
+        outcome,
+        DriveOutcome::Completed | DriveOutcome::EscalatedForReview
+    ) {
+        for agent in agents {
+            let detail = match merge_results.get(&agent.agent_id) {
+                Some(Ok(state)) if state.merged => None,
+                Some(Ok(state)) => Some(format!(
+                    "{}: {} commit(s) not in {} (tip {})",
+                    agent.branch, state.ahead, config.default_branch, state.tip
+                )),
+                Some(Err(e)) => Some(format!(
+                    "{}: could not compare against {}: {e}",
+                    agent.branch, config.default_branch
+                )),
+                None => None,
+            };
+            if let Some(command) = detail {
+                escalations.push(Escalation {
+                    agent_id: agent.agent_id.clone(),
+                    verdict: "unmerged".to_string(),
+                    command,
+                });
+            }
+        }
+        outcome = if escalations.is_empty() {
+            DriveOutcome::Completed
+        } else {
+            DriveOutcome::EscalatedForReview
+        };
+    }
 
     // --- Wind-down synthesis learning (deduped against in-session friction) --
     if !escalations.is_empty() {
@@ -1394,23 +1502,26 @@ pub fn drive_loop(
         );
     }
 
-    // Wave-level "N/M branches merged" line (GP-05): printed for a completed
-    // wave in addition to the per-agent list — the fallback when a specific
-    // agent's own resolution stayed sparse (e.g. its only signal was the
-    // supervisor's own verdict, never its own `verified`/`done` status), and a
-    // useful roll-up otherwise.
-    let merged_summary =
-        (outcome == DriveOutcome::Completed && !coding_ids.is_empty()).then(|| {
-            let merged = coding_ids
-                .iter()
-                .filter(|id| resolved_phase.get(*id).is_some_and(|p| p.rank() == 2))
-                .count();
-            format!("{merged}/{} branches merged", coding_ids.len())
-        });
+    // Wave-level "N/M branches merged" line: the ref-derived count, printed
+    // for every outcome with coding agents (not only `Completed`) — a
+    // `heartbeat` exit benefits from the same truth as a finished one.
+    let merged_summary = (!coding_ids.is_empty()).then(|| {
+        let merged = merge_results
+            .values()
+            .filter(|r| matches!(r, Ok(s) if s.merged))
+            .count();
+        format!("{merged}/{} branches merged", coding_ids.len())
+    });
 
     DriveSummary {
         outcome,
-        agent_states: resolved_agent_states(&coding_ids, &latest_status, &resolved_phase),
+        agent_states: resolved_agent_states(
+            &coding_ids,
+            &latest_status,
+            &resolved_phase,
+            &merge_results,
+            &config.default_branch,
+        ),
         escalations,
         exhausted,
         broker_log_hint: config.broker_log_hint.clone(),
@@ -1643,13 +1754,58 @@ fn record_escalation(deps: &mut DriveDeps<'_>, ctx: SweepContext<'_>, escalation
     }
 }
 
+/// Tail-only scan for a CLI-unavailability marker — a usage/session limit or
+/// an expired/missing login (`drive-loop-exit-summary-truth`, D4). Anchors on
+/// the same trailing non-blank window [`is_live_prompt`] uses
+/// ([`LIVE_PROMPT_TAIL`]), so a marker that has scrolled into history, or that
+/// an agent merely printed while reading docs, does not fire. Matched
+/// case-insensitively as a substring, by the same convention every other
+/// marker field uses. Returns the matching line verbatim (trimmed), for
+/// quoting in the exit summary.
+///
+/// Sources its markers from the embedded Claude Code profile
+/// (`cli-prompt-profiles` capability), the same way [`is_live_prompt`] and
+/// [`detect_prompt_shape`] source theirs — the compiled loop's shape checks
+/// are Claude-specific; per-CLI overrides serve the bundled `sweep.sh`
+/// helper's independent process instead.
+#[must_use]
+fn cli_unavailable_line(capture: &str) -> Option<String> {
+    let markers = &claude_prompt_profile().cli_unavailable_markers;
+    let nonblank: Vec<&str> = capture.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail = &nonblank[nonblank.len().saturating_sub(LIVE_PROMPT_TAIL)..];
+    tail.iter().find_map(|line| {
+        let lower = line.to_ascii_lowercase();
+        markers
+            .iter()
+            .any(|m| lower.contains(&m.to_ascii_lowercase()))
+            .then(|| line.trim().to_string())
+    })
+}
+
+/// What sweeping one pane found.
+enum PaneSweepOutcome {
+    /// Nothing actionable — no live prompt, no CLI-unavailability marker.
+    None,
+    /// A risky/unknown prompt (or a CLI-unavailability marker on a coding
+    /// pane) was escalated this sweep.
+    Escalated(Escalation),
+    /// The orchestrator pane itself shows a CLI-unavailability marker: the
+    /// caller must exit the loop at once (D4).
+    OrchestratorCliUnavailable(String),
+}
+
 /// Sweeps one pane: captures it, and when a LIVE prompt is in the tail either
 /// approves it (audit-logged first, then the option digit and `Enter` as two
 /// separate keystrokes, gated on a fresh re-confirm) or records a deduped
 /// escalation without blocking the rest of the wave.
 ///
-/// Returns the escalation when one was newly recorded this sweep, so the caller
-/// accumulates it for the exit summary. A pane with no live prompt — mere
+/// Before the live-prompt check, every pane's tail is also scanned for a
+/// CLI-unavailability marker (D4): the orchestrator pane signals an immediate
+/// exit to the caller, while a coding pane's match becomes a deduped
+/// `cli-unavailable` escalation and the sweep continues driving the rest of
+/// the wave.
+///
+/// A pane with no live prompt and no CLI-unavailability marker — mere
 /// narration, or a resolved prompt scrolled into history — is left untouched;
 /// that is also what keeps pane 0 quiet. The one exception is an IDLE pane whose
 /// input box still holds an unsubmitted directive: that gets a follow-up `Enter`
@@ -1663,9 +1819,30 @@ fn sweep_pane(
     deps: &mut DriveDeps<'_>,
     config: &DriveConfig,
     dedup: &mut DedupWindow,
-) -> Option<Escalation> {
+) -> PaneSweepOutcome {
     let session = ctx.session;
     let capture = deps.capturer.capture(session, pane.pane_index);
+
+    if let Some(line) = cli_unavailable_line(&capture) {
+        if agent_id == SUPERVISOR_AGENT_ID {
+            return PaneSweepOutcome::OrchestratorCliUnavailable(line);
+        }
+        // Coding pane: non-blocking escalation, deduped exactly like a
+        // risky/unknown prompt, so a persistent marker does not re-fire every
+        // sweep.
+        let key = approval_dedup_key(agent_id, &capture);
+        if !dedup.should_emit(&key, deps.clock.now()) {
+            return PaneSweepOutcome::None;
+        }
+        let escalation = Escalation {
+            agent_id: agent_id.to_string(),
+            verdict: "cli-unavailable".to_string(),
+            command: line,
+        };
+        record_escalation(deps, ctx, &escalation);
+        return PaneSweepOutcome::Escalated(escalation);
+    }
+
     if !is_live_prompt(&capture) {
         let _ = submit_buffered_input(
             deps.capturer,
@@ -1674,7 +1851,7 @@ fn sweep_pane(
             pane.pane_index,
             &capture,
         );
-        return None;
+        return PaneSweepOutcome::None;
     }
 
     let verdict = classify_prompt(
@@ -1703,13 +1880,13 @@ fn sweep_pane(
                 pane.pane_index,
                 option_index,
             );
-            None
+            PaneSweepOutcome::None
         }
         PromptVerdict::Danger | PromptVerdict::Unknown => {
             // Non-blocking escalation, deduped on (agent_id, shape).
             let key = approval_dedup_key(agent_id, &capture);
             if !dedup.should_emit(&key, deps.clock.now()) {
-                return None;
+                return PaneSweepOutcome::None;
             }
             let escalation = Escalation {
                 agent_id: agent_id.to_string(),
@@ -1724,7 +1901,7 @@ fn sweep_pane(
                 "unattended loop escalated a prompt",
                 &friction_learning_body(&escalation),
             );
-            Some(escalation)
+            PaneSweepOutcome::Escalated(escalation)
         }
     }
 }
@@ -2265,7 +2442,8 @@ fn duration_from_env_ms(key: &str, default: Duration) -> Duration {
 
 /// Builds the per-agent final-state list, preferring each agent's resolved
 /// terminal phase over the final `/status` snapshot's literal status when the
-/// resolved phase outranks it (GP-05).
+/// resolved phase outranks it (GP-05), and appending the ref-derived
+/// merged/unmerged annotation (`drive-loop-exit-summary-truth`, D3).
 ///
 /// A `/status` snapshot alone can go stale: a generic `working` heartbeat
 /// republished after a `verified`/`done` artifact event overwrites the
@@ -2280,6 +2458,8 @@ fn resolved_agent_states(
     coding_ids: &[String],
     latest_status: &[AgentStatusRow],
     resolved: &HashMap<String, WorkerPhase>,
+    merge_results: &HashMap<String, Result<MergeState, PawError>>,
+    default_branch: &str,
 ) -> Vec<(String, String)> {
     coding_ids
         .iter()
@@ -2290,7 +2470,18 @@ fn resolved_agent_states(
                 Some(phase) if phase.rank() > literal_rank => phase.as_status().to_string(),
                 _ => literal.map_or_else(|| "unknown".to_string(), |r| r.status.clone()),
             };
-            (id.clone(), status)
+            let merge_note = match merge_results.get(id) {
+                Some(Ok(state)) if state.merged => "merged".to_string(),
+                Some(Ok(state)) => format!(
+                    "unmerged ({} ahead of {default_branch}, tip {})",
+                    state.ahead, state.tip
+                ),
+                Some(Err(e)) => {
+                    format!("unmerged (could not compare against {default_branch}: {e})")
+                }
+                None => "unmerged (no merge check result)".to_string(),
+            };
+            (id.clone(), format!("{status} · {merge_note}"))
         })
         .collect()
 }
@@ -2612,6 +2803,37 @@ impl BranchRefresher for GitBranchRefresher {
     }
 }
 
+/// Production [`MergeCheck`]: resolves each branch's merge state against a
+/// default branch resolved ONCE at loop start via [`crate::git::default_branch`]
+/// (`drive-loop-exit-summary-truth`, D1) — never re-derived per branch, so
+/// every comparison in a run is against the same target.
+struct GitMergeCheck {
+    repo_root: PathBuf,
+    default_branch: String,
+}
+
+impl MergeCheck for GitMergeCheck {
+    fn merge_state(&self, branch: &str) -> Result<MergeState, PawError> {
+        let merged =
+            crate::git::branch_is_merged_into(&self.repo_root, branch, &self.default_branch)?;
+        if merged {
+            return Ok(MergeState {
+                merged: true,
+                ahead: 0,
+                tip: String::new(),
+            });
+        }
+        let ahead =
+            crate::git::unmerged_commit_count(&self.repo_root, branch, &self.default_branch)?;
+        let tip = crate::git::branch_tip_short(&self.repo_root, branch)?;
+        Ok(MergeState {
+            merged: false,
+            ahead,
+            tip,
+        })
+    }
+}
+
 /// Inputs for [`run_drive_loop`] beyond the session name, repo root, and agent
 /// roster — bundled so the production entry point stays under the
 /// argument-count lint and so `cmd_supervisor` builds them in one place.
@@ -2659,8 +2881,13 @@ pub struct DriveRunOptions {
 ///
 /// # Errors
 ///
-/// Returns an error only for an unrecoverable setup failure; the loop itself
-/// swallows transient tmux/broker errors and keeps polling.
+/// Returns an error for an unrecoverable setup failure, or — AFTER printing
+/// the exit summary — when the outcome is [`DriveOutcome::CliUnavailable`]
+/// (`drive-loop-exit-summary-truth`, D4): the one outcome whose exit status
+/// changes, so an unattended `--unattended` process exits non-zero rather
+/// than reporting success with the orchestrator gone. The loop itself
+/// swallows transient tmux/broker errors and keeps polling; every other
+/// outcome keeps returning `Ok`.
 pub fn run_drive_loop(
     session: &str,
     repo_root: &Path,
@@ -2686,6 +2913,11 @@ pub fn run_drive_loop(
         repo_root: repo_root.to_path_buf(),
         session_name: session.to_string(),
         bound_created_at: session_created_at,
+    };
+    let default_branch = crate::git::default_branch(repo_root)?;
+    let merge_check = GitMergeCheck {
+        repo_root: repo_root.to_path_buf(),
+        default_branch: default_branch.clone(),
     };
 
     let enumerator = TmuxPaneEnumerator;
@@ -2734,6 +2966,7 @@ pub fn run_drive_loop(
         branch_refresh_enabled,
         clis,
         supervisor_cli,
+        default_branch,
         ..DriveConfig::default()
     };
 
@@ -2744,6 +2977,7 @@ pub fn run_drive_loop(
         status: &status,
         messages: &messages,
         clock: &clock,
+        merge_check: &merge_check,
         alerts: &mut alerts,
         learnings: &mut learnings,
         refresher: &mut refresher,
@@ -2751,6 +2985,13 @@ pub fn run_drive_loop(
 
     let summary = drive_loop(session, repo_root, agents, &mut deps, &config, &instance);
     println!("{}", summary.render());
+    if summary.outcome == DriveOutcome::CliUnavailable {
+        // The one exit-status change in this release (D4): every other
+        // outcome keeps returning `Ok`, printed exactly as before.
+        return Err(PawError::SessionError(
+            "unattended drive loop exited: cli-unavailable".to_string(),
+        ));
+    }
     Ok(summary)
 }
 
@@ -3051,6 +3292,46 @@ mod tests {
         }
     }
 
+    /// Scripted [`MergeCheck`] fake. Defaults to "every branch already
+    /// merged" (the all-pass shape tests unconcerned with merge state want),
+    /// so a test only opts into the ref-truth override via
+    /// [`Self::with_unmerged`] / [`Self::with_error`].
+    #[derive(Default)]
+    struct FakeMergeCheck {
+        unmerged: HashMap<String, (usize, String)>,
+        errors: HashMap<String, String>,
+    }
+    impl FakeMergeCheck {
+        fn with_unmerged(mut self, branch: &str, ahead: usize, tip: &str) -> Self {
+            self.unmerged
+                .insert(branch.to_string(), (ahead, tip.to_string()));
+            self
+        }
+        fn with_error(mut self, branch: &str, message: &str) -> Self {
+            self.errors.insert(branch.to_string(), message.to_string());
+            self
+        }
+    }
+    impl MergeCheck for FakeMergeCheck {
+        fn merge_state(&self, branch: &str) -> Result<MergeState, PawError> {
+            if let Some(msg) = self.errors.get(branch) {
+                return Err(PawError::WorktreeError(msg.clone()));
+            }
+            if let Some((ahead, tip)) = self.unmerged.get(branch) {
+                return Ok(MergeState {
+                    merged: false,
+                    ahead: *ahead,
+                    tip: tip.clone(),
+                });
+            }
+            Ok(MergeState {
+                merged: true,
+                ahead: 0,
+                tip: String::new(),
+            })
+        }
+    }
+
     /// Serves a scripted sequence of newly-published broker messages — one
     /// batch per poll iteration, empty once the script is exhausted (mirroring
     /// a real observer, which only ever returns messages published *since* the
@@ -3163,10 +3444,12 @@ mod tests {
             AgentPane {
                 agent_id: "feat-a".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-a"),
+                branch: "feat/a".to_string(),
             },
             AgentPane {
                 agent_id: "feat-b".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-b"),
+                branch: "feat/b".to_string(),
             },
         ];
         // Pane index 4 holds feat/b's worktree; index 2 holds feat/a's.
@@ -3185,6 +3468,7 @@ mod tests {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
         }];
         assert_eq!(
             resolve_pane_agent(0, "/repo", &agents),
@@ -3485,6 +3769,7 @@ mod tests {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -3508,6 +3793,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -3572,6 +3858,7 @@ mod tests {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -3595,6 +3882,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -3721,10 +4009,12 @@ mod tests {
             AgentPane {
                 agent_id: "feat-a".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-a"),
+                branch: "feat/a".to_string(),
             },
             AgentPane {
                 agent_id: "feat-b".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-b"),
+                branch: "feat/b".to_string(),
             },
         ];
         let enumerator = FakeEnumerator { panes: vec![] };
@@ -3756,6 +4046,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -3770,14 +4061,17 @@ mod tests {
 
         assert_eq!(summary.outcome, DriveOutcome::Completed);
         assert!(
-            summary.agent_states.iter().all(|(_, s)| s != "working"),
+            summary
+                .agent_states
+                .iter()
+                .all(|(_, s)| !s.starts_with("working")),
             "resolved state must never regress to working: {:?}",
             summary.agent_states
         );
         assert!(
             summary
                 .agent_states
-                .contains(&("feat-a".to_string(), "verified".to_string())),
+                .contains(&("feat-a".to_string(), "verified · merged".to_string())),
             "feat-a resolves to its earlier terminal artifact: {:?}",
             summary.agent_states
         );
@@ -3796,6 +4090,7 @@ mod tests {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -3819,6 +4114,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -3858,6 +4154,7 @@ mod tests {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
         }];
         let enumerator = FakeEnumerator { panes: vec![] };
         let capturer = FakeCapturer::new(&[]);
@@ -3875,6 +4172,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -3945,6 +4243,7 @@ mod tests {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![
@@ -3978,6 +4277,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -4003,6 +4303,7 @@ mod tests {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![
@@ -4039,6 +4340,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -4073,10 +4375,12 @@ mod tests {
             AgentPane {
                 agent_id: "feat-a".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-a"),
+                branch: "feat/a".to_string(),
             },
             AgentPane {
                 agent_id: "feat-b".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-b"),
+                branch: "feat/b".to_string(),
             },
         ];
         let enumerator = FakeEnumerator {
@@ -4114,6 +4418,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -4160,10 +4465,12 @@ mod tests {
             AgentPane {
                 agent_id: "feat-a".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-a"),
+                branch: "feat/a".to_string(),
             },
             AgentPane {
                 agent_id: "feat-b".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-b"),
+                branch: "feat/b".to_string(),
             },
         ];
         let enumerator = FakeEnumerator {
@@ -4201,6 +4508,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -4258,6 +4566,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -4302,6 +4611,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -4325,6 +4635,7 @@ mod tests {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -4349,6 +4660,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -4375,6 +4687,7 @@ mod tests {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -4398,6 +4711,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -4422,6 +4736,7 @@ mod tests {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -4448,6 +4763,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -4577,6 +4893,7 @@ mod tests {
         vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
         }]
     }
 
@@ -4618,6 +4935,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -4729,6 +5047,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -4785,6 +5104,7 @@ mod tests {
                 status: &status,
                 messages: &messages,
                 clock: &clock,
+                merge_check: &FakeMergeCheck::default(),
                 alerts: &mut alerts,
                 learnings: &mut learnings,
                 refresher: &mut refresher,
@@ -4913,6 +5233,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -4969,6 +5290,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -5028,6 +5350,7 @@ mod tests {
                 status: &status,
                 messages: &messages,
                 clock: &clock,
+                merge_check: &FakeMergeCheck::default(),
                 alerts: &mut alerts,
                 learnings: &mut learnings,
                 refresher: &mut refresher,
@@ -5253,6 +5576,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -5286,6 +5610,7 @@ mod tests {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
         }];
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -5310,6 +5635,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -5349,10 +5675,12 @@ mod tests {
             AgentPane {
                 agent_id: "feat-a".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-a"),
+                branch: "feat/a".to_string(),
             },
             AgentPane {
                 agent_id: "feat-b".to_string(),
                 worktree_path: PathBuf::from("/repo-feat-b"),
+                branch: "feat/b".to_string(),
             },
         ]
     }
@@ -5389,12 +5717,336 @@ mod tests {
             status: &status,
             messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
         };
         drive_loop_in_tmp("paw-test", agents, &mut deps, config);
         (dispatcher, alerts)
+    }
+
+    /// Like [`run_loop`] but for `drive-loop-exit-summary-truth` scenarios:
+    /// takes the [`MergeCheck`] fake directly and hands back the full
+    /// [`DriveSummary`] alongside the dispatcher, so a test can assert on the
+    /// ref-derived outcome/escalations AND on keystrokes in one place.
+    fn run_loop_with_merge_check(
+        agents: &[AgentPane],
+        panes: Vec<PaneInfo>,
+        pane_text: &[(usize, &str)],
+        statuses: Vec<Vec<AgentStatusRow>>,
+        merge_check: &dyn MergeCheck,
+        config: &DriveConfig,
+    ) -> (DriveSummary, RecordingDispatcher) {
+        let enumerator = FakeEnumerator { panes };
+        let capturer = FakeCapturer::new(pane_text);
+        let mut dispatcher = RecordingDispatcher::default();
+        let status = ScriptedStatus::new(statuses);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
+        let messages = ScriptedMessages::none();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            merge_check,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            refresher: &mut refresher,
+        };
+        let summary = drive_loop_in_tmp("paw-test", agents, &mut deps, config);
+        (summary, dispatcher)
+    }
+
+    /// Spec scenario: two `done` workers, neither branch actually merged — the
+    /// exact 0.16.0 dogfood shape (`drive-loop-exit-summary-truth`). The
+    /// summary must read `escalated-for-review` / `0/2 branches merged` with
+    /// one `[unmerged]` entry per branch, and an orchestrator pane present
+    /// must receive no keystrokes for those entries (they are pushed directly
+    /// onto `escalations`, never through `record_escalation`).
+    #[test]
+    fn two_done_agents_none_merged_reports_escalated_for_review() {
+        let agents = two_agents();
+        let merge_check = FakeMergeCheck::default()
+            .with_unmerged("feat/a", 3, "aaa1111")
+            .with_unmerged("feat/b", 5, "bbb2222");
+        let (summary, dispatcher) = run_loop_with_merge_check(
+            &agents,
+            vec![
+                pane(0, "/repo"),
+                pane(2, "/repo-feat-a"),
+                pane(3, "/repo-feat-b"),
+            ],
+            &[(0, IDLE_PANE), (2, IDLE_PANE), (3, IDLE_PANE)],
+            vec![vec![row("feat-a", "done"), row("feat-b", "done")]],
+            &merge_check,
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                default_branch: "main".to_string(),
+                ..DriveConfig::default()
+            },
+        );
+        assert_eq!(summary.outcome, DriveOutcome::EscalatedForReview);
+        assert_eq!(
+            summary.merged_summary.as_deref(),
+            Some("0/2 branches merged")
+        );
+        assert_eq!(summary.escalations.len(), 2, "{:?}", summary.escalations);
+        for e in &summary.escalations {
+            assert_eq!(e.verdict, "unmerged");
+        }
+        assert!(
+            summary
+                .escalations
+                .iter()
+                .any(|e| e.agent_id == "feat-a" && e.command.contains("aaa1111")),
+            "{:?}",
+            summary.escalations
+        );
+        assert!(
+            summary
+                .escalations
+                .iter()
+                .any(|e| e.agent_id == "feat-b" && e.command.contains("bbb2222")),
+            "{:?}",
+            summary.escalations
+        );
+        assert!(
+            dispatcher.events.is_empty(),
+            "the orchestrator pane must receive no keystrokes for unmerged entries: {:?}",
+            dispatcher.events
+        );
+    }
+
+    /// The all-merged counterpart: both branches actually merged reports
+    /// `completed` / `2/2 branches merged` with no escalations.
+    #[test]
+    fn two_done_agents_all_merged_reports_completed() {
+        let agents = two_agents();
+        let merge_check = FakeMergeCheck::default();
+        let (summary, _dispatcher) = run_loop_with_merge_check(
+            &agents,
+            vec![
+                pane(0, "/repo"),
+                pane(2, "/repo-feat-a"),
+                pane(3, "/repo-feat-b"),
+            ],
+            &[(0, IDLE_PANE), (2, IDLE_PANE), (3, IDLE_PANE)],
+            vec![vec![row("feat-a", "done"), row("feat-b", "done")]],
+            &merge_check,
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                default_branch: "main".to_string(),
+                ..DriveConfig::default()
+            },
+        );
+        assert_eq!(summary.outcome, DriveOutcome::Completed);
+        assert_eq!(
+            summary.merged_summary.as_deref(),
+            Some("2/2 branches merged")
+        );
+        assert!(summary.escalations.is_empty(), "{:?}", summary.escalations);
+    }
+
+    /// D2 (fail-safe): a comparison git cannot make (a deleted branch, a bad
+    /// ref) counts as unmerged, with the reason surfaced on the escalation.
+    #[test]
+    fn comparison_error_counts_as_unmerged_with_reason() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
+        }];
+        let merge_check =
+            FakeMergeCheck::default().with_error("feat/a", "fatal: not a valid object name");
+        let (summary, _dispatcher) = run_loop_with_merge_check(
+            &agents,
+            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
+            &[(0, IDLE_PANE), (2, IDLE_PANE)],
+            vec![vec![row("feat-a", "done")]],
+            &merge_check,
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                default_branch: "main".to_string(),
+                ..DriveConfig::default()
+            },
+        );
+        assert_eq!(summary.outcome, DriveOutcome::EscalatedForReview);
+        assert_eq!(summary.escalations.len(), 1, "{:?}", summary.escalations);
+        assert_eq!(summary.escalations[0].verdict, "unmerged");
+        assert!(
+            summary.escalations[0]
+                .command
+                .contains("fatal: not a valid object name"),
+            "{:?}",
+            summary.escalations[0]
+        );
+    }
+
+    /// A `heartbeat` exit still gets the ref-derived merge truth in its
+    /// summary text, even though it is not a completion outcome (D3): the
+    /// roll-up line benefits from the same truth, but the outcome/exit status
+    /// is unchanged from before this feature.
+    #[test]
+    fn heartbeat_exit_reports_ref_derived_merged_summary() {
+        let agents = two_agents();
+        let merge_check = FakeMergeCheck::default().with_unmerged("feat/a", 1, "ccc3333");
+        let (summary, _dispatcher) = run_loop_with_merge_check(
+            &agents,
+            vec![
+                pane(0, "/repo"),
+                pane(2, "/repo-feat-a"),
+                pane(3, "/repo-feat-b"),
+            ],
+            &[(0, IDLE_PANE), (2, IDLE_PANE), (3, IDLE_PANE)],
+            vec![vec![row("feat-a", "working"), row("feat-b", "working")]],
+            &merge_check,
+            &DriveConfig {
+                poll_interval: Duration::from_millis(0),
+                heartbeat: Duration::from_millis(0),
+                default_branch: "main".to_string(),
+                ..DriveConfig::default()
+            },
+        );
+        assert_eq!(summary.outcome, DriveOutcome::Heartbeat);
+        assert_eq!(
+            summary.merged_summary.as_deref(),
+            Some("1/2 branches merged")
+        );
+    }
+
+    // --- CLI-unavailability detection (drive-loop-exit-summary-truth, D4) ---
+
+    /// The orchestrator pane's tail showing a CLI-unavailability marker exits
+    /// the loop at once with `cli-unavailable`, quoting the matching line.
+    #[test]
+    fn orchestrator_marker_exits_with_cli_unavailable() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
+        }];
+        let merge_check = FakeMergeCheck::default();
+        let (summary, _dispatcher) = run_loop_with_merge_check(
+            &agents,
+            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
+            &[
+                (0, "working…\nYou've hit your session limit"),
+                (2, IDLE_PANE),
+            ],
+            vec![vec![row("feat-a", "working")]],
+            &merge_check,
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                default_branch: "main".to_string(),
+                ..DriveConfig::default()
+            },
+        );
+        assert_eq!(summary.outcome, DriveOutcome::CliUnavailable);
+        assert!(
+            summary
+                .escalations
+                .iter()
+                .any(|e| e.verdict == "cli-unavailable"
+                    && e.command.contains("You've hit your session limit")),
+            "{:?}",
+            summary.escalations
+        );
+        let text = summary.render();
+        assert!(
+            text.contains("You've hit your session limit"),
+            "summary must quote the matching line: {text}"
+        );
+    }
+
+    /// A CLI-unavailability marker on a CODING pane is a deduped escalation —
+    /// the loop keeps driving the rest of the wave, and the final outcome is
+    /// never `completed` while it stands.
+    #[test]
+    fn coding_pane_marker_escalates_and_keeps_driving() {
+        let agents = two_agents();
+        let merge_check = FakeMergeCheck::default();
+        let (summary, dispatcher) = run_loop_with_merge_check(
+            &agents,
+            vec![
+                pane(0, "/repo"),
+                pane(2, "/repo-feat-a"),
+                pane(3, "/repo-feat-b"),
+            ],
+            &[
+                (0, IDLE_PANE),
+                (2, "You've hit your session limit"),
+                (3, &live_safe_capture("cargo test --lib")),
+            ],
+            vec![vec![row("feat-a", "done"), row("feat-b", "done")]],
+            &merge_check,
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                default_branch: "main".to_string(),
+                whitelist: vec!["cargo test".to_string()],
+                ..DriveConfig::default()
+            },
+        );
+        assert_ne!(
+            summary.outcome,
+            DriveOutcome::Completed,
+            "a live cli-unavailable escalation must never read completed"
+        );
+        assert!(
+            summary
+                .escalations
+                .iter()
+                .any(|e| e.agent_id == "feat-a" && e.verdict == "cli-unavailable"),
+            "{:?}",
+            summary.escalations
+        );
+        assert!(
+            dispatcher
+                .events
+                .iter()
+                .any(|(p, t)| *p == 3 && t == "Enter"),
+            "feat-b's safe prompt must still be approved: {:?}",
+            dispatcher.events
+        );
+    }
+
+    /// A marker that has scrolled out of the live tail window is inert — the
+    /// same "narration, not a live signal" rule [`is_live_prompt`] follows.
+    #[test]
+    fn scrolled_away_marker_is_not_acted_on() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
+        }];
+        let merge_check = FakeMergeCheck::default();
+        let scrolled_away =
+            "You've hit your session limit\nfiller1\nfiller2\nfiller3\nfiller4\nfiller5";
+        let (summary, _dispatcher) = run_loop_with_merge_check(
+            &agents,
+            vec![pane(2, "/repo-feat-a")],
+            &[(2, scrolled_away)],
+            vec![vec![row("feat-a", "done")]],
+            &merge_check,
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                default_branch: "main".to_string(),
+                ..DriveConfig::default()
+            },
+        );
+        assert_eq!(summary.outcome, DriveOutcome::Completed);
+        assert!(summary.escalations.is_empty(), "{:?}", summary.escalations);
     }
 
     /// Asserts a payload containing `needle` was typed into `pane_index`
@@ -5596,6 +6248,7 @@ mod tests {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
         }];
         let question = BrokerMessage::Question {
             agent_id: "feat-a".to_string(),
@@ -5635,6 +6288,7 @@ mod tests {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
         }];
         let (dispatcher, _) = run_loop(
             &agents,
@@ -5755,6 +6409,7 @@ mod tests {
         vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from(worktree),
+            branch: "feat/a".to_string(),
         }]
     }
 
@@ -5791,6 +6446,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -6061,6 +6717,7 @@ mod tests {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: worktree_path.clone(),
+            branch: "feat/example".to_string(),
         }];
         let mut pane_by_agent = HashMap::new();
         pane_by_agent.insert("feat-a".to_string(), 2usize);
@@ -6091,6 +6748,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
@@ -6136,6 +6794,7 @@ mod tests {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: worktree_path.clone(),
+            branch: "feat/example".to_string(),
         }];
         let mut pane_by_agent = HashMap::new();
         pane_by_agent.insert("feat-a".to_string(), 2usize);
@@ -6169,6 +6828,7 @@ mod tests {
             status: &status,
             messages: &messages,
             clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,

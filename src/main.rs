@@ -894,6 +894,7 @@ fn cmd_prompt_profile(cli: Option<&str>, field: &str) -> Result<(), PawError> {
         "broad_grant_marker" => escape_for_regex_alternation(&profile.broad_grant_marker),
         "context_bloat_pattern" => profile.context_bloat_pattern.clone(),
         "paste_buffer_pattern" => profile.paste_buffer_pattern.clone(),
+        "cli_unavailable_markers" => marker_alternation(&profile.cli_unavailable_markers),
         other => {
             return Err(PawError::SessionError(format!(
                 "unknown prompt-profile field '{other}'"

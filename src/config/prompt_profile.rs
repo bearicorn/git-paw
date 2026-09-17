@@ -93,6 +93,13 @@ pub struct CliPromptProfile {
     /// Consulted today only by the bundled `sweep.sh` helper's stuck-shape
     /// detector.
     pub paste_buffer_pattern: String,
+    /// Substrings/phrases indicating the CLI itself has stopped serving —
+    /// a usage/session limit or an expired/missing login — rather than a
+    /// worker being merely stuck. Matched tail-only against the live-prompt
+    /// scan's capture (`drive-loop-exit-summary-truth`): a marker in an
+    /// orchestrator pane is a loud, explicit `cli-unavailable` exit; in a
+    /// coding pane it is a deduped escalation.
+    pub cli_unavailable_markers: Vec<String>,
 }
 
 /// A partial per-CLI prompt-shape profile override, configured under
@@ -148,6 +155,9 @@ pub struct CliPromptProfileOverride {
     /// See [`CliPromptProfile::paste_buffer_pattern`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paste_buffer_pattern: Option<String>,
+    /// See [`CliPromptProfile::cli_unavailable_markers`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_unavailable_markers: Option<Vec<String>>,
 }
 
 /// Returns the embedded Claude Code prompt-shape profile — the compiled
@@ -221,9 +231,21 @@ pub fn claude_prompt_profile() -> &'static CliPromptProfile {
             "transport error".to_string(),
             "Connection error".to_string(),
             "error streaming".to_string(),
+            // Mid-response connection drop: the conversation context survives
+            // a transient drop like this — a nudge resumes the worker — so it
+            // belongs here, never in `cli_unavailable_markers` (reserved for
+            // terminal conditions requiring human intervention).
+            "API Error".to_string(),
+            "Connection closed mid-response".to_string(),
         ],
         context_bloat_pattern: r"/?(clear|compact) to save ([0-9]+)k tokens".to_string(),
         paste_buffer_pattern: r"Pasted text #[0-9]".to_string(),
+        cli_unavailable_markers: vec![
+            "You've hit your session limit".to_string(),
+            "usage limit reached".to_string(),
+            "Please run /login".to_string(),
+            "Invalid API key".to_string(),
+        ],
     })
 }
 
@@ -317,6 +339,10 @@ pub fn resolve_prompt_profile<S: std::hash::BuildHasher>(
             .paste_buffer_pattern
             .clone()
             .unwrap_or_else(|| default.paste_buffer_pattern.clone()),
+        cli_unavailable_markers: override_
+            .cli_unavailable_markers
+            .clone()
+            .unwrap_or_else(|| default.cli_unavailable_markers.clone()),
     }
 }
 
@@ -342,6 +368,101 @@ mod tests {
         assert!(!p.stream_error_markers.is_empty());
         assert!(!p.context_bloat_pattern.is_empty());
         assert!(!p.paste_buffer_pattern.is_empty());
+        assert!(!p.cli_unavailable_markers.is_empty());
+    }
+
+    /// `drive-loop-exit-summary-truth` task 3.3: the default resolves the
+    /// session-limit marker observed in the 0.16.0 dogfood.
+    #[test]
+    fn default_resolves_the_session_limit_marker() {
+        let clis: HashMap<String, CustomCli> = HashMap::new();
+        let resolved = resolve_prompt_profile("claude", &clis);
+        assert!(
+            resolved
+                .cli_unavailable_markers
+                .iter()
+                .any(|m| m == "You've hit your session limit"),
+            "{:?}",
+            resolved.cli_unavailable_markers
+        );
+    }
+
+    /// A mid-response connection drop is a stream error, not CLI
+    /// unavailability (amendment, 2026-09-15): the context survives and a
+    /// nudge resumes the worker, so it must never fire the loud
+    /// `cli-unavailable` exit reserved for conditions needing a human.
+    #[test]
+    fn connection_drop_matches_stream_error_not_cli_unavailable() {
+        let p = claude_prompt_profile();
+        let capture = "API Error: Connection closed mid-response";
+        let lower = capture.to_ascii_lowercase();
+        assert!(
+            p.stream_error_markers
+                .iter()
+                .any(|m| lower.contains(&m.to_ascii_lowercase())),
+            "{:?}",
+            p.stream_error_markers
+        );
+        assert!(
+            !p.cli_unavailable_markers
+                .iter()
+                .any(|m| lower.contains(&m.to_ascii_lowercase())),
+            "{:?}",
+            p.cli_unavailable_markers
+        );
+    }
+
+    /// An override wins over the default for `cli_unavailable_markers`.
+    #[test]
+    fn cli_unavailable_markers_override_wins_over_default() {
+        let mut clis: HashMap<String, CustomCli> = HashMap::new();
+        clis.insert(
+            "mycli".to_string(),
+            CustomCli {
+                command: "mycli".to_string(),
+                display_name: None,
+                submit_delay_ms: None,
+                settings_path: None,
+                approval_args: HashMap::new(),
+                prompt_profile: Some(CliPromptProfileOverride {
+                    cli_unavailable_markers: Some(vec!["out of tokens".to_string()]),
+                    ..Default::default()
+                }),
+                session_id_args: None,
+                resume_args: None,
+            },
+        );
+        assert_eq!(
+            resolve_prompt_profile("mycli", &clis).cli_unavailable_markers,
+            vec!["out of tokens".to_string()]
+        );
+    }
+
+    /// A partial override lacking `cli_unavailable_markers` falls back to the
+    /// embedded default for that field (D2), same as every other field.
+    #[test]
+    fn cli_unavailable_markers_falls_back_when_absent_from_override() {
+        let mut clis: HashMap<String, CustomCli> = HashMap::new();
+        clis.insert(
+            "mycli".to_string(),
+            CustomCli {
+                command: "mycli".to_string(),
+                display_name: None,
+                submit_delay_ms: None,
+                settings_path: None,
+                approval_args: HashMap::new(),
+                prompt_profile: Some(CliPromptProfileOverride {
+                    approval_markers: Some(vec!["waiting for go-ahead".to_string()]),
+                    ..Default::default()
+                }),
+                session_id_args: None,
+                resume_args: None,
+            },
+        );
+        assert_eq!(
+            resolve_prompt_profile("mycli", &clis).cli_unavailable_markers,
+            claude_prompt_profile().cli_unavailable_markers
+        );
     }
 
     #[test]

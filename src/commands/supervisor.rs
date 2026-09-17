@@ -933,6 +933,7 @@ fn drive_unattended_loop(
         .map(|wt| AgentPane {
             agent_id: broker::messages::slugify_branch(&wt.branch),
             worktree_path: wt.worktree_path.clone(),
+            branch: wt.branch.clone(),
         })
         .collect();
 

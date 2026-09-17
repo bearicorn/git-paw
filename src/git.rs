@@ -511,6 +511,133 @@ pub(crate) fn branch_is_behind_default(
     branch_is_behind_default_with(&RealCommandRunner, repo_root, branch, default_branch)
 }
 
+/// Whether `branch` is merged into `default_branch` — the exit-summary merge
+/// truth (`drive-loop-exit-summary-truth`).
+///
+/// Implemented as `git merge-base --is-ancestor <branch> <default_branch>`:
+/// exit `0` means `branch` is fully contained in `default_branch`'s history
+/// (merged); exit `1` means it is not. Any other exit (a bad ref, a corrupt
+/// object) is surfaced as an error rather than guessed at — callers must
+/// treat an unresolvable comparison as unmerged (the fail-safe direction),
+/// not silently skip the branch.
+///
+/// # Errors
+/// Returns [`PawError::WorktreeError`] if `git merge-base` cannot be spawned,
+/// or exits with a code other than `0` or `1`.
+pub(crate) fn branch_is_merged_into_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    branch: &str,
+    default_branch: &str,
+) -> Result<bool, PawError> {
+    let cwd = repo_root.to_string_lossy();
+    let output = runner
+        .run(
+            "git",
+            &[
+                "-C",
+                &cwd,
+                "merge-base",
+                "--is-ancestor",
+                branch,
+                default_branch,
+            ],
+        )
+        .map_err(|e| PawError::WorktreeError(format!("failed to run git merge-base: {e}")))?;
+    match output.code {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(PawError::WorktreeError(format!(
+                "git merge-base --is-ancestor could not compare {branch} against \
+                 {default_branch}: {stderr}"
+            )))
+        }
+    }
+}
+
+/// [`branch_is_merged_into_with`] against [`RealCommandRunner`].
+pub(crate) fn branch_is_merged_into(
+    repo_root: &Path,
+    branch: &str,
+    default_branch: &str,
+) -> Result<bool, PawError> {
+    branch_is_merged_into_with(&RealCommandRunner, repo_root, branch, default_branch)
+}
+
+/// The number of commits on `branch` that are not on `default_branch` —
+/// `git rev-list --count <default_branch>..<branch>` — used to annotate an
+/// unmerged branch in the exit summary.
+///
+/// # Errors
+/// Returns [`PawError::WorktreeError`] if `git rev-list` cannot be spawned,
+/// exits non-zero, or prints output that does not parse as a count.
+pub(crate) fn unmerged_commit_count_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    branch: &str,
+    default_branch: &str,
+) -> Result<usize, PawError> {
+    let cwd = repo_root.to_string_lossy();
+    let range = format!("{default_branch}..{branch}");
+    let output = runner
+        .run("git", &["-C", &cwd, "rev-list", "--count", &range])
+        .map_err(|e| PawError::WorktreeError(format!("failed to run git rev-list: {e}")))?;
+    if output.code != Some(0) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(PawError::WorktreeError(format!(
+            "git rev-list --count {range} failed: {stderr}"
+        )));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<usize>()
+        .map_err(|e| {
+            PawError::WorktreeError(format!(
+                "git rev-list --count {range} printed a non-numeric count: {e}"
+            ))
+        })
+}
+
+/// [`unmerged_commit_count_with`] against [`RealCommandRunner`].
+pub(crate) fn unmerged_commit_count(
+    repo_root: &Path,
+    branch: &str,
+    default_branch: &str,
+) -> Result<usize, PawError> {
+    unmerged_commit_count_with(&RealCommandRunner, repo_root, branch, default_branch)
+}
+
+/// A short SHA for `branch`'s tip — `git rev-parse --short <branch>` — used
+/// to identify an unmerged branch in the exit summary.
+///
+/// # Errors
+/// Returns [`PawError::WorktreeError`] if `git rev-parse` cannot be spawned
+/// or exits non-zero (e.g. the branch was deleted mid-wave).
+pub(crate) fn branch_tip_short_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    branch: &str,
+) -> Result<String, PawError> {
+    let cwd = repo_root.to_string_lossy();
+    let output = runner
+        .run("git", &["-C", &cwd, "rev-parse", "--short", branch])
+        .map_err(|e| PawError::WorktreeError(format!("failed to run git rev-parse: {e}")))?;
+    if output.code != Some(0) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(PawError::WorktreeError(format!(
+            "git rev-parse --short {branch} failed: {stderr}"
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// [`branch_tip_short_with`] against [`RealCommandRunner`].
+pub(crate) fn branch_tip_short(repo_root: &Path, branch: &str) -> Result<String, PawError> {
+    branch_tip_short_with(&RealCommandRunner, repo_root, branch)
+}
+
 /// Resolves the absolute worktree directory path for `branch` under the
 /// given `placement`.
 ///
@@ -2455,6 +2582,145 @@ mod tests {
                 !behind,
                 "feat/example already contains all of main's commits"
             );
+        }
+
+        // === Merge-truth gate (drive-loop-exit-summary-truth) ================
+
+        #[test]
+        fn branch_is_merged_into_true_when_branch_is_an_ancestor() {
+            let fake = FakeCommandRunner::scripted(|_, _| Ok(ok_with("")));
+            let merged = super::super::branch_is_merged_into_with(
+                &fake,
+                Path::new("/repo"),
+                "feat/x",
+                "main",
+            )
+            .expect("is-ancestor runs");
+            assert!(merged, "exit 0 (branch IS an ancestor) means merged");
+        }
+
+        #[test]
+        fn branch_is_merged_into_false_when_branch_is_not_an_ancestor() {
+            let fake = FakeCommandRunner::scripted(|_, _| Ok(fail_with(1, "")));
+            let merged = super::super::branch_is_merged_into_with(
+                &fake,
+                Path::new("/repo"),
+                "feat/x",
+                "main",
+            )
+            .expect("is-ancestor runs");
+            assert!(!merged, "exit 1 (not an ancestor) means unmerged");
+        }
+
+        #[test]
+        fn branch_is_merged_into_errors_on_an_unresolvable_comparison() {
+            let fake = FakeCommandRunner::scripted(|_, _| {
+                Ok(fail_with(128, "fatal: not a valid object name feat/x"))
+            });
+            let err = super::super::branch_is_merged_into_with(
+                &fake,
+                Path::new("/repo"),
+                "feat/x",
+                "main",
+            )
+            .unwrap_err();
+            assert!(matches!(err, PawError::WorktreeError(_)));
+        }
+
+        #[test]
+        fn branch_is_merged_into_true_for_a_real_repo_after_fast_forward() {
+            let r = super::setup_rebase_repo();
+            let merged = super::super::branch_is_merged_into(r.path(), "feat/example", "main")
+                .expect("is-ancestor runs against a real repo");
+            assert!(merged, "feat/example starts equal to main — merged");
+        }
+
+        #[test]
+        fn branch_is_merged_into_false_for_a_real_repo_one_commit_ahead() {
+            let r = super::setup_rebase_repo();
+            super::advance_main(r.path(), 1);
+            std::fs::write(r.path().join("feature.txt"), "work\n").unwrap();
+            super::run_git(r.path(), &["checkout", "feat/example"]);
+            super::run_git(r.path(), &["add", "."]);
+            super::run_git(r.path(), &["commit", "-m", "feature work"]);
+            super::run_git(r.path(), &["checkout", "main"]);
+            let merged = super::super::branch_is_merged_into(r.path(), "feat/example", "main")
+                .expect("is-ancestor runs against a real repo");
+            assert!(!merged, "feat/example has a commit not in main");
+        }
+
+        #[test]
+        fn unmerged_commit_count_reports_zero_when_nothing_pending() {
+            let fake = FakeCommandRunner::scripted(|_, _| Ok(ok_with("0\n")));
+            let count = super::super::unmerged_commit_count_with(
+                &fake,
+                Path::new("/repo"),
+                "feat/x",
+                "main",
+            )
+            .expect("rev-list runs");
+            assert_eq!(count, 0);
+        }
+
+        #[test]
+        fn unmerged_commit_count_parses_a_positive_count() {
+            let fake = FakeCommandRunner::scripted(|_, _| Ok(ok_with("3\n")));
+            let count = super::super::unmerged_commit_count_with(
+                &fake,
+                Path::new("/repo"),
+                "feat/x",
+                "main",
+            )
+            .expect("rev-list runs");
+            assert_eq!(count, 3);
+        }
+
+        #[test]
+        fn unmerged_commit_count_errors_on_non_numeric_output() {
+            let fake = FakeCommandRunner::scripted(|_, _| Ok(ok_with("not-a-number\n")));
+            let err = super::super::unmerged_commit_count_with(
+                &fake,
+                Path::new("/repo"),
+                "feat/x",
+                "main",
+            )
+            .unwrap_err();
+            assert!(matches!(err, PawError::WorktreeError(_)));
+        }
+
+        #[test]
+        fn unmerged_commit_count_matches_a_real_repo() {
+            let r = super::setup_rebase_repo();
+            std::fs::write(r.path().join("feature.txt"), "work\n").unwrap();
+            super::run_git(r.path(), &["checkout", "feat/example"]);
+            super::run_git(r.path(), &["add", "."]);
+            super::run_git(r.path(), &["commit", "-m", "feature work"]);
+            super::run_git(r.path(), &["checkout", "main"]);
+            let count = super::super::unmerged_commit_count(r.path(), "feat/example", "main")
+                .expect("rev-list runs against a real repo");
+            assert_eq!(count, 1);
+        }
+
+        #[test]
+        fn branch_tip_short_returns_a_short_sha_for_a_real_repo() {
+            let r = super::setup_rebase_repo();
+            let tip = super::super::branch_tip_short(r.path(), "feat/example")
+                .expect("rev-parse runs against a real repo");
+            let full = super::head_sha(r.path(), "feat/example");
+            assert!(
+                full.starts_with(&tip) && !tip.is_empty(),
+                "short tip {tip} must prefix the full sha {full}"
+            );
+        }
+
+        #[test]
+        fn branch_tip_short_errors_when_branch_is_gone() {
+            let fake = FakeCommandRunner::scripted(|_, _| {
+                Ok(fail_with(128, "fatal: ambiguous argument 'feat/gone'"))
+            });
+            let err = super::super::branch_tip_short_with(&fake, Path::new("/repo"), "feat/gone")
+                .unwrap_err();
+            assert!(matches!(err, PawError::WorktreeError(_)));
         }
 
         #[test]
