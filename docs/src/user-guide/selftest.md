@@ -20,7 +20,7 @@ git paw selftest
 
 git-paw's session-management surface (`start`, `add`, `remove`, `stop`, `purge`)
 is its riskiest plumbing because it spans modules — worktrees (`git.rs`), tmux
-panes and sockets (`tmux.rs`), the broker HTTP roster (`broker/`), and session
+panes and sockets (`tmux/`), the broker HTTP roster (`broker/`), and session
 state (`session.rs`). Historically the only way to exercise the full path was to
 boot a real session with a real AI CLI in an interactive terminal — something CI
 cannot do and developers reproduced only through ad-hoc shell incantations.

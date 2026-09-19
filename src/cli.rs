@@ -46,7 +46,7 @@ impl SpecsFormat {
     name = "git-paw",
     version,
     about = "Parallel AI Worktrees — orchestrate multiple AI coding CLI sessions across git worktrees",
-    long_about = "git-paw orchestrates multiple AI coding CLI sessions (Claude, Codex, Gemini, etc.) \
+    long_about = "git-paw orchestrates multiple AI coding CLI sessions (Claude, Codex, Antigravity, etc.) \
                   across git worktrees from a single terminal using tmux. Each branch gets its own \
                   worktree and AI session, running in parallel.",
     after_help = "\x1b[1mQuick Start:\x1b[0m\n\n  \
@@ -279,7 +279,7 @@ pub enum Command {
         #[arg(
             long,
             conflicts_with = "branch",
-            help = "Derive branch + CLI from a spec (OpenSpec change, Markdown spec, or Spec Kit feature)"
+            help = "Derive branch + CLI from a spec (OpenSpec change, Markdown spec, Spec Kit feature, or Superpowers plan)"
         )]
         from_spec: Option<String>,
     },
@@ -333,8 +333,7 @@ pub enum Command {
                       (~300 MB per Claude pane).\n\n\
                       Use pause for short breaks (lunch, meetings, end-of-day). For longer \
                       breaks, use `git paw stop` to kill the CLIs and release RAM (worktrees \
-                      preserved). A future `git paw hibernate` (v1.0.0) will snapshot state \
-                      to disk.\n\n\
+                      preserved).\n\n\
                       Example:\n  git paw pause"
     )]
     Pause,
@@ -441,7 +440,8 @@ pub enum Command {
     /// Register a custom AI CLI
     #[command(
         about = "Register a custom AI CLI",
-        long_about = "Adds a custom CLI to your global config (~/.config/git-paw/config.toml). \
+        long_about = "Adds a custom CLI to your global config (git-paw/config.toml in the platform \
+                      config directory: ~/.config on Linux, ~/Library/Application Support on macOS). \
                       The command can be an absolute path or a binary name on PATH.\n\n\
                       Examples:\n  \
                       git paw add-cli my-agent /usr/local/bin/my-agent\n  \
@@ -480,9 +480,9 @@ pub enum Command {
         long_about = "Creates the .git-paw/ directory with a default config and sets up \
                       .gitignore for logs.\n\n\
                       Also the upgrade path after a version bump: re-running init on an \
-                      existing config appends any missing section and backfills any missing \
-                      top-level default key, without modifying settings you have already \
-                      set.\n\n\
+                      existing config appends a missing [supervisor] section and backfills any \
+                      missing top-level default key, without modifying settings you have \
+                      already set.\n\n\
                       Examples:\n  git paw init"
     )]
     Init,

@@ -27,6 +27,8 @@ constitution = ".specify/memory/constitution.md"
 
 All five fields are optional. List only the docs you have. Paths are resolved relative to the repository root; absolute paths are accepted as-is. A missing file does not break config-load — the runtime flags it if the supervisor tries to read it.
 
+`[governance]` also accepts two more optional pointers, `readme` and `docs` (your README and documentation root). They feed the [MCP server](mcp.md)'s documentation tools rather than the supervisor's audit.
+
 For Spec Kit projects, `governance.constitution` auto-wires to `.specify/memory/constitution.md` when `[specs] type = "speckit"`. You only need to set `constitution` explicitly if you keep it somewhere else, or want to disable the auto-wiring (set it to `""`).
 
 See [Configuration → Governance](../configuration/README.md#governance) for the full field reference and merging rules.
@@ -171,7 +173,7 @@ Spec Kit users typically keep this file at `.specify/memory/constitution.md`; gi
 
 When the supervisor verifies an agent's change, it reads the configured governance documents alongside the diff. Findings flow through the existing `agent.feedback` channel — the supervisor does not crash or block on governance, it surfaces what it sees and lets the agent respond.
 
-The runtime side of this — boot-prompt injection of the governance doc paths and the supervisor's audit handling — lives in the parallel `governance-context` capability. This chapter and the `[governance]` config table are the path-pointer slot only.
+How the supervisor audits against these documents is described in the bundled supervisor skill, and the [MCP server](mcp.md)'s governance tools serve the same documents to MCP clients. This chapter and the `[governance]` config table (the `core-governance-config` capability) are the path-pointer slot only.
 
 ## Rollout suggestion
 

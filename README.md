@@ -10,7 +10,7 @@
 [![Crates.io](https://img.shields.io/crates/v/git-paw.svg)](https://crates.io/crates/git-paw)
 [![Downloads](https://img.shields.io/crates/d/git-paw.svg)](https://crates.io/crates/git-paw)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![MSRV: stable](https://img.shields.io/badge/MSRV-stable-brightgreen.svg)](rust-toolchain.toml)
+[![MSRV: 1.96](https://img.shields.io/badge/MSRV-1.96-brightgreen.svg)](Cargo.toml)
 
 </div>
 
@@ -19,32 +19,24 @@
 ```
 $ git paw
 
-  🐾 git-paw — Parallel AI Worktrees
-
-  ? Select mode:
-  > Same CLI for all branches
-    Different CLI per branch
-
-  ? Select branches (type to filter, space to toggle, enter to confirm):
-  > [x] feat/auth
-    [x] feat/api
+  Select branches (type to filter, ctrl-u to clear, space to toggle, enter to confirm)
+  filter:
+  > [x] feat/api
+    [x] feat/auth
     [ ] fix/typo
     [ ] main
 
-  ? Select AI CLI:
-  > claude
-    codex
-    agy
+  CLI assignment mode:
+  > Same CLI for all branches
+    Different CLI per branch
 
-  ✔ Creating worktrees...
-    ../myproject-feat-auth/
-    ../myproject-feat-api/
+  Select AI CLI for all branches:
+    Antigravity (agy)
+  > Claude (claude)
+    Codex (codex)
 
-  ✔ Launching tmux session: paw-myproject
-    Pane 1: feat/auth → claude
-    Pane 2: feat/api → claude
-
-  Attaching to tmux session...
+  # git-paw creates a worktree per branch, opens the tmux session
+  # paw-myproject with one pane per branch running claude, and attaches you
 ```
 
 ## What It Does
@@ -54,12 +46,12 @@ git-paw lets you run multiple AI coding assistants in parallel, each in its own 
 ## Features
 
 - **Contained worktree layout (v0.8.0)** — new repos place agent worktrees *inside* the project at `.git-paw/worktrees/<branch-slug>/` instead of scattering them as siblings of the repo, enabling a single project-scoped permission grant for every agent. Configurable via `worktree_placement` (`"child"` | `"sibling"`); existing repos default to the v0.7.0 sibling layout and stay there until they opt in. See [Worktree Placement](docs/src/user-guide/worktree-placement.md)
-- **Parallel AI sessions** — run Claude, Codex, Gemini, or any AI CLI across multiple branches simultaneously
+- **Parallel AI sessions** — run Claude, Codex, Antigravity, or any AI CLI across multiple branches simultaneously
 - **Git worktree isolation** — each branch gets its own working directory, no stashing or switching needed
 - **Runtime isolation** — opt into `[worktree.env]` / `[worktree.ports]` and each worktree gets its own copy of the env files you name plus its own block of ports in a generated `.env.local`, so several agents can actually *run* their dev servers side by side instead of colliding on one `.env` and one port. Add `[worktree.hooks]` and your own `on_create` / `on_remove` commands run per worktree — a script that prints `DATABASE_URL=...` gives every agent its own database branch, and its teardown drops it again. Absent config changes nothing. See [Runtime Isolation](docs/src/user-guide/runtime-isolation.md)
 - **Smart session management** — reattach to active sessions, auto-recover after crashes or reboots, and rebase existing agent branches onto the repository's default branch on every `git paw start` so agents never drift behind supervisor commits on `main` (pass `--no-rebase` to opt out)
 - **Interactive or scripted** — fuzzy branch picker and CLI selector, or pass `--cli` and `--branches` flags
-- **Per-branch CLI assignment** — use Claude on one branch and Gemini on another in the same session
+- **Per-branch CLI assignment** — use Claude on one branch and Codex on another in the same session
 - **Presets** — save branch + CLI combos in config for one-command launches
 - **Custom CLI support** — register any AI CLI with `git paw add-cli`
 - **Session persistence** — state saved to disk, survives tmux crashes and system reboots
@@ -77,8 +69,8 @@ git-paw lets you run multiple AI coding assistants in parallel, each in its own 
 - **Skill templates** — coordination instructions auto-injected into each agent's AGENTS.md
 - **Boot-prompt injection** — standardized boot instructions automatically prepended to all agent prompts, ensuring reliable self-reporting (register, done, blocked, question operations) — always enabled for broker sessions
 - **Cursor-based messaging** — lossless message polling with sequence tracking
-- **Spec Kit backend** — first-class support for [GitHub Spec Kit](https://github.com/github/spec-kit) projects via `[specs] type = "speckit"`; `.specify/specs/` is auto-detected at the repo root and the `[P]`/non-`[P]` task split decomposes into per-task and consolidated worktrees
-- **`--specs-format` override** — force-select the spec backend (`openspec`, `markdown`, `speckit`) on the command line, overriding both `[specs] type` in config and the `.specify/` auto-detection
+- **Spec Kit backend** — first-class support for [GitHub Spec Kit](https://github.com/github/spec-kit) projects via `[specs] type = "speckit"` with `dir = ".specify/specs"` (what `git paw init` writes when you pick Spec Kit); the `[P]`/non-`[P]` task split decomposes into per-task and consolidated worktrees
+- **`--specs-format` override** — force-select the spec backend (`openspec`, `markdown`, `speckit`, `superpowers`) on the command line, overriding `[specs] type` in config (there is no filesystem auto-detection)
 - **`--no-supervisor`** — single-session override of `[supervisor] enabled = true` for plain (non-supervisor) operation without editing config
 - **`start --unattended`** — run a supervisor wave to completion with no human in the seat: engages supervisor mode and drives an in-process loop that auto-approves classifier-safe prompts, escalates the rest for later review without blocking the wave, detects completion, and exits with a summary (designed for detached operation; mutually exclusive with `--no-supervisor`). See [Supervisor → Unattended mode](docs/src/user-guide/supervisor.md#unattended-mode---unattended)
 - **Autonomous orchestrator (v0.14.0+)** — when a supervisor pane is present, the unattended loop stops parking judgment calls in an inbox nobody reads and *hands them over*: a risky/unknown prompt, a worker's `agent.question`, a `committed`/`done` artifact's merge decision, and a non-converging branch are each injected into the supervisor's pane as a task prompt, in addition to the usual broker record. A longer-cadence nudge (~5 min) asks the supervisor to re-run its orchestration sweep, and worker-directed nudges stop once that worker has finished (`done`/`verified`). The loop never waits on the supervisor, and with no supervisor pane nothing is injected anywhere — a pure `--unattended` run is unchanged. See [the loop is a pump, the supervisor is the brain](docs/src/user-guide/supervisor.md#the-loop-is-a-pump-the-supervisor-is-the-brain)
@@ -87,7 +79,7 @@ git-paw lets you run multiple AI coding assistants in parallel, each in its own 
 - **Automatic conflict detection** — the broker auto-emits `[conflict-detector]`-tagged `agent.feedback` for forward (overlapping intents), in-flight (overlapping `modified_files`), and ownership-violation conflicts; an unresolved in-flight overlap is classified from the agents' declared regions — a true collision escalates to the supervisor inbox via `agent.question`, while an additive overlap (disjoint declared regions) is downgraded to an informational `agent.feedback` and never blocks on human input
 - **Learnings mode** — opt-in `[supervisor] learnings = true` collects deterministic friction signals (stuck duration, recovery cycles, forward conflicts, in-flight conflicts, ownership violations) into `.git-paw/session-learnings.md` for post-session review. **No telemetry** — the file is purely local and nothing is sent anywhere; you can optionally share it via a [GitHub issue](https://github.com/bearicorn/git-paw/issues) (after reviewing/anonymising it) to help improve the tool. See [Learnings → Privacy & Sharing](docs/src/user-guide/learnings.md#privacy--sharing)
 - **Governance pointers** — point the supervisor at your existing ADRs, test strategy, security checklist, DoD, and constitution via the `[governance]` config table; Spec Kit projects auto-wire `.specify/memory/constitution.md` when present
-- **Auto-approval policy** — `[supervisor.auto_approve]` controls safe-command prefixes and approval level for stalled-pane sweeps; `[supervisor.common_dev_allowlist]` seeds a curated dev-loop preset into `.claude/settings.json` so common build/test/git commands bypass per-prompt approval
+- **Auto-approval policy** — `[supervisor.auto_approve]` controls safe-command prefixes and approval level for stalled-pane sweeps; `[supervisor.common_dev_allowlist]` folds a curated dev-loop preset (non-destructive git and read-only search verbs, plus opt-in `stacks` such as `rust` or `node`) into that whitelist so common build/test/git commands bypass per-prompt approval
 - **Conflict-detector tuning** — `[supervisor.conflict]` exposes the in-flight escalation window (`window_seconds`), the intent-overlap warning toggle (`warn_on_intent_overlap`), and the ownership-violation escalation toggle (`escalate_on_violation`)
 - **Learnings flush cadence** — `[supervisor.learnings_config] flush_interval_seconds` (default 60) controls how often learnings entries are flushed from memory to `.git-paw/session-learnings.md`
 - **Routing through the supervisor** — type `/agents` in the supervisor pane to see the live agent inventory (status, mode, pane) and `/tell <agent> <prompt>` to route a prompt to one agent without tab-switching into its pane; `[supervisor.tell] mode` picks the delivery channel (`feedback` queue by default, `send-keys` for accept-edits agents) and every route is recorded in the session learnings
@@ -130,7 +122,7 @@ git paw start --cli claude --branches feat/auth,feat/api
 ```
 
 This creates:
-- A worktree for each branch (`../yourproject-feat-auth/`, `../yourproject-feat-api/`)
+- A worktree for each branch — `.git-paw/worktrees/feat-auth/`, `.git-paw/worktrees/feat-api/` in a repo set up with `git paw init`, or `../yourproject-feat-auth/`, `../yourproject-feat-api/` when no `worktree_placement` is configured (see [Worktree Placement](docs/src/user-guide/worktree-placement.md))
 - A tmux session with one pane per branch, each running `claude`
 
 ## Quick Start: Per-Branch CLI
@@ -142,10 +134,10 @@ Use different AI CLIs on different branches:
 git paw
 # → Pick branches: feat/auth, feat/api
 # → Pick CLI for feat/auth: claude
-# → Pick CLI for feat/api: gemini
+# → Pick CLI for feat/api: codex
 ```
 
-Result: a tmux session where `feat/auth` runs Claude and `feat/api` runs Gemini, side by side.
+Result: a tmux session where `feat/auth` runs Claude and `feat/api` runs Codex, side by side.
 
 ## Quick Start: Supervisor Mode
 
@@ -159,14 +151,13 @@ git paw start --no-supervisor
 
 # Bypass the uncommitted-spec validation warning when launching from specs
 git paw start --from-all-specs --force
-git paw start --supervisor --force
 
 # Drive the whole wave to completion with no human in the seat (detached)
 git paw start --unattended --from-all-specs
 git paw start --unattended --branches feat/auth,feat/api
 ```
 
-The supervisor agent runs in its own pane, polls each worker agent for progress and artifacts via the broker, runs the configured test command between merges, and writes a session summary when work completes. Use this mode when you want to leave a multi-branch session running without continually steering each agent yourself.
+The supervisor agent runs in its own pane, polls each worker agent for progress and artifacts via the broker, runs the configured test command between merges, and publishes a final summary status when work completes. Use this mode when you want to leave a multi-branch session running without continually steering each agent yourself.
 
 By default `git paw start --supervisor` builds the session and returns, expecting you to watch the panes and clear safe permission prompts. Add **`--unattended`** to fold that operator loop into the tool: it engages supervisor mode and drives an in-process loop that sweeps every pane (including the supervisor's own) on a ~15-second cadence, auto-approves classifier-safe prompts, escalates risky/unknown prompts for later review without blocking the wave, and exits with a summary on completion or a ~25-minute heartbeat. It needs no attached terminal. See [Supervisor → Unattended mode](docs/src/user-guide/supervisor.md#unattended-mode---unattended).
 
@@ -174,7 +165,7 @@ The loop is the pump; the supervisor pane is the brain. When a supervisor pane i
 
 For the end-to-end recipe — planning as a pre-step, writing task-level-concrete specs, and defining what "verified" means in your `AGENTS.md` so a fleet of cheaper workers succeeds under one smart orchestrator — see the [Tiered-Model Workflow](docs/src/user-guide/tiered-model-workflow.md) guide.
 
-Supervisor mode also composes a curated dev-command allowlist into its own auto-approve whitelist so common dev-loop commands (`cargo build`, `git commit`, `just`, `mdbook build`, `openspec validate`, ...) bypass per-prompt approval — declare your stack with `[supervisor.common_dev_allowlist] stacks = ["rust"]`; extend with `extra = [...]`.
+Supervisor mode also composes a curated dev-command allowlist into its own auto-approve whitelist so common dev-loop commands (non-destructive `git` verbs such as `git commit`, read-only `find`/`grep`, and your stack's toolchain verbs such as `cargo build`/`cargo test` for `rust`) bypass per-prompt approval — declare your stack with `[supervisor.common_dev_allowlist] stacks = ["rust"]`; extend with `extra = [...]`.
 
 `--no-supervisor` is the highest-precedence step in the supervisor-mode resolution chain — it wins over both `[supervisor] enabled = true` in config and any interactive prompt. It is mutually exclusive with `--supervisor`; passing both fails at parse time. `--force` only matters for spec-mode launches (`--from-all-specs` / `--specs`) and bypasses the warning when uncommitted spec changes are detected on disk.
 
@@ -247,6 +238,7 @@ All examples below use `git paw`, but `git-paw` works identically.
 | `attach` | Reattach the terminal to the current repo's running session (v0.16.0+). |
 | `list-clis` / `add-cli` / `remove-cli` | Manage auto-detected and custom AI CLIs. |
 | `replay` | View session logs (`--list`, `--color`, `--session`). |
+| `approvals` | Report the command patterns you approved by hand during a session, with a hint on where to promote each (`--session`, `--limit`, `--json`). |
 | `mcp` | Read-only [MCP](https://modelcontextprotocol.io) server over stdio — no session or broker required (v0.7.0+). |
 | `doctor` | Read-only preflight diagnostics — grouped ✓/⚠/✗ checks with a remedy on each finding, `--json`, `--live` (v0.13.0+). |
 | `completions` | Print a bash/zsh/fish completion script to stdout (v0.16.0+). |
@@ -263,7 +255,7 @@ default_spec_cli = "claude"   # skip the picker for spec-mode launches
 branch_prefix = "spec/"       # prefix for spec-derived branches
 
 [specs]
-type = "openspec"             # "openspec" | "markdown" | "speckit"
+type = "openspec"             # "openspec" | "markdown" | "speckit" | "superpowers"
 
 [presets.backend]
 branches = ["feat/api", "fix/db"]

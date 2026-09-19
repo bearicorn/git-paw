@@ -11,13 +11,13 @@ Add a `[broker]` section to your `.git-paw/config.toml`:
 enabled = true
 ```
 
-When you run `git paw start`, pane 0 becomes a dashboard instead of an agent pane. The dashboard hosts the broker and displays a live status table.
+When you run `git paw start`, pane 0 becomes a dashboard instead of an agent pane (in supervisor mode the supervisor takes pane 0 and the dashboard moves to pane 1). The dashboard hosts the broker and displays a live status table.
 
 ## How Agents Discover the Broker
 
 git-paw sets the `GIT_PAW_BROKER_URL` environment variable in every agent pane. Agents use this URL to send and receive messages. A typical value is `http://127.0.0.1:9119`.
 
-When skill templates are enabled (the default), each agent's `AGENTS.md` boot block calls the bundled [broker helper](#broker-helper) for interacting with the broker, so agents know how to use it without any manual setup.
+With the broker enabled, each agent's [boot block](#boot-prompt-injection) calls the bundled [broker helper](#broker-helper) (or, for an MCP-speaking CLI, the [MCP publish tools](#mcp-tool-form)), and the agent's `AGENTS.md` view carries the bundled coordination skill with the broker URL pre-expanded, so agents know how to use the broker without any manual setup.
 
 ## Broker helper
 
@@ -115,6 +115,10 @@ This is the safe default: a boot block naming tools a CLI cannot call would
 strand the agent at the very first step, so git-paw only switches to the MCP
 form when it is confident the target CLI can act on it.
 
+The MCP publish surface has no inbox or poll tool, so even the MCP form of
+the boot block reads the agent's inbox with
+`.git-paw/scripts/broker.sh --agent <id> poll`.
+
 ## Prompt-free boot calls
 
 So an agent's first boot action never stalls on a permission prompt,
@@ -208,7 +212,7 @@ prompt are governed by the briefing itself.
 
 ## Message Types
 
-Every broker message uses the same JSON envelope:
+Most broker messages use the same JSON envelope:
 
 ```json
 {
@@ -218,16 +222,23 @@ Every broker message uses the same JSON envelope:
 }
 ```
 
-`<variant>` is one of eight shipped values; `<slug>` is the agent's slugified
-branch name (lowercase alphanumeric + `-` / `_`; slashes from a branch name
-like `feat/auth` become hyphens — `feat-auth`). The eight variants are
-`agent.status`, `agent.artifact`, `agent.blocked`, `agent.intent`,
-`agent.question`, `agent.feedback`, `agent.answer`, and `agent.verified`;
+`<slug>` is the agent's slugified branch name (lowercase alphanumeric + `-` /
+`_`; slashes from a branch name like `feat/auth` become hyphens —
+`feat-auth`). Eight variants use this envelope: `agent.status`,
+`agent.artifact`, `agent.blocked`, `agent.intent`, `agent.question`,
+`agent.feedback`, `agent.answer`, and `agent.verified`. Three more do not:
+`agent.advanced-main` carries its fields flat alongside `type` (see
+[Advanced Main](#advanced-main)); `agent.learning`, published by the
+[learnings aggregator](learnings.md#programmatic-consumption-agentlearning-v060),
+carries its `agent_id` inside `payload`; and `supervisor.verify-now` is
+emitted by the broker itself — carrying only the committing `branch_id` — to
+the supervisor inbox whenever an `agent.artifact { status: "committed" }`
+arrives and `[supervisor] verify_on_commit_nudge` is on (the default).
 `src/broker/messages.rs` is the source of truth for the payload schemas.
 
 > **`agent.status` and `agent.artifact` are normally automatic.** The
 > filesystem watcher publishes `agent.status` (with `modified_files`) whenever
-> a tracked file changes in a worktree, and the post-commit git hook publishes
+> a worktree's `git status --porcelain` output changes, and the post-commit git hook publishes
 > `agent.artifact` with `status: "committed"` and the committed file list every
 > time an agent commits. The manual `curl` examples below are escape hatches
 > for cases where the automatic publishers do not apply (e.g. code-less tasks
@@ -356,6 +367,18 @@ Each event carries a deterministic id derived from
 `merged_branch + new_main_sha + base + UTC-hour-bucket`, so re-publishing the
 same merge within the hour dedups to one logical event.
 
+## When You Depend on a Peer's Work
+
+When a peer's `agent.artifact` lists work an agent depends on, the bundled
+`coordination` skill tells the agent to treat it as a signal, not an
+instruction to graft the peer's commit: publish `agent.blocked` naming the
+peer and what it needs, then continue on unblocked work (or wait if none
+remains). Agents must **not** cherry-pick a peer's commit into their own
+branch — the supervisor later merges that commit from the peer's own branch,
+so the grafted copy leaves the dependent branch divergent and unmergeable.
+Peer work arrives through the base branch instead, via the
+`agent.advanced-main` discipline below.
+
 ## When Main Advances
 
 An `agent.advanced-main` event arrives on your normal
@@ -373,6 +396,13 @@ conflict with in-flight work, so it always requires judgment. If you do rebase,
 commit or deliberately stash your work first so a rebase conflict can never wipe
 uncommitted edits. (The bundled `coordination` skill teaches this discipline to
 coding agents directly.)
+
+Separately, when the operator sets `[supervisor] branch_refresh = true`, the
+supervisor's unattended drive loop may itself rebase an idle, clean worker
+branch onto the default branch after a merge. The worker is then told its HEAD
+moved by an `agent.feedback` tagged `[branch-refresh]` — never by
+`agent.advanced-main`. See
+[Supervisor → Branch refresh](supervisor.md#branch-refresh-opt-in).
 
 ## Polling for Messages
 
@@ -418,7 +448,7 @@ enabled = true
 port = 9120
 ```
 
-The default port is `9119`. The broker always binds to `127.0.0.1` (localhost only) and should never be exposed to the network.
+The default port is `9119`. The broker binds to `127.0.0.1` (localhost only) by default — the `[broker] bind` setting — and should never be exposed to the network.
 
 ## Automatic Conflict Detection (v0.5.0)
 
@@ -430,15 +460,19 @@ supervisor inbox via `agent.question`. Three failure shapes are detected:
 - **Forward conflicts** — two agents publish `agent.intent` with overlapping
   `files`. Both receive `agent.feedback` listing the other agent and the
   overlapping paths. Toggle with `[supervisor.conflict] warn_on_intent_overlap`.
-- **In-flight conflicts** — an agent publishes `agent.status` or
-  `agent.artifact` whose `modified_files` overlap with another agent's active
-  intent or recent status. The broker waits `[supervisor.conflict] window_seconds`
-  (default 120) for one side to retract; if both sides keep modifying, the
-  detector escalates to the supervisor inbox via `agent.question`.
-- **Ownership violations** — an agent's `modified_files` includes a path the
-  spec marks as owned by another change. The violator receives
-  `agent.feedback`; if `[supervisor.conflict] escalate_on_violation = true` the
-  supervisor inbox also receives a follow-up `agent.question`.
+- **In-flight conflicts** — two agents' `agent.status` `modified_files` sets
+  overlap on the same file. Both receive `agent.feedback`. The broker waits
+  `[supervisor.conflict] window_seconds` (default 120) for one side to stop
+  touching the file; if both keep modifying it, the detector escalates a true
+  collision to the supervisor inbox via `agent.question` (an overlap whose
+  declared regions are disjoint is downgraded to an informational
+  `agent.feedback` instead).
+- **Ownership violations** — an agent's `modified_files` includes a file
+  outside its own active `agent.intent` and inside another agent's active
+  intent. The violator receives `agent.feedback`; if
+  `[supervisor.conflict] escalate_on_violation = true` the supervisor inbox
+  also receives a follow-up `agent.question`. The shared spec `tasks.md` every
+  agent ticks its own line in is exempt.
 
 See the [Conflict Detection chapter](conflict-detection.md) for the full
 walkthrough — failure shapes, the `[conflict-detector]` tag, supervisor inbox
@@ -446,26 +480,26 @@ routing, and the configuration knobs.
 
 ## Audit Trail
 
-The broker writes all messages to `.git-paw/broker.log` as JSONL (one JSON object per line). This file is flushed every 5 seconds and provides a complete audit trail of agent communication.
+The broker appends every message to a `broker.log` file in git-paw's session-state directory (`~/Library/Application Support/git-paw/sessions/` on macOS, `$XDG_DATA_HOME/git-paw/sessions/` — default `~/.local/share/git-paw/sessions/` — on Linux), outside the repository. Each line is plain text — `[<seq>] <unix-seconds> [<agent_id>] <message summary>` — and the file is flushed every 5 seconds, giving an audit trail of agent communication. For the full JSON of every message, query the broker's `GET /log` endpoint.
 
-The log file is automatically cleaned up by `git paw purge`. It is also covered by the `.gitignore` entry that `git paw init` creates.
+The log file is automatically cleaned up by `git paw purge`.
 
 ## Working Heartbeat
 
-The broker's filesystem watcher publishes `agent.status` whenever a file in a
-worktree changes, which keeps the dashboard's `last_seen` timestamp fresh during
+The broker's filesystem watcher publishes `agent.status` whenever a worktree's
+`git status` changes, which keeps the dashboard's `last_seen` timestamp fresh during
 active editing. The watcher cannot observe read-only tool uses (file reads,
 greps, searches), permission-prompt waits, or LLM-only deliberation between tool
 calls — so a long read-heavy investigation looks stuck on the dashboard even
 though the agent is making progress.
 
 To bridge that gap, the embedded coordination skill instructs agents to publish
-a lightweight `agent.status` heartbeat every 5 tool uses while actively working:
+a lightweight `agent.status` heartbeat every 5 tool uses while actively working,
+through the bundled [broker helper](#broker-helper), which publishes
+`{"status":"working","message":"<text>","modified_files":[]}`:
 
 ```bash
-curl -s -X POST http://127.0.0.1:9119/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.status","agent_id":"feat-auth","payload":{"status":"working","message":"reviewing auth tests","modified_files":[]}}'
+.git-paw/scripts/broker.sh --agent feat-auth status "reviewing auth tests"
 ```
 
 The heartbeat reuses the existing `agent.status` shape — no new wire format is
@@ -578,8 +612,8 @@ Two related forms of an agent identifier appear throughout the broker protocol:
 - **Branch name** — the original git ref (e.g. `feat/no-supervisor-flag`). Used
   in `git checkout`, `git worktree`, `git push`, and any other git command.
 - **`agent_id`** — the dashed slug form (e.g. `feat-no-supervisor-flag`). Used
-  in every `/publish` payload, every `/messages/<id>` URL, and the `target`
-  field of `agent.feedback` and `agent.question` payloads.
+  in every `/publish` envelope's `agent_id`, every `/messages/<id>` URL, and
+  payload fields that name another agent, such as `from` in `agent.blocked`.
 
 `agent_id` is the slugified form of the branch name. The conversion (named
 `slugify_branch` in the source) lowercases the input, replaces every character
@@ -619,9 +653,9 @@ blocked indefinitely.
 The supervisor skill therefore instructs supervisors (both human and LLM) to
 **both** publish `agent.answer` (the non-error reply shape — `agent.feedback`
 stays reserved for corrective errors) **and** send the answer text to the
-asking agent's tmux pane via `tmux send-keys`. This dual write is
-transitional; MCP-mediated inbox access will let agents consume `agent.answer`
-directly and remove the second step.
+asking agent's tmux pane via `tmux send-keys`. The MCP publish tools include
+no inbox read, so the dual write applies to agents booted with the
+[MCP tool form](#mcp-tool-form) too.
 
 ## Spec Kit Consolidated Worktrees
 
@@ -639,7 +673,7 @@ The embedded coordination skill picks up on the branch prefix:
   3. Publishes `agent.intent` for the union of files across the next 1–2 tasks (with a generous TTL) rather than one publish per task.
   4. Publishes `agent.artifact` with `status: "done"` only when every listed task shows `- [x]` in `tasks.md`. Partial completion is not "done".
 
-When `tasks.md` is the merge-conflict surface between worktrees, git's line-level merge handles per-task checkbox flips automatically. If two worktrees ever flip the *same* task ID, conflict detection (via `agent.intent` overlap) catches it upstream.
+When `tasks.md` is the merge-conflict surface between worktrees, git's line-level merge handles per-task checkbox flips automatically. A checkbox writeback to the shared `tasks.md` is never reported as an ownership violation — the [conflict detector](conflict-detection.md#ownership-violation) exempts that file — while forward and in-flight overlap detection still apply to it.
 
 ## Workflow phases
 
@@ -771,7 +805,7 @@ which is the authoritative source.
 After the "While you're editing" discipline, the coordination skill teaches
 agents to manage their own context window so they don't hit an opaque
 "context length exceeded" failure mid-task and lose uncommitted work. The
-guidance has three parts:
+guidance has four parts:
 
 - **Residual-budget heuristic.** After the boot block, skill prose, and
   governance docs load, an agent aims to keep at least ~60% of the model's
@@ -784,6 +818,12 @@ guidance has three parts:
 - **Commit before you compact.** Every compact / clear / summarise operation
   is preceded by a commit or an `agent.artifact` publish, so reducing context
   is never lossy.
+- **Proactive context-bloat flagging.** When an agent's pane shows a
+  `/clear to save <N>k tokens` hint with `N` at or above
+  `[supervisor] context_bloat_threshold_k` (default 250), the supervisor flags
+  it with a synthetic `agent.status` carrying `phase: "context-bloat"`; the
+  agent commits (or publishes an `agent.artifact`) first, then clears or
+  compacts.
 
 The bundled coordination skill (`assets/agent-skills/coordination.md`, the
 "Context budget" section) is the **authoritative** source for the exact

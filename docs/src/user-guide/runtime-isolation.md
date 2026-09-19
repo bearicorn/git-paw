@@ -204,10 +204,11 @@ half-built runtime.
 
 ## Checking it worked
 
-After starting a session, look inside any agent's worktree:
+After starting a session, look inside any agent's worktree (under
+`.git-paw/worktrees/` by default — see [Worktree Placement](worktree-placement.md)):
 
 ```console
-$ cat ../myproject-feat-two/.env.local
+$ cat .git-paw/worktrees/feat-two/.env.local
 # >>> git-paw (managed) >>>
 PORT=3010
 VITE_PORT=3011

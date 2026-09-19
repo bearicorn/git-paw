@@ -6,7 +6,7 @@ git-paw uses TOML configuration files at two levels, with repo-level settings ov
 
 | Level | Path | Purpose |
 |-------|------|---------|
-| Global | `~/.config/git-paw/config.toml` | Default CLI, custom CLIs, global presets |
+| Global | `~/.config/git-paw/config.toml` (Linux; `$XDG_CONFIG_HOME/git-paw/config.toml` when that is set) or `~/Library/Application Support/git-paw/config.toml` (macOS) | Default CLI, custom CLIs, global presets |
 | Per-repo | `.git-paw/config.toml` (in repo root) | Repo-specific overrides |
 
 Both files are optional. git-paw works with sensible defaults when no config exists.
@@ -35,20 +35,24 @@ mouse = true
 # writes "child" for new repos and backfills it into a config that omits it.
 worktree_placement = "child"
 
-# Pane affordances: heavy borders, per-pane labels, active-pane highlight
+# Pane affordances: double-line borders, per-pane labels, active-pane highlight
 # (default: true; set false to inherit your own tmux styling)
 # [layout]
 # border_affordances = true
 
-# Per-worktree runtime isolation (both opt-in; absent = no copying, no
-# .env.local). Files are copied verbatim into each worktree; each worktree
-# gets its own port block base + slot * stride. Keep stride >= vars length.
+# Per-worktree runtime isolation (all opt-in; absent = no copying, no
+# .env.local, no hook). Files are copied verbatim into each worktree; each
+# worktree gets its own port block base + slot * stride (keep stride >= vars
+# length); hooks run your own commands at worktree create/remove.
 # [worktree.env]
 # copy = [".env", ".env.development"]
 # [worktree.ports]
 # base   = 3000
 # stride = 10
 # vars   = ["PORT", "VITE_PORT"]
+# [worktree.hooks]
+# on_create = "scripts/paw-db-branch.sh {worktree_id}"
+# on_remove = "scripts/paw-db-drop.sh {worktree_id}"
 
 # Custom CLI definitions
 [clis.my-agent]
@@ -109,14 +113,22 @@ cli = "codex"
 already-initialised repo and it brings `.git-paw/config.toml` up to the current
 defaults. The migration is **strictly additive** — it appends
 
-- any default `[section]` the file is missing, and
+- a `[supervisor]` section when the file has none (init asks whether to enable
+  supervisor mode in an interactive terminal, and writes `enabled = false`
+  otherwise), and
 - any **top-level default key** the file is missing, written with its
   generated-default value (for example `worktree_placement`, added in v0.8.0).
 
+An existing but empty `config.toml` is instead seeded with the full generated
+template. The other sections appear in the template only as commented examples,
+so they are not appended to a file you have already written.
+
 It never modifies or removes a section, a key, or a commented example you have
-already set, so your customised settings survive verbatim. Once every default
-section and top-level key is present the run is a no-op, and init reports
-`Already initialized. Nothing to do.`
+already set, so your customised settings survive verbatim. Once `[supervisor]`
+and every top-level default key are present the config is left untouched, and
+— if nothing else needed creating — init reports
+`Already initialized. Nothing to do.` (The bundled `.git-paw/scripts/` helpers
+are refreshed on every run regardless.)
 
 When something is added, init names it:
 
@@ -409,7 +421,7 @@ $ cat scripts/paw-db-branch.sh
 createdb "paw_$1" >/dev/null
 echo "DATABASE_URL=postgres://localhost/paw_$1"
 
-$ cat ../myproject-feat-two/.env.local
+$ cat .git-paw/worktrees/feat-two/.env.local
 # >>> git-paw (managed) >>>
 PORT=3010
 VITE_PORT=3011
@@ -549,7 +561,7 @@ git paw add-cli my-agent my-agent --display-name "My Agent"
 git paw remove-cli my-agent
 ```
 
-The `add-cli` and `remove-cli` commands modify the **global** config at `~/.config/git-paw/config.toml`.
+The `add-cli` and `remove-cli` commands modify the **global** config (see [Config File Locations](#config-file-locations)). `add-cli` stores a binary name given on the command line as its resolved absolute path.
 
 ### Listing CLIs
 
@@ -560,10 +572,10 @@ git paw list-clis
 Shows both auto-detected and custom CLIs with their source:
 
 ```
-Name       Path                         Source
-claude     /usr/local/bin/claude        detected
-codex      /usr/local/bin/codex         detected
-my-agent   /usr/local/bin/my-agent      custom
+NAME            SOURCE     PATH
+claude          detected   /usr/local/bin/claude
+codex           detected   /usr/local/bin/codex
+my-agent        custom     /usr/local/bin/my-agent
 ```
 
 ## Presets
@@ -728,6 +740,8 @@ branch_refresh = false
 | `context_bloat_threshold_k` | `250` (thousand tokens) | Read by `.git-paw/scripts/sweep.sh`: when an agent's pane shows a `/clear to save <N>k tokens` hint whose `N` meets or exceeds this value, the agent is proactively flagged `context-bloat` so the supervisor can pre-empt the eventual freeze. Omitted → the documented default |
 | `blocked_on_supervisor_window_seconds` | `900` (~15 min) | Read by `.git-paw/scripts/sweep.sh`: an agent whose latest unanswered `agent.blocked` names the supervisor as the blocker is flagged `blocked-on-supervisor` once it has waited longer than this window, forcing the supervisor to answer. Omitted → the documented default |
 | `branch_refresh` | `false` | When `true`, the [unattended drive loop](../user-guide/supervisor.md#unattended-mode---unattended) rebases an idle, clean worker branch onto the default branch after a successful merge — see [Branch refresh](../user-guide/supervisor.md#branch-refresh-opt-in) for the full precondition gate list. Default off: history is rewritten under a live agent only on explicit opt-in |
+| `learnings` | `false` | Master switch for [learnings mode](#learnings-mode-tuning): when `true` (and the broker is enabled), the session's friction signals are appended to `.git-paw/session-learnings.md`. Tuned by the `[supervisor.learnings_config]` sub-table |
+| `auto_revert` | `false` | Used by [opsx role gating](#opsx-role-gating) in `block` mode: when `true`, the supervisor reverts a coding agent's archive commit without first confirming with you. Default off — a revert always asks first |
 
 **Approval flag resolution.** When composing a pane's launch command, git-paw
 resolves the permission flags for a `(CLI, level)` pair in order: (1) the
@@ -784,7 +798,7 @@ verbatim — the supervisor agent recognises that as the same skip token.
 | Level | Behavior |
 |-------|----------|
 | `manual` | Agents prompt for every action (safest, slowest) |
-| `auto` | CLI default behavior — some prompts, some auto-approved |
+| `auto` | Low-friction mode — the CLI's mapped `auto` flag from the table above (e.g. accept-edits for Claude); a CLI with no mapped flag keeps its default behavior |
 | `full-auto` | Skip all permission prompts (fastest, agents run unattended) |
 
 The supervisor translates the approval level into CLI-specific flags at launch (e.g. `--dangerously-skip-permissions` for Claude in full-auto mode).
@@ -792,7 +806,7 @@ The supervisor translates the approval level into CLI-specific flags at launch (
 ### Auto-approve safe permission prompts
 
 When supervisor mode is enabled, git-paw can automatically approve common,
-known-safe permission prompts (`cargo test`, `git commit`, broker `curl` calls, etc.)
+known-safe permission prompts (`git commit`, broker `curl` calls, a declared stack's toolchain commands such as `cargo test`, etc.)
 in stalled agent panes so the supervisor does not have to dismiss every prompt by hand.
 
 ```toml
@@ -890,9 +904,8 @@ the resolved option digit + `Enter` (if safe) or publishes an `agent.question` t
 (if not).
 
 Prompt-free broker calls come from the CLI's own resolved permission mode
-(see `unattended-boot-hardening`) together with git-paw's command
-classifier, which recognises the bundled `.git-paw/scripts/{broker,sweep,
-docs-fetch}.sh` helpers by their stable path. No settings-file allowlist is
+together with git-paw's command classifier, which recognises the bundled
+`.git-paw/scripts/{broker,sweep,docs-fetch}.sh` helpers by their stable path. No settings-file allowlist is
 written or required for this.
 
 ### Common dev-command allowlist
@@ -1060,9 +1073,9 @@ round-trips unchanged.
 
 When supervisor mode is active, the parent `[supervisor] learnings = true`
 flag (default `false`) activates the learnings subsystem. Entries are
-appended to `.git-paw/session-learnings.md` covering the five deterministic
-categories tracked in v0.5.0 (stuck duration, recovery-cycle count, forward
-conflicts, in-flight conflicts, ownership violations). The
+appended to `.git-paw/session-learnings.md` covering the four deterministic
+categories (conflict events, where agents got stuck, recovery cycles,
+permission patterns — see [Learnings](../user-guide/learnings.md)). The
 `[supervisor.learnings_config]` sub-table tunes the flush cadence; the
 master switch lives on the parent table.
 
@@ -1173,7 +1186,7 @@ Auto-wiring only runs for the Spec Kit backend. With `[specs] type = "openspec"`
 
 ### What the supervisor does with these paths
 
-This `[governance]` table is the storage slot. The runtime consumer — boot-prompt injection so the supervisor can read each doc and apply it to its audit — lives in the parallel `governance-context` capability. See the [Governance](../user-guide/governance.md) chapter of the user guide for what that looks like end-to-end.
+This `[governance]` table is the storage slot. The runtime consumer is the supervisor's boot prompt, which lists each configured doc so the supervisor can read it and apply it to its audit. See the [Governance](../user-guide/governance.md) chapter of the user guide for what that looks like end-to-end.
 
 ## MCP
 
@@ -1190,7 +1203,7 @@ The section is optional; omitting it (or `name`) makes the server advertise `git
 
 ## Dashboard
 
-Configure the dashboard TUI rendered in pane 0 when the broker is enabled.
+Configure the dashboard TUI rendered in its own pane when the broker is enabled (pane 0 in a session without a supervisor, pane 1 beside the supervisor in supervisor mode).
 
 ```toml
 [dashboard]
@@ -1239,11 +1252,11 @@ border_affordances = true  # default
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `border_affordances` | `true` | When `true`, git-paw applies *pane affordances* to the sessions it creates: heavy pane borders (`━┃` instead of the default `─│`), a per-pane label strip showing each pane's index and role/branch (e.g. `0: supervisor`, `1: dashboard`, `2: feat/foo`), a dim border on inactive panes, and a cyan-bold border on the focused pane. Set to `false` to opt out and inherit your own tmux styling instead. |
+| `border_affordances` | `true` | When `true`, git-paw applies *pane affordances* to the sessions it creates: double-line pane borders (`═║` instead of the default `─│`), a per-pane label bar showing each pane's index and role/branch (e.g. `0: supervisor`, `1: dashboard`, `2: feat/foo`), a dim border on inactive panes, and a cyan-bold border on the focused pane. Set to `false` to opt out and inherit your own tmux styling instead. |
 
 These options are scoped to git-paw-managed sessions (`paw-*`) only — your other tmux sessions are never touched. They apply to both `git paw start` and supervisor-mode sessions.
 
-**When to disable.** Turn `border_affordances` off if you run a tmux theme you prefer, are on tmux older than 3.2 (where the heavy border lines aren't recognised — git-paw warns and continues, but you may prefer the consistent default look), or find the label strip noisy on small terminals.
+**When to disable.** Turn `border_affordances` off if you run a tmux theme you prefer, are on tmux older than 3.2 (where the double border lines aren't recognised — git-paw warns and continues, but you may prefer the consistent default look), or find the label strip noisy on small terminals.
 
 See [Supervisor](../user-guide/supervisor.md) for how the labelled layout looks in a supervisor session.
 
@@ -1258,6 +1271,7 @@ When both global and repo configs exist, they merge with these rules:
 | `branch_prefix` | Repo wins |
 | `mouse` | Repo wins |
 | `worktree_placement` | Repo wins |
+| `docs_base_url` | Repo wins |
 | `clis` | Maps merge (repo overrides per-key) |
 | `presets` | Maps merge (repo overrides per-key) |
 | `specs` | Repo wins |
@@ -1269,7 +1283,7 @@ When both global and repo configs exist, they merge with these rules:
 | `layout` | Repo wins |
 | `opsx` | Repo wins |
 | `mcp` | Per-field merge (repo wins on each set field, unset fields fall back to global) |
-| `worktree` | Repo wins (the whole table, including both sub-tables) |
+| `worktree` | Repo wins (the whole table, including its `env`, `ports`, and `hooks` sub-tables) |
 
 **Example:** If global config defines `[clis.my-agent]` and repo config defines `[clis.my-agent]` with a different command, the repo version wins. But a `[clis.other-tool]` in global config still appears — maps are merged, not replaced.
 

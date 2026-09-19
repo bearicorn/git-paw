@@ -4,7 +4,7 @@ Contributions to git-paw are welcome! This guide covers the development workflow
 
 ## Prerequisites
 
-- Rust (see `rust-toolchain.toml` for the exact version)
+- Rust (stable, per `rust-toolchain.toml`; the MSRV is 1.96, per `rust-version` in `Cargo.toml`)
 - tmux
 - [just](https://github.com/casey/just) (task runner)
 
@@ -23,9 +23,12 @@ git-paw uses `just` as a task runner. Key recipes:
 | Command | Description |
 |---------|-------------|
 | `just check` | Run fmt + clippy + tests |
-| `just test` | Run all tests |
-| `just test-all` | Run all tests including tmux-dependent ones |
-| `just lint` | Run `cargo fmt --check` and `cargo clippy` |
+| `just test` | Run all tests (tmux tests included — tmux is a hard dependency) |
+| `just verify` | Lint + `cargo deny` + the full suite with `--no-fail-fast` + `cargo audit` |
+| `just lint` | Run `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` |
+| `just deny` | Run `cargo deny check` |
+| `just audit` | Run `cargo audit` |
+| `just smoke-all` | Cold-start integration tests (host, plus a container on macOS) |
 | `just coverage` | Generate HTML coverage report |
 | `just docs` | Build and open mdBook documentation |
 | `just api-docs` | Build and open Rustdoc API docs |
@@ -49,11 +52,8 @@ cargo install --path .
 ## Testing
 
 ```bash
-# Unit tests
+# All tests (unit + integration; tmux tests run normally, so tmux must be installed)
 cargo test
-
-# Include tmux-dependent tests (requires tmux installed)
-cargo test -- --include-ignored
 
 # Coverage report
 cargo llvm-cov --html
@@ -68,7 +68,7 @@ Tests are organized as:
 ## Code Style
 
 - **Formatting:** `cargo fmt` (config in `rustfmt.toml`)
-- **Linting:** `cargo clippy -- -D warnings` with pedantic lints enabled
+- **Linting:** `cargo clippy --all-targets -- -D warnings` with pedantic lints enabled
 - **No panics:** No `unwrap()` or `expect()` in non-test `src/` code
 - **Documentation:** `//!` module-level doc comments, `///` on all public items
 
@@ -96,9 +96,11 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/):
 [optional footer(s)]
 ```
 
-**Types:** `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `ci`, `chore`
+**Types:** `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `ci`, `chore`, `perf`
 
-**Scopes:** `cli`, `detect`, `git`, `tmux`, `session`, `config`, `interactive`, `error`
+**Scopes:** `detect`, `git`, `tmux`, `session`, `config`, `interactive`, `error`, `cli`, `docs`, `ci`, `specs`, `agents`, `logging`, `replay`, `init`, `broker`, `dashboard`, `skills`, `supervisor`, `merge-loop`, `user-guide`, `worktree`, `governance`, `learnings`, `pause`
+
+Compound scopes are written `(scope1,scope2,...)` when one change spans several scopes, e.g. `feat(cli,config): add new flag with config wiring`.
 
 **Examples:**
 ```
@@ -136,3 +138,5 @@ PRs should:
 ## Architecture
 
 See the [Architecture](architecture.md) chapter for an overview of the module structure and design decisions.
+
+New code follows the [Target Architecture](architecture-direction.md): decisions are pure functions, and tmux, git, the broker and the filesystem are reached only through ports named in git-paw's own terms.

@@ -22,7 +22,7 @@ Yes! Use `git paw add-cli` to register any CLI binary. See [Custom CLIs](configu
 
 ### What happens if I close my terminal?
 
-The tmux session keeps running in the background. Run `git paw` again to reattach.
+The tmux session keeps running in the background. Run `git paw attach` (or `git paw` again) to reattach.
 
 ### What happens if tmux crashes or my machine reboots?
 
@@ -34,7 +34,7 @@ One session per repository. To work with multiple repos, open separate terminals
 
 ### How do I switch between branches in a session?
 
-Click the pane you want (mouse mode is on by default), or use `Ctrl-b` followed by arrow keys to navigate between panes. Each pane is labeled with its branch and CLI in the border title.
+Click the pane you want (mouse mode is on by default), or use `Ctrl-b` followed by arrow keys to navigate between panes. Each pane's border label shows its pane index and branch.
 
 ## Worktrees
 
@@ -44,16 +44,19 @@ Git worktrees let you check out multiple branches simultaneously in separate dir
 
 ### Where does git-paw create worktrees?
 
-As siblings of your main repo directory. For a project at `~/projects/my-app` with branch `feat/auth`:
+It depends on `worktree_placement`. `git paw init` writes `"child"`, which keeps worktrees inside the repo; with no `worktree_placement` set, they are created as siblings of the repo. For a project at `~/projects/my-app` with branch `feat/auth`:
 
 ```
-~/projects/my-app/              ← your repo
-~/projects/my-app-feat-auth/    ← worktree created by git-paw
+~/projects/my-app/                                ← your repo
+~/projects/my-app/.git-paw/worktrees/feat-auth/   ← "child" (written by git paw init)
+~/projects/my-app-feat-auth/                      ← "sibling" (field absent)
 ```
+
+See [Worktree Placement](user-guide/worktree-placement.md).
 
 ### Does stopping a session delete my worktrees?
 
-No. `git paw stop` kills the tmux session but keeps worktrees and any uncommitted work intact. Only `git paw purge` removes worktrees.
+No. `git paw stop` kills the tmux session but keeps worktrees and any uncommitted work intact. Only `git paw purge` (or `git paw remove <branch>` for a single agent) removes worktrees.
 
 ### Can I manually work in a git-paw worktree?
 
@@ -109,15 +112,14 @@ git paw add-cli my-tool /path/to/my-tool
 
 ### "no space for new pane" in tmux
 
-This can happen with many branches on a small terminal. Make your terminal window larger before launching, or select fewer branches. git-paw caps each agent row at five panes and rebalances every row to equal width, so panes stay as wide as the layout allows; the hard cap is 25 agents per session.
+This can happen with many branches on a small terminal. Make your terminal window larger before launching, or select fewer branches. In supervisor mode, git-paw caps each agent row at five panes and rebalances every row to equal width, so panes stay as wide as the layout allows; the hard cap is 25 agents per session.
 
 ### Session state seems stale
 
-git-paw checks tmux liveness to determine effective status. If something seems off, try:
+git-paw checks tmux liveness to determine effective status. `git paw status` shows a session whose receipt claims it is active but whose tmux session is gone as 🔴 stale, and `git paw start` self-heals such a receipt before launching. To clear stale receipts without touching a live session:
 
 ```bash
-git paw purge --force
-git paw start
+git paw purge --stale
 ```
 
 ### Repository names with dots or spaces, and install paths with spaces

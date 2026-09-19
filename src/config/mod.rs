@@ -966,7 +966,7 @@ worktree_placement = "child"
 # [logging]
 # enabled = false
 
-# HTTP broker for agent coordination (requires --broker flag on start).
+# HTTP broker for agent coordination.
 # [broker]
 # enabled = true
 # port = 9119

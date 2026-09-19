@@ -34,3 +34,17 @@
 - [ ] 6.2 `cargo fmt`, then `just lint`
 - [ ] 6.3 `GIT_PAW_ALLOW_LIVE_SESSION=1 cargo test --no-fail-fast`, verifying the real exit code rather than piped output
 - [ ] 6.4 `openspec validate live-prompt-tail-window --strict`
+
+## 7. Amendment — boundary with the cli-unavailable scan (folded in 2026-10-18)
+
+- [ ] 7.1 Do NOT modify `src/supervisor/drive.rs`. Its `cli_unavailable_line` also scans a fixed `LIVE_PROMPT_TAIL` window and has the same blind spot, but it is fixed by a separate follow-up change; `idle-pane-nudge-submission` is editing `drive.rs` concurrently in this wave
+- [ ] 7.2 Keep `LIVE_PROMPT_TAIL` defined and compiling so `cli_unavailable_line` is unaffected by this change
+- [ ] 7.3 Expose the bounded-trailing-region logic as a reusable `pub(crate)` helper (not inlined into `live_prompt_markers_at_tail`), so the follow-up can adopt it for the banner scan rather than re-deriving it
+
+## 8. Amendment — case-insensitive stuck-on-prompt matching (folded in 2026-10-18)
+
+- [ ] 8.1 Make the stuck-on-prompt marker match in `assets/scripts/sweep.sh` case-insensitive (the `re.search(markers, cap)` in the stuck-eval Python block); sync the tracked `.git-paw/scripts/sweep.sh` and run `bash -n` on both
+- [ ] 8.2 Make `tests/sweep_sh_stuck_detection.rs` exercise the binary-sourced path: put the freshly built `git-paw` first on the fixture's `PATH`, so `git paw __prompt-profile` resolves. Today CI has no `git-paw` on `PATH`, so these tests only ever exercise the fallback literal
+- [ ] 8.3 Add a test that evaluates one capture with binary-sourced markers and with the fallback markers and asserts the same classification
+- [ ] 8.4 Replace the vacuous `out.contains("stuck")` assertion in `permission_prompt_with_stale_heartbeat_publishes_stuck` — `not-stuck` satisfies it — with an exact phase assertion
+- [ ] 8.5 Confirm the three previously-failing tests (`permission_prompt_with_stale_heartbeat_publishes_stuck`, `permission_marker_is_stuck_on_prompt_not_no_progress`, `repeated_detection_is_deduped`) pass on a machine with `git-paw` installed

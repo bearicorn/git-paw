@@ -14,6 +14,7 @@ Environment
   ✓ git                     git version 2.39.5 (/usr/bin/git)
   ✓ tmux                    tmux 3.6a (/opt/homebrew/bin/tmux)
   ✓ git repository          the working directory is inside a git repository
+  ✓ sandbox                 sandbox-exec available for optional worker confinement
 
 CLIs
   ✓ detected CLIs           2 available: claude, codex
@@ -28,15 +29,15 @@ Spec system
   ✓ spec-worker CLI         no default_spec_cli configured — spec workers fall back to default_cli or the interactive picker
 
 Bundled scripts
+  ✓ _paw_common.sh          installed, executable, matches this binary
   ✗ sweep.sh                .git-paw/scripts/sweep.sh is missing
       ↳ run `git paw init` to (re)install the bundled helper scripts
   ✓ broker.sh               installed, executable, matches this binary
   ✓ docs-fetch.sh           installed, executable, matches this binary
-  ✓ _paw_common.sh          installed, executable, matches this binary
   ✓ python3                 Python 3.12.4 (python3)
 
 Broker
-  ✓ broker                  disabled — the pure-manual baseline
+  ✓ broker                  disabled — the pure-manual baseline (no agent coordination, no dashboard feed)
 
 Supervisor
   ✓ supervisor              disabled — agents run without a supervising pane
@@ -46,7 +47,7 @@ Hygiene
   ✓ session state           no stale session receipt
   ✓ worktree registrations  every registered worktree exists on disk
 
-16 ✓ · 1 ⚠ · 1 ✗
+17 ✓ · 1 ⚠ · 1 ✗
 ```
 
 ## Diagnose, don't repair
@@ -82,14 +83,14 @@ git paw doctor || echo "fix the ✗ findings before launching"
 
 | Group | Checks |
 |---|---|
-| **Environment** | `git` and `tmux` on `PATH` and at or above their minimum versions (git 2.5 for `git worktree`, tmux 1.8); the working directory is inside a git repository. Missing or too old is ✗. |
+| **Environment** | `git` and `tmux` on `PATH` and at or above their minimum versions (git 2.5 for `git worktree`, tmux 1.8); the working directory is inside a git repository. Missing or too old is ✗. Also whether this OS's FS-scoped sandbox backend (`sandbox-exec` on macOS, `bwrap` on Linux/WSL) is on `PATH` — absent is ⚠ with a pointer to the [sandbox guide](sandbox.md), never ✗, because the sandbox is optional. |
 | **CLIs** | The AI CLIs that resolve on `PATH` — the known roster plus your `[clis.*]` entries. None resolving is ⚠, surfacing the `No AI CLIs found` launch failure before you hit it. |
 | **Config** | `.git-paw/config.toml` exists and parses (unparseable is ✗, absent is ⚠); the resolved `worktree_placement`; any key this version does not recognise (⚠, naming the key). |
 | **Spec system** | The explicitly configured spec format and how many specs it discovered. Unconfigured is ⚠ with the "add `[specs]` or pass `--specs-format`" guidance — there is no filesystem auto-detection. Also reports the effective spec-worker CLI: the CLI each discovered spec would actually launch with (its own `paw_cli` when set, else `default_spec_cli`). Warns (⚠) when a configured `default_spec_cli` is never actually reachable by any discovered spec — every one of them pins its own `paw_cli` instead — surfacing a silent mis-resolution (such as a spec-driven `--supervisor` launch quietly using an unexpected, unsandboxed CLI) rather than passing green. Informational (✓) when no specs or no `default_spec_cli` are configured — there's nothing to verify against yet. |
 | **Bundled scripts** | `sweep.sh`, `broker.sh`, `docs-fetch.sh`, and the shared `_paw_common.sh` preamble they source exist under `.git-paw/scripts/`, are executable, and match this binary's embedded copies. Missing or non-executable is ✗; content drift is ⚠ ("stale"). Also checks for a Python 3 interpreter, which every bundled script needs — absent is ⚠, not ✗, because core `start`/`add`/`remove` needs no Python. |
 | **Broker** | When `[broker] enabled = true`, that the configured `bind`/`port` is free or already serving a git-paw broker. Another service on the port is ⚠. When disabled, an informational ✓ noting the pure-manual baseline. |
 | **Supervisor** | When `[supervisor] enabled = true`, that each configured gate command's binary resolves on `PATH` (✗ per missing binary) and that `sweep.sh` is installed. When disabled, an informational ✓. |
-| **Hygiene** | The required `.gitignore` entries (including `.git-paw/worktrees/`); session receipts that claim active while their tmux session is gone; registered worktrees whose directory no longer exists. Each is ⚠ with a `git paw purge --stale` remedy. |
+| **Hygiene** | The required `.gitignore` entries (including `.git-paw/worktrees/`); session receipts that claim active while their tmux session is gone (or, past a short launch grace period, while every agent pane has dropped back to a bare shell); registered worktrees whose directory no longer exists. Each is ⚠ with a `git paw purge --stale` remedy. |
 
 ### The supervisor check is project-agnostic
 
@@ -157,4 +158,5 @@ reports a missing tmux as the hard failure.
 
 Doctor introduces no configuration fields. It reads the configuration you
 already have (`[broker]`, `[supervisor]`, `[specs]`, `[clis.*]`,
-`worktree_placement`) and reports what it resolved.
+`worktree_placement`, `default_spec_cli` / `default_cli`) and reports what it
+resolved.

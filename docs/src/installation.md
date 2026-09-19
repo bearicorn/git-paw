@@ -4,8 +4,10 @@
 
 Before installing git-paw, ensure you have:
 
-- **Git** 2.20 or later
-- **tmux** — any recent version
+- **Git** 2.5 or later (worktree support)
+- **tmux** 1.8 or later
+
+`git paw doctor` checks both versions for you.
 
 ### Installing tmux
 
@@ -66,7 +68,7 @@ git-paw --version
 You should see output like:
 
 ```
-git-paw 0.1.0
+git-paw 0.16.0
 ```
 
 Since git-paw is named with the `git-` prefix, git recognizes it as a subcommand. Both of these work:

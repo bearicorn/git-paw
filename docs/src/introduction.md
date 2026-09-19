@@ -2,7 +2,7 @@
 
 **git-paw** (Parallel AI Worktrees) orchestrates multiple AI coding CLI sessions across git worktrees from a single terminal using tmux.
 
-Working with AI coding assistants like Claude, Codex, or Gemini is powerful — but what if you could run them in parallel across multiple branches at once? That's exactly what git-paw does.
+Working with AI coding assistants like Claude, Codex, or Antigravity is powerful — but what if you could run them in parallel across multiple branches at once? That's exactly what git-paw does.
 
 ## The Problem
 
@@ -35,7 +35,7 @@ git-paw will:
 - **One command** to go from zero to parallel AI sessions
 - **Smart start** — reattaches to active sessions, recovers crashed ones, or launches fresh
 - **Live branch-set editing** (v0.6.0) — `git paw add` and `git paw remove` attach or detach a single agent mid-session, no stop/purge/restart, the other agents untouched
-- **Per-branch CLI selection** — use Claude on one branch and Gemini on another
+- **Per-branch CLI selection** — use Claude on one branch and Codex on another
 - **Session persistence** — stop and resume without losing your place
 - **Custom CLI support** — register any AI CLI binary, not just the built-in ones
 - **Presets** — save branch + CLI combos in config for one-command launch
@@ -53,7 +53,7 @@ git-paw will:
 │  │  (git worktree)     │  │  (git worktree)        │  │
 │  │                     │  │                        │  │
 │  ├────────────────────┤  ├────────────────────────┤  │
-│  │  fix/bug → gemini   │  │  refactor/db → aider   │  │
+│  │  fix/bug → codex    │  │  refactor/db → aider   │  │
 │  │                     │  │                        │  │
 │  │  (git worktree)     │  │  (git worktree)        │  │
 │  │                     │  │                        │  │
@@ -65,8 +65,8 @@ Each pane runs in its own git worktree, so there are no branch conflicts. Your A
 
 ## Requirements
 
-- **Git** (2.20+ recommended for worktree improvements)
-- **tmux** (any recent version)
+- **Git** 2.5+ (worktree support)
+- **tmux** 1.8+
 - At least one AI coding CLI installed (see [Supported AI CLIs](supported-clis.md))
 - macOS or Linux (Windows via WSL only)
 

@@ -109,6 +109,7 @@ The project uses standard Rust development tools along with additional quality a
 ### Code Style
 
 - **Structuring, decoupling, and refactoring code**: follow the `code-standards` agent skill (`.agents/skills/code-standards/SKILL.md`) — the decided patterns (process-execution `CommandRunner` seam, domain newtypes, hidden-subcommand IPC, domain-module layout), the frozen do-not-touch list, the refactor rules, and the bundled Rust API Guidelines / CLI-design / NFR references. Repo-local dev skill; conformance guarded by `tests/agent_skills_conform.rs`.
+- **Target architecture and decoupling** (tmux, headless, the broker host vs the dashboard view, spec backends, agent CLIs, MCP): new code follows the target described in `docs/src/architecture-direction.md` — ports and adapters at the edges, pure decisions inside (functional core, imperative shell), Strategy for per-CLI / per-spec-format behavior, DTOs only at serialized contracts, and dependencies pointing inward (`entry → app → core`). Apply it with the `concept-decoupling` agent skill (`.agents/skills/concept-decoupling/SKILL.md`): map the leaked *model*, name ports in git-paw's terms (never a tool's), pull decisions out of the I/O, keep adapters compile-time and in-tree, and restructure seam-first behind the behavior-preserving `code-architecture` contract. Repo-local dev skill; conformance guarded by `tests/agent_skills_conform.rs`.
 - Formatting configured in `rustfmt.toml`
 - Clippy pedantic lints enabled (configured in `Cargo.toml` under `[lints.clippy]`)
 - All public functions and types must have doc comments (`///`)
@@ -563,7 +564,7 @@ If you need to refer back to a prior release's archive content:
 ## Project Metadata
 
 - License: MIT
-- MSRV: current stable
+- MSRV: 1.96 (`rust-version` in `Cargo.toml`) — keep it at or below the rustc of the cargo-dist release runner; never raise it to current stable
 
 ## Commits
 

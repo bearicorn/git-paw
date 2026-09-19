@@ -50,6 +50,21 @@ so the markers are folded into that change as an amendment instead.
 
 - `approval-auto`: the *Live-prompt gate* requirement gains trailing-region tolerance —
   detection anchors on the modal block, not on a fixed tail line count.
+- `broker-agent-helper`: *sweep.sh detects stuck-on-prompt agents* — prompt markers are
+  matched case-insensitively, and the verdict must not depend on whether the markers came
+  from the binary or the helper's fallback.
+
+**Folded in (2026-10-18) — sweep.sh stuck-on-prompt is case-sensitive.** The stuck check
+matches the profile's `approval_markers` with a bare `re.search` (no `re.I`). The embedded
+profile stores those markers lowercased (`do you want to proceed`), because the Rust
+detectors lowercase both sides; the helper's built-in fallback is capitalised. So on any
+machine where `git paw` is resolvable — every real install — the stuck check misses every
+prompt that lacks the literal lowercase text `requires approval`. CI never has `git-paw` on
+`PATH`, falls back to the capitalised literal, and passes; that is why three
+`sweep_sh_stuck_detection` tests fail on every developer machine (and on a clean `main`)
+while CI stays green. A v0.16.0 regression from moving sweep.sh to binary-sourced markers.
+Same class as GP-31 — the bundled mirror's prompt matching disagreeing with the Rust gate —
+in the same file, so it lands here.
 
 ## Impact
 
