@@ -194,7 +194,6 @@ Only add dependencies listed in the approved set:
 | `ratatui` | TUI framework (dashboard) |
 | `crossterm` | Terminal backend for ratatui |
 | `schemars` | JSON Schema derivation for governance config |
-| `serde_yaml` | Spec Kit frontmatter parsing |
 | `chrono` | ISO timestamp formatting in broker messages and learnings aggregator |
 | `regex` | Broker `agent_id` validation + supervisor `sweep.sh` phantom filter |
 | `rmcp` v1.7 | Official MCP Rust SDK (Apache-2.0) — stdio MCP server for `git paw mcp`; needs active upstream version tracking (protocol churn) |
@@ -206,6 +205,7 @@ Do not add other dependencies without explicit approval.
 #### Notable exclusions
 
 - `dirs` — Replaced by homegrown `src/dirs.rs` because the upstream crate's license is not FOSS-compatible. Do not re-add.
+- `serde_yaml` — Replaced by a dependency-free skill-frontmatter parser (`src/skill_frontmatter.rs`) because the crate is deprecated upstream and depends on the unmaintained `unsafe-libyaml` (RUSTSEC-2024-0449). Do not re-add.
 
 ## Configuration
 

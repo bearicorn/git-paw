@@ -27,10 +27,15 @@
 - [ ] 5.1 When the roster has no orchestrator pane, add a summary line stating that no orchestrator pane was monitored for CLI unavailability
 - [ ] 5.2 Do NOT widen the pane-0 / supervisor-role resolution
 
-## 6. Docs and gates
+## 6. Spend-limit marker (GP-50)
 
-- [ ] 6.1 Update the unattended-operation chapter: banners are detected above CLI chrome, per-CLI markers apply, and the no-orchestrator limitation is stated
-- [ ] 6.2 Verify every scenario in `specs/supervisor-unattended-operation/spec.md` maps to a test
-- [ ] 6.3 `cargo fmt`, then `just lint`
-- [ ] 6.4 `GIT_PAW_ALLOW_LIVE_SESSION=1 cargo test --no-fail-fast`, verifying the real exit code
-- [ ] 6.5 `openspec validate cli-unavailable-detection-gaps --strict`
+- [ ] 6.1 Add `monthly spend limit` to the embedded profile's `cli_unavailable_markers` in `src/config/prompt_profile.rs`
+- [ ] 6.2 Test: the full spend-limit banner matches `cli_unavailable_markers` and not `stream_error_markers`; the loop escalates a coding pane showing it
+
+## 7. Docs and gates
+
+- [ ] 7.1 Update the unattended-operation chapter: banners are detected above CLI chrome, per-CLI markers apply, an organisation spend limit is detected, and the no-orchestrator limitation is stated
+- [ ] 7.2 Verify every scenario in `specs/supervisor-unattended-operation/spec.md` and `specs/cli-prompt-profiles/spec.md` maps to a test
+- [ ] 7.3 `cargo fmt`, then `just lint`
+- [ ] 7.4 `GIT_PAW_ALLOW_LIVE_SESSION=1 cargo test --no-fail-fast`, verifying the real exit code
+- [ ] 7.5 `openspec validate cli-unavailable-detection-gaps --strict`

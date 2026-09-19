@@ -190,9 +190,36 @@ The first match wins. If no skill is found, resolution fails with an error.
 Skills are validated against the agentskills.io specification:
 
 - Required `name` and `description` fields must be present
-- YAML frontmatter must be valid
+- Frontmatter must parse within the supported subset (below)
 - Skill directory must contain SKILL.md file
 - Clear error messages for validation failures
+
+### Supported frontmatter subset
+
+git-paw parses `SKILL.md` frontmatter with a small, dependency-free parser
+rather than a full YAML library, so it supports a bounded subset rather than
+arbitrary YAML:
+
+- Top-level `key: value` pairs, where the value is a plain, single-quoted,
+  or double-quoted scalar (surrounding whitespace is trimmed from plain
+  scalars).
+- Literal (`|`) and folded (`>`) block scalars, including their strip (`-`)
+  and keep (`+`) chomping indicators.
+- Full-line and trailing `#` comments outside quoted scalars.
+- A one-level `metadata` mapping of string keys to scalar values — every
+  value is read as a string.
+- A key git-paw doesn't consume (for example `allowed-tools:` followed by a
+  list) loads fine; it's skipped along with any indented content beneath it.
+
+**This parser does not silently misparse.** If `name`, `description`,
+`license`, `compatibility`, or `metadata` uses a construct outside this
+subset — a flow mapping or list (`{ a: 1 }`, `[a, b]`), an anchor or alias
+(`&foo`, `*foo`), a YAML tag (`!!str`), or a nested mapping inside
+`metadata` — the skill fails to load with a validation error naming the
+field, rather than silently producing a different value. This applies to
+your own override skills too: a `SKILL.md` you hand-write under
+`.agents/skills/` is held to the same subset as the embedded skills git-paw
+ships.
 
 ## Examples
 

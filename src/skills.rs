@@ -317,31 +317,41 @@ fn parse_standardized_metadata(
     let frontmatter_lines = &lines[1..frontmatter_end];
     let frontmatter_yaml = frontmatter_lines.join("\n");
 
-    // Parse YAML into metadata
-    let metadata: StandardizedSkillMetadata = match serde_yaml::from_str(&frontmatter_yaml) {
-        Ok(meta) => meta,
-        Err(e) => {
-            return Err(SkillError::ValidationError {
-                name: "unknown".to_string(),
-                reason: format!("invalid YAML frontmatter: {e}"),
-            });
+    // Parse the frontmatter's supported subset (see `skill_frontmatter`)
+    let parsed = crate::skill_frontmatter::parse(&frontmatter_yaml).map_err(|e| {
+        SkillError::ValidationError {
+            name: e.partial_name.unwrap_or_else(|| "unknown".to_string()),
+            reason: format!(
+                "unsupported YAML construct in '{}' field: {}",
+                e.field, e.detail
+            ),
         }
-    };
+    })?;
 
     // Validate required fields
-    if metadata.name.is_empty() {
+    let name = parsed.name.unwrap_or_default();
+    if name.is_empty() {
         return Err(SkillError::ValidationError {
             name: "unknown".to_string(),
             reason: "missing required 'name' field in frontmatter".to_string(),
         });
     }
 
-    if metadata.description.is_empty() {
+    let description = parsed.description.unwrap_or_default();
+    if description.is_empty() {
         return Err(SkillError::ValidationError {
-            name: metadata.name.clone(),
+            name: name.clone(),
             reason: "missing required 'description' field in frontmatter".to_string(),
         });
     }
+
+    let metadata = StandardizedSkillMetadata {
+        name,
+        description,
+        license: parsed.license,
+        compatibility: parsed.compatibility,
+        metadata: parsed.metadata,
+    };
 
     // Extract content after frontmatter
     let content_without_frontmatter = lines[frontmatter_end + 1..].join("\n");
@@ -4231,6 +4241,99 @@ mod tests {
 
         // Restore original directory
         std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    // Corpus parity (drop-serde-yaml 4.1): every embedded skill, every
+    // repository SKILL.md, and every hand-written edge-case fixture must
+    // parse to exactly the values frozen from the old serde_yaml-based
+    // parser in tests/fixtures/skill_frontmatter_expected.json.
+    #[test]
+    fn frontmatter_corpus_matches_frozen_serde_yaml_parity() {
+        // Resolved against CARGO_MANIFEST_DIR, not the process CWD: other
+        // tests in this module call `std::env::set_current_dir`, which is
+        // process-global and races with this test under cargo's default
+        // parallel test execution.
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let expected_json = std::fs::read_to_string(
+            repo_root.join("tests/fixtures/skill_frontmatter_expected.json"),
+        )
+        .expect("fixture JSON must exist");
+        let expected: serde_json::Value =
+            serde_json::from_str(&expected_json).expect("fixture JSON must parse");
+        let entries = expected["entries"]
+            .as_array()
+            .expect("fixture JSON must have an entries array");
+        assert!(!entries.is_empty(), "corpus must not be empty");
+
+        for entry in entries {
+            let source = entry["source"].as_str().expect("entry must have a source");
+            let content = std::fs::read_to_string(repo_root.join(source))
+                .unwrap_or_else(|e| panic!("reading {source}: {e}"));
+            let (metadata, _) = parse_standardized_metadata(&content)
+                .unwrap_or_else(|e| panic!("parsing {source}: {e}"));
+            let metadata = metadata.unwrap_or_else(|| panic!("expected metadata for {source}"));
+
+            assert_eq!(
+                metadata.name,
+                entry["name"].as_str().unwrap(),
+                "name mismatch for {source}"
+            );
+            assert_eq!(
+                metadata.description,
+                entry["description"].as_str().unwrap(),
+                "description mismatch for {source}"
+            );
+            assert_eq!(
+                metadata.license.as_deref(),
+                entry["license"].as_str(),
+                "license mismatch for {source}"
+            );
+            assert_eq!(
+                metadata.compatibility.as_deref(),
+                entry["compatibility"].as_str(),
+                "compatibility mismatch for {source}"
+            );
+            let expected_metadata = entry
+                .get("metadata")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let actual_metadata = metadata.metadata.unwrap_or(serde_json::Value::Null);
+            assert_eq!(
+                actual_metadata, expected_metadata,
+                "metadata mismatch for {source}"
+            );
+        }
+    }
+
+    // Rejection naming the field (drop-serde-yaml 4.2), exercised through
+    // the public parse_standardized_metadata surface so the assertion pins
+    // the actual SkillError::ValidationError a caller sees, not just the
+    // internal skill_frontmatter::UnsupportedConstruct.
+    #[test]
+    fn unsupported_constructs_reject_naming_the_field_in_skill_error() {
+        for (content, expected_field) in [
+            (
+                "---\nname: n\ndescription: d\nmetadata: { a: 1 }\n---\n",
+                "metadata",
+            ),
+            (
+                "---\nname: n\ndescription: d\nmetadata:\n  foo:\n    bar: baz\n---\n",
+                "metadata",
+            ),
+            ("---\nname: n\ndescription: &anchor d\n---\n", "description"),
+            ("---\nname: n\ndescription: *alias\n---\n", "description"),
+            ("---\nname: n\ndescription: !!str d\n---\n", "description"),
+            ("---\nname: n\ndescription: [a, b]\n---\n", "description"),
+        ] {
+            let err = parse_standardized_metadata(content).expect_err(content);
+            let SkillError::ValidationError { reason, .. } = err else {
+                panic!("expected ValidationError for {content}, got {err:?}");
+            };
+            assert!(
+                reason.contains(expected_field),
+                "reason {reason:?} does not name field {expected_field} for input {content}"
+            );
+        }
     }
 
     // 9.17: SkillTemplate is cloneable
