@@ -25,6 +25,12 @@ A code analysis of the merged result (`cli_unavailable_line` / `sweep_pane` in
    the pane whose role resolves to the supervisor id. With no supervisor pane in the roster
    — the v0.18.0 model — the orchestrator's own CLI death is invisible, and nothing in the
    summary says so.
+5. **The embedded markers miss an organisation spend limit (GP-50).** During the v0.17.0
+   dogfood a worker stopped on `You've hit your org's monthly spend limit · run
+   /usage-credits to ask your admin for a higher limit` with its finished work uncommitted.
+   None of the embedded `cli_unavailable_markers` matches it, so the loop would read the
+   pane as quiet rather than dead. It is a terminal condition needing an admin, so it
+   belongs in `cli_unavailable_markers`, not `stream_error_markers`.
 
 ## What Changes
 
@@ -38,6 +44,8 @@ A code analysis of the merged result (`cli_unavailable_line` / `sweep_pane` in
 - With no orchestrator pane in the roster, worker-pane detection SHALL still work, and the
   exit summary SHALL state that no orchestrator pane was monitored rather than implying full
   coverage. The pane-0 / supervisor-role logic SHALL NOT be widened — v0.18.0 replaces it.
+- The embedded Claude Code profile's `cli_unavailable_markers` SHALL include the
+  organisation spend-limit phrasing, matched on its stable stem `monthly spend limit`.
 
 ## Capabilities
 
@@ -48,9 +56,12 @@ A code analysis of the merged result (`cli_unavailable_line` / `sweep_pane` in
 ### Modified Capabilities
 
 - `supervisor-unattended-operation`: *CLI unavailability is an explicit non-success exit*.
+- `cli-prompt-profiles`: *The Claude Code profile is embedded as the default* (adds the
+  spend-limit marker).
 
 ## Impact
 
+- `src/config/prompt_profile.rs` — the embedded `cli_unavailable_markers` list.
 - `src/supervisor/drive.rs` — `cli_unavailable_line`, the coding-pane branch of
   `sweep_pane`, and the exit summary.
 - Needs each pane's CLI. The roster / session file already records it per agent; plumb that

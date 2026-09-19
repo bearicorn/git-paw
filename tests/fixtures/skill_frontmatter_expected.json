@@ -1,0 +1,214 @@
+{
+  "entries": [
+    {
+      "compatibility": "git-paw v0.5.0+",
+      "description": "Coordination skills for git-paw agents to communicate via the broker system",
+      "id": "assets/agent-skills/coordination.md",
+      "license": "MIT",
+      "metadata": null,
+      "name": "coordination",
+      "source": "assets/agent-skills/coordination.md"
+    },
+    {
+      "compatibility": "git-paw v0.10.0+",
+      "description": "Consult git-paw's documentation on demand via the bundled docs-fetch helper",
+      "id": "assets/agent-skills/docs-fetch.md",
+      "license": "MIT",
+      "metadata": null,
+      "name": "docs-fetch",
+      "source": "assets/agent-skills/docs-fetch.md"
+    },
+    {
+      "compatibility": "git-paw v0.3.0+",
+      "description": "Supervisor skills for monitoring and verifying peer agents in git-paw sessions",
+      "id": "assets/agent-skills/supervisor.md",
+      "license": "MIT",
+      "metadata": null,
+      "name": "supervisor",
+      "source": "assets/agent-skills/supervisor.md"
+    },
+    {
+      "compatibility": "git-paw (Rust, cargo, tmux)",
+      "description": "git-paw's code patterns and refactor rules — how to structure, decouple, and refactor code so it stays testable and behavior-preserving. Use when implementing a feature, decoupling a module, refactoring, or reviewing/gating a change. Defines the injectable seams, domain module layout, error/idiom rules, and the frozen do-not-touch zones. Consulted by both the implementing agent (author-time) and the supervisor's review gate.",
+      "id": ".agents/skills/code-standards/SKILL.md",
+      "license": "MIT",
+      "metadata": null,
+      "name": "code-standards",
+      "source": ".agents/skills/code-standards/SKILL.md"
+    },
+    {
+      "compatibility": "git-paw",
+      "description": "The completeness check for a git-paw change — a change is done only when every dimension is satisfied. Use at author-time to self-check before publishing done, and at the supervisor review gate to confirm nothing was skipped. Ties together spec, code, tests, docs, security, safety, and export-agnosticism via the per-dimension standards skills; it is the AGENTS.md Change Checklist and the five-gate framework as one skill.",
+      "id": ".agents/skills/definition-of-done/SKILL.md",
+      "license": "MIT",
+      "metadata": null,
+      "name": "definition-of-done",
+      "source": ".agents/skills/definition-of-done/SKILL.md"
+    },
+    {
+      "compatibility": "git-paw",
+      "description": "Verify everything built is documented across git-paw's four doc layers (the Gate-4 doc audit). Use when a change adds or alters any user-facing surface — a CLI command or flag, a config field, a capability, or a module. Maps each change type to the layers it must update, requires the layers stay consistent and `mdbook build` passes, and gives the doc-audit checklist.",
+      "id": ".agents/skills/doc-completeness/SKILL.md",
+      "license": "MIT",
+      "metadata": null,
+      "name": "doc-completeness",
+      "source": ".agents/skills/doc-completeness/SKILL.md"
+    },
+    {
+      "compatibility": "git-paw",
+      "description": "Keep everything git-paw EXPORTS to a consumer project-agnostic across every export surface — bundled skills, shell scripts and mirrored logic (code), the init default config, allowlist/classifier presets, injected AGENTS.md sections / boot blocks / git hooks / settings seeding, and templates. Use whenever a change adds or edits any exported asset. Codifies the export-surface inventory, the agnosticism rule, how to stay agnostic per surface, the enforcing audits, and the review-gate checklist.",
+      "id": ".agents/skills/export-agnosticism/SKILL.md",
+      "license": "MIT",
+      "metadata": null,
+      "name": "export-agnosticism",
+      "source": ".agents/skills/export-agnosticism/SKILL.md"
+    },
+    {
+      "compatibility": "git-paw",
+      "description": "Reshape a dogfood-built release branch into clean, changelog-worthy commits before the release PR. Use when a `feat/vX.Y.0-*` branch carries a messy history — many `--no-ff` per-change merges plus per-section, fixup, and up-front spec commits — that must become one conventional commit per change. Covers what \"changelog-worthy\" means against `cliff.toml`, the non-interactive content-preserving `read-tree` replay (the agent harness has no `git rebase -i`), the mandatory empty-`git diff` preservation gate, and per-commit buildability.",
+      "id": ".agents/skills/release-history-curation/SKILL.md",
+      "license": "MIT",
+      "metadata": null,
+      "name": "release-history-curation",
+      "source": ".agents/skills/release-history-curation/SKILL.md"
+    },
+    {
+      "compatibility": "git-paw",
+      "description": "Review a change for harm potential from two angles — SECURITY (external bad actors attacking the tool or the consumer's environment) and SAFETY (the blast radius of a rogue or mistaken agent git-paw itself runs, with real, often auto-approved, execution power). Use when a change touches allowlists, process spawning, paths, untrusted input, secrets, dependencies, command classification, worktree confinement, or git/file operations. Covers least-privilege, injection, secrets, and dependencies for security; and out-of-worktree actions, irreversible git, persistence, and exfiltration for safety.",
+      "id": ".agents/skills/security-and-safety-review/SKILL.md",
+      "license": "MIT",
+      "metadata": null,
+      "name": "security-and-safety-review",
+      "source": ".agents/skills/security-and-safety-review/SKILL.md"
+    },
+    {
+      "compatibility": "git-paw",
+      "description": "Keep the OpenSpec capability set lean, namespaced by concern, traceable, and readable as documentation — the Gate-3 spec audit. Use when authoring a new capability, archiving a change, consolidating or auditing specs, or preparing the contract for a release freeze. Covers capability granularity and the `<namespace>-<sub>` naming convention, the per-feature-distributes / cross-cutting-centralizes-in-core discipline, contract-preserving verbatim reorganization, RFC-2119 and GIVEN/WHEN/THEN authoring, the requirement-to-test traceability doctrine, the docs include-coupling, and the errors a pre-freeze audit must catch.",
+      "id": ".agents/skills/spec-organization/SKILL.md",
+      "license": "MIT",
+      "metadata": null,
+      "name": "spec-organization",
+      "source": ".agents/skills/spec-organization/SKILL.md"
+    },
+    {
+      "compatibility": "git-paw (Rust, cargo, tmux, OpenSpec)",
+      "description": "Decide the right test type for a git-paw behavior and write it so it survives refactors. Use when adding, reviewing, or consolidating tests — it maps each OpenSpec scenario or behavior to the correct layer (unit table / integration / e2e-PTY / asset-parity), enforces behavioral-only assertions, lists the anti-patterns (source-grep, per-field batteries, brittle prose pins, fixed sleeps) to avoid, and — when consolidating a suite — applies the net-first discipline (establish each domain's behavioral guard before collapsing units into it).",
+      "id": ".agents/skills/test-strategy/SKILL.md",
+      "license": "MIT",
+      "metadata": null,
+      "name": "test-strategy",
+      "source": ".agents/skills/test-strategy/SKILL.md"
+    },
+    {
+      "compatibility": "git-paw",
+      "description": "Build with ratio 3: 4 for best results",
+      "id": "tests/fixtures/skill_frontmatter/double_quoted_colon.md",
+      "license": "MIT",
+      "metadata": null,
+      "name": "double-quoted-colon",
+      "source": "tests/fixtures/skill_frontmatter/double_quoted_colon.md"
+    },
+    {
+      "compatibility": "git-paw",
+      "description": "It's a test of escaped quotes",
+      "id": "tests/fixtures/skill_frontmatter/single_quoted_apostrophe.md",
+      "license": "MIT",
+      "metadata": null,
+      "name": "single-quoted-apostrophe",
+      "source": "tests/fixtures/skill_frontmatter/single_quoted_apostrophe.md"
+    },
+    {
+      "compatibility": null,
+      "description": "First line.\nSecond line.\n",
+      "id": "tests/fixtures/skill_frontmatter/literal_clip.md",
+      "license": null,
+      "metadata": null,
+      "name": "literal-clip",
+      "source": "tests/fixtures/skill_frontmatter/literal_clip.md"
+    },
+    {
+      "compatibility": null,
+      "description": "First line.\nSecond line.",
+      "id": "tests/fixtures/skill_frontmatter/literal_strip.md",
+      "license": null,
+      "metadata": null,
+      "name": "literal-strip",
+      "source": "tests/fixtures/skill_frontmatter/literal_strip.md"
+    },
+    {
+      "compatibility": null,
+      "description": "First line.\nSecond line.\n\n",
+      "id": "tests/fixtures/skill_frontmatter/literal_keep.md",
+      "license": null,
+      "metadata": null,
+      "name": "literal-keep",
+      "source": "tests/fixtures/skill_frontmatter/literal_keep.md"
+    },
+    {
+      "compatibility": null,
+      "description": "First line. Second line.\n",
+      "id": "tests/fixtures/skill_frontmatter/folded_clip.md",
+      "license": null,
+      "metadata": null,
+      "name": "folded-clip",
+      "source": "tests/fixtures/skill_frontmatter/folded_clip.md"
+    },
+    {
+      "compatibility": null,
+      "description": "First line. Second line.",
+      "id": "tests/fixtures/skill_frontmatter/folded_strip.md",
+      "license": null,
+      "metadata": null,
+      "name": "folded-strip",
+      "source": "tests/fixtures/skill_frontmatter/folded_strip.md"
+    },
+    {
+      "compatibility": null,
+      "description": "First line. Second line.\n\n",
+      "id": "tests/fixtures/skill_frontmatter/folded_keep.md",
+      "license": null,
+      "metadata": null,
+      "name": "folded-keep",
+      "source": "tests/fixtures/skill_frontmatter/folded_keep.md"
+    },
+    {
+      "compatibility": "git-paw",
+      "description": "Does something useful",
+      "id": "tests/fixtures/skill_frontmatter/trailing_comment.md",
+      "license": "MIT",
+      "metadata": null,
+      "name": "trailing-comment",
+      "source": "tests/fixtures/skill_frontmatter/trailing_comment.md"
+    },
+    {
+      "compatibility": "git-paw",
+      "description": "Has trailing spaces on this line",
+      "id": "tests/fixtures/skill_frontmatter/trailing_whitespace.md",
+      "license": "MIT",
+      "metadata": null,
+      "name": "trailing-whitespace",
+      "source": "tests/fixtures/skill_frontmatter/trailing_whitespace.md"
+    },
+    {
+      "compatibility": "git-paw",
+      "description": "Has extra unconsumed keys",
+      "id": "tests/fixtures/skill_frontmatter/unconsumed_nested_sequence.md",
+      "license": null,
+      "metadata": null,
+      "name": "unconsumed-nested-sequence",
+      "source": "tests/fixtures/skill_frontmatter/unconsumed_nested_sequence.md"
+    },
+    {
+      "compatibility": null,
+      "description": "Has a metadata map with string values",
+      "id": "tests/fixtures/skill_frontmatter/metadata_map.md",
+      "license": null,
+      "metadata": {
+        "author": "openspec",
+        "version": "1.0"
+      },
+      "name": "metadata-map",
+      "source": "tests/fixtures/skill_frontmatter/metadata_map.md"
+    }
+  ]
+}

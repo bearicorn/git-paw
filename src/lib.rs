@@ -48,6 +48,7 @@ pub mod random;
 pub mod replay;
 pub mod selftest;
 pub mod session;
+mod skill_frontmatter;
 pub mod skills;
 pub mod specs;
 pub mod supervisor;
