@@ -8,8 +8,8 @@ This guide covers the full range of git-paw features beyond the quick starts.
 
 Running `git paw` (or `git paw start`) with no flags launches the interactive flow:
 
-1. Mode selection — same CLI for all branches, or different CLI per branch
-2. Branch selection — multi-select with type-to-filter search (type to narrow, space to toggle, enter to confirm)
+1. Branch selection — multi-select with type-to-filter search (type to narrow, ctrl-u to clear, space to toggle, enter to confirm)
+2. Mode selection — same CLI for all branches, or different CLI per branch
 3. CLI selection — single pick (uniform) or per-branch assignment
 
 ### Smart start behavior
@@ -18,8 +18,10 @@ Running `git paw` (or `git paw start`) with no flags launches the interactive fl
 
 | State | Behavior |
 |-------|----------|
-| Active tmux session exists | Reattaches immediately |
-| Saved session, tmux dead (crash/reboot) | Auto-recovers: reuses worktrees, recreates tmux, relaunches CLIs |
+| Active tmux session exists | Reattaches immediately (with no TTY — a script — it refuses with an error naming the session instead) |
+| Paused session | Restarts the dashboard/broker and reattaches; the CLI panes are untouched |
+| Stopped session (`git paw stop`, or a paused session whose tmux died), or a live tmux session whose agent panes have all dropped back to a shell | Recovers: reuses worktrees, recreates tmux, relaunches CLIs (resuming conversations where the CLI supports it) |
+| Stale receipt (says active, but its tmux session is gone — a crash or reboot) | Clears the receipt the way `git paw purge --stale` does, then launches fresh |
 | No session | Full interactive launch |
 
 You never need to think about whether to "start" or "resume" — just run `git paw`.
@@ -77,18 +79,35 @@ Displays the current session state:
 ```
 Session: paw-my-app
 Status:  🟢 active
-Created: 2025-01-15T10:30:00Z
+Tmux:    running
 
-Worktrees:
-  feat/auth    → claude  (../my-app-feat-auth)
-  feat/api     → claude  (../my-app-feat-api)
-  refactor/db  → aider   (../my-app-refactor-db)
+  feat/auth → claude (/path/to/my-app/.git-paw/worktrees/feat-auth)
+  feat/api → claude (/path/to/my-app/.git-paw/worktrees/feat-api)
+  refactor/db → aider (/path/to/my-app/.git-paw/worktrees/refactor-db)
 ```
+
+With the broker enabled, a `Broker:` line shows its URL and whether it is
+responding. `git paw status --json` emits the same information
+machine-readably, including each worker's `cli_session_id`.
 
 Status indicators:
 - 🟢 **active** — tmux session is running
+- 🔵 **paused** — `git paw pause` detached it; CLI panes are still running
 - 🟡 **stopped** — session state saved, tmux not running (recoverable)
+- 🔴 **stale** — the receipt claims active, but the tmux session is gone (or,
+  past a short launch grace period, every agent pane has dropped back to a
+  bare shell); `git paw start` self-heals it, `git paw purge --stale` clears it
 - No session — nothing saved for this repo
+
+### Reattaching
+
+```bash
+git paw attach
+```
+
+Reattaches your terminal to the session running for this repository — the same
+as `tmux attach -t paw-<project>`, without needing the exact session name. It
+errors with a pointer to `git paw start` when no session is running.
 
 ### Stopping a session
 
@@ -154,3 +173,17 @@ Mouse mode is enabled by default, so clicking and dragging just works. You can d
 git-paw manages one session per repository. If you run `git paw` in a repo that already has a session, it reattaches rather than creating a second session.
 
 To work with multiple repos simultaneously, open separate terminals and run `git paw` in each repo directory.
+
+## Shell Completions
+
+`git paw completions <shell>` prints a completion script to stdout for your
+shell's standard completion mechanism:
+
+```bash
+git paw completions bash > /etc/bash_completion.d/git-paw
+git paw completions zsh > "${fpath[1]}/_git-paw"
+git paw completions fish > ~/.config/fish/completions/git-paw.fish
+```
+
+See the [CLI reference](../cli-reference.md#git-paw-completions) for the
+supported shells.

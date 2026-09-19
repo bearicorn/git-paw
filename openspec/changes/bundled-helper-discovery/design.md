@@ -1,83 +1,49 @@
 ## Context
 
-Both defects here are conformance failures, not design gaps. The requirements exist and
-the implementation does not meet them.
-
-`broker-agent-helper`'s *Helpers provisioned into agent worktrees* has required worktree
-provisioning since it was written. Nothing implements it: the bundled scripts are
-`include_str!`-ed only in `src/init.rs`, which serves repo-level `git paw init`, and
-`worktree_provision::provision_worktree` — the seam every launch path calls — writes env
-files, allocates runtime slots and runs lifecycle hooks, but no scripts. The gap was
-invisible because this repository has run `git paw init`, so the *repo root* has
-`.git-paw/scripts/`; a worktree is a separate checkout and `.git-paw/` is gitignored, so
-it has none.
-
-For session discovery the spec set is the problem. Three capabilities mention where
-session state lives and they do not agree: `broker-watcher-and-state` and
-`approval-pattern-surfacing` say `.git-paw/sessions/…`, `core-ci-hygiene` says the XDG
-data directory. The code uses XDG (`session::session_state_dir()` →
-`crate::dirs::data_dir()`). `sweep.sh` implements the repo-relative one, which is exactly
-what two of the three specs told it to do.
+Two session documents exist by design. Global session state (`Session`, in the platform data
+directory) is git-paw's own record — repo path, worktrees, status, broker port. The per-repo
+discovery file (`RepoSessionFile`, in `<repo>/.git-paw/sessions/`) is the public surface for
+helpers — session name, an `agents` roster, and an optional orchestrator entry. Each has the
+right consumers; the defects are in who reads which, and in who writes the second one.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Make the session-state location unambiguous, in one place, so the next implementer
-  cannot pick the wrong answer in good faith.
-- Let a bundled helper resolve the session from the repository root, since that is where
-  an external orchestrator runs.
-- Provision helpers at the one seam every launch path shares, so no path can miss it.
-- Keep the `$TMUX` fallback working for the in-session case.
+- Every agent worktree has the helpers it is told to call.
+- `sweep.sh` reads the document git-paw writes for it, in that document's shape.
+- A process started anywhere inside a session's repository or its worktrees can find the
+  session.
 
 **Non-Goals:**
 
-- Moving the session-state location. XDG is right and `core-ci-hygiene` already depends
-  on it; this change documents it, it does not change it.
-- Rewriting the two stale incidental path references. See Decisions.
-- Teaching helpers to work without a session at all.
+- Moving either document, or merging the two.
+- Writing the discovery file on the spec-driven launch path — `start-spec-launch-parity`
+  does that.
 - Changing what the helpers do once they have found the session.
 
 ## Decisions
 
-**Make `session-state` the single authority, and say so in the requirement.** The usual
-fix would be to correct every stale mention. The reason to add an explicit authority
-clause instead is that the stale mentions are *incidental* — each sits inside a
-requirement about something else (roster seeding; the manual-approval log). Those
-requirements will keep being edited for their own reasons, and each edit is another
-chance to restate a path. An authority clause makes every such mention non-normative by
-construction, which is durable in a way that one round of corrections is not.
+**Provision at `provision_worktree`.** It is the one seam the supervisor, bare, spec-driven
+and `add` paths all call, so fixing it there satisfies the requirement everywhere and makes
+it hard for a future launch path to miss. Reuse `init.rs`'s embedded constants so the
+worktree copy cannot drift from the init copy.
 
-**Leave the two stale mentions to the pre-freeze spec audit, and record it.** Correcting
-them properly means reproducing 113 lines of unrelated requirement text in MODIFIED
-deltas, inside a change about helper discovery. That trade is bad: it bloats the diff,
-puts unrelated requirements at risk of transcription error, and buries the actual fix.
-The authority clause removes the harm in the meantime, and the debt is written down
-rather than forgotten.
+**Read `agents`, not `worktrees`.** The discovery file is the helper's contract; the global
+shape is not. Aligning the fixtures to the written shape is as important as the code fix —
+two fixtures disagreeing is how a reader of the wrong shape kept passing.
 
-**Provision at `provision_worktree`, not at each call site.** It is the single seam the
-supervisor path, the bare path, the spec-driven path and `git paw add` all already call.
-Fixing it there satisfies the requirement everywhere at once and makes it structurally
-hard for a future launch path to miss — which is precisely how this one was missed.
-
-**Share `init.rs`'s embedded constants.** A second `include_str!` set would let the
-worktree copy drift from the init copy, reintroducing the version-skew the requirement's
-"matching the running binary's version" clause exists to prevent.
+**Resolve worktree → owning repository before matching.** `git rev-parse
+--git-common-dir` (or the equivalent) from a linked worktree points at the owning
+repository's `.git`; resolve that, then match `repo_path`. This fixes MCP without touching
+MCP, and keeps `mcp::resolve_repo`'s documented behaviour (a worktree is its own root for
+*file* operations) intact.
 
 ## Risks / Trade-offs
 
-- **Writing into every worktree.** Provisioning writes files into each agent worktree on
-  every attach. The requirement already demands idempotence; the risk is clobbering a
-  helper a user deliberately modified in a worktree. That is an acceptable loss — the
-  requirement explicitly wants the worktree helper to match the running binary — but it
-  should be stated in the docs rather than discovered.
-- **Helper behaviour changes for existing users.** A helper that currently resolves via
-  `$TMUX` will start resolving via the data directory. If both are present and disagree
-  (two sessions, one stale), the resolution order matters. Prefer the authoritative
-  lookup and treat `$TMUX` as the fallback, so the in-session case stays correct.
-- **The bash mirror problem again.** `assets/scripts/sweep.sh` and the tracked
-  `.git-paw/scripts/sweep.sh` both exist and have drifted before. Both must be updated,
-  and `bash -n` run on each — these files carry a known heredoc-quoting hazard.
-- **Two specs will still say the wrong thing.** Mitigated by the authority clause, but a
-  reader who finds only the stale mention is still misled. The pre-freeze audit item is
-  the real fix and should not be allowed to lapse.
+- **Worktree helper writes overwrite local edits.** Intended — the requirement wants the
+  helper to match the running binary — but state it in the docs.
+- **The bash mirror can drift again.** Both `assets/scripts/sweep.sh` and the tracked copy
+  must change; run `bash -n` on each.
+- **A repository with several sessions.** Resolution still returns the first match, as
+  today; worktree resolution does not change that.

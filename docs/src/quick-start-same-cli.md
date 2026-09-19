@@ -21,44 +21,51 @@ cd ~/projects/my-app
 git paw
 ```
 
-## Step 3: Select your mode
+If neither your repo nor your global config has a `[supervisor]` section,
+git-paw first asks `Start in supervisor mode? [y/N]` — answer `n` (the default)
+for this walkthrough.
 
-git-paw presents a mode picker:
+## Step 3: Select branches
 
-```
-? How would you like to assign CLIs to branches?
-> Same CLI for all branches
-  Different CLI per branch
-```
-
-Select **Same CLI for all branches** and press Enter.
-
-## Step 4: Select branches
-
-A multi-select list of all your branches appears with type-to-filter search:
+A multi-select list of all your branches (sorted by name) appears with
+type-to-filter search:
 
 ```
-? Select branches (type to filter, space to toggle, enter to confirm):
-  [ ] main
-  [x] feat/auth
+Select branches (type to filter, ctrl-u to clear, space to toggle, enter to confirm)
+filter:
   [x] feat/api
+  [x] feat/auth
   [ ] fix/typo
-  [x] refactor/db
+  [ ] main
+> [x] refactor/db
 ```
 
 Type to narrow the list (case-insensitive substring match), use arrow keys to
 navigate, Space to toggle, Ctrl-U to clear the filter, and Enter to confirm.
 Branches you toggle stay selected even if a later filter hides them.
 
-## Step 5: Select your CLI
+## Step 4: Select your mode
 
-Pick which AI CLI to use on all selected branches:
+git-paw presents a mode picker:
 
 ```
-? Select AI CLI:
-> claude
-  codex
-  gemini
+CLI assignment mode:
+> Same CLI for all branches
+  Different CLI per branch
+```
+
+Select **Same CLI for all branches** and press Enter.
+
+## Step 5: Select your CLI
+
+Pick which AI CLI to use on all selected branches. Detected CLIs are listed by
+display name, with the binary in parentheses:
+
+```
+Select AI CLI for all branches:
+  Antigravity (agy)
+> Claude (claude)
+  Codex (codex)
 ```
 
 ## Step 6: git-paw does the rest
@@ -71,28 +78,22 @@ git-paw now:
 4. Launches your chosen CLI in each pane
 5. Saves the session state for later recovery
 
-```
-Creating worktrees...
-  ✓ my-app-feat-auth (feat/auth)
-  ✓ my-app-feat-api (feat/api)
-  ✓ my-app-refactor-db (refactor/db)
+The worktrees land under `.git-paw/worktrees/` (for example
+`.git-paw/worktrees/feat-auth/`) in a repo set up with `git paw init`, or beside
+the repo (`../my-app-feat-auth/`) when no `worktree_placement` is configured —
+see [Worktree Placement](user-guide/worktree-placement.md). Nothing else is
+printed on success: git-paw attaches you straight to the session. (From a
+non-interactive terminal it prints `Session 'paw-my-app' started in detached
+mode.` and a `tmux attach -t paw-my-app` hint instead.)
 
-Launching tmux session: paw-my-app
-  Pane 1: feat/auth → claude
-  Pane 2: feat/api → claude
-  Pane 3: refactor/db → claude
-
-Attaching to session...
-```
-
-You're now inside a tmux session with three panes, each running Claude in its own worktree:
+You're now inside a tmux session with three panes, each running Claude in its own worktree. Each pane's border label shows its pane index and branch (with `[broker] enabled = true`, the dashboard takes pane 0 and the agents start at pane 1):
 
 ```
-┌─── feat/auth → claude ────────┬─── feat/api → claude ─────────┐
+┌─── 0: feat/api ───────────────┬─── 1: feat/auth ──────────────┐
 │                                │                                │
 │  Claude is ready to help...    │  Claude is ready to help...    │
 │                                │                                │
-├─── refactor/db → claude ──────┴────────────────────────────────┤
+├─── 2: refactor/db ────────────┴────────────────────────────────┤
 │                                                                 │
 │  Claude is ready to help...                                     │
 │                                                                 │
@@ -113,7 +114,7 @@ git paw start --cli claude --branches feat/auth,feat/api,refactor/db
 
 - **Switch panes:** Click with mouse, or use `Ctrl-b` then arrow keys
 - **Detach:** Press `Ctrl-b d` to detach from tmux (session keeps running)
-- **Reattach:** Run `git paw` again — it detects the active session and reattaches
+- **Reattach:** Run `git paw attach` (or `git paw` again — it detects the active session and reattaches)
 - **Stop:** Run `git paw stop` to kill tmux but keep worktrees
 - **Purge:** Run `git paw purge` to remove everything
 

@@ -10,8 +10,8 @@ content in its boot prompt or guessing.
 The design mirrors the other bundled helpers (`broker.sh`, `sweep.sh`): the
 skill teaches *when and why* to consult the docs, and the helper does the
 fetch. The agent invokes one stable script path rather than hand-rolling
-`curl`, which keeps the permission grant a single least-privilege path and the
-behaviour deterministic.
+`curl`, which lets git-paw's command classifier approve it by that exact path
+and keeps the behaviour deterministic.
 
 ## What the agent gets
 
@@ -43,7 +43,7 @@ the output to just that section instead of the whole page:
 
 ```bash
 .git-paw/scripts/docs-fetch.sh get user-guide/worktree-placement.html
-.git-paw/scripts/docs-fetch.sh get user-guide/worktree-placement.html child-layout
+.git-paw/scripts/docs-fetch.sh get user-guide/worktree-placement.html child-vs-sibling
 ```
 
 ## Configurable docs source
@@ -72,8 +72,9 @@ without the docs** in that case rather than block or retry in a loop.
 ## Least-privilege install
 
 `git paw init` installs `docs-fetch.sh` into `.git-paw/scripts/` alongside
-`broker.sh`, `sweep.sh`, and the shared `_paw_common.sh` preamble they source,
-and the agent allowlist grants that exact script
-path — both the bare path and the `bash <path>` form — never a broad `curl`
-wildcard. A single by-path grant covers every subcommand, so an agent consults
-the docs without any wildcard network permission.
+`broker.sh`, `sweep.sh`, and the shared `_paw_common.sh` preamble they source.
+Nothing is seeded into the agent CLI's settings file: git-paw's command
+classifier recognises that exact script path — invoked directly or as
+`bash <path>` / `sh <path>` — as safe, never a broad `curl` wildcard. One
+by-path rule covers every subcommand, so an agent consults the docs without any
+wildcard network permission.

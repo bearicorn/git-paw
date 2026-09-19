@@ -12,7 +12,7 @@ read-only tools:
 - **Governance** — your configured ADRs, test strategy, security checklist,
   Definition of Done, and constitution
 - **Project knowledge** — discovered specs and tasks (OpenSpec, Markdown, Spec
-  Kit), the spec dependency graph, and rendered agent skills
+  Kit, Superpowers), the spec dependency graph, and rendered agent skills
 - **Session state** — the active session's status/summary and the
   session-learnings file
 - **Git context** — branches, recent commits, and branch diffs
@@ -205,11 +205,12 @@ VS Code (1.102+) supports MCP servers. It is workspace-aware, so bare
 
 - **ChatGPT Web is not supported.** The browser version of ChatGPT cannot
   spawn local processes, which stdio MCP requires. ChatGPT **Desktop** on macOS
-  works (with Developer Mode). ChatGPT Web waits for a future HTTP transport.
+  works (with Developer Mode). The server speaks stdio only — there is no HTTP
+  transport.
 - **Per-repo configuration is required.** Each repository needs its own entry
   in the client config (with its own `--repo` path where the client spawns from
-  a fixed directory). For many repos this is repetitive; a single-server,
-  multi-repo registry is planned for a later release.
+  a fixed directory). For many repos this is repetitive; one server instance
+  serves exactly one repository.
 - **Claude Desktop (and ChatGPT Desktop) need `--repo`.** They spawn MCP
   servers from their own app-support directory, not your project, so
   current-directory discovery cannot find your repo. Workspace-aware clients
@@ -333,6 +334,9 @@ the boot block](coordination.md#mcp-tool-form) for a CLI that speaks MCP.
 | `publish_artifact` | `{ exports?, modified_files? }` | `{ published: true }` — `agent.artifact` (`status:"done"`) — the code-less DONE fallback; a task that produces a commit reports via the post-commit hook instead |
 | `publish_blocked` | `{ needs, from }` | `{ published: true }` — `agent.blocked` with dependency info |
 | `publish_question` | `{ question }` | `{ published: true }` — `agent.question`, routed to the supervisor inbox |
+
+There is no inbox or poll tool: an agent reads its broker inbox with
+`.git-paw/scripts/broker.sh poll`, whichever form its boot block uses.
 
 Three properties are structural, not incidental:
 

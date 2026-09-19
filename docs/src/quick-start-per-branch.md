@@ -6,7 +6,7 @@ This walkthrough shows how to assign different AI CLIs to different branches —
 
 You have three branches and want to use:
 - **Claude** for the auth feature (complex logic)
-- **Gemini** for the API work (lots of boilerplate)
+- **Codex** for the API work (lots of boilerplate)
 - **Aider** for the database refactor (incremental edits)
 
 ## Step 1: Launch git-paw
@@ -16,79 +16,71 @@ cd ~/projects/my-app
 git paw
 ```
 
-## Step 2: Select per-branch mode
+(If neither your repo nor your global config has a `[supervisor]` section,
+git-paw first asks `Start in supervisor mode? [y/N]` — answer `n`.)
+
+## Step 2: Select branches
 
 ```
-? How would you like to assign CLIs to branches?
-  Same CLI for all branches
-> Different CLI per branch
-```
-
-## Step 3: Select branches
-
-```
-? Select branches (type to filter, space to toggle, enter to confirm):
-  [ ] main
-  [x] feat/auth
+Select branches (type to filter, ctrl-u to clear, space to toggle, enter to confirm)
+filter:
   [x] feat/api
-  [x] refactor/db
+  [x] feat/auth
+  [ ] main
+> [x] refactor/db
 ```
 
 Type to filter the list (case-insensitive substring match); selections persist
 across filter changes, and Ctrl-U clears the filter.
 
+## Step 3: Select per-branch mode
+
+```
+CLI assignment mode:
+  Same CLI for all branches
+> Different CLI per branch
+```
+
 ## Step 4: Assign a CLI to each branch
 
-git-paw prompts you for each branch individually:
+git-paw prompts you for each selected branch in turn (in the order they are
+listed above):
 
 ```
-? Select CLI for feat/auth:
-> claude
-  codex
-  gemini
-  aider
-```
-
-```
-? Select CLI for feat/api:
-  claude
-  codex
-> gemini
-  aider
+Select CLI for feat/api:
+  Aider (aider)
+  Claude (claude)
+> Codex (codex)
 ```
 
 ```
-? Select CLI for refactor/db:
-  claude
-  codex
-  gemini
-> aider
+Select CLI for feat/auth:
+  Aider (aider)
+> Claude (claude)
+  Codex (codex)
+```
+
+```
+Select CLI for refactor/db:
+> Aider (aider)
+  Claude (claude)
+  Codex (codex)
 ```
 
 ## Step 5: Watch it launch
 
-```
-Creating worktrees...
-  ✓ my-app-feat-auth (feat/auth)
-  ✓ my-app-feat-api (feat/api)
-  ✓ my-app-refactor-db (refactor/db)
+git-paw creates a worktree per branch, opens the `paw-my-app` tmux session with
+each branch's chosen CLI in its own pane, and attaches you to it — nothing else
+is printed on success.
 
-Launching tmux session: paw-my-app
-  Pane 1: feat/auth → claude
-  Pane 2: feat/api → gemini
-  Pane 3: refactor/db → aider
-
-Attaching to session...
-```
-
-The tmux session shows each pane with its branch and CLI clearly labeled in the pane border:
+Each pane's border label shows its pane index and branch (with `[broker] enabled = true`, the dashboard takes pane 0 and the agents start at pane 1):
 
 ```
-┌─── feat/auth → claude ────────┬─── feat/api → gemini ─────────┐
+┌─── 0: feat/api ───────────────┬─── 1: feat/auth ──────────────┐
 │                                │                                │
-│  Claude is ready to help...    │  Gemini is ready...            │
+│  Codex is ready...             │  Claude is ready to help...    │
 │                                │                                │
-├─── refactor/db → aider ───────┴────────────────────────────────┤
+├─── 2: refactor/db ────────────┴────────────────────────────────┤
 │                                                                 │
 │  Aider v0.x loaded...                                           │
 │                                                                 │
@@ -99,7 +91,7 @@ The tmux session shows each pane with its branch and CLI clearly labeled in the 
 
 Per-branch mode is great for:
 
-- **A/B testing AI assistants** — give the same task to Claude and Gemini, compare results
+- **A/B testing AI assistants** — give the same task to Claude and Codex, compare results
 - **Specialization** — use a code-generation-focused tool for boilerplate and a reasoning-focused tool for complex logic
 - **Trying new tools** — test a new AI CLI on one branch while using your trusted tool on others
 

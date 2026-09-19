@@ -1,23 +1,21 @@
 ## ADDED Requirements
 
-### Requirement: Bundled helpers resolve session state from the authoritative location
+### Requirement: Bundled helpers read the per-repo discovery file's agent roster
 
-The bundled helper scripts SHALL locate session state through the authoritative location defined by `session-state` ("Session state location is authoritative"), not through a repository-relative directory. A helper SHALL therefore resolve the active session when invoked from the repository root, with no requirement that it run inside the session's terminal multiplexer.
+The bundled helper scripts SHALL resolve agents from the per-repo discovery file (`.git-paw/sessions/<session>.json`) using that file's own shape — the `agents` roster, whose entries carry `branch_id`, `worktree_path`, `cli` and `pane_index` — and SHALL NOT read the global session-state shape (`worktrees` entries carrying `branch`). Mapping a pane's working directory to its agent SHALL therefore succeed against a discovery file written by any launch path. Test fixtures that model the discovery file SHALL use the same shape, so the helper's tests cannot pass against a document git-paw never writes.
 
-A helper MAY additionally fall back to inferring the session from its own environment when it is running inside the session, but that fallback SHALL NOT be the only path that works. When no session can be resolved, the helper SHALL say so explicitly rather than silently degrading every subcommand to an empty result.
+A helper MAY additionally infer the session from its own environment when it runs inside the session's multiplexer, as a secondary path. When no session can be resolved, the helper SHALL say so explicitly rather than degrading every subcommand to an empty result.
 
-#### Scenario: Helper resolves the session from the repository root
+#### Scenario: A pane path resolves to its agent from the discovery file
 
-- **GIVEN** an active session for a repository, and a shell at that repository's root that is not inside the session's multiplexer
-- **WHEN** a bundled helper subcommand that needs the session is invoked
-- **THEN** it SHALL resolve the active session
-- **AND** SHALL operate on that session's panes rather than reporting no session
+- **GIVEN** a per-repo discovery file whose `agents` roster contains an agent with `branch_id` `feat-x` and `worktree_path` `/repo/.git-paw/worktrees/feat-x`
+- **WHEN** the helper resolves the agent for a pane whose working directory is inside that worktree
+- **THEN** it SHALL resolve `feat-x`
 
-#### Scenario: Empty repo-relative directory does not defeat discovery
+#### Scenario: Fixtures use the shape git-paw writes
 
-- **GIVEN** an active session and a repository containing an empty `.git-paw/sessions/` directory
-- **WHEN** a bundled helper resolves the session
-- **THEN** it SHALL resolve the session from the authoritative location
+- **WHEN** the helper's tests construct a discovery file
+- **THEN** they SHALL use the `agents` roster shape written by the per-repo discovery writer
 
 #### Scenario: No active session is reported explicitly
 

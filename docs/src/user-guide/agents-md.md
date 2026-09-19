@@ -13,7 +13,7 @@ tracked `AGENTS.md` is left exactly as the project committed it, so a
 legitimate hand edit to it (yours or the agent's) shows up in `git status` and
 commits normally, mid-session.
 
-> **Why a sidecar (finding F10).** Through v0.7.0 git-paw injected its section
+> **Why a sidecar.** Through v0.7.0 git-paw injected its section
 > into the *tracked* worktree `AGENTS.md` and then ran
 > `git update-index --assume-unchanged AGENTS.md` to keep `git add -A` from
 > committing the ephemeral injection. That bit is **file-level**: git stopped
@@ -100,10 +100,12 @@ Each worktree's `.git-paw/AGENTS.local.md` sidecar includes:
     helper for the agent to self-report status, artifacts, blockers, and
     questions. The helper (installed by `git paw init`, alongside the
     supervisor's `sweep.sh`) discovers the broker URL and shapes the JSON, so
-    the boot block carries no raw `curl` or broker URL. The launch path seeds
-    a single least-privilege allowlist grant for the helper's stable path
-    (`.git-paw/scripts/broker.sh`) instead of a broad `curl` rule — see
-    [Coordination](./coordination.md#broker-helper).
+    the boot block carries no raw `curl` or broker URL. Nothing is seeded
+    into the agent CLI's settings file: the helper runs without a prompt
+    because of the CLI's resolved permission mode and git-paw's command
+    classifier, which recognises the helper by its stable path
+    (`.git-paw/scripts/broker.sh`) instead of needing a broad `curl` rule —
+    see [Coordination](./coordination.md#broker-helper).
 
 The supervisor-mode boot prompt does not duplicate any of this content — it
 points at the sidecar. If a change is updated on disk during a session (e.g.

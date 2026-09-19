@@ -34,8 +34,10 @@ The conflict is *forward* because it surfaces before either agent commits
 — intent is the early-warning channel.
 
 **Trigger.** Any non-empty intersection between two active intents (an
-intent stays active until its `valid_for_seconds` TTL expires, the agent
-publishes a fresh intent, or the agent commits).
+intent stays active until its `valid_for_seconds` TTL expires or the agent
+publishes a fresh intent, which replaces it). Each pair is warned once;
+the warning can fire again only after one side's intent changes its file
+set or expires.
 
 **Action.** Each agent receives an `agent.feedback` with the
 `[conflict-detector]` tag in its `errors[0]`, naming the peer and listing
@@ -52,18 +54,19 @@ file-level trigger above, preserving v0.5.0 behaviour. Cross-kind comparisons
 
 **Toggle.** `[supervisor.conflict] warn_on_intent_overlap` (default
 `true`). When `false`, the detector still records intents (so in-flight
-detection keeps working) but no `agent.feedback` fires for forward shape.
+classification and ownership detection keep working) but no `agent.feedback`
+fires for forward shape.
 
 ### In-flight conflict
 
-One agent publishes `agent.status` or `agent.artifact` whose
-`modified_files` overlap with another agent's active intent — or another
-agent's recent status / artifact. The conflict is *in-flight* because at
-least one side is already writing.
+Two agents' current `agent.status` `modified_files` sets overlap on the same
+file. The conflict is *in-flight* because both sides are already writing.
 
-**Trigger.** Any non-empty intersection between an `agent.status` /
-`agent.artifact` `modified_files` array and another agent's active intent
-or status (whichever is freshest).
+**Trigger.** Any non-empty intersection between one agent's latest
+`agent.status` `modified_files` and another agent's latest
+`agent.status` `modified_files` (each new status replaces that agent's
+previous set). `agent.artifact` does not feed this check, and declared
+intents only decide how an unresolved overlap is classified (below).
 
 **Action.** Both agents receive `[conflict-detector]`-tagged
 `agent.feedback`. The detector starts a `window_seconds` timer; if no
@@ -94,16 +97,18 @@ escalates, preserving the conservative default.
 
 ### Ownership violation
 
-An agent's `modified_files` (in `agent.status` or `agent.artifact`)
-touches a path that the spec marks as *owned* by a different change. The
-ownership map is built once at session start from the change directories'
-`Files owned:` / `Owned files:` declarations.
+An agent's `modified_files` (from its `agent.status`) touches a file that
+another agent has claimed in its active `agent.intent`. Ownership is
+intent-based: a file is *owned* by whichever agent's non-expired intent
+declares it.
 
-**Trigger.** Any path in `modified_files` matches an ownership entry that
-points to a change other than the sending agent's.
+**Trigger.** Any path in the agent's `modified_files` that lies outside its
+own active intent (or the agent has no active intent) and inside another
+agent's active intent.
 
-**Action.** The violator receives `agent.feedback` describing the touched
-path and the owning change. When
+**Action.** The violator receives `agent.feedback` naming the touched file
+and the agent whose intent claims it; each violator/file pair is warned
+once. When
 `[supervisor.conflict] escalate_on_violation = true` (default), the
 supervisor inbox also receives a follow-up `agent.question` so a human
 can decide whether to override the boundary or block the work.
@@ -119,8 +124,8 @@ are still reported.
 
 ## The `[conflict-detector]` Tag
 
-Every auto-emitted `agent.feedback` from the detector starts its `errors`
-array with a fixed tag:
+Every auto-emitted `agent.feedback` from the detector carries a single
+`errors` entry that starts with a fixed tag:
 
 ```json
 {
@@ -129,8 +134,7 @@ array with a fixed tag:
   "payload": {
     "from": "supervisor",
     "errors": [
-      "[conflict-detector] forward conflict: feat-api also declares intent over src/auth/middleware.rs",
-      "..."
+      "[conflict-detector] forward conflict: agent feat-api also intends to modify: src/auth/middleware.rs"
     ]
   }
 }
@@ -162,21 +166,22 @@ can:
    pausing the offending agent until the other side commits.
 
 Ownership-violation escalations follow the same routing. Forward conflicts
-do not escalate by default — they are advisory.
+never escalate — they are advisory.
 
 ## Interaction with the Filesystem Watcher
 
-The broker's filesystem watcher publishes `agent.status` (with a fresh
-`modified_files` array) whenever a tracked file changes in a worktree.
-The conflict detector consumes these auto-published status messages, so
-in-flight conflicts surface as soon as edits land on disk — no manual
-`agent.status` curl required from the agent.
+The broker's filesystem watcher polls `git status --porcelain` in each
+worktree every ~2 seconds and publishes `agent.status` (with a fresh
+`modified_files` array) whenever the set of reported paths — modified,
+staged, or untracked — changes. The conflict detector consumes these
+auto-published status messages, so in-flight conflicts surface as soon as
+edits land on disk — no manual `agent.status` curl required from the agent.
 
-The watcher is read-only with respect to git (it watches the working
-tree, not the index), so the detector sees overlaps the instant a file
-is modified, even before `git add` or `git commit`. This is the
-mechanism that makes "in-flight" meaningfully earlier than the
-post-commit hook's `agent.artifact { status: "committed" }`.
+The watcher only reads `git status` — it never stages or commits — so the
+detector sees overlaps within one poll of a file being modified, even
+before `git add` or `git commit`. This is the mechanism that makes
+"in-flight" meaningfully earlier than the post-commit hook's
+`agent.artifact { status: "committed" }`.
 
 ## Configuration Knobs
 

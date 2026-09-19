@@ -4,7 +4,7 @@ When the broker is enabled, one tmux pane runs the dashboard instead of an
 agent CLI. In **supervisor mode** the dashboard lives at **pane 1** (pane 0
 hosts the supervisor CLI itself); in **broker-only mode** (broker on,
 supervisor off) the dashboard lives at **pane 0**. Either way it renders the
-same live status table that updates every second, giving you an at-a-glance
+same live status table that refreshes about once a second (and immediately on a key press), giving you an at-a-glance
 view of what each agent is doing.
 
 The dashboard is **observation-only** — it never sends actions back to agents. Beyond `q` to quit, its keystrokes drive the [Broker log panel](#broker-log-panel) (toggle, filter, inspect). Human input (questions, directives, replies to `agent.question` events) happens in the supervisor pane itself; the dashboard simply renders broker state.
@@ -14,18 +14,18 @@ The dashboard is **observation-only** — it never sends actions back to agents.
 The dashboard renders a table with one row per agent. When a supervisor pane is running, its row is pinned to the top with a horizontal-line divider beneath it; coding-agent rows follow in alphabetical order:
 
 ```
-┌────────────┬────────┬────────────┬─────────┐
-│ Agent      │ CLI    │ Status     │ Time    │
-├────────────┼────────┼────────────┼─────────┤
-│ supervisor │ claude │ 🔵 watching│ 12s ago │
-│ ────────── │ ────── │ ────────── │ ─────── │
-│ feat-api   │ claude │ 🟡 blocked │ 1m 05s  │
-│ feat-auth  │ claude │ 🔵 working │ 3m 22s  │
-│ fix-typo   │ gemini │ 🟢 done    │ 8m 41s  │
-└────────────┴────────┴────────────┴─────────┘
+┌────────────┬────────┬────────────┬─────────────┐
+│ Agent      │ CLI    │ Status     │ Last Update │
+├────────────┼────────┼────────────┼─────────────┤
+│ supervisor │ claude │ 🔵 watching│ 12s ago     │
+│ ────────── │ ────── │ ────────── │ ─────────── │
+│ feat-api   │ claude │ 🟡 blocked │ 1m ago      │
+│ feat-auth  │ claude │ 🔵 working │ 3m ago      │
+│ fix-typo   │ codex  │ 🟢 done    │ 8m ago      │
+└────────────┴────────┴────────────┴─────────────┘
 ```
 
-When no supervisor pane is running (e.g. `--no-broker` is not in play but no `--supervisor` was passed, or during the boot window before the supervisor has finished self-registering), the divider is not rendered and coding agents fill rows alphabetically from the top.
+When no supervisor pane is running (e.g. broker-only mode — broker on, no `--supervisor` — or during the boot window before the supervisor has finished self-registering), the divider is not rendered and coding agents fill rows alphabetically from the top.
 
 ### Status Symbols
 
@@ -37,7 +37,7 @@ When no supervisor pane is running (e.g. `--no-broker` is not in play but no `--
 | 🟡 | Blocked -- agent is waiting on something |
 | ⚪ | Idle / unknown phase -- agent has not reported a recognised status |
 
-The **Time** column shows elapsed time since the agent's last status update.
+The **Last Update** column shows elapsed time since the agent's last status update (`30s ago`, `3m ago`, `1h 15m ago`).
 
 ### Supervisor row, `cli` field, and `phase` field
 
@@ -62,7 +62,7 @@ The supervisor row appears **after** the supervisor pane's CLI has booted and pu
 | `q` | Quit the dashboard (shuts down the broker; agent panes keep running but lose broker communication) |
 | `l` | Toggle the [Broker log panel](#broker-log-panel) on/off |
 | `a` | Reset the Broker log filter to `All` |
-| `1`–`9` | Toggle the individual filter chips (status / artifact / blocked / verified / feedback / question / intent / verify-now / advanced-main) |
+| `1`–`9`, `0` | Toggle the individual filter chips (status / artifact / blocked / verified / feedback / question / intent / verify-now / advanced-main / learning) |
 | `↑`/`k`, `↓`/`j` | Move the highlight up/down the Broker log rows |
 | `Enter` | Open the details overlay for the highlighted row |
 | `Esc` | Close the details overlay |
@@ -102,7 +102,8 @@ height_lines = 20
 
 When the panel is hidden the dashboard layout is identical to its v0.5.0
 post-inbox-removal shape (title, agent table, status line) — the agent table
-expands to fill the freed space. See the
+expands to fill the freed space, and the status line gains a
+`broker log hidden — press l to show` hint. See the
 [configuration reference](../configuration/README.md#broker-log-panel) for the
 table's fields.
 
@@ -110,7 +111,7 @@ table's fields.
 
 A header row of chips sits above the message list, one per broker message type
 plus an `All` reset. `All` is active by default (every message shows). Pressing
-a digit hotkey (`1`–`9`) narrows the view to that type; pressing more digits adds
+a digit hotkey (`1`–`9`, then `0` for the tenth chip) narrows the view to that type; pressing more digits adds
 types inclusively; pressing an active chip again removes it (emptying the
 selection returns to `All`). Press `a` to reset to `All` at any time. Filtering
 is a view operation — the ring buffer always retains every message regardless of
@@ -127,6 +128,10 @@ the active chips.
 | `7` | intent | `agent.intent` |
 | `8` | verify-now | `supervisor.verify-now` |
 | `9` | advanced-main | `agent.advanced-main` |
+| `0` | learning | `agent.learning` |
+
+`agent.answer` messages have no chip of their own; they show in the default
+`All` view.
 
 ### Row format
 
@@ -137,8 +142,8 @@ summary, and so on). Summaries that overflow the panel width are truncated with
 an ellipsis (`…`); the full body is available in the details overlay.
 
 ```
-┌─ Broker log (7 shown / 7 held) — l hide · a all · 1-9 filter · ↵ details · Esc close ─┐
-│  All  1:status 2:artifact 3:blocked 4:verified 5:feedback 6:question 7:intent 8:verify-now 9:advanced-main │
+┌─ Broker log (7 shown / 7 held) — l hide · a all · 1-9·0 filter · ↵ details · Esc close ─┐
+│  All  1:status 2:artifact 3:blocked 4:verified 5:feedback 6:question 7:intent 8:verify-now 9:advanced-main 0:learning │
 │ 14:35:09 · status   · feat-auth · working: rebasing onto main                          │
 │ 14:34:58 · intent   · feat-auth · wire AuthClient                                       │
 │ 14:34:12 · blocked  · feat-api  · needs auth token format from feat-auth               │
@@ -214,7 +219,7 @@ The dashboard process is bound to its session: when the session ends, the dashbo
 
 - **Clean shutdown.** tmux delivers `SIGHUP` when it kills the session or pane; the signal handler sets a shutdown flag and the loop exits, flushing the broker log on the way out.
 - **Orphaned to init.** On Unix, if the parent process is gone the dashboard has been reparented to init (`getppid() == 1`) — the tell-tale of a session torn down *without* `SIGHUP` (an abrupt `tmux kill-server`, a crash, or the machine sleeping). The loop notices the reparent and exits. On non-Unix platforms this check is inert and only the `SIGHUP` shutdown path applies.
-- **Controlling terminal gone.** If reading input (`event::poll`) errors, or a write to the terminal fails, the dashboard treats its controlling terminal as gone and exits. This catches the case where the pane was killed but the dashboard was reparented to a *lingering shell* (a live but unrelated parent), so the orphan-to-init check alone would miss it.
+- **Controlling terminal gone.** If the pane's terminal hangs up, reading input (`event::poll`) errors, or a write to the terminal fails, the dashboard treats its controlling terminal as gone and exits. This catches the case where the pane was killed but the dashboard was reparented to a *lingering shell* (a live but unrelated parent), so the orphan-to-init check alone would miss it.
 - **Broker fails to bind.** If the in-process broker cannot bind its port — most often because a stale dashboard is still squatting it — the process emits a diagnostic to stderr and exits non-zero rather than entering a render/retry loop, so a bind failure can never spin up a second CPU-pegging dashboard.
 
 Because the dashboard is cheap to relaunch (`git paw start` re-attaches to the session), exiting eagerly on any of these signals is preferred over risking a leaked, busy-looping process.

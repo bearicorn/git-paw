@@ -33,6 +33,7 @@
 - [Supported AI CLIs](supported-clis.md)
 - [CLI Reference](cli-reference.md)
 - [Architecture](architecture.md)
+  - [Target Architecture](architecture-direction.md)
 - [Specifications](specifications/README.md)
 - [Contributing](contributing.md)
 - [Changelog](changelog.md)

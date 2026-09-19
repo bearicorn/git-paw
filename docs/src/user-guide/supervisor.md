@@ -408,17 +408,18 @@ When you attach to a supervisor session, git-paw styles the tmux panes so the
 boundary between the top row (supervisor + dashboard) and the agent grid below
 is easy to see. By default each session gets:
 
-- **Heavy pane borders** (`━┃`) instead of tmux's default light `─│` lines, so
-  the rows visibly separate even with four or more agents.
-- **A per-pane label strip** above every pane showing its index and role:
+- **Double-line pane borders** (`═║`) instead of tmux's default light `─│`
+  lines, so the rows visibly separate even with four or more agents.
+- **A per-pane label strip** above every pane — a reverse-video label bar
+  showing its index and role:
 
   ```text
-  ┏━ 0: supervisor ━━━━━━━━━┓┏━ 1: dashboard ━━━━━━━━━┓
-  ┃ (supervisor agent)      ┃┃ (live agent table)     ┃
-  ┗━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━┛
-  ┏━ 2: feat/cold-start ━━━━┓┏━ 3: feat/conflict-det ━┓
-  ┃ (coding agent)          ┃┃ (coding agent)         ┃
-  ┗━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━┛
+  ╔═ 0: supervisor ═════════╗╔═ 1: dashboard ═════════╗
+  ║ (supervisor agent)      ║║ (live agent table)     ║
+  ╚═════════════════════════╝╚════════════════════════╝
+  ╔═ 2: feat/cold-start ════╗╔═ 3: feat/conflict-det ═╗
+  ║ (coding agent)          ║║ (coding agent)         ║
+  ╚═════════════════════════╝╚════════════════════════╝
   ```
 
   Pane `0` is always `supervisor`, pane `1` is `dashboard`, and the agent panes
@@ -435,7 +436,7 @@ other tmux sessions keep their own styling. They apply to plain
 Set `[layout].border_affordances = false` in your config to opt out and
 inherit your own tmux styling — see the
 [Layout configuration reference](../configuration/README.md#layout). On tmux
-older than 3.2 the heavy border lines aren't recognised; git-paw prints a
+older than 3.2 the double border lines aren't recognised; git-paw prints a
 warning and continues with the remaining affordances rather than failing.
 
 ## Understanding what the supervisor is doing
@@ -498,10 +499,14 @@ tmux display-message -t paw-<project>:0.<pane> -p '#{pane_current_path}'
 ```
 
 The output is the pane's working directory. For coding-agent panes that is
-the agent's worktree path, whose basename ends in `<project>-feat-<branch>`
-— the authoritative `agent_id` (with the slash form `feat/<branch>` for git
-operations). A pane whose `pane_current_path` ends in `myproj-feat-auth`
-belongs to agent `feat-auth`.
+the agent's worktree path — `<repo>/.git-paw/worktrees/feat-<branch>` under
+the child placement `git paw init` configures, or `<project>-feat-<branch>`
+beside the repo under the sibling placement. Matching it against the
+`worktree_path` entries in the per-repo session file
+(`.git-paw/sessions/<session>.json`) gives the owning agent's `branch_id` — the
+authoritative `agent_id` (with the slash form `feat/<branch>` for git
+operations). A pane whose `pane_current_path` is
+`<repo>/.git-paw/worktrees/feat-auth` belongs to agent `feat-auth`.
 
 The supervisor agent builds the `{pane_index → agent_id}` map once per
 session and reuses it; re-resolution only happens when the supervisor
@@ -544,7 +549,8 @@ granularity.
 ## Spec audit governance sub-step
 
 When a project's `.git-paw/config.toml` lists governance documents under
-`[supervisor].governance.docs`, the supervisor reads each doc as part of the
+`[governance]` (`adr`, `test_strategy`, `security`, `dod`, `constitution`),
+the supervisor reads each doc as part of the
 Spec Audit gate and flags drift between the diff and the doc's checklist.
 The five canonical doc-checklist examples are:
 
@@ -564,9 +570,12 @@ config schema and how the supervisor reads each doc.
 ## Common dev-command allowlist
 
 A bundled **universal** preset whitelists routine, stack-neutral dev commands
-so the supervisor stops escalating every `git commit`, `git push`, `git diff`,
-`grep`, or broker curl on `127.0.0.1`. The preset always applies and ships
-with the launcher. Toolchain-specific commands (`cargo …`, `npm …`, `pytest`,
+— non-destructive git verbs (`git status`, `git diff`, `git add`,
+`git commit`, …) plus read-only `find`, `grep`, and `sed -n` — so the
+supervisor stops escalating every one of them. The preset always applies and
+ships with the launcher. The danger-list still wins over it: `git push` is in
+the preset but always escalates (see [Decision order](#decision-order)).
+Toolchain-specific commands (`cargo …`, `npm …`, `pytest`,
 `go …`) are **not** in the universal set — opt into them per stack.
 
 To pull in a toolchain's curated patterns, name its stack preset; to add
@@ -584,10 +593,12 @@ captured command line, the same way the universal patterns are. See
 [Configuration](../configuration/README.md) for the named-preset contents and
 the full schema.
 
-The same declaration feeds two consumers: the auto-approve classifier's
-whitelist below (declaring `stacks = ["rust"]` is what makes a `cargo test`
-prompt auto-approve) and the bundled supervisor skill's rendered permission
-guidance. One declaration drives both — they cannot drift.
+The universal preset feeds two consumers: the auto-approve classifier's
+whitelist below and the bundled supervisor skill's rendered permission
+guidance (`{{DEV_ALLOWLIST_PRESET}}`). Both are generated from the same
+constant, so they cannot drift. Declared `stacks` and `extra` patterns feed the
+classifier only — declaring `stacks = ["rust"]` is what makes a `cargo test`
+prompt auto-approve — and are not rendered into the skill text.
 
 ### Run dev commands bare — no exit-code-probe wrappers
 
@@ -889,7 +900,7 @@ auto-approve, it appends one JSON line to
 `.git-paw/sessions/<session>.manual-approvals.jsonl`:
 
 ```json
-{ "timestamp": "2026-05-29T12:34:56Z", "agent_id": "feat/auth",
+{ "timestamp": "2026-05-29T12:34:56Z", "agent_id": "feat-auth",
   "pattern": "make integration-test", "first_seen": true }
 ```
 
@@ -990,7 +1001,8 @@ resolved spec backend. Three placeholders make this work:
 - `{{SPEC_PATH_DOCTRINE}}` renders a per-backend path doctrine: OpenSpec
   sessions see `openspec/changes/<name>/...` references, Spec Kit sessions
   see `.specify/specs/<feature>/...`, Markdown sessions see the flat
-  `paw_status: pending` shape, and multi-backend sessions list each
+  `paw_status: pending` shape, Superpowers sessions see
+  `docs/superpowers/plans/*.md`, and multi-backend sessions list each
   present backend's conventions in one paragraph.
 
 A CI no-leak audit asserts that the rendered supervisor skill contains
@@ -1095,10 +1107,10 @@ configuration, and escalation behaviour.
 
 ## Learnings aggregator
 
-When `[supervisor.learnings] enabled = true`, the supervisor session
-records deterministic friction signals (sandbox warnings, approval
-patterns, recurring errors) into a markdown file you can review after the
-run. The supervisor also records *qualitative* learnings it reasons out over
+When `[supervisor] learnings = true`, the supervisor session
+records deterministic friction signals (stuck durations, recovery cycles,
+conflict events, permission patterns) into a markdown file you can review
+after the run. The supervisor also records *qualitative* learnings it reasons out over
 the run — recurring failure shapes, doc gaps, ADR drift, scope mistakes, and
 **tooling friction** with git-paw itself — publishing each through the bundled
 `.git-paw/scripts/sweep.sh learn <category> <title> <body-json>` helper (never
@@ -1264,8 +1276,9 @@ opsx-role-gating: detected archive activity on commit abc1234 by agent feat-x
 
 If a warning is a false positive, the named reason tells you which signal fired
 so you can adjust (or flip `role_gating = "off"`). The guard is **inert under
-the Spec Kit and Markdown engines** — those have no `/opsx:` commands or archive
-paths, so the capability and its skill sections are scoped to OpenSpec only.
+the Spec Kit, Markdown, and Superpowers engines** — those have no `/opsx:`
+commands or archive paths, so the capability and its skill sections are scoped
+to OpenSpec only.
 
 > **v0.6.0 behaviour change.** `role_gating` defaults to `warn`, so sessions
 > where a coding agent archives a change now see guard feedback. Set
@@ -1301,7 +1314,11 @@ branch and publishes `agent.feedback` to the owning agent asking them to
 rebase or resolve. On a successful fast-forward, the supervisor runs the
 configured `{{TEST_COMMAND}}`; if tests fail, the supervisor reverts the
 merge with `git reset --hard <prev-HEAD>` and publishes `agent.feedback`
-tagged `[regression]`.
+tagged `[regression]`. If tests pass, it publishes `agent.advanced-main`
+(the merged branch, the new default-branch SHA, and the resolved base branch
+name) so every dependent agent learns the base moved on its next inbox poll —
+see [When Main Advances](coordination.md#when-main-advances) — then moves on to
+the next branch.
 
 **Cycle handling.** If the dependency graph has a cycle, the supervisor
 does NOT merge any branch in the cycle. Instead, it publishes
@@ -1317,8 +1334,8 @@ Over a long wave the supervisor merges peer after peer into the default
 branch while every other live worker keeps committing on the baseline it
 started from, so each branch drifts further from what it will eventually
 be merged into. The only *existing* recourse is worker-side and advisory —
-see [*When main advances*](#pane-driving-and-cross-worktree-git-disciplines)
-above — which correctly tells a worker holding uncommitted work not to
+see [*When Main Advances*](coordination.md#when-main-advances) in Agent
+Coordination — which correctly tells a worker holding uncommitted work not to
 auto-rebase, but means refresh only happens when a worker chooses to act.
 
 When `[supervisor] branch_refresh = true` is set, the supervisor's

@@ -108,8 +108,9 @@ agent branch modified the same line of the same file — `git paw start`:
 
 When you see this error:
 
-1. `cd` into the affected agent's worktree (typically at
-   `../<project>-<branch-slug>/`).
+1. `cd` into the affected agent's worktree (by default at
+   `.git-paw/worktrees/<branch-slug>/`; `../<project>-<branch-slug>/` with
+   `worktree_placement = "sibling"`).
 2. Inspect the conflicting files git named in the error.
 3. Either reconcile manually (e.g. `git rebase main` followed by
    resolving conflicts and `git rebase --continue`), or decide the
@@ -127,11 +128,11 @@ launch time.
 - It does not `git fetch` or `git pull` for `main`. The rebase target
   is whatever `origin/HEAD` tracks **locally**; the user owns the
   remote-sync decision.
-- It does not rewrite the working tree files inside a surviving
-  worktree. After a rebase-on-resume, the worktree directory's files
-  may diverge from the branch's new HEAD until the agent does its own
-  checkout or pull inside the worktree. This is the standard `git
-  rebase` caveat — `git status` from inside the pane will surface it.
+- It does not leave a surviving worktree's files behind its branch.
+  The rebase runs inside the worktree that has the branch checked out,
+  so on resume that worktree's files move with the rebased HEAD. If git
+  refuses the rebase there (for example, the worktree has uncommitted
+  changes), it fails like a conflict — see above.
 - It does not rebase one agent branch onto another agent branch. Only
   `feat/<change>` onto the repository's default branch.
 - It does not loop or retry on failure. One attempt, abort on
@@ -156,13 +157,18 @@ and after `git paw start` will show the SHA change (or lack thereof).
 
 ## Cold recovery resumes worker context
 
-When `git paw start` recovers a stopped session — or relaunches a
-worker whose pane died (a crash, an accidental `tmux kill-pane`, a
-machine sleep that tore the tmux server down) — a CLI that supports
-it is relaunched with its prior conversation context restored instead
-of starting cold. See [Per-CLI cold resume](pause.md#per-cli-cold-resume)
+When `git paw start` recovers a stopped session — including a paused
+session whose tmux server died, and a session still up in tmux whose
+every agent pane has dropped back to a bare shell (crashed CLIs) — a
+CLI that supports it is relaunched with its prior conversation context
+restored instead of starting cold. See [Per-CLI cold resume](pause.md#per-cli-cold-resume)
 for the mechanism (session-id assignment at launch, resume on
 recovery) and which CLIs it covers today.
+
+A receipt that still claims **active** after its tmux session vanished
+(a crash, or a machine sleep that tore the tmux server down) is not
+recovered: `git paw status` reports it as `🔴 stale`, and `start`
+clears it the way `git paw purge --stale` does, then launches fresh.
 
 ## Adding and removing branches mid-session
 
@@ -183,11 +189,11 @@ git paw add --from-spec add-export      # derive branch + CLI from a discovered 
 What it does:
 
 1. Resolves the branch and CLI — from the positional argument, or (with
-   `--from-spec`) from a discovered spec across the OpenSpec / Markdown /
-   Spec Kit backends (same resolution as `git paw start --specs NAME`). An
-   unknown spec name errors with the discovered candidate list; an unknown
-   `--cli` errors with the detected CLI ids — and in both cases nothing is
-   created.
+   `--from-spec`) from a spec discovered in the configured `[specs]` format
+   — OpenSpec, Markdown, Spec Kit, or Superpowers (same resolution as
+   `git paw start --specs NAME`). An unknown spec name errors with the
+   discovered candidate list; an unknown `--cli` errors with the detected
+   CLI ids — and in both cases nothing is created.
 2. Enforces the 25-agent cap **before** touching anything. Adding the 26th
    agent fails with the same "split into multiple sessions" message
    `start` uses.

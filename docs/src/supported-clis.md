@@ -11,6 +11,16 @@ git-paw auto-detects these AI coding CLIs on your PATH:
 | [Vibe](https://docs.mistral.ai/capabilities/vibe/) | `vibe` | Mistral AI's coding CLI | See project docs | No |
 | [Qwen](https://github.com/QwenLM) | `qwen` | Alibaba's Qwen coding CLI | See project docs | No |
 | [Amp](https://ampcode.com) | `amp` | Sourcegraph's AI coding agent | See project docs | No |
+| opencode | `opencode` | Open-source terminal coding agent | See project docs | No |
+| Cline | `cline` | Cline's coding agent CLI | See project docs | No |
+| Droid | `droid` | Factory's coding agent CLI | See project docs | No |
+| Pi | `pi` | Terminal coding agent | See project docs | No |
+| Junie | `junie` | JetBrains' coding agent CLI | See project docs | No |
+| Cursor | `cursor` | Cursor's command-line tool | See project docs | No |
+| GitHub Copilot CLI | `copilot` | GitHub Copilot in the terminal | See project docs | No |
+| cn | `cn` | Continue's coding agent CLI | See project docs | No |
+| Kilo Code | `kilo` | Kilo Code's coding agent CLI | See project docs | No |
+| Kimi | `kimi` | Moonshot AI's coding agent CLI | See project docs | No |
 
 "Cold resume" means git-paw can restore the CLI's prior conversation
 when recovering a stopped session or relaunching a dead pane, rather

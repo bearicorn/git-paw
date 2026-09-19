@@ -1,16 +1,16 @@
 # Quick Start: Supervisor Mode
 
-This walkthrough shows how to launch git-paw in **supervisor mode** — git-paw's hands-off, spec-driven workflow where a supervisor agent orchestrates several coding agents in parallel, runs tests between merges, and writes a final session report.
+This walkthrough shows how to launch git-paw in **supervisor mode** — git-paw's hands-off, spec-driven workflow where a supervisor agent orchestrates several coding agents in parallel, runs tests between merges, and publishes a final summary.
 
 ## What Supervisor Mode Does
 
-Supervisor mode (`git paw start --supervisor`) launches every pending spec as its own coding agent in a background tmux pane and gives you an interactive supervisor agent in the foreground pane. The supervisor automatically launches all agents per spec, runs the configured `test_command` between merges, walks branches in topological order based on declared dependencies, writes a `.git-paw/session-summary.md` when the run is complete, and auto-approves common safe permission prompts (e.g. `git commit`, broker `curl` calls, and your declared stack's toolchain verbs such as `cargo test` for `stacks = ["rust"]`) so the run can proceed unattended.
+Supervisor mode with a spec flag (`git paw start --supervisor --from-all-specs`) launches every pending spec as its own coding agent in a background tmux pane and gives you an interactive supervisor agent in the foreground pane. (Bare `git paw start --supervisor`, with no spec flag, opens the interactive branch picker instead.) The supervisor automatically launches all agents per spec, runs the configured `test_command` between merges, walks branches in topological order based on declared dependencies, publishes a final summary status when the run is complete, and auto-approves common safe permission prompts (e.g. `git commit`, broker `curl` calls, and your declared stack's toolchain verbs such as `cargo test` for `stacks = ["rust"]`) so the run can proceed unattended.
 
 ## Prerequisites
 
 - The standard git-paw [prerequisites](quick-start-same-cli.md#prerequisites) (git-paw installed, tmux, an AI CLI on `PATH`, a git repo).
 - `[broker] enabled = true` in your config — supervisor mode requires the coordination broker.
-- A `[supervisor]` section is recommended but optional. If it is missing, git-paw prompts for the supervisor CLI, the test command, and the agent approval level on first run.
+- A `[supervisor]` section is recommended but optional. If it is missing, `--supervisor` runs on built-in defaults and takes the supervisor CLI from `default_cli` (one of `[supervisor].cli` or `default_cli` must be set), and a plain `git paw start` asks `Start in supervisor mode?`. `git paw init` writes the section for you, asking whether to enable supervisor mode by default and, if you do, for the test command.
 - A specs directory configured via `[specs]` (default: `specs/`) containing at least one pending spec.
 
 ## Smallest Runnable Example
@@ -51,12 +51,12 @@ agent_approval = "auto"
 ### 3. Launch
 
 ```bash
-git paw start --supervisor
+git paw start --supervisor --from-all-specs
 ```
 
 git-paw creates a worktree per spec, opens a tmux session with the supervisor in pane 0, the dashboard in pane 1, and one coding agent per spec in the remaining panes (pane 2 onwards). The supervisor injects its boot prompt automatically; you only need to chat with it for high-level approvals.
 
-When every agent has reported `verified` and the supervisor has merged each branch in topological order, git-paw writes `.git-paw/session-summary.md` and exits.
+When every agent has reported `verified` and the supervisor has merged each branch in topological order, the supervisor publishes a final `agent.status` summarising which branches merged and which were skipped (and why).
 
 ## Skipping Supervisor for One Session
 
@@ -95,9 +95,10 @@ See [Configuration → Broker](configuration/README.md#broker) for `[broker]` se
 Every coordination message the supervisor and its agents exchange goes through
 the broker as a JSON envelope of the form
 `{"type": "agent.<variant>", "agent_id": "<slug>", "payload": {...}}`. The
-canonical examples below come from `src/broker/messages.rs`. `agent_id` slugs
-must be lowercase alphanumeric + `-` / `_` (no slashes — `feat/auth` is the
-git branch name; `feat-auth` is the slug form the broker accepts).
+canonical examples below come from `src/broker/messages.rs`. The broker accepts
+an `agent_id` of `supervisor` or a lowercase two-part slug — letters, digits and
+`-`, with the parts joined by `-` or `/` (git-paw itself publishes the slug
+form: branch `feat/auth` becomes `feat-auth`).
 
 `agent.status` (auto-published by the filesystem watcher whenever an agent's
 worktree changes; the manual form below is an escape hatch):
@@ -117,18 +118,20 @@ curl -s -X POST "$GIT_PAW_BROKER_URL/publish" \
   -d '{"type":"agent.artifact","agent_id":"feat-auth","payload":{"status":"done","exports":["AuthClient"],"modified_files":[]}}'
 ```
 
-`agent.blocked`, `agent.intent`, `agent.question`, `agent.feedback`, and
-`agent.verified` round out the seven shipped variants — see the full reference
-with payload-field semantics in [Agent Coordination](user-guide/coordination.md).
+`agent.blocked`, `agent.intent`, `agent.question`, `agent.answer`,
+`agent.feedback`, `agent.verified`, `agent.advanced-main`, and `agent.learning`
+— plus the broker-emitted `supervisor.verify-now` — round out the message set;
+see the full reference with payload-field semantics in
+[Agent Coordination](user-guide/coordination.md).
 
 ## Where to Look When Things Go Wrong
 
-When a supervisor run misbehaves, three places have everything you need:
+When a supervisor run misbehaves, these places have everything you need:
 
 1. **Dashboard pane (pane 1).** With `[broker] enabled = true` the dashboard runs in pane 1 of the supervisor session and updates every second. Use it to spot which agent is `blocked`, which is `working`, and how long it has been since each agent's last status update. See the [Dashboard chapter](user-guide/dashboard.md) for status-symbol meanings and controls.
 2. **Supervisor pane (pane 0).** The supervisor CLI runs here and prints feedback inline as it walks agents through the merge plan. Scroll back with tmux's copy mode if you need to inspect earlier reasoning.
-3. **`.git-paw/session-summary.md`.** Written by the supervisor when the run exits. Contains per-branch test results, merge order, and any agents that were skipped. If the supervisor exited early, this file tells you why.
-4. **`.git-paw/broker.log`.** A JSONL audit trail of every message the broker handled — `agent.status`, `agent.artifact`, `agent.blocked`, `agent.intent`, `agent.question`, `agent.feedback`, and `agent.verified`. Tail it live with `tail -f .git-paw/broker.log` to watch coordination as it happens. The file is flushed every five seconds; see [Agent Coordination](user-guide/coordination.md) for the full schema.
+3. **The supervisor's final status.** When its merge loop completes, the supervisor publishes a final `agent.status` (agent `supervisor`) listing which branches merged cleanly, which were skipped and why, and any regressions it hit. It shows up in the dashboard's broker log panel.
+4. **`broker.log`.** A plain-text audit trail with one line per message the broker handled (`[<seq>] <unix-seconds> [<agent_id>] <message summary>`), written to git-paw's sessions directory — not to `.git-paw/` — at `~/.local/share/git-paw/sessions/broker.log` on Linux (or under `$XDG_DATA_HOME`) and `~/Library/Application Support/git-paw/sessions/broker.log` on macOS. Tail it live with `tail -f` to watch coordination as it happens. The file is appended every five seconds; see [Agent Coordination](user-guide/coordination.md) for the message types.
 
 If you need to inspect an individual agent's pane history, run `tmux capture-pane -p -t <session>:<window>.<pane>` against the session printed at launch.
 

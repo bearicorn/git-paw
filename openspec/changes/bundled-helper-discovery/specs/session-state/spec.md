@@ -1,28 +1,38 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
-### Requirement: Session state location is authoritative
+### Requirement: Find session by repository path
 
-Session state files SHALL be stored under the platform data directory resolved by the system's own directory resolution — `~/Library/Application Support/git-paw/sessions/` on macOS, and `$XDG_DATA_HOME/git-paw/sessions/` (falling back to `~/.local/share/git-paw/sessions/`) elsewhere. This requirement is the single authority on that location.
+The system SHALL scan all session files and return the session matching a given repository path. A path that is the root of — or lies inside — a linked worktree of a repository SHALL resolve to that repository's session, by first resolving the worktree to the repository that owns it, so a process started inside an agent's worktree (such as `git paw mcp` spawned by the agent's CLI with no `--repo`) finds the session and its broker. A worktree's own root SHALL NOT be compared directly against a session's repository path.
 
-Session state SHALL NOT be stored in a repository-relative directory. A repository may contain a `.git-paw/sessions/` directory for other per-repository artifacts, and its presence SHALL NOT be taken to indicate where session state lives.
+#### Scenario: Finds correct session among multiple
+- **GIVEN** two sessions for different repositories
+- **WHEN** `find_session_for_repo()` is called with one repo path
+- **THEN** it SHALL return the matching session
 
-Where another capability mentions a session-state path incidentally, while specifying something else, that mention SHALL be treated as non-normative and this requirement SHALL prevail. Any component that needs to locate session state — including bundled helper scripts — SHALL resolve it through the same resolution this requirement names, rather than hardcoding a path that happens to work in one layout.
+Test: `session::tests::finds_correct_session_among_multiple_by_repo_path`
 
-#### Scenario: Session state resolves to the platform data directory
+#### Scenario: No matching session
+- **GIVEN** saved sessions for other repositories
+- **WHEN** `find_session_for_repo()` is called with a different path
+- **THEN** it SHALL return `None`
 
-- **WHEN** a session is saved
-- **THEN** its state file SHALL be written under the platform data directory's `git-paw/sessions/` path
-- **AND** SHALL NOT be written under the repository's own directory
+Test: `session::tests::find_returns_none_when_no_repo_matches`
 
-#### Scenario: A repo-relative sessions directory is not consulted
+#### Scenario: No sessions directory
+- **GIVEN** no sessions directory exists
+- **WHEN** `find_session_for_repo()` is called
+- **THEN** it SHALL return `None`
 
-- **GIVEN** a repository containing an empty `.git-paw/sessions/` directory
-- **WHEN** a component locates session state for that repository
-- **THEN** it SHALL resolve the platform data directory
-- **AND** SHALL NOT report that no session exists merely because the repo-relative directory is empty
+Test: `session::tests::find_returns_none_when_no_sessions_exist`
 
-#### Scenario: An incidental path mention elsewhere does not override this
+#### Scenario: A worktree root resolves to its repository's session
 
-- **WHEN** another capability's requirement mentions a session-state path while specifying different behaviour
-- **THEN** that mention SHALL be non-normative
-- **AND** implementations SHALL follow this requirement
+- **GIVEN** an active session for a repository and one of that session's agent worktrees
+- **WHEN** `find_session_for_repo()` is called with the worktree's root
+- **THEN** it SHALL return the repository's session
+
+#### Scenario: The MCP server started in a worktree finds the broker
+
+- **GIVEN** an active broker-enabled session and `git paw mcp` started with its working directory inside an agent worktree and no `--repo`
+- **WHEN** the server resolves its repository context
+- **THEN** its broker URL SHALL be the session's broker URL, not absent

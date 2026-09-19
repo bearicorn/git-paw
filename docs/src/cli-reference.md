@@ -12,24 +12,24 @@ Parallel AI Worktrees — orchestrate multiple AI coding CLI sessions across git
 Usage: git-paw [COMMAND]
 
 Commands:
-  start       Launch a new session or reattach to an existing one
-  add         Attach a new worktree + agent pane to a running session
-  remove      Detach a single agent from a running session
-  pause       Pause the session (detaches client, stops broker, leaves CLIs running)
-  stop        Stop the session (kills tmux, keeps worktrees and state)
-  purge       Remove everything (tmux session, worktrees, and state)
-  status      Show session state for the current repo
-  attach      Reattach the current terminal to the running session for this repo
-  list-clis   List detected and custom AI CLIs
-  add-cli     Register a custom AI CLI
-  remove-cli  Unregister a custom AI CLI
-  init        Initialize .git-paw/ directory and configuration
-  replay      View captured session logs
-  approvals   Report manually-approved command patterns for a session
-  mcp         Run a read-only Model Context Protocol (MCP) server over stdio
-  doctor      Diagnose the environment, configuration, and repository state
-  completions Print a shell completion script to stdout
-  help        Print this message or the help of the given subcommand(s)
+  start        Launch a new session or reattach to an existing one
+  add          Attach a new worktree + agent pane to a running session
+  remove       Detach a single agent from a running session
+  pause        Pause the session (detaches client, stops broker, leaves CLIs running)
+  stop         Stop the session (kills tmux, keeps worktrees and state)
+  purge        Remove everything (tmux session, worktrees, and state)
+  status       Show session state for the current repo
+  attach       Reattach the current terminal to the running session for this repo
+  list-clis    List detected and custom AI CLIs
+  add-cli      Register a custom AI CLI
+  remove-cli   Unregister a custom AI CLI
+  init         Initialize .git-paw/ directory and configuration
+  replay       View captured session logs
+  approvals    Report manually-approved command patterns for a session
+  mcp          Run a read-only Model Context Protocol (MCP) server over stdio
+  doctor       Diagnose the environment, configuration, and repository state
+  completions  Print a shell completion script to stdout
+  help         Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help     Print help
@@ -49,6 +49,13 @@ Options:
 
 Running `init` is idempotent — it's safe to run multiple times.
 
+When it writes a fresh `config.toml`, init asks which spec system the project
+uses (recorded in `[specs]`; git-paw never auto-detects it) and whether to
+enable supervisor mode by default. A non-interactive run writes a commented
+`[specs]` template and `[supervisor] enabled = false` instead. Re-running init
+on an existing config is the upgrade path after a version bump — see
+[Upgrading an Existing Config](configuration/README.md#upgrading-an-existing-config).
+
 **What it creates:**
 - `.git-paw/config.toml` — default configuration
 - `.git-paw/logs/` — log directory (added to `.gitignore`)
@@ -59,10 +66,16 @@ Running `init` is idempotent — it's safe to run multiple times.
 - `.git-paw/scripts/broker.sh` — bundled agent-broker helper (the agent side
   of `sweep.sh`); the agent boot block calls it to self-report to the broker.
   See [Coordination → Broker helper](user-guide/coordination.md#broker-helper)
+- `.git-paw/scripts/docs-fetch.sh` — bundled agent helper that fetches
+  documentation on demand (see [Docs Fetch Skill](user-guide/docs-fetch.md))
 - `.git-paw/scripts/_paw_common.sh` — shared preamble the bundled helpers
   source for repository-root resolution, Python 3 detection, and broker /
   docs URL discovery. Binary-managed like the helpers themselves: it is
   overwritten on every `git paw init`, and a helper cannot run without it
+- `.gitignore` entries for `.git-paw/logs/`, `.git-paw/tmp/`,
+  `.git-paw/worktrees/` (where agent worktrees live under the default `child`
+  placement), `.git-paw/session-summary.md`, and
+  `.git-paw/session-learnings.md`
 
 **Example:**
 ```bash
@@ -77,21 +90,19 @@ Smart start: reattaches if a session is active, recovers if stopped/crashed, or 
 Usage: git-paw start [OPTIONS]
 
 Options:
-      --cli <CLI>              AI CLI to use (skips CLI picker)
-      --branches <BRANCHES>    Comma-separated branches (skips branch picker)
-      --from-all-specs         Launch from every discovered spec across all configured formats
-      --specs [<NAMES>...]     Comma-separated spec names; bare flag opens picker (TTY required)
-      --specs-format <FORMAT>  Override spec backend: openspec, markdown, speckit, superpowers
-      --dry-run                Preview the session plan without executing
-      --preset <PRESET>        Use a named preset from config
-      --supervisor             Run the session in supervisor mode (auto-start agents,
-                                run test_command between merges, write session summary)
-      --no-supervisor          Disable supervisor for this session, overriding any
-                                `[supervisor] enabled = true` in config
-      --force                  With `--from-all-specs`/`--specs`, bypass the uncommitted-spec warning
-      --no-rebase              Skip rebasing existing agent branches onto the default branch
-      --unattended             Run the supervisor wave to completion with no human babysitting
-  -h, --help                   Print help
+      --cli <CLI>                    AI CLI to use (skips CLI picker)
+      --branches <BRANCHES>          Comma-separated branches (skips branch picker)
+      --from-all-specs               Launch from every discovered spec across all configured formats
+      --specs [<SPECS>...]           Comma-separated spec names; bare flag opens picker (TTY required)
+      --specs-format <SPECS_FORMAT>  Override spec format (openspec, markdown, speckit, superpowers) [possible values: openspec, markdown, speckit, superpowers]
+      --dry-run                      Preview the session plan without executing
+      --preset <PRESET>              Use a named preset from config
+      --supervisor                   Enable supervisor mode for this session
+      --no-supervisor                Disable supervisor for this session, overriding any [supervisor] enabled = true in config
+      --force                        Bypass uncommitted-spec validation warning
+      --no-rebase                    Skip rebasing existing agent branches onto the default branch before opening worktrees
+      --unattended                   Run the supervisor wave to completion with no human babysitting (auto-approve safe prompts, escalate the rest, detect completion, exit with a summary)
+  -h, --help                         Print help
 ```
 
 | Flag | Accepted values | Purpose |
@@ -191,7 +202,7 @@ See [Spec-Driven Launch](user-guide/spec-driven-launch.md) for details on spec f
 
 Hot-attaches a worktree and agent pane to a running **supervisor-mode** session without a stop/purge/restart. The agent grid re-tiles to the layout a `start` of that many agents would produce, the new branch is registered in the session, and the agent boots with the same broker boot block + initial prompt a start-time agent receives. The supervisor discovers it on its next broker poll — no restart.
 
-Provide a branch name, or use `--from-spec` to derive the branch (and CLI) from a discovered spec across the OpenSpec / Markdown / Spec Kit backends (same resolution as `start --specs NAME`). Adding past the 25-agent cap is rejected with the same "split into multiple sessions" message `start` uses. Adding to a paused session leaves the new pane paused until `git paw start`.
+Provide a branch name, or use `--from-spec` to derive the branch (and CLI) from a spec discovered in the configured spec system — OpenSpec, Markdown, Spec Kit, or Superpowers (same resolution as `start --specs NAME`). Adding past the 25-agent cap is rejected with the same "split into multiple sessions" message `start` uses. Adding to a paused session leaves the new pane paused until `git paw start`.
 
 ```
 Usage: git-paw add [OPTIONS] [BRANCH]
@@ -201,7 +212,7 @@ Arguments:
 
 Options:
       --cli <CLI>              AI CLI for the new pane (defaults to the session's default CLI)
-      --from-spec <FROM_SPEC>  Derive branch + CLI from a spec (OpenSpec change, Markdown spec, or Spec Kit feature)
+      --from-spec <FROM_SPEC>  Derive branch + CLI from a spec (OpenSpec change, Markdown spec, Spec Kit feature, or Superpowers plan)
   -h, --help                   Print help
 ```
 
@@ -239,7 +250,7 @@ git paw remove feat/wip --force
 git paw remove feat/keep --keep-worktree
 ```
 
-> Both `add` and `remove` operate on supervisor-mode sessions (the default). A bare (`--no-supervisor`) session reports an actionable error; stop and re-start it with the full branch set. One branch per invocation in v0.6.0.
+> Both `add` and `remove` operate on supervisor-mode sessions (the default). A bare (`--no-supervisor`) session reports an actionable error; stop and re-start it with the full branch set. One branch per invocation.
 
 ## `git paw pause`
 
@@ -321,7 +332,7 @@ git paw purge --stale --all-repos   # every repository on the machine
 
 ## `git paw status`
 
-Displays the current session status, branches, CLIs, and worktree paths for the repository in the current directory. When the broker is enabled, also shows the broker URL and connected agent count.
+Displays the current session status, branches, CLIs, and worktree paths for the repository in the current directory. When the session was launched with the broker, also shows the broker URL and whether it is running, paused, or not responding.
 
 ```
 Usage: git-paw status [OPTIONS]
@@ -342,7 +353,9 @@ The status line shows one of:
 
 When the status is `🔴 stale`, run `git paw start` to self-heal (the stale
 receipt is invalidated automatically before launching) or `git paw purge --stale`
-to clear it. The `--json` output's `status` field carries the matching lowercase
+to clear it. The `--json` output is an object with `session`, `status`,
+`tmux_running`, and `worktrees` fields (just `{ "session": null }` when the
+repository has no session); its `status` field carries the matching lowercase
 value (`active`, `paused`, `stopped`, or `stale`).
 
 Each entry in `--json`'s `worktrees` array carries:
@@ -401,7 +414,7 @@ git paw list-clis
 
 ## `git paw add-cli`
 
-Adds a custom CLI to your global config (`~/.config/git-paw/config.toml`). The command can be an absolute path or a binary name on PATH.
+Adds a custom CLI to your global config (`~/.config/git-paw/config.toml` on Linux, `~/Library/Application Support/git-paw/config.toml` on macOS — see [Config File Locations](configuration/README.md#config-file-locations)). The command can be an absolute path or a binary name on PATH; a binary name is resolved to its absolute path when it is registered.
 
 ```
 Usage: git-paw add-cli [OPTIONS] <NAME> <COMMAND>
@@ -448,14 +461,18 @@ Replay captured session logs. Requires [logging](user-guide/session-logging.md) 
 Usage: git-paw replay [OPTIONS] [BRANCH]
 
 Arguments:
-  [BRANCH]  Branch to replay (fuzzy-matched against log filenames)
+  [BRANCH]  Branch to replay
 
 Options:
-      --list              List available log sessions and branches
-      --color             Display with colors via less -R
-      --session <SESSION> Session to replay from (defaults to most recent)
-  -h, --help              Print help
+      --list               List available log sessions and branches
+      --color              Display with colors via less -R
+      --session <SESSION>  Session to replay from (defaults to most recent)
+  -h, --help               Print help
 ```
+
+The branch argument matches either the original branch name or its log
+filename (`/` becomes `--`), so `feat/add-auth` and `feat--add-auth` select
+the same log. An unmatched name errors with the list of available branches.
 
 **Examples:**
 ```bash
@@ -484,10 +501,10 @@ workflow.
 Usage: git-paw approvals [OPTIONS]
 
 Options:
-      --session <SESSION> Session to read from (defaults to the active session)
-      --limit <LIMIT>     Show at most N patterns (top N by count)
-      --json              Emit machine-readable JSON
-  -h, --help              Print help
+      --session <SESSION>  Session to read from (defaults to the active session)
+      --limit <LIMIT>      Show at most N patterns (top N by count)
+      --json               Emit machine-readable JSON
+  -h, --help               Print help
 ```
 
 Each row carries a `SUGGEST` hint — `project allowlist` for project-specific

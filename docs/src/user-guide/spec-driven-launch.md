@@ -186,9 +186,9 @@ In this example, one feature directory produces three worktrees and three branch
 3. **Validation Criteria (advisory)** — each `checklists/<file>.md` content under its own heading. Checklists are advisory in this release; full enforcement is planned for v1.0.0.
 4. **Your Task** — the single task description (`task/...` worktrees) or the ordered task list plus sequential-execution + `- [x]` writeback + `agent.artifact` (with `status: "done"`) instructions (`phase/...` worktrees).
 
-**Task writeback.** Agents working in a `phase/...` worktree flip `- [ ]` to `- [x]` in the worktree's `tasks.md` as they complete each task. The writeback may be committed alongside the task's code change or as a separate commit. Per-line edits across worktrees are merged by git in the normal way; the `conflict-detection` layer catches the pathological case of two worktrees racing on the same task ID.
+**Task writeback.** Agents working in a `phase/...` worktree flip `- [ ]` to `- [x]` in the worktree's `tasks.md` as they complete each task. The writeback may be committed alongside the task's code change or as a separate commit. Per-line edits across worktrees are merged by git in the normal way. The [conflict detector](conflict-detection.md#ownership-violation) exempts writebacks to the shared `tasks.md` from ownership-violation detection; concurrent edits to it by two worktrees can still raise in-flight warnings.
 
-**Constitution wiring.** When `.specify/memory/constitution.md` exists, git-paw exposes its path via the SpecKit backend's `detect_constitution` probe. A future `[governance.constitution]` config slot (the `governance-config` change) will consume this path automatically, so projects that already have a Spec Kit constitution get governance configured for free.
+**Constitution wiring.** With `[specs] type = "speckit"` and no explicit `[governance] constitution` setting, git-paw probes `<specs dir>/../memory/constitution.md` (normally `.specify/memory/constitution.md`) and, when it exists, wires it in as the governance constitution automatically — so a project that already has a Spec Kit constitution gets it configured for free. An explicit `[governance] constitution` value always wins; see [Configuration → Spec Kit constitution auto-wiring](../configuration/README.md#spec-kit-constitution-auto-wiring).
 
 ### Superpowers Format
 
@@ -232,6 +232,7 @@ The interpretation of `dir` depends on the format:
 - **`openspec`** — directory of change subdirectories (`<dir>/<change>/tasks.md`).
 - **`markdown`** — directory of `.md` files (`<dir>/<spec>.md`).
 - **`speckit`** — directory of feature subdirectories (`<dir>/<feature>/tasks.md`); typically `.specify/specs`.
+- **`superpowers`** — directory of flat plan files (`<dir>/<plan>.md`); typically `docs/superpowers/plans`.
 
 ### Branch Naming
 
@@ -240,6 +241,7 @@ Branch names depend on the format:
 - **OpenSpec:** `<branch_prefix><id>` where ID is the subdirectory name. `specs/add-auth/` with prefix `spec/` becomes branch `spec/add-auth`.
 - **Markdown:** `<branch_prefix><id>` where ID is `paw_branch` (if set) or the filename stem. `specs/add-auth.md` with prefix `spec/` becomes branch `spec/add-auth`.
 - **Spec Kit:** branch prefix is `task/` or `phase/` depending on the entry kind; `branch_prefix` is **not** applied. Example: `.specify/specs/003-user-list/tasks.md` with task `- [ ] T009 [P] Add login form` produces branch `task/t009-add-login-form`.
+- **Superpowers:** `plan/<slugified plan-file stem>`; `branch_prefix` is **not** applied. Example: `docs/superpowers/plans/2026-07-20-add-auth.md` produces branch `plan/2026-07-20-add-auth`.
 
 ## CLI Resolution
 
@@ -271,9 +273,11 @@ git paw start --specs add-auth --dry-run
 `--from-all-specs --supervisor` (or `--from-all-specs` with `[supervisor] enabled = true`
 in your config) engages the supervisor flow against the discovered specs.
 git-paw scans the configured specs directory, creates one worktree per spec,
-launches the dashboard pane and per-spec agent panes, and starts the supervisor
-CLI in your foreground terminal — same supervisor architecture as
-`--branches`-driven sessions, just with branches discovered from specs.
+and builds one tmux session with the supervisor pane (pane 0), the dashboard
+pane, and the per-spec agent panes, then returns with an attach hint (or, with
+`--unattended`, runs the in-process drive loop instead) — same
+supervisor architecture as `--branches`-driven sessions, just with branches
+discovered from specs.
 
 The [CLI Resolution](#cli-resolution) chain above applies identically here —
 `--supervisor` never bypasses or alters it. In particular, `default_spec_cli`
@@ -311,13 +315,12 @@ Session 'paw-myproject' started in detached mode.
 Attach with:  tmux attach -t paw-myproject
 ```
 
-For supervisor mode in a non-interactive context, the foreground supervisor
-CLI is also skipped (Claude/Codex etc. need a TTY to run interactively). The
-session, dashboard pane, and agent panes are all created; you can attach later
-from a real terminal and start the supervisor manually:
+Supervisor mode never auto-attaches, interactive terminal or not: the
+supervisor CLI runs inside the session's pane 0, and (without `--unattended`)
+the launch prints `Supervisor session '<name>' launched with <N> coding
+agent(s).` followed by the same `Attach with:` hint. Attach later from a real
+terminal:
 
 ```bash
 tmux attach -t paw-myproject
-# in another terminal, in the repo root:
-cd /path/to/repo && claude
 ```

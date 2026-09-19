@@ -4,7 +4,7 @@ Thanks for your interest in contributing! This guide will help you get started.
 
 ## Prerequisites
 
-- **Rust** (stable) — install via [rustup](https://rustup.rs/)
+- **Rust** (stable; MSRV 1.96, per `rust-version` in `Cargo.toml`) — install via [rustup](https://rustup.rs/)
 - **tmux** — `brew install tmux` (macOS) or `apt install tmux` (Linux)
 - **just** — `cargo install just` ([casey/just](https://github.com/casey/just))
 
@@ -27,9 +27,11 @@ just check
 | Command | Description |
 |---------|-------------|
 | `just check` | Run lint + tests |
-| `just test` | Run all tests |
-| `just test-all` | Run all tests including tmux-dependent tests |
-| `just lint` | Run `cargo fmt --check` + `cargo clippy` |
+| `just test` | Run all tests (tmux tests included — tmux is a hard dependency) |
+| `just verify` | Lint + `cargo deny` + the full suite with `--no-fail-fast` + `cargo audit` |
+| `just lint` | Run `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` |
+| `just deny` | Run `cargo deny check` (licenses, advisories, duplicate deps) |
+| `just audit` | Run `cargo audit` |
 | `just coverage` | Generate HTML coverage report |
 | `just build` | Build release binary |
 | `just install` | Install from local source |
@@ -59,7 +61,7 @@ We use [Conventional Commits](https://www.conventionalcommits.org/):
 [optional body]
 ```
 
-**Types:** `feat`, `fix`, `docs`, `refactor`, `test`, `ci`, `chore`
+**Types:** `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `ci`, `chore`, `perf`
 
 **Examples:**
 
@@ -117,8 +119,7 @@ instead of the user's real `~/Library/Application Support/git-paw/`
 (macOS) or `~/.local/share/git-paw/` (Linux). The `cmd_iso` helper
 in `tests/e2e_tests.rs` bundles both overrides into one call site.
 
-see `openspec/changes/test-tmux-isolation` for the rationale and
-historical context.
+See `openspec/specs/core-ci-hygiene/spec.md` for the requirements.
 
 ## Cold-start smoke before pushing
 
@@ -163,7 +164,7 @@ they grow stale.
 ### PR Checklist
 
 - [ ] `cargo build` compiles without warnings
-- [ ] `cargo clippy -- -D warnings` passes
+- [ ] `cargo clippy --all-targets -- -D warnings` passes
 - [ ] `cargo fmt --check` passes
 - [ ] Tests added/updated for changes
 - [ ] Commit messages follow Conventional Commits
@@ -173,7 +174,7 @@ they grow stale.
 To add a new AI CLI to the auto-detection list:
 
 1. Add the binary name to `KNOWN_CLIS` in `src/detect.rs`
-2. Add a row to the "Supported AI CLIs" table in `README.md`
+2. Add a row to the "Supported AI CLIs" table in `README.md` and in `docs/src/supported-clis.md`
 3. Add a test case in the detection tests
 4. Submit a PR with a link to the CLI's homepage
 

@@ -23,3 +23,9 @@
 - [ ] 4.1 `tests/add_remove_e2e.rs`: `remove` of a created branch with an unmerged commit keeps the branch and prints the hint; `remove` of a merged created branch deletes it
 - [ ] 4.2 E2E purge (`tests/e2e_tests.rs` or `tests/git_integration.rs`): `purge --force` with an unmerged created branch removes worktree + session, keeps the branch, prints tip SHA
 - [ ] 4.3 Every scenario maps to a named test; `cargo fmt`; `just check` + `just deny` green; `mdbook build docs/` succeeds
+
+## 6. Amendment — stale docs in this change's area (folded in 2026-10-18, from a docs sweep)
+
+- [ ] 6.1 `docs/src/cli-reference.md` purge entry does not say purge deletes the branches git-paw created; fix it, and the one-column misalignment in its help block
+- [ ] 6.2 README purge section does not mention branch deletion or `--stale`; add both
+- [ ] 6.3 `docs/src/architecture.md` describes teardown as "`git worktree remove` followed by prune"; the code runs the `on_remove` hook, then `worktree remove --force`, then deletes created branches, with no prune — describe what it actually does after this change

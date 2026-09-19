@@ -107,6 +107,8 @@ Three more placeholders make the bundled supervisor skill polyglot:
   - Spec Kit: `.specify/specs/<feature>/{spec,plan,tasks}.md` plus the
     Spec Kit checklist convention.
   - Markdown: flat `.md` files with `paw_status: pending` frontmatter.
+  - Superpowers: plan files under `docs/superpowers/plans/*.md`, worked
+    `### Task N` step by step with `- [ ]` → `- [x]` checkboxes.
   - Multi-backend: one sentence per present backend, introduced by a
     "This session spans multiple spec backends" clause.
   - No backend resolved: a sentinel sentence pointing the supervisor at
@@ -215,4 +217,4 @@ Skill templates are only injected when the broker is enabled (`[broker] enabled 
 
 In addition to skill template injection, git-paw automatically injects a standardized boot instruction block into every agent's initial prompt. This ensures reliable agent self-reporting even if skill templates are not used or if agents don't read the AGENTS.md file thoroughly.
 
-The boot-prompt injection includes pre-expanded curl commands for all essential coordination operations (register, done, blocked, question) and is active in both supervisor and manual broker modes. See the [Coordination documentation](coordination.md#boot-prompt-injection) for details.
+The boot-prompt injection covers every essential coordination operation (register, done, blocked, question) with the agent's id pre-expanded, as calls to the bundled `.git-paw/scripts/broker.sh` helper — or, for CLIs known to speak MCP (`claude`, `codex`, `cursor`, `agy`), as MCP publish-tool calls — and is active in both supervisor and manual broker modes. See the [Coordination documentation](coordination.md#boot-prompt-injection) for details.

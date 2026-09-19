@@ -11,7 +11,7 @@ Add the `[logging]` section to your `.git-paw/config.toml` (or global config):
 enabled = true
 ```
 
-When enabled, git-paw uses `tmux pipe-pane` to capture each pane's output to a log file when a session starts.
+When enabled, git-paw uses `tmux pipe-pane` to capture each coding-agent pane's output to a log file when it launches a fresh session — a plain `git paw start`, a spec-driven launch, or a supervisor session. The dashboard and supervisor panes are not logged, and neither are panes attached later with `git paw add` or the panes of a session recovered by `git paw start` after `git paw stop`.
 
 ## Log Storage
 
@@ -46,7 +46,7 @@ Shows all sessions and their logged branches.
 git paw replay feat/add-auth
 ```
 
-Branch names are fuzzy-matched — you can use the original branch name, the sanitized filename, or a partial match.
+The argument must match a log exactly — as the original branch name (`feat/add-auth`), the sanitized stem (`feat--add-auth`), or the full filename (`feat--add-auth.log`). Partial names are not matched; when nothing matches, the error lists the available branches.
 
 By default, ANSI escape codes are stripped for clean text output.
 

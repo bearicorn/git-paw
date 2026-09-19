@@ -2,10 +2,11 @@
 
 Learnings mode records deterministic friction signals from a supervisor
 session into a markdown file you can review after the run. It is an opt-in
-v0.5.0 feature: it requires supervisor mode to be active and the
-`[supervisor] learnings = true` flag to be set explicitly. The output is
-file-only in v0.5.0; a programmatic `agent.learning` broker variant is
-deferred to v0.6.0.
+feature: it requires supervisor mode to be active and the
+`[supervisor] learnings = true` flag to be set explicitly. The markdown file
+is always written; when the broker is enabled, each record is additionally
+published as an `agent.learning` broker message (see
+[Programmatic consumption](#programmatic-consumption-agentlearning-v060)).
 
 ## Contents
 
@@ -13,10 +14,11 @@ deferred to v0.6.0.
 - [Privacy & Sharing](#privacy--sharing)
 - [Enabling Learnings Mode](#enabling-learnings-mode)
 - [Output File](#output-file)
-- [The Five Categories](#the-five-categories)
+- [The Deterministic Categories](#the-deterministic-categories)
+- [Qualitative signals (v0.6.0)](#qualitative-signals-v060)
 - [Sample Output](#sample-output)
 - [Flush Cadence](#flush-cadence)
-- [Roadmap: `agent.learning` (v0.6.0)](#roadmap-agentlearning-v060)
+- [Programmatic consumption: `agent.learning` (v0.6.0)](#programmatic-consumption-agentlearning-v060)
 
 ## Why
 
@@ -26,15 +28,16 @@ stuck states, conflicts caught and resolved before they hit your eyes.
 Each event is too small to interrupt for, but the *pattern* is the most
 useful signal git-paw can surface for tool, prompt, or process improvement.
 
-Learnings mode aggregates those events into five deterministic categories
-and writes them to a markdown file you can read between sessions —
+Learnings mode aggregates those events into four deterministic categories
+(plus the supervisor's qualitative signals) and writes them to a markdown
+file you can read between sessions —
 turning silent friction into something you can act on.
 
 ## Privacy & Sharing
 
 **Learnings mode performs no telemetry.** The aggregator writes to exactly
 one place — the local `.git-paw/session-learnings.md` file in your repo. The
-broker it observes binds to `127.0.0.1`, and git-paw ships no outbound HTTP
+broker it observes binds to `127.0.0.1` by default, and git-paw ships no outbound HTTP
 client: nothing about your session is collected, uploaded, or phoned home
 under any configuration. The feature is also fully **opt-in** — it runs only
 when you set `[supervisor] learnings = true` (default `false`), and a session
@@ -82,81 +85,65 @@ When active, the learnings subsystem writes to:
 .git-paw/session-learnings.md
 ```
 
-The file lives at the repository root (next to `.git-paw/broker.log` and
-the session state). It is:
+The file lives in the repository root's `.git-paw/` directory. It is:
 
-- **Append-only across sessions.** Subsequent supervisor runs add new
-  entries below previous ones; nothing is overwritten or pruned.
+- **Append-only across sessions.** Each session's first flush adds a
+  `## Session Learnings — <ISO-8601 UTC start time>` heading, and later
+  flushes and later sessions append below it; nothing is overwritten or
+  pruned.
 - **Human-readable markdown.** No JSON or binary; you can `tail`, `grep`,
   or open it in any editor between sessions.
 - **Not committed by default.** `git paw init` adds it to the project's
   `.gitignore` alongside the other `.git-paw/` runtime files.
 
-## The Five Categories
+## The Deterministic Categories
 
-v0.5.0 tracks five deterministic categories. Each entry includes a
-timestamp, the agent involved (when applicable), and a one-line summary.
+The aggregator tracks four deterministic categories, each written under its
+own `###` heading in the session's block. Each bullet is a one-line summary;
+a category with nothing to report is omitted from that flush.
 
-### 1. Stuck duration
+### Conflict events
 
-An agent's `last_seen` exceeds the configured stall threshold without
-producing a new `agent.status`, `agent.artifact`, or `agent.intent`
-message. Records *how long* the agent was stuck and *what* the supervisor
-or auto-approver did to recover it (sweep, pane capture, no-op).
+One bullet per conflict the [broker conflict detector](conflict-detection.md)
+reported via a `[conflict-detector]`-tagged `agent.feedback` or
+`agent.question`, classified as:
 
-Trigger condition: `(now - agent.last_seen) > stall_threshold` AND the
-agent's most recent status is non-terminal (`done`, `verified`, `blocked`,
-and `committed` are excluded; those are intentional resting states).
+- **Forward conflicts** — two agents' `agent.intent` declarations overlap
+  (recorded with a `forward-conflict-…` label). Use these to spot specs that
+  were decomposed too coarsely (two parallel agents both expected to own the
+  same file).
+- **In-flight conflicts** — two agents are modifying the same file at once.
+- **Ownership violations** — an agent edited a file claimed by another
+  agent's active `agent.intent`. Records the violator, the owner, and the
+  file. Use these to spot agents that drifted out of their declared scope.
 
-### 2. Recovery-cycle count
+The detector's symmetric warnings (one per agent in the pair) collapse into a
+single bullet.
 
-How many auto-approve sweeps (or supervisor-driven `tmux send-keys`
-recovery actions) were needed before the agent published a fresh status
-message. A high count for a single agent across a run usually means the
-auto-approve allowlist is missing a prefix that agent's CLI keeps tripping
-on.
+### Where agents got stuck
 
-Trigger condition: incremented once per sweep dispatch against a pane;
-flushed when the agent finally publishes a non-stale message.
+Stuck duration: the time between an agent's `agent.blocked` (naming the agent
+it waits on in `from`) and its next `agent.artifact`. A block still open when
+the session ends is recorded as unresolved, with the duration measured up to
+shutdown.
 
-### 3. Forward conflicts
+### Recovery cycles
 
-Two agents declared `agent.intent` payloads with overlapping `files`
-before either committed. Records the agent pair and the overlapping paths.
-Use this category to spot specs that were decomposed too coarsely (two
-parallel agents both expected to own the same file).
+The recovery-cycle count: how many `agent.feedback` messages an agent received
+before its `agent.verified` (or before session end, if it never verified). A
+high count marks an agent that needed many correction rounds. Zero cycles is
+not recorded.
 
-Trigger condition: `[supervisor.conflict] warn_on_intent_overlap = true`
-AND the broker conflict detector emitted `[conflict-detector]`-tagged
-`agent.feedback` for the overlap.
+### Permission patterns
 
-### 4. In-flight conflicts
-
-Two agents have overlapping `modified_files` in active `agent.status` or
-`agent.artifact` payloads — the second agent committed (or is about to)
-while the first still considers the path active. Records the agent pair,
-the overlapping paths, and whether the conflict resolved within
-`[supervisor.conflict] window_seconds` or escalated to the supervisor
-inbox via `agent.question`.
-
-Trigger condition: any in-flight overlap (forward intent already missing
-or expired). Escalation is recorded separately when
-`window_seconds` elapses without resolution.
-
-### 5. Ownership violations
-
-An agent's `modified_files` includes a path the spec marks as owned by
-another change. Records the violating agent, the touched path, and the
-owning change ID. Use this category to spot agents that drifted out of
-their declared scope — usually a sign the spec body in `AGENTS.md` did
-not make the ownership boundary obvious enough.
-
-Trigger condition: ownership match against the OpenSpec / Markdown /
-Spec Kit ownership declaration parsed at session start.
+How often auto-approve cleared permission prompts for a given matched
+allowlist entry (each auto-approval publishes an `agent.status` with status
+`auto_approved`). An entry appears only once it reaches 5 hits, so the list
+shows which commands your agents trip on most.
 
 ## Qualitative signals (v0.6.0)
 
-The five categories above are *deterministic* — the broker derives them
+The four categories above are *deterministic* — the broker derives them
 mechanically from message traffic. As of v0.6.0 the supervisor also
 records *qualitative* signals: observations that require reasoning
 over the whole session, which only the supervisor LLM can make during its
@@ -246,57 +233,38 @@ JSON body.
 
 ## Sample Output
 
-A short illustrative excerpt (timestamps abbreviated for readability):
+A short illustrative excerpt (agent names, paths, and counts are made up;
+headings and bullet shapes are the ones the aggregator writes):
 
 ```markdown
-# Session learnings — paw-myproject
+## Session Learnings — 2026-05-13T14:30:05Z
 
-## 2026-05-13 14:30 — supervisor run start
+### Conflict events
+- forward-conflict-cross-spec: feat-api and feat-auth
+- in-flight-conflict: feat-api and feat-billing
+- ownership-violation: feat-api edited `src/auth/jwt.rs` owned by feat-auth
 
-### Stuck duration
+### Where agents got stuck
+- feat-api: blocked 11m12s waiting on feat-auth
+- feat-billing: blocked 4m03s waiting on feat-api (unresolved at session end)
 
-- 14:32:18 — feat-auth — stuck for 42s after permission prompt;
-  recovered by auto-approve sweep (`cargo test` allowlist hit).
-- 14:38:51 — feat-api — stuck for 118s on rebase conflict prompt;
-  recovered manually after supervisor `tmux send-keys`.
+### Recovery cycles
+- feat-auth: 3 feedback cycles before verifying
 
-### Recovery-cycle count
-
-- feat-auth — 3 sweeps before fresh status.
-- feat-api — 7 sweeps; investigate auto-approve prefixes.
-
-### Forward conflicts
-
-- feat-auth ↔ feat-api — overlap on `src/auth/middleware.rs`
-  (warned via agent.feedback; both retracted before commit).
-
-### In-flight conflicts
-
-- feat-api ↔ feat-billing — overlap on `src/router.rs`;
-  resolved by feat-billing pause within window_seconds.
-
-### Ownership violations
-
-- feat-api modified `src/auth/jwt.rs` (owned by add-auth);
-  blocked at agent.feedback; escalated to supervisor inbox.
+### Permission patterns
+- `cargo test` auto-approved 23 times
 
 ### Recurring failure shapes
-
-- import cycle between the auth and session modules: 3 instances
-  across feat-auth, feat-api, feat-billing
+- import cycle between the auth and session modules: 3 instances across feat-auth, feat-api, feat-billing
 
 ### Documentation gaps
-
-- agents are expected to run the linter before committing — add a
-  Conventions section to AGENTS.md naming the pre-commit lint step
-
-## 2026-05-13 16:05 — supervisor run start
+- agents run the linter before committing — add a Conventions section to AGENTS.md naming the pre-commit lint step
+## Session Learnings — 2026-05-13T16:05:41Z
 ...
 ```
 
-The exact section ordering and bullet shape may evolve across patch
-releases; the category set and the underlying triggers above are stable
-for the v0.5.0 release.
+The exact bullet wording may evolve across releases; the category set and
+the underlying triggers above are stable.
 
 ## Flush Cadence
 
@@ -310,7 +278,7 @@ flush_interval_seconds = 60
 
 A shorter interval makes the file fresher (useful when you want to
 `tail -f` the file in another terminal); a longer interval batches more
-entries per write. The file is also flushed at supervisor shutdown so
+entries per write. The file is also flushed once more at broker shutdown so
 nothing is lost between sessions even if the interval has not elapsed.
 
 See [Configuration → Learnings mode tuning](../configuration/README.md#learnings-mode-tuning)
@@ -354,10 +322,9 @@ Cross-cutting records (`conflict_event`, `permission_pattern`) carry no
 `branch_id` and land in the supervisor inbox. Every record is also retained
 in the broker's full message log (`/log`).
 
-The MCP `get_learnings()` tool consumes these records when the broker is
-running and falls back to parsing the Markdown file when it is not — the same
-structured shape either way, with a `source: "broker" | "file"` field telling
-you which path produced them.
+The MCP `get_learnings()` tool reads the Markdown file, not the broker: it
+returns each `###` section as a `{ category, entries }` record, and returns the
+four deterministic sections with empty `entries` when no file exists yet.
 
 Publication is controlled by the `broker_publish` knob (default `auto`,
 which follows `[broker] enabled`); see
