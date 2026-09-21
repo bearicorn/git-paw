@@ -47,7 +47,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
+
+use regex::Regex;
 
 use crate::broker::messages::{BrokerMessage, FeedbackPayload};
 use crate::config::{
@@ -1155,6 +1158,33 @@ pub struct DriveDeps<'a> {
     pub learnings: &'a mut dyn LearningSink,
     /// Performs branch-refresh git actions and worker notification.
     pub refresher: &'a mut dyn BranchRefresher,
+    /// Wedged nudges recorded this run, deduped on `(agent_id, command)` so a
+    /// persistently stuck line is escalated once rather than every sweep
+    /// (`idle-pane-nudge-submission`). Folded into the exit summary's
+    /// `escalations` by [`drive_loop`] before the outcome is derived — the
+    /// same place `drive-loop-exit-summary-truth` appends its `[unmerged]`
+    /// entries.
+    pub wedged: Vec<Escalation>,
+}
+
+impl DriveDeps<'_> {
+    /// Records `escalation` as wedged and returns whether it is NEW — the
+    /// first time this `(agent_id, command)` pair has wedged this run.
+    ///
+    /// Deduping here, rather than in each caller, is what keeps a
+    /// persistently stuck line from re-escalating to the broker on every
+    /// sweep: [`recover_stale_input`]'s callers only call
+    /// [`AlertSink::escalate`] when this returns `true`.
+    fn record_wedged(&mut self, escalation: Escalation) -> bool {
+        let is_new = !self
+            .wedged
+            .iter()
+            .any(|e| e.agent_id == escalation.agent_id && e.command == escalation.command);
+        if is_new {
+            self.wedged.push(escalation);
+        }
+        is_new
+    }
 }
 
 /// Tuning knobs for [`drive_loop`].
@@ -1290,6 +1320,13 @@ pub fn drive_loop(
         &config.supervisor_cli,
         &config.clis,
     ));
+    // The most recent `/status` snapshot, used to resolve a coding pane's
+    // nudge settle delay during the sweep — which runs BEFORE this tick's own
+    // fetch below (GP-16's sweep/fetch ordering stays as-is). Empty on the
+    // first tick, which resolves every agent to the config-driven agnostic
+    // default via `resolve_submit_delay_ms`'s empty-CLI fallback, same as the
+    // correction pass's pre-first-status handling.
+    let mut status_for_sweep: Vec<AgentStatusRow> = Vec::new();
 
     // The loop is an expression that breaks with the terminal `(outcome,
     // latest_status)`: every exit path assigns both, so there are no
@@ -1330,6 +1367,7 @@ pub fn drive_loop(
                 deps,
                 config,
                 &mut dedup,
+                &status_for_sweep,
             ) {
                 PaneSweepOutcome::None => {}
                 PaneSweepOutcome::Escalated(escalation) => escalations.push(escalation),
@@ -1353,6 +1391,7 @@ pub fn drive_loop(
         // dispatched below, including `observe_worker_messages`' hand-offs,
         // which used to run on a stale (pre-fetch) view.
         let latest_status = deps.status.fetch();
+        status_for_sweep.clone_from(&latest_status);
         // A branch that reached a terminal PASS leaves the correction cycle,
         // so an unrelated later failure starts from a fresh budget.
         correction.clear_completed(&latest_status);
@@ -1441,6 +1480,14 @@ pub fn drive_loop(
         deps.clock.sleep(config.poll_interval);
     };
     let mut outcome = outcome;
+
+    // --- Wedged nudges reach the summary (idle-pane-nudge-submission) -------
+    // A nudge or stranded line still present after every recovery attempt was
+    // escalated to the broker (deduped) as it happened; it now joins the exit
+    // summary's own escalation list, same as the `[unmerged]` entries appended
+    // just below — one list, so the summary is never silently shorter than
+    // what was actually escalated.
+    escalations.append(&mut deps.wedged);
 
     // --- Ref-derived merge truth (drive-loop-exit-summary-truth, D1) --------
     // Merged-ness is answered by git, once per coding branch, never by loop
@@ -1809,8 +1856,10 @@ enum PaneSweepOutcome {
 /// narration, or a resolved prompt scrolled into history — is left untouched;
 /// that is also what keeps pane 0 quiet. The one exception is an IDLE pane whose
 /// input box still holds an unsubmitted directive: that gets a follow-up `Enter`
-/// (and nothing else) via [`submit_buffered_input`], because no other part of the
-/// loop can see a stall that never became a prompt.
+/// and, if the text survives, the same clear+re-type+`Enter` recovery the nudge
+/// path uses, via [`submit_buffered_input`] — because no other part of the loop
+/// can see a stall that never became a prompt.
+#[allow(clippy::too_many_arguments)]
 fn sweep_pane(
     ctx: SweepContext<'_>,
     pane: &PaneInfo,
@@ -1819,6 +1868,7 @@ fn sweep_pane(
     deps: &mut DriveDeps<'_>,
     config: &DriveConfig,
     dedup: &mut DedupWindow,
+    status: &[AgentStatusRow],
 ) -> PaneSweepOutcome {
     let session = ctx.session;
     let capture = deps.capturer.capture(session, pane.pane_index);
@@ -1844,12 +1894,23 @@ fn sweep_pane(
     }
 
     if !is_live_prompt(&capture) {
+        // The agent's own broker-reported CLI resolves its nudge settle delay
+        // ([`resolve_submit_delay_ms`]), the same resolution the correction
+        // pass uses — an agent with no status row yet falls back to the
+        // config-driven agnostic default via an empty CLI name.
+        let cli = status
+            .iter()
+            .find(|r| r.agent_id == agent_id)
+            .map_or("", |r| r.cli.as_str());
+        let settle_delay = Duration::from_millis(resolve_submit_delay_ms(cli, &config.clis));
         let _ = submit_buffered_input(
-            deps.capturer,
-            deps.dispatcher,
+            deps,
+            ctx.repo_root,
             session,
             pane.pane_index,
+            agent_id,
             &capture,
+            settle_delay,
         );
         return PaneSweepOutcome::None;
     }
@@ -2191,7 +2252,8 @@ fn send_reengagement(
 }
 
 /// Types `text` into `pane_index`, verifies it submitted, and recovers a
-/// stale input line — the drive loop's only actuator, made reliable (GP-15).
+/// stale input line — the drive loop's only actuator, made reliable (GP-15,
+/// then made reachable in the field by `idle-pane-nudge-submission`).
 ///
 /// Gated on a fresh capture taken immediately before the send satisfying
 /// `ready` — the TOCTOU guard every free-text path shares, so no caller can
@@ -2201,26 +2263,28 @@ fn send_reengagement(
 /// mid-response ([`orchestrator_ready`]).
 ///
 /// The whole operation — initial send through every recovery attempt — runs
-/// under `pane_index`'s exclusive [`PaneClaim`], so a `C-u` this function
-/// sends is always clearing a line THIS call itself just typed, never
-/// agent-authored input another approver is mid-way through (task 1.3): a
-/// pane already claimed by a concurrent approver is skipped this tick
-/// ([`NudgeOutcome::Skipped`]) rather than waited on, matching every other
-/// claim-gated send in this module.
+/// under `pane_index`'s exclusive [`PaneClaim`], so a `C-u` this function (or
+/// [`recover_stale_input`] on its behalf) sends is always clearing a line
+/// THIS call itself just typed, never agent-authored input another approver
+/// is mid-way through: a pane already claimed by a concurrent approver is
+/// skipped this tick ([`NudgeOutcome::Skipped`]) rather than waited on,
+/// matching every other claim-gated send in this module.
 ///
 /// The send-verify-recover sequence:
 /// 1. Send the text ([`KeyDispatcher::send_text`], literal), wait
 ///    `settle_delay` (the per-CLI settle delay [`resolve_submit_delay_ms`]
 ///    resolves, the same resolver the boot prompt uses), then send a
 ///    SEPARATE `Enter` — never a single combined text+Enter.
-/// 2. Capture the pane and check whether `text` is still sitting on the input
-///    box ([`input_box_text`]). If it is not, the nudge is
-///    [`NudgeOutcome::Delivered`].
-/// 3. Otherwise recover: clear the line (`C-u`), re-send the text, wait
-///    `settle_delay`, send `Enter` again — up to [`NUDGE_RECOVERY_ATTEMPTS`]
-///    times. A bare second `Enter` alone is a proven no-op against a stale
-///    input line, so recovery always re-establishes the input rather than
-///    repeating just the `Enter`.
+/// 2. Wait `settle_delay` again, allowing the pane to redraw, then capture
+///    and judge by the input box's content via [`nudge_submitted`] — never
+///    by exact equality with `text` — so a wrapped rendering (whose sigil
+///    row shows only the start of a longer send) is correctly recognised as
+///    still present rather than misreported delivered.
+/// 3. Otherwise recover via [`recover_stale_input`]: clear the line (`C-u`),
+///    re-send the text, wait `settle_delay`, send `Enter` again — up to
+///    [`NUDGE_RECOVERY_ATTEMPTS`] times. A bare second `Enter` alone is a
+///    proven no-op against a stale input line, so recovery always
+///    re-establishes the input rather than repeating just the `Enter`.
 /// 4. A pane still showing the text after every attempt is
 ///    [`NudgeOutcome::Wedged`] — escalated to the broker
 ///    ([`AlertSink::escalate`]) rather than retried further.
@@ -2244,64 +2308,168 @@ fn send_nudge(
     }
 
     let [body, submit] = nudge_keystrokes(text);
-    for attempt in 0..=NUDGE_RECOVERY_ATTEMPTS {
-        if attempt > 0 {
-            // Recovery: clear the stale line THIS call put there (never
-            // reached on agent-authored input — the claim above is what
-            // makes that guarantee hold) before re-typing.
-            deps.dispatcher
-                .send_key(session, pane_index, "C-u")
-                .map_err(|e| PawError::TmuxError(format!("send-keys C-u failed: {e}")))?;
-        }
+    deps.dispatcher
+        .send_text(session, pane_index, &body)
+        .map_err(|e| PawError::TmuxError(format!("send-keys -l failed: {e}")))?;
+    deps.clock.sleep(settle_delay);
+    deps.dispatcher
+        .send_key(session, pane_index, &submit)
+        .map_err(|e| PawError::TmuxError(format!("send-keys {submit} failed: {e}")))?;
+    deps.clock.sleep(settle_delay);
+
+    let verify = deps.capturer.capture(session, pane_index);
+    if nudge_submitted(&verify, text) {
+        return Ok(NudgeOutcome::Delivered);
+    }
+    recover_stale_input(deps, session, pane_index, agent_id, text, settle_delay)
+}
+
+/// Whether a post-`Enter` capture shows `text` already submitted, judging by
+/// the input box's content rather than exact equality with `text` (D1).
+///
+/// Submitted when the pane has left idle (a mid-response marker is showing)
+/// or the input box is empty or holds content this call did not type — never
+/// `C-u`ing a line the loop cannot account for. Still PRESENT only when the
+/// box is non-empty and either its sigil row is a prefix of `text` (a
+/// wrapped rendering's sigil row shows only the start of a longer send, so
+/// the FULL text still starts with it) or the box shows a paste-buffer
+/// placeholder matching the profile's `paste_buffer_pattern`.
+fn nudge_submitted(verify: &str, text: &str) -> bool {
+    if pane_is_mid_response(verify) {
+        return true;
+    }
+    let Some(rows) = input_box_rows(verify) else {
+        return true; // no recognised box (or a numbered option) — unknown CLI, treat as submitted
+    };
+    let sigil_row = rows.first().map_or("", String::as_str);
+    if sigil_row.is_empty() {
+        return true; // empty box
+    }
+    !(text.starts_with(sigil_row) || input_box_shows_placeholder(verify))
+}
+
+/// Runs the bounded clear (`C-u`) + re-type + `Enter` recovery loop against
+/// `pane_index`'s input box, assuming the caller already holds the pane's
+/// exclusive [`PaneClaim`] and has already confirmed `text` is still
+/// present.
+///
+/// Shared by [`send_nudge`] (after its own initial plain send) and
+/// [`submit_buffered_input`] (after its own initial lone `Enter`) — the two
+/// callers differ only in what they tried before calling this, never in how
+/// recovery itself behaves (design D4).
+fn recover_stale_input(
+    deps: &mut DriveDeps<'_>,
+    session: &str,
+    pane_index: usize,
+    agent_id: &str,
+    text: &str,
+    settle_delay: Duration,
+) -> Result<NudgeOutcome, PawError> {
+    for _ in 0..NUDGE_RECOVERY_ATTEMPTS {
+        // Clear the stale line a prior step (this function's own earlier
+        // iteration, or the caller's initial send/`Enter`) put there — never
+        // agent-authored input another approver is mid-way through, since
+        // the caller holds the pane's exclusive claim throughout.
         deps.dispatcher
-            .send_text(session, pane_index, &body)
+            .send_key(session, pane_index, "C-u")
+            .map_err(|e| PawError::TmuxError(format!("send-keys C-u failed: {e}")))?;
+        deps.dispatcher
+            .send_text(session, pane_index, text)
             .map_err(|e| PawError::TmuxError(format!("send-keys -l failed: {e}")))?;
         deps.clock.sleep(settle_delay);
         deps.dispatcher
-            .send_key(session, pane_index, &submit)
-            .map_err(|e| PawError::TmuxError(format!("send-keys {submit} failed: {e}")))?;
+            .send_key(session, pane_index, "Enter")
+            .map_err(|e| PawError::TmuxError(format!("send-keys Enter failed: {e}")))?;
+        deps.clock.sleep(settle_delay);
 
         let verify = deps.capturer.capture(session, pane_index);
-        if input_box_text(&verify).as_deref() != Some(text) {
+        if nudge_submitted(&verify, text) {
             return Ok(NudgeOutcome::Delivered);
         }
     }
 
-    deps.alerts.escalate(&Escalation {
+    let escalation = Escalation {
         agent_id: agent_id.to_string(),
         verdict: NUDGE_WEDGED_VERDICT.to_string(),
         command: one_line_capped(text),
-    });
+    };
+    // Escalate to the broker only the first time this exact line wedges —
+    // deduped per `(agent_id, command)` — so a persistently stuck line is
+    // reported once, not every ~15s sweep.
+    if deps.record_wedged(escalation.clone()) {
+        deps.alerts.escalate(&escalation);
+    }
     Ok(NudgeOutcome::Wedged)
 }
 
-/// Extracts the text sitting in a pane's input box, or `None` when the capture
-/// shows no input box or the box is empty.
+/// Reads a pane's input box as its display rows, in order: the sigil row's
+/// text first, then any following `│ … │` continuation rows (no sigil) up to
+/// the box's bottom border. Returns `None` when the capture shows no input
+/// box, the box is empty, or its sigil row is a numbered prompt option (never
+/// read as buffered input, so a boxed prompt option cannot be mistaken for a
+/// stranded directive).
 ///
 /// The input box is the bordered line carrying the CLI's prompt sigil (`│ > …`)
 /// — the same landmark the embedded Claude Code profile's readiness markers
 /// (`crate::config::claude_prompt_profile`) use to recognise a launched CLI.
-/// The LAST such line wins, because a pane's live
-/// input box is always its most recent one. A numbered option line is never
-/// read as buffered input, so a boxed prompt option cannot be mistaken for a
-/// stranded directive.
+/// The LAST such line wins, because a pane's live input box is always its
+/// most recent one. A wrapped rendering's continuation rows carry no sigil of
+/// their own, so they are read by position — every `│ … │` line immediately
+/// below the sigil row — rather than by matching a sigil again.
 ///
 /// The sigil set comes from the embedded profile's `input_sigils`
 /// (`cli-prompt-profiles` capability) rather than a compiled constant.
-fn input_box_text(capture: &str) -> Option<String> {
+fn input_box_rows(capture: &str) -> Option<Vec<String>> {
     let sigils = &claude_prompt_profile().input_sigils;
-    let text = capture.lines().rev().find_map(|raw| {
+    let lines: Vec<&str> = capture.lines().collect();
+    let (sigil_idx, sigil_text) = lines.iter().enumerate().rev().find_map(|(i, raw)| {
         let inner = raw.trim().strip_prefix('│')?.trim_end_matches('│').trim();
         let text = sigils
             .iter()
             .find_map(|sigil| inner.strip_prefix(sigil.as_str()))?
             .trim();
-        Some(text.to_string())
+        Some((i, text.to_string()))
     })?;
-    let mut chars = text.chars();
+
+    let mut chars = sigil_text.chars();
     let is_option = matches!(chars.next(), Some(c) if c.is_ascii_digit())
         && matches!(chars.next(), Some('.' | ')'));
-    (!text.is_empty() && !is_option).then_some(text)
+    if sigil_text.is_empty() || is_option {
+        return None;
+    }
+
+    let mut rows = vec![sigil_text];
+    for raw in &lines[sigil_idx + 1..] {
+        let Some(inner) = raw.trim().strip_prefix('│') else {
+            break; // the box's bottom border, or the box has ended
+        };
+        rows.push(inner.trim_end_matches('│').trim().to_string());
+    }
+    Some(rows)
+}
+
+/// Extracts the text sitting in a pane's input box as a single
+/// whitespace-joined string — the sigil row plus any continuation rows, in
+/// display order — or `None` when [`input_box_rows`] finds no box.
+fn input_box_text(capture: &str) -> Option<String> {
+    Some(input_box_rows(capture)?.join(" "))
+}
+
+/// Compiled regex for the embedded profile's `paste_buffer_pattern`
+/// (`cli-prompt-profiles` capability).
+fn paste_buffer_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(&claude_prompt_profile().paste_buffer_pattern)
+            .expect("embedded paste-buffer pattern is valid")
+    })
+}
+
+/// Whether `capture`'s input box shows a paste-buffer placeholder — e.g.
+/// `Pasted text #1` — matching the resolved profile's `paste_buffer_pattern`,
+/// rather than text that can be re-typed verbatim.
+fn input_box_shows_placeholder(capture: &str) -> bool {
+    input_box_text(capture).is_some_and(|text| paste_buffer_regex().is_match(&text))
 }
 
 /// Whether `capture` shows an IDLE pane holding unsubmitted text in its input
@@ -2320,34 +2488,70 @@ fn pane_has_buffered_input(capture: &str) -> bool {
         && input_box_text(capture).is_some()
 }
 
-/// Submits a directive stranded in an idle pane's input box by sending a
-/// follow-up `Enter`, the same keystroke [`nudge_keystrokes`] uses to flush a
-/// paste buffer.
+/// Submits a directive stranded in an idle pane's input box: a follow-up
+/// `Enter` first (the same keystroke [`nudge_keystrokes`] uses to flush a
+/// swallowed-`Enter` paste), then — if the text survives — the same bounded
+/// clear (`C-u`) + re-type + `Enter` recovery the nudge path uses
+/// ([`recover_stale_input`]), re-typing the text read from the WHOLE input
+/// box (`idle-pane-nudge-submission`).
 ///
-/// Returns `Ok(true)` when the `Enter` went out and `Ok(false)` otherwise. The
-/// shape is checked twice: once on `swept`, the capture the sweep already took
-/// (so a pane with nothing buffered costs no extra `capture-pane`), and again on
-/// a fresh capture taken immediately before the send — the same TOCTOU
-/// discipline [`send_approval`] applies, so a pane that started responding or
-/// raised a prompt in between receives no stray keystroke. No text is ever
-/// typed, so the pane-0 no-pollution rule holds for the supervisor's own pane
-/// too.
+/// Returns `Ok(true)` when any keystroke went out and `Ok(false)` when
+/// nothing was buffered. The shape is checked twice before the `Enter`: once
+/// on `swept`, the capture the sweep already took (so a pane with nothing
+/// buffered costs no extra `capture-pane`), and again on a fresh capture
+/// taken immediately before the send — the same TOCTOU discipline
+/// [`send_approval`] applies, so a pane that started responding or raised a
+/// prompt in between receives no stray keystroke. The `Enter`-first step
+/// types no free text, so it runs without the pane's claim, preserving
+/// today's behaviour for the case it alone fixes (the pane-0 no-pollution
+/// rule holds, since nothing is typed); recovery, which DOES type free text,
+/// runs only under the pane's exclusive [`PaneClaim`] — a concurrent approver
+/// holding it defers recovery to the next sweep, with the `Enter` above still
+/// having gone out. A paste-buffer placeholder is never cleared: the loop
+/// escalates it as wedged instead of `C-u`ing content it cannot restore.
 fn submit_buffered_input(
-    capturer: &dyn PaneCapture,
-    dispatcher: &mut dyn KeyDispatcher,
+    deps: &mut DriveDeps<'_>,
+    repo_root: &Path,
     session: &str,
     pane_index: usize,
+    agent_id: &str,
     swept: &str,
+    settle_delay: Duration,
 ) -> Result<bool, PawError> {
     if !pane_has_buffered_input(swept)
-        || !pane_has_buffered_input(&capturer.capture(session, pane_index))
+        || !pane_has_buffered_input(&deps.capturer.capture(session, pane_index))
     {
         return Ok(false);
     }
-    dispatcher
+    deps.dispatcher
         .send_key(session, pane_index, "Enter")
         .map_err(|e| PawError::TmuxError(format!("send-keys Enter failed: {e}")))?;
-    Ok(true)
+    deps.clock.sleep(settle_delay);
+
+    let verify = deps.capturer.capture(session, pane_index);
+    if !pane_has_buffered_input(&verify) {
+        return Ok(true); // the Enter alone submitted it
+    }
+
+    let Some(_claim) = PaneClaim::try_acquire(repo_root, pane_index) else {
+        return Ok(true); // another approver owns this pane — retry next sweep
+    };
+    if input_box_shows_placeholder(&verify) {
+        let escalation = Escalation {
+            agent_id: agent_id.to_string(),
+            verdict: NUDGE_WEDGED_VERDICT.to_string(),
+            command: one_line_capped(&input_box_text(&verify).unwrap_or_default()),
+        };
+        if deps.record_wedged(escalation.clone()) {
+            deps.alerts.escalate(&escalation);
+        }
+        return Ok(true);
+    }
+    let Some(text) = input_box_text(&verify) else {
+        return Ok(true); // cleared between the check above and the claim
+    };
+    recover_stale_input(deps, session, pane_index, agent_id, &text, settle_delay)
+        .map(NudgeOutcome::was_sent)
 }
 
 /// Whether `capture` shows a pane mid-response — the CLI is mid-turn with its
@@ -2981,6 +3185,7 @@ pub fn run_drive_loop(
         alerts: &mut alerts,
         learnings: &mut learnings,
         refresher: &mut refresher,
+        wedged: Vec::new(),
     };
 
     let summary = drive_loop(session, repo_root, agents, &mut deps, &config, &instance);
@@ -3797,6 +4002,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             whitelist: vec!["cargo test".to_string()],
@@ -3812,7 +4018,7 @@ mod tests {
         );
     }
 
-    // --- idle pane with buffered input (D) ----------------------------------
+    // --- input-box reading: wrapped rows + placeholder (task 1) ------------
 
     /// An idle pane sitting at its input box with `text` unsubmitted.
     fn idle_input_box(text: &str) -> String {
@@ -3820,6 +4026,71 @@ mod tests {
             "● Ran tool\n╭────────────────────────────────╮\n│ > {text}                       │\n╰────────────────────────────────╯\n  ? for shortcuts"
         )
     }
+
+    /// A two-row wrapped input box: the sigil row carries only `first`,
+    /// a continuation row (no sigil) carries `second`.
+    fn wrapped_input_box(first: &str, second: &str) -> String {
+        format!(
+            "╭──────────────────────────────────────╮\n│ > {first}      │\n│   {second}      │\n╰──────────────────────────────────────╯"
+        )
+    }
+
+    #[test]
+    fn input_box_rows_single_row_is_unchanged() {
+        let capture = idle_input_box("please continue");
+        assert_eq!(
+            input_box_rows(&capture),
+            Some(vec!["please continue".to_string()])
+        );
+        assert_eq!(
+            input_box_text(&capture),
+            Some("please continue".to_string())
+        );
+    }
+
+    /// Spec scenario "A wrapped nudge still on the input line is recognised as
+    /// unsubmitted": the continuation row carries no sigil, and
+    /// `input_box_rows` reads it in order anyway.
+    #[test]
+    fn input_box_rows_wrapped_two_row_box_joins_in_order() {
+        let capture = wrapped_input_box(
+            "please review the changes and",
+            "continue with the next task",
+        );
+        assert_eq!(
+            input_box_rows(&capture),
+            Some(vec![
+                "please review the changes and".to_string(),
+                "continue with the next task".to_string(),
+            ])
+        );
+        assert_eq!(
+            input_box_text(&capture),
+            Some("please review the changes and continue with the next task".to_string())
+        );
+    }
+
+    /// Spec scenario "A paste-buffer placeholder is recognised as unsubmitted".
+    #[test]
+    fn input_box_shows_placeholder_is_detected() {
+        let placeholder = idle_input_box("[Pasted text #1 +5 lines]");
+        assert!(input_box_shows_placeholder(&placeholder));
+        assert!(!input_box_shows_placeholder(&idle_input_box(
+            "please continue"
+        )));
+    }
+
+    #[test]
+    fn input_box_rows_excludes_a_numbered_option_line() {
+        assert_eq!(input_box_rows("│ ❯ 1. Yes │"), None);
+    }
+
+    #[test]
+    fn input_box_rows_is_none_for_an_unrecognised_shape() {
+        assert_eq!(input_box_rows("standing by...\n$ "), None);
+    }
+
+    // --- idle pane with buffered input (D) ----------------------------------
 
     /// Spec scenario "A buffered directive on an idle pane is submitted".
     #[test]
@@ -3850,11 +4121,15 @@ mod tests {
         );
     }
 
-    /// End-to-end through the loop: an idle pane holding buffered text receives
-    /// exactly one `Enter` and nothing else — no free text, so pane 0's
-    /// no-pollution rule is untouched.
-    #[test]
-    fn loop_submits_a_stranded_directive_on_an_idle_pane() {
+    /// Builds a one-agent, single-pane `drive_loop_in_tmp` run against
+    /// `capturer` and `status`, returning the dispatcher events and the
+    /// recorded alerts. Shared by the idle-pane stranded-input scenarios
+    /// below (task 3), which differ only in capture sequence and completion
+    /// schedule.
+    fn run_stranded_idle_pane_case(
+        capturer: &dyn PaneCapture,
+        status: &ScriptedStatus,
+    ) -> (Vec<(usize, String)>, RecordingAlerts) {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
@@ -3866,10 +4141,7 @@ mod tests {
                 pane_current_path: "/repo-feat-a".to_string(),
             }],
         };
-        let capturer = FakeCapturer::new(&[(2, &idle_input_box("/opsx:apply my-change"))]);
         let mut dispatcher = RecordingDispatcher::default();
-        // Complete on the first poll so exactly one sweep runs.
-        let status = ScriptedStatus::new(vec![vec![row("supervisor", "done")]]);
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
@@ -3877,15 +4149,16 @@ mod tests {
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
-            capturer: &capturer,
+            capturer,
             dispatcher: &mut dispatcher,
-            status: &status,
+            status,
             messages: &messages,
             clock: &clock,
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -3893,15 +4166,95 @@ mod tests {
             ..DriveConfig::default()
         };
         drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
+        (dispatcher.events, alerts)
+    }
+
+    /// Spec scenario "A buffered directive on an idle pane is submitted": the
+    /// follow-up `Enter` alone clears the box, so no recovery keystrokes
+    /// follow and no free text is ever typed (pane 0's no-pollution rule).
+    #[test]
+    fn loop_submits_a_stranded_directive_on_an_idle_pane() {
+        let stuck = idle_input_box("/opsx:apply my-change");
+        let capturer = SequencedCapturer::new(&[&stuck, &stuck, IDLE_PANE]);
+        let (events, _alerts) = run_stranded_idle_pane_case(
+            &capturer,
+            &ScriptedStatus::new(vec![vec![row("supervisor", "done")]]),
+        );
         assert_eq!(
-            dispatcher.events,
+            events,
             vec![(2, "Enter".to_string())],
             "only the submitting Enter, never free text"
         );
-        assert!(
-            dispatcher.literal_sends.is_empty(),
-            "nothing is typed into the pane"
+    }
+
+    /// Spec scenario "A stale line that survives the Enter is cleared,
+    /// re-typed, and submitted": the box still shows the text after the
+    /// follow-up `Enter`, so the shared recovery helper clears it (`C-u`),
+    /// re-types the WHOLE box's text, and sends `Enter` again.
+    #[test]
+    fn loop_recovers_a_stale_line_on_an_idle_pane() {
+        let stuck = idle_input_box("/opsx:apply my-change");
+        let capturer = SequencedCapturer::new(&[&stuck, &stuck, &stuck, IDLE_PANE]);
+        let (events, alerts) = run_stranded_idle_pane_case(
+            &capturer,
+            &ScriptedStatus::new(vec![vec![row("supervisor", "done")]]),
         );
+        assert_eq!(
+            events,
+            vec![
+                (2, "Enter".to_string()),
+                (2, "C-u".to_string()),
+                (2, "/opsx:apply my-change".to_string()),
+                (2, "Enter".to_string()),
+            ],
+            "the Enter alone does not clear a genuinely stale line, so \
+             recovery clears, re-types the whole box, and submits"
+        );
+        assert!(alerts.escalations.is_empty(), "recovered — no escalation");
+    }
+
+    /// Spec scenario "A paste-buffer placeholder is never cleared": a
+    /// placeholder surviving the `Enter` is never `C-u`'d (it cannot be
+    /// re-typed verbatim) — the pane is escalated as wedged instead.
+    #[test]
+    fn loop_escalates_a_placeholder_stranded_on_an_idle_pane() {
+        let placeholder = idle_input_box("[Pasted text #1 +5 lines]");
+        let capturer = SequencedCapturer::new(&[&placeholder, &placeholder, &placeholder]);
+        let (events, alerts) = run_stranded_idle_pane_case(
+            &capturer,
+            &ScriptedStatus::new(vec![vec![row("supervisor", "done")]]),
+        );
+        assert_eq!(
+            events,
+            vec![(2, "Enter".to_string())],
+            "a placeholder is never cleared with C-u"
+        );
+        assert_eq!(alerts.escalations.len(), 1, "escalated as wedged");
+        assert_eq!(alerts.escalations[0].verdict, NUDGE_WEDGED_VERDICT);
+    }
+
+    /// Spec scenario "A persistently stranded line is escalated once": the
+    /// same stuck line surviving every recovery attempt on two successive
+    /// sweeps records exactly one broker escalation, not one per sweep —
+    /// otherwise a wave with a wedged idle pane re-floods the broker every
+    /// ~15s exactly like the bug this change fixes for the nudge path.
+    #[test]
+    fn persistently_stranded_idle_pane_escalates_once_across_two_sweeps() {
+        let stuck = idle_input_box("/opsx:apply my-change");
+        // FakeCapturer never changes, so every capture across both sweeps
+        // shows the same stuck line — a genuinely wedged pane.
+        let capturer = FakeCapturer::new(&[(2, &stuck)]);
+        let status = ScriptedStatus::new(vec![
+            vec![row("feat-a", "working")],  // tick 1: not yet complete
+            vec![row("supervisor", "done")], // tick 2: complete
+        ]);
+        let (_events, alerts) = run_stranded_idle_pane_case(&capturer, &status);
+        assert_eq!(
+            alerts.escalations.len(),
+            1,
+            "deduped across two sweeps, not one escalation per sweep"
+        );
+        assert_eq!(alerts.escalations[0].verdict, NUDGE_WEDGED_VERDICT);
     }
 
     // --- dedup (task 5.1/5.2) ----------------------------------------------
@@ -4001,6 +4354,69 @@ mod tests {
         );
     }
 
+    // --- wedged nudges reach the summary, once (task 4) ---------------------
+
+    /// Spec scenario "A wedged nudge appears in the exit summary", exercised
+    /// through the orchestration-nudge path (`hand_to_orchestrator`): a nudge
+    /// still wedged after every recovery attempt is folded into
+    /// `DriveSummary.escalations` — which upgrades an otherwise-`Completed`
+    /// wave to `escalated-for-review`, fixing the 0.16.0 field bug where a
+    /// wedged nudge (broker-only) left the printed summary reading
+    /// `0 escalations`.
+    #[test]
+    fn a_wedged_orchestrator_hand_off_reaches_the_summary() {
+        let panes = vec![PaneInfo {
+            pane_index: 0,
+            pane_current_path: "/repo".to_string(),
+        }];
+        let enumerator = FakeEnumerator { panes };
+        // Tick 1: the sweep sees a clean idle pane (nothing buffered, so
+        // `submit_buffered_input` does nothing), then the orchestration nudge
+        // fires and finds a paste-buffer placeholder on every verify —
+        // unreadable, so recovery runs to exhaustion and wedges. Tick 2: a
+        // clean idle pane again, and the wave completes before another nudge
+        // is due.
+        let placeholder = idle_input_box("[Pasted text #1 +5 lines]");
+        let capturer = SequencedCapturer::new(&[
+            IDLE_PANE,    // tick 1 sweep: nothing buffered
+            IDLE_PANE,    // tick 1 nudge ready-check
+            &placeholder, // tick 1 nudge initial verify: still present
+            &placeholder, // tick 1 recovery attempt 1 verify: still present
+            &placeholder, // tick 1 recovery attempt 2 verify: still present (wedged)
+            IDLE_PANE,    // tick 2 sweep: nothing buffered
+        ]);
+        let mut dispatcher = RecordingDispatcher::default();
+        let status = ScriptedStatus::new(vec![vec![], vec![row("supervisor", "done")]]);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
+        let messages = ScriptedMessages::none();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            refresher: &mut refresher,
+            wedged: Vec::new(),
+        };
+        let config = DriveConfig {
+            poll_interval: Duration::from_secs(1),
+            orchestration_nudge_interval: Duration::ZERO,
+            heartbeat: Duration::from_hours(1),
+            ..DriveConfig::default()
+        };
+        let summary = drive_loop_in_tmp("paw-test", &[], &mut deps, &config);
+        assert_eq!(summary.outcome, DriveOutcome::EscalatedForReview);
+        assert_eq!(summary.escalations.len(), 1, "wedge reported exactly once");
+        assert_eq!(summary.escalations[0].verdict, NUDGE_WEDGED_VERDICT);
+    }
+
     // --- GP-05: exit summary resolves terminal state (unattended-wave-lifecycle) --
 
     #[test]
@@ -4050,6 +4466,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             poll_interval: Duration::from_millis(0),
@@ -4118,6 +4535,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             whitelist: vec!["cargo test".to_string()],
@@ -4176,6 +4594,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             heartbeat: Duration::from_hours(1),
@@ -4281,6 +4700,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -4344,6 +4764,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             whitelist: vec!["cargo test".to_string()],
@@ -4422,6 +4843,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             whitelist: vec!["cargo test".to_string()],
@@ -4512,6 +4934,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             whitelist: vec!["cargo build".to_string()],
@@ -4570,6 +4993,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             whitelist: vec!["cargo test".to_string()],
@@ -4615,6 +5039,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -4664,6 +5089,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -4715,6 +5141,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             whitelist: vec!["cargo test".to_string()],
@@ -4767,6 +5194,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             whitelist: vec!["cargo test".to_string()],
@@ -4939,6 +5367,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -5051,6 +5480,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let repo = tempfile::tempdir().expect("temp repo root");
         let outcome = send_reengagement(
@@ -5108,6 +5538,7 @@ mod tests {
                 alerts: &mut alerts,
                 learnings: &mut learnings,
                 refresher: &mut refresher,
+                wedged: Vec::new(),
             };
             send_reengagement(
                 &mut deps,
@@ -5204,6 +5635,95 @@ mod tests {
         assert_eq!(alerts.escalations[0].agent_id, "feat-a");
     }
 
+    /// Spec scenario "A wrapped nudge still on the input line is recognised
+    /// as unsubmitted": the post-`Enter` capture shows only the sigil row's
+    /// prefix of a longer send, plus a continuation row with no sigil — still
+    /// PRESENT, not delivered, because the full text starts with that prefix.
+    #[test]
+    fn wrapped_nudge_still_present_triggers_recovery_and_delivers() {
+        let text = "please review the changes and continue with the next task";
+        let wrapped = wrapped_input_box(
+            "please review the changes and",
+            "continue with the next task",
+        );
+        let capturer = SequencedCapturer::new(&[IDLE_PANE, &wrapped, IDLE_PANE]);
+        let (outcome, dispatcher, alerts, _elapsed) =
+            call_send_reengagement(&capturer, text, Duration::ZERO);
+        assert_eq!(outcome, NudgeOutcome::Delivered);
+        assert_eq!(
+            dispatcher.events,
+            vec![
+                (2, text.to_string()),
+                (2, "Enter".to_string()),
+                (2, "C-u".to_string()),
+                (2, text.to_string()),
+                (2, "Enter".to_string()),
+            ],
+            "a wrapped rendering is recognised as still present and \
+             recovered, never misreported delivered merely because the \
+             sigil row differs from the full text"
+        );
+        assert!(alerts.escalations.is_empty());
+    }
+
+    /// Spec scenario "A paste-buffer placeholder is recognised as
+    /// unsubmitted".
+    #[test]
+    fn placeholder_in_input_box_triggers_recovery() {
+        let text = "please continue";
+        let placeholder = idle_input_box("[Pasted text #1 +5 lines]");
+        let capturer = SequencedCapturer::new(&[IDLE_PANE, &placeholder, IDLE_PANE]);
+        let (outcome, dispatcher, _alerts, _elapsed) =
+            call_send_reengagement(&capturer, text, Duration::ZERO);
+        assert_eq!(outcome, NudgeOutcome::Delivered);
+        assert_eq!(
+            dispatcher.events,
+            vec![
+                (2, text.to_string()),
+                (2, "Enter".to_string()),
+                (2, "C-u".to_string()),
+                (2, text.to_string()),
+                (2, "Enter".to_string()),
+            ],
+            "a paste-buffer placeholder is recognised as still present and \
+             recovered"
+        );
+    }
+
+    /// Spec scenario "An empty input box means the nudge was submitted": an
+    /// actual empty input box (a sigil row with no text), not merely the
+    /// absence of a box, is delivered with no extra keystrokes.
+    #[test]
+    fn empty_input_box_delivers_with_no_extra_keys() {
+        let capturer = FakeCapturer::new(&[(2, &idle_input_box(""))]);
+        let (outcome, dispatcher, _alerts, _elapsed) =
+            call_send_reengagement(&capturer, "please continue", Duration::ZERO);
+        assert_eq!(outcome, NudgeOutcome::Delivered);
+        assert_eq!(
+            dispatcher.events,
+            vec![(2, "please continue".to_string()), (2, "Enter".to_string())],
+            "an already-empty box needs no recovery keystrokes"
+        );
+    }
+
+    /// Spec scenario "Verification waits for the pane to redraw": the verify
+    /// capture is taken only after sleeping `settle_delay` again following
+    /// the `Enter`, so the injected clock records two sleeps per attempt —
+    /// one for the text→Enter wait, one for the Enter→verify wait.
+    #[test]
+    fn verify_sleeps_the_settle_delay_after_enter_too() {
+        let capturer = FakeCapturer::new(&[(2, "standing by...\n$ ")]);
+        let settle_delay = Duration::from_millis(200);
+        let (outcome, _dispatcher, _alerts, elapsed) =
+            call_send_reengagement(&capturer, "please continue", settle_delay);
+        assert_eq!(outcome, NudgeOutcome::Delivered);
+        assert_eq!(
+            elapsed,
+            (settle_delay + Duration::from_millis(1)) * 2,
+            "one settle sleep before Enter and one more before the verify capture"
+        );
+    }
+
     /// Spec scenario "Disabled loopback preserves today's behavior": with
     /// `auto_loopback` off (the default, and every config with no
     /// `[supervisor.correction]` table) the same gate failure sends nothing.
@@ -5237,6 +5757,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         // `DriveConfig::default()` carries `CorrectionConfig::default()`, i.e.
         // `auto_loopback = false` — the absent-table resolution.
@@ -5294,6 +5815,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -5354,6 +5876,7 @@ mod tests {
                 alerts: &mut alerts,
                 learnings: &mut learnings,
                 refresher: &mut refresher,
+                wedged: Vec::new(),
             };
             let config = DriveConfig {
                 poll_interval: Duration::from_secs(1),
@@ -5580,6 +6103,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -5639,6 +6163,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             whitelist: vec!["cargo test".to_string()],
@@ -5721,6 +6246,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         drive_loop_in_tmp("paw-test", agents, &mut deps, config);
         (dispatcher, alerts)
@@ -5758,6 +6284,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let summary = drive_loop_in_tmp("paw-test", agents, &mut deps, config);
         (summary, dispatcher)
@@ -6450,6 +6977,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -6752,6 +7280,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
 
         refresh_branches_after_merge(
@@ -6832,6 +7361,7 @@ mod tests {
             alerts: &mut alerts,
             learnings: &mut learnings,
             refresher: &mut refresher,
+            wedged: Vec::new(),
         };
 
         let pre_head = capture_real_git(&worktree_path, &["rev-parse", "feat/example"]);

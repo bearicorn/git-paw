@@ -47,10 +47,13 @@ Each poll (~15 seconds) the loop:
 - **Submits a directive left buffered on an idle pane.** A pane showing no
   live prompt and no mid-response marker, whose input box still holds
   unsubmitted text, has a stranded directive: the CLI swallowed the first
-  `Enter` into its paste buffer. The loop sends a follow-up `Enter` — and
-  nothing else, no free text — to submit it. Neither the live-prompt scan (there
-  is no prompt) nor the ~25-minute stuck detector would otherwise surface that
-  stall. A pane that is actively generating is never touched.
+  `Enter` into its paste buffer. The loop sends a follow-up `Enter` first; if
+  the text survives that, it runs the same clear-and-recover sequence nudges
+  use (see below), re-typing the text read from the whole input box. A
+  paste-buffer placeholder is never cleared — it is escalated instead. Neither
+  the live-prompt scan (there is no prompt) nor the ~25-minute stuck detector
+  would otherwise surface that stall. A pane that is actively generating is
+  never touched.
 - **Escalates risky/unknown prompts without blocking** — anything the
   classifier does not consider safe is surfaced for later human review (via the
   broker and the exit summary) while the rest of the wave keeps moving. A
@@ -201,15 +204,24 @@ stale input line is a proven no-op — it does not submit anything. So every
 nudge — the orchestration nudge below, a hand-off, and a worker re-engagement
 alike — sends the text, waits the CLI's configured settle delay (the same
 `[clis.<name>].submit_delay_ms` the boot prompt uses), then sends `Enter` as
-a separate keystroke and verifies via a fresh `capture-pane` that the text is
-no longer sitting on the input line. A line still showing the text is
-recovered by clearing it (`Ctrl-U`), re-typing, and sending `Enter` again, up
-to a bounded number of attempts; a pane still wedged after that is escalated
-for human review rather than retried forever. The whole send — the first
-attempt through every recovery attempt — runs under the target pane's
-exclusive claim (see "One approver per pane, enforced" below), so a recovery
-only ever clears a line the loop itself just put there, never text a worker
-agent typed.
+a separate keystroke. Verification waits that same settle delay again, so the
+pane has redrawn, before taking the check capture — and judges by the input
+box's content, never by comparing it against the sent text verbatim: a long
+nudge wraps onto more than one visual row, and only its first row still
+carries the prompt sigil, so an exact-equality check would misread a wrapped
+line as already delivered. The text counts as still present when the input
+box is non-empty and either starts with that first row or shows a
+paste-buffer placeholder; it counts as submitted once the box is empty or the
+pane has left its idle state. A line still present is recovered by clearing
+it (`Ctrl-U`), re-typing the text read from the whole box, and sending
+`Enter` again, up to a bounded number of attempts. A pane still wedged after
+every attempt is escalated to the broker for human review *and* listed in the
+exit summary's escalations — deduplicated per pane, so a persistently stuck
+line is reported once rather than on every ~15-second sweep. The whole send —
+the first attempt through every recovery attempt — runs under the target
+pane's exclusive claim (see "One approver per pane, enforced" below), so a
+recovery only ever clears a line the loop itself just put there, never text a
+worker agent typed.
 
 **No nudge is sent once the loop is winding down.** The wind-down/exit state
 is checked before dispatching any nudge on a tick, not just before the
