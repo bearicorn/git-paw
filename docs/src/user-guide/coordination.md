@@ -525,6 +525,28 @@ alongside the status. Because the panel also
 [collapses consecutive identical heartbeats](dashboard.md#heartbeat-collapsing),
 a phrase that changes as the work moves along keeps each phase on its own row.
 
+## Prefer Native Read Tools Over Shell Pipelines
+
+The bundled coordination skill teaches agents to prefer their CLI's own
+native file-read and search facilities over a shell text-extraction pipeline
+(a command that pipes output through line-slicing or field-extracting
+utilities) when inspecting source. Two costs motivate this:
+
+- **The approval stall** — a shell pipeline typically requires a permission
+  approval before it runs, so the agent waits on a prompt every time.
+- **The dead grant** — a durable approval is keyed on the exact command
+  string, so the next inspection (a different line range, a different search
+  term) never matches it, and the allowlist accumulates entries that exist
+  only to be ignored.
+
+The same mechanic governs scratch files: when an agent captures a command's
+output across repeated iterations, the skill tells it to reuse one scratch
+path rather than writing a fresh numbered file each time, since a durable
+approval keyed on a path does not carry over to a new filename.
+
+The guidance is deliberately CLI-agnostic — it names no specific CLI, tool,
+or vendor — so it holds for any CLI git-paw launches.
+
 ## Commit Cadence
 
 The bundled coordination skill teaches a **per-group** commit cadence. When a

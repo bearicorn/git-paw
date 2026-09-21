@@ -150,6 +150,28 @@ keep observing and acting on whether a command succeeded or failed —
 just let the shell surface the status instead of appending an
 `echo "… $?"`.
 
+### Prefer native read tools over shell pipelines
+
+When inspecting a source file — reading a function, searching for a symbol,
+narrowing in on a few lines — prefer your CLI's own native file-read and
+search facilities over a shell text-extraction pipeline (a command that pipes
+output through line-slicing or field-extracting utilities). Two costs
+motivate this:
+
+- **The approval stall.** A shell pipeline typically requires a permission
+  approval before it runs, so you wait on a prompt every time you reach for
+  one.
+- **The dead grant.** When that approval is granted durably, it is keyed on
+  the exact command string. The next inspection differs in some argument — a
+  different line range, a different search term — so the grant never matches
+  again, and the allowlist accumulates entries that exist only to be ignored.
+
+The same mechanic applies when you capture a command's output to a file
+across repeated iterations: reuse one scratch path rather than writing a
+fresh numbered file each time. A durable approval keyed on a path does not
+carry over to a new filename, so naming a new file costs a fresh approval on
+every iteration.
+
 ### Stay inside your worktree
 
 You have your own git worktree. **Every command you run — edits, `git add`,
