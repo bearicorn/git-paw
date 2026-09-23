@@ -143,8 +143,9 @@ that without any file on disk.
 
 ### Boot Block Injection Modes
 
-- **Supervisor Mode**: Boot block is prepended to each agent's task prompt before injection
-- **Manual Broker Mode**: Boot block is pre-filled into each agent pane's input line (user pastes task after boot instructions)
+- **Supervisor Mode**: Boot block is prepended to each agent's task prompt, then submitted (injected, then a separate `Enter` after a settle delay)
+- **Spec-driven, non-supervisor mode** (`--specs` / `--from-all-specs` without `--supervisor`): the boot block (when the broker is enabled) is prepended to the task prompt the same way, and submitted the same way — the task comes from the spec, not a human, so the combined prompt cannot be left for someone to complete and submit by hand
+- **Bare, human-driven mode** (`git paw start` with no spec selection): Boot block is pre-filled into each agent pane's input line and left unsubmitted (user pastes their task after the boot instructions, then submits both together)
 
 ### Paste Handling
 

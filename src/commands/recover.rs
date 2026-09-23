@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use git_paw::config::{self, CustomCli, PawConfig, SupervisorConfig};
+use git_paw::config::{self, ApprovalLevel, CustomCli, PawConfig, SupervisorConfig};
 use git_paw::error::PawError;
 use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry};
 use git_paw::tmux;
@@ -18,26 +18,38 @@ use super::helpers::dashboard_command;
 use super::supervisor::resolve_supervisor_flags;
 use crate::attach_or_print_hint;
 
-/// Builds the recovery-time CLI launch command for `entry`: the bare CLI id
-/// unchanged, unless the entry carries an assigned `cli_session_id` AND its
-/// CLI resolves a `resume_args` template — in which case the rendered resume
-/// arguments are appended, restoring the worker's conversation context
-/// (`worker-session-id-capture` design D4).
+/// Builds the recovery-time CLI launch command for `entry`: the bare CLI id,
+/// the resolved approval flags for `approval` (`supervisor-config`'s "every
+/// launch path that spawns a worker CLI" requirement — recovery is a launch
+/// path like any other), and, when the entry carries an assigned
+/// `cli_session_id` AND its CLI resolves a `resume_args` template, the
+/// rendered resume arguments — restoring the worker's conversation context
+/// (`worker-session-id-capture` design D4). Resume args are appended AFTER
+/// the approval flags, mirroring how `attach_agent` appends session-id args
+/// after the bare CLI command.
 ///
 /// Recovery never fails because a resume template is absent: an entry
-/// without an id, or a CLI without a resume template, launches exactly as it
-/// did before this change.
+/// without an id, or a CLI without a resume template, launches with just its
+/// approval flags, exactly as every other launch path does for an
+/// unconfigured CLI.
 fn cli_command_for_recovery<S: std::hash::BuildHasher>(
     entry: &WorktreeEntry,
+    approval: ApprovalLevel,
     clis: &HashMap<String, CustomCli, S>,
 ) -> String {
-    let Some(id) = entry.cli_session_id.as_deref() else {
-        return entry.cli.clone();
+    let agent_flags = config::resolve_approval_flags(&entry.cli, &approval, clis);
+    let mut cli_command = if agent_flags.is_empty() {
+        entry.cli.clone()
+    } else {
+        format!("{} {agent_flags}", entry.cli)
     };
-    match config::resolve_resume_args(&entry.cli, id, clis) {
-        Some(args) => format!("{} {args}", entry.cli),
-        None => entry.cli.clone(),
+    if let Some(id) = entry.cli_session_id.as_deref()
+        && let Some(args) = config::resolve_resume_args(&entry.cli, id, clis)
+    {
+        cli_command.push(' ');
+        cli_command.push_str(&args);
     }
+    cli_command
 }
 
 /// Recovers a stopped/stale session by recreating the tmux session from saved state.
@@ -83,6 +95,17 @@ pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<()
         );
     }
 
+    // No `[supervisor]` section is required for this to apply — a bare
+    // (non-supervisor) recovery has none at all, so the level falls back to
+    // `SupervisorConfig`'s default (`agent_approval = "auto"`), exactly as
+    // `cmd_start` and `cmd_add` do.
+    let default_sup = SupervisorConfig::default();
+    let bare_approval = config
+        .supervisor
+        .as_ref()
+        .unwrap_or(&default_sup)
+        .agent_approval;
+
     let tmux_session = match mode {
         SessionMode::Supervisor => {
             recover_supervisor_session(repo_root, existing, &config, broker_url.as_deref(), mouse)?
@@ -93,6 +116,7 @@ pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<()
             broker_url.as_deref(),
             mouse,
             config.border_affordances_enabled(),
+            bare_approval,
             &config.clis,
         )?,
     };
@@ -115,6 +139,7 @@ fn recover_bare_session<S: std::hash::BuildHasher>(
     broker_url: Option<&str>,
     mouse: bool,
     border_affordances: bool,
+    approval: ApprovalLevel,
     clis: &HashMap<String, CustomCli, S>,
 ) -> Result<tmux::TmuxSession, PawError> {
     let mut builder = tmux::TmuxSessionBuilder::new(&existing.project_name)
@@ -136,7 +161,7 @@ fn recover_bare_session<S: std::hash::BuildHasher>(
         builder = builder.add_pane(tmux::PaneSpec {
             branch: entry.branch.clone(),
             worktree: entry.worktree_path.to_string_lossy().to_string(),
-            cli_command: cli_command_for_recovery(entry, clis),
+            cli_command: cli_command_for_recovery(entry, approval, clis),
         });
     }
 
@@ -202,7 +227,11 @@ fn recover_supervisor_session(
         .map(|entry| tmux::PaneSpec {
             branch: entry.branch.clone(),
             worktree: entry.worktree_path.to_string_lossy().to_string(),
-            cli_command: cli_command_for_recovery(entry, &config.clis),
+            cli_command: cli_command_for_recovery(
+                entry,
+                supervisor_cfg.agent_approval,
+                &config.clis,
+            ),
         })
         .collect();
 
@@ -240,13 +269,16 @@ mod tests {
         }
     }
 
-    /// Spec scenario "Recovered Claude worker is resumed".
+    /// Spec scenario "Recovered Claude worker is resumed". `Manual` resolves
+    /// to no flags for every CLI (built-in table), keeping this test's
+    /// assertion scoped to resume-arg behaviour alone — approval-flag
+    /// composition is covered separately below.
     #[test]
     fn recovered_claude_worker_command_carries_resume_args() {
         let e = entry("claude", Some("3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"));
         let clis = HashMap::new();
         assert_eq!(
-            cli_command_for_recovery(&e, &clis),
+            cli_command_for_recovery(&e, ApprovalLevel::Manual, &clis),
             "claude --resume 3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"
         );
     }
@@ -256,7 +288,10 @@ mod tests {
     fn entry_without_an_id_launches_fresh() {
         let e = entry("claude", None);
         let clis = HashMap::new();
-        assert_eq!(cli_command_for_recovery(&e, &clis), "claude");
+        assert_eq!(
+            cli_command_for_recovery(&e, ApprovalLevel::Manual, &clis),
+            "claude"
+        );
     }
 
     /// Spec scenario "CLI without a resume template launches fresh".
@@ -264,6 +299,62 @@ mod tests {
     fn cli_without_a_resume_template_launches_fresh() {
         let e = entry("my-agent", Some("3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"));
         let clis = HashMap::new();
-        assert_eq!(cli_command_for_recovery(&e, &clis), "my-agent");
+        assert_eq!(
+            cli_command_for_recovery(&e, ApprovalLevel::Manual, &clis),
+            "my-agent"
+        );
+    }
+
+    /// `supervisor-config`'s ADDED requirement ("resolved approval flags
+    /// apply on every worker-launch path") covers recovery too: a CLI whose
+    /// resolved flags for `approval` are non-empty carries them in the
+    /// recovered pane's command.
+    #[test]
+    fn recovered_worker_command_carries_resolved_approval_flags() {
+        let e = entry("claude", None);
+        let clis = HashMap::new();
+        assert_eq!(
+            cli_command_for_recovery(&e, ApprovalLevel::Auto, &clis),
+            "claude --permission-mode acceptEdits"
+        );
+    }
+
+    /// A per-CLI `approval_args` override reaches recovery, and combines
+    /// with resume args in the same order `attach_agent` uses: CLI, approval
+    /// flags, then session-id/resume args.
+    #[test]
+    fn recovered_worker_combines_override_approval_flags_with_resume_args() {
+        let e = entry("my-agent", Some("3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"));
+        let mut clis = HashMap::new();
+        clis.insert(
+            "my-agent".to_string(),
+            CustomCli {
+                command: "my-agent".to_string(),
+                display_name: None,
+                submit_delay_ms: None,
+                settings_path: None,
+                approval_args: HashMap::from([("full-auto".to_string(), "--my-flag".to_string())]),
+                prompt_profile: None,
+                session_id_args: None,
+                resume_args: Some("--continue {{SESSION_ID}}".to_string()),
+            },
+        );
+        assert_eq!(
+            cli_command_for_recovery(&e, ApprovalLevel::FullAuto, &clis),
+            "my-agent --my-flag --continue 3f2c1a90-aaaa-4bbb-8ccc-1234567890ab"
+        );
+    }
+
+    /// Empty resolved flags yield the bare CLI name with no trailing
+    /// separator (`supervisor-config`'s "Empty resolved flags launch the
+    /// bare command" scenario).
+    #[test]
+    fn recovered_worker_with_empty_flags_has_no_trailing_separator() {
+        let e = entry("unmapped-cli", None);
+        let clis = HashMap::new();
+        assert_eq!(
+            cli_command_for_recovery(&e, ApprovalLevel::Auto, &clis),
+            "unmapped-cli"
+        );
     }
 }

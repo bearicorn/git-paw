@@ -5,23 +5,21 @@
 //! - **D5** — `--from-specs --supervisor` dispatches to `cmd_supervisor`,
 //!   not `cmd_start_from_specs`. Verified via `--dry-run` output shape.
 //! - **D4** — bare `cmd_start_from_specs` with broker enabled actually
-//!   builds the boot-block injection argv via `build_boot_inject_args`.
-//!   This is checked at the unit-helper level (the `tmux::send-keys`
-//!   subprocess invocation is best-effort and not directly observable).
+//!   injects a boot block. See the D4 section below for how this is
+//!   verified now that `start-spec-launch-parity` moved the spec-driven
+//!   path off `build_boot_inject_args` onto `submit_prompt_to_pane`.
 //! - **D2** — non-TTY launches exit cleanly with an attach hint instead
 //!   of erroring. `assert_cmd::Command::output()` runs commands in a
 //!   non-TTY child process by default, so `git paw start --dry-run`
 //!   continues to work, and a real (non-`--dry-run`) launch from a
 //!   non-TTY context exits with the hint text.
 //!
-//! Tests use `--dry-run` for the dispatch shape assertions (no
-//! tmux/CLI side effects) and the `tmux::build_boot_inject_args` pure
-//! function for argv shape assertions.
+//! Tests use `--dry-run` for the dispatch shape assertions (no tmux/CLI
+//! side effects).
 
 use std::fs;
 
 use assert_cmd::Command;
-use git_paw::tmux::build_boot_inject_args;
 
 mod helpers;
 use helpers::*;
@@ -258,79 +256,24 @@ fn from_specs_with_supervisor_config_routes_to_supervisor_dry_run() {
 // D4 — Boot-block injection argv consistency (tasks 5.1-5.4)
 // -----------------------------------------------------------------------
 //
-// The actual `tmux send-keys` invocation in `cmd_start_from_specs` is a
-// best-effort fire-and-forget subprocess (`let _ = ...`). We can't easily
-// assert "send-keys was called N times" without injecting a process-call
-// recorder, which would require a refactor far beyond this fix's scope.
+// `cmd_start_from_specs` (now `cmd_start_with_specs`) no longer calls
+// `build_boot_inject_args` at all — `start-spec-launch-parity` replaced it
+// with `submit_prompt_to_pane` (literal send, settle delay, separate Enter)
+// so the spec-driven prompt is actually submitted rather than left
+// pre-fill-only. The pure argv-shape tests that used to live here asserted
+// on a helper this path no longer calls, which would pass regardless of
+// whether the real launch path worked at all — a false sense of coverage.
 //
-// Instead, the boot-injection contract is verified by:
+// The injection contract for the spec-driven path (per-agent boot+task
+// prompt, N > 1 panes with the dashboard offset, non-fatal `tmux` failure)
+// is now verified against the REAL launch path (a live tmux pane, not a
+// pure helper) in `tests/start_spec_launch_parity_integration.rs`:
+// `spec_driven_launch_injects_per_pane_for_multiple_specs` and
+// `spec_driven_launch_survives_a_send_keys_failure`.
 //
-// 1. Existing tests in `tests/boot_block_integration.rs` and
-//    `src/tmux.rs::tests` that already validate `build_boot_inject_args`'s
-//    argv shape for any (session, pane_idx, text) input.
-// 2. The pure helper assertions below, which prove the argv shape used by
-//    `cmd_start_from_specs` matches what `cmd_start` already uses (parity).
-// 3. The dispatch tests above, which verify the bare `--from-specs` dry-run
-//    succeeds and produces the expected branch list — proof that the launch
-//    flow runs without aborting before the (post-execute) injection step.
-
-/// `build_boot_inject_args` produces the canonical send-keys argv for any
-/// `(session, pane_idx, boot_block)` tuple. `cmd_start` and `cmd_start_from_specs`
-/// now both call this helper, so injection-shape parity is guaranteed.
-#[test]
-fn boot_inject_args_shape_is_consistent_for_spec_panes() {
-    // Three spec mappings with broker enabled would target panes 1, 2, 3
-    // (dashboard at 0). Verify the argv shape per pane.
-    for pane_idx in 1..=3 {
-        let session = "paw-test";
-        let boot_block = "echo hello";
-        let args = build_boot_inject_args(session, pane_idx, boot_block);
-
-        // The first arg is `send-keys`; the literal `-l` flag must appear
-        // before `-t` (per the existing tmux helper convention); the
-        // session:pane target follows; the boot-block content follows;
-        // there is NO trailing Enter (boot blocks aren't auto-submitted).
-        assert_eq!(
-            args.first().map(String::as_str),
-            Some("send-keys"),
-            "first arg must be 'send-keys' for pane {pane_idx}"
-        );
-        assert!(
-            args.iter().any(|a| a == "-l"),
-            "args must include '-l' literal-mode flag for pane {pane_idx}"
-        );
-        assert!(
-            args.iter().any(|a| a == &format!("{session}:0.{pane_idx}")),
-            "args must include session:pane target {session}:0.{pane_idx}; got: {args:?}"
-        );
-        assert!(
-            args.iter().any(|a| a == boot_block),
-            "args must include the boot block content for pane {pane_idx}"
-        );
-        assert!(
-            !args.iter().any(|a| a == "Enter"),
-            "boot-block injection must NOT include trailing Enter (boot block is content, not a command)"
-        );
-    }
-}
-
-/// Spec panes with broker enabled use pane offset = 1 (dashboard at 0).
-/// With three discovered specs, the targets are 0.1, 0.2, 0.3.
-#[test]
-fn boot_inject_pane_offset_matches_dashboard_layout() {
-    let session = "paw-pane-offset";
-    let pane_offset = 1usize; // broker enabled
-
-    for spec_idx in 0..3 {
-        let pane_idx = spec_idx + pane_offset;
-        let args = build_boot_inject_args(session, pane_idx, "boot");
-        let expected_target = format!("{session}:0.{pane_idx}");
-        assert!(
-            args.iter().any(|a| a == &expected_target),
-            "spec {spec_idx} should target pane {pane_idx} (offset for dashboard); got args: {args:?}"
-        );
-    }
-}
+// `build_boot_inject_args`'s own argv shape (still used by bare `cmd_start`'s
+// pre-fill path) remains covered by `tests/boot_block_integration.rs`'s
+// `boot_inject_args_use_literal_flag_with_no_enter`.
 
 // -----------------------------------------------------------------------
 // D2 — Non-TTY launch handling (tasks 6.1-6.4)

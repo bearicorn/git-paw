@@ -299,10 +299,49 @@ git paw start --from-all-specs
 git paw start --from-all-specs --no-supervisor
 ```
 
-When `[broker] enabled = true` (the default in supervisor mode), each spec
-agent pane receives a boot block via `tmux send-keys` carrying its
-`BRANCH_ID`, broker URL, and curl-publish patterns. This applies to both
-spec-mode-only (`--from-all-specs` without supervisor) and supervisor mode.
+When `[broker] enabled = true` — the broker defaults to disabled and must be
+opted into explicitly in config (supervisor mode does not turn it on for
+you) — each spec agent pane receives a boot block via `tmux send-keys`
+carrying its `BRANCH_ID`, broker URL, and the patterns for publishing through
+the bundled `broker.sh` helper. This applies to both spec-mode-only
+(`--from-all-specs` without supervisor) and supervisor mode; a spec-mode-only
+launch additionally submits the boot block (rather than leaving it
+pre-filled) and appends the task prompt naming the agent's spec assignment,
+so the agent starts work without a human completing the prompt by hand — see
+[Boot-block submission and task-prompt injection](#boot-block-submission-and-task-prompt-injection)
+below.
+
+## Boot-block submission and task-prompt injection
+
+Not every launch path treats its agent pane's initial prompt the same way:
+
+- **Bare `git paw start`** (no spec selection) pre-fills the boot block into
+  the pane's input line and stops — no `Enter` is sent. This is deliberate:
+  the launch is human-driven, so you type your actual task after the boot
+  instructions and submit it yourself.
+- **A spec-driven launch** (`--specs` / `--from-all-specs`, with or without
+  `--supervisor`) has no human typing the task — the task comes from the
+  spec — so leaving the prompt pre-filled would strand the agent with
+  nothing to act on. Both the supervisor path and the non-supervisor
+  spec-mode path submit the combined boot block + task prompt automatically:
+  the text is injected, then — after a brief per-CLI settle delay — a
+  separate `Enter` submits it. The task prompt names the agent's spec
+  assignment and the backend's apply invocation (e.g. `/opsx:apply <id>` for
+  OpenSpec), so the agent drives its spec workflow and checks off tasks as it
+  completes them, rather than improvising an ad hoc one.
+- With `[broker] enabled = false`, the **non-supervisor** spec-mode path
+  (bare `--specs` / `--from-all-specs`, no `--supervisor`) injects no boot
+  block — it is broker-specific content — but still injects and submits the
+  task prompt, since the agent's assignment does not depend on the broker.
+  The **supervisor** path builds its agent panes' prompt the same way
+  regardless of whether the broker is enabled, so a supervisor-mode agent
+  still receives a boot block even with the broker off; only its
+  broker-coordination instructions are then inert.
+
+Every launch path also composes its pane's command from the [resolved
+approval flags](../configuration/README.md#supervisor) (`agent_approval` and
+any per-CLI `approval_args` override) — a bare or spec-driven launch is not
+exempt just because no supervisor is watching.
 
 ## Non-interactive launches
 

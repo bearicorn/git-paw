@@ -748,7 +748,13 @@ resolves the permission flags for a `(CLI, level)` pair in order: (1) the
 per-CLI [`[clis.<name>] approval_args`](#custom-clis) override, (2) the
 built-in table below, (3) no flags. The supervisor pane resolves at its own
 effective level (`approval`, falling back to `agent_approval`); coding-agent
-panes always resolve at `agent_approval`.
+panes always resolve at `agent_approval`. This resolution applies on **every**
+launch path that spawns a worker CLI — supervisor mode, a bare `git paw
+start`, a non-supervisor `--specs` / `--from-all-specs` launch, and `git paw
+add` alike — not only supervisor sessions, even though `agent_approval` is
+declared under `[supervisor]`. A bare or spec-driven launch with no
+`[supervisor]` section at all still resolves `agent_approval` against its
+default (`"auto"`).
 
 | CLI | `full-auto` | `auto` |
 |-----|-------------|--------|

@@ -451,8 +451,14 @@ back to injection. The gate is conservative: an unrecognised CLI whose UI
 matches no known marker simply falls back to injecting after the budget, so
 launch behaviour is never worse than the previous fixed-sleep launch. This
 prevents the multi-line boot block from being typed into a bare shell, where
-it would be interpreted line-by-line as failing commands. The same gate guards
-both the `git paw start` and `git paw add` launch paths.
+it would be interpreted line-by-line as failing commands. The same gate also
+recognises a first-run trust/bypass acceptance dialog and fails the launch
+loudly rather than risk a blind `Enter` accepting it. The gate guards every
+pane that receives an injected prompt: bare `git paw start` (with the broker
+enabled), a spec-driven launch (`--specs` / `--from-all-specs`, with or
+without `--supervisor`), and `git paw add`. Session recovery and a
+broker-less bare launch spawn panes without ever calling the gate — harmless,
+since neither path injects anything into them.
 
 ## Non-Supervisor Layout
 

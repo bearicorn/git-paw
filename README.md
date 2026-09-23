@@ -125,6 +125,13 @@ This creates:
 - A worktree for each branch — `.git-paw/worktrees/feat-auth/`, `.git-paw/worktrees/feat-api/` in a repo set up with `git paw init`, or `../yourproject-feat-auth/`, `../yourproject-feat-api/` when no `worktree_placement` is configured (see [Worktree Placement](docs/src/user-guide/worktree-placement.md))
 - A tmux session with one pane per branch, each running `claude`
 
+Every launch path — including this bare one, not just supervisor mode —
+builds its pane command from the resolved approval flags: with no
+`[supervisor]` config at all, `agent_approval` defaults to `auto`, so Claude
+panes launch with `--permission-mode acceptEdits` automatically. See
+[Approval flag resolution](docs/src/configuration/README.md#supervisor) to
+change the level or set per-CLI overrides.
+
 ## Quick Start: Per-Branch CLI
 
 Use different AI CLIs on different branches:
@@ -150,6 +157,7 @@ git paw start --supervisor
 git paw start --no-supervisor
 
 # Bypass the uncommitted-spec validation warning when launching from specs
+# (non-supervisor only — see the `--force` note below)
 git paw start --from-all-specs --force
 
 # Drive the whole wave to completion with no human in the seat (detached)
@@ -167,7 +175,7 @@ For the end-to-end recipe — planning as a pre-step, writing task-level-concret
 
 Supervisor mode also composes a curated dev-command allowlist into its own auto-approve whitelist so common dev-loop commands (non-destructive `git` verbs such as `git commit`, read-only `find`/`grep`, and your stack's toolchain verbs such as `cargo build`/`cargo test` for `rust`) bypass per-prompt approval — declare your stack with `[supervisor.common_dev_allowlist] stacks = ["rust"]`; extend with `extra = [...]`.
 
-`--no-supervisor` is the highest-precedence step in the supervisor-mode resolution chain — it wins over both `[supervisor] enabled = true` in config and any interactive prompt. It is mutually exclusive with `--supervisor`; passing both fails at parse time. `--force` only matters for spec-mode launches (`--from-all-specs` / `--specs`) and bypasses the warning when uncommitted spec changes are detected on disk.
+`--no-supervisor` is the highest-precedence step in the supervisor-mode resolution chain — it wins over both `[supervisor] enabled = true` in config and any interactive prompt. It is mutually exclusive with `--supervisor`; passing both fails at parse time. `--force` only matters for a spec-mode launch **without** supervisor mode (`--from-all-specs` / `--specs`, no `--supervisor`) and bypasses the warning when uncommitted spec changes are detected on disk; the check itself does not run under supervisor mode, so `--force` has no effect there.
 
 ## Installation
 

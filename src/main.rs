@@ -407,6 +407,15 @@ pub(crate) fn build_task_prompt(spec_entry: Option<&git_paw::specs::SpecEntry>) 
     }
 }
 
+/// Combines a boot block with the agent's task prompt into the single string
+/// submitted to its pane. Shared by [`attach_agent`] (the supervisor and
+/// `add` paths) and `commands::start::cmd_start_with_specs` so a spec-driven
+/// launch's prompt is byte-identical to the supervisor path's for the same
+/// branch, broker config, and spec entry (`start-spec-launch-parity`).
+pub(crate) fn combine_boot_and_task_prompt(boot_block: &str, task_prompt: &str) -> String {
+    format!("{boot_block}\n\n{task_prompt}")
+}
+
 /// Per-session context for [`attach_agent`] — the values shared across every
 /// agent attached to a single session. `cmd_supervisor` builds it once before
 /// its per-branch loop; `cmd_add` builds it once for the single new agent.
@@ -602,7 +611,7 @@ fn attach_agent(
             worktree: wt_str,
             cli_command,
         },
-        prompt: format!("{boot_block}\n\n{task_prompt}"),
+        prompt: combine_boot_and_task_prompt(&boot_block, &task_prompt),
         entry: WorktreeEntry {
             branch: branch.to_string(),
             worktree_path: wt.path,

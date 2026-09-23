@@ -36,3 +36,50 @@ Test: `session::tests::find_returns_none_when_no_sessions_exist`
 - **GIVEN** an active broker-enabled session and `git paw mcp` started with its working directory inside an agent worktree and no `--repo`
 - **WHEN** the server resolves its repository context
 - **THEN** its broker URL SHALL be the session's broker URL, not absent
+
+### Requirement: start writes a per-repo session JSON
+
+`git paw start` SHALL write a per-repo session JSON to
+`.git-paw/sessions/paw-<project>.json` describing the launched
+session. This is the discovery surface the bundled
+`sweep.sh` helper reads. The file SHALL be written on launch
+and removed on `purge`. Every path through which `git paw start`
+creates or rebuilds the session's panes SHALL (re)write it — the
+bare launch, the spec-driven launch with or without supervisor
+mode, the supervisor launch, recovery of a stopped session, and
+restart of a paused session — and each agent entry's `pane_index`
+SHALL identify the pane that agent occupies in the resulting
+session.
+
+#### Scenario: start writes the per-repo JSON
+
+- **WHEN** `git paw start` (any flags) succeeds
+- **THEN** `.git-paw/sessions/paw-<project>.json` SHALL exist
+  describing the session (name + agent list)
+
+#### Scenario: A spec-driven launch writes the per-repo JSON
+
+- **WHEN** `git paw start --specs <names>` succeeds without supervisor mode
+- **THEN** `.git-paw/sessions/paw-<project>.json` SHALL exist with one
+  `agents` entry per launched spec branch
+
+#### Scenario: Recovery rewrites the per-repo JSON
+
+- **GIVEN** a stopped session whose per-repo JSON is missing
+- **WHEN** `git paw start` recovers it
+- **THEN** `.git-paw/sessions/paw-<project>.json` SHALL exist and list
+  every recovered agent with the pane index it occupies in the rebuilt
+  session
+
+#### Scenario: Restart from pause rewrites the per-repo JSON
+
+- **GIVEN** a paused session
+- **WHEN** `git paw start` resumes it
+- **THEN** `.git-paw/sessions/paw-<project>.json` SHALL list every agent
+  with the pane index it occupies in the resumed session
+
+#### Scenario: purge removes the per-repo JSON
+
+- **GIVEN** an active session with the per-repo JSON present
+- **WHEN** the user runs `git paw purge --force`
+- **THEN** the per-repo JSON SHALL be removed

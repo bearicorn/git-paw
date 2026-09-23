@@ -20,12 +20,19 @@
 ## 4. Helper agreement
 
 - [ ] 4.1 Confirm `sweep.sh approve` inherits the fix through `__classify --resolve-option` and needs no independent rule
-- [ ] 4.2 Inspect `assets/scripts/sweep.sh` for any local assumption that option 2 is the broad grant; fix and sync the tracked `.git-paw/scripts/sweep.sh` copy if so, running `bash -n` on both
+- [ ] 4.2 Inspect `assets/scripts/sweep.sh` for any local assumption that option 2 is the broad grant; fix it and refresh the repo-root `.git-paw/scripts/sweep.sh` copy (gitignored, written by `git paw init`) if so, running `bash -n` on both
 - [ ] 4.3 Add a parity assertion that the helper and the in-tool approver resolve the same option for a scope-wide-grant capture
+
+## 4b. Managed-script trust (exact location)
+
+- [ ] 4b.1 Failing tests first, one per scenario in `specs/approval-command-safety/spec.md`: `bash .git-paw/../../tmp/sweep.sh`, `bash .git-paw/other/sweep.sh` and `bash .git-paw/tmp/sweep.sh` do NOT classify safe (all classify `safe` with the `managed-script` label today); `bash .git-paw/scripts/sweep.sh status`, `.git-paw/scripts/broker.sh --agent feat-x status booting` and `.git-paw/scripts/sweep.sh status-publish` still do; the chained-danger scenario still escalates
+- [ ] 4b.2 In `src/supervisor/auto_approve.rs` `is_managed_script_path`: refuse any token with a `..` component; normalise `.` components; with a worktree root, resolve relative tokens against it (symlinks resolved when the file exists) and require the result to equal `<worktree>/.git-paw/scripts/<name>`; with no worktree root keep requiring the literal relative `.git-paw/scripts/<name>`. Stop delegating the decision to `agents::is_managed_path` (leave that function unchanged — `remove` depends on its subtree-wide answer) and update the doc comments of `is_managed_script_path` / `is_managed_script_invocation`
+- [ ] 4b.3 (SHOULD) Compare the invoked file's bytes with the embedded asset (`src/init.rs` `BROKER_SCRIPT` / `SWEEP_SCRIPT` / `DOCS_FETCH_SCRIPT`); on mismatch the managed-script rule does not match. Add the "A modified helper is not trusted" test. If deferred, record the deferral and the reason in this change's design.md before archive
+- [ ] 4b.4 Add the 4b.1 captures to `tests/classify_subcommand.rs` so `git paw __classify` (and therefore `sweep.sh classify`) agrees with the in-tool classifier
 
 ## 5. Spec traceability and security review
 
-- [ ] 5.1 Verify every scenario in `specs/approval-auto/spec.md` maps to at least one test (Gate 3)
+- [ ] 5.1 Verify every scenario in `specs/approval-auto/spec.md` and `specs/approval-command-safety/spec.md` maps to at least one test (Gate 3)
 - [ ] 5.2 Run the `security-and-safety-review` dev skill against this change — it alters what is auto-approved and is the blast-radius control for agent execution
 - [ ] 5.3 Confirm by inspection that no code path can select a permanent grant the previous implementation would have refused (this change must only narrow)
 
