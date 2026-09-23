@@ -40,6 +40,20 @@ overridden by hand.
   that "Security decisions are never profile-sourced", and the breadth of a permanent
   permission grant is exactly such a decision — a consumer must not be able to widen what
   auto-approves by editing a profile field. The rule lives in the classifier.
+- **Managed-script trust (folded in, same classifier, same security review):** the
+  managed helper-script rule SHALL trust only the exact `<worktree>/.git-paw/scripts/<name>`
+  location. Today `is_managed_script_path` (`src/supervisor/auto_approve.rs`) trusts any
+  token whose basename is `broker.sh` / `sweep.sh` / `docs-fetch.sh` and whose **relative**
+  path passes `agents::is_managed_path` — true for anything starting `.git-paw/` — with no
+  `..` normalisation and no content check. So `bash .git-paw/../../tmp/sweep.sh` and
+  `bash .git-paw/tmp/sweep.sh` (an agent-writable scratch directory) classify `safe` today
+  (verified with `git paw __classify`), and `drive.rs::classify_prompt` labels them
+  `managed-script`. The path SHALL be normalised, any `..` component refused, and the
+  resolved path SHALL be exactly `<worktree>/.git-paw/scripts/<name>`; the classifier
+  SHOULD also compare the file's content with the embedded asset.
+- GP-51 (`/dev/null` discard redirects anywhere) was folded in here originally; it now
+  lives in `classifier-compound-segments`, which owns the normaliser and the redirect
+  analysis and lands first.
 
 ## Capabilities
 
@@ -52,17 +66,33 @@ overridden by hand.
 - `approval-auto`: *Broad grant restricted to allowlisted non-arbitrary-code verbs* gains
   the grant-scope condition; *Option-index selection for Yes/No prompts* requires
   text-based rather than index-based resolution of the broad-grant option.
+- `approval-command-safety`: *git-paw managed helper-script invocations classify as safe*
+  trusts only the exact `<worktree>/.git-paw/scripts/<name>` location (normalised path,
+  `..` refused, SHOULD content-check against the embedded asset).
 
 ## Impact
 
 - `src/supervisor/auto_approve.rs` — broad-grant rule and option resolution
-  (`--resolve-option` path used by `git paw __classify`).
-- `assets/scripts/sweep.sh` and the tracked `.git-paw/scripts/sweep.sh` copy — the helper
+  (`--resolve-option` path used by `git paw __classify`); `is_managed_script_path` /
+  `is_managed_script_invocation` (managed-script trust; stop delegating the decision to
+  `agents::is_managed_path`, whose subtree-wide answer is right for `remove` but too broad
+  here); `src/init.rs`'s embedded script constants (`BROKER_SCRIPT`, `SWEEP_SCRIPT`,
+  `DOCS_FETCH_SCRIPT`) if the content check is implemented.
+- `src/supervisor/drive.rs::classify_prompt` and `src/supervisor/poll.rs` — the
+  `managed-script` rule they call inherits the tightening; no call-site change.
+- **Depends on `classifier-compound-segments` (wave 3, lands first)** for per-segment
+  evaluation of compound commands. This change (wave 4) reasons about the *grant* a
+  compound command is offered; that change makes the classifier evaluate *every segment*
+  of it, and applies the managed-script rule per segment.
+- `assets/scripts/sweep.sh` (and the repo-root `.git-paw/scripts/sweep.sh` copy, which is
+  gitignored and written by `git paw init`) — the helper
   reads the resolved option from `__classify --resolve-option`, so the fix is centralised,
   but the helper's own option parsing must be checked for the same assumption.
 - **Security-relevant**: this narrows what is auto-approved. It cannot widen the
   allowlist; the failure mode of a bug here is extra prompts, not extra grants.
 - **Delta coordination**: modifies different `approval-auto` requirements than
-  `live-prompt-tail-window`, and touches no `cli-prompt-profiles` requirement, so it does
-  not collide with `drive-loop-exit-summary-truth`'s deltas. All three archive
-  independently.
+  `live-prompt-tail-window`, and touches no `cli-prompt-profiles` requirement (the already
+  archived `drive-loop-exit-summary-truth` touched those). In `approval-command-safety` it
+  modifies only the managed helper-script requirement, which no other pending change
+  touches; `classifier-compound-segments` and `retire-stale-requirements` modify other
+  requirements of that capability. All archive independently.

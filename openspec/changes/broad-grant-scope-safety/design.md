@@ -34,12 +34,18 @@ continuous rather than occasional.
 
 **Non-Goals:**
 
-- Changing which *commands* classify safe. The classifier's verdict is untouched; only
-  what we do with that verdict changes.
+- Changing which *commands* classify safe, with one exception: the folded-in managed-script
+  trust fix narrows the managed helper-script rule to its exact location (see Decisions).
+  Otherwise the classifier's verdict is untouched; only what we do with that verdict
+  changes.
 - Making the rule configurable. See Decisions.
 - Detecting or cleaning up grants already written by previous runs. Out of scope, worth a
   separate look.
-- Changing how compound commands are classified (each segment is already evaluated).
+- Changing how compound commands are classified. An earlier draft of this design said
+  "each segment is already evaluated" — that was wrong: today the shell allowlist matches
+  only the first segment of a command and ignores the rest. Per-segment evaluation is
+  delivered by `classifier-compound-segments`, which lands first (wave 3). This change
+  relies on it and does not re-implement it.
 
 ## Decisions
 
@@ -64,6 +70,25 @@ profile-sourced". The breadth of a permanent permission grant is a security deci
 consumer could widen it by editing a profile field, the profile becomes a privilege-
 escalation surface. The rule belongs in the classifier, where the rest of the safety
 decisions live.
+
+**Managed-script trust is an exact location, not a subtree.** The managed helper-script
+rule exists so an agent's boot-time `broker.sh` call never stalls on a prompt. It
+currently asks `agents::is_managed_path` whether the token is "managed", and that answer
+is "anything under `.git-paw/`" — correct for `remove` (which must not refuse on
+git-paw's own bookkeeping) but far too broad for an execution grant: `.git-paw/tmp/` is
+the scratch directory agents write freely, and the relative token is never normalised,
+so `.git-paw/../../tmp/sweep.sh` passes too. The rule instead normalises the path,
+refuses any `..` component outright (rather than trying to resolve it), and requires the
+result to be exactly `<worktree>/.git-paw/scripts/<name>` (or, with no worktree, the
+relative `.git-paw/scripts/<name>`). Refusing `..` instead of resolving it keeps the
+check lexical and fail-closed, and no legitimate helper call uses `..`.
+
+A content check against the embedded asset (`src/init.rs` `BROKER_SCRIPT` /
+`SWEEP_SCRIPT` / `DOCS_FETCH_SCRIPT`) closes the remaining gap — an agent overwriting the
+helper in its own worktree — and is specified as SHOULD. Its cost: a repo-root helper
+left stale after a binary upgrade (until `git paw init` refreshes it) would escalate
+instead of auto-approving. `bundled-helper-discovery` refreshes worktree copies from the
+embedded assets on every attach, which keeps agent panes unaffected.
 
 **This change strictly narrows.** A bug in it produces extra prompts, never extra grants.
 That asymmetry is worth preserving explicitly in review.

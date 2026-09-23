@@ -29,7 +29,8 @@ use super::helpers::{
 use super::recover::recover_session;
 use super::supervisor::cmd_supervisor;
 use crate::{
-    SpecMode, apply_spec_mode, attach_or_print_hint, invalidate_if_stale,
+    SpecMode, apply_spec_mode, attach_or_print_hint, build_task_prompt,
+    combine_boot_and_task_prompt, gate_pane_or_fail_on_dialog, invalidate_if_stale,
     reattach_active_session_or_refuse, resolve_submit_delay_ms, submit_prompt_to_pane,
     write_repo_discovery_file,
 };
@@ -201,6 +202,18 @@ pub(crate) fn cmd_start(
 
     let worktree_runtime = config.worktree_runtime();
 
+    // Resolve approval flags per branch's CLI (supervisor-config: resolved
+    // approval flags apply on every worker-launch path, bare `start` included).
+    // No `[supervisor]` section is required for this to apply — a bare launch
+    // has no supervisor at all, so the level falls back to `SupervisorConfig`'s
+    // default (`agent_approval = "auto"`) exactly as `cmd_add` does.
+    let default_sup = SupervisorConfig::default();
+    let approval = &config
+        .supervisor
+        .as_ref()
+        .unwrap_or(&default_sup)
+        .agent_approval;
+
     for (branch, cli) in &selection.mappings {
         let wt = git::create_worktree(&repo_root, branch, !no_rebase, config.worktree_placement())?;
         let wt_str = wt.path.to_string_lossy().to_string();
@@ -265,10 +278,11 @@ pub(crate) fn cmd_start(
             )?;
         }
 
+        let agent_flags = config::resolve_approval_flags(cli, approval, &config.clis);
         builder = builder.add_pane(tmux::PaneSpec {
             branch: branch.clone(),
             worktree: wt_str,
-            cli_command: cli.clone(),
+            cli_command: apply_approval_flags(cli, &agent_flags),
         });
 
         worktree_entries.push(WorktreeEntry {
@@ -299,26 +313,13 @@ pub(crate) fn cmd_start(
     // Execute tmux session
     tmux_session.execute()?;
 
-    // Inject boot blocks for manual broker mode (without supervisor).
-    // The argv shape is determined by `tmux::build_boot_inject_args` so the
-    // call shape (literal mode, no trailing Enter, `-l` before `-t`) has a
-    // single source of truth that tests can verify directly.
-    if broker_config.enabled {
-        for (idx, (branch, cli)) in selection.mappings.iter().enumerate() {
-            let pane_idx = if broker_config.enabled { idx + 1 } else { idx };
-            let boot_block = git_paw::skills::build_boot_block(
-                branch,
-                &broker_config.url(),
-                git_paw::skills::cli_speaks_mcp(cli),
-            );
-
-            let args =
-                git_paw::tmux::build_boot_inject_args(&tmux_session.name, pane_idx, &boot_block);
-            let _ = std::process::Command::new("tmux").args(&args).status();
-        }
-    }
-
-    // Save session state
+    // Save session state and write the per-repo discovery file BEFORE
+    // gating/injecting — matching the supervisor path's order (save, then
+    // gate). A stuck dialog fails the gate-and-inject step below with `?`,
+    // but the session and worktrees it already created must still be
+    // discoverable: `git paw stop`/`purge` need the saved session, and
+    // `sweep.sh` needs the discovery file, so a user can clean up or re-run
+    // without the next launch forking a parallel `paw-<project>-2` session.
     let mut state = Session {
         session_name: tmux_session.name.clone(),
         repo_path: repo_root,
@@ -353,6 +354,33 @@ pub(crate) fn cmd_start(
         pane_offset,
         None, // bare-mode session: no orchestrator pane
     );
+
+    // Inject boot blocks for manual broker mode (without supervisor).
+    // The argv shape is determined by `tmux::build_boot_inject_args` so the
+    // call shape (literal mode, no trailing Enter, `-l` before `-t`) has a
+    // single source of truth that tests can verify directly.
+    //
+    // Gated on launch-readiness first (`tmux-orchestration`'s Launch-readiness
+    // gate requirement applies uniformly to the start-time path): a pane still
+    // showing an unanswered first-run trust/bypass dialog MUST NOT receive the
+    // boot block on top of it, so the launch fails loudly instead.
+    if broker_config.enabled {
+        for (idx, (branch, cli)) in selection.mappings.iter().enumerate() {
+            let pane_idx = if broker_config.enabled { idx + 1 } else { idx };
+            let agent_flags = config::resolve_approval_flags(cli, approval, &config.clis);
+            let cli_command = apply_approval_flags(cli, &agent_flags);
+            gate_pane_or_fail_on_dialog(&tmux_session.name, pane_idx, &cli_command, &config.clis)?;
+            let boot_block = git_paw::skills::build_boot_block(
+                branch,
+                &broker_config.url(),
+                git_paw::skills::cli_speaks_mcp(cli),
+            );
+
+            let args =
+                git_paw::tmux::build_boot_inject_args(&tmux_session.name, pane_idx, &boot_block);
+            let _ = std::process::Command::new("tmux").args(&args).status();
+        }
+    }
 
     // Attach (or print hint when stdin is non-TTY).
     attach_or_print_hint(&tmux_session.name)
@@ -550,6 +578,19 @@ fn launch_spec_session(
 
     let worktree_runtime = config.worktree_runtime();
 
+    // Resolve approval flags per branch's CLI (supervisor-config: resolved
+    // approval flags apply on every worker-launch path, the spec-driven path
+    // included). No `[supervisor]` section is required — a spec-driven
+    // launch without `--supervisor` has none at all, so the level falls back
+    // to `SupervisorConfig`'s default (`agent_approval = "auto"`), exactly
+    // as `cmd_add` does.
+    let default_sup = SupervisorConfig::default();
+    let approval = &config
+        .supervisor
+        .as_ref()
+        .unwrap_or(&default_sup)
+        .agent_approval;
+
     for (branch, cli) in mappings {
         let wt = git::create_worktree(repo_root, branch, !no_rebase, config.worktree_placement())?;
         let wt_str = wt.path.to_string_lossy().to_string();
@@ -619,10 +660,11 @@ fn launch_spec_session(
             )?;
         }
 
+        let agent_flags = config::resolve_approval_flags(cli, approval, &config.clis);
         builder = builder.add_pane(tmux::PaneSpec {
             branch: branch.clone(),
             worktree: wt_str,
-            cli_command: cli.clone(),
+            cli_command: apply_approval_flags(cli, &agent_flags),
         });
 
         worktree_entries.push(WorktreeEntry {
@@ -652,24 +694,15 @@ fn launch_spec_session(
     // Execute tmux session
     tmux_session.execute()?;
 
-    // Inject broker boot blocks per pane (mirrors cmd_start; cmd_start_from_specs
-    // was missing this in v0.4 — fixes dogfood D4 in `from-specs-launch-fixes`).
-    if broker_config.enabled {
-        let pane_offset = usize::from(broker_config.enabled);
-        for (idx, (branch, cli)) in mappings.iter().enumerate() {
-            let pane_idx = idx + pane_offset;
-            let boot_block = git_paw::skills::build_boot_block(
-                branch,
-                &broker_config.url(),
-                git_paw::skills::cli_speaks_mcp(cli),
-            );
-            let args =
-                git_paw::tmux::build_boot_inject_args(&tmux_session.name, pane_idx, &boot_block);
-            let _ = std::process::Command::new("tmux").args(&args).status();
-        }
-    }
+    let pane_offset = usize::from(broker_config.enabled);
 
-    // Save session state
+    // Save session state and write the per-repo discovery file BEFORE
+    // gating/injecting — matching the supervisor path's order (save, then
+    // gate). A stuck dialog fails the gate-and-submit step below with `?`,
+    // but the session and worktrees it already created must still be
+    // discoverable: `git paw stop`/`purge` need the saved session, and
+    // `sweep.sh` needs the discovery file, so a user can clean up or re-run
+    // without the next launch forking a parallel `paw-<project>-2` session.
     let mut state = Session {
         session_name: tmux_session.name.clone(),
         repo_path: repo_root.to_path_buf(),
@@ -692,6 +725,52 @@ fn launch_spec_session(
     }
 
     session::save_session(&state)?;
+
+    // Write the per-repo discovery file sweep.sh reads. Mirrors `cmd_start`:
+    // in the bare layout the dashboard occupies pane 0 when the broker is
+    // enabled, so coding agents start at pane 1; without the broker they
+    // start at pane 0.
+    write_repo_discovery_file(
+        &state.repo_path,
+        &tmux_session.name,
+        &state.worktrees,
+        pane_offset,
+        None, // bare-mode session: no orchestrator pane
+    );
+
+    // Inject and submit each agent's prompt: the broker boot block (when
+    // enabled) plus the task prompt naming its spec assignment and apply
+    // invocation — byte-identical to what the supervisor path builds for the
+    // same spec (`combine_boot_and_task_prompt`). Unlike the bare `cmd_start`
+    // pre-fill (no human types a spec-driven task, so leaving it unsubmitted
+    // would strand the agent), this submits via the same split-send +
+    // settle-delay mechanism the supervisor path uses, and runs even when the
+    // broker is disabled — the boot block is broker-specific and correctly
+    // suppressed without one, but the agent's assignment is not.
+    //
+    // Gated on launch-readiness first, exactly as the supervisor path gates
+    // each agent pane: this path now sends a real `Enter` (unlike the bare
+    // pre-fill above), so a blind submit into a pane still showing an
+    // unanswered first-run trust/bypass dialog could accidentally accept it.
+    for (idx, (branch, cli)) in mappings.iter().enumerate() {
+        let pane_idx = idx + pane_offset;
+        let agent_flags = config::resolve_approval_flags(cli, approval, &config.clis);
+        let cli_command = apply_approval_flags(cli, &agent_flags);
+        gate_pane_or_fail_on_dialog(&tmux_session.name, pane_idx, &cli_command, &config.clis)?;
+        let task_prompt = build_task_prompt(spec_by_branch.get(branch.as_str()).copied());
+        let prompt = if broker_config.enabled {
+            let boot_block = git_paw::skills::build_boot_block(
+                branch,
+                &broker_config.url(),
+                git_paw::skills::cli_speaks_mcp(cli),
+            );
+            combine_boot_and_task_prompt(&boot_block, &task_prompt)
+        } else {
+            task_prompt
+        };
+        let delay = resolve_submit_delay_ms(cli, &config.clis);
+        submit_prompt_to_pane(&tmux_session.name, pane_idx, &prompt, delay);
+    }
 
     attach_or_print_hint(&tmux_session.name)
 }
@@ -783,4 +862,33 @@ pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result
     session::save_session(&updated)?;
 
     attach_or_print_hint(&existing.session_name)
+}
+
+/// Appends `flags` to `cli` with a single separating space, or returns `cli`
+/// unchanged when `flags` is empty — no trailing separator — matching the
+/// supervisor path's (`attach_agent`'s) pane-command construction.
+fn apply_approval_flags(cli: &str, flags: &str) -> String {
+    if flags.is_empty() {
+        cli.to_string()
+    } else {
+        format!("{cli} {flags}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_approval_flags_empty_yields_bare_cli_no_trailing_separator() {
+        assert_eq!(apply_approval_flags("echo", ""), "echo");
+    }
+
+    #[test]
+    fn apply_approval_flags_non_empty_joins_with_single_space() {
+        assert_eq!(
+            apply_approval_flags("echo", "--full-auto"),
+            "echo --full-auto"
+        );
+    }
 }

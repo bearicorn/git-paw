@@ -61,6 +61,11 @@ to.
 - `boot-block`: *Manual mode boot block pre-fill* is scoped to the bare human-driven path;
   *Boot-block injection in cmd_start_from_specs* additionally requires submission and
   task-prompt injection.
+- `session-state`: *start writes a per-repo session JSON* is widened — "any flags" now
+  explicitly includes a spec-driven launch without supervisor mode. `cmd_start_with_specs`
+  was the only launch path that never called `write_repo_discovery_file`, so
+  `.git-paw/sessions/paw-<project>.json` never existed for that path and `sweep.sh` could
+  not discover the session from the repo root (folded in during review).
 
 ### Added Capabilities
 
