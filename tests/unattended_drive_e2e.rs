@@ -126,6 +126,33 @@ fn write_prompt_dummy(dir: &Path, name: &str, shown_cmd: &str) -> PathBuf {
     path
 }
 
+/// Writes an executable dummy-CLI script that continuously reprints a live
+/// permission prompt FOLLOWED by a persistent six-line task-list region below
+/// the footer — mirroring current Claude Code's chrome under its input area,
+/// the exact shape `live-prompt-tail-window` fixes detection for. Used by
+/// `unattended_auto_approves_safe_prompt_with_trailing_task_region`.
+fn write_prompt_dummy_with_trailing_region(dir: &Path, name: &str, shown_cmd: &str) -> PathBuf {
+    let path = dir.join(name);
+    let script = format!(
+        "#!/usr/bin/env bash\n\
+         # Test dummy CLI: reprint a live permission prompt with a trailing\n\
+         # task-list region below the footer; ignore stdin.\n\
+         while true; do\n\
+         \x20 printf 'Bash command\\n  {shown_cmd}\\nDo you want to proceed?\\n> 1. Yes\\n  2. No\\n(esc to cancel)\\nTasks\\n[ ] one\\n[ ] two\\n[ ] three\\nmain*\\nSonnet\\n'\n\
+         \x20 sleep 0.4\n\
+         done\n"
+    );
+    fs::write(&path, script).expect("write dummy script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path).expect("stat dummy").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("chmod dummy");
+    }
+    path
+}
+
 /// Writes an executable dummy CLI that reprints a *branch-aware* prompt: agent
 /// panes on branch `danger_branch` show `danger_cmd`, every other agent shows
 /// `safe_cmd`. The pane runs in the agent's worktree, so the current branch
@@ -470,6 +497,60 @@ fn unattended_auto_approves_safe_prompt_then_completes() {
     assert!(
         stdout.contains("Unattended drive loop exited: completed"),
         "summary should report completion; stdout:\n{stdout}"
+    );
+}
+
+/// `live-prompt-tail-window` task 5.2 — the same safe prompt, but the pane's
+/// chrome under the input area (a persistent task list) pushes the modal six
+/// non-blank lines above the end of the capture, exactly as a dogfooded
+/// current Claude Code renders it. An `--unattended` run must still
+/// auto-approve: the trailing chrome must not hide a live modal.
+#[test]
+#[serial]
+fn unattended_auto_approves_safe_prompt_with_trailing_task_region() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let home = TempDir::new().expect("home dir");
+    let out = TempDir::new().expect("out dir");
+    let port = pick_broker_port();
+    let url = format!("http://127.0.0.1:{port}");
+
+    let safe = write_prompt_dummy_with_trailing_region(tr.path(), "dummy_safe_chrome.sh", "ls -la");
+    write_config(tr.path(), port, plain_dummy(), &safe.to_string_lossy());
+
+    let (mut child, stdout_path) = spawn_unattended(
+        tr.path(),
+        home.path(),
+        tmux_env.socket_dir(),
+        out.path(),
+        "feat/alpha",
+        "400",
+        "120000", // long heartbeat: completion, not heartbeat, ends the run
+    );
+
+    assert!(
+        wait_for_broker(&url, Duration::from_secs(20)),
+        "broker should come up on the ephemeral port"
+    );
+    let approved = wait_for_status(&url, "feat-alpha", "auto_approved", Duration::from_secs(25));
+    publish_terminal(&url, "supervisor", "done");
+
+    let status = wait_child(&mut child, Duration::from_secs(30));
+    let stdout = read_to_string(&stdout_path);
+    kill_session(tmux_env.socket_dir(), &stdout);
+
+    assert!(
+        approved,
+        "the safe prompt must still be auto-approved with trailing task-list chrome below it; stdout:\n{stdout}"
+    );
+    let status = status.unwrap_or_else(|| panic!("child did not exit; stdout:\n{stdout}"));
+    assert!(
+        status.success(),
+        "unattended run should exit 0; stdout:\n{stdout}"
     );
 }
 

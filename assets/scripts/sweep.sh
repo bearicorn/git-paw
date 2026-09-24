@@ -252,11 +252,37 @@ STUCK_DEDUP_FILE="${PAW_DIR}/.sweep-stuck-dedup"
 # Live-prompt structural markers (approve-send gate). Textual markers of a
 # LIVE permission prompt, matched case-insensitively; numbered option lines
 # (`1.` / `2)`) anchor a multi-option prompt whose question sits above the
-# 4-line tail (block window: last 15 non-blank lines). Sourced from the
-# resolved profile so `approve` / `classify` agree with the in-tool
-# auto-approver (src/supervisor/auto_approve.rs) on what "live" means.
+# 4-line tail (block window: last 15 non-blank lines) at the capture's true
+# end. Detection also searches upward over a bounded trailing region above
+# that end -- see is_live_capture below for the full anchored-search and
+# footer-shape discipline. Sourced from the resolved profile so `approve` /
+# `classify` agree with the in-tool auto-approver
+# (src/supervisor/auto_approve.rs) on what "live" means.
 LIVE_PROMPT_MARKERS_REGEX=$(discover_prompt_profile_field live_prompt_markers \
   'do you want to|esc to cancel')
+# Widest number of trailing non-blank lines of non-prompt content (a task
+# list, a status strip, a progress footer) tolerated between a modal's own
+# footer and the end of the capture. Mirrors LIVE_PROMPT_TRAILING_BOUND in
+# src/supervisor/auto_approve.rs -- keep both in lockstep.
+LIVE_PROMPT_TRAILING_BOUND=10
+# Marker drawn only while a modal is actively live -- never left behind by an
+# already-answered prompt -- so it is the only marker allowed to anchor a
+# match at a bounded offset above the capture's end. Mirrors
+# LIVE_PROMPT_FOOTER_MARKERS in src/supervisor/auto_approve.rs: a bare
+# confirmation question on its own must NOT extend past the narrow 4-line
+# tail, or an answered prompt followed by ordinary command output would
+# misread as live.
+LIVE_PROMPT_FOOTER_REGEX='esc to cancel'
+# Anchored form of the marker above: must START the line (once leading TUI
+# decoration and an optional open-paren are skipped), not merely appear
+# ANYWHERE in it. Mirrors is_footer_line in src/supervisor/auto_approve.rs.
+# Gate-review safety finding: a bare substring check at a bounded offset
+# above the capture's end also fires on narration ("the footer reads \"Esc to
+# cancel\" below it") or grep-style output that happens to echo the marker
+# text -- neither is a live modal. This anchored form, combined with the
+# option-line check in LIVE_PROMPT_OPTION_REGEX, requires the modal's actual
+# shape instead of a lone string.
+LIVE_PROMPT_FOOTER_LINE_REGEX="^[[:space:]│─╭╮╰╯├┤┐└┘┌⎿❯●•*·]*\(?(${LIVE_PROMPT_FOOTER_REGEX})"
 # A numbered option line once its leading TUI decoration (box-drawing glyphs,
 # bullets, the selection caret) is skipped. The decoration class is a
 # terminal-rendering detail shared by every CLI, not vendor prompt shape, so
@@ -266,6 +292,25 @@ LIVE_PROMPT_MARKERS_REGEX=$(discover_prompt_profile_field live_prompt_markers \
 _option_line_digit=$(discover_prompt_profile_field option_line_pattern '^[0-9][.)]')
 LIVE_PROMPT_OPTION_REGEX="^[[:space:]│─╭╮╰╯├┤┐└┘┌⎿❯●•*·]*${_option_line_digit#^}"
 unset _option_line_digit
+# The CLI's composer/input-line sigils (e.g. `>`, `❯`), sourced from the
+# resolved profile's input_sigils. A line carrying one of these with no
+# option-line text following it is a CANDIDATE idle input box -- mirrors
+# is_idle_input_box_line in src/supervisor/auto_approve.rs. Gate-review safety
+# finding: a real live modal REPLACES the input box while it is up, so an idle
+# input-box line appearing below a shape-gated footer match (e.g. the
+# supervisor's own pane echoing another pane's modal via `sweep.sh capture`,
+# with its own idle composer below) means the footer is quoted/historical
+# content, not an active modal.
+#
+# The `│` border is OPTIONAL in INPUT_BOX_LINE_REGEX: ground-truthed against a
+# live `tmux capture-pane -p`, current Claude Code's idle input box has NO
+# side borders at all -- a rule line (RULE_LINE_REGEX), the bare sigil line,
+# another rule line, then the mode strip. A borderless sigil line only counts
+# as the input box when the line immediately above it is a pure rule line
+# (see is_idle_input_box_line); a bordered line always counts.
+INPUT_SIGILS_REGEX=$(discover_prompt_profile_field input_sigils '>|❯')
+INPUT_BOX_LINE_REGEX="^[[:space:]]*│?[[:space:]]*(${INPUT_SIGILS_REGEX})"
+RULE_LINE_REGEX='^[─━═-]+$'
 
 # --- Additional stuck shapes: stream-timeout, context-bloat, no-progress -----
 # A coding agent's CLI API call can fail mid-stream (transport error / timeout)
@@ -1048,11 +1093,17 @@ if stream_markers and re.search(stream_markers, cap):
     raise SystemExit(0)
 
 # 2. Permission / paste-buffer marker → stuck-on-prompt (existing path).
-#    Paste-buffer is checked first so its more specific marker wins.
+#    Paste-buffer is checked first so its more specific marker wins. The
+#    permission match is case-insensitive: the embedded profile stores
+#    approval_markers lowercased (the compiled Rust detectors lowercase both
+#    sides before comparing), so a case-sensitive match here silently missed
+#    every prompt whose on-screen text was not literally lowercase once the
+#    markers started coming from the binary instead of this fallback literal
+#    (v0.16.0 regression).
 variant = None
 if re.search(paste_marker, cap):
     variant = "paste-buffer"
-elif re.search(markers, cap):
+elif re.search(markers, cap, re.IGNORECASE):
     variant = "permission"
 
 if variant is not None:
@@ -1209,25 +1260,132 @@ cmd_classify() {
 }
 
 # Live-prompt gate (arg 1: the pane capture). Structural mirror of
-# live_prompt_markers_at_tail in src/supervisor/auto_approve.rs: a textual
-# marker (LIVE_PROMPT_MARKERS_REGEX, case-insensitive) within the last 4
-# non-blank lines, or a numbered option line anchoring that tail with a
-# textual marker within the last 15 non-blank lines -- a multi-option prompt
-# bottoms out in its option list, with the question above it.
+# live_prompt_markers_at_tail in src/supervisor/auto_approve.rs: anchors on
+# the modal block by searching upward from the end of the non-blank lines,
+# tolerating up to LIVE_PROMPT_TRAILING_BOUND trailing non-prompt lines (a
+# task list, a status strip, a progress footer) so a CLI that renders chrome
+# below its input area does not hide a live modal underneath it.
+#
+# At the true end of the capture (offset 0): a textual marker
+# (LIVE_PROMPT_MARKERS_REGEX, case-insensitive) within the last 4 non-blank
+# lines, or a numbered option line anchoring that tail with a textual marker
+# within the last 15 non-blank lines -- a multi-option prompt bottoms out in
+# its option list, with the question above it.
+#
+# At any bounded offset above the true end, a bare substring match is NOT
+# enough: a line merely mentioning the footer text (narration, grep-style
+# output echoing it) is not a live modal. The gate instead requires the
+# modal's actual SHAPE: LIVE_PROMPT_FOOTER_LINE_REGEX must match a line
+# STARTING the last-4 window (not just appear anywhere in it) AND
+# LIVE_PROMPT_OPTION_REGEX must match a numbered option line within the last
+# 15 non-blank lines. Either alone can appear in prose or tool output; both
+# together only render while a modal is genuinely live. A bare confirmation
+# question never qualifies here either way -- an answered prompt can leave
+# its question text in the pane followed by ordinary command output, and
+# admitting that would misread a resolved prompt as live.
+#
+# Gate-review safety finding: even the shape check above can be fooled by a
+# FULL modal copied verbatim into tool output (e.g. the supervisor's own pane
+# running `sweep.sh capture 2`, echoing another pane's footer + option lines
+# quoted behind the tool-output glyph). So beyond the narrow tail, a match is
+# rejected outright when an INPUT_BOX_LINE_REGEX line (the CLI's idle
+# composer, not an option line) sits anywhere between the matched footer and
+# the capture's true end -- a real live modal replaces the input box while it
+# is up, so seeing one below a footer means the footer is quoted/historical.
 #
 # Prompt DETECTION stays in the helper; only CLASSIFICATION moved to
 # `git paw __classify`. This gate runs BEFORE any delegation, so a pane with
 # no live prompt costs no subprocess and can never be approved.
-is_live_capture() {
-  local nonblank tail4 tail15
-  nonblank=$(grep -v '^[[:space:]]*$' <<<"${1}")
-  tail4=$(tail -4 <<<"${nonblank}")
-  if grep -Eqi "${LIVE_PROMPT_MARKERS_REGEX}" <<<"${tail4}"; then
+
+# True when $1 is the CLI's idle input-box line, recognising BOTH shapes: a
+# `│`-bordered composer line, or a borderless composer line framed by a
+# horizontal rule immediately above it ($2, the preceding non-blank line --
+# current Claude Code's real shape, ground-truthed against a live
+# `tmux capture-pane -p`). Either way, a numbered option line is never read as
+# the input box (the same selection-caret sigil also prefixes option lines).
+# Mirrors is_idle_input_box_line in src/supervisor/auto_approve.rs.
+is_idle_input_box_line() {
+  local line="${1}" preceding="${2:-}"
+  grep -Eq "${INPUT_BOX_LINE_REGEX}" <<<"${line}" || return 1
+  grep -Eq "${LIVE_PROMPT_OPTION_REGEX}" <<<"${line}" && return 1
+  if [[ "${line}" == *"│"* ]]; then
     return 0
   fi
-  tail15=$(tail -15 <<<"${nonblank}")
-  grep -Eq "${LIVE_PROMPT_OPTION_REGEX}" <<<"${tail4}" &&
-    grep -Eqi "${LIVE_PROMPT_MARKERS_REGEX}" <<<"${tail15}"
+  [[ -n "${preceding}" ]] || return 1
+  local trimmed_preceding
+  trimmed_preceding=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<<"${preceding}")
+  grep -Eq "${RULE_LINE_REGEX}" <<<"${trimmed_preceding}"
+}
+
+is_live_capture() {
+  local -a nonblank
+  local line total limit offset keep tail_start block_start i idx
+  while IFS= read -r line; do
+    [[ -n "${line//[[:space:]]/}" ]] && nonblank+=("${line}")
+  done <<<"${1}"
+  total=${#nonblank[@]}
+  if ((total == 0)); then
+    return 1
+  fi
+  limit=${LIVE_PROMPT_TRAILING_BOUND}
+  if ((limit > total)); then
+    limit=${total}
+  fi
+  for ((offset = 0; offset <= limit; offset++)); do
+    keep=$((total - offset))
+    if ((keep <= 0)); then
+      continue
+    fi
+    tail_start=$((keep > 4 ? keep - 4 : 0))
+    block_start=$((keep > 15 ? keep - 15 : 0))
+    if ((offset == 0)); then
+      for ((i = tail_start; i < keep; i++)); do
+        if grep -Eqi "${LIVE_PROMPT_MARKERS_REGEX}" <<<"${nonblank[i]}"; then
+          return 0
+        fi
+      done
+      local tail_has_option=0
+      for ((i = tail_start; i < keep; i++)); do
+        if grep -Eq "${LIVE_PROMPT_OPTION_REGEX}" <<<"${nonblank[i]}"; then
+          tail_has_option=1
+          break
+        fi
+      done
+      if ((tail_has_option)); then
+        for ((i = block_start; i < keep; i++)); do
+          if grep -Eqi "${LIVE_PROMPT_MARKERS_REGEX}" <<<"${nonblank[i]}"; then
+            return 0
+          fi
+        done
+      fi
+    else
+      local block_has_option=0
+      for ((idx = block_start; idx < keep; idx++)); do
+        if grep -Eq "${LIVE_PROMPT_OPTION_REGEX}" <<<"${nonblank[idx]}"; then
+          block_has_option=1
+          break
+        fi
+      done
+      if ((block_has_option == 0)); then
+        continue
+      fi
+      for ((i = tail_start; i < keep; i++)); do
+        if grep -Eqi "${LIVE_PROMPT_FOOTER_LINE_REGEX}" <<<"${nonblank[i]}"; then
+          local blocked=0
+          for ((idx = i + 1; idx < total; idx++)); do
+            if is_idle_input_box_line "${nonblank[idx]}" "${nonblank[idx - 1]}"; then
+              blocked=1
+              break
+            fi
+          done
+          if ((blocked == 0)); then
+            return 0
+          fi
+        fi
+      done
+    fi
+  done
+  return 1
 }
 
 # Shared classifier invocation (stdin: pane capture). $1 = worktree root,

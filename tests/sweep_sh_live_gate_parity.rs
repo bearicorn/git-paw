@@ -18,6 +18,7 @@
 //! subprocess reads the same embedded profile the in-process Rust gate
 //! does". `one_source_is_read_by_both_consumers` pins that directly.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -101,10 +102,73 @@ fn sweep_sees_live(repo: &Path, sweep: &Path, capture: &str) -> bool {
     !stdout.contains("no-op (not live)")
 }
 
+/// A bare confirmation question followed by ordinary command output and a
+/// shell prompt — no option list, no footer.
+fn answered_then_output_fixture() -> String {
+    let mut capture = String::from("Do you want to proceed?\n");
+    for line in ["ran it", "line b", "line c", "line d"] {
+        capture.push_str(line);
+        capture.push('\n');
+    }
+    capture.push_str("$ ");
+    capture
+}
+
+/// A live multi-option prompt (footer + option list) followed by `n`
+/// ordinary trailing lines — pins the exact effective-tolerance boundary
+/// (`LIVE_PROMPT_TRAILING_BOUND` + `LIVE_PROMPT_TAIL` - 1 = 13; see the doc
+/// comment on `LIVE_PROMPT_TRAILING_BOUND`). 13 is still live, 14 is not.
+fn multi_option_prompt_with_trailing_lines(n: usize) -> String {
+    let mut capture = String::from("Do you want to proceed?\n❯ 1. Yes\n  2. No\n  Esc to cancel\n");
+    for i in 1..=n {
+        let _ = writeln!(capture, "output line {i}");
+    }
+    capture
+}
+
+/// Gate-review safety finding: a FULL modal copied verbatim into tool output
+/// (e.g. the supervisor's own pane running `sweep.sh capture 2`, echoing
+/// another pane's footer + option lines quoted behind the tool-output corner
+/// glyph `⎿`) followed by the supervisor's own idle input box.
+fn captured_modal_with_idle_input_box_fixture() -> String {
+    "$ sweep.sh capture 2\n\
+     ⎿ Bash command\n\
+     ⎿   rm -rf /tmp/foo\n\
+     ⎿ Do you want to proceed?\n\
+     ⎿ ❯ 1. Yes\n\
+     ⎿   2. No\n\
+     ⎿ Esc to cancel\n\
+     Done.\n\
+     ╭──────────────────────────────────────────────╮\n\
+     │ >                                              │\n\
+     ╰──────────────────────────────────────────────╯"
+        .to_string()
+}
+
+/// Same scenario, but with current Claude Code's REAL idle input-box shape —
+/// ground-truthed against a live `tmux capture-pane -p`: NO side borders at
+/// all, just a rule line, the bare sigil line, another rule line, then the
+/// mode strip.
+fn captured_modal_with_borderless_idle_input_box_fixture() -> String {
+    "$ sweep.sh capture 2\n\
+     ⎿ Bash command\n\
+     ⎿   rm -rf /tmp/foo\n\
+     ⎿ Do you want to proceed?\n\
+     ⎿ ❯ 1. Yes\n\
+     ⎿   2. No\n\
+     ⎿ Esc to cancel\n\
+     Done.\n\
+     ──────────────────────────────────────────────\n\
+     ❯\n\
+     ──────────────────────────────────────────────\n\
+       ⏵⏵ accept edits on (shift+tab to cycle)"
+        .to_string()
+}
+
 /// The shared fixture set: `(name, capture, expected_live)`. Every entry is
 /// evaluated by BOTH the Rust gate and the sweep.sh mirror, and both must
 /// agree with the expectation.
-fn fixtures() -> Vec<(&'static str, &'static str, bool)> {
+fn fixtures() -> Vec<(&'static str, String, bool)> {
     vec![
         (
             "multi-option block with a don't-ask-again option, inline (esc) only",
@@ -116,32 +180,99 @@ fn fixtures() -> Vec<(&'static str, &'static str, bool)> {
              │ ❯ 1. Yes                                                     │\n\
              │   2. Yes, and don't ask again for cargo test in this project │\n\
              │   3. No, and tell Claude what to do differently (esc)        │\n\
-             ╰──────────────────────────────────────────────────────────────╯",
+             ╰──────────────────────────────────────────────────────────────╯"
+                .to_string(),
             true,
         ),
         (
             "multi-option block with an explicit Esc to cancel footer",
-            "Do you want to proceed?\n❯ 1. Yes\n  2. Yes, and don't ask again for: git status\n  3. No\n  Esc to cancel",
+            "Do you want to proceed?\n❯ 1. Yes\n  2. Yes, and don't ask again for: git status\n  3. No\n  Esc to cancel".to_string(),
             true,
         ),
         (
             "single prompt with the question at the tail",
-            "Bash command\n  git status\nDo you want to proceed?",
+            "Bash command\n  git status\nDo you want to proceed?".to_string(),
             true,
         ),
         (
             "prose narration mentioning a safe command",
-            "I might run cargo test soon.\nHere is some narration about the plan.\n$ ls -la\ndone.",
+            "I might run cargo test soon.\nHere is some narration about the plan.\n$ ls -la\ndone.".to_string(),
             false,
         ),
         (
             "numbered list in prose without any prompt marker",
-            "Here is my plan:\n1. run the tests\n2. commit the work\n3. stand by for verification",
+            "Here is my plan:\n1. run the tests\n2. commit the work\n3. stand by for verification".to_string(),
             false,
         ),
         (
-            "prompt scrolled out of the tail by later output",
-            "Do you want to proceed?\n  Esc to cancel\noutput line 1\noutput line 2\noutput line 3\noutput line 4\noutput line 5",
+            // Original pinned regression fixture — restored to its original
+            // size after a gate-review finding: stretching it hid a bug
+            // rather than exercised it. No option list anywhere, so the
+            // shape-gated extension can never succeed regardless of the
+            // footer's distance from the end.
+            "footer with no option list anywhere is not a live modal",
+            "Do you want to proceed?\n  Esc to cancel\noutput line 1\noutput line 2\noutput line 3\noutput line 4\noutput line 5".to_string(),
+            false,
+        ),
+        (
+            "live multi-option prompt with a six-line trailing task-list region",
+            "Bash command\n  rm -rf /tmp/paw-build-9\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n  Esc to cancel\n\
+             Tasks\n☐ Implement feature\n☐ Write tests\n☐ Update docs\nmain* ⇡2\nSonnet 5.1 · 42% context used"
+                .to_string(),
+            true,
+        ),
+        (
+            "answered prompt followed by command output is not live",
+            answered_then_output_fixture(),
+            false,
+        ),
+        (
+            "exactly 13 trailing lines (effective tolerance) is still live",
+            multi_option_prompt_with_trailing_lines(13),
+            true,
+        ),
+        (
+            "14 trailing lines, one past the effective tolerance, is not live",
+            multi_option_prompt_with_trailing_lines(14),
+            false,
+        ),
+        (
+            // Gate-review safety finding: narration mentioning the footer
+            // text, more than LIVE_PROMPT_TAIL lines from the end so only
+            // the offset>0 shape-gated path can reach it, with no option
+            // list anywhere, must NOT read as live.
+            "narration mentioning the footer text is not a live modal",
+            "I checked the pane and its footer currently reads \"Esc to cancel\" below it.\n\
+             Nothing else is happening right now.\n\
+             Just idle, waiting for the next task.\n\
+             Still idle.\n\
+             Still nothing.\n\
+             $ "
+                .to_string(),
+            false,
+        ),
+        (
+            // Same reasoning, but the mention comes from grep-style output
+            // echoing a matching line (prefixed by file/line context, so it
+            // does not START the line either).
+            "grep-style output echoing the footer text is not a live modal",
+            "grep -rn \"esc to cancel\" src/\n\
+             src/supervisor/auto_approve.rs:1378:const LIVE_PROMPT_FOOTER_MARKERS: &[&str] = &[\"esc to cancel\"];\n\
+             done searching\n\
+             no further prompts found\n\
+             agent waiting for next instruction\n\
+             $ "
+                .to_string(),
+            false,
+        ),
+        (
+            "a captured modal in tool output with an idle input box below it is not live",
+            captured_modal_with_idle_input_box_fixture(),
+            false,
+        ),
+        (
+            "a captured modal above the real borderless idle input box is not live",
+            captured_modal_with_borderless_idle_input_box_fixture(),
             false,
         ),
     ]
@@ -202,8 +333,8 @@ fn rust_gate_and_sweep_helper_agree_on_shared_fixtures() {
     let sweep = install_sweep(repo.path());
 
     for (name, capture, expected_live) in fixtures() {
-        let rust_live = is_live_prompt(capture);
-        let sweep_live = sweep_sees_live(repo.path(), &sweep, capture);
+        let rust_live = is_live_prompt(&capture);
+        let sweep_live = sweep_sees_live(repo.path(), &sweep, &capture);
         assert_eq!(
             rust_live, expected_live,
             "Rust gate disagrees with expectation on fixture: {name}"

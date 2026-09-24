@@ -592,8 +592,11 @@ always the authoritative check, never this summary:
    `[supervisor.auto_approve]` poll thread alike — passes through the
    broker-mediated-approvals send gate: it re-captures the target pane
    immediately before sending and dispatches keys only when a permission-prompt
-   marker is still present in the last ~4 non-blank lines. A prompt that cleared
-   between your decision and the send therefore receives **no** stray keys
+   marker still anchors the modal block — the narrow last-4-line tail at the
+   capture's true end, or, at a bounded offset above it, the footer line
+   itself together with a numbered option line nearby (never a bare mention
+   of the footer text). A prompt that cleared between your decision and the
+   send therefore receives **no** stray keys
    (which would otherwise land as literal chat text). The gate also refuses
    pane 0 (your own pane): `sweep.sh approve 0` sends nothing and reports the
    exclusion, and the auto-approver never blind-sends into pane 0. Clearing your

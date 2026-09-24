@@ -34,10 +34,15 @@ Each poll (~15 seconds) the loop:
   with its own `capture-pane` call.
 - **Acts only on a live prompt** — the prompt's structural markers (numbered
   option glyphs and/or the `Do you want to …` question, with the
-  `Esc to cancel` footer) at the tail of the capture, over a window wide
-  enough to span a full multi-option prompt block — so a prompt offering a
-  "don't ask again" option is detected too. Prompt-like text scrolled up in
-  history is ignored.
+  `Esc to cancel` footer) anchored on the modal block itself, searching
+  upward from the end of the capture and tolerating up to 13 non-blank
+  trailing lines of non-prompt content below it (a task list, a status strip,
+  a progress footer), so a CLI that renders chrome under its input area
+  doesn't hide a live modal — and so a prompt offering a "don't ask again"
+  option is detected too. Beyond that true end, liveness requires the modal's
+  actual shape (the footer anchoring a line, with an option list nearby), not
+  a bare mention of the footer text in narration or tool output. Prompt-like
+  text scrolled well past that bound is ignored.
 - **Auto-approves classifier-safe prompts** using the same
   [auto-approve classification](#auto-approve-classification) the attended
   dashboard approver uses. The supervisor's pane 0 is covered too, but is only
@@ -705,15 +710,27 @@ and `FOO=bar rm -rf /` both still escalate, and a redirect to a real device
 ### Decision order
 
 1. **Live-prompt gate.** The classifier acts only when the prompt's
-   structural markers are at the tail of the capture: a textual marker (the
+   structural markers anchor the modal block, searched upward from the end of
+   the capture: at the capture's true end, a textual marker (the
    `Do you want to …` question or the `Esc to cancel` footer) within the last
    ~4 non-blank lines, or a numbered option line anchoring that tail with a
    textual marker within the last ~15 non-blank lines. The wider block window
    means **multi-option prompts** — `Do you want to proceed?` above a
    numbered list with a "don't ask again" option — are detected and
-   auto-clearable rather than missed. A prompt that has scrolled away, or
-   pane text that is just narration, is treated as *not live* — no keystrokes
-   are sent. This kills phantom approvals.
+   auto-clearable rather than missed. The search also tolerates up to 13
+   non-blank trailing lines of non-prompt content below the modal — a task
+   list, a status strip, a progress footer the CLI renders under its input
+   area — so that chrome doesn't hide a still-live prompt; but once the
+   anchor shifts past the true end of the capture, re-confirming liveness
+   there requires the modal's actual SHAPE: the footer (`Esc to cancel`)
+   anchoring the START of a line, together with a numbered option line
+   nearby. A bare confirmation question is not enough there, nor is the
+   footer text merely mentioned mid-line (narration describing the UI, or
+   grep-style tool output echoing a matching line) — an already-answered
+   prompt can leave either behind followed by ordinary command output. A
+   prompt that has scrolled past the 13-line tolerance, or pane text that is
+   just narration with no modal around it, is treated as *not live* — no
+   keystrokes are sent. This kills phantom approvals.
 2. **Danger-list (escalate wins).** A curated danger-list is evaluated
    **first** and overrides any allowlist match. It covers `rm -rf` / `rm -fr`,
    `git push`, `--force` / `force-push`, `reset --hard`, `git rebase`,
@@ -795,13 +812,14 @@ and `FOO=bar rm -rf /` both still escalate, and a redirect to a real device
 The live-prompt gate above runs at *detection*. A second, independent check
 runs at *send* time: immediately before dispatching the approval keystrokes,
 the approver takes a **fresh capture** of the target pane and confirms the
-prompt's live structural markers are still at the tail (the same
-multi-option-wide window as detection, not a fixed ~4-line scan). If the
-prompt cleared between the decision and the send — the agent moved on, or you
-answered it first — **no keystrokes are sent**, and `sweep.sh approve`
-reports `cleared before send, no keys sent`. This closes the stray-input race
-where the option digit would otherwise land in the CLI's chat box as literal
-text, polluting context and leaving dangling unsubmitted commands.
+prompt's live structural markers still anchor the modal block (the same
+anchored search and bounded-trailing-region tolerance as detection, not a
+fixed ~4-line scan). If the prompt cleared between the decision and the
+send — the agent moved on, or you answered it first — **no keystrokes are
+sent**, and `sweep.sh approve` reports `cleared before send, no keys sent`.
+This closes the stray-input race where the option digit would otherwise land
+in the CLI's chat box as literal text, polluting context and leaving dangling
+unsubmitted commands.
 
 The blind send-keys path also never targets **pane 0** (the supervisor's own
 pane): `sweep.sh approve 0` sends nothing and reports that pane 0 is excluded,
