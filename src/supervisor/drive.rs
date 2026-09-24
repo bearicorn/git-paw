@@ -63,10 +63,10 @@ use super::approval_gate::{approval_dedup_key, live_prompt_in_tail};
 use super::approve::{KeyDispatcher, TmuxKeyDispatcher, approval_keystrokes};
 use super::auto_approve::{
     LIVE_PROMPT_TAIL, ProtectedPaths, detect_prompt_shape, extract_command_slice,
-    extract_path_from_file_prompt, is_dangerous, is_git_dir_write, is_live_prompt,
-    is_managed_script_invocation, is_protected_path_violation, is_safe_command, is_scratch_rm,
-    is_worktree_dev_test_op, is_worktree_file_op, is_worktree_git_op, normalize_command,
-    select_option_index,
+    extract_path_from_file_prompt, is_dangerous, is_git_dir_write, is_idle_input_box_line,
+    is_live_prompt, is_managed_script_invocation, is_protected_path_violation, is_rule_line,
+    is_safe_command, is_scratch_rm, is_worktree_dev_test_op, is_worktree_file_op,
+    is_worktree_git_op, normalize_command, select_option_index, strip_input_sigil,
 };
 use super::claim::PaneClaim;
 use super::poll::{AgentStatusRow, fetch_status_over_http};
@@ -2402,48 +2402,50 @@ fn recover_stale_input(
     Ok(NudgeOutcome::Wedged)
 }
 
-/// Reads a pane's input box as its display rows, in order: the sigil row's
-/// text first, then any following `│ … │` continuation rows (no sigil) up to
-/// the box's bottom border. Returns `None` when the capture shows no input
-/// box, the box is empty, or its sigil row is a numbered prompt option (never
-/// read as buffered input, so a boxed prompt option cannot be mistaken for a
-/// stranded directive).
-///
-/// The input box is the bordered line carrying the CLI's prompt sigil (`│ > …`)
-/// — the same landmark the embedded Claude Code profile's readiness markers
-/// (`crate::config::claude_prompt_profile`) use to recognise a launched CLI.
-/// The LAST such line wins, because a pane's live input box is always its
-/// most recent one. A wrapped rendering's continuation rows carry no sigil of
-/// their own, so they are read by position — every `│ … │` line immediately
-/// below the sigil row — rather than by matching a sigil again.
+/// The input box is recognised via [`is_idle_input_box_line`] — either the
+/// `│`-bordered style (`│ > … │`) or current Claude Code's borderless,
+/// rule-framed style (a rule line, the sigil line, another rule line),
+/// ground-truthed against a live `tmux capture-pane -p`. The LAST such line
+/// wins, because a pane's live input box is always its most recent one. A
+/// wrapped rendering's continuation rows carry no sigil of their own, so they
+/// are read by position rather than by matching a sigil again: every
+/// `│ … │` line immediately below the sigil row for the bordered style, or
+/// every plain line up to the closing rule line for the borderless style
+/// (never crossing into the mode strip below it).
 ///
 /// The sigil set comes from the embedded profile's `input_sigils`
 /// (`cli-prompt-profiles` capability) rather than a compiled constant.
 fn input_box_rows(capture: &str) -> Option<Vec<String>> {
-    let sigils = &claude_prompt_profile().input_sigils;
     let lines: Vec<&str> = capture.lines().collect();
-    let (sigil_idx, sigil_text) = lines.iter().enumerate().rev().find_map(|(i, raw)| {
-        let inner = raw.trim().strip_prefix('│')?.trim_end_matches('│').trim();
-        let text = sigils
+    let preceding_non_blank = |idx: usize| -> Option<&str> {
+        lines[..idx]
             .iter()
-            .find_map(|sigil| inner.strip_prefix(sigil.as_str()))?
-            .trim();
-        Some((i, text.to_string()))
-    })?;
-
-    let mut chars = sigil_text.chars();
-    let is_option = matches!(chars.next(), Some(c) if c.is_ascii_digit())
-        && matches!(chars.next(), Some('.' | ')'));
-    if sigil_text.is_empty() || is_option {
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .copied()
+    };
+    let sigil_idx = (0..lines.len())
+        .rev()
+        .find(|&idx| is_idle_input_box_line(lines[idx], preceding_non_blank(idx)))?;
+    let sigil_text = strip_input_sigil(lines[sigil_idx])?.trim().to_string();
+    if sigil_text.is_empty() {
         return None;
     }
 
+    let bordered = lines[sigil_idx].trim().starts_with('│');
     let mut rows = vec![sigil_text];
     for raw in &lines[sigil_idx + 1..] {
-        let Some(inner) = raw.trim().strip_prefix('│') else {
-            break; // the box's bottom border, or the box has ended
-        };
-        rows.push(inner.trim_end_matches('│').trim().to_string());
+        if bordered {
+            let Some(inner) = raw.trim().strip_prefix('│') else {
+                break; // the box's bottom border, or the box has ended
+            };
+            rows.push(inner.trim_end_matches('│').trim().to_string());
+        } else {
+            if is_rule_line(raw) {
+                break; // the box's closing rule line
+            }
+            rows.push(raw.trim().to_string());
+        }
     }
     Some(rows)
 }
@@ -4119,6 +4121,65 @@ mod tests {
             !pane_has_buffered_input("│ ❯ 1. Yes │"),
             "a boxed option line is not buffered input"
         );
+    }
+
+    /// An idle pane sitting at its input box with `text` unsubmitted,
+    /// rendered in current Claude Code's REAL shape — ground-truthed against
+    /// a live `tmux capture-pane -p`: NO side borders at all, just a rule
+    /// line, the bare sigil line, another rule line, then the mode strip.
+    fn idle_input_box_rule_style(text: &str) -> String {
+        format!(
+            "● Ran tool\n────────────────────────────────\n❯ {text}\n────────────────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ? for shortcuts"
+        )
+    }
+
+    /// Gate-review safety finding: `input_box_text` originally only
+    /// recognised a `│`-bordered box, so current Claude Code's real
+    /// borderless shape was invisible to buffered-input detection — an idle
+    /// pane holding unsubmitted text would never get its follow-up `Enter`.
+    #[test]
+    fn idle_pane_with_buffered_input_gets_a_follow_up_enter_borderless_shape() {
+        assert!(pane_has_buffered_input(&idle_input_box_rule_style(
+            "please continue with task 3"
+        )));
+    }
+
+    /// An empty borderless input box is not a stranded directive either.
+    #[test]
+    fn empty_borderless_box_is_not_buffered_input() {
+        assert!(!pane_has_buffered_input(&idle_input_box_rule_style("")));
+    }
+
+    /// Gate-review safety finding: a borderless input box whose composer text
+    /// wraps across multiple plain lines (no sigil, no border) up to the
+    /// closing rule line must have every row read as buffered input, exactly
+    /// like a bordered box's wrapped continuation rows.
+    #[test]
+    fn borderless_multi_row_buffered_input_is_detected() {
+        let capture = "● Ran tool\n\
+            ────────────────────────────────\n\
+            ❯ please continue with the long\n\
+            running task from before\n\
+            ────────────────────────────────\n\
+              ⏵⏵ accept edits on (shift+tab to cycle) · ? for shortcuts";
+        assert!(pane_has_buffered_input(capture));
+        assert_eq!(
+            input_box_text(capture).as_deref(),
+            Some("please continue with the long running task from before")
+        );
+    }
+
+    /// Gate-review safety finding: a paste-buffer placeholder in the
+    /// borderless input box is recognised the same way as the bordered one —
+    /// never re-typed verbatim, always escalated as wedged if it survives a
+    /// recovery attempt.
+    #[test]
+    fn borderless_paste_buffer_placeholder_is_detected() {
+        let placeholder = idle_input_box_rule_style("[Pasted text #1 +5 lines]");
+        assert!(input_box_shows_placeholder(&placeholder));
+        assert!(!input_box_shows_placeholder(&idle_input_box_rule_style(
+            "please continue"
+        )));
     }
 
     /// Builds a one-agent, single-pane `drive_loop_in_tmp` run against

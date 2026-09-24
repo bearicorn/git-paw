@@ -390,11 +390,11 @@ When the session is NOT unattended (no drive loop), the boot context SHALL NOT c
 
 ### Requirement: Manual mode boot block pre-fill
 
-In manual broker mode (without supervisor), the system SHALL pre-fill the boot instruction block into each agent pane's input line without sending an Enter key. This allows users to paste their actual task after the boot instructions.
+In manual broker mode on a **bare, human-driven launch** — `git paw start` with no spec selection and no supervisor mode — the system SHALL pre-fill the boot instruction block into each agent pane's input line without sending an Enter key. This allows users to paste their actual task after the boot instructions. This pre-fill-only behaviour SHALL NOT apply to a spec-driven launch, where the task is supplied by the spec rather than typed by a human and an unsubmitted prompt would strand the agent; a spec-driven launch submits per "Boot-block injection in cmd_start_from_specs".
 
 #### Scenario: Boot block pre-filled without Enter
 
-- **GIVEN** broker-enabled session in manual mode
+- **GIVEN** broker-enabled session in manual mode launched with no spec selection
 - **WHEN** agent panes are created
 - **THEN** boot block SHALL be sent to input line
 - **AND** no Enter key SHALL be sent
@@ -406,6 +406,12 @@ In manual broker mode (without supervisor), the system SHALL pre-fill the boot i
 - **WHEN** user pastes task instructions
 - **THEN** task appears after boot block
 - **AND** user can press Enter to submit combined content
+
+#### Scenario: Spec-driven launch is not pre-fill-only
+
+- **GIVEN** broker-enabled session launched with `--specs` or `--from-all-specs` and no supervisor mode
+- **WHEN** agent panes are created
+- **THEN** the boot prompt SHALL be submitted rather than left pre-filled
 
 ### Requirement: Manual mode injection timing
 
@@ -435,36 +441,49 @@ The system SHALL respect the same boot block configuration in manual mode as in 
 
 ### Requirement: Boot-block injection in cmd_start_from_specs
 
-When `git paw start --from-specs` is invoked WITHOUT supervisor mode (the bare from-specs path, routed by the dispatcher per `cli-parsing` to `cmd_start_from_specs`) AND `[broker] enabled = true` is set in config, the system SHALL inject a broker boot block into each coding agent pane via `tmux send-keys` after the tmux session is executed.
+When `git paw start --from-specs` is invoked WITHOUT supervisor mode (the bare from-specs path, routed by the dispatcher per `cli-parsing` to `cmd_start_from_specs`) AND `[broker] enabled = true` is set in config, the system SHALL inject a broker boot block into each coding agent pane after the tmux session is executed, and SHALL submit it.
 
-The injection SHALL mirror the existing behaviour of bare `cmd_start` for consistency:
-- After `tmux_session.execute()` succeeds.
-- For each spec mapping (each branch + worktree), compute `pane_idx = idx + pane_offset` where `pane_offset = 1` when broker is enabled (account for the dashboard pane at index 0).
-- Build the boot block via `git_paw::skills::build_boot_block(branch, &broker_config.url())`.
-- Build the send-keys argv via `git_paw::tmux::build_boot_inject_args(&tmux_session.name, pane_idx, &boot_block)`.
-- Invoke `std::process::Command::new("tmux").args(&args).status()` (best-effort; failures are non-fatal, matching the existing pattern).
+The injection SHALL use the split-send + settle-delay submission mechanism required by `cli-resolution` ("Boot prompt submitted via split-send + settle delay"): the prompt text is sent literally, then `Enter` is sent as a separate keystroke after the per-CLI settle delay. A spec-driven launch SHALL NOT leave the prompt unsubmitted.
 
-The boot block carries the agent's `BRANCH_ID`, broker URL, and curl-publish-status patterns. Without it, agents launched via from-specs sit at the Claude welcome screen with no broker context — which they need in order to participate in any broker-driven coordination (status publishing, conflict detection in v0.5.0+, etc.).
+The injected prompt SHALL carry both the boot block and the task prompt. The boot block carries the agent's `BRANCH_ID`, broker URL, and the publish patterns it needs to participate in broker coordination. The task prompt SHALL name the agent's assignment and the format-native apply invocation for the spec's backend, so the agent drives the spec workflow — walking its task list and marking tasks off — rather than improvising a private one. Without it an agent may complete the work while leaving every task unchecked, so `openspec status` and any orchestrator reading progress see none.
 
-When `[broker] enabled = false`, no boot-block injection occurs (matching the existing `cmd_start` behaviour — the boot block is broker-specific content).
-
-This requirement does NOT cover spec-content / task-prompt injection. The full prompt that tells the agent what work to do is delivered via the per-worktree `AGENTS.md` (per `worktree-agents-md` capability) and, in a future change, may be augmented by a format-native apply skill invocation (per `dogfood-v040-slot` D1 finding). v0.4 hardening only requires boot-block parity here.
+When `[broker] enabled = false`, no boot-block injection occurs (matching the existing `cmd_start` behaviour — the boot block is broker-specific content). The task prompt SHALL still be injected and submitted for a spec-driven launch, since the agent's assignment does not depend on the broker.
 
 #### Scenario: Boot block is injected per agent pane in spec-mode-with-broker
 
 - **GIVEN** `[broker] enabled = true` and `[supervisor]` is not configured (spec-mode-only)
 - **AND** three pending spec changes are discovered
 - **WHEN** `git paw start --from-specs` is invoked
-- **THEN** after `tmux_session.execute()` succeeds, the system SHALL invoke `tmux send-keys` once per spec pane (panes 1, 2, 3 with broker enabled and dashboard at pane 0)
-- **AND** each invocation SHALL pass the boot block produced by `build_boot_block(branch, broker_url)` for that pane's branch
-- **AND** the per-pane argv SHALL match what `build_boot_inject_args(session_name, pane_idx, boot_block)` produces
+- **THEN** the system SHALL inject once per spec pane (panes 1, 2, 3 with broker enabled and dashboard at pane 0)
+- **AND** each injection SHALL carry the boot block produced for that pane's branch
+
+#### Scenario: The spec-driven boot prompt is submitted
+
+- **GIVEN** a spec-driven launch without supervisor mode
+- **WHEN** the boot prompt has been injected into an agent pane
+- **THEN** a separate `Enter` SHALL be sent after the settle delay
+- **AND** the pane SHALL NOT be left with an unsubmitted prompt in its input line
+
+#### Scenario: The task prompt is injected alongside the boot block
+
+- **GIVEN** a spec-driven launch without supervisor mode, for a spec with a known backend
+- **WHEN** the agent's prompt is built
+- **THEN** it SHALL include the task prompt naming the assignment and the backend's apply invocation
+- **AND** the prompt SHALL match the one the supervisor path builds for the same spec
+
+#### Scenario: Task prompt is injected even with the broker disabled
+
+- **GIVEN** `[broker] enabled = false` and a spec-driven launch without supervisor mode
+- **WHEN** agent panes are created
+- **THEN** no boot block SHALL be injected
+- **AND** the task prompt SHALL still be injected and submitted
 
 #### Scenario: No boot-block injection when broker is disabled
 
 - **GIVEN** `[broker] enabled = false`
 - **AND** spec changes are discovered
 - **WHEN** `git paw start --from-specs` is invoked
-- **THEN** no `tmux send-keys` calls SHALL be made for boot-block injection
+- **THEN** no broker boot block SHALL be injected
 - **AND** the launch SHALL still proceed (panes are created, just without broker boot blocks)
 
 #### Scenario: Boot-block injection failure is non-fatal

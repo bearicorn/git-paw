@@ -46,18 +46,22 @@ use crate::supervisor::auto_approve::{
 /// is a non-blind concern owned by the unattended drive loop.
 pub const SUPERVISOR_PANE_INDEX: usize = 0;
 
-/// Returns whether the prompt's live structural markers are present at the
-/// tail of `capture`.
+/// Returns whether the prompt's live structural markers anchor the modal
+/// block of `capture`.
 ///
 /// Delegates to the Live-prompt gate's structural check
 /// ([`is_live_prompt`] — option glyphs / `Do you want to …` / `Esc to
-/// cancel`, tail-anchored over a window wide enough to span a full
-/// multi-option prompt block), extended with the embedded Claude Code
-/// profile's approval markers so the re-confirm also recognises other agent
-/// CLIs' prompt wordings (`requires approval`, `(y/n)`, …) that
-/// `permission-detection` accepts. A marker found only in scrollback above
-/// the tail is treated as *not live* — that is a prompt already answered and
-/// scrolled away.
+/// cancel`, anchored over a window wide enough to span a full multi-option
+/// prompt block and searched upward over a bounded trailing region so a CLI
+/// that renders chrome under its input area doesn't hide a live modal),
+/// extended with the embedded Claude Code profile's approval markers so the
+/// re-confirm also recognises other agent CLIs' prompt wordings (`requires
+/// approval`, `(y/n)`, …) that `permission-detection` accepts. A marker found
+/// only in scrollback above the tail — or found only as a bare substring
+/// mention with no accompanying option list once the anchor has shifted past
+/// the capture's true end — is treated as *not live*: the first is a prompt
+/// already answered and scrolled away, the second is narration or tool
+/// output that merely mentions the footer text rather than the modal itself.
 #[must_use]
 pub fn live_prompt_in_tail(capture: &str) -> bool {
     is_live_prompt(capture)
@@ -233,11 +237,15 @@ mod tests {
     }
 
     /// A marker only in scrollback above the tail is NOT live (spec scenario
-    /// "A stale marker only in scrollback is not treated as live").
+    /// "An answered prompt followed by command output is not live"): the
+    /// question line has no option list and no `Esc to cancel` footer after
+    /// it, so the bounded trailing region must NOT admit it — only the
+    /// modal's structural footer can anchor a match beyond the narrow tail.
     #[test]
     fn marker_only_in_scrollback_is_not_live() {
         // The marker line is followed by more than 4 non-blank lines, so it
-        // falls outside the tail window.
+        // falls outside the tail window, and nothing resembling a footer
+        // ever appears — a bare question answered and scrolled past.
         let capture = "Do you want to proceed?\nran it\nline b\nline c\nline d\n$ ";
         assert!(!live_prompt_in_tail(capture));
     }

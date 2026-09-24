@@ -32,6 +32,33 @@ fn cmd() -> Command {
     Command::cargo_bin("git-paw").expect("binary exists")
 }
 
+/// Directory holding the freshly built binary, prepended to `stuck-eval`'s
+/// child `PATH` so `git paw __prompt-profile` (sourced by sweep.sh via
+/// `discover_prompt_profile_field`) resolves to THIS build rather than
+/// falling back to the script's hardcoded capitalised literal. Mirrors
+/// `tests/sweep_sh_live_gate_parity.rs`'s `built_bin_dir`. Without this, CI
+/// (which has no `git-paw` on `PATH`) only ever exercises the fallback path,
+/// masking a case-sensitivity mismatch that only bites once markers are
+/// binary-sourced (and therefore lowercased).
+fn built_bin_dir() -> std::path::PathBuf {
+    assert_cmd::cargo::cargo_bin("git-paw")
+        .parent()
+        .expect("built binary has a parent dir")
+        .to_path_buf()
+}
+
+/// `PATH` with the built binary's directory prepended (`binary_on_path:
+/// true`) or deliberately excluded (`false`, forcing sweep.sh's fallback
+/// literal) — used by task 8.3's binary-vs-fallback equivalence test.
+fn resolved_path(binary_on_path: bool) -> String {
+    let base = std::env::var("PATH").unwrap_or_default();
+    if binary_on_path {
+        format!("{}:{}", built_bin_dir().display(), base)
+    } else {
+        base
+    }
+}
+
 fn init_git_repo(dir: &std::path::Path) {
     for args in [
         &["init", "-b", "main"][..],
@@ -179,10 +206,11 @@ fn seed_progress(fx: &Fixture, agent: &str, checkbox: &str, commit: &str, ts: u6
 }
 
 /// Runs `stuck-eval` with the full positional arg set (`checkbox_count`,
-/// `commit_count`, `blocked_age_seconds`); pass "" for any the branch under
-/// test does not use.
+/// `commit_count`, `blocked_age_seconds`) and an explicit choice of whether
+/// the built `git-paw` binary is resolvable on `PATH`; pass "" for any arg
+/// the branch under test does not use.
 #[allow(clippy::too_many_arguments)]
-fn run_stuck_eval_full(
+fn run_stuck_eval_full_with_path(
     fx: &Fixture,
     agent: &str,
     last_seen: u64,
@@ -190,6 +218,7 @@ fn run_stuck_eval_full(
     commit: &str,
     blocked_age: &str,
     capture: &str,
+    binary_on_path: bool,
 ) -> String {
     let mut child = StdCommand::new("bash")
         .arg(&fx.sweep)
@@ -200,6 +229,7 @@ fn run_stuck_eval_full(
         .arg(commit)
         .arg(blocked_age)
         .current_dir(&fx.root)
+        .env("PATH", resolved_path(binary_on_path))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -215,26 +245,34 @@ fn run_stuck_eval_full(
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
+/// Runs `stuck-eval` with the built binary resolvable on `PATH` (task 8.2),
+/// so `git paw __prompt-profile` sources the real, lowercased markers rather
+/// than sweep.sh's hardcoded capitalised fallback literal — every test using
+/// this helper exercises the same path a real install does.
+#[allow(clippy::too_many_arguments)]
+fn run_stuck_eval_full(
+    fx: &Fixture,
+    agent: &str,
+    last_seen: u64,
+    checkbox: &str,
+    commit: &str,
+    blocked_age: &str,
+    capture: &str,
+) -> String {
+    run_stuck_eval_full_with_path(
+        fx,
+        agent,
+        last_seen,
+        checkbox,
+        commit,
+        blocked_age,
+        capture,
+        true,
+    )
+}
+
 fn run_stuck_eval(fx: &Fixture, agent: &str, last_seen: u64, capture: &str) -> String {
-    let mut child = StdCommand::new("bash")
-        .arg(&fx.sweep)
-        .arg("stuck-eval")
-        .arg(agent)
-        .arg(last_seen.to_string())
-        .current_dir(&fx.root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn sweep.sh");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(capture.as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().expect("wait");
-    String::from_utf8_lossy(&out.stdout).to_string()
+    run_stuck_eval_full(fx, agent, last_seen, "", "", "", capture)
 }
 
 /// Polls until the recorder has captured at least `min` publishes, or the
@@ -264,7 +302,12 @@ fn permission_prompt_with_stale_heartbeat_publishes_stuck() {
     // Wait (bounded) for the recorder to capture the publish.
     wait_for_bodies(&fx, 1, Duration::from_secs(5));
     fx.stop.store(true, Ordering::SeqCst);
-    assert!(out.contains("stuck"), "expected stuck output, got: {out}");
+    // An exact phase assertion, not `out.contains("stuck")` — that vacuous
+    // check is satisfied by `not-stuck` too (task 8.4).
+    assert!(
+        out.contains("published (phase=stuck-on-prompt)"),
+        "expected the stuck-on-prompt phase publish, got: {out}"
+    );
     let bodies = fx.bodies.lock().unwrap();
     assert_eq!(
         bodies.len(),
@@ -282,6 +325,47 @@ fn permission_prompt_with_stale_heartbeat_publishes_stuck() {
             .contains("Do you want to proceed?"),
         "captured_prompt must carry the prompt text: {}",
         bodies[0]
+    );
+}
+
+/// Task 8.3: a capitalised permission prompt (`Do you want to proceed?`)
+/// classifies identically whether the markers come from the resolvable
+/// `git-paw` binary (lowercased, per `approval_markers`) or from sweep.sh's
+/// own capitalised fallback literal — the marker SOURCE must not change the
+/// verdict. Two separate fixtures (and tmp dirs) avoid the dedup window
+/// treating the second run as a repeat.
+#[test]
+#[serial]
+fn marker_source_does_not_change_the_verdict() {
+    let capture = "tool output\nDo you want to proceed?\n  1. Yes\n  2. No\n";
+
+    let fx_binary = setup();
+    let binary_out =
+        run_stuck_eval_full_with_path(&fx_binary, "feat-src-bin", 45, "", "", "", capture, true);
+    wait_for_bodies(&fx_binary, 1, Duration::from_secs(5));
+    fx_binary.stop.store(true, Ordering::SeqCst);
+
+    let fx_fallback = setup();
+    let fallback_out = run_stuck_eval_full_with_path(
+        &fx_fallback,
+        "feat-src-fallback",
+        45,
+        "",
+        "",
+        "",
+        capture,
+        false,
+    );
+    wait_for_bodies(&fx_fallback, 1, Duration::from_secs(5));
+    fx_fallback.stop.store(true, Ordering::SeqCst);
+
+    assert!(
+        binary_out.contains("published (phase=stuck-on-prompt)"),
+        "binary-sourced markers must classify stuck-on-prompt, got: {binary_out}"
+    );
+    assert!(
+        fallback_out.contains("published (phase=stuck-on-prompt)"),
+        "fallback markers must classify stuck-on-prompt, got: {fallback_out}"
     );
 }
 
