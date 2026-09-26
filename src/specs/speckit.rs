@@ -876,8 +876,9 @@ mod tests {
              Phase 2 (Build). Complete the following tasks in order:\n\n- T001 — one\n\n\
              Work through these tasks sequentially in the order listed. After completing each task, \
              flip its `- [ ]` checkbox to `- [x]` in this worktree's `tasks.md`. You may commit the \
-             writeback alongside the task's code change or as a separate commit. Publish `agent.done` \
-             only when every task above shows `- [x]` in `tasks.md`."
+             writeback alongside the task's code change or as a separate commit. When every task \
+             above shows `- [x]` in `tasks.md`, commit your work. The post-commit hook will \
+             auto-publish your completion."
         );
     }
 
@@ -960,7 +961,7 @@ mod tests {
         assert!(prompt.contains("Create auth tables"));
         assert!(prompt.contains("Seed test data"));
         assert!(prompt.contains("`- [x]`"));
-        assert!(prompt.contains("agent.done"));
+        assert!(prompt.contains("commit your work"));
     }
 
     #[test]
@@ -975,7 +976,7 @@ mod tests {
         assert!(prompt.contains("T009"));
         assert!(prompt.contains("only one task"));
         assert!(!prompt.contains("sequentially"));
-        assert!(!prompt.contains("agent.done"));
+        assert!(!prompt.contains("commit your work"));
     }
 
     #[test]

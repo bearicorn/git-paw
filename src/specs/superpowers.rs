@@ -352,7 +352,10 @@ Run: `cargo test auth`\n\n\
             prompt.contains("- [ ]") && prompt.contains("- [x]"),
             "flip writeback described"
         );
-        assert!(prompt.contains("agent.done"), "completion signal described");
+        assert!(
+            prompt.contains("commit your work"),
+            "completion signal described"
+        );
     }
 
     // Byte-identical safety net (D1 / task 1.3): the task-prompt section
@@ -398,8 +401,8 @@ Run: `cargo test auth`\n\n\
              ## Execution\n\
              \n\
              Work the steps in order. As you complete each step, flip its `- [ ]` to `- [x]` in \
-             the plan file (mid-flight writeback). Publish `agent.done` only when every step in \
-             the plan shows `- [x]`."
+             the plan file (mid-flight writeback). When every step in the plan shows `- [x]`, \
+             commit your work. The post-commit hook will auto-publish your completion."
         );
     }
 

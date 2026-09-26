@@ -208,7 +208,10 @@ fn boot_prompt_carries_plan_context_tasks_and_writeback_instruction() {
         prompt.contains("- [ ]") && prompt.contains("- [x]"),
         "writeback (flip - [ ] to - [x]) described"
     );
-    assert!(prompt.contains("agent.done"), "completion signal described");
+    assert!(
+        prompt.contains("commit your work"),
+        "completion signal described"
+    );
 
     // Sections are joined by the `\n\n---\n\n` separator.
     assert!(
