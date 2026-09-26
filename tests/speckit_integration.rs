@@ -157,14 +157,14 @@ fn entry_prompts_contain_spec_and_plan_content() {
     assert!(alpha.prompt.contains("T006"));
     assert!(alpha.prompt.contains("T007"));
     // Sequential instruction is present on consolidated entries only.
-    assert!(alpha.prompt.contains("agent.done"));
+    assert!(alpha.prompt.contains("commit your work"));
 
     // Beta has spec.md but no plan.md — Implementation Plan section is absent.
     let beta = entries.iter().find(|e| e.id == "002-beta-T010").unwrap();
     assert!(beta.prompt.contains("Beta feature spec content."));
     assert!(!beta.prompt.contains("## Implementation Plan"));
-    // Single-[P] entries do not carry the agent.done writeback instruction.
-    assert!(!beta.prompt.contains("agent.done"));
+    // Single-[P] entries do not carry the commit writeback instruction.
+    assert!(!beta.prompt.contains("commit your work"));
 }
 
 #[test]

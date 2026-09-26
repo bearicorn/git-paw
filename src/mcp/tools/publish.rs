@@ -65,7 +65,7 @@ pub struct PublishStatusParams {
 /// Parameters for [`GitPawMcpServer::publish_artifact`].
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PublishArtifactParams {
-    /// Public API items exported for peers to cherry-pick.
+    /// Public API items exposed by this artifact.
     #[serde(default)]
     pub exports: Vec<String>,
     /// Files touched by this artifact.
@@ -124,7 +124,7 @@ impl GitPawMcpServer {
                        updates outside this worktree, planning notes, exploration tasks). Tasks that \
                        produce code changes SHALL NOT call this tool: commit via `git commit` and let \
                        the post-commit hook publish it with the authoritative modified_files list. \
-                       exports announces public API items for peers to cherry-pick; modified_files \
+                       exports lists public API items exposed by this artifact; modified_files \
                        lists files touched. The publishing agent_id is resolved automatically from \
                        this session's worktree branch."
     )]

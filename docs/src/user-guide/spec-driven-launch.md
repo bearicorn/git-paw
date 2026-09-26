@@ -183,7 +183,7 @@ In this example, one feature directory produces three worktrees and three branch
 
 1. **Feature Context** — the full `spec.md` content.
 2. **Implementation Plan** — the full `plan.md` content (omitted when absent).
-3. **Validation Criteria (advisory)** — each `checklists/<file>.md` content under its own heading. Checklists are advisory in this release; full enforcement is planned for v1.0.0.
+3. **Validation Criteria (advisory)** — each `checklists/<file>.md` content under its own heading. Checklists are advisory.
 4. **Your Task** — the single task description (`task/...` worktrees) or the ordered task list plus sequential-execution + `- [x]` writeback + `agent.artifact` (with `status: "done"`) instructions (`phase/...` worktrees).
 
 **Task writeback.** Agents working in a `phase/...` worktree flip `- [ ]` to `- [x]` in the worktree's `tasks.md` as they complete each task. The writeback may be committed alongside the task's code change or as a separate commit. Per-line edits across worktrees are merged by git in the normal way. The [conflict detector](conflict-detection.md#ownership-violation) exempts writebacks to the shared `tasks.md` from ownership-violation detection; concurrent edits to it by two worktrees can still raise in-flight warnings.
@@ -208,7 +208,7 @@ Unlike Spec Kit, a superpowers plan is **not** fanned out into per-task worktree
 
 **Selecting Superpowers.** As with every format, git-paw does not auto-detect it — configure `[specs] type = "superpowers"` with `dir = "docs/superpowers/plans"` (`git paw init` prompts you to choose the spec system), or pass `--specs-format superpowers` for a single launch.
 
-**Boot prompt.** Each worktree's `.git-paw/AGENTS.local.md` sidecar contains: **Plan Context** (Goal / Architecture / Tech Stack), **Your Tasks** (the plan's task sections with their `Files:` and `Run:` metadata), and an **Execution** instruction to work the steps in order, flip `- [ ]` → `- [x]` in the plan file as each lands, and publish `agent.done` only when every step shows `- [x]`.
+**Boot prompt.** Each worktree's `.git-paw/AGENTS.local.md` sidecar contains: **Plan Context** (Goal / Architecture / Tech Stack), **Your Tasks** (the plan's task sections with their `Files:` and `Run:` metadata), and an **Execution** instruction to work the steps in order, flip `- [ ]` → `- [x]` in the plan file as each lands, and commit your work when every step shows `- [x]`; the post-commit hook will auto-publish your completion.
 
 ## Configuration
 

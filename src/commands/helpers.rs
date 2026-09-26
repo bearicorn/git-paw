@@ -99,10 +99,10 @@ pub(crate) fn dashboard_command_for(exe: &std::path::Path) -> String {
 /// Error returned when add/remove is invoked on a bare-mode session.
 pub(crate) fn bare_mode_unsupported(session_name: &str, verb: &str) -> PawError {
     PawError::SessionError(format!(
-        "`git paw {verb}` supports supervisor-mode sessions (the default). Session \
-         '{session_name}' was started in bare (no-supervisor) mode, whose tiled grid is \
-         not re-tiled incrementally in v0.6.0. Stop and re-start with the full branch set, \
-         or run the session in supervisor mode to use add/remove."
+        "`git paw {verb}` is not supported on session '{session_name}' (bare/no-supervisor mode). \
+         The tiled grid cannot be re-tiled incrementally for dynamic branch addition. Stop and \
+         re-start with the full branch set, or run the session in supervisor mode to use \
+         add/remove."
     ))
 }
 
@@ -211,6 +211,61 @@ mod tests {
         assert_eq!(
             launched, "__dashboard",
             "the pane's shell did not launch the spaced binary path with its subcommand"
+        );
+    }
+
+    #[test]
+    fn bare_mode_add_error_names_session_and_states_limitation() {
+        let err = bare_mode_unsupported("test-session", "add");
+        let msg = err.to_string();
+
+        assert!(msg.contains("test-session"), "error must name the session");
+        assert!(msg.contains("bare"), "error must mention bare mode");
+        assert!(msg.contains("add"), "error must mention the add command");
+        assert!(
+            msg.contains("supervisor"),
+            "error must mention supervisor mode"
+        );
+        assert!(
+            !msg.contains("the default"),
+            "error must not claim supervisor is the default"
+        );
+        assert!(
+            !msg.contains("v0.6.0"),
+            "error must not cite a release version"
+        );
+        assert!(
+            !msg.contains("v1.0.0"),
+            "error must not cite a release version"
+        );
+    }
+
+    #[test]
+    fn bare_mode_remove_error_names_session_and_states_limitation() {
+        let err = bare_mode_unsupported("my-session", "remove");
+        let msg = err.to_string();
+
+        assert!(msg.contains("my-session"), "error must name the session");
+        assert!(msg.contains("bare"), "error must mention bare mode");
+        assert!(
+            msg.contains("remove"),
+            "error must mention the remove command"
+        );
+        assert!(
+            msg.contains("supervisor"),
+            "error must mention supervisor mode"
+        );
+        assert!(
+            !msg.contains("the default"),
+            "error must not claim supervisor is the default"
+        );
+        assert!(
+            !msg.contains("v0.6.0"),
+            "error must not cite a release version"
+        );
+        assert!(
+            !msg.contains("v1.0.0"),
+            "error must not cite a release version"
         );
     }
 }

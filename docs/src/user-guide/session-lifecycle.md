@@ -265,8 +265,9 @@ What it does:
 agent passively: its heartbeat stops, and the supervisor drops it from
 its coordination scope on the next `/status` poll.
 
-> **Scope (v0.6.0):** `add` / `remove` operate on **supervisor-mode**
-> sessions (the default). Bare (`--no-supervisor`) sessions report an
-> actionable error — stop and re-start them with the full branch set.
+> **Scope:** `add` / `remove` operate on **supervisor-mode** sessions only.
+> Bare (`--no-supervisor`) sessions report an actionable error — stop and
+> re-start them with the full branch set. Dynamic branch attachment requires
+> supervisor mode for the session's tiled grid to be re-tiled incrementally.
 > One branch per invocation; bulk add/remove and configurable layouts
 > are tracked for a later release.

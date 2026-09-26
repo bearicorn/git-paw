@@ -18,7 +18,7 @@ When you finish your task, commit your work via `git commit`. The git-paw post-c
 
 **WARNING: Do NOT publish manual `done` while your worktree has uncommitted changes — commit instead.** The post-commit hook will publish on your behalf with the authoritative `modified_files` list derived from the commit.
 
-**Fallback for code-less tasks only:** if your task produces no code changes (docs-only updates handled outside this worktree, planning notes, exploration tasks where the artifact is information reported to the broker), call the `publish_artifact` tool. Pass `exports` to announce public API items for peers to cherry-pick, and `modified_files` to list the files touched.
+**Fallback for code-less tasks only:** if your task produces no code changes (docs-only updates handled outside this worktree, planning notes, exploration tasks where the artifact is information reported to the broker), call the `publish_artifact` tool. Pass `exports` to list public API items exposed by this artifact, and `modified_files` to list the files touched.
 
 Call the `publish_artifact` tool with `{"exports": [], "modified_files": []}` (fill in the arrays as applicable).
 
