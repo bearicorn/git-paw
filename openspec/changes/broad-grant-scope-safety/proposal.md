@@ -55,6 +55,14 @@ overridden by hand.
   lives in `classifier-compound-segments`, which owns the normaliser and the redirect
   analysis and lands first.
 
+- **GP-56 (folded in): file prompts are classified on a bare file name.** Claude Code's
+  question line abbreviates the target (`Do you want to make this edit to tasks.md?`); the
+  real path is on the `Edit file` header line (`../../../openspec/changes/x/tasks.md`). The
+  classifier extracts the question-line name, resolves it inside the worktree, and returns
+  `safe` — so every out-of-worktree edit classifies safe. Verified in the v0.17.0 dogfood: a
+  worker's edit of the main checkout's `tasks.md` classified `safe 1`. Take the path from the
+  header and fail closed when it cannot be found.
+
 ## Capabilities
 
 ### New Capabilities
@@ -65,7 +73,9 @@ overridden by hand.
 
 - `approval-auto`: *Broad grant restricted to allowlisted non-arbitrary-code verbs* gains
   the grant-scope condition; *Option-index selection for Yes/No prompts* requires
-  text-based rather than index-based resolution of the broad-grant option.
+  text-based rather than index-based resolution of the broad-grant option;
+  *Worktree-confined file operations classify as safe* takes the target from the file header
+  and fails closed (GP-56).
 - `approval-command-safety`: *git-paw managed helper-script invocations classify as safe*
   trusts only the exact `<worktree>/.git-paw/scripts/<name>` location (normalised path,
   `..` refused, SHOULD content-check against the embedded asset).

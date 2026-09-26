@@ -78,6 +78,41 @@ pub enum SpecBackendKind {
     Superpowers,
 }
 
+impl SpecBackendKind {
+    /// Every variant, in canonical order — the single source of truth for
+    /// which `[specs].type` values are supported.
+    pub const ALL: [SpecBackendKind; 4] = [
+        SpecBackendKind::OpenSpec,
+        SpecBackendKind::Markdown,
+        SpecBackendKind::SpecKit,
+        SpecBackendKind::Superpowers,
+    ];
+
+    /// Parses a `[specs].type` string into the kind it selects, or `None`
+    /// if the string names no supported backend.
+    #[must_use]
+    pub fn parse(spec_type: &str) -> Option<Self> {
+        match spec_type {
+            "openspec" => Some(Self::OpenSpec),
+            "markdown" => Some(Self::Markdown),
+            "speckit" => Some(Self::SpecKit),
+            "superpowers" => Some(Self::Superpowers),
+            _ => None,
+        }
+    }
+
+    /// The `[specs].type` string that selects this kind.
+    #[must_use]
+    pub fn type_str(self) -> &'static str {
+        match self {
+            Self::OpenSpec => "openspec",
+            Self::Markdown => "markdown",
+            Self::SpecKit => "speckit",
+            Self::Superpowers => "superpowers",
+        }
+    }
+}
+
 use markdown::MarkdownBackend;
 
 /// Parses YAML frontmatter delimited by `---` lines.
@@ -138,14 +173,21 @@ pub(crate) fn parse_frontmatter(content: &str) -> (Option<HashMap<String, String
 
 /// Returns the appropriate backend for the given spec format type.
 fn backend_for_type(spec_type: &str) -> Result<Box<dyn SpecBackend>, PawError> {
-    match spec_type {
-        "openspec" => Ok(Box::new(OpenSpecBackend)),
-        "markdown" => Ok(Box::new(MarkdownBackend)),
-        "speckit" => Ok(Box::new(SpecKitBackend)),
-        "superpowers" => Ok(Box::new(SuperpowersBackend)),
-        _ => Err(PawError::SpecError(format!(
-            "unknown spec type: {spec_type} (known: openspec, markdown, speckit, superpowers)"
-        ))),
+    match SpecBackendKind::parse(spec_type) {
+        Some(SpecBackendKind::OpenSpec) => Ok(Box::new(OpenSpecBackend)),
+        Some(SpecBackendKind::Markdown) => Ok(Box::new(MarkdownBackend)),
+        Some(SpecBackendKind::SpecKit) => Ok(Box::new(SpecKitBackend)),
+        Some(SpecBackendKind::Superpowers) => Ok(Box::new(SuperpowersBackend)),
+        None => {
+            let known = SpecBackendKind::ALL
+                .iter()
+                .map(|k| k.type_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(PawError::SpecError(format!(
+                "unknown spec type: {spec_type} (known: {known})"
+            )))
+        }
     }
 }
 

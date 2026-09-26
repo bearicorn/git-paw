@@ -140,3 +140,61 @@ The bundled `sweep.sh approve` helper SHALL follow the same option selection: it
 - **GIVEN** a live 3-option prompt whose permanent-grant option grants similar commands in a directory
 - **WHEN** the operator runs `sweep.sh approve <pane>`
 - **THEN** the helper SHALL select the one-time option, agreeing with the in-tool auto-approver
+
+### Requirement: Worktree-confined file operations classify as safe
+
+The auto-approve classifier SHALL recognise Claude's
+filesystem-prompt patterns (write / edit / create / delete)
+and SHALL classify them as safe-by-pattern when the resolved
+target path is inside the agent's worktree root. The target path
+SHALL be taken from the prompt's file header — the path line that
+follows the `Edit file` / `Write file` / `Create file` heading, which
+the CLI renders relative to the pane's working directory or as an
+absolute path — and SHALL NOT be taken from the question line
+(`Do you want to make this edit to <name>?`), which the CLI may
+abbreviate to a bare file name. A relative header path SHALL be
+resolved against the agent's worktree root. When no header path can
+be found, or the header path and the question-line name disagree on
+the file name, the prompt SHALL NOT be classified safe-by-pattern
+(fail closed). The classifier SHALL canonicalize paths before the
+`starts_with(worktree_root)` check to prevent symlink-escape.
+
+#### Scenario: In-worktree file create is auto-approved
+
+- **GIVEN** an agent on `feat/cold-start-ci-parity` whose
+  worktree root is `/path/to/git-paw-feat-cold-start-ci-parity/`
+- **WHEN** Claude prompts "Do you want to allow this write
+  to Containerfile?" (resolving to the worktree root)
+- **THEN** the classifier SHALL return safe-by-pattern, and
+  the auto-approve sweep SHALL dispatch the approval
+  keystrokes
+
+#### Scenario: Out-of-worktree file create requires manual approval
+
+- **GIVEN** the same agent
+- **WHEN** Claude prompts a write to `/etc/hosts` (or any
+  path resolving outside the worktree)
+- **THEN** the classifier SHALL NOT return safe-by-pattern,
+  and the existing manual-prompt flow SHALL run
+
+#### Scenario: Symlink-escape attempt does not bypass the boundary
+
+- **GIVEN** a malicious prompt whose path contains `..`
+  resolving outside the worktree
+- **WHEN** the classifier canonicalizes the path
+- **THEN** the resolved path SHALL be checked against the
+  worktree root via `starts_with`, and the symlink-escape
+  attempt SHALL fail the safety check
+
+#### Scenario: A bare file name on the question line does not hide an out-of-worktree header path
+
+- **GIVEN** an agent whose worktree is `<repo>/.git-paw/worktrees/feat-x`
+- **AND** a captured Edit prompt whose file header reads `../../../openspec/changes/x/tasks.md` while its question line reads `Do you want to make this edit to tasks.md?`
+- **WHEN** the classifier evaluates the prompt
+- **THEN** it SHALL resolve the header path against the worktree root, find it outside the worktree, and SHALL NOT classify the prompt safe-by-pattern
+
+#### Scenario: A prompt with no recognisable header path fails closed
+
+- **GIVEN** a captured file prompt whose question line names `tasks.md` and whose file header path cannot be found in the capture
+- **WHEN** the classifier evaluates the prompt
+- **THEN** it SHALL NOT classify the prompt safe-by-pattern

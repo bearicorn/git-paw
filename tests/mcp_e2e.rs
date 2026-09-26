@@ -385,6 +385,67 @@ fn invalid_spec_type_exits_nonzero_with_clear_message() {
     );
 }
 
+// mcp-server "Hard errors only for malformed configuration" / "Project
+// knowledge tools" — Scenario: A Superpowers repository is served.
+#[test]
+fn superpowers_repo_starts_serves_and_renders_skill() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("proj");
+    std::fs::create_dir(&repo).unwrap();
+    git_init_with_commit(&repo);
+    std::fs::create_dir(repo.join(".git-paw")).unwrap();
+    std::fs::write(
+        repo.join(".git-paw/config.toml"),
+        "[specs]\ntype = \"superpowers\"\ndir = \"docs/superpowers/plans\"\n",
+    )
+    .unwrap();
+    let plans_dir = repo.join("docs/superpowers/plans");
+    std::fs::create_dir_all(&plans_dir).unwrap();
+    std::fs::write(
+        plans_dir.join("2026-01-01-add-auth.md"),
+        "# Add auth Implementation Plan\n\n\
+         **Goal:** Add token auth to the API\n\n\
+         ---\n\n\
+         ### Task 1: Validation\n\n\
+         - [ ] **Step 1: Write the failing test**\n",
+    )
+    .unwrap();
+
+    // `git paw mcp` starts and serves rather than exiting non-zero.
+    let mut client = McpClient::spawn(&repo);
+    client.initialize();
+
+    // get_specs() lists the plan with backend "superpowers".
+    let specs = client.call_tool("get_specs", json!({}));
+    let entries = specs
+        .pointer("/structuredContent/specs")
+        .and_then(Value::as_array)
+        .expect("specs array");
+    assert_eq!(entries.len(), 1, "one entry for the in-scope plan");
+    assert_eq!(
+        entries[0].get("backend").and_then(Value::as_str),
+        Some("superpowers")
+    );
+
+    // get_skill renders the Superpowers spec-path doctrine, not the
+    // no-backend sentinel.
+    let skill = client.call_tool("get_skill", json!({ "name": "supervisor" }));
+    let content = skill
+        .pointer("/structuredContent/skill/content")
+        .and_then(Value::as_str)
+        .expect("rendered skill content");
+    assert!(
+        content.contains("docs/superpowers/plans"),
+        "skill content should render the Superpowers spec-path doctrine: {content}"
+    );
+    assert!(
+        !content.contains("no spec backend resolved for this session"),
+        "skill content should not fall back to the no-backend sentinel: {content}"
+    );
+
+    client.shutdown_and_assert_clean_exit(Duration::from_secs(2));
+}
+
 #[test]
 fn optional_parameters_are_marked_optional_in_schema() {
     let tmp = tempfile::tempdir().unwrap();

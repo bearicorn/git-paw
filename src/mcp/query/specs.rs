@@ -1,4 +1,5 @@
-//! Spec & task reads across the `OpenSpec`, Markdown, and Spec Kit backends.
+//! Spec & task reads across the `OpenSpec`, Markdown, Spec Kit, and
+//! Superpowers backends.
 //!
 //! Uses the same discovery (`specs::scan_specs_with_override`) that
 //! `git paw start --from-all-specs` uses, then reads per-backend artifacts
@@ -89,7 +90,7 @@ fn derive_title(spec_dir: &Path, entry: &SpecEntry) -> String {
 pub struct SpecInfo {
     /// Spec id (directory or file stem).
     pub id: String,
-    /// Backend: "openspec" | "markdown" | "speckit".
+    /// Backend: "openspec" | "markdown" | "speckit" | "superpowers".
     pub backend: String,
     /// Human title.
     pub title: String,
