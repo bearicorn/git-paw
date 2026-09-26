@@ -291,8 +291,17 @@ mid-flight discovery costs a blocked round-trip). Two enums carry this hazard:
   - `src/skills.rs` — `render_spec_path_doctrine`.
   - `src/main.rs` — `build_task_prompt`.
   - `src/mcp/query/specs.rs` — `backend_str`, `derive_title`, `get_spec`.
-- Plus the dispatch (`backend_for_type` in `src/specs/mod.rs`) and the
-  `SpecsFormat` CLI enum in `src/cli.rs`.
+  - `src/mcp/tools/project.rs` — `get_skill`'s backend-to-doctrine match.
+- Plus the dispatch (`backend_for_type`, `SpecBackendKind::parse`, and
+  `SpecBackendKind::type_str` in `src/specs/mod.rs`) and the `SpecsFormat`
+  CLI enum in `src/cli.rs`.
+- Non-compile-forcing string dispatches (derive their valid-set from
+  `SpecBackendKind::ALL`/`parse` rather than keeping a parallel list, so
+  they cannot reject a variant discovery already supports):
+  `src/mcp/server.rs` — `validate_startup_config`. This exact gap (a
+  hand-maintained three-value list predating the `Superpowers` variant)
+  is what made `git paw mcp` refuse to start in a Superpowers repository —
+  see `mcp-superpowers-support`.
 
 Grep the variant name across `src/` before finishing to catch every site — but
 the point is to list them in Impact so the work is *scoped*, not *discovered*.

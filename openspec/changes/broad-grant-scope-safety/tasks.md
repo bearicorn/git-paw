@@ -30,6 +30,14 @@
 - [ ] 4b.3 (SHOULD) Compare the invoked file's bytes with the embedded asset (`src/init.rs` `BROKER_SCRIPT` / `SWEEP_SCRIPT` / `DOCS_FETCH_SCRIPT`); on mismatch the managed-script rule does not match. Add the "A modified helper is not trusted" test. If deferred, record the deferral and the reason in this change's design.md before archive
 - [ ] 4b.4 Add the 4b.1 captures to `tests/classify_subcommand.rs` so `git paw __classify` (and therefore `sweep.sh classify`) agrees with the in-tool classifier
 
+## 4c. File-prompt path from the header, not the question line (GP-56)
+
+- [ ] 4c.1 Failing test first, using a REAL capture (`tests/fixtures/` copy of a live Claude Code Edit prompt): header `Edit file` / `../../../openspec/changes/x/tasks.md`, question `Do you want to make this edit to tasks.md?`, worktree `<repo>/.git-paw/worktrees/feat-x` — today `git paw __classify` returns `safe 1`; it must NOT be safe
+- [ ] 4c.2 In `extract_path_from_file_prompt` / `is_worktree_file_op` (src/supervisor/auto_approve.rs), take the path from the line after the `Edit file` / `Write file` / `Create file` header (resolve relative paths against the worktree root); fail closed when no header path is found or its file name disagrees with the question line's
+- [ ] 4c.3 Check every other caller of `extract_path_from_file_prompt` (`is_protected_path_violation`, the `.git/`-write rule) gets the header path too, so protected-path and `.git/` checks see the real target
+- [ ] 4c.4 Option resolution: a permanent-grant option for a file prompt ("Yes, allow all edits in <dir>/ during this session") is scope-wide — never selected (ties into 3.x); add a fixture where that directory is outside the worktree
+- [ ] 4c.5 Mirror in `sweep.sh` if it extracts the path itself; add the capture to the `__classify`/sweep parity fixtures
+
 ## 5. Spec traceability and security review
 
 - [ ] 5.1 Verify every scenario in `specs/approval-auto/spec.md` and `specs/approval-command-safety/spec.md` maps to at least one test (Gate 3)

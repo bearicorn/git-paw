@@ -12,6 +12,7 @@ use rmcp::{ServerHandler, ServiceExt, tool_handler};
 
 use crate::error::PawError;
 use crate::mcp::{RepoContext, logging};
+use crate::specs::SpecBackendKind;
 
 /// The MCP server handler. Holds the resolved [`RepoContext`] (shared
 /// read-only by every tool) and the merged tool router.
@@ -84,14 +85,17 @@ fn validate_startup_config(ctx: &RepoContext) -> Result<(), PawError> {
     let config = crate::config::load_config(&ctx.root, None)?;
     if let Some(specs) = config.specs.as_ref()
         && let Some(spec_type) = specs.spec_type.as_deref()
+        && SpecBackendKind::parse(spec_type).is_none()
     {
-        const VALID: [&str; 3] = ["openspec", "markdown", "speckit"];
-        if !VALID.contains(&spec_type) {
-            return Err(PawError::McpError(format!(
-                "invalid [specs].type = \"{spec_type}\" in .git-paw/config.toml. \
-                 Valid values: openspec, markdown, speckit."
-            )));
-        }
+        let valid = SpecBackendKind::ALL
+            .iter()
+            .map(|k| k.type_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(PawError::McpError(format!(
+            "invalid [specs].type = \"{spec_type}\" in .git-paw/config.toml. \
+             Valid values: {valid}."
+        )));
     }
     Ok(())
 }
@@ -183,6 +187,60 @@ mod tests {
         let server = GitPawMcpServer::new(ctx());
         let info = server.get_info();
         assert_ne!(info.server_info.name, "rmcp");
+    }
+
+    // mcp-server "Hard errors only for malformed configuration" — Scenario:
+    // Every supported spec backend type is accepted at startup.
+    #[test]
+    fn validate_startup_config_accepts_every_known_spec_backend_type() {
+        for kind in SpecBackendKind::ALL {
+            let tmp = tempfile::tempdir().unwrap();
+            let git_paw_dir = tmp.path().join(".git-paw");
+            std::fs::create_dir(&git_paw_dir).unwrap();
+            std::fs::write(
+                git_paw_dir.join("config.toml"),
+                format!("[specs]\ntype = \"{}\"\n", kind.type_str()),
+            )
+            .unwrap();
+            let ctx = RepoContext {
+                root: tmp.path().to_path_buf(),
+                git_paw_dir: None,
+                broker_url: None,
+                server_name: "git-paw".to_string(),
+            };
+            assert!(
+                validate_startup_config(&ctx).is_ok(),
+                "{kind:?} ({}) should be accepted by startup validation",
+                kind.type_str()
+            );
+        }
+    }
+
+    #[test]
+    fn validate_startup_config_rejects_unrecognised_type() {
+        let tmp = tempfile::tempdir().unwrap();
+        let git_paw_dir = tmp.path().join(".git-paw");
+        std::fs::create_dir(&git_paw_dir).unwrap();
+        std::fs::write(
+            git_paw_dir.join("config.toml"),
+            "[specs]\ntype = \"unrecognised\"\n",
+        )
+        .unwrap();
+        let ctx = RepoContext {
+            root: tmp.path().to_path_buf(),
+            git_paw_dir: None,
+            broker_url: None,
+            server_name: "git-paw".to_string(),
+        };
+        let err = validate_startup_config(&ctx).unwrap_err().to_string();
+        assert!(err.contains("unrecognised"), "got: {err}");
+        for kind in SpecBackendKind::ALL {
+            assert!(
+                err.contains(kind.type_str()),
+                "error should list {} as a valid value; got: {err}",
+                kind.type_str()
+            );
+        }
     }
 
     #[test]
