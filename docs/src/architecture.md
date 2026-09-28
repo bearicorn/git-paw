@@ -528,7 +528,14 @@ create_worktree()          stop              start (recover)
 Key points:
 - **Stop** preserves worktrees — uncommitted work survives
 - **Recover** reuses existing worktrees — no data loss
-- **Purge** removes worktrees — `git worktree remove` followed by prune
+- **Purge** removes worktrees — per worktree it runs the configured
+  `[worktree.hooks] on_remove` command, then `git worktree remove --force`, then
+  decides the branch's fate. There is no prune step. The branch is deleted only
+  when git-paw created it **and** `git merge-base --is-ancestor
+  refs/heads/<branch> refs/heads/<target>` succeeds for the default branch or
+  for the branch recorded as the worktree's base; otherwise it is kept and
+  printed with its tip SHA and a resume/discard hint. Each step is best-effort:
+  a failure is reported as a `warning:` and never aborts the teardown.
 - **Start** prunes stale worktree registrations (`git worktree prune`) before creating new worktrees
 
 ## Session State

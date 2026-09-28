@@ -241,7 +241,7 @@ All examples below use `git paw`, but `git-paw` works identically.
 | `remove` | Detach one agent — pane + worktree — with `--force` / `--keep-worktree` (v0.6.0+). |
 | `pause` | Soft-stop: detach and stop the broker, keep CLI panes for instant resume (v0.5.0+). |
 | `stop` | Kill the tmux session and CLIs; keep worktrees + state. |
-| `purge` | Remove the session, all worktrees, and state (`--force` to skip the prompt). |
+| `purge` | Remove the session, all worktrees, and state (`--force` to skip the prompt, `--stale` to sweep only dead receipts). Deletes only the branches git-paw created that are fully merged — a branch with unmerged commits is kept and printed with its tip SHA. |
 | `status` | Show session name, branches, CLIs, and state. |
 | `attach` | Reattach the terminal to the current repo's running session (v0.16.0+). |
 | `list-clis` / `add-cli` / `remove-cli` | Manage auto-detected and custom AI CLIs. |
@@ -326,8 +326,19 @@ git paw start
 git paw pause  → soft stop (detach + broker stop; CLIs keep running)
 git paw stop   → kills CLIs, keeps worktrees + state
 git paw start  → auto-recovers (or restarts a paused session)
-git paw purge  → removes everything
+git paw purge  → removes worktrees + state; deletes only merged git-paw branches
 ```
+
+`purge` deletes a branch only when git-paw created it **and** it is fully
+merged into the default branch — or into the branch it was created from, which
+matters when you launch a wave from an integration branch — printing
+`Deleted branch <name> (was <sha>)`. A branch with commits in neither, or one
+whose merge state cannot be determined, is kept even under `--force`, and is
+reported with its tip SHA plus how to resume (`git worktree add '<path>'
+<branch>`) or discard (`git branch -d`/`-D <branch>`) it.
+`git paw purge --stale` sweeps only sessions
+whose tmux session is already gone, scoped to the current repository unless you
+add `--all-repos`; live sessions are never touched.
 
 ## Security
 

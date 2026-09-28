@@ -5,7 +5,6 @@
 
 use std::io::IsTerminal;
 use std::path::Path;
-use std::process::Command as StdCommand;
 
 use clap::Parser;
 use dialoguer::Confirm;
@@ -617,6 +616,7 @@ fn attach_agent(
             worktree_path: wt.path,
             cli: ctx.agent_cli.to_string(),
             branch_created: wt.branch_created,
+            base_branch: created_branch_base(ctx.repo_root, wt.branch_created),
             pending_boot_prompt: None,
             runtime_slot: provisioned.runtime_slot,
             cli_session_id,
@@ -1311,9 +1311,14 @@ fn cmd_purge(force: bool, stale: bool, all_repos: bool) -> Result<(), PawError> 
 }
 
 /// Probes the existing receipt for staleness and, when stale (the receipt
-/// claims active but the tmux session is gone), invalidates it — purging the
-/// recorded worktrees, branches, and receipt equivalent to `purge --force` —
-/// and emits a stderr notice naming the entry (design D5).
+/// claims active but the tmux session is gone), invalidates it — removing the
+/// recorded worktrees and the receipt equivalent to `purge --force` — and emits
+/// a stderr notice naming the entry (design D5).
+///
+/// Like every other teardown path it goes through `detach_worktree`, so a
+/// branch is deleted only when git-paw created it and it is already contained
+/// in the default branch or the branch it was created from; anything else is
+/// kept.
 ///
 /// Returns `true` when invalidation fired; the caller SHALL then proceed with
 /// a fresh launch as if no prior session existed. Returns `false` for a live
@@ -1483,15 +1488,187 @@ fn detach_worktree(
     }
     let _ = stderr.flush();
 
-    if entry.branch_created
-        && let Err(e) = git::delete_branch(repo_root, &entry.branch)
+    if entry.branch_created {
+        retire_created_branch(repo_root, entry, stderr);
+    }
+}
+
+/// The start point to record on a worktree entry git-paw just created a branch
+/// for — the main checkout's current branch, which is what
+/// `git worktree add -b <branch> <path>` branches from.
+///
+/// `None` when the branch already existed (there is no git-paw-chosen start
+/// point to record) or when `HEAD` is detached. Teardown treats a missing value
+/// as "compare against the default branch only", which is the pre-existing
+/// behaviour, so an unrecorded entry is never less safe.
+pub(crate) fn created_branch_base(repo_root: &Path, branch_created: bool) -> Option<String> {
+    if !branch_created {
+        return None;
+    }
+    git::current_branch(repo_root).ok()
+}
+
+/// Where a branch's commits stand relative to the branches it could have
+/// landed in.
+enum MergeState {
+    /// Contained in the default branch, or in the branch it was created from.
+    Merged,
+    /// Carries commits that are in neither. `count` is `None` when the
+    /// comparison succeeded but counting the commits did not.
+    Unmerged {
+        count: Option<usize>,
+        compared_against: String,
+    },
+    /// No comparison could be made; the wrapped text says why.
+    Undeterminable(String),
+}
+
+/// Compares `entry`'s branch against the default branch and, when one was
+/// recorded, the branch it was created from.
+///
+/// Both comparisons matter because `git worktree add -b` takes no start point:
+/// a branch git-paw created starts at whatever the main checkout had checked
+/// out. Launched from an integration branch, an agent branch that has been
+/// merged *into that integration branch* is finished work, but it is not yet an
+/// ancestor of the default branch — comparing against the default alone would
+/// keep it and report the entire integration backlog as its "unmerged" count.
+/// Containment in **either** branch therefore means merged, and the count is
+/// taken against the recorded base when there is one, so the number describes
+/// the branch's own commits.
+///
+/// Fails closed: when every comparison errors the result is
+/// [`MergeState::Undeterminable`], which callers treat as "retain".
+fn branch_merge_state(
+    repo_root: &Path,
+    entry: &WorktreeEntry,
+    default_branch: Option<&str>,
+) -> MergeState {
+    // The recorded base first: it is the more specific question, and its label
+    // is the one a count should be reported against.
+    let mut targets: Vec<&str> = Vec::new();
+    if let Some(base) = entry.base_branch.as_deref() {
+        targets.push(base);
+    }
+    if let Some(default) = default_branch
+        && !targets.contains(&default)
     {
+        targets.push(default);
+    }
+
+    let mut first_comparable: Option<&str> = None;
+    let mut failures = Vec::new();
+    for target in targets {
+        match git::branch_is_merged_into(repo_root, &entry.branch, target) {
+            Ok(true) => return MergeState::Merged,
+            Ok(false) => first_comparable.get_or_insert(target),
+            Err(e) => {
+                failures.push(format!("{target}: {e}"));
+                continue;
+            }
+        };
+    }
+
+    // At least one target answered "not contained" — report against the first
+    // one, which is the recorded base when there is one. If none answered at
+    // all, nothing is known and the branch must be kept.
+    let Some(compared_against) = first_comparable else {
+        return MergeState::Undeterminable(if failures.is_empty() {
+            "the default branch could not be resolved and no base branch was recorded".to_string()
+        } else {
+            failures.join("; ")
+        });
+    };
+
+    MergeState::Unmerged {
+        count: git::unmerged_commit_count(repo_root, &entry.branch, compared_against).ok(),
+        compared_against: compared_against.to_string(),
+    }
+}
+
+/// `-d` when git would accept the safe delete for `branch`, `-D` otherwise.
+///
+/// `git branch -d` refuses unless the branch is contained in the checked-out
+/// branch, so suggesting it blindly hands the operator a command that fails.
+/// Suggesting `-D` blindly is worse: it is the irreversible form, and an
+/// operator who pastes it loses the branch even in the cases where git would
+/// have vetoed the delete. The check is the same containment question git
+/// itself asks.
+fn discard_flag(repo_root: &Path, branch: &str) -> &'static str {
+    let safe = git::current_branch(repo_root)
+        .ok()
+        .and_then(|head| git::branch_is_merged_into(repo_root, branch, &head).ok())
+        .unwrap_or(false);
+    if safe { "-d" } else { "-D" }
+}
+
+/// Decides the fate of a branch git-paw created, once its worktree is gone.
+///
+/// `git branch -D` is the only irreversible operation in the teardown: it drops
+/// the branch reflog with the ref, and the worktree whose `HEAD` reflog was the
+/// other recovery path has just been removed. So the deletion is gated on the
+/// read-only check in [`branch_merge_state`] — the branch is deleted only when
+/// its tip is an ancestor of the default branch or of the branch it was created
+/// from.
+///
+/// The gate fails **closed**: a branch carrying commits in neither, a branch
+/// whose comparison errors, and a branch in a repository whose default branch
+/// cannot be resolved are all retained. Every outcome is printed with the SHA
+/// that matters — `Deleted branch <name> (was <sha>)` on deletion, and on
+/// retention the tip plus how to resume (`git worktree add`) or discard
+/// (`git branch -d` / `-D`) the branch by hand.
+fn retire_created_branch(repo_root: &Path, entry: &WorktreeEntry, stderr: &mut dyn std::io::Write) {
+    let tip =
+        git::branch_tip_short(repo_root, &entry.branch).unwrap_or_else(|_| "unknown".to_string());
+
+    let default_branch = git::default_branch(repo_root).ok();
+    let retention_reason = match branch_merge_state(repo_root, entry, default_branch.as_deref()) {
+        MergeState::Merged => None,
+        MergeState::Unmerged {
+            count: Some(count),
+            compared_against,
+        } => Some(format!("{count} commit(s) not in {compared_against}")),
+        MergeState::Unmerged {
+            count: None,
+            compared_against,
+        } => Some(format!(
+            "commits not in {compared_against}; count unavailable"
+        )),
+        MergeState::Undeterminable(why) => {
+            Some(format!("merge state could not be determined: {why}"))
+        }
+    };
+
+    if let Some(reason) = retention_reason {
+        let _ = writeln!(stderr, "Kept branch {} at {tip} ({reason})", entry.branch);
         let _ = writeln!(
             stderr,
-            "warning: failed to delete branch '{}': {e}",
+            "  resume it with: git worktree add '{}' {}",
+            entry.worktree_path.display(),
             entry.branch
         );
+        let _ = writeln!(
+            stderr,
+            "  discard it with: git branch {} {}",
+            discard_flag(repo_root, &entry.branch),
+            entry.branch
+        );
+        let _ = stderr.flush();
+        return;
     }
+
+    match git::delete_branch(repo_root, &entry.branch) {
+        Ok(()) => {
+            let _ = writeln!(stderr, "Deleted branch {} (was {tip})", entry.branch);
+        }
+        Err(e) => {
+            let _ = writeln!(
+                stderr,
+                "warning: failed to delete branch '{}': {e}",
+                entry.branch
+            );
+        }
+    }
+    let _ = stderr.flush();
 }
 
 /// Testable core of the purge UX. Emits the unmerged-commits warning to
@@ -1506,24 +1683,56 @@ fn purge_with_prompt(
     kill_tmux: &mut dyn FnMut(&str) -> Result<(), PawError>,
     stderr: &mut dyn std::io::Write,
 ) -> Result<PurgeOutcome, PawError> {
-    let default_branch = resolve_default_branch(repo_root);
-    let unmerged = collect_unmerged_branches(repo_root, session, &default_branch);
+    // The single default-branch resolver (`git-operations`), not a purge-local
+    // lookup: a purge-local fallback to a literal `main` made every comparison
+    // fail in a `master`-default repository without `origin/HEAD`, and the
+    // branches were deleted without a warning. When the resolver itself fails,
+    // nothing is comparable, so every branch is reported as undeterminable and
+    // `retire_created_branch` keeps all of them.
+    let default_branch = git::default_branch(repo_root);
+    if let Err(ref e) = default_branch {
+        let _ = writeln!(
+            stderr,
+            "Warning: the default branch could not be resolved ({e}) — no branch will be deleted."
+        );
+    }
+    let unmerged = collect_unmerged_branches(repo_root, session, default_branch.as_deref().ok());
 
     if !unmerged.is_empty() {
         let _ = writeln!(
             stderr,
-            "Warning: {} branch(es) have unmerged commits:",
+            "Warning: {} branch(es) have unmerged commits and will be kept:",
             unmerged.len()
         );
-        for (branch, count) in &unmerged {
-            let _ = writeln!(
-                stderr,
-                "  {branch}: {count} commit(s) not in {default_branch}"
-            );
+        for retained in &unmerged {
+            match (retained.unmerged_count, &retained.compared_against) {
+                (Some(count), Some(target)) => {
+                    let _ = writeln!(
+                        stderr,
+                        "  {} ({}): {count} commit(s) not in {target}",
+                        retained.branch, retained.tip
+                    );
+                }
+                (None, Some(target)) => {
+                    let _ = writeln!(
+                        stderr,
+                        "  {} ({}): commits not in {target}; count unavailable",
+                        retained.branch, retained.tip
+                    );
+                }
+                (_, None) => {
+                    let _ = writeln!(
+                        stderr,
+                        "  {} ({}): merge state could not be determined",
+                        retained.branch, retained.tip
+                    );
+                }
+            }
         }
         let _ = writeln!(
             stderr,
-            "Purging is irreversible — those commits will be lost."
+            "Their worktrees (including any uncommitted changes) and the session state \
+             will be removed; the branches themselves are kept."
         );
         // Flush the warning block so it lands on the terminal before the
         // dialoguer prompt reads from stdin. Without this flush the
@@ -1538,7 +1747,8 @@ fn purge_with_prompt(
         let prompt_text = if unmerged.is_empty() {
             "This will remove the tmux session, all worktrees, and session state. Continue?"
         } else {
-            "Purge is irreversible. Continue?"
+            "Worktrees (including any uncommitted changes) and session state will be removed; \
+             the branches listed above are kept. Continue?"
         };
         if !confirm(prompt_text)? {
             return Ok(PurgeOutcome::Cancelled);
@@ -1595,51 +1805,55 @@ fn purge_with_prompt(
     Ok(PurgeOutcome::Purged)
 }
 
-/// Resolves the default branch name for the repo, falling back to `"main"`.
-fn resolve_default_branch(repo_root: &Path) -> String {
-    let output = StdCommand::new("git")
-        .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
-        .current_dir(repo_root)
-        .output();
-    if let Ok(out) = output
-        && out.status.success()
-    {
-        let s = String::from_utf8_lossy(&out.stdout);
-        if let Some(name) = s.trim().strip_prefix("refs/remotes/origin/") {
-            return name.to_string();
-        }
-    }
-    "main".to_string()
+/// A session branch that purge will report as unmerged, and therefore keep.
+struct RetainedBranch {
+    /// The branch name as recorded in the session file.
+    branch: String,
+    /// Short SHA of the branch tip, or `"unknown"` if it could not be read.
+    tip: String,
+    /// The branch the count is against — the recorded base when the entry has
+    /// one, else the default branch. `None` when no comparison could be made.
+    compared_against: Option<String>,
+    /// `Some(n)` — `n` commits are not in `compared_against`; `None` — the
+    /// count could not be taken.
+    unmerged_count: Option<usize>,
 }
 
-/// For each worktree branch in the session, returns the list of branches with
-/// at least one commit not yet merged to the default branch, along with the
-/// count of such commits.
+/// The session's branches that are contained in neither the default branch nor
+/// the branch they were created from.
+///
+/// `default_branch` is `None` when the resolver itself failed; an entry with no
+/// recorded base is then uncomparable and is reported as such. A comparison
+/// that errors is likewise reported rather than skipped: the old
+/// `continue`-on-failure silently classified an uncomparable branch as merged,
+/// which is the direction that loses work.
 fn collect_unmerged_branches(
     repo_root: &Path,
     session: &Session,
-    default_branch: &str,
-) -> Vec<(String, usize)> {
+    default_branch: Option<&str>,
+) -> Vec<RetainedBranch> {
     let mut out = Vec::new();
     for entry in &session.worktrees {
-        if entry.branch == default_branch {
+        if Some(entry.branch.as_str()) == default_branch {
             continue;
         }
-        let result = StdCommand::new("git")
-            .args(["log", &entry.branch, "--not", default_branch, "--oneline"])
-            .current_dir(repo_root)
-            .output();
-        let Ok(output) = result else { continue };
-        if !output.status.success() {
-            continue;
-        }
-        let count = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .count();
-        if count > 0 {
-            out.push((entry.branch.clone(), count));
-        }
+        let (compared_against, unmerged_count) =
+            match branch_merge_state(repo_root, entry, default_branch) {
+                MergeState::Merged => continue,
+                MergeState::Unmerged {
+                    count,
+                    compared_against,
+                } => (Some(compared_against), count),
+                MergeState::Undeterminable(_) => (None, None),
+            };
+        let tip = git::branch_tip_short(repo_root, &entry.branch)
+            .unwrap_or_else(|_| "unknown".to_string());
+        out.push(RetainedBranch {
+            branch: entry.branch.clone(),
+            tip,
+            compared_against,
+            unmerged_count,
+        });
     }
     out
 }
@@ -1660,6 +1874,7 @@ mod tests {
     use git_paw::session::SessionStatus;
     use serial_test::serial;
     use std::path::PathBuf;
+    use std::process::Command as StdCommand;
     use std::time::UNIX_EPOCH;
     use tempfile::TempDir;
 
@@ -2450,13 +2665,31 @@ mod tests {
         );
     }
 
+    /// The tip SHA of `branch`, or `None` when the branch does not exist.
+    fn branch_tip(repo: &Path, branch: &str) -> Option<String> {
+        let out = StdCommand::new("git")
+            .current_dir(repo)
+            .args(["rev-parse", "--verify", "--quiet", branch])
+            .output()
+            .expect("git spawn");
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
     fn setup_purge_sandbox(with_unmerged_commit: bool) -> PurgeSandbox {
+        setup_purge_sandbox_on("main", with_unmerged_commit)
+    }
+
+    /// `setup_purge_sandbox` with an explicit default-branch name, so the
+    /// `master`-default / no-`origin/HEAD` path can be exercised.
+    fn setup_purge_sandbox_on(default_branch: &str, with_unmerged_commit: bool) -> PurgeSandbox {
         let sandbox = TempDir::new().expect("tempdir");
         let repo = sandbox.path().join("repo");
         std::fs::create_dir(&repo).expect("mkdir repo");
         let sessions_dir = sandbox.path().join("sessions");
 
-        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["init", "-q", "-b", default_branch]);
         git(&repo, &["config", "user.email", "test@test.com"]);
         git(&repo, &["config", "user.name", "Test"]);
         std::fs::write(repo.join("README.md"), "# test").unwrap();
@@ -2487,6 +2720,7 @@ mod tests {
                 worktree_path: wt.path.clone(),
                 cli: "claude".to_string(),
                 branch_created: wt.branch_created,
+                base_branch: created_branch_base(&repo, wt.branch_created),
                 pending_boot_prompt: None,
                 runtime_slot: None,
                 cli_session_id: None,
@@ -2507,11 +2741,354 @@ mod tests {
         }
     }
 
+    /// A sandbox whose main checkout sits on an integration branch that is
+    /// ahead of the default branch, with one agent worktree branched off it —
+    /// the shape `git paw start` produces when the operator launches a wave
+    /// from an integration branch rather than from `main`.
+    ///
+    /// When `merged_into_integration` the agent's commit is merged back into
+    /// the integration branch before the session struct is built.
+    fn setup_integration_sandbox(merged_into_integration: bool) -> PurgeSandbox {
+        let sandbox = TempDir::new().expect("tempdir");
+        let repo = sandbox.path().join("repo");
+        std::fs::create_dir(&repo).expect("mkdir repo");
+        let sessions_dir = sandbox.path().join("sessions");
+
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "test@test.com"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("README.md"), "# test").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "initial"]);
+
+        // The integration branch runs ahead of main by two commits — exactly
+        // the backlog a default-branch-only comparison would miscount as the
+        // agent's own work.
+        git(&repo, &["checkout", "-q", "-b", "integration"]);
+        for n in 1..=2 {
+            std::fs::write(repo.join(format!("integration-{n}.txt")), "x").unwrap();
+            git(&repo, &["add", "."]);
+            git(&repo, &["commit", "-q", "-m", &format!("integration {n}")]);
+        }
+
+        let wt = git::create_worktree(
+            &repo,
+            "feature/test",
+            false,
+            git_paw::config::WorktreePlacement::Sibling,
+        )
+        .expect("create worktree");
+        std::fs::write(wt.path.join("agent.txt"), "agent work").unwrap();
+        git(&wt.path, &["add", "."]);
+        git(&wt.path, &["commit", "-q", "-m", "agent work"]);
+
+        if merged_into_integration {
+            git(
+                &repo,
+                &["merge", "-q", "--no-ff", "-m", "merge", "feature/test"],
+            );
+        }
+
+        let session = Session {
+            session_name: "paw-repo".to_string(),
+            repo_path: repo.clone(),
+            project_name: "repo".to_string(),
+            created_at: UNIX_EPOCH,
+            status: SessionStatus::Stopped,
+            worktrees: vec![WorktreeEntry {
+                branch: "feature/test".to_string(),
+                worktree_path: wt.path.clone(),
+                cli: "claude".to_string(),
+                branch_created: wt.branch_created,
+                base_branch: created_branch_base(&repo, wt.branch_created),
+                pending_boot_prompt: None,
+                runtime_slot: None,
+                cli_session_id: None,
+            }],
+            broker_port: None,
+            broker_bind: None,
+            broker_log_path: None,
+            mode: SessionMode::Bare,
+            dashboard_pane: None,
+        };
+        session::save_session_in(&session, &sessions_dir).expect("save session");
+
+        PurgeSandbox {
+            _sandbox: sandbox,
+            repo,
+            sessions_dir,
+            session,
+        }
+    }
+
+    // --- shared teardown: branch retention (`git-add-remove-branch`) ---
+
+    /// Spec `git-add-remove-branch` — "A same-named tag never stands in for the
+    /// branch". `rev-parse` tries `refs/tags/<name>` before `refs/heads/<name>`,
+    /// so an unqualified comparison would answer on the tag's history: the tag
+    /// here sits on merged history while the branch carries unmerged work.
+    #[test]
+    #[serial]
+    fn detach_worktree_is_not_fooled_by_a_tag_sharing_the_branch_name() {
+        let sb = setup_purge_sandbox(true);
+        // A tag with the branch's exact name, pointing at fully merged history.
+        git(&sb.repo, &["tag", "feature/test", "main"]);
+        let entry = &sb.session.worktrees[0];
+        let branch_tip_before = branch_tip(&sb.repo, "refs/heads/feature/test")
+            .expect("branch ref resolves before teardown");
+        let tag_tip = branch_tip(&sb.repo, "refs/tags/feature/test").expect("tag ref resolves");
+        assert_ne!(
+            branch_tip_before, tag_tip,
+            "the fixture must put the tag on different history than the branch"
+        );
+
+        let mut stderr = Vec::<u8>::new();
+        detach_worktree(&sb.repo, entry, None, &mut stderr);
+
+        let err_text = String::from_utf8(stderr).unwrap();
+        assert_eq!(
+            branch_tip(&sb.repo, "refs/heads/feature/test").as_deref(),
+            Some(branch_tip_before.as_str()),
+            "the unmerged branch must survive despite the merged same-named tag: {err_text:?}"
+        );
+        assert!(
+            err_text.contains("Kept branch feature/test at")
+                && err_text.contains("1 commit(s) not in"),
+            "the comparison must run on refs/heads, not the tag: {err_text:?}"
+        );
+        assert!(
+            err_text.contains(&branch_tip_before[..7]),
+            "the reported tip must be the branch's, not the tag's: {err_text:?}"
+        );
+    }
+
+    /// Spec `git-add-remove-branch` — "A branch merged into the branch it was
+    /// created from is deleted". Launched from an integration branch, work that
+    /// has landed in that branch is finished even though it is not yet in the
+    /// default branch.
+    #[test]
+    #[serial]
+    fn detach_worktree_deletes_a_branch_merged_into_its_recorded_base() {
+        let sb = setup_integration_sandbox(true);
+        let entry = &sb.session.worktrees[0];
+        assert_eq!(
+            entry.base_branch.as_deref(),
+            Some("integration"),
+            "the session must record the branch git-paw branched from"
+        );
+
+        let mut stderr = Vec::<u8>::new();
+        detach_worktree(&sb.repo, entry, None, &mut stderr);
+
+        let err_text = String::from_utf8(stderr).unwrap();
+        assert!(
+            branch_tip(&sb.repo, "feature/test").is_none(),
+            "a branch merged into its base should be deleted; stderr: {err_text:?}"
+        );
+        assert!(
+            err_text.contains("Deleted branch feature/test (was "),
+            "deletion must print the branch and its SHA: {err_text:?}"
+        );
+    }
+
+    /// Spec `git-add-remove-branch` — "An unmerged branch is counted against
+    /// the branch it was created from". The integration branch is two commits
+    /// ahead of `main`; the agent added one. Counting against `main` would
+    /// report three and describe the integration backlog as the agent's work.
+    #[test]
+    #[serial]
+    fn detach_worktree_counts_an_unmerged_branch_against_its_recorded_base() {
+        let sb = setup_integration_sandbox(false);
+        let entry = &sb.session.worktrees[0];
+        let tip_before = branch_tip(&sb.repo, "feature/test").expect("branch exists");
+
+        let mut stderr = Vec::<u8>::new();
+        detach_worktree(&sb.repo, entry, None, &mut stderr);
+
+        let err_text = String::from_utf8(stderr).unwrap();
+        assert_eq!(
+            branch_tip(&sb.repo, "feature/test").as_deref(),
+            Some(tip_before.as_str()),
+            "an unmerged branch must survive: {err_text:?}"
+        );
+        assert!(
+            err_text.contains("1 commit(s) not in integration"),
+            "the count must be against the recorded base, not the default branch: {err_text:?}"
+        );
+        assert!(
+            !err_text.contains("3 commit(s)"),
+            "the integration backlog must not be counted as the agent's work: {err_text:?}"
+        );
+    }
+
+    /// Spec `git-add-remove-branch` — the retention hint quotes the worktree
+    /// path (a path with a space would otherwise produce a broken command) and
+    /// offers `git branch -d` when git would accept the safe delete.
+    #[test]
+    #[serial]
+    fn retention_hint_quotes_the_path_and_prefers_the_safe_delete_when_it_would_work() {
+        // HEAD is `integration`, which contains the branch — so `-d` succeeds —
+        // but the entry records no base, so teardown still compares against
+        // `main` only and keeps it (the pre-`base_branch` session shape).
+        let mut sb = setup_integration_sandbox(true);
+        sb.session.worktrees[0].base_branch = None;
+        let entry = &sb.session.worktrees[0];
+        let worktree_path = entry.worktree_path.display().to_string();
+
+        let mut stderr = Vec::<u8>::new();
+        detach_worktree(&sb.repo, entry, None, &mut stderr);
+
+        let err_text = String::from_utf8(stderr).unwrap();
+        assert!(
+            err_text.contains(&format!("git worktree add '{worktree_path}' feature/test")),
+            "the resume hint must quote the worktree path: {err_text:?}"
+        );
+        assert!(
+            err_text.contains("git branch -d feature/test"),
+            "`-d` must be offered when git would accept it: {err_text:?}"
+        );
+    }
+
+    /// The `-D` fallback: nothing contains the branch, so the safe delete would
+    /// be refused and the hint must say so.
+    #[test]
+    #[serial]
+    fn retention_hint_falls_back_to_force_delete_when_the_safe_delete_would_fail() {
+        let sb = setup_purge_sandbox(true);
+        let entry = &sb.session.worktrees[0];
+
+        let mut stderr = Vec::<u8>::new();
+        detach_worktree(&sb.repo, entry, None, &mut stderr);
+
+        let err_text = String::from_utf8(stderr).unwrap();
+        assert!(
+            err_text.contains("git branch -D feature/test"),
+            "`-D` is the only form that would work here: {err_text:?}"
+        );
+    }
+
+    /// Spec `git-add-remove-branch` — "remove keeps a created branch with
+    /// unmerged commits".
+    #[test]
+    #[serial]
+    fn detach_worktree_keeps_a_created_branch_with_unmerged_commits() {
+        let sb = setup_purge_sandbox(true);
+        let entry = &sb.session.worktrees[0];
+        let tip_before = branch_tip(&sb.repo, &entry.branch).expect("branch exists");
+        let worktree_path = entry.worktree_path.clone();
+
+        let mut stderr = Vec::<u8>::new();
+        detach_worktree(&sb.repo, entry, None, &mut stderr);
+
+        let err_text = String::from_utf8(stderr).unwrap();
+        assert!(!worktree_path.exists(), "worktree should be removed");
+        assert_eq!(
+            branch_tip(&sb.repo, &entry.branch).as_deref(),
+            Some(tip_before.as_str()),
+            "the branch must survive at the same tip"
+        );
+        assert!(
+            err_text.contains("Kept branch feature/test at ")
+                && err_text.contains("1 commit(s) not in main"),
+            "retention must name the branch, its tip, and the unmerged count: {err_text:?}"
+        );
+        assert!(
+            err_text.contains(&format!(
+                "git worktree add '{}' feature/test",
+                worktree_path.display()
+            )),
+            "retention must print the resume hint: {err_text:?}"
+        );
+        assert!(
+            err_text.contains("git branch -D feature/test"),
+            "retention must print the discard hint: {err_text:?}"
+        );
+    }
+
+    /// Spec `git-add-remove-branch` — "remove deletes a created branch that is
+    /// fully merged".
+    #[test]
+    #[serial]
+    fn detach_worktree_deletes_a_created_branch_that_is_fully_merged() {
+        let sb = setup_purge_sandbox(false);
+        let entry = &sb.session.worktrees[0];
+        let tip_before = branch_tip(&sb.repo, &entry.branch).expect("branch exists");
+        let short_tip = &tip_before[..7];
+
+        let mut stderr = Vec::<u8>::new();
+        detach_worktree(&sb.repo, entry, None, &mut stderr);
+
+        let err_text = String::from_utf8(stderr).unwrap();
+        assert!(
+            branch_tip(&sb.repo, &entry.branch).is_none(),
+            "a fully merged created branch should be deleted"
+        );
+        assert!(
+            err_text.contains(&format!("Deleted branch feature/test (was {short_tip}")),
+            "deletion must print the branch and the SHA it was at: {err_text:?}"
+        );
+    }
+
+    /// Spec `git-add-remove-branch` — "A pre-existing branch is never deleted".
+    #[test]
+    #[serial]
+    fn detach_worktree_leaves_a_pre_existing_branch_untouched() {
+        let mut sb = setup_purge_sandbox(false);
+        sb.session.worktrees[0].branch_created = false;
+        let entry = &sb.session.worktrees[0];
+        let tip_before = branch_tip(&sb.repo, &entry.branch).expect("branch exists");
+
+        let mut stderr = Vec::<u8>::new();
+        detach_worktree(&sb.repo, entry, None, &mut stderr);
+
+        let err_text = String::from_utf8(stderr).unwrap();
+        assert_eq!(
+            branch_tip(&sb.repo, &entry.branch).as_deref(),
+            Some(tip_before.as_str()),
+            "a branch git-paw did not create must remain even when merged"
+        );
+        assert!(
+            !err_text.contains("Deleted branch"),
+            "no deletion should be reported: {err_text:?}"
+        );
+    }
+
+    /// Spec `git-add-remove-branch` — "A failed merge comparison retains the
+    /// branch". The session entry names a branch that is not in the repository,
+    /// so `git merge-base` cannot compare it.
+    #[test]
+    #[serial]
+    fn detach_worktree_retains_a_branch_whose_merge_state_is_undeterminable() {
+        let mut sb = setup_purge_sandbox(true);
+        sb.session.worktrees[0].branch = "feature/ghost".to_string();
+        let entry = &sb.session.worktrees[0];
+
+        let mut stderr = Vec::<u8>::new();
+        detach_worktree(&sb.repo, entry, None, &mut stderr);
+
+        let err_text = String::from_utf8(stderr).unwrap();
+        assert!(
+            err_text.contains("Kept branch feature/ghost")
+                && err_text.contains("merge state could not be determined"),
+            "an uncomparable branch must be retained with the reason stated: {err_text:?}"
+        );
+        assert!(
+            !err_text.contains("Deleted branch"),
+            "nothing may be deleted on a failed comparison: {err_text:?}"
+        );
+        assert!(
+            branch_tip(&sb.repo, "feature/test").is_some(),
+            "the real branch must be untouched"
+        );
+    }
+
     #[test]
     #[serial]
     fn purge_no_unmerged_commits_runs_without_warning() {
         let sb = setup_purge_sandbox(false);
         let worktree_path = sb.session.worktrees[0].worktree_path.clone();
+        let short_tip =
+            branch_tip(&sb.repo, "feature/test").expect("branch exists")[..7].to_string();
 
         let mut confirm_calls = 0;
         let mut confirm = |_: &str| -> Result<bool, PawError> {
@@ -2543,12 +3120,21 @@ mod tests {
             !sb.sessions_dir.join("paw-repo.json").exists(),
             "session file should be removed"
         );
+        assert!(
+            branch_tip(&sb.repo, "feature/test").is_none(),
+            "a fully merged created branch should be deleted"
+        );
+        assert!(
+            err_text.contains(&format!("Deleted branch feature/test (was {short_tip}")),
+            "each deletion should print the SHA the branch was at: {err_text:?}"
+        );
     }
 
     #[test]
     #[serial]
     fn purge_with_unmerged_commits_emits_warning_to_stderr() {
         let sb = setup_purge_sandbox(true);
+        let tip_before = branch_tip(&sb.repo, "feature/test").expect("branch exists before purge");
 
         let mut confirm = |_: &str| -> Result<bool, PawError> { Ok(true) };
         let mut stderr = Vec::<u8>::new();
@@ -2575,8 +3161,119 @@ mod tests {
             "stderr should name the branch: {err_text:?}"
         );
         assert!(
-            err_text.contains("irreversible"),
-            "stderr should warn about data loss: {err_text:?}"
+            err_text.contains("will be kept"),
+            "the warning must say the branches are kept, not lost: {err_text:?}"
+        );
+        assert!(
+            err_text.contains("1 commit(s) not in main"),
+            "the warning must report the unmerged count: {err_text:?}"
+        );
+        assert_eq!(
+            branch_tip(&sb.repo, "feature/test").as_deref(),
+            Some(tip_before.as_str()),
+            "an unmerged branch must survive the purge at the same tip"
+        );
+    }
+
+    /// Spec `supervisor-launch` — "Confirmed purge also retains unmerged
+    /// branches".
+    #[test]
+    #[serial]
+    fn purge_confirmed_by_the_user_still_retains_an_unmerged_branch() {
+        let sb = setup_purge_sandbox(true);
+        let tip_before = branch_tip(&sb.repo, "feature/test").expect("branch exists before purge");
+        let worktree_path = sb.session.worktrees[0].worktree_path.clone();
+
+        let mut confirm = |_: &str| -> Result<bool, PawError> { Ok(true) };
+        let mut stderr = Vec::<u8>::new();
+
+        let outcome = purge_with_prompt(
+            &sb.repo,
+            &sb.sessions_dir,
+            &sb.session,
+            false,
+            &mut confirm,
+            &mut |_: &str| Ok(()),
+            &mut stderr,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, PurgeOutcome::Purged);
+        assert!(!worktree_path.exists(), "worktree should still be removed");
+        assert_eq!(
+            branch_tip(&sb.repo, "feature/test").as_deref(),
+            Some(tip_before.as_str()),
+            "answering Y must not delete an unmerged branch"
+        );
+    }
+
+    /// Spec `supervisor-launch` — "An undeterminable merge state is treated as
+    /// unmerged". The session names a branch that no longer exists, so every
+    /// ref comparison against it errors.
+    #[test]
+    #[serial]
+    fn purge_reports_an_undeterminable_merge_state_and_deletes_nothing() {
+        let mut sb = setup_purge_sandbox(true);
+        let tip_before = branch_tip(&sb.repo, "feature/test").expect("branch exists before purge");
+        sb.session.worktrees[0].branch = "feature/ghost".to_string();
+
+        let mut stderr = Vec::<u8>::new();
+        let outcome = purge_with_prompt(
+            &sb.repo,
+            &sb.sessions_dir,
+            &sb.session,
+            true, // force
+            &mut |_: &str| Ok(true),
+            &mut |_: &str| Ok(()),
+            &mut stderr,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, PurgeOutcome::Purged);
+        let err_text = String::from_utf8(stderr).unwrap();
+        assert!(
+            err_text.contains("merge state could not be determined"),
+            "an uncomparable branch must be reported, not silently treated as merged: {err_text:?}"
+        );
+        assert_eq!(
+            branch_tip(&sb.repo, "feature/test").as_deref(),
+            Some(tip_before.as_str()),
+            "no branch may be deleted when the comparison cannot be made"
+        );
+    }
+
+    /// Spec `supervisor-launch` — "Purge in a master-default repository without
+    /// origin/HEAD compares against master". The purge-local resolver used to
+    /// fall back to a literal `main` here, so the comparison failed and the
+    /// branch was deleted without a warning.
+    #[test]
+    #[serial]
+    fn purge_in_a_master_default_repo_without_origin_head_reports_the_unmerged_commit() {
+        let sb = setup_purge_sandbox_on("master", true);
+        let tip_before = branch_tip(&sb.repo, "feature/test").expect("branch exists before purge");
+
+        let mut stderr = Vec::<u8>::new();
+        let outcome = purge_with_prompt(
+            &sb.repo,
+            &sb.sessions_dir,
+            &sb.session,
+            true, // force
+            &mut |_: &str| Ok(true),
+            &mut |_: &str| Ok(()),
+            &mut stderr,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, PurgeOutcome::Purged);
+        let err_text = String::from_utf8(stderr).unwrap();
+        assert!(
+            err_text.contains("1 commit(s) not in master"),
+            "the comparison must run against master, not a literal main: {err_text:?}"
+        );
+        assert_eq!(
+            branch_tip(&sb.repo, "feature/test").as_deref(),
+            Some(tip_before.as_str()),
+            "the unmerged branch must survive"
         );
     }
 
@@ -2584,6 +3281,7 @@ mod tests {
     #[serial]
     fn purge_force_skips_confirm_but_still_warns() {
         let sb = setup_purge_sandbox(true);
+        let tip_before = branch_tip(&sb.repo, "feature/test").expect("branch exists before purge");
 
         let mut confirm_calls = 0;
         let mut confirm = |_: &str| -> Result<bool, PawError> {
@@ -2609,6 +3307,19 @@ mod tests {
         assert!(
             err_text.contains("Warning:") && err_text.contains("unmerged commits"),
             "force mode should still warn: {err_text:?}"
+        );
+        assert!(
+            err_text.contains("will be kept"),
+            "--force must not imply the branches are deleted: {err_text:?}"
+        );
+        assert_eq!(
+            branch_tip(&sb.repo, "feature/test").as_deref(),
+            Some(tip_before.as_str()),
+            "--force must still retain a branch with unmerged commits"
+        );
+        assert!(
+            err_text.contains("git branch -D feature/test"),
+            "the retention must print how to discard the branch by hand: {err_text:?}"
         );
     }
 

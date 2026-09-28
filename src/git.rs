@@ -511,8 +511,26 @@ pub(crate) fn branch_is_behind_default(
     branch_is_behind_default_with(&RealCommandRunner, repo_root, branch, default_branch)
 }
 
+/// The fully-qualified ref for a local branch.
+///
+/// Every merge comparison and tip lookup goes through this. A bare name is
+/// resolved by git's `rev-parse` precedence, which tries `refs/tags/<name>`
+/// **before** `refs/heads/<name>` — so a tag sharing an agent branch's name
+/// (an annotated release tag, a tag pushed by a hook) would silently answer
+/// the merge question on the tag's history. A tag on merged history would make
+/// an unmerged branch look deletable, and the "was <sha>" line would print the
+/// tag's SHA, not the branch's. Qualifying the ref removes the ambiguity: a
+/// `refs/heads/<name>` that does not exist fails the comparison outright,
+/// which the callers already treat as "retain".
+fn heads_ref(branch: &str) -> String {
+    format!("refs/heads/{branch}")
+}
+
 /// Whether `branch` is merged into `default_branch` — the exit-summary merge
 /// truth (`drive-loop-exit-summary-truth`).
+///
+/// Both sides are qualified as `refs/heads/<name>` ([`heads_ref`]), so a
+/// same-named tag can never stand in for either branch.
 ///
 /// Implemented as `git merge-base --is-ancestor <branch> <default_branch>`:
 /// exit `0` means `branch` is fully contained in `default_branch`'s history
@@ -531,6 +549,8 @@ pub(crate) fn branch_is_merged_into_with(
     default_branch: &str,
 ) -> Result<bool, PawError> {
     let cwd = repo_root.to_string_lossy();
+    let branch_ref = heads_ref(branch);
+    let default_ref = heads_ref(default_branch);
     let output = runner
         .run(
             "git",
@@ -539,8 +559,8 @@ pub(crate) fn branch_is_merged_into_with(
                 &cwd,
                 "merge-base",
                 "--is-ancestor",
-                branch,
-                default_branch,
+                &branch_ref,
+                &default_ref,
             ],
         )
         .map_err(|e| PawError::WorktreeError(format!("failed to run git merge-base: {e}")))?;
@@ -550,15 +570,18 @@ pub(crate) fn branch_is_merged_into_with(
         _ => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             Err(PawError::WorktreeError(format!(
-                "git merge-base --is-ancestor could not compare {branch} against \
-                 {default_branch}: {stderr}"
+                "git merge-base --is-ancestor could not compare {branch_ref} against \
+                 {default_ref}: {stderr}"
             )))
         }
     }
 }
 
 /// [`branch_is_merged_into_with`] against [`RealCommandRunner`].
-pub(crate) fn branch_is_merged_into(
+///
+/// # Errors
+/// Propagates the errors of [`branch_is_merged_into_with`].
+pub fn branch_is_merged_into(
     repo_root: &Path,
     branch: &str,
     default_branch: &str,
@@ -580,7 +603,7 @@ pub(crate) fn unmerged_commit_count_with(
     default_branch: &str,
 ) -> Result<usize, PawError> {
     let cwd = repo_root.to_string_lossy();
-    let range = format!("{default_branch}..{branch}");
+    let range = format!("{}..{}", heads_ref(default_branch), heads_ref(branch));
     let output = runner
         .run("git", &["-C", &cwd, "rev-list", "--count", &range])
         .map_err(|e| PawError::WorktreeError(format!("failed to run git rev-list: {e}")))?;
@@ -601,7 +624,10 @@ pub(crate) fn unmerged_commit_count_with(
 }
 
 /// [`unmerged_commit_count_with`] against [`RealCommandRunner`].
-pub(crate) fn unmerged_commit_count(
+///
+/// # Errors
+/// Propagates the errors of [`unmerged_commit_count_with`].
+pub fn unmerged_commit_count(
     repo_root: &Path,
     branch: &str,
     default_branch: &str,
@@ -621,20 +647,24 @@ pub(crate) fn branch_tip_short_with(
     branch: &str,
 ) -> Result<String, PawError> {
     let cwd = repo_root.to_string_lossy();
+    let branch_ref = heads_ref(branch);
     let output = runner
-        .run("git", &["-C", &cwd, "rev-parse", "--short", branch])
+        .run("git", &["-C", &cwd, "rev-parse", "--short", &branch_ref])
         .map_err(|e| PawError::WorktreeError(format!("failed to run git rev-parse: {e}")))?;
     if output.code != Some(0) {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(PawError::WorktreeError(format!(
-            "git rev-parse --short {branch} failed: {stderr}"
+            "git rev-parse --short {branch_ref} failed: {stderr}"
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// [`branch_tip_short_with`] against [`RealCommandRunner`].
-pub(crate) fn branch_tip_short(repo_root: &Path, branch: &str) -> Result<String, PawError> {
+///
+/// # Errors
+/// Propagates the errors of [`branch_tip_short_with`].
+pub fn branch_tip_short(repo_root: &Path, branch: &str) -> Result<String, PawError> {
     branch_tip_short_with(&RealCommandRunner, repo_root, branch)
 }
 

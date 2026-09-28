@@ -144,6 +144,26 @@ pub struct WorktreeEntry {
     #[serde(default)]
     pub branch_created: bool,
 
+    /// The branch this worktree's branch was created from, when git-paw
+    /// created it.
+    ///
+    /// `git worktree add -b <branch> <path>` takes no start point, so a branch
+    /// git-paw creates starts at the **main checkout's `HEAD`** — which is the
+    /// default branch only when the operator launched the session from it.
+    /// Launched from an integration branch, every created branch inherits that
+    /// branch's commits, so comparing it against the default branch reports the
+    /// whole integration backlog as "unmerged" and the teardown keeps a branch
+    /// that has in fact already landed where it belongs. Recording the start
+    /// point lets teardown ask the question that matters: is this branch
+    /// contained in the default branch *or* in the branch it came from.
+    ///
+    /// `None` when git-paw did not create the branch, when the start point
+    /// could not be read (a detached `HEAD`), and on every session file written
+    /// before this field existed. Omitted from JSON when `None`, so a session
+    /// that predates it round-trips byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+
     /// Boot+task prompt awaiting submission.
     ///
     /// Set only when an agent is attached via `git paw add` to a *paused*
@@ -758,6 +778,7 @@ mod tests {
                     worktree_path: PathBuf::from("/Users/test/code/my-project-feature-auth"),
                     cli: "claude".to_string(),
                     branch_created: false,
+                    base_branch: None,
                     pending_boot_prompt: None,
                     runtime_slot: None,
                     cli_session_id: None,
@@ -767,6 +788,7 @@ mod tests {
                     worktree_path: PathBuf::from("/Users/test/code/my-project-fix-api"),
                     cli: "gemini".to_string(),
                     branch_created: false,
+                    base_branch: None,
                     pending_boot_prompt: None,
                     runtime_slot: None,
                     cli_session_id: None,
@@ -776,6 +798,7 @@ mod tests {
                     worktree_path: PathBuf::from("/Users/test/code/my-project-feature-logging"),
                     cli: "claude".to_string(),
                     branch_created: false,
+                    base_branch: None,
                     pending_boot_prompt: None,
                     runtime_slot: None,
                     cli_session_id: None,
@@ -895,6 +918,65 @@ mod tests {
         assert!(
             !written.contains("runtime_slot"),
             "absent slot must not be serialized; got:\n{written}"
+        );
+    }
+
+    // -- base_branch: additive optional field (purge-unmerged-branch-safety) --
+
+    /// Spec scenario "A session file written before the base branch was
+    /// recorded loads with no base". Teardown then compares against the default
+    /// branch alone — the behaviour that shipped before the field existed.
+    #[test]
+    fn state_file_without_base_branch_loads_with_none() {
+        let dir = TempDir::new().unwrap();
+        let json = r#"{
+            "session_name": "paw-legacy",
+            "repo_path": "/Users/test/code/legacy",
+            "project_name": "legacy",
+            "created_at": "2024-03-23T13:20:00Z",
+            "status": "active",
+            "worktrees": [
+                {
+                    "branch": "feature/auth",
+                    "worktree_path": "/Users/test/code/legacy-feature-auth",
+                    "cli": "claude",
+                    "branch_created": true
+                }
+            ]
+        }"#;
+        std::fs::write(dir.path().join("paw-legacy.json"), json).unwrap();
+
+        let loaded = load_session_from("paw-legacy", dir.path())
+            .unwrap()
+            .expect("legacy session should load");
+        assert_eq!(loaded.worktrees[0].base_branch, None);
+        assert!(loaded.worktrees[0].branch_created);
+    }
+
+    #[test]
+    fn saved_session_round_trips_base_branch_intact() {
+        let dir = TempDir::new().unwrap();
+        let mut session = sample_session();
+        session.worktrees[0].base_branch = Some("feat/v0.17.0-specs".into());
+        save_session_in(&session, dir.path()).unwrap();
+
+        let loaded = load_session_from("paw-my-project", dir.path())
+            .unwrap()
+            .expect("session should exist");
+        assert_eq!(
+            loaded.worktrees[0].base_branch.as_deref(),
+            Some("feat/v0.17.0-specs")
+        );
+    }
+
+    #[test]
+    fn absent_base_branch_is_omitted_from_serialized_state() {
+        let dir = TempDir::new().unwrap();
+        save_session_in(&sample_session(), dir.path()).unwrap();
+        let written = std::fs::read_to_string(dir.path().join("paw-my-project.json")).unwrap();
+        assert!(
+            !written.contains("base_branch"),
+            "an unrecorded base must not be serialized; got:\n{written}"
         );
     }
 

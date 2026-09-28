@@ -364,11 +364,10 @@ pub fn setup_test_repo() -> TestRepo {
     let repo = sandbox.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo dir");
 
-    // Force `main` as the initial branch — Ubuntu CI defaults to `master`
-    // unless `init.defaultBranch` is set, and the production
-    // `resolve_default_branch` falls back to `"main"` when there is no
-    // remote, so the unmerged-commits warning silently no-ops on a
-    // master-default repo.
+    // Force `main` as the initial branch so every test repo has the same
+    // default branch name to assert against. Ubuntu CI defaults to `master`
+    // unless `init.defaultBranch` is set; `git::default_branch` resolves
+    // either, but the expected strings in the tests would differ.
     Command::new("git")
         .current_dir(&repo)
         .args(["init", "-b", "main"])

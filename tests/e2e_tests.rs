@@ -161,6 +161,111 @@ fn stop_with_no_session() {
         .stdout(predicate::str::contains("No active session"));
 }
 
+/// Spec `supervisor-launch` — "Purge --force skips confirmation but retains
+/// unmerged branches". The worktree, the tmux session, and the per-repo
+/// session state all go; the branch git-paw created survives at the same tip
+/// and is reported with it.
+#[test]
+#[serial]
+fn purge_force_removes_the_worktree_and_session_but_keeps_an_unmerged_branch() {
+    let tr = setup_test_repo();
+    let fake_home = TempDir::new().expect("home tempdir");
+    let tmux_env = helpers::tmux_test_env();
+
+    let paw_dir = tr.path().join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    fs::write(
+        paw_dir.join("config.toml"),
+        "default_cli = \"cat\"\n\n[clis.cat]\ncommand = \"/bin/cat\"\n",
+    )
+    .expect("write config");
+
+    // Attach fails without a TTY, but the session and worktree are created.
+    let start_out = cmd_iso(fake_home.path(), &tmux_env)
+        .current_dir(tr.path())
+        .args([
+            "start",
+            "--no-supervisor",
+            "--cli",
+            "cat",
+            "--branches",
+            "feat/wip",
+        ])
+        .output()
+        .expect("run start");
+
+    let project = tr
+        .path()
+        .file_name()
+        .expect("repo dir name")
+        .to_string_lossy()
+        .to_string();
+    let worktree = tr
+        .path()
+        .parent()
+        .expect("repo parent")
+        .join(format!("{project}-feat-wip"));
+    assert!(
+        worktree.exists(),
+        "worktree for feat/wip should exist after start, looked at {};\nstdout:\n{}\nstderr:\n{}",
+        worktree.display(),
+        String::from_utf8_lossy(&start_out.stdout),
+        String::from_utf8_lossy(&start_out.stderr)
+    );
+
+    // Give the branch a commit that is not in the default branch.
+    fs::write(worktree.join("work.txt"), "agent work").expect("write work file");
+    run_git(&worktree, &["add", "work.txt"]);
+    run_git(&worktree, &["commit", "-q", "-m", "agent work"]);
+    let tip_before = branch_tip(tr.path(), "feat/wip").expect("feat/wip exists before purge");
+    let short_tip = tip_before[..7].to_string();
+
+    let purge = cmd_iso(fake_home.path(), &tmux_env)
+        .current_dir(tr.path())
+        .args(["purge", "--force"])
+        .output()
+        .expect("run purge");
+    let stderr = String::from_utf8_lossy(&purge.stderr).to_string();
+
+    assert!(purge.status.success(), "purge failed; stderr:\n{stderr}");
+    assert!(
+        !worktree.exists(),
+        "purge must still remove the worktree; stderr:\n{stderr}"
+    );
+    let leftover_receipts = fs::read_dir(paw_dir.join("sessions"))
+        .map(std::iter::Iterator::count)
+        .unwrap_or_default();
+    assert_eq!(
+        leftover_receipts, 0,
+        "purge must drop the per-repo session state; stderr:\n{stderr}"
+    );
+    assert_eq!(
+        branch_tip(tr.path(), "feat/wip").as_deref(),
+        Some(tip_before.as_str()),
+        "--force must not delete a branch with unmerged commits; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&short_tip),
+        "purge must print the retained branch's tip SHA; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("will be kept") && stderr.contains("git branch -D feat/wip"),
+        "purge must say the branch is kept and how to discard it; stderr:\n{stderr}"
+    );
+}
+
+/// The tip SHA of `branch` in `repo`, or `None` when it does not exist.
+fn branch_tip(repo: &Path, branch: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .current_dir(repo)
+        .args(["rev-parse", "--verify", "--quiet", branch])
+        .output()
+        .expect("git rev-parse");
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 #[test]
 fn purge_with_no_session() {
     let tr = setup_test_repo();
