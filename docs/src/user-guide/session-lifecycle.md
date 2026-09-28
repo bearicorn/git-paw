@@ -259,6 +259,25 @@ What it does:
    sweep, so a mid-grid removal is safe.
 4. Removes the worktree (reusing `git paw purge`'s per-worktree teardown)
    unless `--keep-worktree`, then drops the branch from the session.
+5. **Branch safety:** deletes the branch only when git-paw created it
+   **and** its tip is an ancestor of the default branch or of the branch
+   it was created from, printing `Deleted branch <name> (was <sha>)`. A
+   branch that existed before the session is never deleted. A created
+   branch carrying commits in neither — or one whose merge state cannot
+   be determined — is kept after its worktree is gone, and is reported
+   with its tip and how to pick the work back up or throw it away:
+
+   ```
+   Kept branch feat/wip at 9f8e7d6 (3 commit(s) not in main)
+     resume it with: git worktree add '/path/to/worktree' feat/wip
+     discard it with: git branch -D feat/wip
+   ```
+
+   The discard command is `git branch -d` when git would accept the safe
+   delete, `-D` when only the forced form would work.
+
+   `--force` relaxes the uncommitted-work check only; it never deletes a
+   branch with unmerged commits.
 
 `git paw remove supervisor` is refused — to end the whole session use
 `git paw stop` (or `git paw purge`). The supervisor notices a removed

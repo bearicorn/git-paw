@@ -295,7 +295,10 @@ pub enum Command {
                       changes (it lists what would be lost) unless you pass --force. Pass \
                       --keep-worktree to detach the pane + session entry but leave the worktree \
                       and branch on disk (this skips the uncommitted-work check, since nothing \
-                      is deleted). `remove supervisor` is refused — use `git paw stop` to end \
+                      is deleted). The branch itself is deleted only when git-paw created it \
+                      and it is fully merged into the default branch; otherwise it is kept and \
+                      reported with its tip SHA and how to resume or discard it. \
+                      `remove supervisor` is refused — use `git paw stop` to end \
                       the whole session. The supervisor notices the departure on its next broker \
                       poll (the agent stops heartbeating) — no restart.\n\n\
                       Examples:\n  \
@@ -348,7 +351,9 @@ pub enum Command {
                       Three teardown verbs:\n  \
                       pause — soft stop (detach + broker stop; CLIs keep running, RAM held)\n  \
                       stop  — kills CLI processes; preserves worktrees on disk (this command)\n  \
-                      purge — full reset; removes worktrees, branches, and state\n\n\
+                      purge — full reset; removes worktrees and session state, and deletes \
+                      only the branches git-paw created that are fully merged (branches \
+                      with unmerged commits are kept)\n\n\
                       `stop` prompts for confirmation in interactive terminals. Use \
                       `--force` to skip the prompt (scripts) or pipe stdin from \
                       `/dev/null` for non-interactive contexts.\n\n\
@@ -360,11 +365,21 @@ pub enum Command {
         force: bool,
     },
 
-    /// Remove everything (tmux session, worktrees, and state)
+    /// Remove all worktrees and session state; keeps branches with unmerged commits
     #[command(
-        about = "Remove everything (tmux session, worktrees, and state)",
-        long_about = "Nuclear option: kills the tmux session, removes all worktrees, and deletes \
-                      session state. Requires confirmation unless --force is used.\n\n\
+        about = "Remove all worktrees and session state; keeps branches with unmerged commits",
+        long_about = "Nuclear option: kills the tmux session, removes all worktrees (including \
+                      any uncommitted changes in them), and deletes session state. Requires \
+                      confirmation unless --force is used.\n\n\
+                      Branches: purge deletes only the branches git-paw created that are fully \
+                      merged into the default branch — or into the branch they were created \
+                      from, which is what makes a wave launched from an integration branch \
+                      clean up correctly — printing each with the SHA it was at. A branch \
+                      carrying commits in neither, or whose merge state cannot be determined, \
+                      is kept, and is reported with its tip SHA and how to resume it \
+                      (`git worktree add '<path>' <branch>`) or discard it \
+                      (`git branch -d <branch>`, or `-D` when the safe delete would be \
+                      refused). Branches that existed before the session are never deleted.\n\n\
                       Use --stale to purge only sessions whose tmux session is gone (a stale \
                       receipt). Live sessions are left untouched, so --stale is safe in cleanup \
                       scripts. Pairing --stale with --force is a no-op (--force is redundant on \
@@ -375,8 +390,11 @@ pub enum Command {
                       git paw purge --stale\n  git paw purge --stale --all-repos"
     )]
     Purge {
-        /// Skip confirmation prompt.
-        #[arg(long, help = "Skip confirmation prompt")]
+        /// Skip the confirmation prompt; never deletes a branch with unmerged commits.
+        #[arg(
+            long,
+            help = "Skip the confirmation prompt; never deletes a branch with unmerged commits"
+        )]
         force: bool,
         /// Purge only stale sessions (receipt claims active but tmux is gone).
         #[arg(
@@ -1582,6 +1600,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Spec `supervisor-launch` — "Help text states unmerged branches are
+    /// kept". `purge --help` must say branches with unmerged commits survive,
+    /// and `--force` must not read as "delete them anyway".
+    #[test]
+    fn purge_help_states_unmerged_branches_are_kept() {
+        let err = Cli::try_parse_from(["git-paw", "purge", "--help"])
+            .expect_err("--help should display help");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        let short = Cli::try_parse_from(["git-paw", "purge", "-h"])
+            .expect_err("-h should display help")
+            .to_string();
+        assert!(
+            short.contains("keeps branches with unmerged commits"),
+            "the purge summary line should state branches are kept; got: {short}"
+        );
+        for anchor in [
+            "fully merged",
+            "is kept",
+            "git worktree add '<path>' <branch>",
+            "git branch -d <branch>",
+            "Skip the confirmation prompt; never deletes a branch with unmerged commits",
+        ] {
+            assert!(
+                help.contains(anchor),
+                "purge --help should surface {anchor:?}; got: {help}"
+            );
+        }
+        assert!(
+            !help.contains("removes worktrees, branches, and state"),
+            "purge --help must not claim it removes branches outright; got: {help}"
+        );
     }
 
     /// The root `--help` lists every public subcommand plus the quick-start

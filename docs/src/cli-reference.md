@@ -17,7 +17,7 @@ Commands:
   remove       Detach a single agent from a running session
   pause        Pause the session (detaches client, stops broker, leaves CLIs running)
   stop         Stop the session (kills tmux, keeps worktrees and state)
-  purge        Remove everything (tmux session, worktrees, and state)
+  purge        Remove all worktrees and session state; keeps branches with unmerged commits
   status       Show session state for the current repo
   attach       Reattach the current terminal to the running session for this repo
   list-clis    List detected and custom AI CLIs
@@ -296,17 +296,69 @@ When the session is currently paused, the confirmation prompt additionally warns
 
 ## `git paw purge`
 
-Nuclear option: kills the tmux session, removes all worktrees, and deletes session state. When the broker was enabled, also removes `broker.log`. Requires confirmation unless `--force` is used.
+Nuclear option: kills the tmux session, removes all worktrees (including any uncommitted changes in them), and deletes session state. When the broker was enabled, also removes `broker.log`. Requires confirmation unless `--force` is used.
 
 ```
+Remove all worktrees and session state; keeps branches with unmerged commits
+
 Usage: git-paw purge [OPTIONS]
 
 Options:
-      --force       Skip confirmation prompt
-      --stale       Purge only stale sessions (receipt claims active but tmux is gone); live sessions untouched
-      --all-repos   With --stale, sweep every repository's stale receipts instead of just the current one
-  -h, --help        Print help
+      --force      Skip the confirmation prompt; never deletes a branch with unmerged commits
+      --stale      Purge only stale sessions (receipt claims active but tmux is gone); live sessions untouched
+      --all-repos  With --stale, sweep every repository's stale receipts instead of just the current one
+  -h, --help       Print help (see more with '--help')
 ```
+
+### Which branches purge deletes
+
+Purge deletes a branch only when **git-paw created it** (so a branch that
+existed before the session is never touched) **and** its tip is an ancestor of
+the default branch — or of the branch it was created from, see below. Each
+deletion prints the SHA the branch was at:
+
+```
+Deleted branch feat/done-thing (was 1a2b3c4)
+```
+
+A branch carrying commits that are in neither — or one whose merge state cannot
+be determined, for instance because the default branch cannot be resolved — is
+**kept**, with or without `--force`. Only its worktree (including any
+uncommitted changes) and the session state go away. Each retained branch is
+reported with its tip and the two ways to finish the job by hand:
+
+```
+Kept branch feat/wip at 9f8e7d6 (3 commit(s) not in main)
+  resume it with: git worktree add '/path/to/worktree' feat/wip
+  discard it with: git branch -D feat/wip
+```
+
+The discard command is `git branch -d` when git would accept the safe delete
+(the branch is already contained in whatever you have checked out) and
+`git branch -D` otherwise, so the suggestion always runs.
+
+Every comparison names refs explicitly (`refs/heads/<branch>`). A tag that
+happens to share a branch's name therefore cannot answer the merge question on
+the tag's history, which would otherwise let a merged tag clear the way for
+deleting an unmerged branch.
+
+### Branches created from an integration branch
+
+`git worktree add -b` takes no start point, so a branch git-paw creates starts
+at whatever the main checkout has checked out. Launch a wave from an
+integration branch and every agent branch inherits that branch's commits.
+git-paw records the start point on the session entry, and teardown asks whether
+the branch is contained in the default branch **or** in that recorded base —
+so work merged into the integration branch is recognised as finished, and a
+branch that really is unmerged is counted against the base rather than being
+reported with the whole integration backlog folded into its number.
+
+Sessions written before this was recorded carry no base and are compared
+against the default branch alone, exactly as they were before.
+
+Before the confirmation prompt, purge lists every branch it is going to keep,
+so you see the outcome before agreeing to it. `--force` skips the prompt, not
+the retention rule.
 
 `--stale` purges only sessions whose tmux session no longer exists (a stale
 receipt). By default the sweep is **scoped to the current repository** — it

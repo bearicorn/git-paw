@@ -253,6 +253,131 @@ fn remove_clean_agent_detaches_and_updates_session() {
     assert!(wt_gone, "worktree for 'b' should be removed from disk");
 }
 
+// --- branch retention on teardown (`git-add-remove-branch`) ---
+
+/// The tip SHA of `branch` in `repo`, or `None` when it does not exist.
+fn branch_tip(repo: &Path, branch: &str) -> Option<String> {
+    let out = StdCommand::new("git")
+        .current_dir(repo)
+        .args(["rev-parse", "--verify", "--quiet", branch])
+        .output()
+        .expect("git rev-parse");
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn commit_in(worktree: &Path, file: &str, body: &str, message: &str) {
+    fs::write(worktree.join(file), body).expect("write file");
+    for args in [vec!["add", file], vec!["commit", "-q", "-m", message]] {
+        let out = StdCommand::new("git")
+            .current_dir(worktree)
+            .args(&args)
+            .output()
+            .expect("git spawn");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// Scenario "remove keeps a created branch with unmerged commits": the
+/// worktree goes, the branch stays at the same tip, and the output names it
+/// with its SHA and the recovery hint.
+#[test]
+#[serial]
+fn remove_keeps_a_created_branch_that_has_unmerged_commits() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    write_supervisor_config(tr.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let session = start_session(tr.path(), home.path(), &tmux_env, "a");
+    let wt_a = tr.path().parent().unwrap().join("repo-a");
+    assert!(wt_a.exists(), "worktree for 'a' should exist");
+    commit_in(&wt_a, "work.txt", "agent work", "agent work");
+    let tip_before = branch_tip(tr.path(), "a").expect("branch 'a' exists before remove");
+
+    let mut rm = cmd();
+    tmux_env.apply_assert(&mut rm);
+    let out = rm
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .args(["remove", "a"])
+        .timeout(Duration::from_secs(40))
+        .output()
+        .expect("run remove");
+
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let wt_gone = !wt_a.exists();
+    let tip_after = branch_tip(tr.path(), "a");
+    kill(&tmux_env, &session);
+
+    assert!(out.status.success(), "remove failed; stderr:\n{stderr}");
+    assert!(wt_gone, "worktree for 'a' should be removed from disk");
+    assert_eq!(
+        tip_after.as_deref(),
+        Some(tip_before.as_str()),
+        "the unmerged branch must survive at the same tip; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Kept branch a at") && stderr.contains("1 commit(s) not in main"),
+        "retention must report the branch, its tip, and the count; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("git worktree add") && stderr.contains("git branch -D a"),
+        "retention must print the resume and discard hints; stderr:\n{stderr}"
+    );
+}
+
+/// Scenario "remove deletes a created branch that is fully merged".
+#[test]
+#[serial]
+fn remove_deletes_a_created_branch_that_is_fully_merged() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    write_supervisor_config(tr.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let session = start_session(tr.path(), home.path(), &tmux_env, "a");
+    let tip_before = branch_tip(tr.path(), "a").expect("branch 'a' exists before remove");
+    let short_tip = tip_before[..7].to_string();
+
+    let mut rm = cmd();
+    tmux_env.apply_assert(&mut rm);
+    let out = rm
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .args(["remove", "a"])
+        .timeout(Duration::from_secs(40))
+        .output()
+        .expect("run remove");
+
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let tip_after = branch_tip(tr.path(), "a");
+    kill(&tmux_env, &session);
+
+    assert!(out.status.success(), "remove failed; stderr:\n{stderr}");
+    assert!(
+        tip_after.is_none(),
+        "a fully merged created branch should be deleted; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("Deleted branch a (was {short_tip}")),
+        "deletion must print the branch and the SHA it was at; stderr:\n{stderr}"
+    );
+}
+
 // --- 8.7 / 8.8 uncommitted-work safety + --keep-worktree ---
 
 #[test]

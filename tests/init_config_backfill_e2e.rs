@@ -127,6 +127,7 @@ impl Fixture {
                 worktree_path: canon(&sibling),
                 cli: "claude".to_string(),
                 branch_created: true,
+                base_branch: None,
                 pending_boot_prompt: None,
                 runtime_slot: None,
                 cli_session_id: None,

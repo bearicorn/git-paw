@@ -4,11 +4,11 @@
 
 Before destroying worktrees, `git paw purge` SHALL check each worktree branch for commits not yet merged to the default branch, and SHALL never delete a branch that carries any. The system SHALL:
 
-1. For each worktree branch, determine whether its tip is an ancestor of the default branch (`git merge-base --is-ancestor <branch> <default-branch>`) and, when it is not, count the commits not in the default branch
+1. For each worktree branch, determine whether its tip is an ancestor of the default branch, or of the branch recorded as that worktree's base (`git merge-base --is-ancestor refs/heads/<branch> refs/heads/<target>`, every ref qualified so a same-named tag cannot answer for the branch) and, when it is an ancestor of neither, count the commits not in the recorded base — or, when none was recorded, not in the default branch
 2. If any branch has unmerged commits, display a warning listing each such branch with its commit count and tip SHA, and stating that those branches will be **kept** — only their worktrees (including any uncommitted changes) and the session state are removed
 3. Require either the `--force` flag or interactive confirmation ("Y" response) to proceed with worktree removal
 4. If the user declines, exit without destroying any worktrees
-5. Whether or not `--force` is given, retain every branch that has unmerged commits or whose merge state cannot be determined; delete only a branch git-paw created whose tip is an ancestor of the default branch; and print, for each retained branch, its tip SHA and how to resume or discard it by hand
+5. Whether or not `--force` is given, retain every branch that has unmerged commits or whose merge state cannot be determined; delete only a branch git-paw created whose tip is an ancestor of the default branch or of its recorded base; and print, for each retained branch, its tip SHA and how to resume or discard it by hand
 
 The default branch SHALL be resolved through the single default-branch resolver (see `git-operations`, "Default-branch resolution is single-source and tolerant of a missing origin/HEAD"), not a purge-local lookup. The `purge` help text (`about`, `long_about`, and the `--force` option) and the `stop` help text that describes purge SHALL state that branches with unmerged commits are kept.
 

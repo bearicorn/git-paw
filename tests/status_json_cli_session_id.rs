@@ -63,6 +63,7 @@ fn receipt(
             worktree_path: worktree_path.to_path_buf(),
             cli: "claude".to_string(),
             branch_created: false,
+            base_branch: None,
             pending_boot_prompt: None,
             runtime_slot: None,
             cli_session_id: cli_session_id.map(String::from),
