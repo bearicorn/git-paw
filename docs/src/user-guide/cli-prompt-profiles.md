@@ -55,7 +55,7 @@ heard of — resolves the full embedded default rather than an empty profile.
 | `stream_error_markers` | Phrases indicating the CLI's API call failed mid-turn (transport error, timeout, disconnect). | the bundled `sweep.sh` helper's stuck-shape detector |
 | `context_bloat_pattern` | Regex source matching a context-bloat clear/compact hint, capturing the token count in thousands. | the bundled `sweep.sh` helper's stuck-shape detector |
 | `paste_buffer_pattern` | Regex source matching a paste-aware CLI's "pasted text" acknowledgement. | the bundled `sweep.sh` helper's stuck-shape detector |
-| `cli_unavailable_markers` | Substrings/phrases indicating the CLI itself has stopped serving — a usage/session limit or an expired/missing login — rather than a worker being merely stuck. | the unattended drive loop (`supervisor::drive::cli_unavailable_line`): an orchestrator-pane match is an immediate `cli-unavailable` exit, a coding-pane match a deduped escalation |
+| `cli_unavailable_markers` | Substrings/phrases indicating the CLI itself has stopped serving — a usage/session limit (`"You've hit your session limit"`), an organisation spend limit (`"org's monthly spend limit"`), or an expired/missing login — rather than a worker being merely stuck. | the unattended drive loop (`supervisor::drive::cli_unavailable_line`), resolved per pane for its own CLI: an orchestrator-pane match is an immediate `cli-unavailable` exit, a coding-pane match a deduped escalation |
 
 Every marker-list field is matched as a case-insensitive substring, mirroring
 the behaviour each site had before profiles existed. Pattern fields are
