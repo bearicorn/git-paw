@@ -3575,6 +3575,23 @@ mod tests {
             "section must carry the review-and-anonymise caveat"
         );
     }
+
+    #[test]
+    fn learnings_doc_documents_broker_publication_and_file_sourced_get_learnings() {
+        let doc = include_str!("../docs/src/user-guide/learnings.md");
+        assert!(
+            doc.contains("agent.learning"),
+            "learnings doc must mention agent.learning broker messages"
+        );
+        assert!(
+            doc.contains("get_learnings") || doc.contains("get_learnings()"),
+            "learnings doc must mention that get_learnings() reads the file"
+        );
+        assert!(
+            !doc.contains("deferred"),
+            "learnings doc must not claim the feature is deferred"
+        );
+    }
 }
 
 #[cfg(test)]

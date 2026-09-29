@@ -16,9 +16,9 @@
 #     worktree branch (mirrors sweep.sh's resolve_agent_for_path slug rules).
 #
 # Wrapping every agent->broker curl behind one stable script path means the
-# launch path can seed a single least-privilege allowlist grant
-# (`.git-paw/scripts/broker.sh`) instead of a broad `curl *` rule, removing
-# the boot-publish dead-stall (v0.7.0 dogfood) where the first register curl
+# classifier recognises this script path (`.git-paw/scripts/broker.sh`)
+# instead of requiring a broad `curl *` allowlist rule, removing the
+# boot-publish dead-stall (v0.7.0 dogfood) where the first register curl
 # raised an unanswerable permission prompt.
 #
 # Subcommands implemented (per agent-broker-helper §D1):
