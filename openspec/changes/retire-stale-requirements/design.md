@@ -69,9 +69,8 @@ Alternatives rejected: SipHash with fixed keys via `std::hash::SipHasher` (depre
 std-internal); keeping `DefaultHasher` and documenting the instability (leaves the defect).
 
 The same `DefaultHasher` pattern computes the `agent.advanced-main` event id
-(`src/broker/messages.rs` ~:430). It is out of scope here (different capability, no dogfood
-report), but it has the same toolchain-stability property and should get the same fix in a
-follow-up.
+(`src/broker/messages.rs` ~:430). It is fixed here (task 2b.5) with the same FNV-1a scheme,
+so no persisted or published id depends on the toolchain.
 
 ## Risks / Trade-offs
 

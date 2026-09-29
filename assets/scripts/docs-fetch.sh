@@ -13,9 +13,9 @@
 #     `docs_base_url` (default: git-paw's published documentation site).
 #
 # Wrapping every docs->agent curl behind one stable script path means the
-# launch path can seed a single least-privilege allowlist grant
-# (`.git-paw/scripts/docs-fetch.sh`) instead of a broad `curl *` rule, matching
-# the by-path model of the broker helper.
+# classifier recognises this script path (`.git-paw/scripts/docs-fetch.sh`)
+# instead of requiring a broad `curl *` allowlist rule, matching the by-path
+# model of the broker helper.
 #
 # Documentation is fetched ON DEMAND from the configured site; no doc content
 # is shipped inside this script or the binary. Lookup is best-effort: on an

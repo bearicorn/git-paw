@@ -3177,4 +3177,13 @@ Here is my plan:
             Some(tmp.path())
         ));
     }
+
+    /// Spec scenario "A bundled `sweep.sh learn` subcommand classifies safe".
+    #[test]
+    fn managed_sweep_sh_learn_invocation_is_safe() {
+        assert!(is_managed_script_invocation(
+            ".git-paw/scripts/sweep.sh learn tooling_friction \"t\" '{}'",
+            None
+        ));
+    }
 }

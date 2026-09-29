@@ -17,8 +17,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use std::hash::Hasher as _;
-
 use chrono::{TimeZone as _, Utc};
 
 use super::messages::{BrokerMessage, LearningPayload};
@@ -129,6 +127,23 @@ pub const CATEGORY_CORRECTION_EXHAUSTED: &str = "correction_exhausted";
 /// scoping is carried by [`LearningRecord::branch_id`].
 pub const LEARNINGS_AGENT_ID: &str = "supervisor";
 
+/// FNV-1a 64-bit hash function.
+///
+/// Hand-rolled FNV-1a without external dependencies. Offset basis is
+/// `0xcbf2_9ce4_8422_2325`, prime is `0x0100_0000_01b3`. This hash is stable
+/// across Rust toolchain versions and is used for deterministic record ids.
+pub(crate) fn fnv1a64(input: &str) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+
+    let mut hash = OFFSET_BASIS;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
 /// One structured, emittable learning record — the single in-memory
 /// representation of a learning destined for the `agent.learning` wire
 /// variant.
@@ -162,12 +177,13 @@ impl LearningRecord {
     /// hash of a canonical serialisation of `category`, `branch_id`, the
     /// `body` (object keys sorted), and the UTC hour bucket (`YYYY-MM-DDTHH`).
     ///
-    /// Uses the std-library [`DefaultHasher`](std::collections::hash_map::DefaultHasher)
-    /// — no external crypto dependency. The id is not a security primitive;
-    /// it only needs to be deterministic for the same canonical input so
-    /// consumers can dedupe. Re-publishing the same logical record within one
-    /// UTC hour yields the same id; across an hour boundary the id changes so
-    /// a genuine recurrence registers.
+    /// Uses a hand-rolled FNV-1a 64-bit hash — no external crypto dependency.
+    /// The id is not a security primitive; it only needs to be deterministic
+    /// for the same canonical input so consumers can dedupe. FNV-1a is stable
+    /// across Rust toolchain versions, unlike std's `DefaultHasher`. The hash
+    /// is rendered as 16 lowercase hex characters. Re-publishing the same
+    /// logical record within one UTC hour yields the same id; across an hour
+    /// boundary the id changes so a genuine recurrence registers.
     #[must_use]
     pub fn deterministic_id(&self) -> String {
         let mut canon = String::new();
@@ -179,9 +195,8 @@ impl LearningRecord {
         canon.push('|');
         canon.push_str(&hour_bucket(self.timestamp));
 
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        hasher.write(canon.as_bytes());
-        format!("{:016x}", hasher.finish())
+        let hash = fnv1a64(&canon);
+        format!("{hash:016x}")
     }
 }
 
@@ -2112,6 +2127,33 @@ mod tests {
             body: serde_json::json!({"agents": ["feat-x", "feat-y"], "files": ["src/a.rs"]}),
             timestamp: ts,
         }
+    }
+
+    // Test that FNV-1a hash is stable and pinned to known values.
+    #[test]
+    fn fnv1a64_test_vectors() {
+        // Empty string should hash to offset basis
+        assert_eq!(fnv1a64(""), 0xcbf2_9ce4_8422_2325);
+        // "a" should produce the expected hash
+        assert_eq!(fnv1a64("a"), 0xaf63_dc4c_8601_ec8c);
+    }
+
+    // Task 2b.1: A known record has a pinned id (using FNV-1a).
+    #[test]
+    fn deterministic_id_matches_golden_value() {
+        // 2026-01-01T00:00:00Z = 1767225600 seconds since epoch
+        let base_2026_01_01 = 1_767_225_600_u64;
+        let record = LearningRecord {
+            category: "conflict_event".to_string(),
+            agent_id: LEARNINGS_AGENT_ID.to_string(),
+            branch_id: None,
+            title: "title".to_string(),
+            body: serde_json::json!({"agents":["feat-a","feat-b"],"file":"src/lib.rs"}),
+            timestamp: UNIX_EPOCH + Duration::from_secs(base_2026_01_01 + 13 * 3600 + 30 * 60),
+        };
+        // This id is the FNV-1a hash of the canonical form:
+        // conflict_event||{agents:["feat-a","feat-b"],file:"src/lib.rs"}|2026-01-01T13
+        assert_eq!(record.deterministic_id(), "351c85e586ece5f0");
     }
 
     // Task 2.3: same record at 13:30 and 13:59 produces the same id.

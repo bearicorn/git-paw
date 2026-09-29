@@ -304,12 +304,19 @@ Each `agent.learning` record carries:
 | `body`       | Category-specific structured object                             |
 | `timestamp`  | ISO 8601 UTC                                                    |
 
-The `id` is a stable 64-bit hash (16 hex chars) over the category, branch,
-body (keys sorted), and the UTC *hour bucket*. It is a dedup key, not a
-security primitive. Re-publishing the same logical record within one
-hour yields the same `id`, so a consumer can dedupe re-emissions; a genuine
-recurrence in a later hour gets a fresh `id`. This lets the aggregator re-run
-a sweep idempotently without flooding consumers with duplicates.
+The `id` is a 64-bit FNV-1a hash (16 lowercase hex characters) of the
+canonical form (category, branch, body sorted, UTC *hour bucket*).
+FNV-1a is stable across Rust toolchain versions — each `id` is deterministic
+regardless of when or where it is computed. It is a dedup key, not a security
+primitive. Re-publishing the same logical record within one hour yields the
+same `id`, so a consumer can dedupe re-emissions; a genuine recurrence in a
+later hour gets a fresh `id`. This lets the aggregator re-run a sweep
+idempotently without flooding consumers with duplicates.
+
+**Note:** record ids changed once in this release (v0.17.0) when the hash
+implementation was switched from platform-dependent `DefaultHasher` to
+stable FNV-1a. Existing ids from v0.16.x are now invalid; re-run your
+aggregator to regenerate them.
 
 Branch-scoped records (`stuck_duration`, `recovery_cycles`) are routed to
 that branch's inbox and are retrievable with:

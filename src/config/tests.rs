@@ -1690,6 +1690,30 @@ fn supervisor_common_dev_allowlist_round_trips_through_save_and_load() {
 }
 
 #[test]
+fn effective_whitelist_ignores_common_dev_allowlist_enabled_false() {
+    let cfg = AutoApproveConfig::default();
+    let dev = CommonDevAllowlistConfig {
+        enabled: false,
+        stacks: vec!["rust".to_string()],
+        extra: vec![],
+    };
+    let wl = cfg.effective_whitelist(&dev);
+    // The `enabled` field is parsed for compatibility but has no effect.
+    // Even when enabled = false, the whitelist is composed normally with
+    // universal patterns and stack presets.
+    for pattern in crate::supervisor::dev_allowlist::DEV_ALLOWLIST_PRESET {
+        assert!(
+            wl.iter().any(|c| c == pattern),
+            "whitelist should have universal preset pattern: {pattern}",
+        );
+    }
+    assert!(
+        wl.iter().any(|c| c == "cargo test"),
+        "whitelist should have rust stack preset (cargo test)",
+    );
+}
+
+#[test]
 fn generated_default_config_template_contains_common_dev_allowlist_section() {
     let template = generate_default_config();
     assert!(
@@ -2424,6 +2448,13 @@ fn effective_whitelist_default_is_stack_neutral() {
     }
     assert!(wl.iter().any(|c| c == "git commit"));
     assert!(wl.iter().any(|c| c == "curl http://127.0.0.1:"));
+    // Verify every universal preset pattern is present
+    for pattern in crate::supervisor::dev_allowlist::DEV_ALLOWLIST_PRESET {
+        assert!(
+            wl.iter().any(|c| c == pattern),
+            "whitelist missing universal preset pattern: {pattern}",
+        );
+    }
 }
 
 /// Spec scenario "Declared stack contributes its toolchain verbs": the

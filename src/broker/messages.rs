@@ -8,6 +8,8 @@ use std::fmt;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::learnings::fnv1a64;
+
 /// Validation errors for broker messages.
 #[derive(Debug, thiserror::Error)]
 pub enum MessageError {
@@ -400,9 +402,8 @@ impl AdvancedMainPayload {
 /// Computes the deterministic dedup `id` for an `agent.advanced-main` event.
 ///
 /// Reuses the `agent.learning` id-hashing pattern from the
-/// `agent-learning-variant` capability — the std-hash shape (no third-party
-/// crates): a `std::collections::hash_map::DefaultHasher` over a canonical,
-/// newline-delimited serialisation of
+/// `agent-learning-variant` capability — FNV-1a 64-bit (no third-party
+/// crates) over a canonical, newline-delimited serialisation of
 /// `merged_branch | new_main_sha | base | hour_bucket`, rendered as a
 /// zero-padded 16-hex-char (64-bit) string. `hour_bucket` is the UTC
 /// `YYYY-MM-DDTHH` truncation of `merged_at`.
@@ -413,9 +414,8 @@ impl AdvancedMainPayload {
 /// variant's recurrence-detection contract). Because `new_main_sha` is unique
 /// per merge, distinct merges effectively never collide regardless of bucket.
 ///
-/// `DefaultHasher` is seeded with fixed keys, so the id is stable within a
-/// session and across processes built from the same toolchain — sufficient
-/// for in-session / in-log dedup, which is all this id is used for.
+/// FNV-1a is stable across Rust toolchain versions, unlike the std's
+/// `DefaultHasher`, so the id is deterministic across processes and sessions.
 #[must_use]
 pub fn advanced_main_id(
     merged_branch: &str,
@@ -423,14 +423,11 @@ pub fn advanced_main_id(
     base: &str,
     merged_at: DateTime<Utc>,
 ) -> String {
-    use std::hash::{Hash as _, Hasher as _};
-
     let hour_bucket = merged_at.format("%Y-%m-%dT%H").to_string();
     let canonical = format!("{merged_branch}\n{new_main_sha}\n{base}\n{hour_bucket}");
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    canonical.hash(&mut hasher);
-    // u64 -> zero-padded 16 hex chars, matching agent.learning's std-hash id.
-    format!("{:016x}", hasher.finish())
+    let hash = fnv1a64(&canonical);
+    // u64 -> zero-padded 16 hex chars, matching agent.learning's FNV-1a id.
+    format!("{hash:016x}")
 }
 
 /// Payload for `agent.learning` messages.
@@ -2771,6 +2768,31 @@ mod tests {
             obj.contains_key("question"),
             "QuestionPayload must serialise the 'question' field; got keys {:?}",
             obj.keys().collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn advanced_main_id_uses_fnv1a_hash() {
+        // Verify that advanced_main_id uses FNV-1a hashing (deterministic
+        // across toolchains) rather than DefaultHasher (which varies).
+        // The id should be consistent across calls.
+        let id1 = advanced_main_id(
+            "feat/my-feature",
+            "abc123def456",
+            "main",
+            ts("2026-01-01T13:30:00Z"),
+        );
+        let id2 = advanced_main_id(
+            "feat/my-feature",
+            "abc123def456",
+            "main",
+            ts("2026-01-01T13:30:00Z"),
+        );
+        assert_eq!(id1, id2, "same input must produce identical ids");
+        assert_eq!(id1.len(), 16, "id must be 16 hex characters");
+        assert!(
+            id1.chars().all(|c| c.is_ascii_hexdigit()),
+            "id must be lowercase hex only; got {id1}"
         );
     }
 }

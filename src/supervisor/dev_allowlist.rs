@@ -298,8 +298,25 @@ mod tests {
 
     #[test]
     fn effective_patterns_orders_preset_before_extra() {
-        let extra = vec!["pnpm test".to_string()];
+        let extra = vec!["pnpm test".to_string(), "deno fmt".to_string()];
         let out = effective_patterns(&[], &extra);
+        // Check both extras are present
+        assert!(
+            out.iter().any(|s| s == "pnpm test"),
+            "missing pnpm test extra"
+        );
+        assert!(
+            out.iter().any(|s| s == "deno fmt"),
+            "missing deno fmt extra"
+        );
+        // Check every universal preset is present
+        for pattern in DEV_ALLOWLIST_PRESET {
+            assert!(
+                out.iter().any(|s| s == pattern),
+                "missing universal preset pattern: {pattern}",
+            );
+        }
+        // Check ordering: universal patterns before extra
         let pnpm_idx = out.iter().position(|s| s == "pnpm test").unwrap();
         let git_idx = out.iter().position(|s| s == "git diff").unwrap();
         assert!(
@@ -313,6 +330,18 @@ mod tests {
         let extra = vec!["git diff".to_string()];
         let out = effective_patterns(&[], &extra);
         assert_eq!(out.iter().filter(|s| *s == "git diff").count(), 1);
+    }
+
+    #[test]
+    fn effective_patterns_keeps_unvalidated_extra_entries() {
+        // Extra entries are passed through unchanged, even if they're not
+        // real commands (e.g., a typo or nonsense string).
+        let extra = vec!["not-a-real-command".to_string()];
+        let out = effective_patterns(&[], &extra);
+        assert!(
+            out.iter().any(|s| s == "not-a-real-command"),
+            "extra entries must be kept even if unvalidated",
+        );
     }
 
     #[test]
@@ -376,5 +405,23 @@ mod tests {
             .map(|s| (*s).to_string())
             .collect();
         assert_eq!(out, expected, "unknown stack must add nothing");
+    }
+
+    #[test]
+    fn preset_entries_are_bare_prefixes() {
+        // Every preset entry is a bare command prefix: at most one space
+        // separating command from optional subcommand/flag (never
+        // additional arguments).
+        for entry in DEV_ALLOWLIST_PRESET {
+            let tokens: Vec<&str> = entry.split_whitespace().collect();
+            assert!(
+                tokens.len() <= 2,
+                "preset entry must be a bare prefix (1-2 tokens), got {tokens:?} from: {entry}",
+            );
+            assert!(
+                !tokens.is_empty(),
+                "preset entry must not be empty: {entry}"
+            );
+        }
     }
 }
