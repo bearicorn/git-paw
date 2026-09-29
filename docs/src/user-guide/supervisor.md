@@ -124,16 +124,52 @@ this list, not just the outcome word, before running `purge`.
 A rate-limited or logged-out CLI in the **orchestrator's own pane** is a loud,
 explicit, non-success exit — not a silent idle pane the loop waits out for up
 to 25 minutes. Each poll, every pane's capture tail is also scanned for a
-CLI-unavailability marker (a usage/session-limit phrase, or a
-login-loss phrase such as an expired/missing credential). A match on the
-orchestrator pane ends the loop immediately with outcome `cli-unavailable`;
-the summary names the pane and quotes the matching line, and the
-`--unattended` process **exits non-zero** — the one outcome whose exit status
-differs from every outcome that predates this behaviour. Nothing is killed:
-the tmux session and worker panes are left running for you to attach to or
-resume later. A match on a coding-agent pane instead becomes a deduped
-`cli-unavailable` escalation and the loop keeps driving the rest of the wave —
-that worker's branch will show as unmerged in the exit summary regardless.
+CLI-unavailability marker (a usage/session-limit phrase, an organisation
+spend-limit phrase, or a login-loss phrase such as an expired/missing
+credential). A match on the orchestrator pane ends the loop immediately with
+outcome `cli-unavailable`; the summary names the pane and quotes the matching
+line, and the `--unattended` process **exits non-zero** — the one outcome
+whose exit status differs from every outcome that predates this behaviour.
+Nothing is killed: the tmux session and worker panes are left running for you
+to attach to or resume later. A match on a coding-agent pane instead becomes a
+deduped `cli-unavailable` escalation and the loop keeps driving the rest of
+the wave — that worker's branch will show as unmerged in the exit summary
+regardless.
+
+The scan tolerates the same bounded trailing region of non-prompt content the
+live-prompt gate does, so a banner is still found underneath chrome a CLI
+draws below it — current Claude Code's persistent task list, a status strip,
+or similar — rather than only a fixed last few lines. A marker separated from
+the end of the capture by more than that bound still counts as scrolled away
+and is ignored, same as before.
+
+Markers are resolved **per pane, for its own CLI** — the orchestrator pane
+included: a `[clis.<name>]` override of `cli_unavailable_markers` applies to
+that CLI's panes, falling back to the embedded Claude Code default (which
+includes `You've hit your session limit`, an organisation `org's monthly
+spend limit`, an expired/missing login, and an invalid API key) when the CLI
+has no override. The override resolves from that pane's own broker-reported
+CLI (the `/status` snapshot), so it only takes effect once that pane has
+published at least one status — a pane's first sweep of the run, before any
+`/status` row exists for it, always falls back to the embedded default for
+that one tick. `git paw __prompt-profile --field cli_unavailable_markers`
+reads the exact same resolved field the loop does — it is a read path for the
+bundled `sweep.sh` helper's *other* detectors (stuck-shape, live-prompt) to
+stay in sync with the Rust side, not a second classifier: `sweep.sh` itself
+does not consult `cli_unavailable_markers` or classify a pane for CLI
+unavailability today.
+
+A `cli-unavailable` escalation is deduplicated on the agent and the matched
+marker — never on the banner line's full text, which can carry a reset time
+or countdown — so the same banner observed across sweeps is one escalation,
+while two distinct banners on one agent (e.g. a session limit followed later
+by a login failure) are two.
+
+With no orchestrator pane in the session (a pure `--unattended` run), coding
+pane detection is unaffected, but there is nothing in the roster to watch for
+the orchestrator's own CLI dying — the exit summary says so explicitly
+(`No orchestrator pane was monitored for CLI unavailability this run.`)
+instead of implying coverage it does not have.
 
 For an unattended session the in-process loop is the **sole** approver: the
 dashboard subprocess's auto-approve thread is disabled so two approvers never

@@ -58,7 +58,14 @@ widening exactly the logic v0.18.0 deletes. Saying so in the summary is cheap an
   this change follows it. Sequencing handles it: wave 3, after that change merges.
 - **Per-CLI resolution needs the CLI at sweep time.** If an agent's CLI cannot be resolved
   (an old session file without it), fall back to the embedded default — today's behaviour —
-  rather than failing the sweep.
+  rather than failing the sweep. In practice this means a pane's *first* sweep of a run
+  always resolves the embedded default: the loop reads the pane's CLI from the `/status`
+  snapshot (`status_for_sweep`), which is empty until the pane has published at least one
+  status, so the override only takes effect from that pane's second sweep onward. This
+  applies uniformly to the orchestrator pane too — it is resolved the same way, from a
+  `"supervisor"` `/status` row seeded with its configured CLI, not hardcoded to the embedded
+  default — so a `[clis.<name>]` override on the orchestrator's own CLI is honoured once it
+  has published.
 - **Both edit `drive.rs`.** `idle-pane-nudge-submission` edits it in wave 2. Different
   functions, but wave 1 proved that clean textual merges can still fail to build; this lands
   after that one merges, and Gate 2 runs on the merged tree.

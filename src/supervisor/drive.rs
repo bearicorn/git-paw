@@ -54,7 +54,8 @@ use regex::Regex;
 
 use crate::broker::messages::{BrokerMessage, FeedbackPayload};
 use crate::config::{
-    CorrectionConfig, CustomCli, OnExhausted, claude_prompt_profile, resolve_submit_delay_ms,
+    CorrectionConfig, CustomCli, OnExhausted, claude_prompt_profile, resolve_prompt_profile,
+    resolve_submit_delay_ms,
 };
 use crate::error::PawError;
 use crate::session::{self, SessionStatus};
@@ -62,11 +63,12 @@ use crate::session::{self, SessionStatus};
 use super::approval_gate::{approval_dedup_key, live_prompt_in_tail};
 use super::approve::{KeyDispatcher, TmuxKeyDispatcher, approval_keystrokes};
 use super::auto_approve::{
-    LIVE_PROMPT_TAIL, ProtectedPaths, detect_prompt_shape, extract_command_slice,
-    extract_path_from_file_prompt, is_dangerous, is_git_dir_write, is_idle_input_box_line,
-    is_live_prompt, is_managed_script_invocation, is_protected_path_violation, is_rule_line,
-    is_safe_command, is_scratch_rm, is_worktree_dev_test_op, is_worktree_file_op,
-    is_worktree_git_op, normalize_command, select_option_index, strip_input_sigil,
+    LIVE_PROMPT_TAIL, ProtectedPaths, anchor_on_trailing_region, detect_prompt_shape,
+    extract_command_slice, extract_path_from_file_prompt, is_dangerous, is_git_dir_write,
+    is_idle_input_box_line, is_live_prompt, is_managed_script_invocation,
+    is_protected_path_violation, is_rule_line, is_safe_command, is_scratch_rm,
+    is_worktree_dev_test_op, is_worktree_file_op, is_worktree_git_op, normalize_command,
+    select_option_index, strip_input_sigil,
 };
 use super::claim::PaneClaim;
 use super::poll::{AgentStatusRow, fetch_status_over_http};
@@ -869,8 +871,29 @@ impl Escalation {
     /// publish an answer, or declare the branch unrecoverable itself. The human
     /// framing is deliberately not reused: telling a model to "review the pane
     /// and decide manually" invites it to wait for someone else.
+    ///
+    /// A `"cli-unavailable"` verdict paraphrases its `command` instead of
+    /// quoting it, since this text is typed into the orchestrator's own
+    /// pane, which the next sweep re-scans:
+    /// the `cli-unavailable` verdict's `command` is the matched banner LINE
+    /// VERBATIM (`sweep_pane`), and quoting it here would plant a copy of the
+    /// marker in a scanned pane — the next sweep would then see its own
+    /// echoed hand-off, misread it as a fresh orchestrator-pane banner, and
+    /// exit the run `cli-unavailable` for the wrong reason
+    /// (`cli-unavailable-detection-gaps`). The broker-facing [`Self::question`]
+    /// is unaffected: it is never typed into a pane the loop scans.
     #[must_use]
     pub fn handoff_text(&self) -> String {
+        if self.verdict == "cli-unavailable" {
+            return one_line_capped(&format!(
+                "Judgment call handed to you (cli-unavailable / {}): that agent's CLI \
+                 appears to have stopped serving (a usage/session-limit or login-loss \
+                 banner was detected on its pane). Decide it now from the specs and \
+                 cross-agent state and act on it; escalate to the human only if it is \
+                 genuinely undecidable.",
+                self.agent_id
+            ));
+        }
         one_line_capped(&format!(
             "Judgment call handed to you ({} / {}): {}. Decide it now from the specs \
              and cross-agent state and act on it; escalate to the human only if it is \
@@ -937,6 +960,13 @@ pub struct DriveSummary {
     /// wave (GP-05) — the fallback the per-agent list has when its own
     /// resolution is sparse or unavailable, and a useful roll-up otherwise.
     pub merged_summary: Option<String>,
+    /// Whether an orchestrator (supervisor CLI) pane was present for at least
+    /// one sweep this run. `false` for a pure `--unattended` roster with no
+    /// supervisor pane — the summary then says so rather than implying an
+    /// orchestrator was watched for CLI unavailability when none ran
+    /// (`cli-unavailable-detection-gaps`; the pane-0 / supervisor-role
+    /// resolution itself is unchanged).
+    pub orchestrator_monitored: bool,
 }
 
 impl DriveSummary {
@@ -955,6 +985,9 @@ impl DriveSummary {
         );
         if let Some(merged) = &self.merged_summary {
             let _ = writeln!(out, "{merged}");
+        }
+        if !self.orchestrator_monitored {
+            out.push_str("No orchestrator pane was monitored for CLI unavailability this run.\n");
         }
 
         out.push_str("\nPer-agent final state:\n");
@@ -1327,6 +1360,10 @@ pub fn drive_loop(
     // default via `resolve_submit_delay_ms`'s empty-CLI fallback, same as the
     // correction pass's pre-first-status handling.
     let mut status_for_sweep: Vec<AgentStatusRow> = Vec::new();
+    // Whether an orchestrator pane was present for at least one sweep, so the
+    // exit summary can say honestly whether CLI unavailability was ever
+    // monitored for it (`cli-unavailable-detection-gaps`).
+    let mut orchestrator_monitored = false;
 
     // The loop is an expression that breaks with the terminal `(outcome,
     // latest_status)`: every exit path assigns both, so there are no
@@ -1349,6 +1386,7 @@ pub fn drive_loop(
             orchestrator: orchestrator_pane_index(&panes, agents),
             orchestrator_settle_delay,
         };
+        orchestrator_monitored |= ctx.orchestrator.is_some();
         let mut pane_by_agent: HashMap<String, usize> = HashMap::new();
         for pane in panes {
             let role = resolve_pane_agent(pane.pane_index, &pane.pane_current_path, agents);
@@ -1574,6 +1612,7 @@ pub fn drive_loop(
         broker_log_hint: config.broker_log_hint.clone(),
         learnings_hint: config.learnings_hint.clone(),
         merged_summary,
+        orchestrator_monitored,
     }
 }
 
@@ -1801,32 +1840,64 @@ fn record_escalation(deps: &mut DriveDeps<'_>, ctx: SweepContext<'_>, escalation
     }
 }
 
+/// A CLI-unavailability marker found in a pane's capture.
+struct CliUnavailableMatch {
+    /// The configured marker string that matched (stable across sweeps, even
+    /// when the matching line itself carries a reset time or countdown).
+    marker: String,
+    /// The matching line, verbatim (trimmed), for quoting in the exit summary.
+    line: String,
+}
+
 /// Tail-only scan for a CLI-unavailability marker — a usage/session limit or
-/// an expired/missing login (`drive-loop-exit-summary-truth`, D4). Anchors on
-/// the same trailing non-blank window [`is_live_prompt`] uses
-/// ([`LIVE_PROMPT_TAIL`]), so a marker that has scrolled into history, or that
-/// an agent merely printed while reading docs, does not fire. Matched
+/// an expired/missing login (`drive-loop-exit-summary-truth`, D4;
+/// `cli-unavailable-detection-gaps`). Anchors on the same bounded trailing
+/// region [`is_live_prompt`] uses ([`anchor_on_trailing_region`]), so a CLI
+/// that renders a task list or status strip below the banner does not hide
+/// it — while a marker separated from the end of the capture by more than
+/// that bound still counts as scrolled away and is ignored. Matched
 /// case-insensitively as a substring, by the same convention every other
-/// marker field uses. Returns the matching line verbatim (trimmed), for
-/// quoting in the exit summary.
+/// marker field uses.
 ///
-/// Sources its markers from the embedded Claude Code profile
-/// (`cli-prompt-profiles` capability), the same way [`is_live_prompt`] and
-/// [`detect_prompt_shape`] source theirs — the compiled loop's shape checks
-/// are Claude-specific; per-CLI overrides serve the bundled `sweep.sh`
-/// helper's independent process instead.
+/// `markers` is the CALLER's resolved [`CliPromptProfile::cli_unavailable_markers`]
+/// for the pane's own CLI ([`resolve_prompt_profile`]) — this function sources
+/// nothing itself, so the loop and the bundled `sweep.sh` helper (which reads
+/// the same resolved field via `git paw __prompt-profile`) cannot drift apart
+/// on what counts as unavailable for a given CLI.
+///
+/// [`CliPromptProfile::cli_unavailable_markers`]: crate::config::CliPromptProfile::cli_unavailable_markers
 #[must_use]
-fn cli_unavailable_line(capture: &str) -> Option<String> {
-    let markers = &claude_prompt_profile().cli_unavailable_markers;
+fn cli_unavailable_line(capture: &str, markers: &[String]) -> Option<CliUnavailableMatch> {
     let nonblank: Vec<&str> = capture.lines().filter(|l| !l.trim().is_empty()).collect();
-    let tail = &nonblank[nonblank.len().saturating_sub(LIVE_PROMPT_TAIL)..];
-    tail.iter().find_map(|line| {
-        let lower = line.to_ascii_lowercase();
-        markers
-            .iter()
-            .any(|m| lower.contains(&m.to_ascii_lowercase()))
-            .then(|| line.trim().to_string())
-    })
+    let mut found: Option<CliUnavailableMatch> = None;
+    anchor_on_trailing_region(&nonblank, |lines, _offset| {
+        let tail = &lines[lines.len().saturating_sub(LIVE_PROMPT_TAIL)..];
+        for line in tail {
+            let lower = line.to_ascii_lowercase();
+            if let Some(marker) = markers
+                .iter()
+                .find(|m| lower.contains(&m.to_ascii_lowercase()))
+            {
+                found = Some(CliUnavailableMatch {
+                    marker: marker.clone(),
+                    line: line.trim().to_string(),
+                });
+                return true;
+            }
+        }
+        false
+    });
+    found
+}
+
+/// Dedup key for a `cli-unavailable` escalation: `(agent_id, matched marker)`
+/// — never the banner line's full text, which may carry a reset time or
+/// countdown that changes between sweeps (`cli-unavailable-detection-gaps`).
+/// So the same banner observed across sweeps is one escalation, and two
+/// distinct banners on one agent are two.
+#[must_use]
+fn cli_unavailable_dedup_key(agent_id: &str, marker: &str) -> String {
+    format!("cli-unavailable|{agent_id}|{marker}")
 }
 
 /// What sweeping one pane found.
@@ -1873,35 +1944,38 @@ fn sweep_pane(
     let session = ctx.session;
     let capture = deps.capturer.capture(session, pane.pane_index);
 
-    if let Some(line) = cli_unavailable_line(&capture) {
+    // The pane's own broker-reported CLI, consulted both to resolve its
+    // per-CLI `cli_unavailable_markers` override below and (further down) its
+    // nudge settle delay — an agent with no status row yet falls back to the
+    // config-driven/embedded-default behaviour via an empty CLI name.
+    let cli = status
+        .iter()
+        .find(|r| r.agent_id == agent_id)
+        .map_or("", |r| r.cli.as_str());
+
+    let markers = &resolve_prompt_profile(cli, &config.clis).cli_unavailable_markers;
+    if let Some(m) = cli_unavailable_line(&capture, markers) {
         if agent_id == SUPERVISOR_AGENT_ID {
-            return PaneSweepOutcome::OrchestratorCliUnavailable(line);
+            return PaneSweepOutcome::OrchestratorCliUnavailable(m.line);
         }
-        // Coding pane: non-blocking escalation, deduped exactly like a
-        // risky/unknown prompt, so a persistent marker does not re-fire every
-        // sweep.
-        let key = approval_dedup_key(agent_id, &capture);
+        // Coding pane: non-blocking escalation, deduped on (agent_id, matched
+        // marker) — never on incidental transcript content, so a persistent
+        // marker does not re-fire every sweep and two distinct banners stay
+        // distinct (`cli-unavailable-detection-gaps`).
+        let key = cli_unavailable_dedup_key(agent_id, &m.marker);
         if !dedup.should_emit(&key, deps.clock.now()) {
             return PaneSweepOutcome::None;
         }
         let escalation = Escalation {
             agent_id: agent_id.to_string(),
             verdict: "cli-unavailable".to_string(),
-            command: line,
+            command: m.line,
         };
         record_escalation(deps, ctx, &escalation);
         return PaneSweepOutcome::Escalated(escalation);
     }
 
     if !is_live_prompt(&capture) {
-        // The agent's own broker-reported CLI resolves its nudge settle delay
-        // ([`resolve_submit_delay_ms`]), the same resolution the correction
-        // pass uses — an agent with no status row yet falls back to the
-        // config-driven agnostic default via an empty CLI name.
-        let cli = status
-            .iter()
-            .find(|r| r.agent_id == agent_id)
-            .map_or("", |r| r.cli.as_str());
         let settle_delay = Duration::from_millis(resolve_submit_delay_ms(cli, &config.clis));
         let _ = submit_buffered_input(
             deps,
@@ -3330,6 +3404,47 @@ mod tests {
         }
     }
 
+    /// Like [`SequencedCapturer`] but keyed PER PANE: each pane index advances
+    /// its own position independently. A single pane can be captured more
+    /// than once within one sweep (the orchestrator pane's ready-check and
+    /// post-send verify inside `send_nudge`, in addition to the sweep's own
+    /// capture), and those extra calls must never consume another pane's
+    /// scripted sequence.
+    struct PerPaneSequencedCapturer {
+        by_pane: HashMap<usize, (Vec<String>, Cell<usize>)>,
+    }
+    impl PerPaneSequencedCapturer {
+        fn new(entries: &[(usize, &[&str])]) -> Self {
+            let by_pane = entries
+                .iter()
+                .map(|(idx, captures)| {
+                    (
+                        *idx,
+                        (
+                            captures.iter().map(|c| (*c).to_string()).collect(),
+                            Cell::new(0),
+                        ),
+                    )
+                })
+                .collect();
+            Self { by_pane }
+        }
+    }
+    impl PaneCapture for PerPaneSequencedCapturer {
+        fn capture(&self, _session: &str, pane_index: usize) -> String {
+            let Some((captures, idx)) = self.by_pane.get(&pane_index) else {
+                return String::new();
+            };
+            let i = idx.get();
+            idx.set(i + 1);
+            captures
+                .get(i)
+                .or_else(|| captures.last())
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
     /// Records every dispatch in order in `events`, and additionally records
     /// the LITERAL (`send-keys -l`) sends in `literal_sends`, so a test can
     /// assert not just *what* was typed but *by which* path.
@@ -4403,6 +4518,7 @@ mod tests {
             broker_log_hint: Some("/tmp/broker.log".to_string()),
             learnings_hint: Some(".git-paw/session-learnings.md".to_string()),
             merged_summary: None,
+            orchestrator_monitored: true,
         };
         let text = summary.render();
         assert!(text.contains("escalated-for-review"), "states outcome");
@@ -5515,6 +5631,38 @@ mod tests {
         }
     }
 
+    /// Safety finding: `handoff_text` is TYPED into the orchestrator's own
+    /// pane, which the loop re-scans on the very next sweep. A `cli-unavailable`
+    /// escalation's `command` is the matched banner LINE VERBATIM
+    /// (`sweep_pane`); quoting it in the hand-off would plant a live copy of
+    /// the marker in a scanned pane, and the bounded-trailing-region scan
+    /// (`cli-unavailable-detection-gaps`) is wide enough to see its own echo
+    /// on the following sweep. `handoff_text` must paraphrase instead of
+    /// quoting for this verdict, for EVERY marker in the embedded profile —
+    /// not just the one fixture this change happened to use.
+    #[test]
+    fn cli_unavailable_handoff_text_never_quotes_the_matched_banner() {
+        for marker in &claude_prompt_profile().cli_unavailable_markers {
+            let escalation = Escalation {
+                agent_id: "feat-a".to_string(),
+                verdict: "cli-unavailable".to_string(),
+                command: format!("{marker} (reset in 2h14m)"),
+            };
+            let text = escalation.handoff_text();
+            assert!(
+                text.contains("feat-a") && text.contains("cli-unavailable"),
+                "still identifies the agent and verdict: {text}"
+            );
+            for m in &claude_prompt_profile().cli_unavailable_markers {
+                assert!(
+                    !text.to_ascii_lowercase().contains(&m.to_ascii_lowercase()),
+                    "hand-off for marker {marker:?} must not quote any cli_unavailable \
+                     marker verbatim (would self-trigger on the next sweep): {text}"
+                );
+            }
+        }
+    }
+
     /// Defence-in-depth: the re-engagement text always travels the literal
     /// (`send-keys -l`) path, so a payload that happens to be a single token
     /// matching a tmux key name is TYPED, never resolved as a key. Without
@@ -6608,8 +6756,14 @@ mod tests {
         );
     }
 
-    /// A marker that has scrolled out of the live tail window is inert — the
-    /// same "narration, not a live signal" rule [`is_live_prompt`] follows.
+    /// A marker separated from the end of the capture by more than the
+    /// bounded trailing region ([`anchor_on_trailing_region`]'s
+    /// `LIVE_PROMPT_TRAILING_BOUND`) is inert — the same "narration, not a
+    /// live signal" rule [`is_live_prompt`] follows (`cli-unavailable-
+    /// detection-gaps`, task 2.2). 14 filler lines — one past the maximum
+    /// offset the bounded scan tolerates for a 4-line tail window — keeps
+    /// this scenario genuinely scrolled away under the new bounded-region
+    /// scan, rather than relying on the narrower pre-fix window.
     #[test]
     fn scrolled_away_marker_is_not_acted_on() {
         let agents = vec![AgentPane {
@@ -6618,12 +6772,15 @@ mod tests {
             branch: "feat/a".to_string(),
         }];
         let merge_check = FakeMergeCheck::default();
-        let scrolled_away =
-            "You've hit your session limit\nfiller1\nfiller2\nfiller3\nfiller4\nfiller5";
+        let filler: String = (1..=14)
+            .map(|i| format!("filler{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let scrolled_away = format!("You've hit your session limit\n{filler}");
         let (summary, _dispatcher) = run_loop_with_merge_check(
             &agents,
             vec![pane(2, "/repo-feat-a")],
-            &[(2, scrolled_away)],
+            &[(2, scrolled_away.as_str())],
             vec![vec![row("feat-a", "done")]],
             &merge_check,
             &DriveConfig {
@@ -6635,6 +6792,426 @@ mod tests {
         );
         assert_eq!(summary.outcome, DriveOutcome::Completed);
         assert!(summary.escalations.is_empty(), "{:?}", summary.escalations);
+    }
+
+    // --- `cli-unavailable-detection-gaps` gap closures ----------------------
+
+    /// Spec scenario "A banner above a task-list footer is still detected":
+    /// current Claude Code renders a persistent multi-line task list under
+    /// the composer, which used to push the banner out of the fixed 4-line
+    /// tail. The bounded-trailing-region scan ([`anchor_on_trailing_region`])
+    /// must still find it.
+    #[test]
+    fn banner_above_task_list_footer_is_detected_on_coding_pane() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
+        }];
+        let merge_check = FakeMergeCheck::default();
+        let banner_above_chrome = "You've hit your session limit\n\
+             Tasks\n☐ Implement feature\n☐ Write tests\n☐ Update docs\n\
+             main* ⇡2\nSonnet 5.1 · 42% context used";
+        let (summary, _dispatcher) = run_loop_with_merge_check(
+            &agents,
+            vec![pane(2, "/repo-feat-a")],
+            &[(2, banner_above_chrome)],
+            vec![vec![row("feat-a", "done")]],
+            &merge_check,
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                default_branch: "main".to_string(),
+                ..DriveConfig::default()
+            },
+        );
+        assert!(
+            summary
+                .escalations
+                .iter()
+                .any(|e| e.agent_id == "feat-a" && e.verdict == "cli-unavailable"),
+            "{:?}",
+            summary.escalations
+        );
+    }
+
+    /// Spec scenario "A per-CLI marker override is honoured by the loop": a
+    /// CLI whose `[clis.<name>].prompt_profile` overrides
+    /// `cli_unavailable_markers` with `out of tokens` is detected when that
+    /// CLI's pane tail shows the override text — not the embedded Claude
+    /// default, which does not contain it.
+    #[test]
+    fn per_cli_marker_override_is_honoured_by_the_loop() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
+        }];
+        let mut clis: HashMap<String, CustomCli> = HashMap::new();
+        clis.insert(
+            "mycli".to_string(),
+            CustomCli {
+                command: "mycli".to_string(),
+                display_name: None,
+                submit_delay_ms: None,
+                settings_path: None,
+                approval_args: HashMap::new(),
+                prompt_profile: Some(crate::config::CliPromptProfileOverride {
+                    cli_unavailable_markers: Some(vec!["out of tokens".to_string()]),
+                    ..Default::default()
+                }),
+                session_id_args: None,
+                resume_args: None,
+            },
+        );
+        let merge_check = FakeMergeCheck::default();
+        let (summary, _dispatcher) = run_loop_with_merge_check(
+            &agents,
+            vec![pane(2, "/repo-feat-a")],
+            &[(2, "out of tokens")],
+            vec![vec![row_with_cli("feat-a", "working", "mycli")]],
+            &merge_check,
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                default_branch: "main".to_string(),
+                clis,
+                ..DriveConfig::default()
+            },
+        );
+        assert!(
+            summary.escalations.iter().any(|e| e.agent_id == "feat-a"
+                && e.verdict == "cli-unavailable"
+                && e.command.contains("out of tokens")),
+            "{:?}",
+            summary.escalations
+        );
+    }
+
+    /// Spec scenario "The same banner across sweeps is one escalation": the
+    /// dedup key is `(agent_id, matched marker)`, never incidental transcript
+    /// content — so a banner that stays while EARLIER lines in the capture
+    /// change between sweeps still collapses to one escalation.
+    #[test]
+    fn same_banner_across_sweeps_whose_earlier_lines_change_is_one_escalation() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
+        }];
+        // Distinct leading content each sweep, same trailing banner — a
+        // same-marker dedup key must still collapse these to one escalation.
+        let capturer = SequencedCapturer::new(&[
+            "turn 1 of the transcript\nYou've hit your session limit",
+            "turn 2, different leading content\nYou've hit your session limit",
+        ]);
+        let status = ScriptedStatus::new(vec![
+            vec![row("feat-a", "working")], // tick 1: not yet complete
+            vec![row("feat-a", "done")],    // tick 2: complete
+        ]);
+        let enumerator = FakeEnumerator {
+            panes: vec![pane(2, "/repo-feat-a")],
+        };
+        let mut dispatcher = RecordingDispatcher::default();
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
+        let merge_check = FakeMergeCheck::default();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &ScriptedMessages::default(),
+            clock: &clock,
+            merge_check: &merge_check,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            refresher: &mut refresher,
+            wedged: Vec::new(),
+        };
+        let summary = drive_loop_in_tmp(
+            "paw-test",
+            &agents,
+            &mut deps,
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                default_branch: "main".to_string(),
+                ..DriveConfig::default()
+            },
+        );
+        assert_eq!(
+            summary
+                .escalations
+                .iter()
+                .filter(|e| e.agent_id == "feat-a" && e.verdict == "cli-unavailable")
+                .count(),
+            1,
+            "deduped across two sweeps despite changing leading content: {:?}",
+            summary.escalations
+        );
+    }
+
+    /// Spec scenario "Two different banners on one agent are two
+    /// escalations": the dedup key includes the matched MARKER, so a
+    /// session-limit banner followed by an authentication-failure banner on
+    /// the same agent records two distinct escalations.
+    #[test]
+    fn two_different_banners_on_one_agent_are_two_escalations() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
+        }];
+        let capturer =
+            SequencedCapturer::new(&["You've hit your session limit", "Invalid API key"]);
+        let status = ScriptedStatus::new(vec![
+            vec![row("feat-a", "working")],
+            vec![row("feat-a", "done")],
+        ]);
+        let enumerator = FakeEnumerator {
+            panes: vec![pane(2, "/repo-feat-a")],
+        };
+        let mut dispatcher = RecordingDispatcher::default();
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
+        let merge_check = FakeMergeCheck::default();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &ScriptedMessages::default(),
+            clock: &clock,
+            merge_check: &merge_check,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            refresher: &mut refresher,
+            wedged: Vec::new(),
+        };
+        let summary = drive_loop_in_tmp(
+            "paw-test",
+            &agents,
+            &mut deps,
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                default_branch: "main".to_string(),
+                ..DriveConfig::default()
+            },
+        );
+        let cli_unavailable: Vec<_> = summary
+            .escalations
+            .iter()
+            .filter(|e| e.agent_id == "feat-a" && e.verdict == "cli-unavailable")
+            .collect();
+        assert_eq!(
+            cli_unavailable.len(),
+            2,
+            "two distinct banners must yield two escalations: {:?}",
+            summary.escalations
+        );
+    }
+
+    /// Spec scenario "No orchestrator pane is reported honestly": a pure
+    /// `--unattended` roster with no supervisor pane still escalates a coding
+    /// pane's CLI-unavailability marker, and the rendered summary states that
+    /// no orchestrator pane was monitored rather than implying full coverage.
+    #[test]
+    fn no_orchestrator_pane_is_reported_honestly() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
+        }];
+        let merge_check = FakeMergeCheck::default();
+        let (summary, _dispatcher) = run_loop_with_merge_check(
+            &agents,
+            vec![pane(2, "/repo-feat-a")], // no pane 0 — no orchestrator in the roster
+            &[(2, "You've hit your session limit")],
+            vec![vec![row("feat-a", "done")]],
+            &merge_check,
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                default_branch: "main".to_string(),
+                ..DriveConfig::default()
+            },
+        );
+        assert!(
+            summary
+                .escalations
+                .iter()
+                .any(|e| e.agent_id == "feat-a" && e.verdict == "cli-unavailable"),
+            "coding-pane detection must work unchanged with no orchestrator: {:?}",
+            summary.escalations
+        );
+        assert!(!summary.orchestrator_monitored);
+        let text = summary.render();
+        assert!(
+            text.contains("No orchestrator pane was monitored for CLI unavailability"),
+            "summary must state the monitoring gap honestly: {text}"
+        );
+    }
+
+    /// Spec scenario (GP-50) "The embedded profile recognises an organisation
+    /// spend limit": the full spend-limit banner matches
+    /// `cli_unavailable_markers` and the loop escalates a coding pane showing
+    /// it; it must NOT match `stream_error_markers`, which is reserved for
+    /// transient mid-turn drops.
+    #[test]
+    fn spend_limit_banner_matches_cli_unavailable_not_stream_error() {
+        let spend_limit_banner = "You've hit your org's monthly spend limit · run /usage-credits to ask your admin for a higher limit";
+        let profile = claude_prompt_profile();
+        assert!(
+            profile
+                .cli_unavailable_markers
+                .iter()
+                .any(|m| spend_limit_banner
+                    .to_ascii_lowercase()
+                    .contains(&m.to_ascii_lowercase())),
+            "the embedded profile must recognise the spend-limit banner"
+        );
+        assert!(
+            !profile
+                .stream_error_markers
+                .iter()
+                .any(|m| spend_limit_banner
+                    .to_ascii_lowercase()
+                    .contains(&m.to_ascii_lowercase())),
+            "the spend-limit banner must not also read as a transient stream error"
+        );
+
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
+        }];
+        let merge_check = FakeMergeCheck::default();
+        let (summary, _dispatcher) = run_loop_with_merge_check(
+            &agents,
+            vec![pane(2, "/repo-feat-a")],
+            &[(2, spend_limit_banner)],
+            vec![vec![row("feat-a", "done")]],
+            &merge_check,
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                default_branch: "main".to_string(),
+                ..DriveConfig::default()
+            },
+        );
+        assert!(
+            summary
+                .escalations
+                .iter()
+                .any(|e| e.agent_id == "feat-a" && e.verdict == "cli-unavailable"),
+            "{:?}",
+            summary.escalations
+        );
+    }
+
+    /// Safety finding (gate review): a worker's `cli-unavailable` escalation
+    /// is handed off to the orchestrator pane via `record_escalation` →
+    /// `hand_to_orchestrator`. The bounded-trailing-region scan
+    /// (`cli-unavailable-detection-gaps`) is wide enough that if the
+    /// orchestrator's pane shows that hand-off text on the NEXT sweep (the
+    /// CLI echoing what it was asked, as terminal CLIs commonly do), a
+    /// verbatim-quoted banner would self-trigger `OrchestratorCliUnavailable`
+    /// and end the run non-zero, naming the wrong pane. `handoff_text`'s
+    /// paraphrase (tested directly above) is what prevents this; this test
+    /// proves the FULL LOOP does not exit `CliUnavailable` even when the
+    /// orchestrator pane's capture is exactly the echoed hand-off text.
+    #[test]
+    fn echoed_handoff_on_orchestrator_pane_does_not_self_trigger_cli_unavailable() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
+        }];
+        let echoed_handoff = Escalation {
+            agent_id: "feat-a".to_string(),
+            verdict: "cli-unavailable".to_string(),
+            command: "You've hit your session limit".to_string(),
+        }
+        .handoff_text();
+        // Tick 1: pane 0 idle (its ready-check and post-send verify inside
+        // `send_nudge` re-capture it, so it is scripted 3 wide for that one
+        // tick), feat-a's pane shows the banner — this produces the hand-off
+        // typed into pane 0. Tick 2: pane 0 now shows exactly that echoed
+        // text, feat-a has gone quiet and finished.
+        let capturer = PerPaneSequencedCapturer::new(&[
+            (
+                0,
+                [IDLE_PANE, IDLE_PANE, IDLE_PANE, echoed_handoff.as_str()].as_slice(),
+            ),
+            (2, ["You've hit your session limit", IDLE_PANE].as_slice()),
+        ]);
+        let status = ScriptedStatus::new(vec![
+            vec![row("feat-a", "working")],
+            vec![row("feat-a", "done")],
+        ]);
+        let enumerator = FakeEnumerator {
+            panes: vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
+        };
+        let mut dispatcher = RecordingDispatcher::default();
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
+        let merge_check = FakeMergeCheck::default();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &ScriptedMessages::default(),
+            clock: &clock,
+            merge_check: &merge_check,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            refresher: &mut refresher,
+            wedged: Vec::new(),
+        };
+        let summary = drive_loop_in_tmp(
+            "paw-test",
+            &agents,
+            &mut deps,
+            &DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                default_branch: "main".to_string(),
+                ..DriveConfig::default()
+            },
+        );
+        assert_ne!(
+            summary.outcome,
+            DriveOutcome::CliUnavailable,
+            "the orchestrator's own echoed hand-off must never self-trigger \
+             cli-unavailable: {summary:?}"
+        );
+        assert_eq!(
+            summary
+                .escalations
+                .iter()
+                .filter(|e| e.verdict == "cli-unavailable")
+                .count(),
+            1,
+            "exactly feat-a's original escalation, nothing from pane 0's echo: {:?}",
+            summary.escalations
+        );
+        assert!(
+            summary
+                .escalations
+                .iter()
+                .all(|e| e.agent_id != SUPERVISOR_AGENT_ID),
+            "the orchestrator itself must never be escalated from its own echo: {:?}",
+            summary.escalations
+        );
     }
 
     /// Asserts a payload containing `needle` was typed into `pane_index`

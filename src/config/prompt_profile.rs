@@ -245,6 +245,7 @@ pub fn claude_prompt_profile() -> &'static CliPromptProfile {
             "usage limit reached".to_string(),
             "Please run /login".to_string(),
             "Invalid API key".to_string(),
+            "org's monthly spend limit".to_string(),
         ],
     })
 }
