@@ -53,7 +53,7 @@ The danger list, protected-path violation rules, worktree-boundary resolution, t
 
 ### Requirement: The Claude Code profile is embedded as the default
 
-The system SHALL embed a Claude Code profile compiled into the binary, and SHALL use it as the default for every field. When no profile configuration is present, resolved behaviour SHALL be identical to the behaviour before profiles existed. The embedded profile's `cli_unavailable_markers` SHALL include Claude Code's session/usage-limit and authentication-failure phrasings, including `You've hit your session limit`. The embedded profile's `stream_error_markers` SHALL additionally include the mid-response connection-drop phrasings `API Error` and `Connection closed mid-response`, which denote a transient drop whose conversation context survives — a nudge resumes the worker — and SHALL NOT be placed in `cli_unavailable_markers`, which is reserved for terminal conditions requiring human intervention.
+The system SHALL embed a Claude Code profile compiled into the binary, and SHALL use it as the default for every field. When no profile configuration is present, resolved behaviour SHALL be identical to the behaviour before profiles existed. The embedded profile's `cli_unavailable_markers` SHALL include Claude Code's session/usage-limit, organisation spend-limit and authentication-failure phrasings, including `You've hit your session limit` and `org's monthly spend limit`. The spend-limit marker SHALL be scoped to that organisation-specific phrasing rather than the bare phrase `monthly spend limit`, which is plausible wording in an unrelated consumer application a worker might legitimately have open and would wrongly read as CLI unavailability. The embedded profile's `stream_error_markers` SHALL additionally include the mid-response connection-drop phrasings `API Error` and `Connection closed mid-response`, which denote a transient drop whose conversation context survives — a nudge resumes the worker — and SHALL NOT be placed in `cli_unavailable_markers`, which is reserved for terminal conditions requiring human intervention.
 
 #### Scenario: Absent configuration reproduces current behaviour
 
@@ -71,6 +71,13 @@ The system SHALL embed a Claude Code profile compiled into the binary, and SHALL
 - **GIVEN** no profile configuration and a pane capture whose tail contains `You've hit your session limit`
 - **WHEN** the capture is matched against the resolved `cli_unavailable_markers`
 - **THEN** it SHALL match
+
+#### Scenario: The embedded profile recognises an organisation spend limit
+
+- **GIVEN** no profile configuration and a pane capture whose tail contains `You've hit your org's monthly spend limit · run /usage-credits to ask your admin for a higher limit`
+- **WHEN** the capture is matched against the resolved `cli_unavailable_markers`
+- **THEN** it SHALL match
+- **AND** it SHALL NOT match `stream_error_markers`
 
 #### Scenario: A mid-response connection drop is a stream error, not CLI unavailability
 

@@ -315,11 +315,14 @@ fn provisioned_files_are_present_before_the_agent_cli_starts() {
     )
     .expect("write config");
 
+    let home = TempDir::new().expect("home tempdir");
     let mut start = Command::cargo_bin("git-paw").expect("binary exists");
     tmux_env.apply_assert(&mut start);
     let out = start
         .current_dir(tr.path())
         .env("PATH", &path_var)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--branches", "probe-a", "--cli", "envprobe"])
         .timeout(Duration::from_secs(30))
         .output()

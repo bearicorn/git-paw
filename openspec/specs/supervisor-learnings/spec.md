@@ -4,7 +4,6 @@
 An opt-in, broker-internal aggregator (active only under supervisor mode with `learnings = true`) that observes broker messages to derive both deterministic signals — stuck-duration, recovery-cycle, conflict-event, and permission-pattern — and qualitative, judgment-based signals the supervisor publishes through the `sweep.sh learn` helper (recurring_failure_shape, doc_gap, adr_drift, scope_mistake, tooling_friction). It appends them under per-session, per-category headings in a local `.git-paw/session-learnings.md`, flushing periodically and on shutdown, performing no telemetry, and printing a privacy disclosure at session start.
 
 When the broker is enabled the aggregator emits each record on the `agent.learning` broker variant — carrying a deterministic hour-bucketed id for idempotent re-emission — in addition to appending it to the file; when the broker is off, behaviour is file-only and matches v0.5.0 exactly, and the MCP `get_learnings` tool reads from the broker when running or from the file otherwise. The aggregator's internal `LearningRecord` data model serialises directly to the `agent.learning` broker variant at the conversion boundary, without re-deriving records from broker messages and without a parallel internal representation — a forward-design property now realised by the `agent.learning` variant.
-
 ## Requirements
 ### Requirement: Learnings aggregator lifecycle
 
@@ -439,10 +438,11 @@ caller (the skill documents the per-category body).
 
 #### Scenario: learn needs no broad curl grant
 
-- **WHEN** the supervisor's permission allowlist is seeded
-- **THEN** invoking `sweep.sh learn …` SHALL be covered by the existing
-  by-path grant for `.git-paw/scripts/sweep.sh`
-- **AND** no broad `curl *` grant SHALL be required to publish a learning
+- **GIVEN** the command `.git-paw/scripts/sweep.sh learn tooling_friction "t" '{}'`
+- **WHEN** the safe-command classifier evaluates it
+- **THEN** it SHALL classify as safe under the managed helper-script rule (the
+  script path `.git-paw/scripts/sweep.sh`)
+- **AND** no broad `curl *` whitelist entry SHALL be required to publish a learning
 
 ### Requirement: Tooling-friction qualitative category
 
@@ -601,12 +601,24 @@ structured object), and `timestamp` (ISO 8601 UTC).
 ### Requirement: Deterministic id for idempotent re-emission
 
 The aggregator SHALL produce a deterministic `id` for each
-`agent.learning` record. The system SHALL compute the id as a
-hex-encoded SHA-256 prefix (16 hex characters) of a canonical
-serialisation comprising `category`, `branch_id`, the
-category-specific body fields in a stable order, and the UTC
-hour bucket (`YYYY-MM-DDTHH`). Re-publishing the same logical
-record within the same hour SHALL produce the same id.
+`agent.learning` record. The system SHALL compute the id as the
+64-bit FNV-1a hash (offset basis `0xcbf29ce484222325`, prime
+`0x100000001b3`) of the UTF-8 bytes of a canonical serialisation,
+rendered as 16 lowercase hexadecimal characters. The canonical
+serialisation SHALL be `<category>|<branch_id>|<body>|<hour>`, where
+`<branch_id>` is empty for a record with no branch, `<hour>` is the
+UTC hour bucket (`YYYY-MM-DDTHH`), and `<body>` is the
+category-specific body fields in a stable order: an object as
+`{key:value,…}` with its keys in ascending byte order and written
+unquoted, an array as `[item,…]` in its own order, and every other
+value as its compact JSON text. Re-publishing the same logical
+record within the same hour SHALL produce the same id. The id SHALL
+NOT depend on the Rust toolchain or the platform; in particular it
+SHALL NOT be computed with the standard library's `DefaultHasher`,
+whose algorithm is unspecified and may change between Rust releases.
+Because earlier releases computed the id with `DefaultHasher`, ids
+change once on upgrade: a record emitted before the upgrade and the
+same logical record emitted after it carry different ids.
 
 #### Scenario: Same record within the hour gets the same id
 
@@ -621,6 +633,16 @@ record within the same hour SHALL produce the same id.
   committed at 14:01 UTC
 - **WHEN** both publish
 - **THEN** the two messages SHALL carry different `id` values
+
+#### Scenario: A known record has a pinned id
+
+- **GIVEN** a record with category `conflict_event`, no branch id,
+  body `{"file":"src/lib.rs","agents":["feat-a","feat-b"]}`, committed
+  at `2026-01-01T13:30:00Z`
+- **WHEN** its id is computed
+- **THEN** the canonical serialisation SHALL be
+  `conflict_event||{agents:["feat-a","feat-b"],file:"src/lib.rs"}|2026-01-01T13`
+- **AND** the id SHALL be `351c85e586ece5f0`
 
 ### Requirement: Dual output when broker is enabled
 
@@ -672,38 +694,6 @@ fields in the model.
   `LearningRecord`), with the broker payload produced by a
   conversion function
 
-### Requirement: MCP get_learnings consumes the variant
-
-The MCP get_learnings tool SHALL prefer broker records when the
-broker is running and SHALL fall back to parsing the learnings
-file when the broker is off. The tool's response SHALL include a
-`source` field indicating which path produced the records. This
-applies to the `get_learnings()` tool defined in [[mcp-server]]'s
-`mcp-read-tools` capability.
-
-#### Scenario: Broker-running mode returns broker records
-
-- **GIVEN** an active session with the broker running and
-  committed learning records
-- **WHEN** an MCP client calls `get_learnings()`
-- **THEN** the response SHALL list the broker records, and the
-  `source` field SHALL be `"broker"`
-
-#### Scenario: Broker-off mode falls back to file parsing
-
-- **GIVEN** a repository with a learnings file but no active
-  broker
-- **WHEN** an MCP client calls `get_learnings()`
-- **THEN** the response SHALL list records parsed from the file,
-  and the `source` field SHALL be `"file"`
-
-#### Scenario: Identical record shape across both sources
-
-- **WHEN** the same record is read via broker mode and via file
-  mode (after broker stops)
-- **THEN** the structured fields the client sees (`category`,
-  `title`, `body`, `timestamp`, `id`) SHALL be equivalent
-
 ### Requirement: Backwards compatibility with v0.5.0
 
 The system SHALL produce no change in observable behaviour for
@@ -729,9 +719,11 @@ flag, the location and append-only shape of
 `.git-paw/session-learnings.md`, and the five deterministic
 categories tracked (stuck duration, recovery-cycle
 count, forward conflicts, in-flight conflicts, ownership
-violations). The chapter SHALL state that the broker
-`agent.learning` wire variant is deferred to v0.6.0 and that
-the tool ships file-only output.
+violations). The chapter SHALL state that when the broker is
+enabled each record is additionally published as an
+`agent.learning` broker message, and that the MCP
+`get_learnings()` tool reads the learnings file rather than the
+broker.
 
 The chapter SHALL be linked from `docs/src/SUMMARY.md` under the
 User Guide group.
@@ -761,7 +753,10 @@ User Guide group.
 - **AND** it mentions in-flight conflicts
 - **AND** it mentions ownership violations
 
-#### Scenario: Learnings chapter defers `agent.learning` to v0.6.0
+#### Scenario: Learnings chapter documents broker publication and file-sourced get_learnings
 
 - **WHEN** `docs/src/user-guide/learnings.md` is inspected
-- **THEN** it states that the `agent.learning` broker variant (or programmatic access) is deferred to v0.6.0
+- **THEN** it states that records are additionally published as `agent.learning` broker messages when the broker is enabled
+- **AND** it states that `get_learnings()` reads the Markdown file, not the broker
+- **AND** it does NOT state that the `agent.learning` variant is deferred
+

@@ -417,6 +417,7 @@ fn start_then_purge(repo: &Path, on_remove: &str) -> Option<(String, PathBuf)> {
     let _proc_env = tmux_env.apply_to_process();
 
     let bin_dir = TempDir::new().expect("bin tempdir");
+    let home = TempDir::new().expect("home tempdir");
     write_idle_cli(bin_dir.path(), "idleprobe");
     let path_var = format!(
         "{}:{}",
@@ -443,6 +444,8 @@ fn start_then_purge(repo: &Path, on_remove: &str) -> Option<(String, PathBuf)> {
     let started = start
         .current_dir(repo)
         .env("PATH", &path_var)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--branches", "teardown-a", "--cli", "idleprobe"])
         .timeout(Duration::from_secs(30))
         .output()
@@ -471,6 +474,8 @@ fn start_then_purge(repo: &Path, on_remove: &str) -> Option<(String, PathBuf)> {
     let purged = purge
         .current_dir(repo)
         .env("PATH", &path_var)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["purge", "--force"])
         .timeout(Duration::from_secs(30))
         .output()

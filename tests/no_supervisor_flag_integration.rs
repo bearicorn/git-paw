@@ -10,6 +10,7 @@
 use std::fs;
 
 use assert_cmd::Command;
+use tempfile::TempDir;
 
 mod helpers;
 use helpers::*;
@@ -47,9 +48,12 @@ display_name = "Echo"
 fn no_supervisor_overrides_config_enabled_in_dry_run() {
     let tr = setup_test_repo();
     write_supervisor_enabled_config(tr.path());
+    let home = TempDir::new().expect("home tempdir");
 
     let output = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args([
             "start",
             "--no-supervisor",
@@ -105,9 +109,12 @@ fn no_supervisor_overrides_config_enabled_in_dry_run() {
 fn supervisor_config_enabled_routes_to_supervisor_dry_run() {
     let tr = setup_test_repo();
     write_supervisor_enabled_config(tr.path());
+    let home = TempDir::new().expect("home tempdir");
 
     let output = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args([
             "start",
             "--cli",

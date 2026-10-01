@@ -141,10 +141,13 @@ approval_args = {{ "full-auto" = "{SENTINEL_FLAG}" }}
     );
     fs::write(paw_dir.join("config.toml"), config).expect("write config");
 
+    let home = TempDir::new().expect("home tempdir");
     let mut start = cmd();
     tmux_env.apply_assert(&mut start);
     let out = start
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--supervisor", "--branches", "a,b"])
         .timeout(Duration::from_secs(15))
         .output()
@@ -335,10 +338,13 @@ approval = "full-auto"
 "#;
     fs::write(paw_dir.join("config.toml"), config).expect("write config");
 
+    let home = TempDir::new().expect("home tempdir");
     let mut start = cmd();
     tmux_env.apply_assert(&mut start);
     let out = start
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--supervisor", "--branches", "a"])
         .timeout(Duration::from_secs(15))
         .output()

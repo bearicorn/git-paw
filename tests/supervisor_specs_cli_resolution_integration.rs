@@ -91,8 +91,11 @@ fn supervisor_specs_honours_default_spec_cli_not_the_agent_cli_fallback() {
     write_committed_spec(tr.path(), "auth", None);
     write_committed_spec(tr.path(), "api", None);
 
+    let home = tempfile::TempDir::new().expect("home tempdir");
     let out = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--supervisor", "--from-all-specs", "--dry-run"])
         .output()
         .expect("run start --supervisor --from-all-specs --dry-run");
@@ -121,8 +124,11 @@ fn supervisor_specs_paw_cli_still_wins_over_default_spec_cli() {
     write_committed_spec(tr.path(), "auth", Some("beta"));
     write_committed_spec(tr.path(), "api", None);
 
+    let home = tempfile::TempDir::new().expect("home tempdir");
     let out = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--supervisor", "--from-all-specs", "--dry-run"])
         .output()
         .expect("run start --supervisor --from-all-specs --dry-run");
@@ -147,8 +153,11 @@ fn supervisor_specs_cli_flag_still_overrides_everything() {
     write_committed_spec(tr.path(), "auth", Some("beta"));
     write_committed_spec(tr.path(), "api", None);
 
+    let home = tempfile::TempDir::new().expect("home tempdir");
     let out = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args([
             "start",
             "--supervisor",

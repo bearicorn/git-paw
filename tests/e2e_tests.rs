@@ -136,9 +136,12 @@ fn dry_run_with_flags_shows_plan() {
 #[test]
 fn preset_not_found_returns_error() {
     let tr = setup_test_repo();
+    let home = TempDir::new().expect("home tempdir");
 
     cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--preset", "nonexistent"])
         .assert()
         .failure()
@@ -269,9 +272,12 @@ fn branch_tip(repo: &Path, branch: &str) -> Option<String> {
 #[test]
 fn purge_with_no_session() {
     let tr = setup_test_repo();
+    let home = TempDir::new().expect("home tempdir");
 
     cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["purge", "--force"])
         .assert()
         .success()
@@ -385,8 +391,11 @@ fn from_specs_no_specs_config_returns_error() {
     fs::create_dir_all(config.parent().unwrap()).expect("create config dir");
     fs::write(&config, "# no specs section\n").expect("write config");
 
+    let home = TempDir::new().expect("home tempdir");
     cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-specs"])
         .assert()
         .failure()
@@ -419,8 +428,11 @@ fn from_specs_dry_run_with_valid_specs_shows_plan() {
     fs::create_dir_all(&spec_dir).expect("create spec dir");
     fs::write(spec_dir.join("tasks.md"), "Implement authentication\n").expect("write tasks.md");
 
+    let home = TempDir::new().expect("home tempdir");
     cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-specs", "--dry-run", "--cli", "echo"])
         .assert()
         .success()
@@ -447,8 +459,11 @@ fn from_specs_empty_specs_dir_prints_no_pending() {
     // Create the empty specs directory
     fs::create_dir_all(tr.path().join("openspec/changes")).expect("create specs dir");
 
+    let home = TempDir::new().expect("home tempdir");
     cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-specs"])
         .assert()
         .success()
@@ -840,9 +855,12 @@ fn error_exit_code_is_1_for_not_a_git_repo() {
 #[test]
 fn error_exit_code_is_1_for_preset_not_found() {
     let tr = setup_test_repo();
+    let home = TempDir::new().expect("home tempdir");
 
     cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--preset", "nonexistent"])
         .assert()
         .code(1)
@@ -943,8 +961,11 @@ fn from_specs_markdown_format_dry_run() {
     )
     .expect("write spec");
 
+    let home = TempDir::new().expect("home tempdir");
     cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-specs", "--dry-run", "--cli", "echo"])
         .assert()
         .success()
@@ -981,8 +1002,11 @@ fn from_specs_skips_done_markdown_specs() {
     )
     .expect("write spec");
 
+    let home = TempDir::new().expect("home tempdir");
     cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-specs"])
         .assert()
         .success()

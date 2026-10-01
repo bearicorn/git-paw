@@ -331,12 +331,14 @@ name matching local serde conventions).
 `CommonDevAllowlistConfig` SHALL contain:
 
 - `enabled: bool` — defaults to `true` when the field or section is
-  absent from `.git-paw/config.toml`. Controls whether the
-  dev-allowlist seeder (per `dev-command-allowlist`) runs on supervisor
-  start.
+  absent from `.git-paw/config.toml`. Parsed for config compatibility
+  only; it SHALL have no behavioural effect. The resolved dev-allowlist
+  patterns are always composed into the auto-approve whitelist and the
+  rendered supervisor skill guidance, whatever its value.
 - `extra: Vec<String>` — defaults to empty when the field or section
   is absent. User-supplied additional prefix patterns appended to the
-  built-in preset by the seeder.
+  built-in preset when the dev-allowlist patterns are resolved for the
+  auto-approve whitelist.
 
 The `[supervisor.common_dev_allowlist]` TOML table SHALL be fully
 optional. A config file with `[supervisor] enabled = true` and no
@@ -360,6 +362,13 @@ documented defaults rather than triggering parse errors.
   `[supervisor.common_dev_allowlist] enabled = false`
 - **WHEN** the config is loaded
 - **THEN** `supervisor.common_dev_allowlist.enabled` SHALL be `false`
+
+#### Scenario: Enabled false does not change the composed whitelist
+
+- **GIVEN** a config file with
+  `[supervisor.common_dev_allowlist] enabled = false` and `stacks = ["rust"]`
+- **WHEN** the supervisor's effective auto-approve whitelist is composed
+- **THEN** it SHALL still contain the universal preset patterns and `cargo test`
 
 #### Scenario: Extra patterns parsed
 

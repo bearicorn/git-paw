@@ -68,6 +68,7 @@ fn start_session(repo: &Path, home: &Path, tmux_env: &TmuxTestEnv, branches: &st
     let out = start
         .current_dir(repo)
         .env("HOME", home)
+        .env_remove("XDG_DATA_HOME")
         .env("GIT_PAW_READINESS_TIMEOUT_MS", FAST_READINESS_MS)
         .args(["start", "--supervisor", "--branches", branches])
         .timeout(Duration::from_secs(40))
@@ -244,6 +245,7 @@ fn add_preserves_every_agent_pane_mapping() {
     let out = add
         .current_dir(tr.path())
         .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .env("GIT_PAW_READINESS_TIMEOUT_MS", FAST_READINESS_MS)
         .args(["add", "d"])
         .timeout(Duration::from_secs(40))
@@ -310,6 +312,7 @@ fn remove_middle_agent_kills_only_that_pane() {
     let out = rm
         .current_dir(tr.path())
         .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .env("GIT_PAW_READINESS_TIMEOUT_MS", FAST_READINESS_MS)
         .args(["remove", "b", "--force"])
         .timeout(Duration::from_secs(40))

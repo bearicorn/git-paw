@@ -7,6 +7,7 @@
 use std::fs;
 
 use assert_cmd::Command;
+use tempfile::TempDir;
 
 mod helpers;
 use helpers::*;
@@ -60,9 +61,12 @@ fn repo_with_uncommitted_spec() -> (TestRepo, &'static str) {
 #[test]
 fn start_from_specs_without_force_emits_uncommitted_warning() {
     let (tr, id) = repo_with_uncommitted_spec();
+    let home = TempDir::new().expect("home tempdir");
 
     let output = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-specs", "--cli", "echo", "--dry-run"])
         .output()
         .expect("run start --from-specs");
@@ -99,9 +103,12 @@ fn start_from_specs_without_force_emits_uncommitted_warning() {
 #[test]
 fn start_from_specs_with_force_bypasses_warning() {
     let (tr, id) = repo_with_uncommitted_spec();
+    let home = TempDir::new().expect("home tempdir");
 
     let output = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args([
             "start",
             "--from-specs",

@@ -37,8 +37,18 @@ pub fn kill_session(name: &str) {
 }
 
 /// Detached tmux session running a long-lived shell we can `send-keys` into.
-pub fn create_detached_session(name: &str) {
+///
+/// `home` overrides `HOME` (and removes `XDG_DATA_HOME`) on the `tmux
+/// new-session` invocation itself, so every process later launched inside
+/// this pane's shell — including a `git-paw` binary driven via `send_keys`
+/// without its own `assert_cmd::Command` builder — inherits the isolated
+/// `HOME`/`XDG_DATA_HOME` instead of the developer's real session directory.
+/// Callers MUST keep `home` (a `tempfile::TempDir`) alive for at least as
+/// long as the session.
+pub fn create_detached_session(name: &str, home: &Path) {
     let status = Command::new("tmux")
+        .env("HOME", home)
+        .env_remove("XDG_DATA_HOME")
         .args([
             "new-session",
             "-d",

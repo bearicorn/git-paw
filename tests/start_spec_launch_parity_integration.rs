@@ -112,6 +112,25 @@ fn rename_repo_basename(tr: &TestRepo, new_basename: &str) -> std::path::PathBuf
     renamed
 }
 
+/// Resolves the sessions directory a `git paw` subprocess given `HOME = home`
+/// (and `XDG_DATA_HOME` removed) would write into, mirroring
+/// `crate::dirs::data_dir()`. Needed because an in-process call to
+/// `session::find_session_for_repo` resolves from the *test process's own*
+/// environment, not the `home` override passed only to a spawned subprocess —
+/// checking written-session-state after such a launch must look here instead.
+fn sessions_dir_under(home: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        home.join("Library/Application Support")
+            .join("git-paw")
+            .join("sessions")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        home.join(".local/share").join("git-paw").join("sessions")
+    }
+}
+
 /// Writes and commits a pending `OpenSpec` change at `<repo>/specs/<id>/tasks.md`.
 fn write_committed_spec(repo: &std::path::Path, id: &str, body: &str) {
     let change_dir = repo.join("specs").join(id);
@@ -168,6 +187,7 @@ fn write_slow_ready_cli(bin_dir: &std::path::Path, marker: &str, delay: Duration
 fn spawn_start(
     env: &TmuxTestEnv,
     repo: &std::path::Path,
+    home: &std::path::Path,
     path: &str,
     readiness_timeout_ms: &str,
     args: &[&str],
@@ -176,6 +196,8 @@ fn spawn_start(
     env.apply(&mut command);
     command
         .current_dir(repo)
+        .env("HOME", home)
+        .env_remove("XDG_DATA_HOME")
         .env("PATH", path)
         // Override the suite-wide short readiness timeout (set by
         // `TmuxTestEnv::apply`) for tests that need the gate to genuinely
@@ -329,11 +351,14 @@ command = "{probe_cli}"
     let session_name = format!("paw-{project}");
     let anchor = format!("opsx:apply {spec_id}.");
 
+    let home = TempDir::new().expect("home tempdir");
     let mut start_cmd = cmd();
     tmux_env.apply_assert(&mut start_cmd);
     let out = start_cmd
         .current_dir(&repo)
         .env("PATH", &test_path)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-specs", "--cli", probe_cli])
         .timeout(Duration::from_secs(15))
         .output()
@@ -422,10 +447,13 @@ approval_args = {{ "auto" = "{SENTINEL_FLAG}" }}
 
     let session_name = format!("paw-{project}");
 
+    let home = TempDir::new().expect("home tempdir");
     let mut start_cmd = cmd();
     tmux_env.apply_assert(&mut start_cmd);
     let out = start_cmd
         .current_dir(&repo)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-specs", "--cli", "echo"])
         .timeout(Duration::from_secs(15))
         .output()
@@ -479,10 +507,13 @@ approval_args = {{ "auto" = "{SENTINEL_FLAG}" }}
 
     let session_name = format!("paw-{project}");
 
+    let home = TempDir::new().expect("home tempdir");
     let mut start_cmd = cmd();
     tmux_env.apply_assert(&mut start_cmd);
     let out = start_cmd
         .current_dir(&repo)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--cli", "echo", "--branches", "feat/x"])
         .timeout(Duration::from_secs(15))
         .output()
@@ -580,10 +611,13 @@ command = "echo"
 
     let session_name = format!("paw-{project}");
 
+    let home = TempDir::new().expect("home tempdir");
     let mut start_cmd = cmd();
     tmux_env.apply_assert(&mut start_cmd);
     let out = start_cmd
         .current_dir(&repo)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-specs", "--cli", "echo"])
         .timeout(Duration::from_secs(15))
         .output()
@@ -674,11 +708,14 @@ command = "{probe_cli}"
     let session_name = format!("paw-{project}");
     let anchor = format!("opsx:apply {spec_id}.");
 
+    let home = TempDir::new().expect("home tempdir");
     let mut start_cmd = cmd();
     tmux_env.apply_assert(&mut start_cmd);
     let out = start_cmd
         .current_dir(&repo)
         .env("PATH", &test_path)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-specs", "--cli", probe_cli])
         .timeout(Duration::from_secs(15))
         .output()
@@ -760,6 +797,7 @@ fn spec_driven_launch_withholds_injection_until_pane_is_ready() {
     let repo = rename_repo_basename(&tr, &project);
 
     let bin_dir = TempDir::new().expect("bin dir");
+    let home = TempDir::new().expect("home tempdir");
     let ready_delay = Duration::from_secs(1);
     let probe_cli = write_slow_ready_cli(bin_dir.path(), MARKER, ready_delay);
     let inherited_path = std::env::var("PATH").unwrap_or_default();
@@ -800,6 +838,7 @@ readiness_markers = ["{MARKER}"]
     let child = spawn_start(
         &tmux_env,
         &repo,
+        home.path(),
         &test_path,
         "3000",
         &["start", "--from-specs", "--cli", probe_cli],
@@ -900,11 +939,14 @@ command = "{dialog_cli}"
 
     let session_name = format!("paw-{project}");
 
+    let home = TempDir::new().expect("home tempdir");
     let mut start_cmd = cmd();
     tmux_env.apply_assert(&mut start_cmd);
     let out = start_cmd
         .current_dir(&repo)
         .env("PATH", &test_path)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         // Override the suite-wide compressed timeout: a custom CLI's pane
         // can transiently look like a bare shell during startup (shell
         // init overhead) before the gate relaunches into it and the stub's
@@ -934,7 +976,10 @@ command = "{dialog_cli}"
     // saved session; `sweep.sh` needs the discovery file), or a retry forks
     // a parallel `paw-<project>-2` session instead of reattaching.
     assert!(
-        matches!(git_paw::session::find_session_for_repo(&repo), Ok(Some(_))),
+        matches!(
+            git_paw::session::find_session_for_repo_in(&repo, &sessions_dir_under(home.path())),
+            Ok(Some(_))
+        ),
         "a stuck-dialog launch must still save session state for {repo:?}"
     );
     let discovery_path = repo
@@ -984,11 +1029,14 @@ command = "{dialog_cli}"
 
     let session_name = format!("paw-{project}");
 
+    let home = TempDir::new().expect("home tempdir");
     let mut start_cmd = cmd();
     tmux_env.apply_assert(&mut start_cmd);
     let out = start_cmd
         .current_dir(&repo)
         .env("PATH", &test_path)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         // See the spec-driven dialog test above for why this needs a
         // generous override rather than the suite-wide compressed default.
         .env("GIT_PAW_READINESS_TIMEOUT_MS", "3000")
@@ -1013,7 +1061,10 @@ command = "{dialog_cli}"
     // discoverable for stop/purge/sweep.sh and so a retry reattaches
     // instead of forking a parallel session.
     assert!(
-        matches!(git_paw::session::find_session_for_repo(&repo), Ok(Some(_))),
+        matches!(
+            git_paw::session::find_session_for_repo_in(&repo, &sessions_dir_under(home.path())),
+            Ok(Some(_))
+        ),
         "a stuck-dialog launch must still save session state for {repo:?}"
     );
     let discovery_path = repo
@@ -1083,11 +1134,14 @@ command = "{probe_cli}"
 
     let session_name = format!("paw-{project}");
 
+    let home = TempDir::new().expect("home tempdir");
     let mut start_cmd = cmd();
     tmux_env.apply_assert(&mut start_cmd);
     let out = start_cmd
         .current_dir(&repo)
         .env("PATH", &test_path)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-all-specs", "--cli", probe_cli])
         .timeout(Duration::from_secs(20))
         .output()
@@ -1221,11 +1275,14 @@ command = "{selfkill_cli}"
     fs::write(paw_dir.join("config.toml"), config).expect("write config");
     write_committed_spec(&repo, "feature-selfkill", "Implement feature selfkill.\n");
 
+    let home = TempDir::new().expect("home tempdir");
     let mut start_cmd = cmd();
     tmux_env.apply_assert(&mut start_cmd);
     let out = start_cmd
         .current_dir(&repo)
         .env("PATH", &test_path)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-specs", "--cli", selfkill_cli])
         .timeout(Duration::from_secs(15))
         .output()

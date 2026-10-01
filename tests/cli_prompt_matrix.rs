@@ -157,10 +157,13 @@ fn write_echo_config(repo: &std::path::Path, supervisor: Option<bool>) {
 fn start_all_flags_bypass_all_pickers() {
     let tr = setup_test_repo();
     write_echo_config(tr.path(), None);
+    let home = tempfile::TempDir::new().expect("home tempdir");
 
     let out = Command::cargo_bin("git-paw")
         .expect("binary")
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args([
             "start",
             "--branches",
@@ -195,10 +198,13 @@ fn start_all_flags_bypass_all_pickers() {
 fn start_supervisor_flag_enters_supervisor_mode() {
     let tr = setup_test_repo();
     write_echo_config(tr.path(), Some(false));
+    let home = tempfile::TempDir::new().expect("home tempdir");
 
     let out = Command::cargo_bin("git-paw")
         .expect("binary")
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args([
             "start",
             "--branches",
@@ -256,8 +262,9 @@ fn start_no_flags_shows_branch_picker() {
     git(tr.path(), &["branch", "feat/a"]);
     git(tr.path(), &["branch", "feat/b"]);
 
+    let home = tempfile::TempDir::new().expect("home tempdir");
     let session = pty::unique_session_name("paw-matrix-branchpicker");
-    pty::create_detached_session(&session);
+    pty::create_detached_session(&session, home.path());
     let bin = env!("CARGO_BIN_EXE_git-paw");
     let cmd = format!("cd '{}' && '{bin}' start --dry-run", tr.path().display());
     pty::send_keys(&session, &[&cmd, "Enter"]);
@@ -282,8 +289,9 @@ fn start_branches_without_cli_shows_mode_picker() {
     let tr = setup_test_repo();
     write_echo_config(tr.path(), None);
 
+    let home = tempfile::TempDir::new().expect("home tempdir");
     let session = pty::unique_session_name("paw-matrix-modepicker");
-    pty::create_detached_session(&session);
+    pty::create_detached_session(&session, home.path());
     let bin = env!("CARGO_BIN_EXE_git-paw");
     let cmd = format!(
         "cd '{}' && '{bin}' start --branches feat/a,feat/b --dry-run",
@@ -322,8 +330,11 @@ fn purge_force_bypasses_confirmation() {
     let repo = tempfile::TempDir::new().expect("tempdir");
     git(repo.path(), &["init", "-q"]);
 
+    let home = tempfile::TempDir::new().expect("home tempdir");
     Command::cargo_bin("git-paw")
         .expect("binary")
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["purge", "--force"])
         .current_dir(repo.path())
         .assert()
@@ -364,10 +375,13 @@ fn write_openspec_specs_repo(repo: &std::path::Path, ids: &[&str]) {
 fn from_all_specs_launches_every_spec_without_picker() {
     let tr = setup_test_repo();
     write_openspec_specs_repo(tr.path(), &["auth", "api"]);
+    let home = tempfile::TempDir::new().expect("home tempdir");
 
     let out = Command::cargo_bin("git-paw")
         .expect("binary")
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-all-specs", "--cli", "echo", "--dry-run"])
         .output()
         .expect("run start --from-all-specs --dry-run");
@@ -392,10 +406,13 @@ fn from_all_specs_unconfigured_spec_format_errors() {
     let tr = setup_test_repo();
     // echo CLI configured, but NO [specs] section and no --specs-format flag.
     write_echo_config(tr.path(), None);
+    let home = tempfile::TempDir::new().expect("home tempdir");
 
     let out = Command::cargo_bin("git-paw")
         .expect("binary")
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-all-specs", "--dry-run"])
         .output()
         .expect("run start --from-all-specs with no specs config");
@@ -429,8 +446,9 @@ fn bare_specs_on_tty_shows_spec_picker() {
     let tr = setup_test_repo();
     write_openspec_specs_repo(tr.path(), &["auth", "api"]);
 
+    let home = tempfile::TempDir::new().expect("home tempdir");
     let session = pty::unique_session_name("paw-matrix-specpicker");
-    pty::create_detached_session(&session);
+    pty::create_detached_session(&session, home.path());
     let bin = env!("CARGO_BIN_EXE_git-paw");
     let cmd = format!(
         "cd '{}' && '{bin}' start --specs --dry-run",

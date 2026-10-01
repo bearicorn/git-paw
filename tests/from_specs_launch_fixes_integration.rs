@@ -134,9 +134,12 @@ fn repo_with_specs_no_supervisor() -> (TestRepo, &'static str) {
 #[test]
 fn from_specs_with_supervisor_routes_to_supervisor_dry_run() {
     let (tr, id) = repo_with_supervisor_and_spec();
+    let home = tempfile::TempDir::new().expect("home tempdir");
 
     let output = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args([
             "start",
             "--from-specs",
@@ -184,9 +187,12 @@ fn from_specs_with_supervisor_routes_to_supervisor_dry_run() {
 #[test]
 fn from_specs_without_supervisor_routes_to_start_from_specs_dry_run() {
     let (tr, id) = repo_with_specs_no_supervisor();
+    let home = tempfile::TempDir::new().expect("home tempdir");
 
     let output = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-specs", "--cli", "echo", "--dry-run"])
         .output()
         .expect("run start --from-specs --dry-run");
@@ -228,9 +234,12 @@ fn from_specs_without_supervisor_routes_to_start_from_specs_dry_run() {
 #[test]
 fn from_specs_with_supervisor_config_routes_to_supervisor_dry_run() {
     let (tr, id) = repo_with_supervisor_and_spec();
+    let home = tempfile::TempDir::new().expect("home tempdir");
 
     let output = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-specs", "--cli", "echo", "--dry-run"])
         .output()
         .expect("run start --from-specs --dry-run");
@@ -298,9 +307,12 @@ fn from_specs_supervisor_dry_run_succeeds_in_non_tty() {
     // still complete cleanly because dry-run short-circuits before the
     // launch's TTY-sensitive steps.
     let (tr, _) = repo_with_supervisor_and_spec();
+    let home = tempfile::TempDir::new().expect("home tempdir");
 
     let output = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args([
             "start",
             "--from-specs",
@@ -335,9 +347,12 @@ fn from_specs_supervisor_dry_run_succeeds_in_non_tty() {
 #[test]
 fn from_specs_dry_run_succeeds_in_non_tty() {
     let (tr, _) = repo_with_specs_no_supervisor();
+    let home = tempfile::TempDir::new().expect("home tempdir");
 
     let output = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-specs", "--cli", "echo", "--dry-run"])
         .output()
         .expect("run dry-run in non-TTY context");

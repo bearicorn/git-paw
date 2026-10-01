@@ -119,7 +119,59 @@ instead of the user's real `~/Library/Application Support/git-paw/`
 (macOS) or `~/.local/share/git-paw/` (Linux). The `cmd_iso` helper
 in `tests/e2e_tests.rs` bundles both overrides into one call site.
 
-See `openspec/specs/core-ci-hygiene/spec.md` for the requirements.
+See `openspec/specs/core-ci-hygiene/spec.md` for the requirements, and
+`tests/home_xdg_override_conventions.rs` for the standing test that
+enforces this pattern across every file in `tests/`.
+
+### Cleaning up stale session files from a past regression
+
+If this convention regressed on your machine before the standing test
+existed, your real sessions directory may hold stale JSON files from
+test runs — named after a test's temp-project pattern rather than a
+project you actually started. The offending test files (fixed across
+this rollout) use these `unique_project_name`/`unique_session_name`
+prefixes:
+
+- `paw-default-branch-fallback-*`, `paw-rebase-default-*`,
+  `paw-rebase-no-rebase-*` — the two originally-regressed files
+  (`tests/default_branch_fallback_integration.rs`,
+  `tests/rebase_integration.rs`).
+- `paw-launch-parity-*` — `tests/start_spec_launch_parity_integration.rs`.
+- `paw-approval-*` — `tests/e2e_supervisor_approval_flags.rs`.
+- `paw-repo*` — any test built on the shared `setup_test_repo()` helper
+  (most of the remaining fixed files) without renaming its tempdir repo;
+  these don't accumulate distinctly-named litter the way the
+  `unique_project_name` patterns do (every run reuses the same
+  `paw-repo`/`paw-repo-N` names), but a stray file may still exist.
+
+These are safe to delete, but **never delete the whole directory** —
+it also holds your live session's receipt
+(`~/Library/Application Support/git-paw/sessions/paw-<project>.json`
+on macOS, `~/.local/share/git-paw/sessions/paw-<project>.json` on
+Linux). None of the patterns above can match a real project unless you
+happen to have a repo literally named one of those strings — use a
+glob that targets the known offending name patterns instead of a
+wildcard, and verify your live session's file is not matched before
+removing anything:
+
+```bash
+cd ~/Library/Application\ Support/git-paw/sessions/   # or ~/.local/share/git-paw/sessions/ on Linux
+ls paw-default-branch-fallback-* paw-rebase-default-* paw-rebase-no-rebase-* \
+   paw-launch-parity-* paw-approval-* paw-repo* 2>/dev/null
+# confirm the listing above does NOT include your live session's file, then:
+rm -f paw-default-branch-fallback-* paw-rebase-default-* paw-rebase-no-rebase-* \
+      paw-launch-parity-* paw-approval-* paw-repo*
+```
+
+This list isn't exhaustive — if you suspect other litter, list the
+directory and visually confirm each candidate file is a test artifact
+(check its `repo_path` field) before deleting, rather than guessing
+from the name alone.
+
+This cleanup only removes litter that already accumulated; it does
+not undo any mutation an earlier offending test run may have made to
+your actual live session's receipt before this fix landed. There is
+no way to recover that retroactively.
 
 ## Cold-start smoke before pushing
 
