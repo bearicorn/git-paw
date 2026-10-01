@@ -41,8 +41,9 @@ fn interactive_init_records_chosen_spec_system_in_config() {
         .expect("git init");
     assert!(status.success(), "git init failed");
 
+    let home = tempfile::TempDir::new().expect("home tempdir");
     let session = unique_session_name("paw-init-specs");
-    create_detached_session(&session);
+    create_detached_session(&session, home.path());
 
     // Launch the real binary in the pane. Paths from TempDir/Cargo never
     // contain single quotes, so single-quote wrapping is sufficient.
@@ -102,8 +103,9 @@ fn interactive_init_records_supervisor_choice_in_config() {
         .expect("git init");
     assert!(status.success(), "git init failed");
 
+    let home = tempfile::TempDir::new().expect("home tempdir");
     let session = unique_session_name("paw-init-sup");
-    create_detached_session(&session);
+    create_detached_session(&session, home.path());
 
     let bin = env!("CARGO_BIN_EXE_git-paw");
     let cmd = format!("cd '{}' && '{bin}' init", repo.path().display());
@@ -171,8 +173,9 @@ fn interactive_init_migrates_supervisor_into_existing_config() {
     let config_path = paw.join("config.toml");
     std::fs::write(&config_path, "default_cli = \"claude\"\n").expect("seed config");
 
+    let home = tempfile::TempDir::new().expect("home tempdir");
     let session = unique_session_name("paw-init-migrate");
-    create_detached_session(&session);
+    create_detached_session(&session, home.path());
 
     let bin = env!("CARGO_BIN_EXE_git-paw");
     let cmd = format!("cd '{}' && '{bin}' init", repo.path().display());

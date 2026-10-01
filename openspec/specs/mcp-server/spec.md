@@ -132,7 +132,11 @@ repository.
 
 The system SHALL return JSON-RPC protocol errors (not empty
 results) when a user's configuration points at resources that exist
-but cannot be read or parsed. These cases reflect user error and
+but cannot be read or parsed. A configured `[specs].type` SHALL be
+treated as invalid only when the system's spec discovery does not
+support it; the set of valid types SHALL be derived from the same
+source spec discovery uses, so a supported backend is never
+rejected by the server. These cases reflect user error and
 SHALL be visible to the client so the LLM can surface them.
 
 #### Scenario: Governance path points at an unreadable file
@@ -151,6 +155,17 @@ SHALL be visible to the client so the LLM can surface them.
 - **THEN** the server SHALL exit with non-zero status and SHALL
   emit a human-readable error to stderr identifying the invalid
   value and the valid options
+
+#### Scenario: Every supported spec backend type is accepted at startup
+
+- **GIVEN** `[specs].type` is set to any backend type the system's spec discovery supports — `openspec`, `markdown`, `speckit` or `superpowers`
+- **WHEN** the server starts
+- **THEN** the server SHALL start and serve, and SHALL NOT report the type as invalid
+
+#### Scenario: The accepted set cannot drift from spec discovery
+
+- **WHEN** a spec backend type is supported by the system's spec discovery
+- **THEN** the MCP server's startup validation SHALL accept it, because the accepted set is derived from the same source as discovery rather than maintained as a separate list
 
 ### Requirement: Stdout reserved for MCP protocol
 
@@ -385,7 +400,7 @@ hot-reload endpoint.
 - **WHEN** the MCP client calls `get_specs()`
 - **THEN** the response SHALL be a JSON object
   `{ "specs": [...] }` where each entry carries `id`, `backend`
-  (one of `openspec | markdown | speckit`), `title`, `status`,
+  (one of `openspec | markdown | speckit | superpowers`), `title`, `status`,
   and `path`
 
 #### Scenario: get_spec returns the full content of a named spec
@@ -442,6 +457,13 @@ hot-reload endpoint.
 - **WHEN** the MCP client calls `get_specs()` or `get_tasks()`
 - **THEN** the response SHALL be a successful JSON-RPC response
   with empty arrays
+
+#### Scenario: A Superpowers repository is served
+
+- **GIVEN** a repository configured with `[specs].type = "superpowers"` and writing-plans documents under its configured directory
+- **WHEN** the MCP client calls `get_specs()`
+- **THEN** the response SHALL list those plans with `backend` `superpowers`
+- **AND** `get_skill` SHALL render the spec-path doctrine for the Superpowers backend rather than the no-backend sentinel
 
 ### Requirement: Session state tools
 

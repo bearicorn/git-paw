@@ -284,7 +284,11 @@ the agents' delay from the agent CLI.
 The system SHALL boot a fresh supervisor session such that all
 coding agents register with the broker without manual
 intervention, for any CLI given an adequate settle delay
-(default or configured) and broker-curl seeding.
+(default or configured). Registration SHALL NOT depend on
+permission grants seeded into any CLI settings file. The agents'
+boot publish goes through the bundled `broker.sh` helper, which the
+CLI's resolved permission mode and the classifier's managed
+helper-script rule allow without a prompt.
 
 #### Scenario: All agents register unattended
 

@@ -103,6 +103,7 @@ fn start_rebases_an_existing_branch_without_origin_head() {
 
     let project = unique_project_name("existing");
     let sandbox = setup_local_only_sandbox(&project);
+    let home = TempDir::new().expect("home tempdir");
 
     let session_name = format!("paw-{project}");
     kill_session(&session_name);
@@ -113,6 +114,8 @@ fn start_rebases_an_existing_branch_without_origin_head() {
     // symbolic-ref failed"; post-fix it falls back to the local `main`.
     let output = cmd()
         .current_dir(&sandbox.repo)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--cli", "sh", "--branches", "feat/example"])
         .output()
         .expect("run git paw start");

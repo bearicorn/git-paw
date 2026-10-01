@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use assert_cmd::Command;
 use serial_test::serial;
+use tempfile::TempDir;
 
 mod helpers;
 use helpers::*;
@@ -61,10 +62,13 @@ cli = "echo"
 "#;
     fs::write(paw_dir.join("config.toml"), config).expect("write config");
 
+    let home = TempDir::new().expect("home tempdir");
     let mut command = cmd();
     tmux_env.apply_assert(&mut command);
     command
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--supervisor", "--branches", "a,b"])
         .timeout(Duration::from_secs(10));
 

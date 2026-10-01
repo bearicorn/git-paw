@@ -115,8 +115,11 @@ fn cli_flag_overrides_paw_cli_and_default_spec_cli_for_all_branches() {
     write_committed_spec(tr.path(), "auth", Some("beta")); // has paw_cli
     write_committed_spec(tr.path(), "api", None); // would fall to default_spec_cli
 
+    let home = tempfile::TempDir::new().expect("home tempdir");
     let out = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-all-specs", "--cli", "alpha", "--dry-run"])
         .output()
         .expect("run start --from-all-specs --cli alpha --dry-run");
@@ -150,8 +153,11 @@ fn paw_cli_wins_over_default_spec_cli_and_fills_rest() {
     write_committed_spec(tr.path(), "auth", Some("beta")); // paw_cli → beta
     write_committed_spec(tr.path(), "api", None); // default_spec_cli → gamma
 
+    let home = tempfile::TempDir::new().expect("home tempdir");
     let out = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-all-specs", "--dry-run"])
         .output()
         .expect("run start --from-all-specs --dry-run");
@@ -183,8 +189,11 @@ fn default_spec_cli_fills_all_branches_without_prompt() {
     write_committed_spec(tr.path(), "api", None);
     write_committed_spec(tr.path(), "db", None);
 
+    let home = tempfile::TempDir::new().expect("home tempdir");
     let out = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--from-all-specs", "--dry-run"])
         .output()
         .expect("run start --from-all-specs --dry-run");

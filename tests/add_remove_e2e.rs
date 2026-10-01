@@ -95,6 +95,7 @@ fn start_session(repo: &Path, home: &Path, tmux_env: &TmuxTestEnv, branches: &st
     let out = start
         .current_dir(repo)
         .env("HOME", home)
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--supervisor", "--branches", branches])
         .timeout(Duration::from_secs(40))
         .output()
@@ -118,9 +119,12 @@ fn start_session(repo: &Path, home: &Path, tmux_env: &TmuxTestEnv, branches: &st
 #[test]
 fn remove_supervisor_is_refused_with_stop_hint() {
     let tr = setup_test_repo();
+    let home = TempDir::new().expect("home tempdir");
     let mut c = cmd();
     let out = c
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["remove", "supervisor"])
         .timeout(Duration::from_secs(10))
         .output()
@@ -141,6 +145,7 @@ fn add_without_active_session_errors() {
     let out = c
         .current_dir(tr.path())
         .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["add", "feat/x"])
         .timeout(Duration::from_secs(10))
         .output()
@@ -180,6 +185,7 @@ fn add_attaches_pane_and_registers_agent() {
     let out = add
         .current_dir(tr.path())
         .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["add", "c"])
         .timeout(Duration::from_secs(40))
         .output()
@@ -229,6 +235,7 @@ fn remove_clean_agent_detaches_and_updates_session() {
     let out = rm
         .current_dir(tr.path())
         .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["remove", "b"])
         .timeout(Duration::from_secs(40))
         .output()
@@ -404,6 +411,7 @@ fn remove_dirty_refuses_then_keep_worktree_succeeds() {
     let refused = rm
         .current_dir(tr.path())
         .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["remove", "a"])
         .timeout(Duration::from_secs(20))
         .output()
@@ -417,6 +425,7 @@ fn remove_dirty_refuses_then_keep_worktree_succeeds() {
     let kept = rmk
         .current_dir(tr.path())
         .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["remove", "a", "--keep-worktree"])
         .timeout(Duration::from_secs(40))
         .output()
@@ -478,6 +487,7 @@ fn remove_just_started_clean_agent_succeeds_without_force() {
     let out = rm
         .current_dir(tr.path())
         .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["remove", "a"]) // deliberately no --force
         .timeout(Duration::from_secs(40))
         .output()
@@ -558,6 +568,7 @@ fn remove_refuses_genuine_edit_and_hides_managed_files() {
     let out = rm
         .current_dir(tr.path())
         .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["remove", "a"]) // deliberately no --force
         .timeout(Duration::from_secs(20))
         .output()
@@ -603,6 +614,7 @@ fn remove_nonexistent_branch_lists_live_agents() {
     let out = rm
         .current_dir(tr.path())
         .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["remove", "ghost"])
         .timeout(Duration::from_secs(20))
         .output()
@@ -640,6 +652,7 @@ fn add_to_paused_session_holds_prompt_for_resume() {
     let _ = pause
         .current_dir(tr.path())
         .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["pause"])
         .timeout(Duration::from_secs(20))
         .output()
@@ -650,6 +663,7 @@ fn add_to_paused_session_holds_prompt_for_resume() {
     let out = add
         .current_dir(tr.path())
         .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["add", "b"])
         .timeout(Duration::from_secs(40))
         .output()
@@ -737,6 +751,7 @@ fn add_preserves_existing_pane_current_paths() {
     let out = add
         .current_dir(tr.path())
         .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["add", "c"])
         .timeout(Duration::from_secs(40))
         .output()
@@ -803,6 +818,7 @@ fn add_from_spec_resolves_and_attaches() {
     let out = add
         .current_dir(tr.path())
         .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["add", "--from-spec", "add-export"])
         .timeout(Duration::from_secs(40))
         .output()

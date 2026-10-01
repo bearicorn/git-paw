@@ -144,6 +144,7 @@ fn start_default_rebases_feat_branch_onto_main() {
     let sandbox = setup_sandbox(&project);
     write_echo_config(&sandbox.repo);
     advance_main(&sandbox.repo, 3);
+    let home = TempDir::new().expect("home tempdir");
 
     let session_name = format!("paw-{project}");
     kill_session(&session_name);
@@ -152,6 +153,8 @@ fn start_default_rebases_feat_branch_onto_main() {
     // worktree-creation (including the rebase) happens before attach.
     let _ = cmd()
         .current_dir(&sandbox.repo)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--cli", "sh", "--branches", "feat/example"])
         .output()
         .expect("run git paw start");
@@ -192,12 +195,15 @@ fn start_with_no_rebase_preserves_old_baseline() {
     advance_main(&sandbox.repo, 3);
 
     let pre = capture_git(&sandbox.repo, &["rev-parse", "feat/example"]);
+    let home = TempDir::new().expect("home tempdir");
 
     let session_name = format!("paw-{project}");
     kill_session(&session_name);
 
     let _ = cmd()
         .current_dir(&sandbox.repo)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args([
             "start",
             "--no-rebase",

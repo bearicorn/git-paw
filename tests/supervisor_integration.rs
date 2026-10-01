@@ -51,8 +51,11 @@ type = "markdown"
     fs::write(paw_dir.join("config.toml"), config_content).expect("write config");
 
     // Run start with supervisor flag (dry-run) and specify branches
+    let home = tempfile::TempDir::new().expect("home tempdir");
     let output = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args([
             "start",
             "--supervisor",
@@ -106,8 +109,11 @@ cli = "echo"
     fs::write(paw_dir.join("config.toml"), config_content).expect("write config");
 
     // Run start with supervisor flag (dry-run) and specify branches
+    let home = tempfile::TempDir::new().expect("home tempdir");
     let output = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args([
             "start",
             "--supervisor",
@@ -166,8 +172,11 @@ type = "markdown"
     fs::write(tr.path().join("AGENTS.md"), agents_content).expect("write AGENTS.md");
 
     // Run start with supervisor flag (dry-run) and specify branches
+    let home = tempfile::TempDir::new().expect("home tempdir");
     let output = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args([
             "start",
             "--supervisor",
@@ -225,8 +234,11 @@ agent_approval = "full-auto"
     fs::write(paw_dir.join("config.toml"), config_content).expect("write config");
 
     // Run start with supervisor flag (dry-run) and specify branches
+    let home = tempfile::TempDir::new().expect("home tempdir");
     let output = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args([
             "start",
             "--supervisor",
@@ -265,8 +277,11 @@ fn dry_run_with_config(config_content: &str) -> (String, String) {
     fs::create_dir_all(&paw_dir).expect("create .git-paw");
     fs::write(paw_dir.join("config.toml"), config_content).expect("write config");
 
+    let home = tempfile::TempDir::new().expect("home tempdir");
     let output = cmd()
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args([
             "start",
             "--supervisor",

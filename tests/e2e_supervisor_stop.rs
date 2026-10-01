@@ -97,12 +97,15 @@ fn stop_kills_tmux_and_shuts_down_broker() {
     let _proc_env = tmux_env.apply_to_process();
     let port = pick_broker_port();
     write_supervisor_config(tr.path(), port, false);
+    let home = tempfile::TempDir::new().expect("home tempdir");
 
     // Boot the session.
     let mut start = cmd();
     tmux_env.apply_assert(&mut start);
     let out = start
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--supervisor", "--branches", "a,b"])
         .timeout(Duration::from_secs(10))
         .output()
@@ -116,6 +119,8 @@ fn stop_kills_tmux_and_shuts_down_broker() {
     tmux_env.apply_assert(&mut stop);
     let stop_out = stop
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["stop"])
         .timeout(Duration::from_secs(10))
         .output()
@@ -183,11 +188,14 @@ fn stop_in_supervisor_mode_terminates_auto_approve() {
     let _proc_env = tmux_env.apply_to_process();
     let port = pick_broker_port();
     write_supervisor_config(tr.path(), port, true);
+    let home = tempfile::TempDir::new().expect("home tempdir");
 
     let mut start = cmd();
     tmux_env.apply_assert(&mut start);
     let out = start
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--supervisor", "--branches", "a,b"])
         .timeout(Duration::from_secs(10))
         .output()
@@ -204,6 +212,8 @@ fn stop_in_supervisor_mode_terminates_auto_approve() {
     tmux_env.apply_assert(&mut stop);
     let stop_out = stop
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["stop"])
         .timeout(Duration::from_secs(10))
         .output()

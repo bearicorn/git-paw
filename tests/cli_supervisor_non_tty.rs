@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use assert_cmd::Command;
 use serial_test::serial;
+use tempfile::TempDir;
 
 mod helpers;
 use helpers::*;
@@ -84,6 +85,7 @@ fn non_tty_supervisor_skips_cli_launch() {
     let tr = setup_test_repo();
     let tmux_env = tmux_test_env();
     let _proc_env = tmux_env.apply_to_process();
+    let home = TempDir::new().expect("home tempdir");
 
     write_supervisor_specs_config(tr.path());
     write_committed_spec(tr.path(), "feature-x", "Implement feature x.");
@@ -95,6 +97,8 @@ fn non_tty_supervisor_skips_cli_launch() {
     // explicit `Stdio::null()` configuration is needed.
     let output = command
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--supervisor", "--from-specs"])
         .timeout(Duration::from_secs(10))
         .output()

@@ -2,7 +2,6 @@
 
 ## Purpose
 Isolates the test suite from the developer's live environment — tmux-spawning tests use a tempdir-rooted socket via a shared helper, `setup_test_repo` guards against running while a live `paw-*` session exists, `git paw` subcommand tests override `HOME`/`XDG_DATA_HOME`, and broker ports come from an OS-assigned ephemeral bind rather than a collision-prone PID-modulo scheme — and closes the gap between passing tests on a developer's machine and passing in CI by providing cold-start smoke recipes (`just smoke`, `smoke-container`, `smoke-all`) that strip inherited tmux/broker context and mirror CI's environment, plus convention-enforcement tests (every `new-session` carries `-x`/`-y`/`-c`, no stdin-claiming pipe in `sweep.sh`), an expanded CI matrix (headless Linux + macOS), and a CONTRIBUTING rule to run the smoke suite before pushing tmux/broker/worktree changes.
-
 ## Requirements
 ### Requirement: Tmux-spawning tests SHALL use a dedicated tmux socket
 
@@ -135,6 +134,8 @@ This ensures the subprocess resolves `crate::dirs::data_dir()` (and the sessions
 
 The audit SHALL cover every `cmd().args(["<subcommand>", ...])` invocation in `tests/` and SHALL specifically fix `tests/e2e_tests.rs::broker_session_full_lifecycle` (around line 874 in the v0.5.0 baseline, the `["start", "--cli", "echo", "--branches", ...]` call), the matching `stop` and `purge --force` calls in the same test, and any other call sites the audit surfaces. Calls that already follow the pattern (e.g. `tests/cli_tests.rs::test_purge_no_unmerged_runs_without_warning`) SHALL be left as-is.
 
+Conformance SHALL be enforced by a standing test rather than by a one-time audit. The suite SHALL fail when any `assert_cmd` builder in `tests/` that invokes the compiled binary lacks the override and is not accompanied by an explicit comment documenting why it needs the real `HOME`. A review-time audit is insufficient: the rule has regressed twice by way of new test files added after an audit passed, and a regression writes into the developer's real session directory where their live session state lives.
+
 #### Scenario: `broker_session_full_lifecycle` does not write into the real sessions directory
 
 - **GIVEN** a developer with `~/Library/Application Support/git-paw/sessions/` populated with the live `paw-git-paw.json` (and other real session files)
@@ -153,6 +154,27 @@ Test: maintainer-run smoke check during the change rollout — record the direct
 - **AND** the audit's grep query `grep -n 'cmd()\|args(\["start"\|args(\["stop"\|args(\["purge"' tests/*.rs` SHALL be cross-checked against the test bodies to confirm
 
 Test: covered by `cargo test --test e2e_tests` plus the spec-audit grep documented in `tasks.md` step 3.
+
+#### Scenario: A test file without the override fails the suite
+
+- **GIVEN** a test file in `tests/` containing an `assert_cmd` builder that invokes the compiled binary without setting `HOME` to a tempdir and removing `XDG_DATA_HOME`
+- **AND** no comment documenting that it requires the real `HOME`
+- **WHEN** the suite runs
+- **THEN** the convention-enforcement test SHALL fail
+- **AND** its failure message SHALL name the offending file
+
+#### Scenario: Previously-regressed files conform
+
+- **GIVEN** `tests/default_branch_fallback_integration.rs` and `tests/rebase_integration.rs`
+- **WHEN** the convention-enforcement test runs
+- **THEN** it SHALL pass for both files
+- **AND** running their tests SHALL create no file under the user's real platform data directory
+
+#### Scenario: A documented exception is permitted
+
+- **GIVEN** an `assert_cmd` builder accompanied by a comment documenting that it requires the real `HOME`
+- **WHEN** the convention-enforcement test runs
+- **THEN** that builder SHALL NOT cause a failure
 
 ### Requirement: Tests SHALL select the broker port via an OS-assigned ephemeral port
 
@@ -366,3 +388,4 @@ running the recipes.
   `just smoke-all` (or `just smoke` on Linux) before pushing
   changes to tmux/broker/worktree code, with the dogfood-session
   cleanup steps included
+

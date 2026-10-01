@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use assert_cmd::Command;
 use serial_test::serial;
+use tempfile::TempDir;
 
 mod helpers;
 use helpers::*;
@@ -43,6 +44,7 @@ fn supervisor_without_section_uses_default_when_default_cli_present() {
     let tr = setup_test_repo();
     let tmux_env = tmux_test_env();
     let _proc_env = tmux_env.apply_to_process();
+    let home = TempDir::new().expect("home tempdir");
 
     // No `[supervisor]` block on purpose — only top-level `default_cli`.
     write_config(tr.path(), "default_cli = \"echo\"\n");
@@ -51,6 +53,8 @@ fn supervisor_without_section_uses_default_when_default_cli_present() {
     tmux_env.apply_assert(&mut command);
     let output = command
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--supervisor", "--branches", "a,b"])
         .timeout(Duration::from_secs(10))
         .output()
@@ -95,6 +99,7 @@ fn supervisor_without_section_or_default_cli_still_errors() {
     let tr = setup_test_repo();
     let tmux_env = tmux_test_env();
     let _proc_env = tmux_env.apply_to_process();
+    let home = TempDir::new().expect("home tempdir");
 
     // Neither `default_cli` nor `[supervisor]` — the existing CLI-resolution
     // error path SHALL still fire.
@@ -104,6 +109,8 @@ fn supervisor_without_section_or_default_cli_still_errors() {
     tmux_env.apply_assert(&mut command);
     let output = command
         .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
         .args(["start", "--supervisor", "--branches", "a,b"])
         .timeout(Duration::from_secs(10))
         .output()
