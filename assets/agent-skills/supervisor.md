@@ -1137,7 +1137,10 @@ on your behalf:
   conflict`. If neither agent stops touching the file within
   `[supervisor.conflict] window_seconds` (default 120s), the detector
   publishes a single `agent.question` to your inbox prefixed
-  `[conflict-detector]`.
+  `[conflict-detector]`. That escalation is emitted once per pair and
+  file and the decision outlives the agents' commits, so a commit
+  emptying one agent's modified-file set does not make the same
+  conflict escalate a second time.
 - **Ownership violation** — an agent's `modified_files` include a file
   outside its own active `agent.intent` *and* inside another active
   agent's intent. The violator receives `agent.feedback` tagged
@@ -1157,6 +1160,35 @@ Your role with respect to detector messages is limited to:
    resolved within the configured window, decide whether to pause one
    agent, reassign scope, or let them race to completion. The detector
    has no view into intent; you do.
+
+   Once you have adjudicated an escalation, **record it** so the detector
+   stops asking:
+
+   ```bash
+   .git-paw/scripts/sweep.sh conflict-ack __FILL_IN_AGENT_A__ __FILL_IN_AGENT_B__ __FILL_IN_FILE__ "__FILL_IN_NOTE__"
+   ```
+
+   The note is optional — leave it off and the helper supplies a default
+   one, since the agents read `agent.feedback` entries as problems to fix
+   and a bare tag line would puzzle them.
+
+   The acknowledgement suppresses further escalation questions for that
+   pair and file; the detector keeps tracking the overlap rather than
+   dropping it. It is invalidated automatically if the two agents'
+   declared regions for that file later describe a materially different
+   overlap — including one side widening its claim to the whole file — so
+   a conflict that genuinely changes shape can reach you again. An
+   escalation you do not acknowledge is not re-asked either: the decision
+   survives the agents' commits.
+
+   Note what the acknowledgement is not: `from` is self-asserted and the
+   broker does not authenticate senders, so the supervisor-only rule is a
+   filter against ordinary feedback being mistaken for an adjudication,
+   not a guarantee that only you can acknowledge. An acknowledgement
+   published through the helper reaches both named agents, and every
+   acknowledgement stays in the broker log whatever its envelope
+   `agent_id` — so the log, not the agents' inboxes, is where an
+   unexpected one shows up.
 2. **Follow up with repeat offenders.** If the same agent triggers
    multiple ownership-violation feedbacks across a session, send them a
    targeted `agent.feedback` reminding them to publish a wider

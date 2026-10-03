@@ -387,6 +387,13 @@ usage: $0 <subcommand> [args]
   inbox                               supervisor inbox payloads (question/feedback/blocked)
   feedback-gate <agent> <gate> <msg…> publish agent.feedback with bracketed gate prefix
   verified <agent> <msg…>             publish agent.verified
+  conflict-ack <agent-a> <agent-b> <file> [note…]
+                                      record that an in-flight conflict has been
+                                      adjudicated; stops further escalation
+                                      questions for that pair and file while the
+                                      detector keeps tracking the overlap. Both
+                                      agents are told; a default note explains
+                                      there is nothing to fix if none is given
   status-publish [--phase <p>] [--detail '<obj>'] <msg…>
                                       publish an agent.status from agent_id="supervisor";
                                       --phase adds a phase label, --detail a JSON-object detail
@@ -696,6 +703,51 @@ PY
 )
   publish "${payload}" >/dev/null
   echo "verified: ${target}"
+}
+
+# Record an orchestrator adjudication of an in-flight conflict.
+#
+# Publishes an agent.feedback carrying the [conflict-ack] token to BOTH
+# agents. The broker conflict detector reads it as "this pair and file has
+# been adjudicated" and stops emitting further agent.question for them,
+# while leaving the overlap visible in the in-flight view. A conflict whose
+# region declarations later change materially can still escalate again.
+#
+# The token must be its own entry in errors (the file path runs to the end of
+# the string), so the human-readable note is appended as a second entry. The
+# note is not optional in the wire sense: agents are taught that
+# agent.feedback carries errors to fix, so a bare tag line would read as a
+# cryptic error. When no note is given, a default one explains that the
+# overlap was reviewed and there is nothing for them to fix.
+cmd_conflict_ack() {
+  local a=${1:-} b=${2:-} file=${3:-}
+  shift 3 2>/dev/null || true
+  local note=$*
+  if [[ -z "${a}" || -z "${b}" || -z "${file}" ]]; then
+    echo "usage: $0 conflict-ack <agent-a> <agent-b> <file> [note]" >&2
+    exit 2
+  fi
+  local target payload
+  for target in "${a}" "${b}"; do
+    payload=$("${PY}" - "${target}" "${a}" "${b}" "${file}" "${note}" <<'PY'
+import json, sys
+target, a, b, path, note = sys.argv[1:6]
+if not note:
+    note = (
+        f"conflict on {path} between {a} and {b} was reviewed and ruled "
+        "acceptable - nothing for you to fix, carry on with your task"
+    )
+errors = [f"[conflict-ack] {a} {b} {path}", note]
+print(json.dumps({
+    "type": "agent.feedback",
+    "agent_id": target,
+    "payload": {"from": "supervisor", "errors": errors},
+}))
+PY
+)
+    publish "${payload}" >/dev/null
+  done
+  echo "conflict-ack: ${a} + ${b} on ${file}"
 }
 
 cmd_status_publish() {
@@ -1459,6 +1511,7 @@ main() {
     inbox) cmd_inbox "$@" ;;
     feedback-gate) cmd_feedback_gate "$@" ;;
     verified) cmd_verified "$@" ;;
+    conflict-ack) cmd_conflict_ack "$@" ;;
     status-publish) cmd_status_publish "$@" ;;
     learn) cmd_learn "$@" ;;
     -h|--help|help|"") usage; [[ -z "${sub}" ]] && exit 2 || exit 0 ;;

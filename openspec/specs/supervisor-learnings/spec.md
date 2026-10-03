@@ -67,7 +67,7 @@ Each stuck-duration record contributes one bullet to the markdown file's "Where 
 
 ### Requirement: Recovery-cycle signal
 
-The aggregator SHALL count the number of `agent.feedback` messages addressed to each agent X (`Feedback.agent_id = X`) before the agent's eventual `agent.verified`. The count SHALL be recorded as a learning when X is verified, OR at session end if X never verifies.
+The aggregator SHALL count the number of `agent.feedback` messages addressed to each agent X (`Feedback.agent_id = X`) before the agent's eventual `agent.verified`, EXCLUDING any message that carries a conflict acknowledgement (an `errors` entry matching the `[conflict-ack]` form defined by the broker-agent-helper capability). An acknowledgement reports that an overlap was adjudicated and asks the agent for nothing, so counting it would attribute a corrective round the agent never had to make. The count SHALL be recorded as a learning when X is verified, OR at session end if X never verifies.
 
 Each recovery-cycle record contributes one bullet to the markdown file's "Recovery cycles" section at the next flush.
 
@@ -83,6 +83,18 @@ Each recovery-cycle record contributes one bullet to the markdown file's "Recove
 - **GIVEN** agent X received zero `agent.feedback` messages and was verified
 - **WHEN** the aggregator processes the verified event
 - **THEN** no recovery-cycles learning SHALL be recorded (zero is not noise-worthy)
+
+#### Scenario: A conflict acknowledgement is not a recovery cycle
+
+- **GIVEN** agent X received 2 ordinary `agent.feedback` messages and 2 `agent.feedback` messages carrying a `[conflict-ack]` entry, followed by an `agent.verified`
+- **WHEN** the aggregator processes the verified event
+- **THEN** the aggregator SHALL record a recovery-cycles learning with `count = 2`
+
+#### Scenario: An acknowledgement alone produces no recovery cycle
+
+- **GIVEN** agent X received exactly one `agent.feedback` carrying a `[conflict-ack]` entry, followed by an `agent.verified`
+- **WHEN** the aggregator processes the verified event
+- **THEN** no recovery-cycles learning SHALL be recorded for X
 
 ### Requirement: Conflict-event signal
 

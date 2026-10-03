@@ -537,7 +537,9 @@ of three supervisor messages:
 
 - **`agent.verified`** — your work passed verification; pick up the next task.
 - **`agent.feedback`** — your work has issues; fix the listed `errors` in your
-  worktree and re-publish `agent.artifact`.
+  worktree and re-publish `agent.artifact`. An `errors` entry beginning
+  `[conflict-ack]` is the exception — it is informational and needs no fix
+  (see *Messages you may receive* below).
 - **a further `agent.intent`** — new scope routed to you; pick it up.
 
 Publish the terminal signal, then wait for one of those. Do not self-verify, do
@@ -641,6 +643,17 @@ When polling `/messages/{{BRANCH_ID}}`, in addition to peer `agent.artifact` and
   payload contains `from` (typically `"supervisor"`) and `errors`, a list of
   problems to fix. Read each error, fix the underlying issues in your
   worktree, then re-publish `agent.artifact` when the fixes are done.
+
+  **One exception: an `errors` entry beginning `[conflict-ack]`.** That is
+  not a problem to fix. It records that a conflict between you and another
+  agent over a shared file — the one you were warned about by the
+  `[conflict-detector]` in-flight warning — has been reviewed and ruled
+  acceptable. The entry names the two agents and the file, and a second
+  entry explains the decision in plain words. **Do nothing in response**:
+  no fix, no re-published `agent.artifact`, no pausing your edits on that
+  file. Carry on with your task. (If the surrounding `errors` list also
+  carries genuine corrective entries, fix those as usual — only the
+  `[conflict-ack]` entry and its explanation are informational.)
 
 - **`agent.answer`** — an authoritative supervisor reply to an
   `agent.question` you asked. The payload contains `from` (typically

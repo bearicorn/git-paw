@@ -95,6 +95,63 @@ escalates, preserving the conservative default.
 
 **Window.** `[supervisor.conflict] window_seconds` (default `120`).
 
+**Escalations persist across commits.** The *overlap* is as volatile as
+`modified_files`: an agent commits, the watcher publishes an empty set, and
+the overlap vanishes for a tick or two before the file reappears. The
+*decision* — that this pair and this file have already been put to a human —
+is not volatile, and the detector keeps it separately from the live overlap
+view. So a commit does not re-escalate a conflict that has already been
+escalated, and it does not rewind the window timer for one that has not: an
+overlap first seen 100 seconds ago still escalates at the 120-second mark,
+not 120 seconds after the commit. A decision is discarded only once its
+conflict is genuinely over — the overlap has been continuously absent for
+the escalation window (at least 60 seconds) — or when the two agents'
+declared regions for the file describe a materially different overlap.
+
+**Acknowledging an escalation.** Once you have adjudicated an escalation,
+record it so the detector stops asking:
+
+```bash
+.git-paw/scripts/sweep.sh conflict-ack <agent-a> <agent-b> <file> "optional note"
+```
+
+This publishes a `[conflict-ack]`-tagged `agent.feedback` from `supervisor`
+to both agents. A note you pass rides along as a second `errors` entry so
+the agents see your reasoning; if you pass none, the helper supplies a
+default one — agents are taught that `errors` are problems to fix, and a
+bare tag line would read as a cryptic error.
+
+While the acknowledgement stands, no further `agent.question` is emitted
+for that pair and file — but the detector **keeps tracking** the overlap
+rather than dropping it, so a later escalation can still be built on it.
+Acknowledging suppresses the question, not the fact. (No view currently
+renders the in-flight tracker, so "keeps tracking" means exactly that:
+the detector's own state, not something you can read off the dashboard.)
+
+The acknowledgement is invalidated automatically when the two agents'
+region declarations for that file change materially — judged by the same
+intersection rules that drive the additive-versus-true classification
+above. A conflict that genuinely changes shape can therefore escalate
+again: an agent re-declaring `agent.intent` with a range that now overlaps
+its peer's, or widening its claim from a named region to the whole file.
+An intent merely *expiring* is not a change — otherwise every settled
+conflict would re-open one TTL later.
+
+**What the supervisor-only rule does and does not do.** The detector
+honours an acknowledgement only when the carrying `agent.feedback` has
+`from = "supervisor"`. That filter stops an agent's ordinary feedback
+from being mistaken for an adjudication. It is **not** an authentication
+boundary: the broker does not authenticate senders, `from` is
+self-asserted, and `sweep.sh` is present in every worktree — so an agent
+that set out to do so could publish `conflict-ack` for a conflict it is
+party to. What limits the damage is visibility, not prevention: an
+acknowledgement published through the helper reaches **both** named
+agents, and **every** acknowledgement — however it was published — stays
+in the broker message log. (The detector honours one whatever its
+envelope `agent_id`, so a hand-rolled one need not have been delivered to
+both; the log is what you audit.) Sender authentication is part of the
+v0.18.0 broker-authority work.
+
 ### Ownership violation
 
 An agent's `modified_files` (from its `agent.status`) touches a file that
@@ -143,6 +200,15 @@ Every auto-emitted `agent.feedback` from the detector carries a single
 The `[conflict-detector]` prefix distinguishes detector output from
 human-typed supervisor feedback. Agents (and dashboards) that filter or
 classify feedback can match on the tag without parsing payload semantics.
+
+One further tag travels the other way. An `agent.feedback` from
+`supervisor` whose `errors` entry reads
+`[conflict-ack] <agent-a> <agent-b> <file>` is read by the detector as an
+acknowledgement of that conflict (see
+[In-flight conflict](#in-flight-conflict)); `sweep.sh conflict-ack` shapes
+it for you. The file path runs to the end of its `errors` entry, so the tag
+line carries nothing after the path — add any prose as a separate entry.
+The detector never emits `[conflict-ack]` itself.
 
 The detector publishes from the `"supervisor"` agent ID (the `from` field
 in the payload) — same source as human-authored supervisor feedback —

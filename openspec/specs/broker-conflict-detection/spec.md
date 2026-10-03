@@ -106,7 +106,7 @@ When an `agent.status` from agent X carrying `modified_files` is published (typi
 
 For every other agent Y whose current modified-file set is non-empty, the detector SHALL compute the overlap between X's and Y's modified files. For each `file` in the overlap, ordered as `(min(X, Y), max(X, Y))`:
 
-- If the triple `(min, max, file)` is being seen for the first time, the detector SHALL record `first_seen = now` and SHALL emit an `agent.feedback` to both X and Y with `from = "supervisor"` and an error message containing the substring `[conflict-detector] in-flight conflict` and the `file` path. This warning is the *initial* warning for the pair on that file.
+- If the triple `(min, max, file)` is being seen for the first time AND no escalation record exists for that pair and file, the detector SHALL record `first_seen = now` and SHALL emit an `agent.feedback` to both X and Y with `from = "supervisor"` and an error message containing the substring `[conflict-detector] in-flight conflict` and the `file` path. This warning is the *initial* warning for the pair on that file.
 - If the triple has been seen for at least `[supervisor.conflict] window_seconds` and has not yet had its escalation decision made, the detector SHALL classify the overlap on `file` as **additive** or **true** using the two agents' active-intent region declarations for `file` (the `regions` carried on `agent.intent` per `conflict-detector-fn-granularity`), then act as follows:
   - The overlap SHALL be classified **true** when the detector cannot prove the agents' edits are disjoint — specifically, when at least one of X or Y has no active intent for `file`, OR at least one declares `file` at file level (no regions), OR both declare regions for `file` and those region sets intersect under the `conflict-detector-fn-granularity` intersection rules (same named region / same insertion anchor, overlapping line ranges, or a conservative cross-kind named-vs-range comparison).
   - The overlap SHALL be classified **additive** only when BOTH X and Y declare at least one region for `file` AND their region sets for `file` are disjoint (do not intersect) — i.e. well-separated hunks or differently-named regions.
@@ -114,6 +114,14 @@ For every other agent Y whose current modified-file set is non-empty, the detect
   - For an **additive** overlap, the detector SHALL NOT emit an `agent.question`. Instead it SHALL emit exactly one informational `agent.feedback` to both X and Y with `from = "supervisor"` and an error message containing the substring `[conflict-detector]`, an indication that the file is shared but the changes are additive (e.g. "shared file, additive — resolve at merge"), and the `file` path.
   - In both the true and additive cases the triple SHALL be marked as having had its escalation decision made; subsequent ticks SHALL NOT re-emit the escalation `agent.question` nor re-emit the additive `agent.feedback` while the triple's region declarations are unchanged. The triple SHALL remain recorded in the in-flight tracker (it SHALL NOT be removed by the decision itself) so the overlap is never silently dropped.
 - If `file` no longer appears in the intersection of X's and Y's modified files (one of them stopped touching it), the triple SHALL be removed from the in-flight tracker — the conflict has resolved without escalation.
+
+The escalation record for a pair and file SHALL be durable independently of the triple's residency in the in-flight tracker. Removing a triple from the tracker SHALL NOT discard an escalation decision already made for that pair and file, and SHALL NOT reset its `first_seen` clock. A transient emptying of an agent's `modified_files` — which a commit produces — therefore SHALL NOT cause the same conflict to be escalated a second time when the file reappears. The escalation record SHALL be discarded only when the conflict is genuinely over, or when the agents' region declarations for that file materially change, in which case a fresh escalation is permitted.
+
+The detector SHALL accept an acknowledgement for a pair and file, recording that the conflict has been adjudicated. The acknowledgement arrives as an `agent.feedback` carrying the `[conflict-ack]` wire form defined by the broker-agent-helper capability, and the detector SHALL honour it only when that message has `from = "supervisor"`. While an acknowledgement stands, the detector SHALL NOT emit a further `agent.question` for that pair and file. The acknowledgement SHALL be invalidated when the agents' region declarations for that file materially change, so a conflict that genuinely changes shape can escalate again. An acknowledgement SHALL NOT remove the overlap from the in-flight tracker, so the detector keeps tracking the conflict.
+
+An acknowledgement that arrives BEFORE the overlap does SHALL NOT suppress the initial `agent.feedback` warning to the two agents, and SHALL NOT start the escalation window early: `first_seen` is set by the first observed overlap, not by the acknowledgement.
+
+"Materially change" SHALL be judged by the same region-intersection rules that drive the additive-versus-true classification. Specifically, the detector SHALL distinguish a side having NO active intent for the file (an absence of declarations — an intent that expired or was never published) from a side declaring the file at FILE LEVEL (a declaration that it is touching the whole file). An absence SHALL NOT count as a material change, so a lapsing intent cannot re-open a settled conflict. A file-level declaration SHALL count as a material change against a previously recorded region-level overlap — in particular, a side widening from disjoint regions to the whole file turns an additive downgrade into a true collision that no human has yet seen, and SHALL therefore escalate.
 
 #### Scenario: Two agents touching the same file are warned
 
@@ -130,6 +138,69 @@ For every other agent Y whose current modified-file set is non-empty, the detect
 - **WHEN** the detector tick runs
 - **THEN** an `agent.question` SHALL be emitted to inbox `"supervisor"` whose question text contains `[conflict-detector]`, `coordination.md`, `feat-x`, and `feat-y`
 - **AND** the triple SHALL be marked as having had its escalation decision made
+
+#### Scenario: A commit does not re-escalate an already-escalated conflict
+
+- **GIVEN** an escalated conflict `(feat-x, feat-y, src/a.rs)`
+- **WHEN** `feat-x` publishes `agent.status` with `modified_files = []` (its commit), and then republishes `modified_files = ["src/a.rs"]`
+- **AND** more than `window_seconds` elapses with both agents reporting the file
+- **THEN** no further `agent.question` SHALL be emitted for that pair and file
+- **AND** the escalation record SHALL still reflect the earlier decision
+
+#### Scenario: A commit does not reset the first-seen clock
+
+- **GIVEN** an unescalated in-flight overlap `(feat-x, feat-y, src/a.rs)` first seen `T` ago, where `T` is less than `window_seconds`
+- **WHEN** `feat-x` briefly publishes `modified_files = []` and then republishes the file
+- **THEN** the overlap's `first_seen` SHALL remain the original time
+- **AND** the escalation SHALL fire once `window_seconds` has elapsed from that original time, not from the republish
+
+#### Scenario: An acknowledged conflict is not escalated again
+
+- **GIVEN** an escalated conflict `(feat-x, feat-y, src/a.rs)` that has been acknowledged
+- **WHEN** subsequent detector ticks run while both agents still touch the file, including across commits
+- **THEN** no further `agent.question` SHALL be emitted for that pair and file
+- **AND** the overlap SHALL remain present in the in-flight tracker
+
+#### Scenario: A materially changed conflict escalates again despite acknowledgement
+
+- **GIVEN** an acknowledged conflict `(feat-x, feat-y, src/a.rs)`
+- **WHEN** the agents' region declarations for `src/a.rs` materially change
+- **THEN** the acknowledgement SHALL be invalidated
+- **AND** a further `agent.question` MAY be emitted for the changed conflict
+
+#### Scenario: Widening to a file-level claim re-escalates an additive downgrade
+
+- **GIVEN** an in-flight triple `(feat-x, feat-y, src/a.rs)` that was downgraded as additive because both agents declared disjoint regions
+- **WHEN** `feat-y` re-publishes `agent.intent` declaring `src/a.rs` at file level (no regions)
+- **THEN** the prior decision SHALL be invalidated as a material change
+- **AND** exactly one `agent.question` SHALL be emitted for the triple on the next tick
+
+#### Scenario: Widening to a file-level claim re-escalates an acknowledged conflict
+
+- **GIVEN** an acknowledged conflict `(feat-x, feat-y, src/auth.rs)` in which both agents had declared a named region
+- **WHEN** `feat-y` re-publishes `agent.intent` declaring `src/auth.rs` at file level
+- **THEN** the acknowledgement SHALL be invalidated
+- **AND** exactly one `agent.question` SHALL be emitted for the triple on the next tick
+
+#### Scenario: An expiring intent does not re-open a settled conflict
+
+- **GIVEN** an escalated conflict `(feat-x, feat-y, src/a.rs)` whose agents had both declared regions
+- **WHEN** both agents' intents expire while they keep reporting `src/a.rs`
+- **THEN** no further `agent.question` SHALL be emitted — an absence of declarations is not a change to them
+
+#### Scenario: An early acknowledgement still warns both agents
+
+- **GIVEN** an acknowledgement recorded for `(feat-x, feat-y, src/a.rs)` before either agent reports the file
+- **WHEN** both agents subsequently report `src/a.rs` in their `modified_files`
+- **THEN** both SHALL receive the initial `[conflict-detector] in-flight conflict` `agent.feedback`
+- **AND** no `agent.question` SHALL be emitted for the pair and file once the window elapses
+
+#### Scenario: An acknowledgement not sent by the supervisor is ignored
+
+- **GIVEN** an unescalated in-flight overlap `(feat-x, feat-y, src/a.rs)`
+- **WHEN** an `agent.feedback` carrying the `[conflict-ack]` form is published with `from = "feat-x"`
+- **THEN** the detector SHALL NOT record an acknowledgement
+- **AND** the overlap SHALL still escalate once the window elapses
 
 #### Scenario: Additive overlap is downgraded, not escalated to the human
 

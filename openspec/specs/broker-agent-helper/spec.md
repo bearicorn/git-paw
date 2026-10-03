@@ -483,3 +483,52 @@ The `sweep.sh approve <pane>` subcommand SHALL refuse to send keystrokes when th
 - **THEN** it SHALL send NO keystrokes to pane 0
 - **AND** it SHALL report that pane 0 is excluded from blind send-keys
 
+### Requirement: Conflict-acknowledgement wire form and `sweep.sh conflict-ack`
+
+An orchestrator SHALL be able to record that it has adjudicated an in-flight conflict, and SHALL be able to do so without hand-rolling a raw `curl …/publish` call.
+
+The acknowledgement SHALL ride on the existing `agent.feedback` message rather than a new `BrokerMessage` variant. Its wire form is an `errors` entry of exactly:
+
+```
+[conflict-ack] <agent_a> <agent_b> <file>
+```
+
+`<agent_a>` and `<agent_b>` are the two agents' slugified ids (which never contain whitespace) and `<file>` is the contested path, which MAY contain whitespace and therefore runs to the END of that `errors` entry. The entry SHALL carry nothing after the path, so any human-readable prose SHALL be a SEPARATE `errors` entry. An `errors` entry that does not begin with the `[conflict-ack]` token, or that is missing any of the three fields, SHALL NOT be treated as an acknowledgement.
+
+The acknowledgement SHALL be honoured only when the carrying `agent.feedback` has `from = "supervisor"`. This filter stops an agent's ordinary feedback from being mistaken for an adjudication. It is NOT an authentication boundary: the broker does not authenticate senders and `from` is self-asserted, so a deliberately forged acknowledgement is possible. A helper-published acknowledgement reaches BOTH named agents; EVERY acknowledgement, however it was published, is retained in the broker message log — the detector honours one whatever its envelope `agent_id` — so a forgery is auditable after the fact. Sender authentication is out of scope for this capability.
+
+The supervisor-side `sweep.sh` helper SHALL expose a `conflict-ack <agent-a> <agent-b> <file> [note…]` subcommand that shapes and publishes this message to BOTH named agents with `from = "supervisor"`. When no `note` is supplied the helper SHALL supply a default human-readable one naming the file and stating that there is nothing for the recipient to fix — agents are taught that `agent.feedback` `errors` are problems to fix, so a bare tag line would read as a cryptic error. A missing `<agent-a>`, `<agent-b>`, or `<file>` SHALL be rejected (non-zero exit, usage diagnostic on stderr) and SHALL publish nothing.
+
+The bundled coordination guidance SHALL tell agents that a `[conflict-ack]` `errors` entry is informational: nothing to fix, no re-published `agent.artifact`, and no pausing of edits on that file.
+
+#### Scenario: The helper publishes a parseable acknowledgement to both agents
+
+- **GIVEN** a running broker
+- **WHEN** `sweep.sh conflict-ack feat-x feat-y src/a.rs` runs
+- **THEN** exactly two `agent.feedback` messages SHALL be published, one addressed to `feat-x` and one to `feat-y`
+- **AND** each SHALL carry `from = "supervisor"` and a first `errors` entry equal to `[conflict-ack] feat-x feat-y src/a.rs`
+
+#### Scenario: A note rides as a separate errors entry
+
+- **WHEN** `sweep.sh conflict-ack feat-x feat-y src/a.rs "feat-x owns this until it merges"` runs
+- **THEN** each published message SHALL carry two `errors` entries: the `[conflict-ack]` tag entry, then the note
+- **AND** the tag entry SHALL remain parseable as an acknowledgement for `(feat-x, feat-y, src/a.rs)`
+
+#### Scenario: A default note is supplied when none is given
+
+- **WHEN** `sweep.sh conflict-ack feat-x feat-y src/a.rs` runs with no note argument
+- **THEN** each published message SHALL still carry a second `errors` entry naming `src/a.rs` and stating there is nothing for the recipient to fix
+- **AND** that entry SHALL NOT itself parse as an acknowledgement
+
+#### Scenario: A missing argument is rejected without publishing
+
+- **WHEN** `sweep.sh conflict-ack feat-x feat-y` runs with no file argument
+- **THEN** the command SHALL exit non-zero with a usage diagnostic on stderr
+- **AND** no message SHALL be published
+
+#### Scenario: The coordination guidance tells agents the tag is informational
+
+- **WHEN** the bundled coordination skill is read
+- **THEN** its description of `agent.feedback` SHALL name the `[conflict-ack]` entry as an exception to "errors are problems to fix"
+- **AND** SHALL state that the agent is to do nothing in response — no fix, no re-published `agent.artifact`, and no pausing of its edits on that file
+

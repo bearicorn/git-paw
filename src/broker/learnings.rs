@@ -19,6 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{TimeZone as _, Utc};
 
+use super::conflict;
 use super::messages::{BrokerMessage, LearningPayload};
 
 /// Substring marker that conflict-detector-originated messages prepend to
@@ -570,7 +571,18 @@ impl LearningsAggregator {
             BrokerMessage::Feedback {
                 agent_id, payload, ..
             } => {
-                self.record_feedback(agent_id);
+                // A conflict acknowledgement rides on `agent.feedback` but is
+                // not corrective feedback: it tells the agents an overlap was
+                // adjudicated, with nothing for them to fix. Counting it would
+                // inflate their recovery-cycle signal with rounds they never
+                // had to make.
+                if !payload
+                    .errors
+                    .iter()
+                    .any(|e| conflict::parse_conflict_ack(e).is_some())
+                {
+                    self.record_feedback(agent_id);
+                }
                 // The forward / in-flight / ownership detectors all send
                 // `agent.feedback`; classification is keyed on text content.
                 let text = payload.errors.join(" ");
@@ -1933,6 +1945,44 @@ mod tests {
         a.observe(&verified("x"));
         assert_eq!(a.recovery_events().len(), 1);
         assert_eq!(a.recovery_events()[0].count, 3);
+    }
+
+    #[test]
+    fn observe_does_not_count_a_conflict_acknowledgement_as_feedback() {
+        // A `[conflict-ack]` feedback tells the agents an overlap was
+        // adjudicated; there is nothing to fix, so it is not a recovery
+        // cycle. Two genuine corrective rounds plus two acknowledgements
+        // must still report a count of 2.
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        a.observe(&feedback("x", &["test failed"]));
+        a.observe(&feedback("x", &["[conflict-ack] x y src/a.rs"]));
+        a.observe(&feedback(
+            "x",
+            &["[conflict-ack] x y src/b.rs", "ruled acceptable"],
+        ));
+        a.observe(&feedback("x", &["clippy failed"]));
+        a.observe(&verified("x"));
+        assert_eq!(a.recovery_events().len(), 1);
+        assert_eq!(
+            a.recovery_events()[0].count,
+            2,
+            "only the two corrective feedbacks count as recovery cycles"
+        );
+    }
+
+    #[test]
+    fn observe_counts_a_conflict_acknowledgement_only_once_it_is_corrective() {
+        // An acknowledgement on its own must not produce a recovery-cycle
+        // entry at all.
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        a.observe(&feedback("x", &["[conflict-ack] x y src/a.rs"]));
+        a.observe(&verified("x"));
+        assert!(
+            a.recovery_events().is_empty(),
+            "an acknowledgement alone is not a recovery cycle"
+        );
     }
 
     #[test]
