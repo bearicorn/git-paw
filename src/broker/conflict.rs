@@ -22,7 +22,16 @@
 //!   additive — resolve at merge") and never reaches the human. Either
 //!   decision marks the triple handled once; the triple stays tracked until
 //!   an agent stops touching the file, so the overlap is recorded, not
-//!   dropped.
+//!   dropped. The decision itself is held separately from that live view
+//!   and outlives it, so a commit — which empties `modified_files` for a
+//!   tick — cannot make an already-escalated conflict escalate a second
+//!   time or rewind its clock. An orchestrator that has adjudicated an
+//!   escalation can say so by publishing an `agent.feedback` error of the
+//!   form `[conflict-ack] <agent_a> <agent_b> <file>`, which suppresses
+//!   further `agent.question`s for that pair and file while leaving the
+//!   overlap visible. Both the decision and the acknowledgement are
+//!   invalidated if the two agents' region declarations for the file later
+//!   describe a materially different overlap.
 //! - **Ownership violation** — an agent's `modified_files` include a file
 //!   outside its own active `agent.intent` *and* inside another active
 //!   agent's intent. The violator gets `agent.feedback`. If
@@ -296,17 +305,112 @@ impl IntentRecord {
     }
 }
 
-/// State for one in-flight-conflict triple.
-#[derive(Debug, Clone)]
-struct InFlightPair {
-    /// When the triple was first observed.
-    first_seen: Instant,
-    /// Whether this triple's escalation decision has been made and acted
-    /// on — a `True` collision emitted an `agent.question`, or an
-    /// `Additive` overlap emitted a downgrade `agent.feedback`. Once set,
-    /// later ticks neither re-escalate nor re-downgrade the triple while
-    /// its region declarations are unchanged.
-    escalated: bool,
+/// Durable per-`(min_agent, max_agent, file)` record of what the detector
+/// has decided about a conflict.
+///
+/// Deliberately separate from the in-flight tracker's live overlap view: the
+/// overlap is as volatile as `modified_files` (a commit empties the set for a
+/// tick), while the decision is not — once a conflict has been escalated to a
+/// human, or adjudicated by an orchestrator, that stays true across the
+/// commit. Keeping the decision on the tracker entry made a commit discard it
+/// and the identical escalation fire again.
+#[derive(Debug, Clone, Default)]
+struct ConflictDecision {
+    /// When the overlap was first observed in the live view. Lives here
+    /// rather than on the live view itself so a transient empty
+    /// `modified_files` cannot rewind the escalation clock.
+    ///
+    /// `None` while no overlap has been observed yet — a record can exist
+    /// before that, because an orchestrator may acknowledge a conflict it
+    /// anticipates. The window is measured from the first real sighting, not
+    /// from the record's creation.
+    first_seen: Option<Instant>,
+    /// Set once the two agents have been warned that they share the file.
+    /// Tracked separately from the record's existence so a pre-emptive
+    /// acknowledgement cannot swallow the initial warning.
+    warned: bool,
+    /// Set once this conflict's escalation decision has been made and acted
+    /// on — a `True` collision emitted an `agent.question`, or an `Additive`
+    /// overlap emitted a downgrade `agent.feedback`. Once set, later ticks
+    /// neither re-escalate nor re-downgrade while the declarations are
+    /// unchanged.
+    decided: Option<InFlightClass>,
+    /// Set when an orchestrator has adjudicated the conflict (see
+    /// [`ConflictTracker::acknowledge`]). While it stands, no further
+    /// `agent.question` is emitted for the pair and file.
+    acknowledged: bool,
+    /// The overlap's shape under the existing intersection rules at the
+    /// moment the decision or acknowledgement was recorded. `None` until
+    /// either happens. A materially different shape later invalidates both.
+    shape: Option<OverlapShape>,
+    /// When the triple left the live overlap view, if it is currently
+    /// absent. Drives the disposal rule (see
+    /// [`ConflictTracker::sweep_in_flight_pairs`]).
+    absent_since: Option<Instant>,
+}
+
+/// The shape of an in-flight overlap on one file, derived purely from the two
+/// agents' active-intent region declarations through the existing
+/// [`regions_intersect`] rules.
+///
+/// This single value answers both questions the detector asks about a
+/// conflict: how to classify it (additive vs true), and whether it is still
+/// the *same* conflict it decided on earlier. Defining "materially changed"
+/// as "a different shape under the same intersection rules" avoids inventing
+/// a second notion of sameness alongside the classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OverlapShape {
+    /// At least one side has no active intent for the file at all — it never
+    /// published one, or the one it published has expired.
+    ///
+    /// This is the ABSENCE of a declaration, not a declaration. It is
+    /// deliberately distinct from [`OverlapShape::FileLevel`]: an intent
+    /// lapsing must not look like the agents changing their minds, or every
+    /// settled conflict would re-open one TTL after it was settled.
+    NoIntent,
+    /// Both sides have an active intent for the file, but at least one
+    /// declares it at file level (`regions == None`) — "I am touching the
+    /// whole file".
+    ///
+    /// That IS a declaration, and a comparable one: an agent widening from a
+    /// named region to the whole file changes the overlap even though no
+    /// region set can be intersected. Disjointness still cannot be proven, so
+    /// it classifies [`InFlightClass::True`].
+    FileLevel,
+    /// Both sides declared regions for the file; carries the intersection
+    /// under [`regions_intersect`], rendered deterministically. An empty
+    /// intersection means the declared regions are disjoint.
+    Declared {
+        /// Rendered intersecting regions, sorted (empty = disjoint).
+        intersection: Vec<String>,
+    },
+}
+
+impl OverlapShape {
+    /// Classifies the overlap: `Additive` only when both sides declared
+    /// regions and those regions are disjoint, `True` otherwise.
+    fn class(&self) -> InFlightClass {
+        match self {
+            Self::Declared { intersection } if intersection.is_empty() => InFlightClass::Additive,
+            _ => InFlightClass::True,
+        }
+    }
+
+    /// Returns `true` when `self` (the shape observed now) is a *material*
+    /// change from `recorded` (the shape when the decision or
+    /// acknowledgement was made).
+    ///
+    /// A [`OverlapShape::NoIntent`] observation is never a material change:
+    /// the declarations are absent — an intent expired, say — not changed.
+    /// Every other difference counts, including a side widening from regions
+    /// to a whole-file claim ([`OverlapShape::FileLevel`]), which is how an
+    /// overlap the detector downgraded as additive turns into a true
+    /// collision that has never been put to a human. The design leans toward
+    /// invalidating: a spurious re-escalation costs a turn, a missed one can
+    /// cost a merge.
+    fn materially_differs_from(&self, recorded: &Self) -> bool {
+        !matches!(self, Self::NoIntent) && self != recorded
+    }
 }
 
 /// Classification of a due in-flight overlap on a shared file, derived from
@@ -329,43 +433,42 @@ pub enum InFlightClass {
     Additive,
 }
 
-/// Classifies an in-flight overlap on `file` between agents `a` and `b`
-/// using their active-intent region declarations.
+/// Computes the [`OverlapShape`] of an in-flight overlap on `file` between
+/// agents `a` and `b` from their active-intent region declarations.
 ///
-/// Returns [`InFlightClass::Additive`] only when BOTH agents have an active
-/// intent that declares `file` with regions AND those region sets are
-/// disjoint under [`regions_intersect`]. In every other case — either side
-/// has no active intent for `file`, either declares `file` at file level
-/// (`regions == None`), or both declared regions that intersect — it
-/// returns the conservative [`InFlightClass::True`], preserving the
+/// Returns [`OverlapShape::Declared`] only when BOTH agents have an active
+/// intent that declares `file` with regions; its intersection comes straight
+/// from [`regions_intersect`]. When both have an active intent for `file`
+/// but at least one declares it at file level (`regions == None`), the shape
+/// is [`OverlapShape::FileLevel`]. When either side has no active intent for
+/// `file` at all, it is [`OverlapShape::NoIntent`]. The latter two both
+/// classify as the conservative [`InFlightClass::True`], preserving the
 /// pre-region always-escalate behaviour whenever disjointness cannot be
-/// proven.
+/// proven; they differ only in whether a later change counts as material.
 ///
 /// Takes `intents` by reference (rather than being a `&self` method) so it
-/// can be called while `in_flight_pairs` is mutably borrowed inside
+/// can be called while the decision map is mutably borrowed inside
 /// [`ConflictTracker::take_due_escalations`].
-fn classify_in_flight(
+fn overlap_shape(
     intents: &HashMap<String, IntentRecord>,
     a: &str,
     b: &str,
     file: &str,
-) -> InFlightClass {
+) -> OverlapShape {
     let a_regions = intents.get(a).and_then(|r| r.files.get(file));
     let b_regions = intents.get(b).and_then(|r| r.files.get(file));
     match (a_regions, b_regions) {
-        // Both agents declared regions for the file: additive only if the
-        // region sets do not intersect.
         (Some(Some(ra)), Some(Some(rb))) => {
             let (hits, _cross_kind) = regions_intersect(ra, rb);
-            if hits.is_empty() {
-                InFlightClass::Additive
-            } else {
-                InFlightClass::True
+            OverlapShape::Declared {
+                intersection: hits.iter().map(Region::to_string).collect(),
             }
         }
-        // A side has no active intent for the file, or declares it at file
-        // level (`None`): cannot prove disjointness → conservative escalate.
-        _ => InFlightClass::True,
+        // Both have an active intent for the file, at least one at file
+        // level: a declaration the detector can compare against later.
+        (Some(_), Some(_)) => OverlapShape::FileLevel,
+        // A side has no active intent for the file: nothing to compare.
+        _ => OverlapShape::NoIntent,
     }
 }
 
@@ -413,13 +516,20 @@ fn ordered_pair(a: &str, b: &str) -> (String, String) {
 }
 
 /// In-memory tracker for the detector. Owns the active-intent map, the
-/// per-agent current-files map, and dedup sets for warnings.
+/// per-agent current-files map, dedup sets for warnings, the live in-flight
+/// overlap view, and the durable conflict-decision map.
+///
+/// The live view (`in_flight_pairs`) and the decision map (`decisions`) are
+/// deliberately separate: the first answers "which overlaps exist right
+/// now", the second "what has already been decided about this pair and
+/// file". Removing a triple from the live view never discards its decision.
 #[derive(Debug, Default)]
 pub struct ConflictTracker {
     intents: HashMap<String, IntentRecord>,
     current_files: HashMap<String, HashSet<String>>,
     warned_intent_pairs: HashSet<(String, String)>,
-    in_flight_pairs: HashMap<(String, String, String), InFlightPair>,
+    in_flight_pairs: HashSet<(String, String, String)>,
+    decisions: HashMap<(String, String, String), ConflictDecision>,
     warned_violations: HashSet<(String, String)>,
 }
 
@@ -509,22 +619,39 @@ impl ConflictTracker {
     }
 
     /// Removes in-flight triples whose file is no longer in the
-    /// intersection of both agents' current modified-file sets.
-    pub fn sweep_in_flight_pairs(&mut self) {
-        let keys: Vec<(String, String, String)> = self.in_flight_pairs.keys().cloned().collect();
-        for (a, b, file) in keys {
-            let a_has = self
-                .current_files
-                .get(&a)
-                .is_some_and(|files| files.contains(&file));
-            let b_has = self
-                .current_files
-                .get(&b)
-                .is_some_and(|files| files.contains(&file));
-            if !(a_has && b_has) {
-                self.in_flight_pairs.remove(&(a, b, file));
+    /// intersection of both agents' current modified-file sets, then applies
+    /// the disposal rule to the durable decision records.
+    ///
+    /// Removal affects only the live-overlap view. A decision record whose
+    /// triple has left that view is kept — a commit empties `modified_files`
+    /// for a tick or two, and discarding the decision there is exactly what
+    /// let an adjudicated conflict re-escalate. The record is disposed of
+    /// only once its triple has been continuously absent for `retention`,
+    /// which is the detector's definition of "the conflict is genuinely
+    /// over"; a triple that reappears before then clears its absence and
+    /// keeps both its decision and its `first_seen` clock. This bounds the
+    /// decision map to the overlaps seen within the last `retention`,
+    /// rather than letting it grow for the session's life.
+    pub fn sweep_in_flight_pairs(&mut self, now: Instant, retention: Duration) {
+        let current_files = &self.current_files;
+        self.in_flight_pairs.retain(|(a, b, file)| {
+            let a_has = current_files.get(a).is_some_and(|f| f.contains(file));
+            let b_has = current_files.get(b).is_some_and(|f| f.contains(file));
+            a_has && b_has
+        });
+        let live = &self.in_flight_pairs;
+        for (key, record) in &mut self.decisions {
+            if live.contains(key) {
+                record.absent_since = None;
+            } else if record.absent_since.is_none() {
+                record.absent_since = Some(now);
             }
         }
+        self.decisions.retain(|_, record| {
+            record
+                .absent_since
+                .is_none_or(|since| now.saturating_duration_since(since) < retention)
+        });
     }
 
     // ====================================================================
@@ -695,48 +822,118 @@ impl ConflictTracker {
         self.warned_intent_pairs.insert(ordered_pair(a, b));
     }
 
-    /// Inserts an initial entry for the in-flight triple `(min(a, b),
-    /// max(a, b), file)` if not already present. Returns `true` if the
-    /// entry was newly created (i.e. this is the initial warning).
+    /// Records the in-flight triple `(min(a, b), max(a, b), file)` in the
+    /// live-overlap view and ensures a durable decision record exists for
+    /// it. Returns `true` only if the two agents have not yet been warned
+    /// about this pair and file — i.e. this is the initial warning.
+    ///
+    /// A triple that re-enters the live view after a commit emptied an
+    /// agent's `modified_files` finds its decision record still present, so
+    /// it is not re-warned and its `first_seen` clock is not rewound.
+    /// Conversely a record that exists only because the conflict was
+    /// acknowledged ahead of time has not been warned, so the agents still
+    /// get told they share the file.
     pub fn record_in_flight_pair(&mut self, a: &str, b: &str, file: &str, now: Instant) -> bool {
         let (lo, hi) = ordered_pair(a, b);
         let key = (lo, hi, file.to_string());
-        if let std::collections::hash_map::Entry::Vacant(slot) = self.in_flight_pairs.entry(key) {
-            slot.insert(InFlightPair {
-                first_seen: now,
-                escalated: false,
-            });
-            true
-        } else {
+        self.in_flight_pairs.insert(key.clone());
+        let record = self.decisions.entry(key).or_default();
+        record.absent_since = None;
+        if record.first_seen.is_none() {
+            record.first_seen = Some(now);
+        }
+        if record.warned {
             false
+        } else {
+            record.warned = true;
+            true
         }
     }
 
-    /// Returns and marks-decided every in-flight triple whose age exceeds
-    /// `window` and whose escalation decision has not yet been made. Each
-    /// returned triple is paired with its additive-vs-true classification
-    /// (computed from the two agents' declared regions via
-    /// [`classify_in_flight`]) so the caller can act — escalate a `True`
-    /// collision, downgrade an `Additive` overlap — without a second
-    /// lookup. Taking a triple marks it decided (via the `escalated` flag),
-    /// so each triple is returned at most once across the tracker's
-    /// lifetime while its region declarations are unchanged.
+    /// Records that an orchestrator has adjudicated the conflict on `file`
+    /// between `a` and `b`.
+    ///
+    /// While the acknowledgement stands, [`take_due_escalations`] skips the
+    /// pair and file entirely, so no further `agent.question` is emitted for
+    /// it. The acknowledgement does NOT remove the overlap from the live
+    /// in-flight view — acknowledging suppresses the *question*, not the
+    /// *fact*, so the detector keeps tracking the conflict and a later
+    /// material change can still re-escalate it.
+    ///
+    /// The overlap's current shape is recorded alongside the
+    /// acknowledgement; if the two agents' region declarations for `file`
+    /// later yield a materially different shape, the acknowledgement is
+    /// invalidated and the changed conflict may escalate again.
+    ///
+    /// An acknowledgement that arrives before the overlap does creates the
+    /// record but does NOT mark it warned or start its clock: the two agents
+    /// are still told they share the file when they actually do, and the
+    /// escalation window is still measured from that first sighting.
+    ///
+    /// [`take_due_escalations`]: ConflictTracker::take_due_escalations
+    pub fn acknowledge(&mut self, a: &str, b: &str, file: &str) {
+        let (lo, hi) = ordered_pair(a, b);
+        let shape = overlap_shape(&self.intents, &lo, &hi, file);
+        let record = self
+            .decisions
+            .entry((lo, hi, file.to_string()))
+            .or_default();
+        record.acknowledged = true;
+        record.shape = Some(shape);
+    }
+
+    /// Returns and marks-decided every live in-flight triple whose age
+    /// exceeds `window` and whose escalation decision has not yet been made.
+    /// Each returned triple is paired with its additive-vs-true
+    /// classification (computed from the two agents' declared regions) so
+    /// the caller can act — escalate a `True` collision, downgrade an
+    /// `Additive` overlap — without a second lookup.
+    ///
+    /// The decision is recorded durably, keyed on the pair and file rather
+    /// than on the triple's residency in the live view, so each conflict is
+    /// returned at most once no matter how many times a commit empties an
+    /// agent's `modified_files` in between.
+    ///
+    /// Two things suppress a triple: a decision already made, and a standing
+    /// acknowledgement. Both are invalidated first if the agents' region
+    /// declarations for the file now yield a materially different
+    /// [`OverlapShape`], letting a conflict that genuinely changed shape be
+    /// decided afresh.
     pub fn take_due_escalations(
         &mut self,
         window: Duration,
         now: Instant,
     ) -> Vec<(String, String, String, InFlightClass)> {
         let mut out = Vec::new();
-        for (key, pair) in &mut self.in_flight_pairs {
-            if pair.escalated {
+        let intents = &self.intents;
+        for key in &self.in_flight_pairs {
+            let (a, b, file) = key;
+            let Some(record) = self.decisions.get_mut(key) else {
+                continue;
+            };
+            let shape = overlap_shape(intents, a, b, file);
+            if record
+                .shape
+                .as_ref()
+                .is_some_and(|recorded| shape.materially_differs_from(recorded))
+            {
+                record.decided = None;
+                record.acknowledged = false;
+                record.shape = None;
+            }
+            if record.acknowledged || record.decided.is_some() {
                 continue;
             }
-            if now.saturating_duration_since(pair.first_seen) >= window {
-                pair.escalated = true;
-                let (a, b, file) = key;
-                let class = classify_in_flight(&self.intents, a, b, file);
-                out.push((a.clone(), b.clone(), file.clone(), class));
+            let Some(first_seen) = record.first_seen else {
+                continue;
+            };
+            if now.saturating_duration_since(first_seen) < window {
+                continue;
             }
+            let class = shape.class();
+            record.decided = Some(class);
+            record.shape = Some(shape);
+            out.push((a.clone(), b.clone(), file.clone(), class));
         }
         out.sort();
         out
@@ -773,10 +970,32 @@ impl ConflictTracker {
         self.current_files.get(agent_id)
     }
 
-    /// Returns the number of in-flight triples currently tracked.
+    /// Returns the number of in-flight triples currently in the live
+    /// overlap view.
     #[must_use]
     pub fn in_flight_pair_count(&self) -> usize {
         self.in_flight_pairs.len()
+    }
+
+    /// Returns `true` when the live overlap view currently contains the
+    /// triple `(min(a, b), max(a, b), file)`.
+    #[must_use]
+    pub fn has_in_flight_pair(&self, a: &str, b: &str, file: &str) -> bool {
+        let (lo, hi) = ordered_pair(a, b);
+        self.in_flight_pairs.contains(&(lo, hi, file.to_string()))
+    }
+
+    /// Returns the number of durable conflict-decision records retained.
+    ///
+    /// Decision records outlive the live overlap view by design, so this is
+    /// normally at least [`in_flight_pair_count`]; the disposal rule in
+    /// [`sweep_in_flight_pairs`] keeps it bounded.
+    ///
+    /// [`in_flight_pair_count`]: ConflictTracker::in_flight_pair_count
+    /// [`sweep_in_flight_pairs`]: ConflictTracker::sweep_in_flight_pairs
+    #[must_use]
+    pub fn decision_record_count(&self) -> usize {
+        self.decisions.len()
     }
 }
 
@@ -862,6 +1081,40 @@ fn additive_downgrade_feedback(a: &str, b: &str, file: &str) -> String {
     )
 }
 
+/// Token that marks an `agent.feedback` error string as a conflict
+/// acknowledgement rather than ordinary feedback.
+///
+/// Acknowledgement rides on `agent.feedback` rather than a new
+/// `BrokerMessage` variant: publishing feedback to both agents is already
+/// what an orchestrator does after adjudicating an escalation, and adding a
+/// variant would ripple into every exhaustive match listed in AGENTS.md §7
+/// for no behavioural gain. The detector never emits this token itself, so
+/// recognising it cannot feed back into the detector.
+pub const CONFLICT_ACK_TAG: &str = "[conflict-ack]";
+
+/// Parses a conflict acknowledgement out of one `agent.feedback` error
+/// string, returning the `(agent_a, agent_b, file)` it adjudicates.
+///
+/// The expected form is `[conflict-ack] <agent_a> <agent_b> <file>`. Agent
+/// ids are slugified and so never contain whitespace; the remainder of the
+/// line is the file path, which may. Anything after the path (free-form
+/// prose the orchestrator adds) is NOT supported — the path runs to the end
+/// of the string, so the acknowledgement must be its own error entry.
+/// Returns `None` for any string that is not an acknowledgement or is
+/// missing a field.
+#[must_use]
+pub fn parse_conflict_ack(text: &str) -> Option<(String, String, String)> {
+    let rest = text.trim().strip_prefix(CONFLICT_ACK_TAG)?;
+    let mut parts = rest.trim_start().splitn(3, char::is_whitespace);
+    let a = parts.next()?.trim();
+    let b = parts.next()?.trim();
+    let file = parts.next()?.trim();
+    if a.is_empty() || b.is_empty() || file.is_empty() {
+        return None;
+    }
+    Some((a.to_string(), b.to_string(), file.to_string()))
+}
+
 /// Builds the ownership-violation escalation question text.
 fn ownership_escalation_question(violator: &str, file: &str, owner: &str) -> String {
     format!(
@@ -910,6 +1163,40 @@ pub fn process_message(
     config: &ConflictConfig,
     now: Instant,
 ) -> usize {
+    // Drop expired intents up front so neither the acknowledgement's shape
+    // snapshot nor either overlap check sees them.
+    tracker.expire_stale_intents(now);
+
+    // Conflict acknowledgement — an orchestrator adjudicating an escalation.
+    // Handled before the re-entrancy guard below, which would otherwise
+    // swallow it along with the detector's own supervisor-sourced feedback.
+    // Only feedback from the supervisor is honoured. That is a filter, not
+    // an authentication boundary: the broker does not authenticate senders
+    // and `from` is self-asserted, so an agent could deliberately forge an
+    // acknowledgement for a conflict it is party to. What the filter buys
+    // is that an agent's ORDINARY feedback is never mistaken for an
+    // adjudication; what limits a forgery is that every acknowledgement
+    // stays in the broker log and so is auditable. (A helper-published one
+    // also reaches both named agents, but this path honours an
+    // acknowledgement whatever its envelope `agent_id`, so delivery to both
+    // is a property of the helper, not of the wire form.) Sender
+    // authentication is v0.18.0 broker-authority work.
+    if let BrokerMessage::Feedback { payload, .. } = msg
+        && payload.from == CONFLICT_DETECTOR_SENDER
+    {
+        let acks: Vec<(String, String, String)> = payload
+            .errors
+            .iter()
+            .filter_map(|e| parse_conflict_ack(e))
+            .collect();
+        if !acks.is_empty() {
+            for (a, b, file) in acks {
+                tracker.acknowledge(&a, &b, &file);
+            }
+            return 0;
+        }
+    }
+
     // Re-entrancy guard: ignore any message whose sender is the detector
     // itself. The detector publishes `Feedback` (from supervisor) and
     // `Question` (agent_id = supervisor), neither of which it should
@@ -925,8 +1212,6 @@ pub fn process_message(
     }
 
     let mut emitted = 0usize;
-    // Drop expired intents up front so neither overlap check sees them.
-    tracker.expire_stale_intents(now);
 
     match msg {
         BrokerMessage::Intent { agent_id, payload } => {
@@ -982,8 +1267,9 @@ pub fn process_message(
 
             // 2. In-flight resolution — drop any triple whose file
             //    intersection no longer includes the file (one agent
-            //    stopped touching it).
-            tracker.sweep_in_flight_pairs();
+            //    stopped touching it) from the live view, and dispose of
+            //    decision records whose conflict is genuinely over.
+            tracker.sweep_in_flight_pairs(now, decision_retention(config));
 
             // 3. Ownership violations for X.
             for (file, owner) in tracker.ownership_violations(agent_id) {
@@ -1008,12 +1294,29 @@ pub fn process_message(
     emitted
 }
 
+/// Floor on how long a conflict-decision record outlives the disappearance
+/// of its overlap from the live view.
+///
+/// A commit empties an agent's `modified_files` for a tick or two, so the
+/// retention must comfortably exceed that blip. The escalation window is the
+/// natural scale for "how long before we call this conflict settled", but it
+/// is configurable down to a few seconds, so this floor keeps a short window
+/// from reintroducing the commit-blip defect.
+pub const DECISION_RECORD_MIN_RETENTION: Duration = Duration::from_secs(60);
+
+/// How long a conflict-decision record is retained after its triple leaves
+/// the live overlap view — the escalation window, floored at
+/// [`DECISION_RECORD_MIN_RETENTION`].
+fn decision_retention(config: &ConflictConfig) -> Duration {
+    Duration::from_secs(config.window_seconds).max(DECISION_RECORD_MIN_RETENTION)
+}
+
 /// Run a single tick of the periodic timer-driven detector logic:
 /// expire stale intents, sweep resolved in-flight pairs, then act on any
 /// escalation decisions whose window has elapsed.
 ///
 /// Each due triple is classified additive-vs-true from the two agents'
-/// declared regions (see [`classify_in_flight`]). A `True` collision
+/// declared regions (see [`overlap_shape`]). A `True` collision
 /// escalates to the supervisor inbox via `agent.question`; an `Additive`
 /// overlap downgrades to a single informational `agent.feedback` delivered
 /// to both agents and NO `agent.question`. Both branches mark the triple
@@ -1030,7 +1333,7 @@ pub fn tick(
     now: Instant,
 ) -> usize {
     tracker.expire_stale_intents(now);
-    tracker.sweep_in_flight_pairs();
+    tracker.sweep_in_flight_pairs(now, decision_retention(config));
     let window = Duration::from_secs(config.window_seconds);
     let mut emitted = 0usize;
     for (a, b, file, class) in tracker.take_due_escalations(window, now) {
@@ -1434,13 +1737,70 @@ mod tests {
     fn tracker_record_in_flight_pair_returns_true_only_first_time() {
         let mut t = fresh();
         let now = Instant::now();
+        let retention = Duration::from_secs(60);
         assert!(t.record_in_flight_pair("feat-x", "feat-y", "src/a.rs", now));
         assert!(!t.record_in_flight_pair("feat-y", "feat-x", "src/a.rs", now));
-        // Sweep removes triples whose file is no longer in the intersection.
+        // Sweep removes triples whose file is no longer in the intersection
+        // from the LIVE view, but the decision record survives, so a
+        // re-appearance is not treated as a brand-new conflict.
         t.update_status("feat-x", files(&["src/b.rs"]));
         t.update_status("feat-y", files(&["src/a.rs"]));
-        t.sweep_in_flight_pairs();
+        t.sweep_in_flight_pairs(now, retention);
+        assert_eq!(t.in_flight_pair_count(), 0);
+        assert!(!t.record_in_flight_pair("feat-x", "feat-y", "src/a.rs", now));
+    }
+
+    #[test]
+    fn tracker_discards_decision_record_once_conflict_is_genuinely_over() {
+        let mut t = fresh();
+        let now = Instant::now();
+        let retention = Duration::from_secs(60);
+        t.update_status("feat-x", files(&["src/a.rs"]));
+        t.update_status("feat-y", files(&["src/a.rs"]));
         assert!(t.record_in_flight_pair("feat-x", "feat-y", "src/a.rs", now));
+        assert_eq!(t.decision_record_count(), 1);
+        // X stops touching the file and never comes back.
+        t.update_status("feat-x", files(&["src/b.rs"]));
+        t.sweep_in_flight_pairs(now, retention);
+        assert_eq!(
+            t.decision_record_count(),
+            1,
+            "a just-vacated conflict is still within its retention"
+        );
+        t.sweep_in_flight_pairs(now + retention + Duration::from_secs(1), retention);
+        assert_eq!(
+            t.decision_record_count(),
+            0,
+            "decision records do not accumulate for the session's life"
+        );
+        // With the record gone, the same overlap is a brand-new conflict.
+        t.update_status("feat-x", files(&["src/a.rs"]));
+        assert!(t.record_in_flight_pair(
+            "feat-x",
+            "feat-y",
+            "src/a.rs",
+            now + retention + Duration::from_secs(2)
+        ));
+    }
+
+    #[test]
+    fn tracker_reappearing_triple_keeps_its_decision_record() {
+        let mut t = fresh();
+        let now = Instant::now();
+        let retention = Duration::from_secs(60);
+        t.update_status("feat-x", files(&["src/a.rs"]));
+        t.update_status("feat-y", files(&["src/a.rs"]));
+        t.record_in_flight_pair("feat-x", "feat-y", "src/a.rs", now);
+        // A commit empties X's set for a tick, then the file is back.
+        t.update_status("feat-x", files(&[]));
+        t.sweep_in_flight_pairs(now + Duration::from_secs(2), retention);
+        t.update_status("feat-x", files(&["src/a.rs"]));
+        t.record_in_flight_pair("feat-x", "feat-y", "src/a.rs", now + Duration::from_secs(4));
+        // Sweeping long after the blip must not dispose of the record: the
+        // triple is live again, so its absence clock was cleared.
+        t.sweep_in_flight_pairs(now + retention + Duration::from_secs(10), retention);
+        assert_eq!(t.decision_record_count(), 1);
+        assert!(t.has_in_flight_pair("feat-x", "feat-y", "src/a.rs"));
     }
 
     #[test]
@@ -2948,5 +3308,407 @@ mod tests {
         assert_eq!(tick(&state, &mut t, &cfg, due), 1);
         assert_eq!(supervisor_questions(&state).len(), 1);
         assert!(additive_downgrade_feedbacks(&state, "feat-x").is_empty());
+    }
+
+    // ====================================================================
+    // Escalation persistence across commits, and acknowledgement
+    // ====================================================================
+
+    /// An orchestrator's acknowledgement, carried on `agent.feedback` from
+    /// the supervisor.
+    fn ack_msg(target: &str, a: &str, b: &str, file: &str) -> BrokerMessage {
+        BrokerMessage::Feedback {
+            agent_id: target.to_string(),
+            payload: FeedbackPayload {
+                from: CONFLICT_DETECTOR_SENDER.to_string(),
+                errors: vec![format!("{CONFLICT_ACK_TAG} {a} {b} {file}")],
+            },
+        }
+    }
+
+    #[test]
+    fn parse_conflict_ack_extracts_pair_and_file() {
+        assert_eq!(
+            parse_conflict_ack("[conflict-ack] feat-x feat-y src/a.rs"),
+            Some((
+                "feat-x".to_string(),
+                "feat-y".to_string(),
+                "src/a.rs".to_string()
+            ))
+        );
+        // A path containing spaces runs to the end of the string.
+        assert_eq!(
+            parse_conflict_ack("[conflict-ack] feat-x feat-y docs/my notes.md"),
+            Some((
+                "feat-x".to_string(),
+                "feat-y".to_string(),
+                "docs/my notes.md".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_conflict_ack_rejects_non_acknowledgements() {
+        assert!(parse_conflict_ack("[conflict-detector] in-flight conflict").is_none());
+        assert!(parse_conflict_ack("[conflict-ack] feat-x feat-y").is_none());
+        assert!(parse_conflict_ack("[conflict-ack] feat-x").is_none());
+        assert!(parse_conflict_ack("[conflict-ack]").is_none());
+        assert!(parse_conflict_ack("please [conflict-ack] feat-x feat-y f").is_none());
+    }
+
+    #[test]
+    fn detector_commit_does_not_reescalate_an_already_escalated_conflict() {
+        // Spec: A commit does not re-escalate an already-escalated conflict.
+        // Reproduces the dogfood sequence — overlap, escalation, one agent
+        // publishes modified_files = [] (its commit), republishes the file,
+        // the window elapses again.
+        let (state, mut t, cfg, now) =
+            setup_in_flight(vec![block("L82")], vec![block("L82")], "src/a.rs");
+        let due = now + Duration::from_secs(10);
+        assert_eq!(tick(&state, &mut t, &cfg, due), 1);
+        assert_eq!(supervisor_questions(&state).len(), 1);
+
+        // feat-x commits: its dirty set empties, then the file is back.
+        let committed = due + Duration::from_secs(1);
+        process_message(&state, &mut t, &status_msg("feat-x", &[]), &cfg, committed);
+        let republished = committed + Duration::from_secs(2);
+        process_message(
+            &state,
+            &mut t,
+            &status_msg("feat-x", &["src/a.rs"]),
+            &cfg,
+            republished,
+        );
+
+        // Well past the window again, with both agents reporting the file.
+        let later = republished + Duration::from_secs(30);
+        assert_eq!(
+            tick(&state, &mut t, &cfg, later),
+            0,
+            "a commit must not resurrect the escalation"
+        );
+        assert_eq!(
+            supervisor_questions(&state).len(),
+            1,
+            "no further agent.question for the pair and file"
+        );
+        assert_eq!(
+            t.decision_record_count(),
+            1,
+            "the escalation record still reflects the earlier decision"
+        );
+    }
+
+    #[test]
+    fn detector_commit_does_not_reset_the_first_seen_clock() {
+        // Spec: A commit does not reset the first-seen clock. The overlap is
+        // seen at `now`; at T=2s (< window=5s) feat-x blips empty and comes
+        // back. The escalation must still fire at now + window, not at
+        // republish + window.
+        let (state, mut t, cfg, now) =
+            setup_in_flight(vec![block("L82")], vec![block("L82")], "src/a.rs");
+        let committed = now + Duration::from_secs(2);
+        process_message(&state, &mut t, &status_msg("feat-x", &[]), &cfg, committed);
+        let republished = now + Duration::from_secs(3);
+        process_message(
+            &state,
+            &mut t,
+            &status_msg("feat-x", &["src/a.rs"]),
+            &cfg,
+            republished,
+        );
+
+        // window_seconds = 5 — due relative to the ORIGINAL first sighting.
+        let due = now + Duration::from_secs(5);
+        assert_eq!(
+            tick(&state, &mut t, &cfg, due),
+            1,
+            "escalation fires at first_seen + window despite the blip"
+        );
+        assert_eq!(supervisor_questions(&state).len(), 1);
+    }
+
+    #[test]
+    fn detector_acknowledgement_suppresses_escalation_and_keeps_overlap() {
+        // Spec: An acknowledged conflict is not escalated again, and the
+        // overlap stays in the in-flight tracker.
+        let (state, mut t, cfg, now) =
+            setup_in_flight(vec![block("L82")], vec![block("L82")], "src/a.rs");
+        process_message(
+            &state,
+            &mut t,
+            &ack_msg("feat-x", "feat-x", "feat-y", "src/a.rs"),
+            &cfg,
+            now,
+        );
+        let due = now + Duration::from_secs(10);
+        assert_eq!(
+            tick(&state, &mut t, &cfg, due),
+            0,
+            "an acknowledged conflict is not put to the human"
+        );
+        assert!(supervisor_questions(&state).is_empty());
+        assert!(
+            t.has_in_flight_pair("feat-x", "feat-y", "src/a.rs"),
+            "acknowledgement suppresses the question, not the fact"
+        );
+    }
+
+    #[test]
+    fn detector_acknowledged_conflict_stays_quiet_across_commits() {
+        // Spec: ... including across commits.
+        let (state, mut t, cfg, now) =
+            setup_in_flight(vec![block("L82")], vec![block("L82")], "src/a.rs");
+        let due = now + Duration::from_secs(10);
+        assert_eq!(tick(&state, &mut t, &cfg, due), 1);
+        // The orchestrator adjudicates the escalation.
+        process_message(
+            &state,
+            &mut t,
+            &ack_msg("feat-y", "feat-y", "feat-x", "src/a.rs"),
+            &cfg,
+            due,
+        );
+        // feat-y commits and comes back.
+        let committed = due + Duration::from_secs(1);
+        process_message(&state, &mut t, &status_msg("feat-y", &[]), &cfg, committed);
+        process_message(
+            &state,
+            &mut t,
+            &status_msg("feat-y", &["src/a.rs"]),
+            &cfg,
+            committed + Duration::from_secs(2),
+        );
+        let later = committed + Duration::from_secs(30);
+        assert_eq!(tick(&state, &mut t, &cfg, later), 0);
+        assert_eq!(supervisor_questions(&state).len(), 1);
+        assert!(t.has_in_flight_pair("feat-x", "feat-y", "src/a.rs"));
+    }
+
+    #[test]
+    fn detector_early_acknowledgement_still_warns_both_agents() {
+        // An orchestrator may acknowledge a conflict it anticipates, before
+        // the two agents actually touch the file. That must suppress the
+        // escalation QUESTION only — the agents still need to be told they
+        // share the file, and the window still runs from the first real
+        // sighting.
+        let state = fresh_state();
+        let mut t = ConflictTracker::new();
+        let cfg = escalation_config();
+        delivery::publish_message(&state, &status_msg("feat-x", &[]));
+        delivery::publish_message(&state, &status_msg("feat-y", &[]));
+        let now = Instant::now();
+
+        // Acknowledged up front, before either agent reports the file.
+        process_message(
+            &state,
+            &mut t,
+            &ack_msg("feat-x", "feat-x", "feat-y", "src/a.rs"),
+            &cfg,
+            now,
+        );
+        // Now the overlap actually happens.
+        process_message(
+            &state,
+            &mut t,
+            &status_msg("feat-x", &["src/a.rs"]),
+            &cfg,
+            now,
+        );
+        process_message(
+            &state,
+            &mut t,
+            &status_msg("feat-y", &["src/a.rs"]),
+            &cfg,
+            now,
+        );
+
+        for target in ["feat-x", "feat-y"] {
+            let warnings: Vec<_> = supervisor_feedbacks_in_inbox(&state, target)
+                .into_iter()
+                .filter(|m| {
+                    matches!(
+                        m,
+                        BrokerMessage::Feedback { payload, .. }
+                            if payload.errors.iter().any(|e| e.contains("in-flight conflict"))
+                    )
+                })
+                .collect();
+            assert_eq!(
+                warnings.len(),
+                1,
+                "{target} must still be warned that the file is shared"
+            );
+        }
+        // The acknowledgement still suppresses the escalation question.
+        let due = now + Duration::from_secs(10);
+        assert_eq!(tick(&state, &mut t, &cfg, due), 0);
+        assert!(supervisor_questions(&state).is_empty());
+        assert!(t.has_in_flight_pair("feat-x", "feat-y", "src/a.rs"));
+    }
+
+    #[test]
+    fn detector_acknowledgement_from_a_peer_agent_is_ignored() {
+        // Only supervisor-sourced feedback acknowledges — an agent must not
+        // be able to silence a conflict it is party to.
+        let (state, mut t, cfg, now) =
+            setup_in_flight(vec![block("L82")], vec![block("L82")], "src/a.rs");
+        let forged = BrokerMessage::Feedback {
+            agent_id: "feat-y".to_string(),
+            payload: FeedbackPayload {
+                from: "feat-x".to_string(),
+                errors: vec![format!("{CONFLICT_ACK_TAG} feat-x feat-y src/a.rs")],
+            },
+        };
+        process_message(&state, &mut t, &forged, &cfg, now);
+        let due = now + Duration::from_secs(10);
+        assert_eq!(
+            tick(&state, &mut t, &cfg, due),
+            1,
+            "a peer-sourced acknowledgement must not suppress the escalation"
+        );
+        assert_eq!(supervisor_questions(&state).len(), 1);
+    }
+
+    #[test]
+    fn detector_materially_changed_conflict_escalates_despite_acknowledgement() {
+        // Spec: A materially changed conflict escalates again despite
+        // acknowledgement. Start additive (disjoint ranges) and acknowledged;
+        // feat-y then re-declares a range that intersects feat-x's.
+        let (state, mut t, cfg, now) =
+            setup_in_flight(vec![range(10, 30)], vec![range(80, 120)], "src/a.rs");
+        process_message(
+            &state,
+            &mut t,
+            &ack_msg("feat-x", "feat-x", "feat-y", "src/a.rs"),
+            &cfg,
+            now,
+        );
+        let due = now + Duration::from_secs(10);
+        assert_eq!(tick(&state, &mut t, &cfg, due), 0);
+        assert!(supervisor_questions(&state).is_empty());
+
+        // feat-y moves into feat-x's range — the overlap changes shape.
+        process_message(
+            &state,
+            &mut t,
+            &intent_msg_with_regions("feat-y", &[("src/a.rs", vec![range(15, 25)])], "y", 600),
+            &cfg,
+            due,
+        );
+        let after = due + Duration::from_secs(1);
+        assert_eq!(
+            tick(&state, &mut t, &cfg, after),
+            1,
+            "the acknowledgement is invalidated by a material change"
+        );
+        let q = supervisor_questions(&state);
+        assert_eq!(q.len(), 1);
+        if let BrokerMessage::Question { payload, .. } = &q[0] {
+            assert!(payload.question.contains("src/a.rs"));
+        } else {
+            panic!("expected Question");
+        }
+    }
+
+    #[test]
+    fn detector_file_level_redeclaration_reescalates_an_additive_decision() {
+        // An additive downgrade never reaches a human. If one side then
+        // widens its claim to the WHOLE file, disjointness no longer holds
+        // and the overlap becomes a true collision that has never been put
+        // to anyone — it must escalate.
+        let (state, mut t, cfg, now) =
+            setup_in_flight(vec![range(10, 30)], vec![range(80, 120)], "src/a.rs");
+        let due = now + Duration::from_secs(10);
+        assert_eq!(tick(&state, &mut t, &cfg, due), 2, "additive downgrade");
+        assert!(supervisor_questions(&state).is_empty());
+
+        // feat-y re-declares src/a.rs at file level (a bare path, no regions).
+        process_message(
+            &state,
+            &mut t,
+            &intent_msg("feat-y", &["src/a.rs"], "y widens to the whole file", 600),
+            &cfg,
+            due,
+        );
+        let after = due + Duration::from_secs(1);
+        assert_eq!(
+            tick(&state, &mut t, &cfg, after),
+            1,
+            "widening to the whole file flips additive to true"
+        );
+        let q = supervisor_questions(&state);
+        assert_eq!(q.len(), 1, "exactly one escalation question");
+        if let BrokerMessage::Question { payload, .. } = &q[0] {
+            assert!(payload.question.contains("src/a.rs"));
+        } else {
+            panic!("expected Question");
+        }
+        // And it settles again: no second question on later ticks.
+        assert_eq!(
+            tick(&state, &mut t, &cfg, after + Duration::from_secs(30)),
+            0
+        );
+        assert_eq!(supervisor_questions(&state).len(), 1);
+    }
+
+    #[test]
+    fn detector_file_level_redeclaration_reescalates_an_acknowledged_conflict() {
+        // The orchestrator adjudicated a region-scoped collision. One side
+        // then claims the whole file — a materially different conflict, so
+        // the acknowledgement no longer covers it.
+        let (state, mut t, cfg, now) = setup_in_flight(
+            vec![func("validate_token")],
+            vec![func("validate_token")],
+            "src/auth.rs",
+        );
+        process_message(
+            &state,
+            &mut t,
+            &ack_msg("feat-x", "feat-x", "feat-y", "src/auth.rs"),
+            &cfg,
+            now,
+        );
+        let due = now + Duration::from_secs(10);
+        assert_eq!(tick(&state, &mut t, &cfg, due), 0, "acknowledged — quiet");
+        assert!(supervisor_questions(&state).is_empty());
+
+        process_message(
+            &state,
+            &mut t,
+            &intent_msg("feat-y", &["src/auth.rs"], "y takes the whole file", 600),
+            &cfg,
+            due,
+        );
+        let after = due + Duration::from_secs(1);
+        assert_eq!(
+            tick(&state, &mut t, &cfg, after),
+            1,
+            "the acknowledgement does not cover the widened conflict"
+        );
+        assert_eq!(supervisor_questions(&state).len(), 1);
+    }
+
+    #[test]
+    fn detector_expiring_intents_do_not_invalidate_a_decision() {
+        // An intent lapsing is an ABSENCE of declarations, not a change to
+        // them — it must not re-open a settled conflict (otherwise every
+        // acknowledged conflict re-escalates one TTL later).
+        let (state, mut t, cfg, now) =
+            setup_in_flight(vec![block("L82")], vec![block("L82")], "src/a.rs");
+        let due = now + Duration::from_secs(10);
+        assert_eq!(tick(&state, &mut t, &cfg, due), 1);
+        // Intents were published with a 600s TTL; walk past it while both
+        // agents keep reporting the file.
+        let expired = now + Duration::from_secs(700);
+        process_message(
+            &state,
+            &mut t,
+            &status_msg("feat-x", &["src/a.rs"]),
+            &cfg,
+            expired,
+        );
+        assert_eq!(tick(&state, &mut t, &cfg, expired), 0);
+        assert_eq!(supervisor_questions(&state).len(), 1);
     }
 }

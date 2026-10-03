@@ -699,3 +699,168 @@ fn unknown_region_kind_rejected_at_publish() {
     );
     assert_eq!(status, 400, "unknown region kind must be rejected with 400");
 }
+
+// =========================================================================
+// Acknowledgement round-trip: an orchestrator publishes the [conflict-ack]
+// agent.feedback over HTTP, the detector loop reads it off the broker log,
+// and the escalation question is suppressed — while both agents still get
+// their initial in-flight warning and the overlap keeps being tracked.
+// =========================================================================
+
+/// Finds the initial `[conflict-detector] in-flight conflict` warning in a
+/// poll response.
+fn in_flight_warning(resp: &serde_json::Value) -> Option<serde_json::Value> {
+    let msgs = resp["messages"].as_array()?;
+    msgs.iter()
+        .find(|m| {
+            m["type"] == "agent.feedback"
+                && m["payload"]["errors"]
+                    .as_array()
+                    .and_then(|errs| errs.first()?.as_str())
+                    .is_some_and(|s| {
+                        s.starts_with("[conflict-detector]") && s.contains("in-flight conflict")
+                    })
+        })
+        .cloned()
+}
+
+fn is_detector_question(m: &serde_json::Value) -> bool {
+    m["type"] == "agent.question"
+        && m["agent_id"] == "supervisor"
+        && m["payload"]["question"]
+            .as_str()
+            .is_some_and(|s| s.contains("[conflict-detector]"))
+}
+
+/// Finds a `[conflict-detector]` escalation question in a poll response.
+fn detector_question(resp: &serde_json::Value) -> Option<serde_json::Value> {
+    let msgs = resp["messages"].as_array()?;
+    msgs.iter().find(|m| is_detector_question(m)).cloned()
+}
+
+/// Counts the `[conflict-detector]` escalation questions sitting in the
+/// supervisor inbox. Polling is non-destructive (the helper always asks from
+/// seq 0), so this is a running total for the session, not a delta — which
+/// is exactly what "escalated at most once" needs to be measured against.
+fn detector_question_count(url: &str) -> usize {
+    let resp = poll(url, "supervisor");
+    resp["messages"].as_array().map_or(0, |msgs| {
+        msgs.iter().filter(|m| is_detector_question(m)).count()
+    })
+}
+
+#[test]
+#[serial]
+fn acknowledged_in_flight_conflict_is_not_escalated_over_http() {
+    // The window has to outlast the gap between the initial warning landing
+    // and the acknowledgement being published, or a slow run escalates
+    // before the acknowledgement is in — which would pass for the wrong
+    // reason on a fast machine and fail under full-suite load. 5s leaves
+    // room for the poll_until deadline above it.
+    let cfg = ConflictConfig {
+        window_seconds: 5,
+        ..ConflictConfig::default()
+    };
+    let (_handle, url) = spawn_test_broker(Some(&cfg));
+    register_agent(&url, "feat-xx");
+    register_agent(&url, "feat-yy");
+    drain_inbox(&url, "feat-xx");
+    drain_inbox(&url, "feat-yy");
+    drain_inbox(&url, "supervisor");
+
+    publish(
+        &url,
+        r#"{"type":"agent.status","agent_id":"feat-xx","payload":{"status":"working","modified_files":["src/a.rs"]}}"#,
+    );
+    publish(
+        &url,
+        r#"{"type":"agent.status","agent_id":"feat-yy","payload":{"status":"working","modified_files":["src/a.rs"]}}"#,
+    );
+
+    // Both agents are told they share the file.
+    assert!(
+        poll_until(&url, "feat-xx", in_flight_warning).is_some(),
+        "feat-xx in-flight warning"
+    );
+    assert!(
+        poll_until(&url, "feat-yy", in_flight_warning).is_some(),
+        "feat-yy in-flight warning"
+    );
+
+    // The orchestrator adjudicates before the window elapses — exactly the
+    // payload `sweep.sh conflict-ack` shapes.
+    publish(
+        &url,
+        r#"{"type":"agent.feedback","agent_id":"feat-xx","payload":{"from":"supervisor","errors":["[conflict-ack] feat-xx feat-yy src/a.rs","reviewed and ruled acceptable"]}}"#,
+    );
+    publish(
+        &url,
+        r#"{"type":"agent.feedback","agent_id":"feat-yy","payload":{"from":"supervisor","errors":["[conflict-ack] feat-xx feat-yy src/a.rs","reviewed and ruled acceptable"]}}"#,
+    );
+
+    // Well past the window, with both agents still reporting the file. The
+    // total wait here must exceed window_seconds measured from the first
+    // sighting, or the assertion below would hold vacuously.
+    std::thread::sleep(Duration::from_secs(6));
+    publish(
+        &url,
+        r#"{"type":"agent.status","agent_id":"feat-xx","payload":{"status":"working","modified_files":["src/a.rs"]}}"#,
+    );
+    std::thread::sleep(Duration::from_secs(2));
+
+    assert_eq!(
+        detector_question_count(&url),
+        0,
+        "an acknowledged conflict must not escalate to the supervisor inbox"
+    );
+}
+
+#[test]
+#[serial]
+fn unacknowledged_conflict_survives_a_commit_without_reescalating_over_http() {
+    let cfg = ConflictConfig {
+        window_seconds: 1,
+        ..ConflictConfig::default()
+    };
+    let (_handle, url) = spawn_test_broker(Some(&cfg));
+    register_agent(&url, "feat-xx");
+    register_agent(&url, "feat-yy");
+    drain_inbox(&url, "feat-xx");
+    drain_inbox(&url, "feat-yy");
+    drain_inbox(&url, "supervisor");
+
+    publish(
+        &url,
+        r#"{"type":"agent.status","agent_id":"feat-xx","payload":{"status":"working","modified_files":["src/a.rs"]}}"#,
+    );
+    publish(
+        &url,
+        r#"{"type":"agent.status","agent_id":"feat-yy","payload":{"status":"working","modified_files":["src/a.rs"]}}"#,
+    );
+
+    // One escalation after the window.
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        poll_until(&url, "supervisor", detector_question).is_some(),
+        "the first escalation should reach the supervisor inbox"
+    );
+    assert_eq!(detector_question_count(&url), 1);
+
+    // feat-xx commits: empty set, then the file is back.
+    publish(
+        &url,
+        r#"{"type":"agent.status","agent_id":"feat-xx","payload":{"status":"working","modified_files":[]}}"#,
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    publish(
+        &url,
+        r#"{"type":"agent.status","agent_id":"feat-xx","payload":{"status":"working","modified_files":["src/a.rs"]}}"#,
+    );
+    std::thread::sleep(Duration::from_secs(3));
+
+    assert_eq!(
+        detector_question_count(&url),
+        1,
+        "a commit must not re-escalate an already-escalated conflict"
+    );
+}

@@ -134,6 +134,12 @@ before its `agent.verified` (or before session end, if it never verified). A
 high count marks an agent that needed many correction rounds. Zero cycles is
 not recorded.
 
+Conflict acknowledgements are excluded from the count. A `[conflict-ack]`
+feedback (see [Conflict Detection](conflict-detection.md#in-flight-conflict))
+tells an agent that an overlap it was warned about has been adjudicated — it
+asks the agent for nothing, so counting it would report correction rounds
+that never happened.
+
 ### Permission patterns
 
 How often auto-approve cleared permission prompts for a given matched
