@@ -87,21 +87,21 @@ The `--no-rebase` flag MAY be combined with any other `start` flags including `-
 
 ### Requirement: Stop subcommand
 
-The `stop` subcommand SHALL accept an optional `--force` flag (boolean, defaults to `false`). When `--force` is omitted AND stdin is a TTY, `cmd_stop` SHALL render an interactive confirmation prompt describing the destructive nature of stop and pointing at `git paw pause` (soft alternative) and `git paw purge` (full reset). When `--force` is set OR stdin is not a TTY, the prompt SHALL be skipped and the stop SHALL proceed immediately.
+The `stop` subcommand SHALL take no confirmation flag and SHALL NOT prompt for confirmation. Stopping is recoverable — the worktrees, branches and session state survive, and `git paw start` recovers the session — so `stop` SHALL proceed immediately whether or not stdin is a TTY. The `stop` subcommand SHALL NOT accept a `--force` flag; passing one SHALL be rejected by argument parsing as an unexpected argument.
 
-The `long_about` help text for `stop` SHALL name all three teardown verbs (`pause`, `stop`, `purge`) with a one-line summary of each, so users can choose the right verb at `--help` time.
+The `long_about` help text for `stop` SHALL name all three teardown verbs (`pause`, `stop`, `purge`) with a one-line summary of each, so users can choose the right verb at `--help` time, and SHALL NOT describe a confirmation prompt or a `--force` flag.
 
 #### Scenario: Stop parses without flags
 
 - **GIVEN** `stop` is passed
 - **WHEN** the CLI is parsed
-- **THEN** the command SHALL be `Command::Stop { force: false }`
+- **THEN** the command SHALL be `Command::Stop`
 
-#### Scenario: Stop parses with --force
+#### Scenario: Stop rejects --force
 
 - **GIVEN** `stop --force` is passed
 - **WHEN** the CLI is parsed
-- **THEN** the command SHALL be `Command::Stop { force: true }`
+- **THEN** parsing SHALL fail with an unexpected-argument error naming `--force`
 
 #### Scenario: Stop help names all three teardown verbs
 
@@ -109,13 +109,14 @@ The `long_about` help text for `stop` SHALL name all three teardown verbs (`paus
 - **THEN** the output SHALL mention `pause` as the soft alternative
 - **AND** the output SHALL mention `purge` as the full reset
 - **AND** the output SHALL describe what `stop` itself does (kills CLI processes, preserves worktrees)
+- **AND** the output SHALL NOT mention a confirmation prompt or a `--force` flag
 
-#### Scenario: Stop with --force from a TTY skips the prompt
+#### Scenario: Stop from a TTY does not prompt
 
-- **GIVEN** an active session and `--force` is passed
-- **WHEN** `git paw stop --force` is run with stdin attached to a TTY
+- **GIVEN** an active session and stdin attached to a TTY
+- **WHEN** `git paw stop` is run
 - **THEN** no interactive prompt SHALL be rendered
-- **AND** the session SHALL be killed immediately
+- **AND** the session SHALL be stopped immediately
 
 ### Requirement: Purge subcommand with optional --force flag
 

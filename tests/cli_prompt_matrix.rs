@@ -14,6 +14,7 @@
 //! (removal at v1.0.0) is deliberately NOT exercised.
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 
 mod helpers;
 use helpers::{TmuxTestEnv, pty, setup_test_repo};
@@ -322,6 +323,31 @@ fn stop_does_not_prompt() {
         .current_dir(repo.path())
         .assert()
         .success();
+}
+
+/// stop --help: shows all three teardown verbs (pause, stop, purge), describes
+/// what stop does, and does NOT mention confirmation prompts or the `--force` flag.
+#[test]
+fn stop_help_names_three_verbs() {
+    let repo = tempfile::TempDir::new().expect("tempdir");
+    git(repo.path(), &["init", "-q"]);
+
+    Command::cargo_bin("git-paw")
+        .expect("binary")
+        .args(["stop", "--help"])
+        .current_dir(repo.path())
+        .assert()
+        .success()
+        .stdout(
+            predicates::str::contains("pause").and(
+                predicates::str::contains("purge")
+                    .and(predicates::str::contains("stop"))
+                    .and(predicates::str::contains("kills"))
+                    .and(predicates::str::contains("preserves worktrees"))
+                    .and(predicates::str::contains("prompt").not())
+                    .and(predicates::str::contains("--force").not()),
+            ),
+        );
 }
 
 /// purge `--force`: the confirmation is BYPASSED; it exits 0 without prompting.

@@ -132,7 +132,7 @@ fn run(command: Command) -> Result<(), PawError> {
             force,
         } => commands::remove::cmd_remove(&branch, keep_worktree, force),
         Command::Pause => commands::pause::cmd_pause(),
-        Command::Stop { force } => commands::stop::cmd_stop(force),
+        Command::Stop => commands::stop::cmd_stop(),
         Command::Purge {
             force,
             stale,

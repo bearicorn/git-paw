@@ -125,63 +125,23 @@ fn setup_active_session(
 }
 
 // ---------------------------------------------------------------------------
-// 10.5 stop_force_skips_prompt
+// 10.5 stop_kills_session
 // ---------------------------------------------------------------------------
 
 #[test]
 #[serial]
-fn stop_force_skips_prompt() {
+fn stop_kills_session() {
     if skip_if_no_tmux() {
         return;
     }
 
-    let (_tr, fake_home, repo, session_name, _sessions_dir) = setup_active_session("force");
+    let (_tr, fake_home, repo, session_name, _sessions_dir) = setup_active_session("stop");
 
     let out = cmd()
         .current_dir(&repo)
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
         .timeout(Duration::from_secs(10))
-        .args(["stop", "--force"])
-        .output()
-        .expect("run stop --force");
-
-    let alive_after = StdCommand::new("tmux")
-        .args(["has-session", "-t", &session_name])
-        .status()
-        .is_ok_and(|s| s.success());
-    kill_tmux_session(&session_name);
-
-    assert!(
-        out.status.success(),
-        "stop --force should exit 0. stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(!alive_after, "tmux should be killed after stop --force");
-}
-
-// ---------------------------------------------------------------------------
-// 10.6 stop_non_tty_skips_prompt (v0.4 back-compat: no --force needed
-// when stdin is not a TTY — assert_cmd's spawned child has a piped
-// stdin so this matches the non-TTY branch).
-// ---------------------------------------------------------------------------
-
-#[test]
-#[serial]
-fn stop_non_tty_skips_prompt() {
-    if skip_if_no_tmux() {
-        return;
-    }
-
-    let (_tr, fake_home, repo, session_name, _sessions_dir) = setup_active_session("notty");
-
-    let out = cmd()
-        .current_dir(&repo)
-        .env("HOME", fake_home.path())
-        .env_remove("XDG_DATA_HOME")
-        .timeout(Duration::from_secs(10))
-        // No --force: stdin is non-TTY (assert_cmd pipes it), so the
-        // prompt is bypassed.
         .args(["stop"])
         .output()
         .expect("run stop");
@@ -194,7 +154,43 @@ fn stop_non_tty_skips_prompt() {
 
     assert!(
         out.status.success(),
-        "stop (non-TTY, no --force) should exit 0. stderr: {}",
+        "stop should exit 0. stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!alive_after, "tmux should be killed after stop");
+}
+
+// ---------------------------------------------------------------------------
+// 10.6 stop_never_prompts (stop does not prompt in any context)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn stop_never_prompts() {
+    if skip_if_no_tmux() {
+        return;
+    }
+
+    let (_tr, fake_home, repo, session_name, _sessions_dir) = setup_active_session("notty");
+
+    let out = cmd()
+        .current_dir(&repo)
+        .env("HOME", fake_home.path())
+        .env_remove("XDG_DATA_HOME")
+        .timeout(Duration::from_secs(10))
+        .args(["stop"])
+        .output()
+        .expect("run stop");
+
+    let alive_after = StdCommand::new("tmux")
+        .args(["has-session", "-t", &session_name])
+        .status()
+        .is_ok_and(|s| s.success());
+    kill_tmux_session(&session_name);
+
+    assert!(
+        out.status.success(),
+        "stop should exit 0. stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(!alive_after, "tmux should be killed");

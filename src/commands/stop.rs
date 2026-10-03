@@ -8,7 +8,7 @@ use git_paw::session::{self, SessionStatus};
 use git_paw::tmux;
 
 /// Stops the session: kills tmux but preserves worktrees and state.
-pub(crate) fn cmd_stop(_force: bool) -> Result<(), PawError> {
+pub(crate) fn cmd_stop() -> Result<(), PawError> {
     let cwd = std::env::current_dir()
         .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
     let repo_root = git::validate_repo(&cwd)?;

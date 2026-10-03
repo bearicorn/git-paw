@@ -3,9 +3,7 @@
 ## Purpose
 
 The broker runtime is git-paw's in-process coordination server. This capability defines its configuration and lifecycle (the optional `[broker]` config section, the synchronous `start_broker` entry point that owns a tokio runtime and spawns the axum server plus per-worktree watcher tasks, stale-broker detection, `SO_REUSEADDR` restart, `Arc`-shared `BrokerState`, SIGINT and panic isolation, and the stable `delivery.rs` contract — with tokio confined to `src/broker/` so every other module stays synchronous); its complete HTTP surface (`POST /publish` message validation, `GET /messages/:agent_id` cursor-based inbox polling, `GET /status`, the `GET /log` replay seam, and `POST /watch` live watch-target registration); and its integration into the session lifecycle (the hidden `__dashboard` subcommand, the start/stop/pause/resume/purge flows, `GIT_PAW_BROKER_URL` injection into the tmux session, and how `git paw status` surfaces broker and paused-session state).
-
 ## Requirements
-
 ### Requirement: Broker configuration schema
 
 The system SHALL extend `.git-paw/config.toml` with a new optional `[broker]` section containing exactly three fields:
@@ -575,54 +573,30 @@ All panes in the session SHALL inherit this environment variable automatically v
 
 The `stop` flow SHALL kill the tmux session via `tmux::kill_session`. Killing the session kills every pane including the dashboard pane, which causes `run_dashboard` to exit, which drops `BrokerHandle`, which triggers graceful broker shutdown including the final log flush.
 
-The stop flow SHALL render an interactive confirmation prompt before killing the session when stdin is a TTY AND `--force` is not set. The prompt SHALL:
-
-- Name the destructive consequences (CLI processes killed, agent conversation context lost).
-- Point at `git paw pause` as the soft-stop alternative.
-- Point at `git paw purge` as the full-reset alternative.
-- Default to `n` (no) — the user SHALL confirm with `y` to proceed.
-
-When `--force` is set OR stdin is not a TTY, the prompt SHALL be skipped and the kill SHALL proceed immediately. This preserves CI / automation back-compat (non-TTY contexts behave as in v0.4) and gives scripts a `--force` opt-out for TTY contexts.
-
-When the session's recorded status is `Paused`, the confirmation prompt SHALL additionally inform the user that the session is currently paused and that continuing will kill the still-running CLI processes.
+The stop flow SHALL NOT render a confirmation prompt, in any context. Stopping is recoverable: worktrees and session state survive, and `git paw start` recovers the session. When the session's recorded status is `Paused`, stopping SHALL kill the still-running CLI processes as for any other session.
 
 #### Scenario: Stop kills tmux and broker shuts down
 
 - **GIVEN** an active session with broker enabled
-- **WHEN** `git paw stop --force` is executed
+- **WHEN** `git paw stop` is executed
 - **THEN** the tmux session SHALL be killed
 - **AND** the broker port SHALL be freed within 5 seconds
-- **AND** `broker.log` SHALL contain a final flush of all messages
+- **AND** the session's broker log SHALL contain a final flush of all messages
 
-#### Scenario: Stop from TTY without --force prompts before killing
+#### Scenario: Stop never prompts
 
-- **GIVEN** an active session and stdin attached to a TTY
-- **WHEN** `git paw stop` is executed (no `--force`)
-- **THEN** a confirmation prompt SHALL appear
-- **AND** the prompt SHALL mention `git paw pause` as the soft alternative
-- **AND** the prompt SHALL default to `no`
-
-#### Scenario: Stop from non-TTY without --force does not prompt
-
-- **GIVEN** an active session and stdin not attached to a TTY (e.g. CI)
-- **WHEN** `git paw stop` is executed (no `--force`)
+- **GIVEN** an active session, with stdin attached to a TTY or not
+- **WHEN** `git paw stop` is executed
 - **THEN** no interactive prompt SHALL be rendered
-- **AND** the stop SHALL proceed immediately (v0.4 back-compat)
+- **AND** the stop SHALL proceed immediately
 
 #### Scenario: Stop after pause kills remaining CLI panes
 
 - **GIVEN** a session with `status == Paused` and tmux still alive
-- **WHEN** `git paw stop --force` is executed
+- **WHEN** `git paw stop` is executed
 - **THEN** the tmux session SHALL be killed
 - **AND** every previously-still-running CLI process SHALL be terminated
 - **AND** the session state SHALL be `status == Stopped`
-
-#### Scenario: Stop after pause from TTY prompt mentions paused state
-
-- **GIVEN** a session with `status == Paused` and stdin attached to a TTY
-- **WHEN** `git paw stop` is executed (no `--force`)
-- **THEN** the confirmation prompt SHALL inform the user the session is currently paused
-- **AND** the prompt SHALL state that continuing will kill the still-running CLIs
 
 ### Requirement: Purge flow cleans up broker log
 
@@ -805,3 +779,4 @@ The restart-from-pause flow SHALL NOT create worktrees, SHALL NOT spawn coding-a
 - **WHEN** `git paw start` is executed
 - **THEN** `effective_status` SHALL evaluate to `Stopped`
 - **AND** the start flow SHALL run the existing cold-recovery path (fresh CLI spawn), NOT the restart-from-pause path
+
