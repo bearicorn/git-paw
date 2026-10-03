@@ -276,23 +276,19 @@ Idempotent: pausing an already-paused or already-stopped session is a friendly n
 
 Kills the tmux session and every CLI pane process, but preserves worktrees and session state on disk. CLI conversation context is lost. Run `git paw start` later to recover the session with fresh CLI processes.
 
-**v0.5.0 change:** `stop` now prompts for confirmation when stdin is a TTY. Pass `--force` to skip the prompt (scripts); non-TTY contexts (CI, pipes) bypass the prompt automatically for v0.4 back-compat.
+`stop` never prompts for confirmation. Stopping is recoverable: worktrees and session state survive, and `git paw start` recovers the session with fresh processes. Therefore, a confirmation prompt would protect nothing and is not rendered.
 
 ```
-Usage: git-paw stop [OPTIONS]
+Usage: git-paw stop
 
 Options:
-      --force  Skip confirmation prompt
-  -h, --help   Print help
+  -h, --help  Print help
 ```
 
-**Examples:**
+**Example:**
 ```bash
-git paw stop          # prompts in TTY, bypasses in non-TTY
-git paw stop --force  # always bypasses the prompt
+git paw stop
 ```
-
-When the session is currently paused, the confirmation prompt additionally warns that continuing will kill the still-running CLIs.
 
 ## `git paw purge`
 

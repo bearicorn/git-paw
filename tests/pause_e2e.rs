@@ -500,14 +500,14 @@ fn stop_after_pause_kills_remaining_panes() {
     )
     .expect("write session json");
 
-    // Stop --force: skips the prompt, kills the tmux session.
+    // Stop: kills the tmux session.
     let out = cmd()
         .current_dir(&repo)
         .env("HOME", fake_home.path())
         .env_remove("XDG_DATA_HOME")
-        .args(["stop", "--force"])
+        .args(["stop"])
         .output()
-        .expect("run stop --force");
+        .expect("run stop");
 
     let alive_after = StdCommand::new("tmux")
         .args(["has-session", "-t", &session_name])
@@ -517,13 +517,10 @@ fn stop_after_pause_kills_remaining_panes() {
 
     assert!(
         out.status.success(),
-        "stop --force should exit 0. stderr: {}",
+        "stop should exit 0. stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        !alive_after,
-        "tmux session should be gone after stop --force"
-    );
+    assert!(!alive_after, "tmux session should be gone after stop");
 
     let final_json = fs::read_to_string(sessions_dir.join(format!("{session_name}.json")))
         .expect("read final session json");

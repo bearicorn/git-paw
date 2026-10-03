@@ -382,7 +382,7 @@ impl Harness {
 
         // 9. Tear the session down.
         maybe_force_fail(step::STOP)?;
-        self.run_paw_step(step::STOP, &["stop", "--force"])?;
+        self.run_paw_step(step::STOP, &["stop"])?;
 
         Ok(())
     }

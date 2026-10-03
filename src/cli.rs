@@ -354,16 +354,9 @@ pub enum Command {
                       purge — full reset; removes worktrees and session state, and deletes \
                       only the branches git-paw created that are fully merged (branches \
                       with unmerged commits are kept)\n\n\
-                      `stop` prompts for confirmation in interactive terminals. Use \
-                      `--force` to skip the prompt (scripts) or pipe stdin from \
-                      `/dev/null` for non-interactive contexts.\n\n\
-                      Examples:\n  git paw stop\n  git paw stop --force"
+                      Examples:\n  git paw stop"
     )]
-    Stop {
-        /// Skip confirmation prompt.
-        #[arg(long, default_value_t = false, help = "Skip confirmation prompt")]
-        force: bool,
-    },
+    Stop,
 
     /// Remove all worktrees and session state; keeps branches with unmerged commits
     #[command(
@@ -1418,15 +1411,24 @@ mod tests {
 
     // -- Stop subcommand --
 
-    /// One row per `git paw stop` invocation -> the parsed `force` flag.
     #[test]
-    fn stop_force_flag_parses() {
-        for (args, expected_force) in [(vec!["stop"], false), (vec!["stop", "--force"], true)] {
-            match parse(&args).command.unwrap() {
-                Command::Stop { force } => assert_eq!(force, expected_force, "args: {args:?}"),
-                other => panic!("expected Stop, got {other:?}"),
-            }
+    fn stop_parses() {
+        match parse(&["stop"]).command.unwrap() {
+            Command::Stop => {}
+            other => panic!("expected Stop, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn stop_rejects_force_flag() {
+        let result = Cli::try_parse_from(["git-paw", "stop", "--force"]);
+        assert!(result.is_err(), "stop --force should be rejected");
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("unexpected argument '--force'"),
+            "error message: {err_msg}"
+        );
     }
 
     // -- Purge subcommand --
@@ -1576,7 +1578,7 @@ mod tests {
                     "git paw remove feat/wip --force",
                 ],
             ),
-            (&["stop", "--help"], &["pause", "purge", "--force"]),
+            (&["stop", "--help"], &["pause", "purge"]),
             (
                 &["approvals", "--help"],
                 &["--session", "--limit", "--json", "git paw approvals --json"],
