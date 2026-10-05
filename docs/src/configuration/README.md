@@ -690,6 +690,45 @@ enabled = true
 port = 9120
 ```
 
+This is required, not advisory. Before binding, git-paw probes the configured port and asks the listener which repository it serves (`GET /status` reports `repo_root`). A broker for *this* repository is reattached to; a broker for a *different* repository is refused:
+
+```
+port 9119 is held by a git-paw broker for another repository
+(/home/you/other-repo) — set a distinct [broker] port in
+.git-paw/config.toml for one of the repositories
+```
+
+Give one of the two repositories its own `port` and start again. The refusal exists because reattaching would route this repository's agents into the other repository's broker while this repository's dashboard rendered an empty, unwatched state.
+
+**The check runs before anything is created — and before you are asked anything.** `git paw start` (including `--from-specs`, the supervised launch, and session recovery) probes the port as soon as it has read your config, ahead of the branch and CLI pickers, so you are never asked to choose for a launch that cannot proceed and a refused launch leaves no session, no panes, and no session receipt behind. That ordering matters: git-paw injects `GIT_PAW_BROKER_URL` into every agent pane, so a refusal that came only when the dashboard started would already have handed your agents the other repository's broker.
+
+Recovering a stopped session probes the port recorded in the saved session rather than the configured one, because that is the URL the rebuilt agent panes are given — they can differ if you changed `[broker] port` after the session was saved. `--dry-run` creates nothing and never probes.
+
+`git paw status` and `git paw doctor` use the same repository-aware probe, so neither reports a neighbouring repository's broker as your session's own:
+
+```
+Broker:  http://127.0.0.1:9119 (held by another repository's git-paw broker)
+```
+
+```
+⚠ broker          enabled — 127.0.0.1:9119 is held by another repository's git-paw broker
+                  → set a distinct `[broker] port` in .git-paw/config.toml for one of the repositories
+```
+
+A variant of the message appears when the port holder does not report a repository at all:
+
+```
+port 9119 is held by a git-paw broker for another repository (it does not
+report which — an older git-paw broker may be holding the port) — set a
+distinct [broker] port in .git-paw/config.toml for one of the repositories
+```
+
+An unknown owner is never assumed to be yours. This is what you see when a session launched by an older git-paw is still running on the port — stop that session, or move this one to a different port.
+
+A port held by something that is not git-paw at all reports the separate `port ... is already in use by another process` error.
+
+Each session also keeps its own broker log, `<session_name>.broker.log`, so two repositories never write to — or purge — the same file. A session saved by an earlier git-paw recorded a single shared `broker.log`; that recorded path stays authoritative for both the broker and `purge` until the session is resumed or recovered, which migrates it to the per-session name.
+
 See [Agent Coordination](../user-guide/coordination.md) for usage details.
 
 ## Supervisor

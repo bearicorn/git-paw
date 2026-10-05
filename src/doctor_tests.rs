@@ -544,6 +544,7 @@ fn broker_check_grades_each_port_state() {
     for (state, expected) in [
         (PortState::Free, CheckStatus::Ok),
         (PortState::LiveBroker, CheckStatus::Ok),
+        (PortState::OtherRepo, CheckStatus::Warn),
         (PortState::Foreign, CheckStatus::Warn),
         (PortState::Unknown, CheckStatus::Warn),
     ] {
@@ -559,6 +560,45 @@ fn broker_check_grades_each_port_state() {
             "state: {state:?}"
         );
     }
+}
+
+#[test]
+fn another_repositorys_broker_is_distinguished_from_a_foreign_service() {
+    let probe_for = |state| {
+        check_broker(&BrokerProbe {
+            enabled: true,
+            bind: "127.0.0.1".into(),
+            port: 9119,
+            port_state: state,
+        })
+    };
+
+    let other_repo = probe_for(PortState::OtherRepo);
+    let other_repo = named(&other_repo, "broker");
+    assert!(
+        other_repo.detail.contains("another repository"),
+        "the detail must name the real cause; got: {}",
+        other_repo.detail
+    );
+    assert!(
+        other_repo
+            .remedy
+            .as_deref()
+            .is_some_and(|r| r.contains("[broker] port")),
+        "the remedy must be the config fix; got: {:?}",
+        other_repo.remedy
+    );
+
+    // A non-git-paw service on the port has a different cause and a
+    // different fix, so the two verdicts must not collapse into one.
+    let foreign = probe_for(PortState::Foreign);
+    let foreign = named(&foreign, "broker");
+    assert_ne!(foreign.detail, other_repo.detail);
+    assert!(
+        !foreign.detail.contains("another repository"),
+        "a foreign service is not another repository's broker; got: {}",
+        foreign.detail
+    );
 }
 
 #[test]

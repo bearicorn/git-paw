@@ -449,6 +449,8 @@ enabled = true
 port = 9120
 ```
 
+git-paw enforces this: a broker reports the repository it serves on `GET /status`, and a session that finds another repository's broker on its port is refused with an error naming that repository and telling you to set a distinct `[broker] port`. See [Multi-repo port assignment](../configuration/README.md#multi-repo-port-assignment).
+
 The default port is `9119`. The broker binds to `127.0.0.1` (localhost only) by default — the `[broker] bind` setting — and should never be exposed to the network.
 
 ## Automatic Conflict Detection (v0.5.0)
@@ -481,7 +483,7 @@ routing, and the configuration knobs.
 
 ## Audit Trail
 
-The broker appends every message to a `broker.log` file in git-paw's session-state directory (`~/Library/Application Support/git-paw/sessions/` on macOS, `$XDG_DATA_HOME/git-paw/sessions/` — default `~/.local/share/git-paw/sessions/` — on Linux), outside the repository. Each line is plain text — `[<seq>] <unix-seconds> [<agent_id>] <message summary>` — and the file is flushed every 5 seconds, giving an audit trail of agent communication. For the full JSON of every message, query the broker's `GET /log` endpoint.
+The broker appends every message to a `<session_name>.broker.log` file in git-paw's session-state directory (`~/Library/Application Support/git-paw/sessions/` on macOS, `$XDG_DATA_HOME/git-paw/sessions/` — default `~/.local/share/git-paw/sessions/` — on Linux), outside the repository. Each line is plain text — `[<seq>] <unix-seconds> [<agent_id>] <message summary>` — and the file is flushed every 5 seconds, giving an audit trail of agent communication. For the full JSON of every message, query the broker's `GET /log` endpoint.
 
 The log file is automatically cleaned up by `git paw purge`.
 

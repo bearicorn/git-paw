@@ -89,9 +89,13 @@ The function MUST be callable from synchronous Rust code without any surrounding
 Before binding, the system SHALL probe `GET <config.url()>/status` with a timeout of at most 500 milliseconds and SHALL act on the result as follows:
 
 - **No connection / connection refused** → bind and start a new broker
-- **HTTP 200 with a response body containing the marker field `"git_paw": true`** → return a `BrokerHandle` that reattaches to the existing broker without binding
+- **HTTP 200 with a response body containing the marker field `"git_paw": true` AND a `repo_root` equal to the caller's repository** → return a `BrokerHandle` that reattaches to the existing broker without binding
+- **HTTP 200 with the marker field but a different `repo_root`** → return an error stating that the port is held by another repository's git-paw broker, naming that repository and the port, and telling the user to set a distinct `[broker] port` for one of them. The system SHALL NOT reattach, because reattaching would route this repository's agents into the other repository's broker while this repository's dashboard renders an empty, unwatched state
+- **HTTP 200 with the marker field and no `repo_root`** (a broker from a git-paw version that does not report it) → treat the owner as unknown and return the same error, naming the port; the system SHALL NOT assume the broker belongs to the caller
 - **HTTP response without the marker field** → return `Err(BrokerError::PortInUse { .. })` indicating the port is occupied by a foreign process
 - **Timeout** → return `Err(BrokerError::ProbeTimeout { .. })` so the user can investigate
+
+Any local process can bind the port and answer the probe, so a reported `repo_root` is untrusted input. Before it is reproduced in an error message the system SHALL strip control characters from it and SHALL cap its length, and the probe SHALL bound how much of the response it reads.
 
 #### Scenario: Probe finds no listener and proceeds to bind
 
@@ -102,7 +106,7 @@ Before binding, the system SHALL probe `GET <config.url()>/status` with a timeou
 
 #### Scenario: Probe finds a live git-paw broker and reattaches
 
-- **GIVEN** a live git-paw broker is already running on `127.0.0.1:9119`
+- **GIVEN** a live git-paw broker for the same repository is already running on `127.0.0.1:9119`
 - **WHEN** `start_broker` is called with the same config
 - **THEN** the probe receives an HTTP 200 with `"git_paw": true` in the body
 - **AND** `start_broker` returns `Ok(BrokerHandle)` without binding a new socket
@@ -113,6 +117,27 @@ Before binding, the system SHALL probe `GET <config.url()>/status` with a timeou
 - **WHEN** `start_broker` is called with `port = 9119`
 - **THEN** the probe receives a response without the `"git_paw"` marker
 - **AND** `start_broker` returns `Err(BrokerError::PortInUse { .. })` mentioning the port
+
+#### Scenario: Another repository's broker on the port is refused
+
+- **GIVEN** a live git-paw broker for repository A on `127.0.0.1:9119`
+- **WHEN** a session for repository B calls `start_broker` with `port = 9119`
+- **THEN** it SHALL return an error naming repository A and port `9119`
+- **AND** the error SHALL tell the user to set a distinct `[broker] port`
+- **AND** no `BrokerHandle` SHALL be returned for repository B
+
+#### Scenario: A broker that does not report its repository is not assumed to be ours
+
+- **GIVEN** a live git-paw broker on the port whose `GET /status` body has no `repo_root`
+- **WHEN** `start_broker` is called
+- **THEN** it SHALL return the port-held error rather than reattaching
+
+#### Scenario: A hostile reported repository cannot reach the terminal intact
+
+- **GIVEN** a listener on the port whose `GET /status` reports a `repo_root` containing ANSI escape sequences and other control characters
+- **WHEN** the port-held error is rendered
+- **THEN** the rendered message SHALL contain no control characters
+- **AND** an over-long reported repository SHALL be truncated rather than printed in full
 
 ### Requirement: Port reuse on restart
 
@@ -356,6 +381,7 @@ The system SHALL expose `GET /status` returning the current state of the broker 
 - `version: String` — the git-paw crate version (`env!("CARGO_PKG_VERSION")`)
 - `uptime_seconds: u64` — seconds since the broker started
 - `agents: Array<AgentStatusEntry>` — the list returned by `agent_status_snapshot`
+- `repo_root: String` — the canonical path of the repository this broker serves; the stale-broker probe compares it with the caller's repository
 
 The handler MUST be safe to call concurrently. The handler MUST NOT block for more than a few milliseconds.
 
@@ -386,6 +412,12 @@ The handler MUST be safe to call concurrently. The handler MUST NOT block for mo
 - **WHEN** ten concurrent `GET /status` requests are sent
 - **THEN** all ten responses are `200`
 - **AND** all ten bodies contain `"git_paw": true`
+
+#### Scenario: Status response identifies the repository
+
+- **GIVEN** a running broker started for a repository
+- **WHEN** `GET /status` is sent
+- **THEN** the response body contains a `repo_root` field equal to that repository's canonical path
 
 ### Requirement: GET /log returns the full broker message log
 
@@ -488,7 +520,12 @@ self-published a status.
 The system SHALL handle the hidden `__dashboard` subcommand by:
 
 1. Loading `BrokerConfig` from `.git-paw/config.toml`
-2. Constructing a `BrokerState` with `log_path` set to `<session_state_dir>/broker.log`
+2. Constructing a `BrokerState` with `log_path` resolved as follows — one log per session, so two repositories never write to the same file:
+   - when the saved session records a `broker_log_path`, that path, because it is the exact path `purge` deletes and writing anywhere else would orphan a log (this is what keeps a session saved by a git-paw that used a single shared `broker.log` consistent);
+   - otherwise `<session_state_dir>/<session_name>.broker.log`;
+   - when no saved session is found at all, `<session_state_dir>/git-paw.broker.log`, which keeps the dashboard clear of any real session's log.
+
+   The `BrokerState` SHALL also carry the canonical root of the repository the broker serves, plumbed from the launch path rather than re-derived inside the broker.
 3. Calling `start_broker(config, state.clone())` to obtain a `BrokerHandle`
 4. Calling `run_dashboard(state, handle)` which blocks until the user presses `q`
 5. Returning `Ok(())` on clean exit
@@ -507,6 +544,19 @@ The subcommand SHALL refuse to run if the `$TMUX` environment variable is not se
 - **GIVEN** `$TMUX` is not set
 - **WHEN** `git paw __dashboard` is executed
 - **THEN** it returns an error mentioning "internal command" and "tmux"
+
+#### Scenario: Two repositories keep separate broker logs
+
+- **GIVEN** broker-enabled sessions for two repositories, each on its own port
+- **WHEN** both brokers record messages
+- **THEN** each SHALL write to its own `<session_name>.broker.log`
+
+#### Scenario: A session saved under the old shared log name keeps it
+
+- **GIVEN** a saved session whose `broker_log_path` is the shared `<session_state_dir>/broker.log` written by an earlier git-paw
+- **WHEN** `git paw __dashboard` starts its broker for that session
+- **THEN** the broker SHALL write to the recorded path, not to a newly-derived `<session_name>.broker.log`
+- **AND** the path the broker writes SHALL be the path `purge` deletes, so no log is orphaned
 
 ### Requirement: Start flow conditionally creates dashboard pane
 
@@ -600,27 +650,43 @@ The stop flow SHALL NOT render a confirmation prompt, in any context. Stopping i
 
 ### Requirement: Purge flow cleans up broker log
 
-The `purge` flow SHALL delete `broker.log` from the session state directory if the session state contains a `broker_log_path` field. Deletion SHALL be best-effort — missing or already-deleted log files SHALL NOT cause an error.
+The `purge` flow SHALL delete the broker log recorded in the session state's `broker_log_path` field — `<session_state_dir>/<session_name>.broker.log` for a session saved by this version — and SHALL delete no other file in the session-state directory. Deletion SHALL be best-effort: a missing or already-deleted log SHALL NOT cause an error.
 
-#### Scenario: Purge deletes broker.log
+Because the log is named per session, purging one repository's session SHALL NOT delete another session's log, including the log of a neighbouring repository's live broker. A session saved by an earlier git-paw records the shared `broker.log` name; purge SHALL delete whatever path that session actually recorded.
 
-- **GIVEN** an active session with broker enabled and a `broker.log` file
+#### Scenario: Purge deletes the session's broker log
+
+- **GIVEN** an active session with broker enabled and a `<session_name>.broker.log` file
 - **WHEN** `git paw purge --force` is executed
-- **THEN** the `broker.log` file is deleted
+- **THEN** the session's broker log file is deleted
 - **AND** the session state file is deleted
 - **AND** worktrees are removed
 
-#### Scenario: Purge succeeds when broker.log does not exist
+#### Scenario: Purge succeeds when the session's broker log does not exist
 
 - **GIVEN** a session state with `broker_log_path` pointing to a nonexistent file
 - **WHEN** `git paw purge --force` is executed
 - **THEN** purge completes successfully
 
+#### Scenario: Purging one session spares a neighbouring session's log
+
+- **GIVEN** two sessions' broker logs side by side in the session-state directory
+- **WHEN** `git paw purge --force` is executed for one of them
+- **THEN** that session's log SHALL be deleted
+- **AND** the other session's log SHALL remain in place
+
+#### Scenario: Purge deletes the path an older git-paw recorded
+
+- **GIVEN** a session saved by an earlier git-paw whose `broker_log_path` is the shared `broker.log`
+- **WHEN** `git paw purge --force` is executed
+- **THEN** that recorded file SHALL be deleted
+
 ### Requirement: Status shows broker information
 
-When a session is active and has broker fields in its state, `git paw status` SHALL display broker information including the configured URL. The system SHALL attempt to probe `GET /status` against the broker URL:
+When a session is active and has broker fields in its state, `git paw status` SHALL display broker information including the configured URL. The system SHALL probe `GET /status` against the broker URL **with the session's repository**, so a broker on the port that serves a different repository is never reported as this session's broker, and SHALL act on the result as follows:
 
-- If the probe succeeds: display the broker URL, agent count, and uptime from the response.
+- If the probe finds a git-paw broker for this session's repository: display the broker URL, agent count, and uptime from the response.
+- If the probe finds a git-paw broker for a different — or unreported — repository: display the broker URL noting it is held by another repository's git-paw broker. The system SHALL NOT display it as running.
 - If the probe fails AND the session's effective status is `Paused`: display the broker URL with `(paused — run 'git paw start' to resume)`.
 - If the probe fails AND the session's effective status is `Active` or `Stopped`: display the broker URL with `(not responding)`.
 
@@ -652,6 +718,13 @@ When a session is active and has broker fields in its state, `git paw status` SH
 - **WHEN** `git paw status` is executed
 - **THEN** the output SHALL NOT mention broker, port, or agents
 
+#### Scenario: Status reports a port held by another repository
+
+- **GIVEN** a session in repository B whose configured port is held by a live git-paw broker for repository A
+- **WHEN** `git paw status` is executed in repository B
+- **THEN** the broker line SHALL say the port is held by another repository
+- **AND** the output SHALL NOT report the broker as running
+
 ### Requirement: Auto-approve thread location in dashboard subprocess
 
 When supervisor mode is active AND `[supervisor.auto_approve] enabled = true`, the auto-approve poll thread SHALL run inside the dashboard's `__dashboard` subprocess (the long-lived process running in the dashboard pane), NOT inside the `cmd_supervisor` process (which returns immediately after launching the session per the new supervisor-as-pane architecture).
@@ -678,7 +751,7 @@ The auto-approve thread's responsibilities are unchanged: poll `/status` every `
 `git paw pause` SHALL perform a soft-stop that:
 
 1. Detaches every client currently attached to the session by running `tmux detach-client -s <session-name>`. With no clients attached, the command SHALL be a no-op and SHALL NOT error.
-2. Stops the broker by killing the dashboard pane only (`tmux kill-pane -t <session-name>:0.<dashboard-pane-index>`). The dashboard subprocess receives SIGHUP, the `BrokerHandle` drop runs, the broker shuts down gracefully, and `broker.log` flushes.
+2. Stops the broker by killing the dashboard pane only (`tmux kill-pane -t <session-name>:0.<dashboard-pane-index>`). The dashboard subprocess receives SIGHUP, the `BrokerHandle` drop runs, the broker shuts down gracefully, and the session's broker log flushes.
 3. Updates the on-disk session state's `status` field from `Active` to `Paused` (see the session-state delta in this change).
 4. Leaves the tmux session and every coding-agent CLI pane running.
 5. Prints a one-line confirmation: `"Session '<name>' paused. <N> CLI pane(s) still running. Run 'git paw start' to resume."`
@@ -699,7 +772,7 @@ The pause flow SHALL NOT call `tmux::kill_session` at any point.
 - **GIVEN** an active session with broker enabled and listening on port P
 - **WHEN** `git paw pause` is executed
 - **THEN** within 5 seconds, port P SHALL be free (no listener)
-- **AND** the broker's `broker.log` SHALL contain a final flush of all messages
+- **AND** the session's broker log SHALL contain a final flush of all messages
 
 #### Scenario: Pause leaves coding-agent panes alive
 
@@ -779,4 +852,94 @@ The restart-from-pause flow SHALL NOT create worktrees, SHALL NOT spawn coding-a
 - **WHEN** `git paw start` is executed
 - **THEN** `effective_status` SHALL evaluate to `Stopped`
 - **AND** the start flow SHALL run the existing cold-recovery path (fresh CLI spawn), NOT the restart-from-pause path
+
+### Requirement: Launch refuses a port held by another repository before creating anything
+
+Before creating the tmux session — and therefore before any agent pane exists — every launch path that starts or rebuilds a broker-enabled session (`git paw start`, the spec-driven launch, the supervised launch, and session recovery) SHALL probe the broker port against the repository being launched, and SHALL fail the launch with the port-held error when a git-paw broker for a different — or unreported — repository holds it.
+
+The check is required at launch time, not only when the dashboard pane starts its broker: git-paw injects `GIT_PAW_BROKER_URL` into every agent pane, so by the time the dashboard refuses, this repository's agents are already publishing into the other repository's broker. A refused launch SHALL leave no tmux session and no session receipt behind.
+
+**The port probed SHALL be the port the agent panes will be given.** For a fresh launch that is the configured `[broker] port`. For session recovery it is the saved session's `broker_port`/`broker_bind`, which is what recovery rebuilds `GIT_PAW_BROKER_URL` from and which can differ from the current config when `[broker] port` changed after the session was saved; probing the configured port there would miss the clash the agents actually face. A session saved with no broker fields gets no broker URL at all, so recovery SHALL skip the check.
+
+**The check SHALL run before any interactive prompt.** It belongs as early as the resolved configuration allows — ahead of the branch and CLI pickers — so the user is never asked to make selections for a launch that cannot proceed.
+
+A disabled broker SHALL skip the check entirely, and so SHALL a `--dry-run`, which creates nothing and only prints a plan. A foreign listener or a probe timeout SHALL NOT fail the launch here; those are reported by the dashboard's own broker start-up with their existing errors.
+
+#### Scenario: A second repository's launch is refused before any pane exists
+
+- **GIVEN** a live git-paw broker for repository A on port P
+- **AND** repository B configured with `[broker] port = P`
+- **WHEN** `git paw start` is executed in repository B
+- **THEN** the command SHALL exit non-zero with an error naming repository A, port P, and the `[broker] port` fix
+- **AND** no tmux session SHALL have been created
+- **AND** no session receipt SHALL have been written
+
+#### Scenario: A disabled broker launches regardless of the port
+
+- **GIVEN** `[broker] enabled = false` and a git-paw broker for another repository on the configured port
+- **WHEN** a session is launched
+- **THEN** the launch SHALL proceed without probing the port
+
+#### Scenario: The refusal precedes the branch and CLI pickers
+
+- **GIVEN** a git-paw broker for another repository on the configured port
+- **WHEN** `git paw start` is executed with neither `--branches` nor `--cli`
+- **THEN** it SHALL fail with the port-held error
+- **AND** no branch or CLI picker SHALL have been presented
+
+#### Scenario: Recovery probes the saved port, not the configured one
+
+- **GIVEN** a saved session recording `broker_port = P`, where another repository's git-paw broker holds `P`
+- **AND** the current `[broker] port` is a different, free port
+- **WHEN** `git paw start` recovers that session
+- **THEN** it SHALL fail with the port-held error naming `P`
+
+#### Scenario: A dry run prints its plan without probing
+
+- **GIVEN** a git-paw broker for another repository on the configured port
+- **WHEN** `git paw start --dry-run` is executed
+- **THEN** the command SHALL exit zero and print the session plan
+- **AND** it SHALL NOT fail with the port-held error
+
+#### Scenario: Our own broker on the port does not block a launch
+
+- **GIVEN** a live git-paw broker for this same repository on the configured port
+- **WHEN** a session is launched
+- **THEN** the pre-flight check SHALL pass, leaving the reattach decision to `start_broker`
+
+### Requirement: Resume and recovery re-stamp the broker log path
+
+When a broker-enabled session is resumed from pause or recovered from a stopped state, the system SHALL re-stamp the saved session's `broker_log_path` to `<session_state_dir>/<session_name>.broker.log` before saving the session back.
+
+This migrates a session saved by an earlier git-paw — which recorded the single shared `broker.log` — onto the per-session name in one step, so a long-lived session does not keep a shared log name indefinitely. Until it is re-stamped, the recorded path remains authoritative for both the broker and `purge` (see *Dashboard subcommand starts broker and dashboard*), so the two never disagree at any point in the migration.
+
+The re-stamped session SHALL be saved **before** the dashboard pane is started. The dashboard resolves its log path from the saved session, so starting it first would let it read the pre-re-stamp path and write there while `purge` went on to delete the re-stamped one — orphaning exactly the log this requirement exists to prevent.
+
+That early write SHALL carry the re-stamped `broker_log_path` only. On the resume-from-pause path the session's `status` SHALL remain `Paused` until the dashboard pane exists, and SHALL flip to `Active` only afterwards: recording `Active` before the pane is up would leave a failed resume — a `split-window` or `send-keys` that did not succeed — marked active with tmux still alive, which the next `git paw start` reattaches to instead of restarting the broker.
+
+#### Scenario: Recovery re-stamps a shared broker log path
+
+- **GIVEN** a stopped session whose `broker_log_path` is the shared `<session_state_dir>/broker.log` written by an earlier git-paw
+- **WHEN** the session is recovered with `git paw start`
+- **THEN** the saved session SHALL record `<session_state_dir>/<session_name>.broker.log`
+
+#### Scenario: A session without a broker is not given a log path
+
+- **GIVEN** a saved session with no `broker_port`
+- **WHEN** it is resumed or recovered
+- **THEN** `broker_log_path` SHALL remain absent
+
+#### Scenario: A failed resume stays paused with the log path already re-stamped
+
+- **GIVEN** a paused broker-enabled session whose `broker_log_path` is the shared `<session_state_dir>/broker.log`
+- **WHEN** `git paw start` resumes it and recreating the dashboard pane fails
+- **THEN** the saved session's `status` SHALL still be `Paused`, so a retry restarts the broker rather than reattaching
+- **AND** the saved session's `broker_log_path` SHALL already be `<session_state_dir>/<session_name>.broker.log`
+
+#### Scenario: The recovered dashboard writes the re-stamped log, not the old one
+
+- **GIVEN** a stopped session whose `broker_log_path` is the shared `<session_state_dir>/broker.log`
+- **WHEN** it is recovered and its broker records a message
+- **THEN** the broker SHALL have written `<session_state_dir>/<session_name>.broker.log`
+- **AND** the shared `broker.log` SHALL NOT have been written
 

@@ -618,9 +618,47 @@ pub fn remove_repo_session_file(repo_root: &Path, session_name: &str) -> Result<
 
 /// Returns the sessions directory (`~/.local/share/git-paw/sessions/`).
 ///
-/// Also used by the broker to place `broker.log` alongside session state.
+/// Also used by the broker to place its log alongside session state (see
+/// [`broker_log_path`]).
 pub fn session_state_dir() -> Result<PathBuf, PawError> {
     sessions_dir()
+}
+
+/// Returns the broker log path for a session: `<session_state_dir>/<session_name>.broker.log`.
+///
+/// The log is named per session rather than shared, so two repositories
+/// running git-paw on one machine never write to — or purge — the same file.
+/// Session names are already unique per repository on a machine, so they need
+/// no further qualification.
+pub fn broker_log_path(session_name: &str) -> Result<PathBuf, PawError> {
+    Ok(session_state_dir()?.join(format!("{session_name}.broker.log")))
+}
+
+/// Resolves the path the broker should write its log to, for a dashboard
+/// launched against `session`.
+///
+/// The session's recorded `broker_log_path` is authoritative when present:
+/// it is the exact path `purge` deletes, so writing anywhere else would
+/// orphan a log. That is what keeps a session saved by a git-paw which used
+/// a single shared `broker.log` consistent — the writer and the deleter
+/// agree on the old name rather than diverging.
+///
+/// A session with no recorded path falls back to [`broker_log_path`] for its
+/// own name; no session at all (nothing launched this dashboard) falls back
+/// to `git-paw`, which keeps it clear of any real session's log.
+///
+/// # Errors
+///
+/// Returns [`PawError::SessionError`] when the session-state directory
+/// cannot be determined.
+pub fn resolve_broker_log_path(session: Option<&Session>) -> Result<PathBuf, PawError> {
+    match session {
+        Some(sess) => match &sess.broker_log_path {
+            Some(saved) => Ok(saved.clone()),
+            None => broker_log_path(&sess.session_name),
+        },
+        None => broker_log_path("git-paw"),
+    }
 }
 
 /// Returns the sessions directory (`~/.local/share/git-paw/sessions/`).
@@ -1349,6 +1387,80 @@ mod tests {
     // -- Recovery: save → tmux dies → state has everything to reconstruct --
 
     // -- Broker fields --
+
+    #[test]
+    fn broker_log_is_named_per_session() {
+        let alpha = broker_log_path("paw-alpha").unwrap();
+        let beta = broker_log_path("paw-beta").unwrap();
+        assert_ne!(alpha, beta, "two sessions never share one log file");
+        assert_eq!(
+            alpha.file_name().unwrap(),
+            std::ffi::OsStr::new("paw-alpha.broker.log")
+        );
+        assert_eq!(
+            alpha.parent(),
+            beta.parent(),
+            "both sit in the session-state directory"
+        );
+    }
+
+    #[test]
+    fn a_session_recording_the_old_shared_log_name_still_loads() {
+        let dir = TempDir::new().unwrap();
+        let mut session = sample_session();
+        session.broker_port = Some(9119);
+        session.broker_bind = Some("127.0.0.1".to_string());
+        // The pre-change name: one shared file for every repository.
+        session.broker_log_path = Some(PathBuf::from("/var/state/git-paw/sessions/broker.log"));
+        save_session_in(&session, dir.path()).unwrap();
+
+        let loaded = load_session_from("paw-my-project", dir.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.broker_log_path,
+            Some(PathBuf::from("/var/state/git-paw/sessions/broker.log")),
+            "the recorded path survives a round-trip unchanged"
+        );
+        assert_eq!(
+            resolve_broker_log_path(Some(&loaded)).unwrap(),
+            loaded.broker_log_path.clone().unwrap(),
+            "and it is the path the broker writes, matching what purge deletes"
+        );
+    }
+
+    #[test]
+    fn a_saved_broker_log_path_wins_over_the_derived_name() {
+        // A session saved by a git-paw that used one shared `broker.log` is
+        // exactly the case that must not diverge: `purge` deletes the path
+        // the session recorded, so the broker has to write there too.
+        let mut legacy = sample_session();
+        legacy.broker_log_path = Some(PathBuf::from("/var/state/git-paw/sessions/broker.log"));
+        assert_eq!(
+            resolve_broker_log_path(Some(&legacy)).unwrap(),
+            PathBuf::from("/var/state/git-paw/sessions/broker.log"),
+            "the writer must follow the path purge will delete"
+        );
+    }
+
+    #[test]
+    fn a_session_without_a_saved_log_path_gets_the_per_session_name() {
+        let mut session = sample_session();
+        session.broker_log_path = None;
+        assert_eq!(
+            resolve_broker_log_path(Some(&session)).unwrap(),
+            broker_log_path("paw-my-project").unwrap()
+        );
+    }
+
+    #[test]
+    fn a_dashboard_with_no_session_keeps_clear_of_real_session_logs() {
+        let resolved = resolve_broker_log_path(None).unwrap();
+        assert_eq!(
+            resolved.file_name().unwrap(),
+            std::ffi::OsStr::new("git-paw.broker.log")
+        );
+    }
 
     #[test]
     fn session_with_broker_fields_round_trips() {

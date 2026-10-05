@@ -168,8 +168,13 @@ interpreter SHALL be ⚠ and SHALL NOT be ✗.
 ### Requirement: Broker check
 
 When `[broker]` is enabled, the command SHALL check that the configured `bind`/`port` is
-free or reachable. When the broker is disabled, it SHALL note the pure-manual baseline as an
-informational ✓.
+free or reachable. The reachability probe SHALL be made **with the repository being
+diagnosed**, so the check distinguishes this repository's own broker from a git-paw broker
+on the same port that serves a different — or unreported — repository. The latter SHALL
+report ⚠ with the `[broker] port` remedy, because it is the clash that would refuse the next
+`git paw start`, and SHALL be reported distinctly from a non-git-paw service holding the
+port (a different cause with a different fix). When the broker is disabled, it SHALL note
+the pure-manual baseline as an informational ✓.
 
 #### Scenario: Broker enabled and port free
 
@@ -182,6 +187,20 @@ informational ✓.
 - **GIVEN** `[broker] enabled = false`
 - **WHEN** `git paw doctor` is run
 - **THEN** the Broker group SHALL report an informational ✓ noting the pure-manual baseline
+
+#### Scenario: Port held by another repository's broker
+
+- **GIVEN** `[broker] enabled = true` and the configured port is held by a git-paw broker serving a different repository
+- **WHEN** `git paw doctor` is run
+- **THEN** the Broker group SHALL report ⚠
+- **AND** the detail SHALL say the port is held by another repository
+- **AND** the remedy SHALL name the `[broker] port` setting
+
+#### Scenario: A foreign service is not reported as another repository's broker
+
+- **GIVEN** `[broker] enabled = true` and the configured port is held by a non-git-paw service
+- **WHEN** `git paw doctor` is run
+- **THEN** the Broker group SHALL report ⚠ with a detail distinct from the another-repository case
 
 ### Requirement: Supervisor check
 

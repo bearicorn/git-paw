@@ -147,6 +147,14 @@ pub struct BrokerState {
     next_seq: AtomicU64,
     /// Optional path for periodic log flush to disk.
     pub log_path: Option<PathBuf>,
+    /// Canonical root of the repository this broker serves, plumbed from the
+    /// launch path via [`BrokerState::with_repo_root`]. Reported on `GET
+    /// /status` as `repo_root` so the stale-broker probe can tell this
+    /// repository's broker apart from a different repository's broker holding
+    /// the same port. `None` when the caller did not declare a repository
+    /// (router-only unit tests), in which case the probe cannot compare and
+    /// falls back to marker-only matching.
+    pub repo_root: Option<PathBuf>,
     /// Wall-clock instant the broker state was created; used for uptime reporting.
     started_at: Instant,
     /// Optional learnings aggregator. Populated when supervisor + learnings
@@ -190,6 +198,7 @@ impl BrokerState {
             }),
             next_seq: AtomicU64::new(0),
             log_path,
+            repo_root: None,
             started_at: Instant::now(),
             learnings: None,
             // Conservative broker-level default: the nudge is opt-in at the
@@ -199,6 +208,20 @@ impl BrokerState {
             role_gating: None,
             watcher_shutdown_rx: OnceLock::new(),
         }
+    }
+
+    /// Declares the repository this broker serves. Call before
+    /// [`start_broker`] so the stale-broker probe can compare the port
+    /// holder's repository with this one, and so the first `GET /status`
+    /// reports it.
+    ///
+    /// The path is canonicalized so `/var` vs `/private/var` style aliases
+    /// compare equal; an uncanonicalizable path (a repository removed between
+    /// launch and this call) is stored as given.
+    #[must_use]
+    pub fn with_repo_root(mut self, repo_root: &std::path::Path) -> Self {
+        self.repo_root = Some(canonical_or_owned(repo_root));
+        self
     }
 
     /// Attaches the opsx role-gating context. Call before [`start_broker`] so
@@ -354,6 +377,34 @@ pub enum BrokerError {
         source: std::io::Error,
     },
 
+    /// The port is held by a git-paw broker serving a different repository —
+    /// or one that does not report which repository it serves, which an older
+    /// git-paw broker does not. Distinct from [`BrokerError::PortInUse`]:
+    /// that one means a foreign program holds the port, and the two have
+    /// different fixes.
+    ///
+    /// Reattaching would route this repository's agents into the other
+    /// repository's broker while this repository's dashboard rendered an
+    /// empty, unwatched state, so the port holder is refused instead.
+    ///
+    /// `repo_root` is attacker-influenced — any local process can bind the
+    /// port and answer the probe — so it MUST be built with
+    /// [`sanitize_reported_repo_root`], never from the raw response.
+    #[error(
+        "port {port} is held by a git-paw broker for {} — set a distinct [broker] port in .git-paw/config.toml for one of the repositories",
+        .repo_root.as_ref().map_or_else(
+            || "another repository (it does not report which — an older git-paw broker may be holding the port)".to_string(),
+            |root| format!("another repository ({root})"),
+        )
+    )]
+    PortHeldByOtherRepo {
+        /// The port held by the other repository's broker.
+        port: u16,
+        /// The repository the port holder reported serving, or `None` when it
+        /// reported no repository at all.
+        repo_root: Option<String>,
+    },
+
     /// A probe to an existing listener on the port timed out.
     #[error("broker probe timed out on port {port} — check for stuck processes on this port")]
     ProbeTimeout {
@@ -444,8 +495,16 @@ impl Drop for BrokerHandle {
 pub enum ProbeResult {
     /// Nothing is listening — safe to bind.
     NoListener,
-    /// A git-paw broker is already running.
+    /// A git-paw broker for the caller's own repository is already running.
     LiveBroker,
+    /// A git-paw broker is running, but it serves a different repository —
+    /// or it reports no repository at all (an older git-paw broker), in which
+    /// case `repo_root` is `None` and the owner is treated as unknown rather
+    /// than assumed to be the caller's.
+    OtherRepoBroker {
+        /// The repository the port holder reported serving, if any.
+        repo_root: Option<String>,
+    },
     /// Something else is using the port.
     ForeignServer,
     /// The probe timed out.
@@ -459,12 +518,83 @@ pub enum ProbeResult {
 /// Probes a URL to determine what broker (if any) is running there.
 ///
 /// Public entry point for callers that need to inspect broker status without
-/// starting a new server (e.g. the `status` subcommand).
+/// starting a new server (e.g. the `status` subcommand). Such callers only ask
+/// "is a git-paw broker there", so no repository is supplied and any git-paw
+/// broker reports as [`ProbeResult::LiveBroker`].
 pub fn probe_broker(url: &str) -> ProbeResult {
-    probe_existing_broker(url)
+    probe_existing_broker(url, None)
 }
 
-fn probe_existing_broker(url: &str) -> ProbeResult {
+/// Probes a URL and classifies the listener against `repo_root`.
+///
+/// The repository-aware counterpart of [`probe_broker`], for callers that
+/// need to know whether the port holder is *their* broker rather than just
+/// some git-paw broker: the pre-flight launch check, `git paw status`, and
+/// `git paw doctor`. A git-paw broker serving a different repository — or
+/// none at all — comes back as [`ProbeResult::OtherRepoBroker`].
+pub fn probe_broker_for_repo(url: &str, repo_root: &std::path::Path) -> ProbeResult {
+    let canonical = canonical_or_owned(repo_root);
+    probe_existing_broker(url, Some(&canonical))
+}
+
+/// Largest `GET /status` response the probe will read, in bytes.
+///
+/// Any local process can bind the broker port and answer the probe, so the
+/// read is bounded rather than trusting the listener to stop talking. A real
+/// `/status` body is a few kilobytes even with a full agent roster.
+const MAX_PROBE_RESPONSE_BYTES: u64 = 64 * 1024;
+
+/// Longest reported `repo_root` reproduced in an error message.
+const MAX_REPORTED_REPO_ROOT_CHARS: usize = 256;
+
+/// Makes a listener-reported `repo_root` safe to print in an error message.
+///
+/// The value comes from whatever process answered the probe, so it is
+/// untrusted input on its way to a terminal: control characters (including
+/// the ESC that opens an ANSI escape sequence) are replaced with `?` so a
+/// malicious listener cannot repaint, clear, or forge output around git-paw's
+/// error, and the result is capped so it cannot flood the screen.
+fn sanitize_reported_repo_root(reported: &str) -> String {
+    let mut out: String = reported
+        .chars()
+        .take(MAX_REPORTED_REPO_ROOT_CHARS)
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect();
+    if reported.chars().count() > MAX_REPORTED_REPO_ROOT_CHARS {
+        out.push('…');
+    }
+    out
+}
+
+/// Canonicalizes a path, falling back to the path as given when it cannot be
+/// resolved (e.g. it no longer exists). Canonical form is what makes `/var`
+/// and `/private/var` style aliases of one repository compare equal.
+fn canonical_or_owned(path: &std::path::Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Extracts the `repo_root` field from a raw `GET /status` HTTP response.
+///
+/// Parses the body as JSON when it can be isolated; a response whose body is
+/// unparseable, carries no `repo_root`, or carries an empty one yields
+/// `None`, which callers treat as "owner unknown" — the safe direction.
+fn parse_repo_root(response: &str) -> Option<String> {
+    let body = response.split_once("\r\n\r\n").map(|(_, b)| b)?;
+    let json: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    json.get("repo_root")?
+        .as_str()
+        .filter(|root| !root.is_empty())
+        .map(ToString::to_string)
+}
+
+/// Probes the listener at `url`, classifying it against `expected_repo_root`.
+///
+/// When `expected_repo_root` is `Some`, a git-paw broker counts as
+/// [`ProbeResult::LiveBroker`] only if it reports the same canonical
+/// repository; anything else — a different repository, or no reported
+/// repository at all — is [`ProbeResult::OtherRepoBroker`]. When it is `None`
+/// the caller has declared no repository, so the comparison is skipped.
+fn probe_existing_broker(url: &str, expected_repo_root: Option<&std::path::Path>) -> ProbeResult {
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::time::Duration;
@@ -503,12 +633,28 @@ fn probe_existing_broker(url: &str) -> ProbeResult {
     }
 
     let mut response = String::new();
-    if stream.read_to_string(&mut response).is_err() && response.is_empty() {
+    if (&stream)
+        .take(MAX_PROBE_RESPONSE_BYTES)
+        .read_to_string(&mut response)
+        .is_err()
+        && response.is_empty()
+    {
         return ProbeResult::Timeout;
     }
 
     if response.contains("\"git_paw\":true") || response.contains("\"git_paw\": true") {
-        ProbeResult::LiveBroker
+        let Some(expected) = expected_repo_root else {
+            return ProbeResult::LiveBroker;
+        };
+        let reported = parse_repo_root(&response);
+        match reported.as_deref() {
+            Some(root) if canonical_or_owned(std::path::Path::new(root)).as_path() == expected => {
+                ProbeResult::LiveBroker
+            }
+            _ => ProbeResult::OtherRepoBroker {
+                repo_root: reported,
+            },
+        }
     } else if response.starts_with("HTTP/") {
         ProbeResult::ForeignServer
     } else {
@@ -516,10 +662,50 @@ fn probe_existing_broker(url: &str) -> ProbeResult {
     }
 }
 
+/// Checks, before a session launches, that the configured broker port is not
+/// held by another repository's git-paw broker.
+///
+/// The dashboard pane performs the same check when it starts the broker, but
+/// that happens *after* the tmux session exists and the agent panes are up —
+/// and every agent pane already has `GIT_PAW_BROKER_URL` pointing at the
+/// shared port, so by then this repository's agents are publishing into the
+/// other repository's broker. Launchers call this first so the clash is
+/// caught while nothing has been started yet.
+///
+/// A disabled broker is a no-op. Only the other-repository verdict fails the
+/// launch; a foreign listener or a probe timeout is left to the dashboard's
+/// own start-up path, which reports them with their own errors.
+///
+/// # Errors
+///
+/// Returns [`BrokerError::PortHeldByOtherRepo`] when a git-paw broker for a
+/// different — or unreported — repository holds the configured port.
+pub fn ensure_port_free_for_repo(
+    config: &BrokerConfig,
+    repo_root: &std::path::Path,
+) -> Result<(), BrokerError> {
+    if !config.enabled {
+        return Ok(());
+    }
+    if let ProbeResult::OtherRepoBroker { repo_root } =
+        probe_broker_for_repo(&config.url(), repo_root)
+    {
+        return Err(BrokerError::PortHeldByOtherRepo {
+            port: config.port,
+            repo_root: repo_root.as_deref().map(sanitize_reported_repo_root),
+        });
+    }
+    Ok(())
+}
+
 /// Starts the HTTP broker server.
 ///
 /// Probes the configured port first:
-/// - If a live git-paw broker is found, returns a reattached handle.
+/// - If a live git-paw broker for `state`'s repository is found, returns a
+///   reattached handle.
+/// - If a git-paw broker for a different — or unreported — repository holds
+///   the port, returns [`BrokerError::PortHeldByOtherRepo`] without
+///   reattaching.
 /// - If a foreign server occupies the port, returns [`BrokerError::PortInUse`].
 /// - If the probe times out, returns [`BrokerError::ProbeTimeout`].
 /// - If nothing is listening, binds and starts the server.
@@ -565,8 +751,14 @@ pub fn start_broker_with(
     ));
     let stop_flag = Arc::new(AtomicBool::new(false));
 
-    match probe_existing_broker(&url) {
+    match probe_existing_broker(&url, state.repo_root.as_deref()) {
         ProbeResult::LiveBroker => return Ok(BrokerHandle::reattached(url, state)),
+        ProbeResult::OtherRepoBroker { repo_root } => {
+            return Err(BrokerError::PortHeldByOtherRepo {
+                port: config.port,
+                repo_root: repo_root.as_deref().map(sanitize_reported_repo_root),
+            });
+        }
         ProbeResult::ForeignServer => {
             return Err(BrokerError::PortInUse {
                 port: config.port,
@@ -844,8 +1036,417 @@ mod tests {
     #[test]
     fn probe_no_listener() {
         // Use a port that is almost certainly not in use.
-        let result = probe_existing_broker("http://127.0.0.1:19999");
+        let result = probe_existing_broker("http://127.0.0.1:19999", None);
         assert_eq!(result, ProbeResult::NoListener);
+    }
+
+    /// Binds and immediately releases an ephemeral port, yielding a port
+    /// number that is free right now. Good enough for a test that starts its
+    /// own broker on it a moment later.
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind ephemeral port")
+            .local_addr()
+            .expect("read ephemeral addr")
+            .port()
+    }
+
+    fn config_on(port: u16) -> BrokerConfig {
+        BrokerConfig {
+            enabled: true,
+            port,
+            bind: "127.0.0.1".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Starts a broker serving `repo_root` on a free port. Returns the handle
+    /// (keep it alive for the duration of the test) and its config.
+    fn broker_for(repo_root: &std::path::Path) -> (BrokerHandle, BrokerConfig) {
+        let config = config_on(free_port());
+        let handle = start_broker(
+            &config,
+            BrokerState::new(None).with_repo_root(repo_root),
+            Vec::new(),
+        )
+        .expect("start broker for repository");
+        (handle, config)
+    }
+
+    #[test]
+    fn another_repositorys_broker_on_the_port_is_refused() {
+        let repo_a = tempfile::tempdir().expect("tempdir A");
+        let repo_b = tempfile::tempdir().expect("tempdir B");
+        let (_held, config) = broker_for(repo_a.path());
+
+        let result = start_broker(
+            &config,
+            BrokerState::new(None).with_repo_root(repo_b.path()),
+            Vec::new(),
+        );
+
+        let Err(err) = result else {
+            panic!("repository B must not get a handle to repository A's broker");
+        };
+        assert!(
+            matches!(err, BrokerError::PortHeldByOtherRepo { .. }),
+            "refusal must be its own variant, not PortInUse: {err:?}"
+        );
+        let message = err.to_string();
+        let canonical_a = repo_a.path().canonicalize().expect("canonicalize A");
+        assert!(
+            message.contains(&canonical_a.display().to_string()),
+            "error must name the holding repository: {message}"
+        );
+        assert!(
+            message.contains(&config.port.to_string()),
+            "error must name the port: {message}"
+        );
+        assert!(
+            message.contains("[broker] port"),
+            "error must name the config fix: {message}"
+        );
+    }
+
+    #[test]
+    fn broker_that_reports_no_repository_is_refused() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        // A broker started without a declared repository stands in for an
+        // older git-paw whose `/status` does not report `repo_root`.
+        let config = config_on(free_port());
+        let _held = start_broker(&config, BrokerState::new(None), Vec::new())
+            .expect("start repository-less broker");
+
+        let result = start_broker(
+            &config,
+            BrokerState::new(None).with_repo_root(repo.path()),
+            Vec::new(),
+        );
+
+        let Err(err) = result else {
+            panic!("a broker of unknown repository must not be reattached to");
+        };
+        assert!(
+            matches!(
+                err,
+                BrokerError::PortHeldByOtherRepo {
+                    repo_root: None,
+                    ..
+                }
+            ),
+            "unknown owner must surface as an unknown repository: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("older git-paw"),
+            "error should point at an older git-paw broker: {err}"
+        );
+    }
+
+    #[test]
+    fn same_repositorys_broker_is_still_reattached() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        let (_held, config) = broker_for(repo.path());
+
+        let handle = start_broker(
+            &config,
+            BrokerState::new(None).with_repo_root(repo.path()),
+            Vec::new(),
+        )
+        .expect("same repository must reattach");
+        assert!(
+            handle.runtime.is_none(),
+            "a reattached handle owns no runtime"
+        );
+    }
+
+    #[test]
+    fn a_foreign_http_server_on_the_port_is_refused() {
+        use std::io::{Read, Write};
+        // A plain HTTP server that answers GET /status with 404 — no git-paw
+        // marker, so it must be reported as an occupied port rather than
+        // mistaken for a broker of any repository.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind foreign server");
+        let port = listener.local_addr().expect("foreign addr").port();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+
+        let repo = tempfile::tempdir().expect("tempdir");
+        let result = start_broker(
+            &config_on(port),
+            BrokerState::new(None).with_repo_root(repo.path()),
+            Vec::new(),
+        );
+        let _ = server.join();
+
+        let Err(err) = result else {
+            panic!("a foreign HTTP server must not be reattached to");
+        };
+        assert!(
+            matches!(err, BrokerError::PortInUse { .. }),
+            "a non-git-paw listener is an occupied port, not a repository clash: {err:?}"
+        );
+        assert!(
+            err.to_string().contains(&port.to_string()),
+            "error must name the port: {err}"
+        );
+    }
+
+    #[test]
+    fn the_probe_stops_reading_a_listener_that_never_stops_talking() {
+        use std::io::{Read, Write};
+        // A listener that answers the probe and then streams far more than
+        // the bound, without ever closing. Unbounded, the probe would grow
+        // its buffer until the write side gave up or memory ran out; bounded,
+        // it reads its cap and moves on.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind flooding server");
+        let port = listener.local_addr().expect("flood addr").port();
+        let sent = Arc::new(AtomicU64::new(0));
+        let sent_in_thread = Arc::clone(&sent);
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n{\"git_paw\":true,\"pad\":\"");
+                // Four times the bound, so a passing test cannot be an
+                // accident of the flood being smaller than the cap.
+                let chunk = vec![b'A'; 8 * 1024];
+                let flood = 4 * MAX_PROBE_RESPONSE_BYTES;
+                while sent_in_thread.load(Ordering::Relaxed) < flood {
+                    if stream.write_all(&chunk).is_err() {
+                        break;
+                    }
+                    sent_in_thread.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                }
+            }
+        });
+
+        let repo = tempfile::tempdir().expect("tempdir");
+        // The probe must return — a hang here fails the test by timing out —
+        // and must not treat the flood as our own broker.
+        let result = probe_broker_for_repo(&format!("http://127.0.0.1:{port}"), repo.path());
+        assert_ne!(
+            result,
+            ProbeResult::LiveBroker,
+            "a flooding listener is never this repository's broker"
+        );
+
+        // The server stops only because the probe closed the connection after
+        // its cap — so joining also proves the probe did not keep draining.
+        let _ = server.join();
+        // The bound is what the probe READS, not what the attacker sends: the
+        // server also fills the socket buffer. Asserting the listener pushed
+        // at least a full cap's worth is what makes the returning probe
+        // evidence of the bound rather than of a small flood.
+        assert!(
+            sent.load(Ordering::Relaxed) >= MAX_PROBE_RESPONSE_BYTES,
+            "the listener must have pushed at least the read bound for this to prove anything; sent {}",
+            sent.load(Ordering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn a_reported_repository_cannot_inject_terminal_escapes() {
+        // Any local process can bind the port and answer the probe, so the
+        // repository it claims is attacker-controlled text on its way to a
+        // terminal.
+        let hostile = "/repo\u{1b}[2J\u{1b}[31mFATAL: disk wiped\u{7}\nreal-looking line";
+        let sanitized = sanitize_reported_repo_root(hostile);
+        assert!(
+            !sanitized.chars().any(char::is_control),
+            "no control character may survive: {sanitized:?}"
+        );
+        assert!(
+            !sanitized.contains('\u{1b}'),
+            "the ESC that opens an ANSI sequence must be gone: {sanitized:?}"
+        );
+        assert!(
+            sanitized.contains("/repo"),
+            "printable text is preserved so the message stays useful: {sanitized:?}"
+        );
+    }
+
+    #[test]
+    fn a_reported_repository_cannot_flood_the_screen() {
+        let flood = "/".repeat(10_000);
+        let sanitized = sanitize_reported_repo_root(&flood);
+        assert!(
+            sanitized.chars().count() <= MAX_REPORTED_REPO_ROOT_CHARS + 1,
+            "an over-long report is capped, with one marker char: {}",
+            sanitized.chars().count()
+        );
+        assert!(
+            sanitized.ends_with('…'),
+            "truncation is visible to the user"
+        );
+    }
+
+    #[test]
+    fn the_refusal_message_names_the_port_the_holder_and_the_fix() {
+        let err = BrokerError::PortHeldByOtherRepo {
+            port: 9119,
+            repo_root: Some("/home/you/other-repo".to_string()),
+        };
+        let message = err.to_string();
+        assert!(message.contains("9119"), "names the port: {message}");
+        assert!(
+            message.contains("/home/you/other-repo"),
+            "names the holding repository: {message}"
+        );
+        assert!(
+            message.contains("[broker] port"),
+            "names the one-line fix: {message}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_holder_is_not_claimed_as_ours() {
+        let err = BrokerError::PortHeldByOtherRepo {
+            port: 9119,
+            repo_root: None,
+        };
+        let message = err.to_string();
+        assert!(message.contains("9119"), "names the port: {message}");
+        assert!(
+            message.contains("[broker] port"),
+            "names the one-line fix: {message}"
+        );
+        assert!(
+            message.contains("older git-paw"),
+            "points at the likely holder: {message}"
+        );
+        assert!(
+            message.contains("another repository"),
+            "an unreported owner is never claimed as ours: {message}"
+        );
+    }
+
+    #[test]
+    fn port_in_use_is_actionable_and_hides_its_source() {
+        let err = BrokerError::PortInUse {
+            port: 9119,
+            source: std::io::Error::new(std::io::ErrorKind::AddrInUse, "address already in use"),
+        };
+        let message = err.to_string();
+        assert!(message.contains("9119"), "names the port: {message}");
+        assert!(
+            message.contains("[broker] port"),
+            "suggests the config change: {message}"
+        );
+        assert!(
+            !message.contains("address already in use"),
+            "the io::Error text is reserved for the source chain: {message}"
+        );
+        assert!(
+            !message.contains("another repository"),
+            "a foreign process is not another repository's broker: {message}"
+        );
+    }
+
+    #[test]
+    fn probe_timeout_is_actionable() {
+        let message = BrokerError::ProbeTimeout { port: 9119 }.to_string();
+        assert!(message.contains("9119"), "names the port: {message}");
+        assert!(
+            message.contains("stuck processes"),
+            "suggests what to look for: {message}"
+        );
+    }
+
+    #[test]
+    fn every_broker_error_exits_one() {
+        for err in [
+            BrokerError::PortHeldByOtherRepo {
+                port: 9119,
+                repo_root: None,
+            },
+            BrokerError::ProbeTimeout { port: 9119 },
+            BrokerError::BindFailed(std::io::Error::other("boom")),
+            BrokerError::RuntimeFailed(std::io::Error::other("boom")),
+        ] {
+            let wrapped = crate::error::PawError::from(err);
+            assert_eq!(wrapped.exit_code(), 1, "broker failures exit 1: {wrapped}");
+        }
+    }
+
+    #[test]
+    fn the_refusal_message_carries_only_sanitized_text() {
+        let err = BrokerError::PortHeldByOtherRepo {
+            port: 9119,
+            repo_root: Some(sanitize_reported_repo_root("/repo\u{1b}[2Kspoof")),
+        };
+        let message = err.to_string();
+        assert!(
+            !message.chars().any(char::is_control),
+            "the rendered error must be safe to print: {message:?}"
+        );
+        assert!(
+            message.contains("9119"),
+            "the port is still named: {message}"
+        );
+    }
+
+    #[test]
+    fn ensure_port_free_refuses_another_repositorys_broker_before_launch() {
+        let repo_a = tempfile::tempdir().expect("tempdir A");
+        let repo_b = tempfile::tempdir().expect("tempdir B");
+        let (_held, config) = broker_for(repo_a.path());
+
+        let result = ensure_port_free_for_repo(&config, repo_b.path());
+
+        let Err(err) = result else {
+            panic!("the pre-flight check must refuse repository A's broker");
+        };
+        assert!(
+            matches!(err, BrokerError::PortHeldByOtherRepo { .. }),
+            "pre-flight refusal uses the same variant as start_broker: {err:?}"
+        );
+    }
+
+    #[test]
+    fn ensure_port_free_allows_our_own_broker_and_a_disabled_broker() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        let (_held, config) = broker_for(repo.path());
+        assert!(
+            ensure_port_free_for_repo(&config, repo.path()).is_ok(),
+            "our own broker on the port is a reattach, not a clash"
+        );
+
+        // A disabled broker never probes, so even a clashing port is fine.
+        let other = tempfile::tempdir().expect("tempdir other");
+        let disabled = BrokerConfig {
+            enabled: false,
+            ..config
+        };
+        assert!(
+            ensure_port_free_for_repo(&disabled, other.path()).is_ok(),
+            "a disabled broker launches regardless of the port"
+        );
+    }
+
+    #[test]
+    fn repo_root_is_read_from_a_status_body() {
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n\
+             {\"git_paw\":true,\"repo_root\":\"/repos/alpha\",\"agents\":[]}";
+        assert_eq!(
+            parse_repo_root(response),
+            Some("/repos/alpha".to_string()),
+            "a reported repository is read back verbatim"
+        );
+    }
+
+    #[test]
+    fn a_status_body_without_repo_root_reads_as_unknown() {
+        // An older git-paw omits the field entirely; a broker with no declared
+        // repository reports it empty. Both mean "owner unknown".
+        let absent = "HTTP/1.1 200 OK\r\n\r\n{\"git_paw\":true,\"agents\":[]}";
+        let empty = "HTTP/1.1 200 OK\r\n\r\n{\"git_paw\":true,\"repo_root\":\"\"}";
+        assert_eq!(parse_repo_root(absent), None);
+        assert_eq!(parse_repo_root(empty), None);
     }
 
     #[test]

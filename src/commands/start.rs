@@ -14,6 +14,7 @@ use std::path::Path;
 use std::process::Command as StdCommand;
 use std::time::SystemTime;
 
+use git_paw::broker;
 use git_paw::config::{self, PawConfig, SupervisorConfig};
 use git_paw::detect;
 use git_paw::error::PawError;
@@ -85,6 +86,15 @@ pub(crate) fn cmd_start(
     // Fresh launch (or dry-run preview)
     tmux::ensure_tmux_installed()?;
     let config = config::load_config(&repo_root, None)?;
+
+    // Refuse a port held by another repository's broker as soon as the config
+    // is known — before the branch and CLI pickers, so the user is never asked
+    // to make choices for a launch that cannot proceed. Every agent pane would
+    // otherwise be handed a GIT_PAW_BROKER_URL pointing into that other
+    // repository's broker. A dry run creates nothing, so it never probes.
+    if !dry_run {
+        broker::ensure_port_free_for_repo(&config.broker, &repo_root)?;
+    }
 
     // Supervisor mode: when the supervisor section is enabled in config, hand
     // off to the auto-start flow that launches all coding agents under a
@@ -338,7 +348,7 @@ pub(crate) fn cmd_start(
     if broker_config.enabled {
         state.broker_port = Some(broker_config.port);
         state.broker_bind = Some(broker_config.bind.clone());
-        state.broker_log_path = Some(session::session_state_dir()?.join("broker.log"));
+        state.broker_log_path = Some(session::broker_log_path(&state.session_name)?);
         state.dashboard_pane = Some(0);
     }
 
@@ -538,6 +548,9 @@ fn launch_spec_session(
 
     let broker_config = config.broker.clone();
 
+    // See `cmd_start`: the port clash has to be caught before any pane exists.
+    broker::ensure_port_free_for_repo(&broker_config, repo_root)?;
+
     let mut builder = tmux::TmuxSessionBuilder::new(project)
         .session_name(session_name)
         .mouse_mode(mouse)
@@ -722,7 +735,7 @@ fn launch_spec_session(
     if broker_config.enabled {
         state.broker_port = Some(broker_config.port);
         state.broker_bind = Some(broker_config.bind.clone());
-        state.broker_log_path = Some(session::session_state_dir()?.join("broker.log"));
+        state.broker_log_path = Some(session::broker_log_path(&state.session_name)?);
         state.dashboard_pane = Some(0);
     }
 
@@ -787,6 +800,27 @@ pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result
 
     let dashboard_index = existing.dashboard_pane.unwrap_or(0);
 
+    let mut updated = existing.clone();
+    // Re-stamp the broker log path, so a session paused under a git-paw that
+    // used a single shared `broker.log` resumes onto the per-session name
+    // instead of leaving the old file behind for purge to miss.
+    //
+    // This is saved BEFORE the dashboard pane starts below, because the
+    // dashboard resolves its log path from the saved session: starting it
+    // first would let it read the pre-re-stamp path and write there — the
+    // orphaned log this re-stamp exists to prevent.
+    //
+    // `status` deliberately stays `Paused` for this write. Only the log path
+    // is safe to publish before the dashboard exists; recording `Active` here
+    // would mean a failure in the `split-window`/`send-keys` below left a
+    // session marked active with tmux still alive, which the next
+    // `git paw start` would reattach to instead of restarting the broker. The
+    // flip to `Active` happens once the pane is up.
+    if updated.broker_port.is_some() {
+        updated.broker_log_path = Some(session::broker_log_path(&updated.session_name)?);
+        session::save_session(&updated)?;
+    }
+
     // Recreate the dashboard pane only when the original session had a
     // broker enabled. Without a broker there is no dashboard pane to
     // recreate; pause+resume on a no-broker session is purely the tmux
@@ -836,8 +870,11 @@ pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result
         }
     }
 
-    // Update session state: status flips back to Active.
-    let mut updated = existing.clone();
+    // The dashboard pane is up (or there was never one to recreate), so the
+    // session is genuinely running again. Every failure path above returned
+    // early with the session still recorded `Paused`, which is what lets a
+    // retry of `git paw start` restart the broker rather than reattach to a
+    // session it believes is already active.
     updated.status = SessionStatus::Active;
 
     // Submit boot prompts held for agents added while the session was paused

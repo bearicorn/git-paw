@@ -153,12 +153,15 @@ The system SHALL define a `BrokerError` type with variants for broker-specific f
 
 The following variants SHALL exist:
 
-- `PortInUse { port: u16, source: std::io::Error }` — the configured port is already occupied; `source` carries the underlying bind/probe `io::Error` so callers can chain or log the original cause
+- `PortInUse { port: u16, source: std::io::Error }` — the configured port is already occupied by a process that is not a git-paw broker; `source` carries the underlying bind/probe `io::Error` so callers can chain or log the original cause
+- `PortHeldByOtherRepo { port: u16, repo_root: Option<String> }` — the configured port is held by a git-paw broker serving a different repository, or one that reports no repository at all (an older git-paw). Distinct from `PortInUse`, because the two have different causes and different fixes and must be distinguishable to users and to tests
 - `ProbeTimeout { port: u16 }` — the stale-broker probe timed out
 - `BindFailed(std::io::Error)` — socket bind failed for a reason other than port-in-use
 - `RuntimeFailed(std::io::Error)` — tokio runtime construction failed
 
 `PortInUse.source` SHALL be marked `#[source]` (or equivalent thiserror attribute) so it participates in `std::error::Error::source()` chains. The `Display` output SHALL NOT include the source by default — it is reserved for explicit chaining via `{:?}` or programmatic `.source()` access — to avoid duplicated diagnostics in user-facing CLI output.
+
+`PortHeldByOtherRepo.repo_root` is reported by whatever process answered the probe and is therefore untrusted; it SHALL be stripped of control characters and capped in length before it appears in the `Display` output.
 
 #### Scenario: PortInUse is actionable
 
@@ -172,6 +175,28 @@ The following variants SHALL exist:
 - **GIVEN** a `PortInUse` value with an `AddrInUse` source
 - **WHEN** `std::error::Error::source()` is called on it
 - **THEN** the result SHALL be `Some(&dyn Error)` referencing the wrapped `io::Error`
+
+#### Scenario: PortHeldByOtherRepo is actionable
+
+- **GIVEN** `BrokerError::PortHeldByOtherRepo { port: 9119, repo_root: Some("/home/you/other-repo".to_string()) }`
+- **WHEN** formatted with `Display`
+- **THEN** the message SHALL mention port `9119`
+- **AND** the message SHALL name the holding repository `/home/you/other-repo`
+- **AND** the message SHALL tell the user to set a distinct `[broker] port`
+
+#### Scenario: PortHeldByOtherRepo names an unknown holder without guessing
+
+- **GIVEN** `BrokerError::PortHeldByOtherRepo { port: 9119, repo_root: None }`
+- **WHEN** formatted with `Display`
+- **THEN** the message SHALL mention port `9119` and the `[broker] port` fix
+- **AND** the message SHALL say an older git-paw broker may be holding the port
+- **AND** the message SHALL NOT claim the broker belongs to the caller
+
+#### Scenario: PortHeldByOtherRepo renders untrusted text safely
+
+- **GIVEN** a `PortHeldByOtherRepo` whose `repo_root` was reported with ANSI escape sequences and other control characters
+- **WHEN** formatted with `Display`
+- **THEN** the rendered message SHALL contain no control characters
 
 #### Scenario: ProbeTimeout is actionable
 

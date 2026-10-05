@@ -195,7 +195,7 @@ fn recover_session_reconstructs_dashboard_and_watchers() {
 
     // The session name is `paw-<project>` per `tmux::resolve_session_name`.
     let session_name = format!("paw-{project}");
-    let broker_log = sessions_dir.join("broker.log");
+    let broker_log = sessions_dir.join(format!("{session_name}.broker.log"));
 
     // Compose the session JSON with broker_port set + one worktree entry.
     let session_json = serde_json::json!({

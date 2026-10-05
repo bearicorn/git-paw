@@ -1000,14 +1000,20 @@ fn cmd_dashboard() -> Result<(), PawError> {
         .or_else(|| config.default_cli.clone())
         .unwrap_or_default();
 
-    let log_path = session::session_state_dir()?.join("broker.log");
+    // Look up the saved session once: needed for the per-session broker log
+    // name, the broker watcher target list AND to discover the supervisor
+    // pane_map for the auto-approve thread.
+    let saved_session = session::find_session_for_repo(&repo_root)?;
+
+    // One log per session, so two repositories never write — or purge — the
+    // same file. See `session::resolve_broker_log_path` for why the saved
+    // path wins over the derived one.
+    let log_path = session::resolve_broker_log_path(saved_session.as_ref())?;
     let mut broker_state = broker::BrokerState::new(Some(log_path))
+        .with_repo_root(&repo_root)
         .with_verify_on_commit_nudge(verify_on_commit_nudge)
         .with_seeded_cli("supervisor", &supervisor_cli);
 
-    // Look up the saved session once: needed for the broker watcher target
-    // list AND to discover the supervisor pane_map for the auto-approve thread.
-    let saved_session = session::find_session_for_repo(&repo_root)?;
     let watch_targets = saved_session
         .as_ref()
         .map(|sess| {

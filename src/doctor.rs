@@ -275,8 +275,12 @@ pub struct BundledScriptsProbe {
 pub enum PortState {
     /// Nothing is listening — the broker can bind.
     Free,
-    /// A git-paw broker is already reachable there.
+    /// A git-paw broker for *this* repository is already reachable there.
     LiveBroker,
+    /// A git-paw broker holds the port, but it serves a different repository
+    /// — or reports none at all, as an older git-paw broker does. Starting a
+    /// session here would be refused.
+    OtherRepo,
     /// Some other service holds the port.
     Foreign,
     /// The probe could not reach a verdict (it timed out).
@@ -792,6 +796,12 @@ pub fn check_broker(probe: &BrokerProbe) -> Vec<CheckResult> {
             "broker",
             format!("enabled — a git-paw broker is already reachable at {address}"),
         ),
+        PortState::OtherRepo => CheckResult::warn(
+            GROUP_BROKER,
+            "broker",
+            format!("enabled — {address} is held by another repository's git-paw broker"),
+            "set a distinct `[broker] port` in .git-paw/config.toml for one of the repositories",
+        ),
         PortState::Foreign => CheckResult::warn(
             GROUP_BROKER,
             "broker",
@@ -1211,7 +1221,7 @@ fn collect_probes(repo_root: &Path, environment: EnvironmentProbe) -> Probes {
         spec_system: probe_spec_system(&config, repo_root),
         spec_cli: probe_spec_cli(&config, repo_root),
         bundled_scripts: probe_bundled_scripts(repo_root),
-        broker: probe_broker(&config),
+        broker: probe_broker(&config, repo_root),
         supervisor: probe_supervisor(&config, repo_root),
         hygiene: probe_hygiene(repo_root),
         sandbox: probe_sandbox(),
@@ -1365,12 +1375,16 @@ fn is_executable(path: &Path) -> bool {
 
 /// Probes the configured broker address, but only when the broker is enabled —
 /// a disabled broker is reported without touching the network.
-fn probe_broker(config: &PawConfig) -> BrokerProbe {
+fn probe_broker(config: &PawConfig, repo_root: &Path) -> BrokerProbe {
     let broker = &config.broker;
     let port_state = if broker.enabled {
-        match crate::broker::probe_broker(&broker.url()) {
+        // Probe with this repository, so doctor distinguishes "our broker is
+        // up" from "someone else's broker is squatting the port" — the
+        // clash that would refuse the next `git paw start`.
+        match crate::broker::probe_broker_for_repo(&broker.url(), repo_root) {
             crate::broker::ProbeResult::NoListener => PortState::Free,
             crate::broker::ProbeResult::LiveBroker => PortState::LiveBroker,
+            crate::broker::ProbeResult::OtherRepoBroker { .. } => PortState::OtherRepo,
             crate::broker::ProbeResult::ForeignServer => PortState::Foreign,
             crate::broker::ProbeResult::Timeout => PortState::Unknown,
         }
