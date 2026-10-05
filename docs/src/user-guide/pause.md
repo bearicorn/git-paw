@@ -25,7 +25,7 @@ When you run `git paw pause`:
    (`tmux kill-pane -t :0.<idx>`),
    which causes the `__dashboard` subprocess to exit, which drops
    the `BrokerHandle`, which gracefully shuts down the broker and
-   flushes `broker.log`.
+   flushes the session's `<session_name>.broker.log`.
 3. The session state file flips from `status: active` to
    `status: paused`.
 4. Every coding-agent CLI pane keeps running. Their in-memory

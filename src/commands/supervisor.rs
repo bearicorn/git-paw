@@ -405,6 +405,16 @@ pub(crate) fn cmd_supervisor(
         }
     }
 
+    // Refuse a port held by another repository's broker before the branch and
+    // CLI pickers below, so the user is never asked to make choices for a
+    // launch that cannot proceed. See `cmd_start` for why this cannot wait
+    // for the dashboard's own broker start-up. A dry run creates nothing, so
+    // it never probes; the reattach and recover paths returned above and do
+    // their own checks.
+    if !dry_run {
+        broker::ensure_port_free_for_repo(&config.broker, repo_root)?;
+    }
+
     // Fall back to a synthesized default when [supervisor] is absent.
     // `resolve_supervisor_mode` already prompts the user to opt in to
     // supervisor mode without forcing them to hand-author a [supervisor]
@@ -800,7 +810,7 @@ pub(crate) fn cmd_supervisor(
     if broker_config.enabled {
         state.broker_port = Some(broker_config.port);
         state.broker_bind = Some(broker_config.bind.clone());
-        state.broker_log_path = Some(session::session_state_dir()?.join("broker.log"));
+        state.broker_log_path = Some(session::broker_log_path(&state.session_name)?);
         state.dashboard_pane = Some(1);
     }
     session::save_session(&state)?;

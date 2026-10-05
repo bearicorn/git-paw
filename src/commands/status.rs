@@ -80,8 +80,14 @@ pub(crate) fn cmd_status(json: bool) -> Result<(), PawError> {
     // Broker info
     if let (Some(bind), Some(port)) = (&existing.broker_bind, existing.broker_port) {
         let url = format!("http://{bind}:{port}");
-        match broker::probe_broker(&url) {
+        // Probe with this repository, so a broker on the port that serves a
+        // *different* repository is not reported as this session's broker
+        // running.
+        match broker::probe_broker_for_repo(&url, &existing.repo_path) {
             broker::ProbeResult::LiveBroker => println!("Broker:  {url} (running)"),
+            broker::ProbeResult::OtherRepoBroker { .. } => {
+                println!("Broker:  {url} (held by another repository's git-paw broker)");
+            }
             _ if display == session::DisplayStatus::Paused => {
                 println!("Broker:  {url} (paused \u{2014} run 'git paw start' to resume)");
             }

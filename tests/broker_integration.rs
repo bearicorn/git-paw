@@ -151,6 +151,12 @@ fn purge_removes_broker_log_when_exists() {
     );
 }
 
+// Per-session log naming and the "purging one session spares its neighbour"
+// behaviour are covered where the real flows run: `git paw purge --force`
+// through the CLI in `tests/broker_repo_identity_e2e.rs`, and
+// `session::resolve_broker_log_path` in `src/session.rs`. A simulated purge
+// here would pass even if every launcher reverted to the shared `broker.log`.
+
 #[test]
 #[serial]
 fn purge_succeeds_when_broker_log_does_not_exist() {

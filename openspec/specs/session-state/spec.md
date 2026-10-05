@@ -8,13 +8,15 @@ The system SHALL serialize session data to JSON and write it atomically using a 
 
 The session data SHALL include optional broker fields: `broker_port` (`Option<u16>`), `broker_bind` (`Option<String>`), and `broker_log_path` (`Option<PathBuf>`). These fields SHALL be omitted from the JSON when `None` and SHALL default to `None` when absent during deserialization.
 
+`broker_log_path` names one log per session — `<session_state_dir>/<session_name>.broker.log` — so two repositories on one machine never write to, or purge, the same file. A session saved by an earlier git-paw records the shared `<session_state_dir>/broker.log` instead; that value SHALL continue to load and remain authoritative for both the broker and `purge` until a resume or recovery re-stamps it.
+
 #### Scenario: Saved session round-trips with all fields intact
 - **GIVEN** an active session with 3 worktrees
 - **WHEN** `save_session()` is called and the session is loaded back
 - **THEN** all fields (session_name, repo_path, project_name, created_at, status, worktrees) SHALL match the original
 
 #### Scenario: Saved session with broker fields round-trips
-- **GIVEN** an active session with `broker_port = Some(9119)`, `broker_bind = Some("127.0.0.1")`, `broker_log_path = Some("/path/to/broker.log")`
+- **GIVEN** an active session with `broker_port = Some(9119)`, `broker_bind = Some("127.0.0.1")`, `broker_log_path = Some("/path/to/paw-my-project.broker.log")`
 - **WHEN** `save_session()` is called and the session is loaded back
 - **THEN** all broker fields SHALL match the original
 
@@ -23,6 +25,12 @@ The session data SHALL include optional broker fields: `broker_port` (`Option<u1
 - **WHEN** the session is loaded
 - **THEN** `broker_port`, `broker_bind`, and `broker_log_path` SHALL all be `None`
 - **AND** all existing fields SHALL load correctly
+
+#### Scenario: A session recording the old shared log name still loads
+- **GIVEN** a session JSON saved by an earlier git-paw with `broker_log_path = Some("<session_state_dir>/broker.log")`
+- **WHEN** the session is loaded
+- **THEN** `broker_log_path` SHALL be that recorded path
+- **AND** it SHALL be the path both the broker writes and `purge` deletes
 
 #### Scenario: Saving again replaces previous state
 - **GIVEN** a previously saved session

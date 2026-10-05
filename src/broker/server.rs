@@ -443,6 +443,16 @@ async fn log(State(state): State<Arc<BrokerState>>, Query(params): Query<PollQue
 async fn status(State(state): State<Arc<BrokerState>>) -> Response {
     let uptime = state.uptime_seconds();
     let agents = delivery::agent_status_snapshot(&state);
+    // `repo_root` is what the stale-broker probe compares against its own
+    // repository before it will reattach, so a broker that was started
+    // without a declared repository reports an empty string rather than
+    // omitting the field — an absent owner is treated as unknown, never as
+    // the caller's.
+    let repo_root = state
+        .repo_root
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     (
         StatusCode::OK,
         axum::Json(serde_json::json!({
@@ -450,6 +460,7 @@ async fn status(State(state): State<Arc<BrokerState>>) -> Response {
             "version": env!("CARGO_PKG_VERSION"),
             "uptime_seconds": uptime,
             "agents": agents,
+            "repo_root": repo_root,
         })),
     )
         .into_response()
@@ -973,6 +984,33 @@ mod tests {
         assert!(json["version"].is_string());
         assert!(json["uptime_seconds"].is_number());
         assert_eq!(json["agents"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn status_reports_the_repository_it_serves() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(BrokerState::new(None).with_repo_root(repo.path()));
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let canonical = repo.path().canonicalize().expect("canonicalize repo");
+        assert_eq!(
+            json["repo_root"],
+            serde_json::json!(canonical.display().to_string()),
+            "repo_root must be the broker's canonical repository path"
+        );
     }
 
     /// POSTs a JSON body to `/publish` against a router built from `state`.

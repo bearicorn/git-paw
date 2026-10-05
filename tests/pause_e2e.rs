@@ -250,7 +250,7 @@ fn pause_detaches_and_stops_broker() {
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
 
     let session_name = format!("paw-{project}");
-    let broker_log = sessions_dir.join("broker.log");
+    let broker_log = sessions_dir.join(format!("{session_name}.broker.log"));
     let broker_url = format!("http://127.0.0.1:{broker_port}");
 
     // Write a minimal config so __dashboard can find broker settings.

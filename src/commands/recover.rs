@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use git_paw::broker;
 use git_paw::config::{self, ApprovalLevel, CustomCli, PawConfig, SupervisorConfig};
 use git_paw::error::PawError;
 use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry};
@@ -80,6 +81,28 @@ pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<()
         .zip(existing.broker_bind.as_ref())
         .map(|(port, bind)| format!("http://{bind}:{port}"));
 
+    // Recovery rebuilds the agent panes with `GIT_PAW_BROKER_URL` built from
+    // the SAVED broker fields, which can differ from the current config when
+    // `[broker] port` changed since the session was saved. Probe the port the
+    // agents will actually be handed, not the configured one — checking the
+    // wrong port would let the clash `cmd_start` refuses up front slip
+    // through here.
+    let recovery_broker_config = match (existing.broker_port, existing.broker_bind.as_ref()) {
+        (Some(port), Some(bind)) => config::BrokerConfig {
+            enabled: true,
+            port,
+            bind: bind.clone(),
+            ..config.broker.clone()
+        },
+        // No saved broker fields: the rebuilt panes get no broker URL at all,
+        // so there is nothing to clash over.
+        _ => config::BrokerConfig {
+            enabled: false,
+            ..config.broker.clone()
+        },
+    };
+    broker::ensure_port_free_for_repo(&recovery_broker_config, repo_root)?;
+
     // Tear down any stale tmux session of this name before rebuilding so the
     // recovery starts from a clean `new-session`. A half-built session left
     // by a prior crashed/aborted launch would otherwise let the rebuild's
@@ -120,13 +143,24 @@ pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<()
             &config.clis,
         )?,
     };
-    tmux_session.execute()?;
 
     // Update session status + record the resolved mode.
     let mut updated = existing.clone();
     updated.status = SessionStatus::Active;
     updated.mode = mode;
+    // Re-stamp the broker log path. A session saved by a git-paw that used a
+    // single shared `broker.log` would otherwise have the dashboard write the
+    // per-session name while purge deleted the old one, orphaning a log.
+    if updated.broker_port.is_some() {
+        updated.broker_log_path = Some(session::broker_log_path(&updated.session_name)?);
+    }
+    // Save BEFORE the dashboard pane starts. The dashboard resolves its log
+    // path from the saved session, so launching first would let it read the
+    // pre-re-stamp path and write there — the orphaned log this re-stamp
+    // exists to prevent.
     session::save_session(&updated)?;
+
+    tmux_session.execute()?;
 
     attach_or_print_hint(&tmux_session.name)
 }

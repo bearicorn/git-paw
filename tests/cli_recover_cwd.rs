@@ -172,7 +172,7 @@ fn recovered_agent_panes_use_each_agents_worktree_cwd() {
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
 
     let session_name = format!("paw-{project}");
-    let broker_log = sessions_dir.join("broker.log");
+    let broker_log = sessions_dir.join(format!("{session_name}.broker.log"));
 
     let canonical_repo = git_toplevel(&repo);
     let canonical_wt_a = canonical_path(&wt_a);

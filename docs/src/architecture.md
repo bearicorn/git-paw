@@ -99,7 +99,7 @@ It describes the code as it is today. For the structure the code is moving towar
 | `src/broker/server.rs` | `axum` HTTP server: `/publish`, `/watch`, `/messages/:agent_id`, `/status`, `/log`. Validates each incoming `/publish` body (message schema, `agent_id` pattern, unfilled-placeholder rejection) before handing it to delivery. |
 | `src/broker/messages.rs` | `BrokerMessage` enum + payload types + slug validation. Source of truth for the wire format used in user-facing examples. |
 | `src/broker/publish.rs` | Client-side helpers for callers outside the broker process: build `BrokerMessage` values and publish them over HTTP, register a live `/watch` target, and fetch `/log`. Shared by `cmd_supervisor` and the MCP publish tools. |
-| `src/broker/delivery.rs` | Delivery layer: assigns each message its sequence number, updates the sender's record, appends it to the message log, and routes it into inboxes (broadcast, supervisor inbox, targeted delivery). Also cursor-based polling, the dashboard snapshot, and the `broker.log` flush loop. |
+| `src/broker/delivery.rs` | Delivery layer: assigns each message its sequence number, updates the sender's record, appends it to the message log, and routes it into inboxes (broadcast, supervisor inbox, targeted delivery). Also cursor-based polling, the dashboard snapshot, and the broker-log flush loop. |
 | `src/broker/watcher.rs` | Git-status polling watcher: one task per worktree runs `git status --porcelain` every 2 s and publishes `agent.status` (with `modified_files`) when the reported path set changes; prunes a worktree that has vanished. |
 | `src/broker/conflict.rs` | Forward / in-flight / ownership conflict detection. Auto-emits `[conflict-detector]`-tagged `agent.feedback` and escalates via `agent.question`. |
 | `src/broker/learnings.rs` | Opt-in learnings subsystem. Aggregates the deterministic signals (stuck durations, recovery cycles, conflict events, permission patterns) plus published qualitative `agent.learning` records, and flushes them to `.git-paw/session-learnings.md`. |
@@ -344,7 +344,7 @@ Dashboard pane process (git paw __dashboard):
 │   └── Conflict detector (src/broker/conflict.rs), supervisor mode only
 │       └── Forward / in-flight / ownership shapes
 ├── Log flush thread (std::thread, 5s interval)
-│   └── Appends new messages to broker.log
+│   └── Appends new messages to <session_name>.broker.log
 ├── Learnings flush thread (std::thread; opt-in via [supervisor] learnings = true)
 │   └── Flushes the aggregator (src/broker/learnings.rs), fed on every publish,
 │       to .git-paw/session-learnings.md (default every 60s, plus once at shutdown)
@@ -369,9 +369,12 @@ validates incoming messages (`src/broker/server.rs`) and hands them to
 `src/broker/delivery.rs`, which sequences, logs, and routes them; the dashboard
 reads the latest snapshot each tick.
 
-The log flush thread periodically appends new messages to `broker.log` in the
-session-state directory (`~/.local/share/git-paw/sessions/broker.log`, recorded
-as `broker_log_path` in the session file), one human-readable line per message
+The log flush thread periodically appends new messages to the session's broker
+log in the session-state directory
+(`~/.local/share/git-paw/sessions/<session_name>.broker.log`, recorded as
+`broker_log_path` in the session file — one log per session, so two
+repositories never write to or purge the same file), one human-readable line
+per message
 (`[seq] <unix-seconds> [agent_id] <summary>`). This runs on a plain
 `std::thread` to avoid contention with the tokio runtime.
 
@@ -566,7 +569,7 @@ Session state is persisted as JSON under `~/.local/share/git-paw/sessions/`
   ],
   "broker_port": 9119,
   "broker_bind": "127.0.0.1",
-  "broker_log_path": "/home/you/.local/share/git-paw/sessions/broker.log",
+  "broker_log_path": "/home/you/.local/share/git-paw/sessions/paw-myproject.broker.log",
   "mode": "bare",
   "dashboard_pane": 0
 }
@@ -575,7 +578,7 @@ Session state is persisted as JSON under `~/.local/share/git-paw/sessions/`
 `status` is `active`, `paused`, or `stopped`. `broker_port`, `broker_bind`,
 `broker_log_path`, and `dashboard_pane` are present only when the broker is
 enabled; `git paw status` uses the bind and port to probe the broker, and
-`git paw purge` uses `broker_log_path` to clean up `broker.log`. `mode` (`bare`
+`git paw purge` uses `broker_log_path` to clean up that session's broker log. `mode` (`bare`
 or `supervisor`) records the pane layout so recovery rebuilds the same shape.
 `branch_created` records whether git-paw created the branch (rather than
 reusing an existing one). A worktree entry can also carry
