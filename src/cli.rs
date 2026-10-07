@@ -411,10 +411,12 @@ pub enum Command {
         about = "Show session state for the current repo",
         long_about = "Displays the current session status, branches, CLIs, and worktree paths \
                       for the repository in the current directory.\n\n\
-                      Status is one of 🟢 active (tmux running), 🔵 paused, 🟡 stopped, or \
-                      🔴 stale (the receipt claims active but the tmux session no longer \
-                      exists — a crash or release-boundary carry-over). Run `git paw start` to \
-                      self-heal a stale receipt, or `git paw purge --stale` to clear it.\n\n\
+                      Status is one of 🟢 active (tmux running), 🔵 paused, 🟡 stopped \
+                      (tmux not running, or tmux up but every agent pane exited — \
+                      `git paw start` recovers those), or 🔴 stale (the receipt claims \
+                      active but the tmux session no longer exists — a crash or \
+                      release-boundary carry-over). Run `git paw start` to self-heal a stale \
+                      receipt, or `git paw purge --stale` to clear it.\n\n\
                       Pass --json for machine-readable output (the `status` field is one of \
                       active/paused/stopped/stale).\n\n\
                       Examples:\n  git paw status\n  git paw status --json"

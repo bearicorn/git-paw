@@ -488,9 +488,188 @@ fn bare_specs_on_tty_shows_spec_picker() {
     pty::kill_session(&session);
 }
 
-// NOTE — the uniform / per-branch CLI-picker SHOWN rows are deliberately NOT
-// driven here: reaching the CLI picker requires first passing the mode picker
-// (a fuzzy drive-to-completion = flaky). They are covered instead by: the
-// bypass side (`start_all_flags_bypass_all_pickers`), the resolution-chain
-// short-circuit (`tests/cli_resolution_integration.rs`), and the mode-picker
-// render precursor (`start_branches_without_cli_shows_mode_picker`).
+// NOTE — the CLI-picker SHOWN rows are driven here only with `--branches`
+// given, so the fuzzy branch picker (a drive-to-completion = flaky) is
+// bypassed and the two remaining prompts are plain `dialoguer` selects that a
+// bare Enter confirms. The per-branch picker's pre-selection is covered by the
+// unit tests on the shared index helper and on `run_selection`; the bypass
+// side is `start_all_flags_bypass_all_pickers`.
+
+// ---------------------------------------------------------------------------
+// default_cli pre-selection (DS-8).
+// ---------------------------------------------------------------------------
+
+/// Writes a config with two custom CLIs whose commands are on PATH, with
+/// `default_cli` naming the one that sorts SECOND by display name — so a
+/// picker that starts on the first entry cannot accidentally pass the test.
+fn write_two_cli_config(repo: &std::path::Path, supervisor: bool) {
+    let paw = repo.join(".git-paw");
+    std::fs::create_dir_all(&paw).expect("create .git-paw");
+    let mut cfg = String::from(
+        "default_cli = \"true\"\n\n\
+         [clis.echo]\ncommand = \"echo\"\ndisplay_name = \"Alpha Echo\"\n\n\
+         [clis.true]\ncommand = \"true\"\ndisplay_name = \"Zeta True\"\n",
+    );
+    if supervisor {
+        let _ = write!(
+            cfg,
+            "\n[supervisor]\nenabled = true\ncli = \"echo\"\ntest_command = \"true\"\nagent_approval = \"manual\"\n"
+        );
+    }
+    std::fs::write(paw.join("config.toml"), cfg).expect("write config");
+}
+
+/// Spec scenario "Bare git paw start pre-selects the configured default CLI" —
+/// confirming both pickers without moving the cursor maps the branch to
+/// `default_cli`, not to the picker's first entry.
+#[test]
+#[serial]
+fn start_cli_picker_preselects_the_configured_default_cli() {
+    if !pty::tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tmux_env = TmuxTestEnv::new();
+    let _proc = tmux_env.apply_to_process();
+
+    let tr = setup_test_repo();
+    write_two_cli_config(tr.path(), false);
+
+    let home = tempfile::TempDir::new().expect("home tempdir");
+    let session = pty::unique_session_name("paw-matrix-defaultcli");
+    pty::create_detached_session(&session, home.path());
+    let bin = env!("CARGO_BIN_EXE_git-paw");
+    let cmd = format!(
+        "cd '{}' && '{bin}' start --branches feat/a --dry-run",
+        tr.path().display()
+    );
+    pty::send_keys(&session, &[&cmd, "Enter"]);
+
+    pty::wait_for_pane(&session, "CLI assignment mode", Duration::from_secs(10));
+    pty::send_keys(&session, &["Enter"]);
+    pty::wait_for_pane(
+        &session,
+        "Select AI CLI for all branches",
+        Duration::from_secs(10),
+    );
+    pty::send_keys(&session, &["Enter"]);
+
+    // The picker started on `default_cli`, so confirming it maps feat/a to it.
+    pty::wait_for_pane(&session, "feat/a \u{2192} true", Duration::from_secs(10));
+    pty::kill_session(&session);
+}
+
+/// Spec scenario "A uniform CLI pick is honoured" — a supervised launch with
+/// no `--branches`, `--specs` or `--cli` runs the pickers, and the worker
+/// launches with the CLI the user picked there rather than with the
+/// `--cli` > `default_cli` > supervisor-CLI fallback (which would be `echo`).
+#[test]
+#[serial]
+fn supervised_launch_honours_the_uniform_cli_pick() {
+    if !pty::tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tmux_env = TmuxTestEnv::new();
+    let _proc = tmux_env.apply_to_process();
+
+    let tr = setup_test_repo();
+    // `default_cli` and the supervisor CLI are both "echo", so a plan naming
+    // "true" can only have come from the picker.
+    let paw = tr.path().join(".git-paw");
+    std::fs::create_dir_all(&paw).expect("create .git-paw");
+    std::fs::write(
+        paw.join("config.toml"),
+        "default_cli = \"echo\"\n\n\
+         [clis.echo]\ncommand = \"echo\"\ndisplay_name = \"Alpha Echo\"\n\n\
+         [clis.true]\ncommand = \"true\"\ndisplay_name = \"Zeta True\"\n\n\
+         [supervisor]\nenabled = true\ncli = \"echo\"\ntest_command = \"true\"\nagent_approval = \"manual\"\n",
+    )
+    .expect("write config");
+    git(tr.path(), &["branch", "feat/a"]);
+
+    // Pin PATH to a directory holding only the two fixture CLIs (plus the
+    // system directories git needs), so any real agent CLI installed on the
+    // test machine — which lives in a user or package-manager bin directory,
+    // never /usr/bin or /bin — cannot appear in the picker and shift which
+    // entry one `Down` lands on.
+    let bindir = tempfile::TempDir::new().expect("bin tempdir");
+    for name in ["echo", "true"] {
+        let path = bindir.path().join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write fake cli");
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("chmod fake cli");
+    }
+
+    // tmux is a hard dependency of the launch path and may live outside the
+    // system directories (Homebrew) — alongside real agent CLIs. Symlink just
+    // the binary into the fixture directory rather than putting its whole
+    // directory on PATH.
+    let tmux_bin = which::which("tmux").expect("tmux on PATH");
+    std::os::unix::fs::symlink(&tmux_bin, bindir.path().join("tmux")).expect("symlink tmux");
+
+    let home = tempfile::TempDir::new().expect("home tempdir");
+    let session = pty::unique_session_name("paw-matrix-suppick");
+    pty::create_detached_session(&session, home.path());
+    let bin = env!("CARGO_BIN_EXE_git-paw");
+    let cmd = format!(
+        "cd '{}' && PATH='{}:/usr/bin:/bin' '{bin}' start --supervisor --dry-run",
+        tr.path().display(),
+        bindir.path().display()
+    );
+    pty::send_keys(&session, &[&cmd, "Enter"]);
+
+    // Branch picker: filter to feat/a, toggle it, confirm.
+    pty::wait_for_pane(&session, "Select branches", Duration::from_secs(10));
+    pty::send_keys(&session, &["feat/a"]);
+    pty::wait_for_pane(&session, "feat/a", Duration::from_secs(10));
+    pty::send_keys(&session, &["Space"]);
+    pty::send_keys(&session, &["Enter"]);
+
+    // Uniform mode, then move off the pre-selected "Alpha Echo" onto
+    // "Zeta True" and confirm.
+    pty::wait_for_pane(&session, "CLI assignment mode", Duration::from_secs(10));
+    pty::send_keys(&session, &["Enter"]);
+    pty::wait_for_pane(
+        &session,
+        "Select AI CLI for all branches",
+        Duration::from_secs(10),
+    );
+    pty::send_keys(&session, &["Down"]);
+    pty::send_keys(&session, &["Enter"]);
+
+    pty::wait_for_pane(&session, "feat/a \u{2192} true", Duration::from_secs(15));
+    pty::kill_session(&session);
+}
+
+/// Spec scenario "The flag path keeps the session-wide fallback" — with
+/// `--branches` and no `--cli`, no CLI picker is shown and the worker launches
+/// with `default_cli`.
+#[test]
+#[serial]
+fn supervised_launch_with_branches_keeps_the_session_wide_fallback() {
+    if !pty::tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tmux_env = TmuxTestEnv::new();
+    let _proc = tmux_env.apply_to_process();
+
+    let tr = setup_test_repo();
+    write_two_cli_config(tr.path(), true);
+
+    let home = tempfile::TempDir::new().expect("home tempdir");
+    let session = pty::unique_session_name("paw-matrix-supcli");
+    pty::create_detached_session(&session, home.path());
+    let bin = env!("CARGO_BIN_EXE_git-paw");
+    let cmd = format!(
+        "cd '{}' && '{bin}' start --branches feat/a --supervisor --dry-run",
+        tr.path().display()
+    );
+    pty::send_keys(&session, &[&cmd, "Enter"]);
+
+    // --branches shows no CLI picker, so the session-wide fallback applies:
+    // no --cli → default_cli ("true").
+    pty::wait_for_pane(&session, "Agent CLI:  true", Duration::from_secs(10));
+    pty::kill_session(&session);
+}

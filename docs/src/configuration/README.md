@@ -14,7 +14,7 @@ Both files are optional. git-paw works with sensible defaults when no config exi
 ## Full Config Example
 
 ```toml
-# Default CLI used when --cli flag is not provided
+# CLI pre-selected in the interactive picker when --cli is not provided
 default_cli = "my-cli"
 
 # Default CLI for spec-mode launches (--from-all-specs, --specs); bypasses picker when set
@@ -144,7 +144,12 @@ case.
 
 ### `default_cli`
 
-The AI CLI to use when `--cli` is not passed and you want to skip the CLI picker.
+The AI CLI pre-selected in the interactive CLI picker when `--cli` is not
+passed — you can still choose any other listed CLI. It does **not** skip the
+picker: the assignment-mode prompt and the CLI picker still appear, and in
+per-branch mode every branch's picker starts on this CLI too. Unset, or naming
+a CLI that is not available, the picker starts on its first entry. `--cli`
+skips the CLI prompt entirely.
 
 ```toml
 default_cli = "my-cli"
@@ -1300,6 +1305,8 @@ border_affordances = true  # default
 | `border_affordances` | `true` | When `true`, git-paw applies *pane affordances* to the sessions it creates: double-line pane borders (`═║` instead of the default `─│`), a per-pane label bar showing each pane's index and role/branch (e.g. `0: supervisor`, `1: dashboard`, `2: feat/foo`), a dim border on inactive panes, and a cyan-bold border on the focused pane. Set to `false` to opt out and inherit your own tmux styling instead. |
 
 These options are scoped to git-paw-managed sessions (`paw-*`) only — your other tmux sessions are never touched. They apply to both `git paw start` and supervisor-mode sessions.
+
+**This setting is purely visual.** Independently of it, git-paw tags every pane it creates with a pane-scoped `@paw_role` tmux option naming that pane's role (`supervisor`, `dashboard`, or the agent's branch). The option draws nothing on its own — only the label bar above renders it — but `git paw status` and `git paw doctor` use it to tell a coding-agent pane from an infrastructure pane when they check whether a session's agents are still running. Turning affordances off therefore changes how a session looks, never how accurately its state is reported.
 
 **When to disable.** Turn `border_affordances` off if you run a tmux theme you prefer, are on tmux older than 3.2 (where the double border lines aren't recognised — git-paw warns and continues, but you may prefer the consistent default look), or find the label strip noisy on small terminals.
 

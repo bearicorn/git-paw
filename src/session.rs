@@ -84,17 +84,27 @@ impl DisplayStatus {
     /// tmux-liveness probe.
     ///
     /// `🔴 Stale` surfaces only for `Active` receipts whose probe returns
-    /// [`crate::tmux::SessionLiveness::Stale`]. An `Indeterminate` probe (the
-    /// tmux binary is missing) never yields `Stale`: it preserves the
-    /// pre-existing "tmux not alive" display by downgrading active/paused to
-    /// `Stopped`.
+    /// [`crate::tmux::SessionLiveness::Stale`] — the tmux session is absent. An
+    /// `Indeterminate` probe (the tmux binary is missing) never yields `Stale`:
+    /// it preserves the pre-existing "tmux not alive" display by downgrading
+    /// active/paused to `Stopped`. [`crate::tmux::SessionLiveness::AgentsExited`]
+    /// never yields `Stale` either — the tmux session is still running, so such
+    /// a session displays as `Stopped` for every receipt status.
     #[must_use]
+    #[expect(
+        clippy::match_same_arms,
+        reason = "the AgentsExited mapping is spelled out, not left to the wildcard, so the \
+                  stopped-not-stale decision is visible at the match and pinned by its own test"
+    )]
     pub fn from_receipt(status: &SessionStatus, liveness: crate::tmux::SessionLiveness) -> Self {
         use crate::tmux::SessionLiveness as L;
         match (status, liveness) {
             (SessionStatus::Active, L::Alive) => Self::Active,
             (SessionStatus::Active, L::Stale) => Self::Stale,
             (SessionStatus::Paused, L::Alive) => Self::Paused,
+            // The tmux session exists but every agent CLI has exited: stopped,
+            // never stale.
+            (_, L::AgentsExited) => Self::Stopped,
             // Stopped receipt (any probe), paused-with-dead-tmux, and every
             // Indeterminate case fall through to the unchanged Stopped display.
             _ => Self::Stopped,
@@ -1232,6 +1242,7 @@ mod tests {
         for liveness in [
             SessionLiveness::Alive,
             SessionLiveness::Stale,
+            SessionLiveness::AgentsExited,
             SessionLiveness::Indeterminate,
         ] {
             let d = DisplayStatus::from_receipt(&SessionStatus::Stopped, liveness);
@@ -1248,6 +1259,20 @@ mod tests {
         let d = DisplayStatus::from_receipt(&SessionStatus::Active, SessionLiveness::Indeterminate);
         assert_ne!(d, DisplayStatus::Stale);
         assert_eq!(d, DisplayStatus::Stopped);
+    }
+
+    /// Spec scenario "A session whose agent panes all exited reports Stopped":
+    /// an exited-agents probe downgrades active and paused receipts to
+    /// `Stopped`, and never to `Stale` — the tmux session is still running.
+    #[test]
+    fn display_status_agents_exited_is_stopped_never_stale() {
+        use crate::tmux::SessionLiveness;
+        for receipt in [SessionStatus::Active, SessionStatus::Paused] {
+            let d = DisplayStatus::from_receipt(&receipt, SessionLiveness::AgentsExited);
+            assert_eq!(d, DisplayStatus::Stopped, "receipt {receipt:?}");
+            assert_ne!(d, DisplayStatus::Stale, "receipt {receipt:?}");
+            assert_eq!(d.as_str(), "stopped");
+        }
     }
 
     #[test]

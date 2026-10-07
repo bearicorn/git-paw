@@ -8,24 +8,39 @@
 use crate::command_runner::{CommandRunner, RealCommandRunner};
 use crate::error::PawError;
 
+/// How the session executor reacts to a command's non-zero exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureMode {
+    /// Abort the build and propagate the error.
+    Fatal,
+    /// Warn on stderr naming the invocation, then continue. Used for the
+    /// border-affordance `set-option` invocations, which older tmux versions
+    /// may not recognise (design D4) — the user asked for that styling, so a
+    /// silent drop would be surprising.
+    Warn,
+    /// Continue silently. Used for commands the user never asked for
+    /// individually and that have no visible effect of their own, where a
+    /// per-pane warning on every launch would be noise rather than signal.
+    Silent,
+}
+
 /// A single tmux CLI invocation, stored as its argument list.
 ///
 /// Can be inspected as a string (for dry-run / testing) or executed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TmuxCommand {
     args: Vec<String>,
-    /// When `true`, a non-zero exit is treated as a non-fatal warning rather
-    /// than aborting the build. Used for the border-affordance `set-option`
-    /// invocations, which older tmux versions may not recognise (design D4).
-    soft: bool,
+    /// What a non-zero exit means for the build.
+    on_failure: FailureMode,
 }
 
 impl TmuxCommand {
-    /// Create a new tmux command from the given arguments.
+    /// Create a new tmux command from the given arguments. Its failure aborts
+    /// the build.
     fn new(args: &[&str]) -> Self {
         Self {
             args: args.iter().map(|&s| s.to_owned()).collect(),
-            soft: false,
+            on_failure: FailureMode::Fatal,
         }
     }
 
@@ -37,7 +52,20 @@ impl TmuxCommand {
     fn new_soft(args: &[&str]) -> Self {
         Self {
             args: args.iter().map(|&s| s.to_owned()).collect(),
-            soft: true,
+            on_failure: FailureMode::Warn,
+        }
+    }
+
+    /// Create a best-effort tmux command whose failure is ignored silently.
+    ///
+    /// For commands that are git-paw's own bookkeeping rather than something
+    /// the user configured: a build on a tmux too old to support them still
+    /// works, just with less information available, and warning once per pane
+    /// on every launch would bury the warnings that matter.
+    fn new_best_effort(args: &[&str]) -> Self {
+        Self {
+            args: args.iter().map(|&s| s.to_owned()).collect(),
+            on_failure: FailureMode::Silent,
         }
     }
 
@@ -129,14 +157,22 @@ fn push_border_affordances(commands: &mut Vec<TmuxCommand>, session: &str) {
     }
 }
 
-/// Queue the pane-title invocations that label a pane, but only when
-/// `border_affordances` is enabled. The title is the pane's role or branch id
-/// (`supervisor`, `dashboard`, or e.g. `feat/foo`) and renders in the
-/// `pane-border-format` strip configured by [`push_border_affordances`].
+/// Queue the pane-title invocations that label a pane. The title is the pane's
+/// role or branch id (`supervisor`, `dashboard`, or e.g. `feat/foo`).
 ///
 /// Two commands are queued:
-/// - `select-pane -T <title>` sets `#{pane_title}` (the OSC-style title).
-/// - `set-option -p @paw_role <title>` sets a pane-scoped user option.
+/// - `select-pane -T <title>` sets `#{pane_title}` (the OSC-style title). It
+///   renders in the `pane-border-format` strip configured by
+///   [`push_border_affordances`], so it is queued only when
+///   `border_affordances` is enabled — it is purely visual.
+/// - `set-option -p @paw_role <title>` sets a pane-scoped user option. It is
+///   queued **unconditionally**: it has no visual effect on its own (only the
+///   border format renders it), and the agent-pane liveness probe
+///   ([`crate::tmux::session_liveness_for`]) identifies coding-agent panes by
+///   it. Gating it on border affordances would leave an affordances-off
+///   session with no way to tell an agent pane from the dashboard except its
+///   index — and pane indices shift when `git paw pause` kills the dashboard
+///   pane, which made a live session read as "agent panes exited".
 ///
 /// Both carry the same label, but the agent CLI overwrites `#{pane_title}` via
 /// its own OSC title escape sequences as it works, so the `select-pane -T`
@@ -158,17 +194,26 @@ fn push_pane_title(
             "-T",
             title,
         ]));
-        // Pane-scoped user option: stable, not clobbered by the CLI's OSC
-        // title sequences. The border-format prefers this over `#{pane_title}`.
-        commands.push(TmuxCommand::new_soft(&[
-            "set-option",
-            "-p",
-            "-t",
-            target,
-            "@paw_role",
-            title,
-        ]));
     }
+    // Pane-scoped user option: stable, not clobbered by the CLI's OSC title
+    // sequences. The border-format prefers this over `#{pane_title}`, and the
+    // liveness probe classifies panes by it.
+    //
+    // Best-effort rather than warn-on-failure: `set-option -p` needs tmux 3.0,
+    // and this runs once per pane on every launch, `git paw add` and recovery.
+    // Warning there would print a line per pane on every start — including for
+    // users who disabled affordances and asked for nothing of the sort — to
+    // report a degradation they cannot act on (the probe falls back to pane
+    // positions by itself). The affordances the user *did* configure still
+    // warn.
+    commands.push(TmuxCommand::new_best_effort(&[
+        "set-option",
+        "-p",
+        "-t",
+        target,
+        "@paw_role",
+        title,
+    ]));
 }
 
 /// A fully-resolved tmux session ready to execute or inspect.
@@ -201,13 +246,13 @@ impl TmuxSession {
     {
         for cmd in &self.commands {
             if let Err(e) = run(cmd) {
-                if cmd.soft {
-                    warn(format!(
+                match cmd.on_failure {
+                    FailureMode::Fatal => return Err(e),
+                    FailureMode::Warn => warn(format!(
                         "warning: tmux option not supported: {} ({e})",
                         cmd.args.join(" ")
-                    ));
-                } else {
-                    return Err(e);
+                    )),
+                    FailureMode::Silent => {}
                 }
             }
         }

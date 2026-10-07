@@ -345,6 +345,10 @@ pub struct HygieneProbe {
     /// Session names whose receipt claims active but whose tmux session is
     /// gone.
     pub stale_sessions: Vec<String>,
+    /// Session names whose tmux session is still up but whose agent panes have
+    /// all exited (past the launch grace period). `git paw purge --stale` does
+    /// not purge these, so they get their own finding and remedy.
+    pub exited_agent_sessions: Vec<String>,
     /// Worktree paths a session receipt registers that no longer exist.
     pub orphaned_worktrees: Vec<String>,
 }
@@ -909,9 +913,10 @@ pub fn check_hygiene(probe: &HygieneProbe) -> Vec<CheckResult> {
         )
     });
 
-    checks.push(if probe.stale_sessions.is_empty() {
-        CheckResult::ok(GROUP_HYGIENE, "session state", "no stale session receipt")
-    } else {
+    // A session whose tmux session is gone and one whose tmux session is up
+    // but whose agent panes exited need different remedies: `purge --stale`
+    // probes `has-session` only, so it would not purge the latter.
+    checks.push(if !probe.stale_sessions.is_empty() {
         CheckResult::warn(
             GROUP_HYGIENE,
             "session state",
@@ -922,6 +927,19 @@ pub fn check_hygiene(probe: &HygieneProbe) -> Vec<CheckResult> {
             ),
             PURGE_STALE,
         )
+    } else if !probe.exited_agent_sessions.is_empty() {
+        CheckResult::warn(
+            GROUP_HYGIENE,
+            "session state",
+            format!(
+                "{} session(s) are up but their agent panes exited: {}",
+                probe.exited_agent_sessions.len(),
+                probe.exited_agent_sessions.join(", ")
+            ),
+            "run `git paw start` to recover the session",
+        )
+    } else {
+        CheckResult::ok(GROUP_HYGIENE, "session state", "no stale session receipt")
     });
 
     checks.push(if probe.orphaned_worktrees.is_empty() {
@@ -1437,8 +1455,8 @@ fn probe_supervisor(config: &PawConfig, repo_root: &Path) -> SupervisorProbe {
     }
 }
 
-/// Collects `.gitignore` gaps, stale session receipts, and worktree
-/// registrations whose directory is gone.
+/// Collects `.gitignore` gaps, stale session receipts, sessions whose agent
+/// panes have all exited, and worktree registrations whose directory is gone.
 fn probe_hygiene(repo_root: &Path) -> HygieneProbe {
     let ignored: Vec<String> = std::fs::read_to_string(repo_root.join(".gitignore"))
         .map(|content| content.lines().map(|l| l.trim().to_string()).collect())
@@ -1449,7 +1467,7 @@ fn probe_hygiene(repo_root: &Path) -> HygieneProbe {
         .map(ToString::to_string)
         .collect();
 
-    let (stale_sessions, orphaned_worktrees) =
+    let (stale_sessions, exited_agent_sessions, orphaned_worktrees) =
         match crate::session::find_session_for_repo(repo_root) {
             Ok(Some(session)) => {
                 let liveness = crate::tmux::session_liveness_for(
@@ -1465,20 +1483,34 @@ fn probe_hygiene(repo_root: &Path) -> HygieneProbe {
                     } else {
                         Vec::new()
                     };
+                // Only an active or paused receipt describes a session that
+                // was meant to be running, so only those can have lost their
+                // agents; a stopped receipt is expected to have none.
+                let exited_agents = if liveness == crate::tmux::SessionLiveness::AgentsExited
+                    && matches!(
+                        session.status,
+                        crate::session::SessionStatus::Active
+                            | crate::session::SessionStatus::Paused
+                    ) {
+                    vec![session.session_name.clone()]
+                } else {
+                    Vec::new()
+                };
                 let orphans = session
                     .worktrees
                     .iter()
                     .filter(|entry| !entry.worktree_path.exists())
                     .map(|entry| entry.worktree_path.display().to_string())
                     .collect();
-                (stale, orphans)
+                (stale, exited_agents, orphans)
             }
-            _ => (Vec::new(), Vec::new()),
+            _ => (Vec::new(), Vec::new(), Vec::new()),
         };
 
     HygieneProbe {
         missing_gitignore_entries,
         stale_sessions,
+        exited_agent_sessions,
         orphaned_worktrees,
     }
 }

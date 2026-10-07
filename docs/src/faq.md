@@ -81,6 +81,9 @@ Add to your global or repo config:
 default_cli = "my-cli"
 ```
 
+It pre-selects that CLI in the interactive picker; the picker still appears, so
+you can pick another. Pass `--cli` to skip the prompt entirely.
+
 ### How do I disable mouse mode?
 
 ```toml

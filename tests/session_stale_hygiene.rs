@@ -95,6 +95,9 @@ fn tmux_available() -> bool {
 // status — stale display
 // ---------------------------------------------------------------------------
 
+/// Spec scenario "An absent tmux session still reports stale with tmux not
+/// running" — the counterpart to `agent_pane_liveness_e2e.rs`, where the tmux
+/// session exists but its agent panes exited.
 #[test]
 fn status_reports_stale_for_active_receipt_with_dead_tmux() {
     let home = TempDir::new().expect("home");
@@ -123,6 +126,10 @@ fn status_reports_stale_for_active_receipt_with_dead_tmux() {
     assert!(
         stdout.contains("\"status\":\"stale\"") || stdout.contains("\"status\": \"stale\""),
         "JSON status should be stale; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("\"tmux_running\":false") || stdout.contains("\"tmux_running\": false"),
+        "an absent tmux session is not running; got:\n{stdout}"
     );
 
     // Human output shows the red icon + the self-heal hint.

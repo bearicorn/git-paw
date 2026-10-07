@@ -151,6 +151,7 @@ pub(crate) fn cmd_start(
         &interactive_clis,
         resolved_cli.as_deref(),
         resolved_branches.as_deref(),
+        config.default_cli.as_deref(),
     )?;
 
     // Dry run — print plan and exit without creating worktrees

@@ -51,17 +51,23 @@ pub(crate) fn is_session_alive_with(
 
 /// Outcome of a session-liveness probe (design D3 of `session-bugfixes`).
 ///
-/// Distinguishes a genuinely-absent tmux session (`Stale`) from a probe that
-/// could not be run at all (`Indeterminate`, e.g. the `tmux` binary is
-/// missing). Receipt-staleness detection SHALL NOT report `🔴 stale` on an
-/// `Indeterminate` probe — a missing tmux binary is not evidence the session
-/// died.
+/// Distinguishes a genuinely-absent tmux session (`Stale`) from a session that
+/// exists but whose agent panes have all exited (`AgentsExited`), and both from
+/// a probe that could not be run at all (`Indeterminate`, e.g. the `tmux`
+/// binary is missing). Receipt-staleness detection SHALL NOT report `🔴 stale`
+/// on an `Indeterminate` probe — a missing tmux binary is not evidence the
+/// session died — and SHALL NOT report it on `AgentsExited` either: the tmux
+/// session is still running there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionLiveness {
     /// `tmux has-session` returned exit 0 — the session exists.
     Alive,
     /// `tmux has-session` ran and returned non-zero — the session is gone.
     Stale,
+    /// The tmux session exists and the launch grace period has passed, but no
+    /// agent pane runs a non-shell process — every agent's CLI has exited.
+    /// Only [`session_liveness_for`] can return this.
+    AgentsExited,
     /// The probe could not be run (tmux binary absent/unreachable). The
     /// caller SHALL preserve the receipt's current state.
     Indeterminate,
@@ -131,6 +137,12 @@ const AGENT_LAUNCH_GRACE_PERIOD: Duration = Duration::from_secs(30);
 /// within [`AGENT_LAUNCH_GRACE_PERIOD`] of `created_at` is reported alive
 /// regardless, so a just-launched session (whose agent CLI has not yet had
 /// time to start) never flaps to not-alive.
+///
+/// The exited-agent case returns [`SessionLiveness::AgentsExited`], not
+/// [`SessionLiveness::Stale`]: the tmux session is still there, so callers that
+/// render staleness ("the tmux session no longer exists", `purge --stale`) must
+/// not treat it as an absent session. `Stale` from this probe still means only
+/// that `tmux has-session` failed.
 #[must_use]
 pub fn session_liveness_for(
     name: &str,
@@ -167,12 +179,39 @@ pub(crate) fn session_liveness_for_with(
     if has_live_agent_pane_with(runner, name, agent_pane_offset) {
         SessionLiveness::Alive
     } else {
-        SessionLiveness::Stale
+        SessionLiveness::AgentsExited
     }
 }
 
-/// Returns `true` when at least one pane at or beyond `agent_pane_offset` has
-/// a foreground process other than a bare shell (GP-03c).
+/// `@paw_role` values that mark a pane as infrastructure rather than a coding
+/// agent. Every other role git-paw sets is an agent pane's branch name.
+const NON_AGENT_PANE_ROLES: &[&str] = &["dashboard", "supervisor"];
+
+/// Returns `true` when at least one coding-agent pane has a foreground process
+/// other than a bare shell (GP-03c).
+///
+/// Each pane is classified **on its own**:
+///
+/// - a pane whose pane-scoped `@paw_role` option (set at launch to the pane's
+///   branch, see `push_pane_title`) is one of [`NON_AGENT_PANE_ROLES`] is
+///   infrastructure, never an agent;
+/// - any other non-empty role is an agent pane;
+/// - a pane with no role at all falls back to the positional rule
+///   (`pane_index >= agent_pane_offset`).
+///
+/// Roles are preferred over pane indices because `pane_index` is
+/// **positional**: killing a pane renumbers every pane after it. `git paw
+/// pause` kills the dashboard pane, so a paused session's surviving agent
+/// slides down into the dashboard's old index — and a purely positional probe
+/// would then look past it and wrongly conclude that every agent had exited,
+/// which makes `git paw start` tear down a session whose agents are alive.
+///
+/// Classifying per pane rather than switching modes for the whole session
+/// keeps a **mixed** session correct: panes added before and after a
+/// `[layout].border_affordances` change can disagree about whether they carry
+/// a role, and a role-less agent pane must still be able to prove the session
+/// alive. Both rules err toward "alive", which is the safe direction: the cost
+/// of a false "exited" is a torn-down session.
 pub(crate) fn has_live_agent_pane_with(
     runner: &dyn CommandRunner,
     session_name: &str,
@@ -185,7 +224,9 @@ pub(crate) fn has_live_agent_pane_with(
             "-t",
             session_name,
             "-F",
-            "#{pane_index} #{pane_current_command}",
+            // Role last: a branch name may contain the separator, a pane index
+            // and a command name cannot, so the role takes the remainder.
+            "#{pane_index}|#{pane_current_command}|#{@paw_role}",
         ],
     ) else {
         return false;
@@ -194,18 +235,23 @@ pub(crate) fn has_live_agent_pane_with(
         return false;
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines() {
-        let Some((idx_str, command)) = line.split_once(' ') else {
-            continue;
+    text.lines().any(|line| {
+        let mut parts = line.splitn(3, '|');
+        let Some(Ok(idx)) = parts.next().map(|p| p.trim().parse::<usize>()) else {
+            return false;
         };
-        let Ok(idx) = idx_str.parse::<usize>() else {
-            continue;
+        let Some(command) = parts.next().map(str::trim) else {
+            return false;
         };
-        if idx >= agent_pane_offset && !SHELL_COMMAND_NAMES.contains(&command.trim()) {
-            return true;
-        }
-    }
-    false
+        let role = parts.next().unwrap_or_default().trim();
+
+        let is_agent_pane = if role.is_empty() {
+            idx >= agent_pane_offset
+        } else {
+            !NON_AGENT_PANE_ROLES.contains(&role)
+        };
+        is_agent_pane && !SHELL_COMMAND_NAMES.contains(&command)
+    })
 }
 
 /// Resolve a unique session name, handling collisions with existing sessions.

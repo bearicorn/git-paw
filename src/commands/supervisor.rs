@@ -327,6 +327,187 @@ pub(crate) fn resolve_supervisor_flags(
     flags
 }
 
+/// Runs the interactive branch + CLI selection for a supervised launch that
+/// has neither `--branches` nor a spec selection, and splits the result into
+/// the branches to launch and their per-branch CLI overrides.
+///
+/// The overrides are what keep the user's picker choice: without them the
+/// launch would fall back to the session-wide `agent_cli` and silently ignore
+/// the CLI the user just picked (DS-8). `default_cli` only pre-selects in the
+/// picker; `cli_flag` skips it, in which case every branch maps to that CLI.
+fn interactive_branch_cli_selection(
+    prompter: &dyn interactive::Prompter,
+    all_branches: &[String],
+    clis: &[interactive::CliInfo],
+    cli_flag: Option<&str>,
+    default_cli: Option<&str>,
+) -> Result<(Vec<String>, std::collections::HashMap<String, String>), PawError> {
+    let selection =
+        interactive::run_selection(prompter, all_branches, clis, cli_flag, None, default_cli)?;
+    let mut branches = Vec::with_capacity(selection.mappings.len());
+    let mut overrides = std::collections::HashMap::new();
+    for (branch, cli) in selection.mappings {
+        branches.push(branch.clone());
+        overrides.insert(branch, cli);
+    }
+    Ok((branches, overrides))
+}
+
+#[cfg(test)]
+mod interactive_cli_selection_tests {
+    //! Spec: *Supervised launch honours the CLIs chosen in the interactive
+    //! picker* (`supervisor-launch`). A supervised launch with no
+    //! `--branches`, `--specs` or `--cli` must launch every worker with the
+    //! CLI its branch was mapped to, not with the session-wide `agent_cli`
+    //! fallback.
+
+    use std::cell::RefCell;
+
+    use git_paw::error::PawError;
+    use git_paw::interactive::{CliInfo, CliMode, Prompter};
+    use git_paw::specs::SpecEntry;
+
+    use super::interactive_branch_cli_selection;
+
+    /// A prompter that answers with a scripted mode and CLI choices and
+    /// records the `default` each picker was given.
+    struct ScriptedPrompter {
+        mode: CliMode,
+        branches: Vec<String>,
+        uniform_cli: String,
+        per_branch_clis: Vec<String>,
+        per_branch_calls: RefCell<usize>,
+        uniform_default: RefCell<Option<String>>,
+    }
+
+    impl ScriptedPrompter {
+        fn new(mode: CliMode, branches: &[&str], uniform: &str, per_branch: &[&str]) -> Self {
+            Self {
+                mode,
+                branches: branches.iter().map(|b| (*b).to_string()).collect(),
+                uniform_cli: uniform.to_string(),
+                per_branch_clis: per_branch.iter().map(|c| (*c).to_string()).collect(),
+                per_branch_calls: RefCell::new(0),
+                uniform_default: RefCell::new(None),
+            }
+        }
+    }
+
+    impl Prompter for ScriptedPrompter {
+        fn select_mode(&self) -> Result<CliMode, PawError> {
+            Ok(self.mode)
+        }
+        fn select_branches(&self, _branches: &[String]) -> Result<Vec<String>, PawError> {
+            Ok(self.branches.clone())
+        }
+        fn select_cli(&self, _clis: &[CliInfo], default: Option<&str>) -> Result<String, PawError> {
+            *self.uniform_default.borrow_mut() = default.map(String::from);
+            Ok(self.uniform_cli.clone())
+        }
+        fn select_cli_for_branch(
+            &self,
+            _branch: &str,
+            _clis: &[CliInfo],
+            _default: Option<&str>,
+        ) -> Result<String, PawError> {
+            let mut calls = self.per_branch_calls.borrow_mut();
+            let cli = self
+                .per_branch_clis
+                .get(*calls)
+                .cloned()
+                .ok_or(PawError::UserCancelled)?;
+            *calls += 1;
+            Ok(cli)
+        }
+        fn select_specs(&self, _specs: &[SpecEntry]) -> Result<Vec<SpecEntry>, PawError> {
+            Err(PawError::UserCancelled)
+        }
+    }
+
+    fn clis() -> Vec<CliInfo> {
+        ["alpha", "beta"]
+            .into_iter()
+            .map(|n| CliInfo {
+                display_name: n.to_string(),
+                binary_name: n.to_string(),
+            })
+            .collect()
+    }
+
+    fn all_branches() -> Vec<String> {
+        vec!["feat/a".to_string(), "feat/b".to_string()]
+    }
+
+    /// Scenario: "A uniform CLI pick is honoured".
+    #[test]
+    fn a_uniform_pick_overrides_the_configured_default() {
+        let prompter = ScriptedPrompter::new(CliMode::Uniform, &["feat/a"], "beta", &[]);
+
+        let (branches, overrides) = interactive_branch_cli_selection(
+            &prompter,
+            &all_branches(),
+            &clis(),
+            None,
+            Some("alpha"),
+        )
+        .unwrap();
+
+        assert_eq!(branches, vec!["feat/a".to_string()]);
+        assert_eq!(overrides.get("feat/a").map(String::as_str), Some("beta"));
+        assert_eq!(
+            prompter.uniform_default.borrow().as_deref(),
+            Some("alpha"),
+            "default_cli must pre-select in the picker"
+        );
+    }
+
+    /// Scenario: "Per-branch CLI picks are honoured".
+    #[test]
+    fn per_branch_picks_map_each_branch_to_its_own_cli() {
+        let prompter = ScriptedPrompter::new(
+            CliMode::PerBranch,
+            &["feat/a", "feat/b"],
+            "",
+            &["alpha", "beta"],
+        );
+
+        let (branches, overrides) =
+            interactive_branch_cli_selection(&prompter, &all_branches(), &clis(), None, None)
+                .unwrap();
+
+        assert_eq!(branches, all_branches());
+        assert_eq!(overrides.get("feat/a").map(String::as_str), Some("alpha"));
+        assert_eq!(overrides.get("feat/b").map(String::as_str), Some("beta"));
+    }
+
+    /// `--cli` short-circuits CLI resolution here too: no CLI picker runs,
+    /// every branch maps to the flag's CLI, and `default_cli` never reaches a
+    /// prompt. (The spec's "The flag path keeps the session-wide fallback"
+    /// scenario is the `--branches` path, which never reaches this function —
+    /// it is covered by the PTY test in `tests/cli_prompt_matrix.rs`.)
+    #[test]
+    fn the_cli_flag_skips_the_cli_picker() {
+        let prompter = ScriptedPrompter::new(CliMode::Uniform, &["feat/a"], "beta", &[]);
+
+        let (branches, overrides) = interactive_branch_cli_selection(
+            &prompter,
+            &all_branches(),
+            &clis(),
+            Some("alpha"),
+            Some("beta"),
+        )
+        .unwrap();
+
+        assert_eq!(branches, vec!["feat/a".to_string()]);
+        assert_eq!(overrides.get("feat/a").map(String::as_str), Some("alpha"));
+        assert_eq!(
+            prompter.uniform_default.borrow().as_deref(),
+            None,
+            "no CLI picker may run when --cli is given"
+        );
+    }
+}
+
 /// Bundled template for [`build_supervisor_framing`], carrying the
 /// `{{SIDECAR_REL_PATH}}` substitution placeholder.
 const SUPERVISOR_FRAMING_TEMPLATE: &str = include_str!("../../assets/supervisor-framing.md");
@@ -471,14 +652,15 @@ pub(crate) fn cmd_supervisor(
         let interactive_clis: Vec<interactive::CliInfo> =
             detected.iter().map(to_interactive_cli).collect();
         let prompter = interactive::TerminalPrompter;
-        let selection = interactive::run_selection(
+        let (picked_branches, picked_clis) = interactive_branch_cli_selection(
             &prompter,
             &all_branches,
             &interactive_clis,
             cli_flag,
-            None,
+            config.default_cli.as_deref(),
         )?;
-        selection.mappings.into_iter().map(|(b, _)| b).collect()
+        spec_cli_overrides.extend(picked_clis);
+        picked_branches
     } else {
         let discovered =
             git_paw::specs::scan_specs_with_override(config, repo_root, specs_format_override)?;
@@ -540,10 +722,11 @@ pub(crate) fn cmd_supervisor(
     let supervisor_flags =
         resolve_supervisor_flags(&supervisor_cli, supervisor_approval, &config.clis);
 
-    // Resolves the CLI `branch` launches with: its spec-driven override when
-    // the priority chain resolved one (GP-10), else the session-wide
-    // `agent_cli` fallback (the `--branches` / bare-`--supervisor` path,
-    // which has no per-spec `paw_cli`/`default_spec_cli` to consult).
+    // Resolves the CLI `branch` launches with: its per-branch override when
+    // one was resolved — the spec-driven priority chain (GP-10) or the
+    // interactive picker (DS-8) — else the session-wide `agent_cli` fallback
+    // (the `--branches` path, which shows no picker and has no per-spec
+    // `paw_cli`/`default_spec_cli` to consult).
     let effective_agent_cli = |branch: &str| -> String {
         spec_cli_overrides
             .get(branch)

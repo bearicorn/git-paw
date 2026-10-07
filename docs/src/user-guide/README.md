@@ -93,10 +93,10 @@ machine-readably, including each worker's `cli_session_id`.
 Status indicators:
 - 🟢 **active** — tmux session is running
 - 🔵 **paused** — `git paw pause` detached it; CLI panes are still running
-- 🟡 **stopped** — session state saved, tmux not running (recoverable)
-- 🔴 **stale** — the receipt claims active, but the tmux session is gone (or,
-  past a short launch grace period, every agent pane has dropped back to a
-  bare shell); `git paw start` self-heals it, `git paw purge --stale` clears it
+- 🟡 **stopped** — session state saved and tmux not running, or tmux up but
+  every agent pane exited (`git paw start` recovers)
+- 🔴 **stale** — the receipt claims active, but the tmux session is gone;
+  `git paw start` self-heals it, `git paw purge --stale` clears it
 - No session — nothing saved for this repo
 
 ### Reattaching

@@ -27,15 +27,20 @@ pub(crate) fn cmd_status(json: bool) -> Result<(), PawError> {
     // that could not run at all (Indeterminate → never reports stale), and
     // additionally requires a live agent-pane CLI process once past the
     // launch grace period (GP-03c) — a session whose panes all reverted to a
-    // bare shell is not reported healthy merely because the tmux session
-    // object still exists.
+    // bare shell reports AgentsExited, so it displays as stopped rather than
+    // healthy even though the tmux session object still exists. Its tmux
+    // session IS still running, so it counts as running below, and only an
+    // absent tmux session (Stale) yields the stale display.
     let liveness = tmux::session_liveness_for(
         &existing.session_name,
         existing.created_at,
         existing.agent_pane_offset(),
     );
     let display = session::DisplayStatus::from_receipt(&existing.status, liveness);
-    let alive = matches!(liveness, tmux::SessionLiveness::Alive);
+    let tmux_running = matches!(
+        liveness,
+        tmux::SessionLiveness::Alive | tmux::SessionLiveness::AgentsExited
+    );
 
     if json {
         let worktrees: Vec<_> = existing
@@ -53,7 +58,7 @@ pub(crate) fn cmd_status(json: bool) -> Result<(), PawError> {
         let obj = serde_json::json!({
             "session": existing.session_name,
             "status": display.as_str(),
-            "tmux_running": alive,
+            "tmux_running": tmux_running,
             "worktrees": worktrees,
         });
         println!("{obj}");
@@ -74,7 +79,17 @@ pub(crate) fn cmd_status(json: bool) -> Result<(), PawError> {
         }
         _ => {}
     }
-    println!("Tmux:    {}", if alive { "running" } else { "not running" });
+    if matches!(liveness, tmux::SessionLiveness::AgentsExited) {
+        println!("  \u{21b3} agent panes exited — run 'git paw start' to recover them");
+    }
+    println!(
+        "Tmux:    {}",
+        if tmux_running {
+            "running"
+        } else {
+            "not running"
+        }
+    );
     println!();
 
     // Broker info
