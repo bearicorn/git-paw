@@ -717,7 +717,17 @@ The system SHALL accept `[layout].border_affordances` as a
 boolean config field defaulting to `true`. When `false`, the
 session builder SHALL skip every `set-option` invocation and
 every `select-pane -T` call described in this capability,
-leaving the user's tmux defaults in effect.
+leaving the user's tmux defaults in effect — except the
+pane-scoped `@paw_role` option, which SHALL be set regardless.
+`@paw_role` renders nothing on its own (only
+`pane-border-format` reads it, and that option is skipped with
+the rest), so setting it unconditionally leaves the user's tmux
+styling untouched. It is set regardless because the agent-pane
+liveness probe identifies coding-agent panes by it; gating it on
+a styling preference would leave an affordances-off session
+identifiable only by pane index, which shifts when `git paw
+pause` kills the dashboard pane — reporting a live session's
+agents as exited.
 
 #### Scenario: Default true applies all affordances
 
@@ -732,15 +742,26 @@ leaving the user's tmux defaults in effect.
 - **GIVEN** `[layout].border_affordances = false`
 - **WHEN** the session builder runs
 - **THEN** none of the five `set-option` invocations and
-  none of the per-pane title sets SHALL be emitted; the
+  none of the `select-pane -T` title sets SHALL be emitted; the
   session SHALL inherit the user's default tmux styling
+- **AND** the pane-scoped `@paw_role` option SHALL still be set
+  on every pane the builder creates
 
 ### Requirement: Graceful degradation on older tmux
 
 The session builder SHALL tolerate `tmux set-option` failures
-for options unsupported by older tmux versions. The builder
+for options unsupported by older tmux versions. For an option
+the user configured — the border affordances — the builder
 SHALL emit a stderr warning naming the unsupported option and
-SHALL continue building the session.
+SHALL continue building the session. For the pane-scoped
+`@paw_role` option, which is git-paw's own bookkeeping rather
+than a user-facing setting, the builder SHALL continue
+**silently**: `set-option -p` requires tmux 3.0, the option is
+set once per pane on every launch, `git paw add` and recovery,
+and the failure is not actionable — the agent-pane liveness
+probe falls back to pane positions when a pane carries no role.
+Warning per pane on every launch would bury the warnings the
+user can act on.
 
 #### Scenario: Unsupported option produces a stderr warning
 
@@ -759,6 +780,15 @@ SHALL continue building the session.
 - **THEN** the other affordances (title format, status
   position, active-border style) SHALL still be set, since
   they have shipped in tmux since 2.3
+
+#### Scenario: An unsupported @paw_role set is silent
+
+- **GIVEN** a tmux version where pane-scoped `set-option -p` is
+  not recognised (pre-3.0)
+- **WHEN** the session builder runs
+- **THEN** the build SHALL complete without fatal error
+- **AND** stderr SHALL NOT contain a warning for the
+  `@paw_role` invocation
 
 ### Requirement: Applies to both supervisor and non-supervisor sessions
 
@@ -914,4 +944,27 @@ The user-guide supervisor chapter SHALL include the following subsections (or eq
 - **THEN** the content SHALL include a section describing supervisor-driven merge orchestration
 - **AND** SHALL mention the topological order derived from `agent.blocked` events
 - **AND** SHALL mention `git merge --ff-only` as the per-branch merge command
+
+### Requirement: Supervised launch honours the CLIs chosen in the interactive picker
+
+When a supervised launch has no `--branches` and no spec selection, and so runs the interactive selection flow (branch picker, assignment-mode prompt and CLI picker), each coding agent SHALL launch with the CLI the selection mapped to its branch — the uniform choice, or that branch's own per-branch choice. The launch SHALL NOT discard the selection's CLI mapping in favour of `default_cli` or the supervisor CLI. The session-wide fallback (`--cli` > `default_cli` > the supervisor CLI) SHALL apply only to launch paths that show no CLI picker, such as `--branches` without `--cli`; spec-driven branches keep their spec CLI resolution chain.
+
+#### Scenario: A uniform CLI pick is honoured
+
+- **GIVEN** supervisor mode with `default_cli = "alpha"` and the supervisor CLI `alpha`, two available CLIs `alpha` and `beta`, and no `--branches`, `--specs` or `--cli`
+- **WHEN** the user selects `feat/a`, chooses uniform mode and picks `beta`
+- **THEN** the coding agent for `feat/a` SHALL launch with `beta`
+
+#### Scenario: Per-branch CLI picks are honoured
+
+- **GIVEN** supervisor mode with no `--branches`, `--specs` or `--cli`
+- **WHEN** the user selects `feat/a` and `feat/b`, chooses per-branch mode, and picks `alpha` for `feat/a` and `beta` for `feat/b`
+- **THEN** `feat/a`'s coding agent SHALL launch with `alpha` and `feat/b`'s with `beta`
+
+#### Scenario: The flag path keeps the session-wide fallback
+
+- **GIVEN** supervisor mode with `default_cli = "alpha"`
+- **WHEN** the launch is given `--branches feat/a` and no `--cli`
+- **THEN** no CLI picker SHALL be shown
+- **AND** `feat/a`'s coding agent SHALL launch with `alpha`
 

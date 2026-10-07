@@ -90,6 +90,7 @@ fn every_non_ok_check_carries_a_remedy() {
         hygiene: HygieneProbe {
             missing_gitignore_entries: vec![".git-paw/logs/".into()],
             stale_sessions: vec!["paw-demo".into()],
+            exited_agent_sessions: vec!["paw-exited".into()],
             orphaned_worktrees: vec!["/gone".into()],
         },
     };
@@ -735,6 +736,29 @@ fn stale_session_warns_with_the_purge_remedy() {
         "remedy: {:?}",
         check.remedy
     );
+}
+
+/// Spec scenario "Session whose agent panes exited" — a session whose tmux
+/// session is still up gets its own ⚠ with the `git paw start` remedy, never
+/// the `purge --stale` one (which would not purge it).
+#[test]
+fn exited_agent_session_warns_with_the_start_remedy() {
+    let checks = check_hygiene(&HygieneProbe {
+        exited_agent_sessions: vec!["paw-demo".into()],
+        ..HygieneProbe::default()
+    });
+    let check = named(&checks, "session state");
+    assert_eq!(check.status, CheckStatus::Warn);
+    let detail = check.detail.as_str();
+    assert!(detail.contains("paw-demo"), "detail: {detail}");
+    assert!(detail.contains("agent panes exited"), "detail: {detail}");
+    assert!(
+        !detail.contains("gone"),
+        "the finding must not describe the tmux session as gone: {detail}"
+    );
+    let remedy = check.remedy.as_deref().unwrap_or_default();
+    assert!(remedy.contains("git paw start"), "remedy: {remedy}");
+    assert!(!remedy.contains("purge --stale"), "remedy: {remedy}");
 }
 
 #[test]

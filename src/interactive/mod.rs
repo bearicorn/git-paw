@@ -96,7 +96,15 @@ pub trait Prompter {
     fn select_cli(&self, clis: &[CliInfo], default: Option<&str>) -> Result<String, PawError>;
 
     /// Ask the user to pick a CLI for a specific branch. Returns binary name.
-    fn select_cli_for_branch(&self, branch: &str, clis: &[CliInfo]) -> Result<String, PawError>;
+    ///
+    /// When `default` is `Some` and matches a CLI's `binary_name`, that entry
+    /// is pre-selected in the picker. Otherwise the first item is selected.
+    fn select_cli_for_branch(
+        &self,
+        branch: &str,
+        clis: &[CliInfo],
+        default: Option<&str>,
+    ) -> Result<String, PawError>;
 
     /// Ask the user to pick one or more specs. Returns the selected
     /// `SpecEntry` values expanded from grouped logical units.

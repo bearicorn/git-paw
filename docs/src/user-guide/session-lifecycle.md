@@ -165,6 +165,10 @@ restored instead of starting cold. See [Per-CLI cold resume](pause.md#per-cli-co
 for the mechanism (session-id assignment at launch, resume on
 recovery) and which CLIs it covers today.
 
+A session whose panes dropped back to a bare shell reports `🟡 stopped`
+with `Tmux: running`, never `🔴 stale` — its tmux session is still there,
+so `git paw purge --stale` leaves it alone and `start` is the remedy.
+
 A receipt that still claims **active** after its tmux session vanished
 (a crash, or a machine sleep that tore the tmux server down) is not
 recovered: `git paw status` reports it as `🔴 stale`, and `start`

@@ -260,6 +260,10 @@ pub(super) fn clamp_cursor(cursor: &mut usize, state: &PickerState) {
 /// Runs the full interactive selection flow, skipping prompts when CLI flags
 /// provide the necessary data.
 ///
+/// `default_cli` (the configuration's `default_cli`) pre-selects an entry in
+/// the uniform-mode picker and in every per-branch picker. It never skips a
+/// picker: only `cli_flag` does that.
+///
 /// # Errors
 ///
 /// Returns `PawError::NoCLIsFound` if `clis` is empty.
@@ -271,6 +275,7 @@ pub fn run_selection(
     clis: &[CliInfo],
     cli_flag: Option<&str>,
     branches_flag: Option<&[String]>,
+    default_cli: Option<&str>,
 ) -> Result<SelectionResult, PawError> {
     if clis.is_empty() {
         return Err(PawError::NoCLIsFound);
@@ -296,7 +301,7 @@ pub fn run_selection(
         let mode = prompter.select_mode()?;
         match mode {
             CliMode::Uniform => {
-                let cli = prompter.select_cli(clis, None)?;
+                let cli = prompter.select_cli(clis, default_cli)?;
                 selected_branches
                     .into_iter()
                     .map(|branch| (branch, cli.clone()))
@@ -305,7 +310,7 @@ pub fn run_selection(
             CliMode::PerBranch => {
                 let mut pairs = Vec::with_capacity(selected_branches.len());
                 for branch in selected_branches {
-                    let cli = prompter.select_cli_for_branch(&branch, clis)?;
+                    let cli = prompter.select_cli_for_branch(&branch, clis, default_cli)?;
                     pairs.push((branch, cli));
                 }
                 pairs
@@ -398,7 +403,7 @@ mod tests {
     // Fake prompter for testing
     // -----------------------------------------------------------------------
 
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     /// A configurable fake prompter that returns predetermined responses.
     /// Uses `Cell` for interior mutability to track per-branch call order
@@ -413,6 +418,9 @@ mod tests {
         cancel_on_cli_select: bool,
         /// Captures the `default` parameter passed to the last `select_cli()` call.
         last_select_cli_default: Cell<Option<String>>,
+        /// Captures the `default` parameter passed to each
+        /// `select_cli_for_branch()` call, in call order.
+        per_branch_defaults: RefCell<Vec<Option<String>>>,
     }
 
     impl TrackingPrompter {
@@ -426,6 +434,7 @@ mod tests {
                 cancel_on_branch_select: false,
                 cancel_on_cli_select: false,
                 last_select_cli_default: Cell::new(None),
+                per_branch_defaults: RefCell::new(Vec::new()),
             }
         }
 
@@ -439,6 +448,7 @@ mod tests {
                 cancel_on_branch_select: false,
                 cancel_on_cli_select: false,
                 last_select_cli_default: Cell::new(None),
+                per_branch_defaults: RefCell::new(Vec::new()),
             }
         }
 
@@ -452,6 +462,7 @@ mod tests {
                 cancel_on_branch_select: true,
                 cancel_on_cli_select: false,
                 last_select_cli_default: Cell::new(None),
+                per_branch_defaults: RefCell::new(Vec::new()),
             }
         }
 
@@ -465,6 +476,7 @@ mod tests {
                 cancel_on_branch_select: false,
                 cancel_on_cli_select: true,
                 last_select_cli_default: Cell::new(None),
+                per_branch_defaults: RefCell::new(Vec::new()),
             }
         }
 
@@ -479,6 +491,7 @@ mod tests {
                 cancel_on_branch_select: false,
                 cancel_on_cli_select: false,
                 last_select_cli_default: Cell::new(None),
+                per_branch_defaults: RefCell::new(Vec::new()),
             }
         }
     }
@@ -511,7 +524,11 @@ mod tests {
             &self,
             _branch: &str,
             _clis: &[CliInfo],
+            default: Option<&str>,
         ) -> Result<String, PawError> {
+            self.per_branch_defaults
+                .borrow_mut()
+                .push(default.map(String::from));
             let idx = self.per_branch_call_count.get();
             self.per_branch_call_count.set(idx + 1);
             self.per_branch_clis
@@ -563,6 +580,7 @@ mod tests {
             &clis,
             Some("alpha"),
             Some(&flag_branches),
+            None,
         )
         .unwrap();
 
@@ -581,7 +599,7 @@ mod tests {
         let branches = test_branches();
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, Some("alpha"), None).unwrap();
+        let result = run_selection(&prompter, &branches, &clis, Some("alpha"), None, None).unwrap();
 
         // Should use the flag CLI, and the branch from the prompter (index 0)
         assert_eq!(
@@ -597,8 +615,15 @@ mod tests {
         let clis = test_clis();
         let flag_branches = vec!["feature/auth".to_string(), "fix/api".to_string()];
 
-        let result =
-            run_selection(&prompter, &branches, &clis, None, Some(&flag_branches)).unwrap();
+        let result = run_selection(
+            &prompter,
+            &branches,
+            &clis,
+            None,
+            Some(&flag_branches),
+            None,
+        )
+        .unwrap();
 
         assert_eq!(
             result.mappings,
@@ -619,7 +644,7 @@ mod tests {
         let branches = test_branches();
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, None, None).unwrap();
+        let result = run_selection(&prompter, &branches, &clis, None, None, None).unwrap();
 
         assert_eq!(
             result.mappings,
@@ -636,7 +661,7 @@ mod tests {
         let branches = test_branches();
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, None, None).unwrap();
+        let result = run_selection(&prompter, &branches, &clis, None, None, None).unwrap();
 
         assert_eq!(
             result.mappings,
@@ -654,8 +679,15 @@ mod tests {
         let clis = test_clis();
         let flag_branches = vec!["feature/auth".to_string(), "fix/api".to_string()];
 
-        let result =
-            run_selection(&prompter, &branches, &clis, None, Some(&flag_branches)).unwrap();
+        let result = run_selection(
+            &prompter,
+            &branches,
+            &clis,
+            None,
+            Some(&flag_branches),
+            None,
+        )
+        .unwrap();
 
         assert_eq!(
             result.mappings,
@@ -676,7 +708,7 @@ mod tests {
         let branches = test_branches();
         let clis: Vec<CliInfo> = vec![];
 
-        let result = run_selection(&prompter, &branches, &clis, None, None);
+        let result = run_selection(&prompter, &branches, &clis, None, None, None);
 
         assert!(matches!(result, Err(PawError::NoCLIsFound)));
     }
@@ -687,7 +719,7 @@ mod tests {
         let branches: Vec<String> = vec![];
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, None, None);
+        let result = run_selection(&prompter, &branches, &clis, None, None, None);
 
         assert!(matches!(result, Err(PawError::BranchError(_))));
     }
@@ -698,7 +730,7 @@ mod tests {
         let branches = test_branches();
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, None, None);
+        let result = run_selection(&prompter, &branches, &clis, None, None, None);
 
         assert!(matches!(result, Err(PawError::UserCancelled)));
     }
@@ -710,7 +742,7 @@ mod tests {
         let branches = test_branches();
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, None, None);
+        let result = run_selection(&prompter, &branches, &clis, None, None, None);
 
         assert!(matches!(result, Err(PawError::UserCancelled)));
     }
@@ -721,7 +753,7 @@ mod tests {
         let branches = test_branches();
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, None, None);
+        let result = run_selection(&prompter, &branches, &clis, None, None, None);
 
         assert!(matches!(result, Err(PawError::UserCancelled)));
     }
@@ -736,11 +768,127 @@ mod tests {
         let branches = test_branches();
         let clis = test_clis();
 
-        let result = run_selection(&prompter, &branches, &clis, None, None).unwrap();
+        let result = run_selection(&prompter, &branches, &clis, None, None, None).unwrap();
 
         assert_eq!(
             result.mappings,
             vec![("fix/api".to_string(), "alpha".to_string())]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Behavior tests: default_cli pre-selection (DS-8)
+    // -----------------------------------------------------------------------
+
+    /// Spec scenario "`default_cli` pre-selects in the uniform-mode picker".
+    #[test]
+    fn run_selection_passes_default_cli_to_uniform_picker() {
+        let prompter = TrackingPrompter::uniform(vec![0, 1], "beta");
+        let branches = test_branches();
+        let clis = test_clis();
+
+        let result = run_selection(&prompter, &branches, &clis, None, None, Some("beta")).unwrap();
+
+        assert_eq!(
+            prompter.last_select_cli_default.take(),
+            Some("beta".to_string())
+        );
+        assert_eq!(
+            result.mappings,
+            vec![
+                ("feature/auth".to_string(), "beta".to_string()),
+                ("fix/api".to_string(), "beta".to_string()),
+            ]
+        );
+    }
+
+    /// Spec scenario "The picker is still shown when `default_cli` is set" — a
+    /// configured default pre-selects but never skips a prompt, and the CLI
+    /// the user actually picks is the one mapped.
+    #[test]
+    fn run_selection_still_prompts_when_default_cli_set() {
+        let prompter = TrackingPrompter::uniform(vec![0], "alpha");
+        let branches = test_branches();
+        let clis = test_clis();
+
+        let result = run_selection(&prompter, &branches, &clis, None, None, Some("beta")).unwrap();
+
+        assert_eq!(
+            prompter.last_select_cli_default.take(),
+            Some("beta".to_string()),
+            "the picker must have been invoked with the default pre-selected"
+        );
+        assert_eq!(
+            result.mappings,
+            vec![("feature/auth".to_string(), "alpha".to_string())],
+            "the prompter's choice wins over the configured default"
+        );
+    }
+
+    /// Spec scenario "No `default_cli` starts the picker on the first entry".
+    #[test]
+    fn run_selection_without_default_cli_passes_none() {
+        let prompter = TrackingPrompter::uniform(vec![0], "alpha");
+        let branches = test_branches();
+        let clis = test_clis();
+
+        run_selection(&prompter, &branches, &clis, None, None, None).unwrap();
+
+        assert_eq!(prompter.last_select_cli_default.take(), None);
+    }
+
+    /// Spec scenario "`default_cli` pre-selects in every per-branch picker".
+    #[test]
+    fn run_selection_passes_default_cli_to_every_per_branch_picker() {
+        let prompter = TrackingPrompter::per_branch(vec![0, 1], vec!["alpha", "beta"]);
+        let branches = test_branches();
+        let clis = test_clis();
+
+        let result = run_selection(&prompter, &branches, &clis, None, None, Some("beta")).unwrap();
+
+        assert_eq!(
+            prompter.per_branch_defaults.borrow().as_slice(),
+            [Some("beta".to_string()), Some("beta".to_string())]
+        );
+        assert_eq!(
+            result.mappings,
+            vec![
+                ("feature/auth".to_string(), "alpha".to_string()),
+                ("fix/api".to_string(), "beta".to_string()),
+            ]
+        );
+    }
+
+    /// Spec scenario "--cli flag wins over `default_cli`".
+    #[test]
+    fn cli_flag_overrides_default_cli_without_prompting() {
+        // `cancel_on_branches` cancels the branch picker and carries an empty
+        // `uniform_cli`, so a successful mapping to "alpha" can only have come
+        // from the flag — and the captured defaults below show that neither
+        // CLI picker was consulted.
+        let prompter = TrackingPrompter::cancel_on_branches();
+        let branches = test_branches();
+        let clis = test_clis();
+        let flag_branches = test_branches();
+
+        let result = run_selection(
+            &prompter,
+            &branches,
+            &clis,
+            Some("alpha"),
+            Some(&flag_branches),
+            Some("beta"),
+        )
+        .unwrap();
+
+        assert_eq!(prompter.last_select_cli_default.take(), None);
+        assert!(prompter.per_branch_defaults.borrow().is_empty());
+        assert_eq!(
+            result.mappings,
+            vec![
+                ("feature/auth".to_string(), "alpha".to_string()),
+                ("fix/api".to_string(), "alpha".to_string()),
+            ]
         );
     }
 
@@ -1138,6 +1286,7 @@ mod tests {
             &self,
             _branch: &str,
             _clis: &[CliInfo],
+            _default: Option<&str>,
         ) -> Result<String, PawError> {
             Err(PawError::UserCancelled)
         }

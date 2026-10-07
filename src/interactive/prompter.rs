@@ -18,6 +18,18 @@ use super::{CliInfo, CliMode, Prompter};
 /// Interactive prompter using `dialoguer` for terminal UI.
 pub struct TerminalPrompter;
 
+/// Index the CLI picker starts on for a configured default.
+///
+/// `default` pre-selects the entry whose `binary_name` it names; an unset
+/// default, or one naming a CLI that is not in `clis`, starts the picker on
+/// the first entry. Shared by both CLI pickers so uniform and per-branch mode
+/// pre-select identically.
+pub(super) fn default_cli_index(clis: &[CliInfo], default: Option<&str>) -> usize {
+    default
+        .and_then(|name| clis.iter().position(|c| c.binary_name == name))
+        .unwrap_or(0)
+}
+
 impl Prompter for TerminalPrompter {
     fn select_mode(&self) -> Result<CliMode, PawError> {
         let modes = [CliMode::Uniform, CliMode::PerBranch];
@@ -47,14 +59,10 @@ impl Prompter for TerminalPrompter {
     fn select_cli(&self, clis: &[CliInfo], default: Option<&str>) -> Result<String, PawError> {
         let labels: Vec<String> = clis.iter().map(ToString::to_string).collect();
 
-        let default_idx = default
-            .and_then(|name| clis.iter().position(|c| c.binary_name == name))
-            .unwrap_or(0);
-
         let selection = Select::new()
             .with_prompt("Select AI CLI for all branches")
             .items(&labels)
-            .default(default_idx)
+            .default(default_cli_index(clis, default))
             .interact_opt()
             .map_err(|e| map_dialoguer_error(&e))?;
 
@@ -64,13 +72,18 @@ impl Prompter for TerminalPrompter {
         }
     }
 
-    fn select_cli_for_branch(&self, branch: &str, clis: &[CliInfo]) -> Result<String, PawError> {
+    fn select_cli_for_branch(
+        &self,
+        branch: &str,
+        clis: &[CliInfo],
+        default: Option<&str>,
+    ) -> Result<String, PawError> {
         let labels: Vec<String> = clis.iter().map(ToString::to_string).collect();
 
         let selection = Select::new()
             .with_prompt(format!("Select CLI for {branch}"))
             .items(&labels)
-            .default(0)
+            .default(default_cli_index(clis, default))
             .interact_opt()
             .map_err(|e| map_dialoguer_error(&e))?;
 
@@ -103,5 +116,29 @@ fn map_dialoguer_error(err: &dialoguer::Error) -> PawError {
         dialoguer::Error::IO(_) => {
             PawError::SessionError(format!("Interactive prompt failed: {err}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CliInfo, default_cli_index};
+
+    fn cli(name: &str) -> CliInfo {
+        CliInfo {
+            display_name: name.to_string(),
+            binary_name: name.to_string(),
+        }
+    }
+
+    /// Spec scenario "Per-branch picker starts on a configured default" — the
+    /// shared pre-selection rule both CLI pickers use.
+    #[test]
+    fn default_cli_index_picks_the_named_entry_and_otherwise_the_first() {
+        let clis = [cli("alpha"), cli("beta")];
+        assert_eq!(default_cli_index(&clis, Some("beta")), 1);
+        assert_eq!(default_cli_index(&clis, Some("alpha")), 0);
+        assert_eq!(default_cli_index(&clis, None), 0);
+        assert_eq!(default_cli_index(&clis, Some("not-installed")), 0);
+        assert_eq!(default_cli_index(&[], Some("beta")), 0);
     }
 }

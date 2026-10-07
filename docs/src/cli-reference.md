@@ -396,10 +396,18 @@ The status line shows one of:
 |---------|---------|
 | 🟢 active | Receipt says active and the tmux session is alive |
 | 🔵 paused | Receipt says paused and the tmux session is alive |
-| 🟡 stopped | Receipt says stopped (or a paused session whose tmux server died) |
+| 🟡 stopped | Receipt says stopped, a paused session whose tmux server died, or a session whose tmux session is up but whose agent panes have all exited |
 | 🔴 stale | Receipt claims active but the tmux session is gone (a crash or a release-boundary carry-over) |
 
-When the status is `🔴 stale`, run `git paw start` to self-heal (the stale
+When every agent pane has exited — the CLIs died and the panes fell back to a
+bare shell — the session is `🟡 stopped`, not stale: the tmux session itself is
+still running. Status says so with a hint under the status line
+(`agent panes exited — run 'git paw start' to recover them`), reports
+`Tmux: running`, and sets `"tmux_running": true` in JSON. `git paw start`
+recovers such a session; `git paw purge --stale` deliberately leaves it alone.
+
+`🔴 stale` (and the JSON `"stale"` value) means only that the tmux session is
+gone. When the status is `🔴 stale`, run `git paw start` to self-heal (the stale
 receipt is invalidated automatically before launching) or `git paw purge --stale`
 to clear it. The `--json` output is an object with `session`, `status`,
 `tmux_running`, and `worktrees` fields (just `{ "session": null }` when the

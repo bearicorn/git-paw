@@ -11,6 +11,20 @@ For the launcher-level "how do I start supervisor mode" walkthrough, see
 broker-side message contract the supervisor exchanges with coding agents, see
 [Agent Coordination](coordination.md).
 
+## Which CLI the coding agents launch with
+
+A supervised launch given neither `--branches` nor a spec selection runs the
+same interactive selection flow as `git paw start`: the branch picker, the
+assignment-mode prompt, and the CLI picker (uniform, or one picker per branch).
+Each coding agent then launches with **the CLI that selection mapped to its
+branch** — the uniform choice, or that branch's own per-branch choice.
+`default_cli` only pre-selects an entry in those pickers; it never skips them.
+
+The session-wide fallback — `--cli`, else `default_cli`, else the supervisor's
+own CLI — applies only to launch paths that show no CLI picker, such as
+`--branches` without `--cli`. Spec-driven branches keep their own resolution
+chain (see [Spec-driven launch](spec-driven-launch.md)).
+
 ## Unattended mode (`--unattended`)
 
 `git paw start --unattended` runs a supervisor wave to completion with **no
@@ -488,9 +502,12 @@ other tmux sessions keep their own styling. They apply to plain
 
 Set `[layout].border_affordances = false` in your config to opt out and
 inherit your own tmux styling — see the
-[Layout configuration reference](../configuration/README.md#layout). On tmux
-older than 3.2 the double border lines aren't recognised; git-paw prints a
-warning and continues with the remaining affordances rather than failing.
+[Layout configuration reference](../configuration/README.md#layout). Opting out
+changes only the styling: git-paw still tags each pane with its role, which is
+what `status` and `doctor` read to tell whether a session's agents are running.
+On tmux older than 3.2 the double border lines aren't recognised; git-paw
+prints a warning and continues with the remaining affordances rather than
+failing.
 
 ## Understanding what the supervisor is doing
 

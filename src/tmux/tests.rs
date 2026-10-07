@@ -462,9 +462,13 @@ fn active_and_inactive_border_styles_applied() {
     );
 }
 
-/// Scenario: Explicit false skips all affordances — none of the five
-/// `set-option` invocations and none of the per-pane `select-pane -T`
-/// title sets are emitted, but the CLI still launches.
+/// Spec scenario "Explicit false skips all affordances"
+/// (`supervisor-launch` / *`border_affordances` config field*): none of the
+/// five `set-option` invocations and none of the per-pane `select-pane -T`
+/// title sets are emitted, but the CLI still launches — and, per the
+/// requirement's carve-out, the pane-scoped `@paw_role` option is still set.
+/// It renders nothing by itself and is what the liveness probe classifies
+/// panes by.
 #[test]
 fn opt_out_omits_every_affordance_and_title() {
     let session = TmuxSessionBuilder::new("opt-out")
@@ -488,9 +492,13 @@ fn opt_out_omits_every_affordance_and_title() {
             .any(|c| c.contains("select-pane") && c.contains("-T")),
         "opt-out must not set any pane title; cmds:\n{cmds:#?}"
     );
+    // `@paw_role` is NOT an affordance: it renders nothing on its own, and
+    // the agent-pane liveness probe classifies panes by it, so it is set
+    // whether or not the border strip is drawn.
     assert!(
-        !cmds.iter().any(|c| c.contains("@paw_role")),
-        "opt-out must not set the @paw_role pane option; cmds:\n{cmds:#?}"
+        cmds.iter()
+            .any(|c| c.contains("@paw_role") && c.ends_with("feat/a")),
+        "opt-out must still set the @paw_role pane option; cmds:\n{cmds:#?}"
     );
     // The CLI still runs in each pane — opt-out only drops the styling.
     assert_eq!(
@@ -540,6 +548,40 @@ fn soft_affordance_failure_warns_and_continues() {
     assert!(
         ran.iter().any(|c| c.contains("pane-border-status top")),
         "pane-border-status must still be applied after the double-line failure"
+    );
+}
+
+/// `set-option -p` needs tmux 3.0, and the `@paw_role` set runs once per pane
+/// on every launch, `git paw add` and recovery. On an older tmux it must fail
+/// silently: the user configured nothing to warn about, cannot act on it, and
+/// the liveness probe falls back to pane positions by itself. A warning there
+/// would print a line per pane on every start and bury the ones that matter.
+#[test]
+fn paw_role_failure_is_silent_on_older_tmux() {
+    let session = TmuxSessionBuilder::new("old-tmux")
+        .add_pane(make_pane("feat/a", "/tmp/wt", "claude"))
+        .add_pane(make_pane("feat/b", "/tmp/wt2", "claude"))
+        .build()
+        .unwrap();
+
+    let mut warnings: Vec<String> = Vec::new();
+    // Simulate a tmux that rejects only pane-scoped `set-option -p`.
+    let result = session.execute_with(
+        |cmd| {
+            let s = cmd.as_command_string();
+            if s.contains("set-option -p") {
+                Err(PawError::TmuxError("unknown flag: -p".into()))
+            } else {
+                Ok(())
+            }
+        },
+        |w| warnings.push(w),
+    );
+
+    assert!(result.is_ok(), "a failed @paw_role set must not abort");
+    assert!(
+        warnings.is_empty(),
+        "the @paw_role set must fail silently; warnings: {warnings:#?}"
     );
 }
 
@@ -713,7 +755,11 @@ fn supervisor_build_compensates_first_agent_cwd_for_swap() {
 }
 
 /// Scenario: opt-out applies to the supervisor builder too — no affordance
-/// set-options and no `select-pane -T` titles.
+/// set-options and no `select-pane -T` titles, but the `@paw_role` options
+/// the liveness probe reads are still set.
+///
+/// The supervisor-builder half of spec scenario "Explicit false skips all
+/// affordances" (`supervisor-launch` / *`border_affordances` config field*).
 #[test]
 fn supervisor_session_opt_out_omits_affordances() {
     let layout = crate::supervisor::layout::supervisor_layout(1).expect("layout");
@@ -747,6 +793,14 @@ fn supervisor_session_opt_out_omits_affordances() {
             .any(|c| c.contains("select-pane") && c.contains("-T")),
         "opt-out supervisor session must not set pane titles"
     );
+    // The roles the liveness probe reads survive the opt-out.
+    for role in ["supervisor", "dashboard", "feat/foo"] {
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains("@paw_role") && c.ends_with(role)),
+            "opt-out supervisor session must still set @paw_role {role}; cmds:\n{cmds:#?}"
+        );
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -2532,8 +2586,10 @@ fn session_liveness_distinguishes_alive_stale_and_indeterminate() {
 // --- Agent-pane liveness probe (GP-03c) -------------------------------------
 
 /// A runner scripting `has-session` success and `list-panes` returning
-/// `panes` (already formatted as `"#{pane_index} #{pane_current_command}"`
-/// lines).
+/// `panes` (already formatted as
+/// `"#{pane_index}|#{pane_current_command}|#{@paw_role}"` lines). A row with
+/// an empty role models a session launched without border affordances, where
+/// the probe falls back to the positional rule.
 fn runner_with_panes(panes: &str) -> FakeCommandRunner {
     let panes = panes.to_string();
     FakeCommandRunner::scripted(move |_program, args| {
@@ -2557,7 +2613,7 @@ fn runner_with_panes(panes: &str) -> FakeCommandRunner {
 
 #[test]
 fn has_live_agent_pane_true_when_an_agent_pane_runs_its_cli() {
-    let runner = runner_with_panes("0 bash\n1 node\n2 claude\n");
+    let runner = runner_with_panes("0|bash|\n1|node|\n2|claude|\n");
     assert!(has_live_agent_pane_with(&runner, "paw-proj", 2));
 }
 
@@ -2565,8 +2621,91 @@ fn has_live_agent_pane_true_when_an_agent_pane_runs_its_cli() {
 fn has_live_agent_pane_false_when_every_agent_pane_reverted_to_a_shell() {
     // Panes before the offset (supervisor/dashboard) are never consulted,
     // even if they run a non-shell process.
-    let runner = runner_with_panes("0 bash\n1 node\n2 bash\n3 zsh\n");
+    let runner = runner_with_panes("0|bash|\n1|node|\n2|bash|\n3|zsh|\n");
     assert!(!has_live_agent_pane_with(&runner, "paw-proj", 2));
+}
+
+/// Roles, not pane indices, decide which panes are coding agents. `git paw
+/// pause` kills the dashboard pane and tmux renumbers the rest, so the
+/// surviving agent lands at index 0 — below `agent_pane_offset`. The probe
+/// must still see it, or a paused session with a live agent reads as
+/// "agent panes exited" and `start` tears it down.
+#[test]
+fn has_live_agent_pane_true_for_a_renumbered_agent_pane_after_pause() {
+    let runner = runner_with_panes("0|node|feat/auth\n");
+    assert!(has_live_agent_pane_with(&runner, "paw-proj", 1));
+}
+
+/// `[layout].border_affordances = false` must not cost liveness accuracy. The
+/// builder labels every pane with `@paw_role` regardless (the option renders
+/// nothing on its own), so after `git paw pause` kills the dashboard pane and
+/// tmux renumbers the survivors, the probe still recognises the agent pane
+/// that slid into the dashboard's index — the layout tmux reports is the one
+/// asserted on here.
+#[test]
+fn affordances_off_panes_are_still_labelled_so_pause_renumbering_is_safe() {
+    let layout = crate::supervisor::layout::supervisor_layout(1).expect("layout");
+    let supervisor = make_pane("supervisor", "/repo", "claude");
+    let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
+    let agent = make_pane("feat/foo", "/tmp/wt", "claude");
+    let session = build_supervisor_session(
+        "sup-off",
+        None,
+        &supervisor,
+        &dashboard,
+        &[agent],
+        layout,
+        true,
+        false, // border affordances OFF
+        &[],
+    )
+    .expect("session builds");
+    let cmds = session.command_strings();
+    for role in ["supervisor", "dashboard", "feat/foo"] {
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains("@paw_role") && c.ends_with(role)),
+            "an affordances-off session must still label its panes; missing {role}"
+        );
+    }
+
+    // Post-pause: the dashboard pane is gone and the agent pane (which the
+    // builder labelled above) has been renumbered down to index 0, below the
+    // supervisor-mode agent offset.
+    let runner = runner_with_panes("0|claude|supervisor\n1|claude|feat/foo\n");
+    assert!(has_live_agent_pane_with(
+        &runner,
+        "sup-off",
+        crate::supervisor::layout::SUPERVISOR_PANE_OFFSET
+    ));
+}
+
+/// The dashboard and supervisor panes are infrastructure: a non-shell process
+/// in one of them is never evidence that a coding agent is alive, whatever
+/// index it sits at.
+#[test]
+fn has_live_agent_pane_ignores_dashboard_and_supervisor_roles() {
+    let runner = runner_with_panes("0|node|supervisor\n1|node|dashboard\n2|bash|feat/auth\n");
+    assert!(!has_live_agent_pane_with(&runner, "paw-proj", 2));
+}
+
+/// Each pane is classified on its own, so a mixed session — panes launched
+/// before and after a `border_affordances` change — stays correct: a role-less
+/// pane at or past the offset still falls back to the positional rule and can
+/// prove the session alive, rather than being ignored because a sibling pane
+/// happens to carry a role.
+#[test]
+fn has_live_agent_pane_true_for_a_roleless_pane_in_a_mixed_session() {
+    let runner = runner_with_panes("0|node|dashboard\n1|bash|feat/auth\n2|claude|\n");
+    assert!(has_live_agent_pane_with(&runner, "paw-proj", 1));
+}
+
+/// The positional fallback only applies to the role-less pane itself: one
+/// below the offset is still not an agent.
+#[test]
+fn has_live_agent_pane_false_for_a_roleless_pane_below_the_offset() {
+    let runner = runner_with_panes("0|claude|\n1|bash|feat/auth\n");
+    assert!(!has_live_agent_pane_with(&runner, "paw-proj", 1));
 }
 
 #[test]
@@ -2575,16 +2714,17 @@ fn has_live_agent_pane_false_when_list_panes_fails() {
     assert!(!has_live_agent_pane_with(&runner, "paw-proj", 2));
 }
 
-/// Spec scenario "A session whose agent panes all exited reports Stopped"
-/// (via [`SessionLiveness::Stale`], past the launch grace period).
+/// Spec scenario "Exited agent panes are a distinct liveness outcome from an
+/// absent session" — past the launch grace period, bare-shell agent panes give
+/// [`SessionLiveness::AgentsExited`], not `Stale`.
 #[test]
-fn session_liveness_for_reports_stale_when_all_agent_panes_are_bare_shells() {
-    let runner = runner_with_panes("0 bash\n1 node\n2 bash\n");
+fn session_liveness_for_reports_agents_exited_when_all_agent_panes_are_bare_shells() {
+    let runner = runner_with_panes("0|bash|\n1|node|\n2|bash|\n");
     let now = SystemTime::now();
     let created_at = now - Duration::from_secs(120);
     assert_eq!(
         session_liveness_for_with(&runner, "paw-proj", created_at, 2, now),
-        SessionLiveness::Stale
+        SessionLiveness::AgentsExited
     );
 }
 
@@ -2592,7 +2732,7 @@ fn session_liveness_for_reports_stale_when_all_agent_panes_are_bare_shells() {
 /// Active".
 #[test]
 fn session_liveness_for_reports_alive_when_an_agent_pane_is_live() {
-    let runner = runner_with_panes("0 bash\n1 node\n2 claude\n");
+    let runner = runner_with_panes("0|bash|\n1|node|\n2|claude|\n");
     let now = SystemTime::now();
     let created_at = now - Duration::from_secs(120);
     assert_eq!(
@@ -2606,7 +2746,7 @@ fn session_liveness_for_reports_alive_when_an_agent_pane_is_live() {
 /// `Stale` before the CLI has had a chance to start.
 #[test]
 fn session_liveness_for_tolerates_the_launch_window() {
-    let runner = runner_with_panes("0 bash\n1 node\n2 bash\n");
+    let runner = runner_with_panes("0|bash|\n1|node|\n2|bash|\n");
     let now = SystemTime::now();
     let created_at = now - Duration::from_secs(2);
     assert_eq!(
@@ -2616,7 +2756,9 @@ fn session_liveness_for_tolerates_the_launch_window() {
 }
 
 /// A tmux session that does not exist at all stays `Stale` regardless of the
-/// agent-pane check (the base `has-session` probe still gates everything).
+/// agent-pane check (the base `has-session` probe still gates everything) —
+/// the absent-session half of the spec scenario "Exited agent panes are a
+/// distinct liveness outcome from an absent session".
 #[test]
 fn session_liveness_for_reports_stale_when_the_session_does_not_exist() {
     let runner = FakeCommandRunner::failing("can't find session");
