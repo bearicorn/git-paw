@@ -251,12 +251,14 @@ The introduction of tokio SHALL be confined to the `src/broker/` module tree. Th
 
 ### Requirement: POST /publish accepts and validates broker messages
 
-The system SHALL expose `POST /publish` accepting an `application/json` request body. The handler SHALL parse the body via `BrokerMessage::from_json` and SHALL behave as follows:
+The system SHALL expose `POST /publish` accepting an `application/json` request body. For a request that passes the listener guard (see *Broker listener validates the Host header on a loopback bind* and *Broker listener validates the Origin header*), the handler SHALL parse the body via `BrokerMessage::from_json` and SHALL behave as follows:
 
 - **Valid `BrokerMessage`** → call `publish_message(&state, msg)`, respond with HTTP `202 Accepted` and an empty body
 - **Invalid JSON or validation failure** → respond with HTTP `400 Bad Request` and an `application/json` body containing `{ "error": "<message>" }` describing the failure
 - **Wrong content type** → respond with HTTP `415 Unsupported Media Type`
 - **Empty body** → respond with HTTP `400 Bad Request` with an error explaining a JSON body is required
+
+A request refused by the listener guard SHALL receive `403` instead, and SHALL NOT reach this handler.
 
 The handler SHALL NOT log message bodies to standard output. The handler MUST complete in bounded time (no synchronous blocking I/O) and MUST NOT hold any `BrokerState` lock guard across an `.await` boundary.
 
@@ -304,6 +306,13 @@ The handler SHALL NOT log message bodies to standard output. The handler MUST co
 - **GIVEN** a running broker
 - **WHEN** `POST /publish` is sent with an empty body and `Content-Type: application/json`
 - **THEN** the response status is `400`
+
+#### Scenario: A publish refused by the listener guard never reaches the handler
+
+- **GIVEN** a broker bound to `127.0.0.1`
+- **WHEN** a valid `POST /publish` is sent with `Host: attacker.example:9119`
+- **THEN** the response status is `403`, not `202`
+- **AND** no message is delivered
 
 ### Requirement: GET /messages/:agent_id returns queued messages with cursor
 
@@ -450,30 +459,44 @@ This endpoint is the IPC seam used by `cmd_supervisor` (which runs in a differen
 
 ### Requirement: Unknown routes return 404
 
-The system SHALL respond with HTTP `404 Not Found` for any request whose path does not match one of the four documented routes (`POST /publish`, `GET /messages/:agent_id`, `GET /status`, `GET /log`).
+The system SHALL respond with HTTP `404 Not Found` for any request that passes the listener guard and whose path does not match one of the five documented routes (`POST /publish`, `POST /watch`, `GET /messages/:agent_id`, `GET /status`, `GET /log`).
+
+The listener guard runs before routing, so a request it refuses receives `403` rather than `404` even when its path matches no route.
 
 #### Scenario: Unknown path returns 404
 
-- **WHEN** `GET /unknown/route` is sent
+- **GIVEN** a broker bound to `127.0.0.1`
+- **WHEN** `GET /unknown/route` is sent with `Host: 127.0.0.1:9119`
 - **THEN** the response status is `404`
+
+#### Scenario: Unknown path with a refused Host returns 403, not 404
+
+- **GIVEN** a broker bound to `127.0.0.1`
+- **WHEN** `GET /unknown/route` is sent with `Host: attacker.example:9119`
+- **THEN** the response status is `403`
 
 ### Requirement: Wrong HTTP methods return 405
 
-The system SHALL respond with HTTP `405 Method Not Allowed` for requests where the path matches a documented route but the method does not.
+The system SHALL respond with HTTP `405 Method Not Allowed` for requests that pass the listener guard, where the path matches a documented route but the method does not.
+
+The listener guard runs before routing, so a request it refuses receives `403` rather than `405`.
 
 #### Scenario: GET /publish returns 405
 
-- **WHEN** `GET /publish` is sent
+- **GIVEN** a broker bound to `127.0.0.1`
+- **WHEN** `GET /publish` is sent with `Host: 127.0.0.1:9119`
 - **THEN** the response status is `405`
 
 #### Scenario: POST /status returns 405
 
-- **WHEN** `POST /status` is sent
+- **GIVEN** a broker bound to `127.0.0.1`
+- **WHEN** `POST /status` is sent with `Host: 127.0.0.1:9119`
 - **THEN** the response status is `405`
 
 #### Scenario: POST /messages/feat-x returns 405
 
-- **WHEN** `POST /messages/feat-x` is sent
+- **GIVEN** a broker bound to `127.0.0.1`
+- **WHEN** `POST /messages/feat-x` is sent with `Host: 127.0.0.1:9119`
 - **THEN** the response status is `405`
 
 ### Requirement: Live watch-target registration endpoint
@@ -942,4 +965,119 @@ That early write SHALL carry the re-stamped `broker_log_path` only. On the resum
 - **WHEN** it is recovered and its broker records a message
 - **THEN** the broker SHALL have written `<session_state_dir>/<session_name>.broker.log`
 - **AND** the shared `broker.log` SHALL NOT have been written
+
+### Requirement: Broker listener validates the Host header on a loopback bind
+
+When the broker is bound to a loopback address, it SHALL check the host part of every request's `Host` header before routing the request. The accepted host parts SHALL be:
+
+- `localhost`, compared ASCII case-insensitively;
+- an IPv4 literal in `127.0.0.0/8`;
+- `[::1]`.
+
+The port's *value* SHALL NOT be checked, so tunnels and port-forwards on any port are accepted. Its *shape* SHALL be checked: whatever follows the host part SHALL be empty or a `:` followed only by ASCII digits, so `localhost:evil.com`, `127.0.0.1:80:evil` and `[::1]evil.com` are not read as accepted hosts.
+
+A `Host` header sent more than once, or whose bytes are not valid UTF-8, SHALL be refused rather than resolved to its first value or treated as absent.
+
+When the request target is in absolute form (`GET http://host/path`), its authority SHALL be subject to the same rule as the `Host` header, so a foreign authority cannot be smuggled past a loopback `Host`.
+
+A request whose `Host` is missing, or whose host part is not accepted, SHALL receive HTTP `403` with the body `{"error":"forbidden host"}`. The request SHALL NOT be routed and SHALL NOT change any broker state. The check SHALL run before routing, so it covers every route and the `404`/`405` fallbacks alike; a request that passes it SHALL be routed exactly as before.
+
+When the broker is bound to a non-loopback address, it SHALL NOT perform this check. In that case both the process that starts the broker AND every command that brings the broker up SHALL print a warning on stderr. The command SHALL print it before the broker is started, because the broker runs in the dashboard pane, which switches to tmux's alternate screen immediately afterwards. This SHALL cover a fresh launch, a spec-driven launch, a supervisor launch, the recovery of a stopped session, and a resume from pause — not only the fresh-launch paths. The warning SHALL name the bind address and SHALL state that the broker is reachable from the network without authentication.
+
+A non-loopback bind SHALL NOT be described as keeping browsers out. With the `Host` check disabled, a DNS-rebinding page is same-origin with the broker, and a same-origin `GET` carries no `Origin` header, so such a page can read `GET /log`, `GET /status` and `GET /messages/{agent_id}`. Only a loopback bind prevents that.
+
+#### Scenario: Loopback Host is served
+
+- **GIVEN** a broker bound to `127.0.0.1`
+- **WHEN** `GET /status` is sent with `Host: 127.0.0.1:9119`
+- **THEN** the response status SHALL be `200`
+
+#### Scenario: Tunnelled loopback Host on another port is served
+
+- **GIVEN** a broker bound to `127.0.0.1` on port 9119
+- **WHEN** `GET /status` is sent with `Host: localhost:19119`
+- **THEN** the response status SHALL be `200`
+
+#### Scenario: Rebinding Host is refused without state change
+
+- **GIVEN** a broker bound to `127.0.0.1`
+- **WHEN** `POST /publish` with a valid `agent.answer` targeting `feat-x` is sent with `Host: attacker.example:9119`
+- **THEN** the response status SHALL be `403` with the body `{"error":"forbidden host"}`
+- **AND** `GET /messages/feat-x` SHALL return no `agent.answer`
+
+#### Scenario: A Host with junk after the host part is refused
+
+- **GIVEN** a broker bound to `127.0.0.1`
+- **WHEN** `GET /status` is sent with `Host: localhost:evil.com`
+- **THEN** the response status SHALL be `403` with the body `{"error":"forbidden host"}`
+
+#### Scenario: A duplicated or unreadable Host is refused
+
+- **GIVEN** a broker bound to `127.0.0.1`
+- **WHEN** `GET /status` is sent with two `Host` headers, the first `127.0.0.1:9119` and the second `attacker.example:9119`
+- **THEN** the response status SHALL be `403` with the body `{"error":"forbidden host"}`
+
+#### Scenario: A foreign absolute-form target is refused despite a loopback Host
+
+- **GIVEN** a broker bound to `127.0.0.1`
+- **WHEN** `GET http://evil.com/status` is sent with `Host: 127.0.0.1:9119`
+- **THEN** the response status SHALL be `403` with the body `{"error":"forbidden host"}`
+
+#### Scenario: The launch command warns before the session is created
+
+- **GIVEN** `[broker] bind = "0.0.0.0"` and `[broker] enabled = true`
+- **WHEN** a session is launched
+- **THEN** the launch command SHALL print a warning on stderr naming `0.0.0.0` before the session is created
+
+#### Scenario: Recovering or resuming a session warns too
+
+- **GIVEN** `[broker] bind = "0.0.0.0"` and `[broker] enabled = true`
+- **WHEN** a stopped session is recovered, or a paused session is resumed
+- **THEN** the command SHALL print the same warning on stderr before it brings the broker up
+
+#### Scenario: Non-loopback bind skips the Host check and warns
+
+- **GIVEN** `[broker] bind = "0.0.0.0"`
+- **WHEN** the broker starts
+- **THEN** stderr SHALL contain a warning naming `0.0.0.0` and stating that the broker is reachable from the network without authentication
+- **AND** `GET /status` sent with `Host: 192.168.1.5:9119` SHALL return `200`
+
+### Requirement: Broker listener validates the Origin header
+
+The broker SHALL check every request that carries an `Origin` header before routing it. This SHALL apply whatever the bind address. The origin's host SHALL be one that the Host check accepts. A request whose origin's host is not accepted SHALL receive HTTP `403` with the body `{"error":"forbidden origin"}`, as SHALL a request whose `Origin` is the serialized value `null`, and as SHALL a request whose `Origin` header is sent more than once or whose bytes are not valid UTF-8 — such a header SHALL NOT be treated as absent. Such a request SHALL NOT be routed and SHALL NOT change any broker state. A request without an `Origin` header SHALL NOT be affected by this check.
+
+Every in-tree broker client SHALL remain accepted by both checks on the default bind: the bundled `broker.sh` and `sweep.sh` helpers, the bundled post-commit git hook, and the Rust HTTP clients (the publish, watch-registration, log and status clients, and the stale-broker probe) that the CLI, the MCP server and the dashboard use.
+
+#### Scenario: Foreign origin is refused even with a loopback Host
+
+- **WHEN** `POST /publish` is sent with `Host: 127.0.0.1:9119` and `Origin: http://attacker.example`
+- **THEN** the response status SHALL be `403` with the body `{"error":"forbidden origin"}`
+
+#### Scenario: A duplicated or unreadable Origin is refused
+
+- **WHEN** `GET /status` is sent with `Host: 127.0.0.1:9119` and an `Origin` header whose bytes are not valid UTF-8
+- **THEN** the response status SHALL be `403` with the body `{"error":"forbidden origin"}`
+
+#### Scenario: Null origin is refused
+
+- **WHEN** `GET /log` is sent with `Origin: null`
+- **THEN** the response status SHALL be `403`
+
+#### Scenario: Loopback origin is served
+
+- **WHEN** `GET /status` is sent with `Host: 127.0.0.1:9119` and `Origin: http://localhost:3000`
+- **THEN** the response status SHALL be `200`
+
+#### Scenario: Bundled shell clients are unaffected
+
+- **GIVEN** a running broker on the default bind
+- **WHEN** `broker.sh status "x"`, `broker.sh poll`, `sweep.sh status`, `sweep.sh status-publish "x"` and the bundled post-commit hook each talk to it
+- **THEN** every publish SHALL be accepted with `202` and every read SHALL return `200`
+
+#### Scenario: In-tree Rust clients are unaffected
+
+- **GIVEN** a running broker on the default bind
+- **WHEN** `publish_to_broker_http`, `register_watch_target_http`, `fetch_log_entries_over_http`, `fetch_log_over_http`, `fetch_status_agents_over_http`, `fetch_status_over_http` and the stale-broker probe each talk to it
+- **THEN** each SHALL succeed as it does without the guard
+- **AND** the probe SHALL still recognise the listener as a live git-paw broker
 

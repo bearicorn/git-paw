@@ -96,6 +96,26 @@ pub(crate) fn dashboard_command_for(exe: &std::path::Path) -> String {
     )
 }
 
+/// The exposure warning a launch command must print before it creates the
+/// session, or `None` when the broker is disabled or bound to loopback.
+///
+/// The broker process prints the same warning, but into the dashboard pane,
+/// which switches to tmux's alternate screen moments later — so that copy is
+/// effectively invisible. Every path that launches a session calls this and
+/// prints the result on stderr *before* the session exists, while the
+/// operator is still looking at their own terminal.
+pub(crate) fn broker_exposure_warning(broker: &git_paw::config::BrokerConfig) -> Option<String> {
+    (broker.enabled && !git_paw::broker::origin::is_loopback_bind(&broker.bind))
+        .then(|| git_paw::broker::origin::non_loopback_bind_warning(&broker.bind))
+}
+
+/// Prints [`broker_exposure_warning`] on stderr when there is one.
+pub(crate) fn warn_if_broker_is_exposed(broker: &git_paw::config::BrokerConfig) {
+    if let Some(warning) = broker_exposure_warning(broker) {
+        eprintln!("{warning}");
+    }
+}
+
 /// Error returned when add/remove is invoked on a bare-mode session.
 pub(crate) fn bare_mode_unsupported(session_name: &str, verb: &str) -> PawError {
     PawError::SessionError(format!(
@@ -266,6 +286,47 @@ mod tests {
         assert!(
             !msg.contains("v1.0.0"),
             "error must not cite a release version"
+        );
+    }
+
+    // Gate review item 6: the broker's own warning lands in the dashboard
+    // pane just before it switches to the alternate screen, so the launch
+    // command must print it too — before the session is created.
+
+    fn broker(enabled: bool, bind: &str) -> git_paw::config::BrokerConfig {
+        git_paw::config::BrokerConfig {
+            enabled,
+            bind: bind.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_launch_warns_when_the_broker_is_bound_off_loopback() {
+        for bind in ["0.0.0.0", "192.168.1.5", "::"] {
+            let warning = broker_exposure_warning(&broker(true, bind))
+                .unwrap_or_else(|| panic!("bind {bind} must warn"));
+            assert!(warning.contains(bind), "the warning must name the bind");
+            assert!(
+                warning.contains("reachable from the network without authentication"),
+                "the warning must state the exposure, got: {warning}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_launch_is_silent_on_a_loopback_bind_or_a_disabled_broker() {
+        for bind in ["127.0.0.1", "localhost", "::1"] {
+            assert_eq!(
+                broker_exposure_warning(&broker(true, bind)),
+                None,
+                "bind {bind} must not warn"
+            );
+        }
+        assert_eq!(
+            broker_exposure_warning(&broker(false, "0.0.0.0")),
+            None,
+            "a disabled broker is never started, so it must not warn"
         );
     }
 }

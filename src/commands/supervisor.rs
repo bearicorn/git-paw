@@ -28,6 +28,7 @@ use git_paw::tmux;
 
 use super::helpers::{
     attach_session_logging, config_to_custom_defs, dashboard_command, to_interactive_cli,
+    warn_if_broker_is_exposed,
 };
 use super::recover::recover_session;
 use super::start::restart_from_pause;
@@ -712,6 +713,9 @@ pub(crate) fn cmd_supervisor(
     let session_name = tmux::resolve_session_name(&project)?;
     let mouse = config.mouse.unwrap_or(true);
     let broker_config = config.broker.clone();
+    // Warn before the session exists: the dashboard pane prints the same
+    // warning but immediately switches to the alternate screen.
+    warn_if_broker_is_exposed(&broker_config);
     let agent_approval = &supervisor_cfg.agent_approval;
     // The supervisor pane resolves its own level, inheriting agent_approval
     // when [supervisor] approval is unset (pre-v0.11.0 behavior). Coding

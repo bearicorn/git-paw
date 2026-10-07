@@ -19,6 +19,33 @@ git-paw sets the `GIT_PAW_BROKER_URL` environment variable in every agent pane. 
 
 With the broker enabled, each agent's [boot block](#boot-prompt-injection) calls the bundled [broker helper](#broker-helper) (or, for an MCP-speaking CLI, the [MCP publish tools](#mcp-tool-form)), and the agent's `AGENTS.md` view carries the bundled coordination skill with the broker URL pre-expanded, so agents know how to use the broker without any manual setup.
 
+### Requests the broker refuses
+
+The broker is unauthenticated, so before routing **any** request it checks two
+headers to keep browsers and DNS-rebinding pages out. A refused request is not
+routed and changes no broker state:
+
+| Status | Body | Cause |
+|---|---|---|
+| `403` | `{"error":"forbidden host"}` | The broker is bound to a loopback address and the request's `Host` is missing, or its host part is not `localhost`, an IPv4 literal in `127.0.0.0/8`, or `[::1]`. The port is not checked, so tunnels and port-forwards are fine. |
+| `403` | `{"error":"forbidden origin"}` | The request carries an `Origin` header whose host is not loopback, or the serialized value `null`, or the header was sent more than once or with unreadable bytes. This check applies on every bind. A request with no `Origin` — which is what every non-browser client sends — is unaffected. |
+
+A `Host` must also be followed by nothing or a well-formed `:<port>`, so
+`localhost:evil.com` is refused; a duplicated or unreadable `Host` is refused;
+and an absolute-form request target (`GET http://host/path`) must name a
+loopback authority too.
+
+Because the check runs before routing, it also answers for unknown paths and
+wrong methods: a request with a foreign `Host` gets `403`, not `404`/`405`.
+
+Every client git-paw ships — the `broker.sh` and `sweep.sh` helpers, the
+post-commit hook, the CLI, the MCP server and the dashboard — addresses the
+broker by its configured `http://<bind>:<port>` URL and sends no `Origin`, so
+none of them is affected. See
+[Security Posture](./security-posture.md#browser-exposure--the-brokers-host-and-origin-guard)
+for the threat model, the non-loopback-bind exception, and the reverse-proxy
+migration.
+
 ## Broker helper
 
 `git paw init` installs a bundled agent-side helper at

@@ -16,6 +16,7 @@ pub mod conflict;
 pub mod delivery;
 pub mod learnings;
 pub mod messages;
+pub mod origin;
 pub mod publish;
 pub mod server;
 pub mod watcher;
@@ -811,7 +812,17 @@ pub fn start_broker_with(
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let router = server::router(Arc::clone(&state));
+    // The browser-exposure guard checks `Host` only when the listener is
+    // confined to this machine; on a network bind git-paw cannot enumerate the
+    // operator's names, so it warns instead (see `origin::decide_request_origin`).
+    let bind_is_loopback = origin::is_loopback_bind(&config.bind);
+    if !bind_is_loopback {
+        // The launch command prints this too, and that is the copy an operator
+        // reads — this process is the dashboard pane, which switches to tmux's
+        // alternate screen moments later.
+        eprintln!("{}", origin::non_loopback_bind_warning(&config.bind));
+    }
+    let router = server::router(Arc::clone(&state), bind_is_loopback);
 
     let listener = runtime.block_on(async {
         let socket = tokio::net::TcpSocket::new_v4().map_err(BrokerError::BindFailed)?;

@@ -118,6 +118,69 @@ fn sandbox_chapter_covers_the_required_setup() {
 // which asserts the check's remedy output references the posture — not by
 // grepping the doctor source.
 
+// Scenario: Posture chapter covers the guard and its limits — the Host and
+// Origin checks, the DNS-rebinding threat, the non-loopback-bind exception, and
+// the statement that local processes are not authenticated by the guard.
+#[test]
+fn posture_chapter_covers_the_guard_and_its_limits() {
+    let posture = read("docs/src/user-guide/security-posture.md");
+    let missing = contains_all(
+        &posture,
+        &[
+            // The two checks, and the accepted host set.
+            "`Host`",
+            "`Origin`",
+            "127.0.0.0/8",
+            "localhost",
+            "[::1]",
+            // The refusal shapes.
+            "forbidden host",
+            "forbidden origin",
+            "403",
+            // The threat they address.
+            "DNS rebinding",
+            "prompt-injection",
+            // The non-loopback exception, and its warning.
+            "0.0.0.0",
+            "non-loopback exception",
+            "reachable from your network",
+            "warning",
+            // Not authentication.
+            "not authentication",
+            "can still reach the broker",
+            // The proxy migration.
+            "reverse prox",
+            "proxy_set_header Host",
+        ],
+    );
+    assert!(
+        missing.is_empty(),
+        "security-posture.md must cover the broker's browser-exposure guard and its limits; missing: {missing:?}"
+    );
+
+    // The chapter must NOT claim a non-loopback bind still blocks browsers: a
+    // DNS-rebinding page is same-origin with the broker, and its GETs carry no
+    // Origin, so with the Host check off it can read the coordination log.
+    let posture_flat = posture.split_whitespace().collect::<Vec<_>>().join(" ");
+    for claim in [
+        "Only a loopback bind stops a rebinding page from reading the coordination log",
+        "a same-origin `GET` carries **no `Origin` header at all**",
+        "any page served from a loopback origin is accepted",
+    ] {
+        let flat_claim = claim.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            posture_flat
+                .to_lowercase()
+                .contains(&flat_claim.to_lowercase()),
+            "security-posture.md must state: {claim}"
+        );
+    }
+    assert!(
+        !posture_flat.contains("so browsers are still blocked"),
+        "security-posture.md must not claim a non-loopback bind still blocks browsers"
+    );
+}
+
 // The chapters must be wired into the mdBook table of contents, or mdbook build
 // silently omits them.
 #[test]
