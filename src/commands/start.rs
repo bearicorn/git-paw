@@ -25,7 +25,7 @@ use git_paw::tmux;
 
 use super::helpers::{
     agent_pane_offset, attach_session_logging, config_to_custom_defs, dashboard_command,
-    to_interactive_cli,
+    to_interactive_cli, warn_if_broker_is_exposed,
 };
 use super::recover::recover_session;
 use super::supervisor::cmd_supervisor;
@@ -184,6 +184,9 @@ pub(crate) fn cmd_start(
     git::prune_worktrees(&repo_root)?;
 
     let broker_config = config.broker.clone();
+    // Warn before the session exists: the dashboard pane prints the same
+    // warning but immediately switches to the alternate screen.
+    warn_if_broker_is_exposed(&broker_config);
 
     let mut builder = tmux::TmuxSessionBuilder::new(&project)
         .session_name(session_name)
@@ -548,6 +551,9 @@ fn launch_spec_session(
     git::prune_worktrees(repo_root)?;
 
     let broker_config = config.broker.clone();
+    // Warn before the session exists: the dashboard pane prints the same
+    // warning but immediately switches to the alternate screen.
+    warn_if_broker_is_exposed(&broker_config);
 
     // See `cmd_start`: the port clash has to be caught before any pane exists.
     broker::ensure_port_free_for_repo(&broker_config, repo_root)?;
@@ -827,6 +833,14 @@ pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result
     // recreate; pause+resume on a no-broker session is purely the tmux
     // detach/attach cycle.
     if existing.broker_port.is_some() {
+        // Resuming re-spawns the broker, so the exposure warning belongs here
+        // too — the dashboard pane's own copy is hidden by the alternate
+        // screen. Best-effort: a config that will not load is the dashboard's
+        // problem to report, and must not break the resume.
+        if let Ok(config) = config::load_config(repo_root, None) {
+            warn_if_broker_is_exposed(&config.broker);
+        }
+
         let dashboard_command = dashboard_command();
         let repo_str = repo_root.to_string_lossy().to_string();
         // Anchor the new pane on the first agent pane (which still

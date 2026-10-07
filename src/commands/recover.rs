@@ -15,7 +15,7 @@ use git_paw::error::PawError;
 use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry};
 use git_paw::tmux;
 
-use super::helpers::dashboard_command;
+use super::helpers::{dashboard_command, warn_if_broker_is_exposed};
 use super::supervisor::resolve_supervisor_flags;
 use crate::attach_or_print_hint;
 
@@ -159,6 +159,13 @@ pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<()
     // pre-re-stamp path and write there — the orphaned log this re-stamp
     // exists to prevent.
     session::save_session(&updated)?;
+
+    // A recovery rebuilds the session, broker and all, so it is a launch for
+    // the purposes of the exposure warning — and it is the common path after a
+    // reboot or a tmux crash. The dashboard pane's own copy is hidden by the
+    // alternate screen, so warn here, immediately before the pane that starts
+    // the broker comes up.
+    warn_if_broker_is_exposed(&config.broker);
 
     tmux_session.execute()?;
 

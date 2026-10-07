@@ -664,6 +664,22 @@ bind = "127.0.0.1"
 
 When the broker is enabled, git-paw injects the `GIT_PAW_BROKER_URL` environment variable into each agent pane, pointing to `http://<bind>:<port>`. Agents use this URL to communicate with the broker.
 
+> **Warning — a non-loopback `bind` removes a protection and adds exposure.**
+> The broker authenticates nothing: whoever reaches the port can read the whole
+> coordination log and publish any message, including guidance that coding
+> agents running with auto-approved execution will act on. On the default
+> loopback `bind`, git-paw checks every request's `Host` header so a web page
+> cannot reach the broker by DNS rebinding. Setting `bind` to `"0.0.0.0"` or a
+> LAN address **disables that check** — git-paw cannot know your network's
+> names for the machine — and makes the broker reachable from the network with
+> no authentication at all. It also **stops blocking DNS rebinding**: the
+> `Origin` check still runs on every bind and still blocks browser writes and
+> cross-origin reads, but a rebinding page is same-origin with the broker and
+> its `GET`s carry no `Origin`, so it can read `/log`, `/status` and
+> `/messages/*`. Only a loopback bind prevents that. Both the broker and the
+> command that launches the session print a warning on stderr when you set a
+> non-loopback bind. See [Security Posture](../user-guide/security-posture.md#browser-exposure--the-brokers-host-and-origin-guard).
+
 ### Filesystem watcher
 
 The broker's filesystem watcher publishes `agent.status: working` whenever an agent's `git status` changes. By default, an agent that publishes `agent.artifact status: "committed"` and then keeps editing is re-entered into the `working` state — a file modification observed within a TTL window after the commit re-publishes `working`, so the dashboard reflects the agent's continued activity instead of sticking on `committed`.

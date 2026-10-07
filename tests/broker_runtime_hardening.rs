@@ -79,7 +79,7 @@ fn init_repo_with_commit(dir: &Path, message: &str, files: &[&str]) {
 /// whose `modified_files` touch the `OpenSpec` tree, so the guard runs past its
 /// cheap pre-filter and into the blocking `git` read.
 fn committed_artifact_request(agent_id: &str) -> Request<Body> {
-    Request::builder()
+    Request::builder().header("host", "127.0.0.1:9119")
         .method("POST")
         .uri("/publish")
         .header("content-type", "application/json")
@@ -91,6 +91,7 @@ fn committed_artifact_request(agent_id: &str) -> Request<Body> {
 
 fn status_request() -> Request<Body> {
     Request::builder()
+        .header("host", "127.0.0.1:9119")
         .method("GET")
         .uri("/status")
         .body(Body::empty())
@@ -159,7 +160,7 @@ async fn publish_burst_with_role_gating_does_not_stall_status() {
         RoleGatingMode::Warn,
         vec![("feat-burst".to_string(), repo.path().to_path_buf())],
     );
-    let app = server::router(state);
+    let app = server::router(state, true);
 
     // Make each guard read block for a deterministic, CPU-releasing delay so the
     // offload is measurable regardless of runner core count (real git is
@@ -230,7 +231,7 @@ async fn role_gating_guard_output_survives_the_http_publish_path() {
         ],
     );
 
-    let resp = server::router(Arc::clone(&state))
+    let resp = server::router(Arc::clone(&state), true)
         .oneshot(committed_artifact_request("feat-archiver"))
         .await
         .expect("publish request must not error");
@@ -269,7 +270,7 @@ async fn request_after_a_lock_poisoning_panic_is_still_served() {
     let state = Arc::new(BrokerState::new(None));
     poison_state_lock(&state);
 
-    let resp = server::router(state)
+    let resp = server::router(state, true)
         .oneshot(status_request())
         .await
         .expect("the broker must still answer after the lock was poisoned");

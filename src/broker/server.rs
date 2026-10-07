@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use super::BrokerState;
 use super::delivery;
 use super::messages::BrokerMessage;
+use super::origin;
 use super::{WatchTarget, watcher};
 
 /// Compiled-once regex matching the only `agent_id` shapes the broker accepts:
@@ -179,8 +180,16 @@ struct LogEntry {
     message: BrokerMessage,
 }
 
-/// Builds the axum [`Router`] with all broker endpoints.
-pub fn router(state: Arc<BrokerState>) -> Router {
+/// Builds the axum [`Router`] with all broker endpoints, wrapped in the
+/// browser-exposure guard.
+///
+/// `bind_is_loopback` comes from [`origin::is_loopback_bind`] applied to
+/// `[broker] bind`; it decides whether the `Host` check runs (see
+/// [`origin::decide_request_origin`]). The guard is a
+/// [`axum::middleware::from_fn`] layer over the whole router rather than a
+/// per-handler check, so it runs before routing — covering every route and the
+/// `404`/`405` fallbacks alike, including any route added later.
+pub fn router(state: Arc<BrokerState>, bind_is_loopback: bool) -> Router {
     Router::new()
         .route("/publish", post(publish))
         .route("/watch", post(watch))
@@ -188,6 +197,60 @@ pub fn router(state: Arc<BrokerState>) -> Router {
         .route("/status", get(status))
         .route("/log", get(log))
         .with_state(state)
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                origin_guard(bind_is_loopback, request, next).await
+            },
+        ))
+}
+
+/// Reads one header as the guard sees it: absent, a single readable value, or
+/// unusable because it was sent more than once or its bytes are not valid
+/// UTF-8. Both unusable shapes are request-smuggling signals, so neither is
+/// collapsed into "absent" or silently resolved to the first value.
+fn header_view<'a>(
+    headers: &'a HeaderMap,
+    name: &axum::http::HeaderName,
+) -> origin::HeaderView<'a> {
+    let mut values = headers.get_all(name).iter();
+    let Some(first) = values.next() else {
+        return origin::HeaderView::Absent;
+    };
+    if values.next().is_some() {
+        return origin::HeaderView::Unusable;
+    }
+    first
+        .to_str()
+        .map_or(origin::HeaderView::Unusable, origin::HeaderView::Value)
+}
+
+/// Middleware that refuses browser-shaped and foreign-`Host` requests with
+/// `403` before they reach any route.
+async fn origin_guard(
+    bind_is_loopback: bool,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let headers = request.headers();
+    let host = header_view(headers, &axum::http::header::HOST);
+    let origin = header_view(headers, &axum::http::header::ORIGIN);
+    // `Uri::authority` is populated only for an absolute-form request target
+    // (`GET http://host/path`); an ordinary origin-form target leaves it None.
+    let target_authority = request
+        .uri()
+        .authority()
+        .map(axum::http::uri::Authority::as_str);
+
+    if let Err(rejection) =
+        origin::decide_request_origin(host, origin, target_authority, bind_is_loopback)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({ "error": rejection.error_message() })),
+        )
+            .into_response();
+    }
+    next.run(request).await
 }
 
 /// `POST /publish` — accepts a JSON [`BrokerMessage`] and queues it for delivery.
@@ -474,7 +537,14 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_router() -> Router {
-        router(Arc::new(BrokerState::new(None)))
+        router(Arc::new(BrokerState::new(None)), true)
+    }
+
+    /// A request builder pre-seeded with a loopback `Host`, as every real
+    /// client sends. Tests that exercise the guard itself build their own
+    /// requests with [`Request::builder`] instead.
+    fn loopback_request() -> axum::http::request::Builder {
+        Request::builder().header("host", "127.0.0.1:9119")
     }
 
     #[tokio::test]
@@ -482,7 +552,7 @@ mod tests {
         let app = test_router();
         let resp = app
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("POST")
                     .uri("/publish")
                     .header("content-type", "application/json")
@@ -501,7 +571,7 @@ mod tests {
         let app = test_router();
         let resp = app
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("POST")
                     .uri("/publish")
                     .header("content-type", "application/json")
@@ -518,7 +588,7 @@ mod tests {
         let app = test_router();
         let resp = app
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("POST")
                     .uri("/publish")
                     .header("content-type", "application/json")
@@ -535,7 +605,7 @@ mod tests {
         let app = test_router();
         let resp = app
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("POST")
                     .uri("/publish")
                     .header("content-type", "text/plain")
@@ -552,7 +622,7 @@ mod tests {
         let app = test_router();
         let resp = app
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("POST")
                     .uri("/publish")
                     .body(Body::from("{}"))
@@ -568,7 +638,7 @@ mod tests {
         let app = test_router();
         let resp = app
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("POST")
                     .uri("/publish")
                     .header("content-type", "application/json")
@@ -593,7 +663,7 @@ mod tests {
         let app = test_router();
         let resp = app
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("POST")
                     .uri("/publish")
                     .header("content-type", "application/json")
@@ -722,7 +792,7 @@ mod tests {
             let app = test_router();
             let resp = app
                 .oneshot(
-                    Request::builder()
+                    loopback_request()
                         .method("POST")
                         .uri("/publish")
                         .header("content-type", "application/json")
@@ -913,7 +983,7 @@ mod tests {
         let app = test_router();
         let resp = app
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("GET")
                     .uri("/messages/feat-x")
                     .body(Body::empty())
@@ -935,7 +1005,7 @@ mod tests {
         let app = test_router();
         let resp = app
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("GET")
                     .uri("/messages/INVALID!")
                     .body(Body::empty())
@@ -951,7 +1021,7 @@ mod tests {
         let app = test_router();
         let resp = app
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("GET")
                     .uri("/messages/feat-x?since=abc")
                     .body(Body::empty())
@@ -967,7 +1037,7 @@ mod tests {
         let app = test_router();
         let resp = app
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("GET")
                     .uri("/status")
                     .body(Body::empty())
@@ -990,9 +1060,9 @@ mod tests {
     async fn status_reports_the_repository_it_serves() {
         let repo = tempfile::tempdir().expect("tempdir");
         let state = Arc::new(BrokerState::new(None).with_repo_root(repo.path()));
-        let resp = router(state)
+        let resp = router(state, true)
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("GET")
                     .uri("/status")
                     .body(Body::empty())
@@ -1015,9 +1085,9 @@ mod tests {
 
     /// POSTs a JSON body to `/publish` against a router built from `state`.
     async fn publish_json(state: &Arc<BrokerState>, body: &'static str) {
-        let resp = router(Arc::clone(state))
+        let resp = router(Arc::clone(state), true)
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("POST")
                     .uri("/publish")
                     .header("content-type", "application/json")
@@ -1032,9 +1102,9 @@ mod tests {
     /// GETs `/status` against a router built from `state` and returns the
     /// parsed JSON body.
     async fn get_status(state: &Arc<BrokerState>) -> serde_json::Value {
-        let resp = router(Arc::clone(state))
+        let resp = router(Arc::clone(state), true)
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("GET")
                     .uri("/status")
                     .body(Body::empty())
@@ -1136,9 +1206,9 @@ mod tests {
 
     /// POSTs a body to `/watch` against a router built from `state`.
     async fn post_watch(state: &Arc<BrokerState>, body: String) -> StatusCode {
-        router(Arc::clone(state))
+        router(Arc::clone(state), true)
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("POST")
                     .uri("/watch")
                     .header("content-type", "application/json")
@@ -1248,7 +1318,7 @@ mod tests {
         let app = test_router();
         let resp = app
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("POST")
                     .uri("/watch")
                     .header("content-type", "text/plain")
@@ -1265,7 +1335,7 @@ mod tests {
         let app = test_router();
         let resp = app
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("GET")
                     .uri("/unknown/route")
                     .body(Body::empty())
@@ -1281,7 +1351,7 @@ mod tests {
         let app = test_router();
         let resp = app
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("GET")
                     .uri("/publish")
                     .body(Body::empty())
@@ -1321,7 +1391,7 @@ mod tests {
         // Request to /panic — should not crash the server.
         let _panic_resp = client
             .request(
-                Request::builder()
+                loopback_request()
                     .method("GET")
                     .uri(format!("http://{addr}/panic"))
                     .body(axum::body::Body::empty())
@@ -1334,7 +1404,7 @@ mod tests {
 
         let status_resp = client
             .request(
-                Request::builder()
+                loopback_request()
                     .method("GET")
                     .uri(format!("http://{addr}/status"))
                     .body(axum::body::Body::empty())
@@ -1369,10 +1439,10 @@ mod tests {
             delivery::publish_message(&state, &msg);
         }
 
-        let app = router(state);
+        let app = router(state, true);
         let resp = app
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("GET")
                     .uri("/log")
                     .body(Body::empty())
@@ -1410,10 +1480,10 @@ mod tests {
             delivery::publish_message(&state, &msg);
         }
 
-        let app = router(state);
+        let app = router(state, true);
         let resp = app
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("GET")
                     .uri("/log?since=2")
                     .body(Body::empty())
@@ -1439,7 +1509,7 @@ mod tests {
         let app = test_router();
         let resp = app
             .oneshot(
-                Request::builder()
+                loopback_request()
                     .method("GET")
                     .uri("/log?since=notanumber")
                     .body(Body::empty())
@@ -1448,5 +1518,308 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // --- Browser-exposure guard (Host / Origin) -------------------------
+
+    /// Reads a response body into a string.
+    async fn body_text(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("read body");
+        String::from_utf8(bytes.to_vec()).expect("body is utf-8")
+    }
+
+    const ANSWER_BODY: &str = r#"{"type":"agent.answer","agent_id":"supervisor","payload":{"target":"feat-x","from":"supervisor","answer":"ship it"}}"#;
+
+    #[tokio::test]
+    async fn loopback_host_is_served() {
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .header("host", "127.0.0.1:9119")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn tunnelled_loopback_host_on_another_port_is_served() {
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .header("host", "localhost:19119")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn rebinding_host_is_refused_without_state_change() {
+        let state = Arc::new(BrokerState::new(None));
+        let resp = router(Arc::clone(&state), true)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/publish")
+                    .header("content-type", "application/json")
+                    .header("host", "attacker.example:9119")
+                    .body(Body::from(ANSWER_BODY))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body_text(resp).await, r#"{"error":"forbidden host"}"#);
+
+        // The refused publish must not have reached delivery.
+        let resp = router(Arc::clone(&state), true)
+            .oneshot(
+                loopback_request()
+                    .uri("/messages/feat-x")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_text(resp).await;
+        assert!(
+            !body.contains("agent.answer"),
+            "inbox must stay empty, got {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn foreign_origin_is_refused_even_with_a_loopback_host() {
+        let state = Arc::new(BrokerState::new(None));
+        let resp = router(Arc::clone(&state), true)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/publish")
+                    .header("content-type", "application/json")
+                    .header("host", "127.0.0.1:9119")
+                    .header("origin", "http://attacker.example")
+                    .body(Body::from(ANSWER_BODY))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body_text(resp).await, r#"{"error":"forbidden origin"}"#);
+    }
+
+    #[tokio::test]
+    async fn null_origin_is_refused() {
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/log")
+                    .header("host", "127.0.0.1:9119")
+                    .header("origin", "null")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body_text(resp).await, r#"{"error":"forbidden origin"}"#);
+    }
+
+    #[tokio::test]
+    async fn loopback_origin_is_served() {
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .header("host", "127.0.0.1:9119")
+                    .header("origin", "http://localhost:3000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn unknown_route_with_a_foreign_host_is_refused_before_routing() {
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/no-such-route")
+                    .header("host", "attacker.example:9119")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body_text(resp).await, r#"{"error":"forbidden host"}"#);
+    }
+
+    #[tokio::test]
+    async fn unknown_route_with_a_loopback_host_still_404s() {
+        let resp = test_router()
+            .oneshot(
+                loopback_request()
+                    .uri("/no-such-route")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn non_loopback_bind_serves_a_foreign_host_but_still_refuses_an_origin() {
+        let state = Arc::new(BrokerState::new(None));
+        let resp = router(Arc::clone(&state), false)
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .header("host", "192.168.1.5:9119")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = router(state, false)
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .header("host", "192.168.1.5:9119")
+                    .header("origin", "http://attacker.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn a_non_text_origin_is_refused_not_treated_as_absent() {
+        let mut request = Request::builder()
+            .uri("/status")
+            .header("host", "127.0.0.1:9119")
+            .body(Body::empty())
+            .unwrap();
+        request.headers_mut().insert(
+            axum::http::header::ORIGIN,
+            axum::http::HeaderValue::from_bytes(b"http://\xffevil.com").unwrap(),
+        );
+        let resp = test_router().oneshot(request).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body_text(resp).await, r#"{"error":"forbidden origin"}"#);
+    }
+
+    #[tokio::test]
+    async fn a_non_text_host_is_refused() {
+        let mut request = Request::builder()
+            .uri("/status")
+            .body(Body::empty())
+            .unwrap();
+        request.headers_mut().insert(
+            axum::http::header::HOST,
+            axum::http::HeaderValue::from_bytes(b"127.0.0.1\xff").unwrap(),
+        );
+        let resp = test_router().oneshot(request).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body_text(resp).await, r#"{"error":"forbidden host"}"#);
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_host_header_is_refused_not_resolved_to_the_first() {
+        let mut request = Request::builder()
+            .uri("/status")
+            .header("host", "127.0.0.1:9119")
+            .body(Body::empty())
+            .unwrap();
+        request.headers_mut().append(
+            axum::http::header::HOST,
+            axum::http::HeaderValue::from_static("attacker.example:9119"),
+        );
+        let resp = test_router().oneshot(request).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body_text(resp).await, r#"{"error":"forbidden host"}"#);
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_origin_header_is_refused_not_resolved_to_the_first() {
+        let mut request = Request::builder()
+            .uri("/status")
+            .header("host", "127.0.0.1:9119")
+            .header("origin", "http://localhost:3000")
+            .body(Body::empty())
+            .unwrap();
+        request.headers_mut().append(
+            axum::http::header::ORIGIN,
+            axum::http::HeaderValue::from_static("http://attacker.example"),
+        );
+        let resp = test_router().oneshot(request).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body_text(resp).await, r#"{"error":"forbidden origin"}"#);
+    }
+
+    #[tokio::test]
+    async fn a_foreign_absolute_form_target_is_refused_despite_a_loopback_host() {
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("http://evil.com/status")
+                    .header("host", "127.0.0.1:9119")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body_text(resp).await, r#"{"error":"forbidden host"}"#);
+    }
+
+    #[tokio::test]
+    async fn a_loopback_absolute_form_target_is_served() {
+        let resp = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("http://127.0.0.1:9119/status")
+                    .header("host", "127.0.0.1:9119")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_host_with_junk_after_the_port_is_refused() {
+        for host in ["localhost:evil.com", "127.0.0.1:80:evil", "[::1]evil.com"] {
+            let resp = test_router()
+                .oneshot(
+                    Request::builder()
+                        .uri("/status")
+                        .header("host", host)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "host {host}");
+            assert_eq!(body_text(resp).await, r#"{"error":"forbidden host"}"#);
+        }
     }
 }
