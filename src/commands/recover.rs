@@ -129,7 +129,7 @@ pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<()
         .unwrap_or(&default_sup)
         .agent_approval;
 
-    let tmux_session = match mode {
+    let (tmux_session, pane_offset, orchestrator) = match mode {
         SessionMode::Supervisor => {
             recover_supervisor_session(repo_root, existing, &config, broker_url.as_deref(), mouse)?
         }
@@ -169,11 +169,30 @@ pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<()
 
     tmux_session.execute()?;
 
+    // Rewrite the per-repo discovery file `sweep.sh` reads. Recovery REBUILDS
+    // the layout, so a file written by the original launch records pane
+    // indices that no longer describe the live session (and a session recovered
+    // after the file was removed has none at all) — `session-state` requires
+    // every path that creates or rebuilds the session's panes to (re)write it.
+    // The offsets come from the layout just rebuilt above.
+    crate::write_repo_discovery_file(
+        repo_root,
+        &tmux_session.name,
+        &updated.worktrees,
+        pane_offset,
+        orchestrator,
+    );
+
     attach_or_print_hint(&tmux_session.name)
 }
 
 /// Rebuild a bare-mode (non-supervisor) session: dashboard at pane 0 (when
 /// broker enabled), coding agents at pane 1+.
+///
+/// Returns the built session together with the agent pane offset of the
+/// rebuilt layout and its orchestrator entry (`None` — a bare session has no
+/// orchestrator pane), so [`recover_session`] can rewrite the per-repo
+/// discovery file against the layout it actually produced.
 fn recover_bare_session<S: std::hash::BuildHasher>(
     repo_root: &Path,
     existing: &Session,
@@ -182,7 +201,14 @@ fn recover_bare_session<S: std::hash::BuildHasher>(
     border_affordances: bool,
     approval: ApprovalLevel,
     clis: &HashMap<String, CustomCli, S>,
-) -> Result<tmux::TmuxSession, PawError> {
+) -> Result<
+    (
+        tmux::TmuxSession,
+        usize,
+        Option<session::RepoOrchestratorEntry>,
+    ),
+    PawError,
+> {
     let mut builder = tmux::TmuxSessionBuilder::new(&existing.project_name)
         .session_name(existing.session_name.clone())
         .mouse_mode(mouse)
@@ -206,18 +232,34 @@ fn recover_bare_session<S: std::hash::BuildHasher>(
         });
     }
 
-    builder.build()
+    // The dashboard occupies pane 0 when the broker is enabled, so coding
+    // agents start at pane 1; without it they start at pane 0.
+    let pane_offset = usize::from(broker_url.is_some());
+    Ok((builder.build()?, pane_offset, None))
 }
 
 /// Rebuild a supervisor-mode session with the v0.5 layout: supervisor at pane
 /// 0, dashboard at pane 1, coding agents at pane 2+.
+///
+/// Returns the built session together with the agent pane offset of the
+/// rebuilt layout and the orchestrator entry describing the supervisor's own
+/// pane, so [`recover_session`] can rewrite the per-repo discovery file
+/// against the layout it actually produced — including the orchestrator entry
+/// a supervisor-mode discovery file carries.
 fn recover_supervisor_session(
     repo_root: &Path,
     existing: &Session,
     config: &PawConfig,
     broker_url: Option<&str>,
     mouse: bool,
-) -> Result<tmux::TmuxSession, PawError> {
+) -> Result<
+    (
+        tmux::TmuxSession,
+        usize,
+        Option<session::RepoOrchestratorEntry>,
+    ),
+    PawError,
+> {
     // Fall back to a default config when [supervisor] is absent so a
     // re-launched session does not error on a config the prior boot
     // already accepted.
@@ -244,7 +286,7 @@ fn recover_supervisor_session(
     let supervisor_flags =
         resolve_supervisor_flags(&supervisor_cli, supervisor_approval, &config.clis);
     let supervisor_cli_command = if supervisor_flags.is_empty() {
-        supervisor_cli
+        supervisor_cli.clone()
     } else {
         format!("{supervisor_cli} {supervisor_flags}")
     };
@@ -280,7 +322,7 @@ fn recover_supervisor_session(
         .map(|url| vec![("GIT_PAW_BROKER_URL".to_string(), url.to_string())])
         .unwrap_or_default();
 
-    tmux::build_supervisor_session(
+    let session = tmux::build_supervisor_session(
         &existing.project_name,
         Some(existing.session_name.clone()),
         &supervisor_pane,
@@ -290,7 +332,16 @@ fn recover_supervisor_session(
         mouse,
         config.border_affordances_enabled(),
         &env_vars,
-    )
+    )?;
+
+    Ok((
+        session,
+        git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET,
+        Some(session::RepoOrchestratorEntry {
+            cli: supervisor_cli,
+            pane_index: 0,
+        }),
+    ))
 }
 
 #[cfg(test)]

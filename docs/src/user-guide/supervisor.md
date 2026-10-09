@@ -529,6 +529,15 @@ supervisor never hand-rolls the JSON, and git-paw's classifier recognises
 `.git-paw/scripts/sweep.sh` by its stable path — covering every phase without
 a broad `curl` rule.
 
+Every `sweep.sh` publish verb — `status-publish`, `verified`, `feedback-gate`,
+`conflict-ack`, `learn` — checks the broker's HTTP response. When the broker
+does not accept the publish (any non-2xx status, or no response at all), the
+helper prints the broker's error to stderr and **exits non-zero** instead of
+printing its "published" line. A non-zero exit means the event did NOT reach
+the broker: fix the cause (a malformed target agent id, a stopped broker) and
+re-publish rather than treating the verb as done. The agent-side `broker.sh`
+behaves identically.
+
 The phases, with what each one means:
 
 | Phase | The supervisor is… |

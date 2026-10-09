@@ -494,6 +494,102 @@ pub(crate) fn list_panes_with_paths_with(
     Ok(panes)
 }
 
+/// List every live pane in `session_name`'s first window as
+/// `(pane_index, pane_current_path)` pairs via
+/// `tmux list-panes -F '#{pane_index} #{pane_current_path}'`.
+///
+/// The index-valued sibling of [`list_panes_with_paths`]: a pane id (`%N`) is
+/// stable across a layout change, which is exactly why it is the right key for
+/// targeting a pane — but the per-repo discovery file records the pane INDEX,
+/// so a caller rebuilding that file needs indices.
+///
+/// Returns an empty vector (not an error) when the session/server is gone, and
+/// skips any line whose index does not parse, so a caller degrades rather than
+/// failing on one odd pane.
+pub fn list_panes_with_indices(session_name: &str) -> Result<Vec<(usize, String)>, PawError> {
+    list_panes_with_indices_with(&RealCommandRunner, session_name)
+}
+
+/// [`list_panes_with_indices`] against an injected runner.
+pub(crate) fn list_panes_with_indices_with(
+    runner: &dyn CommandRunner,
+    session_name: &str,
+) -> Result<Vec<(usize, String)>, PawError> {
+    let output = runner
+        .run(
+            "tmux",
+            &[
+                "list-panes",
+                "-t",
+                &format!("{session_name}:0"),
+                "-F",
+                "#{pane_index} #{pane_current_path}",
+            ],
+        )
+        .map_err(|e| PawError::TmuxError(format!("failed to run tmux: {e}")))?;
+
+    if !output.success {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+        if stderr.contains("can't find")
+            || stderr.contains("no such")
+            || stderr.contains("no server running")
+        {
+            return Ok(Vec::new());
+        }
+        return Err(PawError::TmuxError(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut panes = Vec::new();
+    for line in text.lines() {
+        let Some((idx, path)) = line.trim_end().split_once(' ') else {
+            continue;
+        };
+        let Ok(idx) = idx.trim().parse::<usize>() else {
+            continue;
+        };
+        let path = path.trim();
+        if path.is_empty() {
+            continue;
+        }
+        panes.push((idx, path.to_string()));
+    }
+    Ok(panes)
+}
+
+/// Resolve the tmux pane INDEX whose `pane_current_path` is `worktree_path` in
+/// `session_name`.
+///
+/// The index-valued sibling of [`resolve_pane_id_for_worktree`], for callers
+/// that must record an index (the per-repo discovery file). Paths are
+/// canonicalised before comparison, so a symlinked temp root (macOS `/var` →
+/// `/private/var`) does not defeat the match. Returns `Ok(None)` when no live
+/// pane sits at the worktree, so the caller can fall back to the layout's
+/// nominal offset.
+pub fn resolve_pane_index_for_worktree(
+    session_name: &str,
+    worktree_path: &Path,
+) -> Result<Option<usize>, PawError> {
+    resolve_pane_index_for_worktree_with(&RealCommandRunner, session_name, worktree_path)
+}
+
+/// [`resolve_pane_index_for_worktree`] against an injected runner.
+pub(crate) fn resolve_pane_index_for_worktree_with(
+    runner: &dyn CommandRunner,
+    session_name: &str,
+    worktree_path: &Path,
+) -> Result<Option<usize>, PawError> {
+    let want = canonical_or_self(worktree_path);
+    for (pane_index, path) in list_panes_with_indices_with(runner, session_name)? {
+        if canonical_or_self(Path::new(&path)) == want {
+            return Ok(Some(pane_index));
+        }
+    }
+    Ok(None)
+}
+
 /// Resolve the tmux pane id (`%N`) whose `pane_current_path` matches
 /// `worktree_path` in `session_name` (design D2, G2a).
 ///

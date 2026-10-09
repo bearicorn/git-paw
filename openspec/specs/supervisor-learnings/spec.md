@@ -772,3 +772,42 @@ User Guide group.
 - **AND** it states that `get_learnings()` reads the Markdown file, not the broker
 - **AND** it does NOT state that the `agent.learning` variant is deferred
 
+### Requirement: sweep.sh learn ids follow the aggregator's deterministic-id scheme
+
+The bundled `sweep.sh learn` subcommand SHALL compute the `id` of the `agent.learning` message it publishes with the scheme defined by "Deterministic id for idempotent re-emission" — over its `category`, an absent `branch_id` (supervisor learnings are cross-cutting), its `body`, and the current UTC hour bucket — so that the helper and the aggregator assign the same id to the same logical record and broker consumers can dedupe across both publishers. The helper SHALL NOT use a different hash function or a different canonical serialisation.
+
+Because the canonical form must render byte-identically in both publishers, the helper SHALL accept only numbers it can render identically to the aggregator: 64-bit integers, negative zero excluded (the aggregator renders `-0` as `-0.0`, a spelling an integer cannot carry). A body carrying a non-integer number, a negative zero, or an integer outside the 64-bit range, SHALL be rejected (non-zero exit, diagnostic on stderr) and SHALL NOT be published. A string that is not encodable as UTF-8 — a lone surrogate escape, which the aggregator's string type cannot hold at all — SHALL likewise be rejected with a diagnostic rather than an interpreter traceback — a record published under an id the aggregator would not reproduce defeats the dedup the scheme exists for.
+
+#### Scenario: learn's id matches the aggregator's id for the same record
+
+- **GIVEN** a `learn` invocation with category `tooling_friction` and body `{"friction":"git commit re-prompts","occurrences":3}` made within one UTC hour
+- **WHEN** the helper publishes the record
+- **THEN** its `id` SHALL equal the id the aggregator's deterministic-id function computes for category `tooling_friction`, no branch id, the same body, and the same hour bucket
+
+#### Scenario: The title does not change the id
+
+- **GIVEN** two `learn` invocations within one UTC hour with the same category and body but different titles
+- **WHEN** both publish
+- **THEN** both messages SHALL carry the same `id`
+
+#### Scenario: A body whose numbers cannot be rendered identically is rejected
+
+- **GIVEN** a `learn` invocation whose body carries a non-integer number (such as `1e16` or `0.5`), a negative zero (`-0`), or an integer outside the 64-bit range
+- **WHEN** the helper runs
+- **THEN** it SHALL exit non-zero with a diagnostic naming the offending value
+- **AND** SHALL NOT publish an `agent.learning`
+
+#### Scenario: A body carrying a lone surrogate is rejected cleanly
+
+- **GIVEN** a `learn` invocation whose body carries a `\udXXX` escape (a lone surrogate, in a key or a value)
+- **WHEN** the helper runs
+- **THEN** it SHALL exit non-zero with a diagnostic naming the offending text
+- **AND** SHALL NOT emit an interpreter traceback
+- **AND** SHALL NOT publish an `agent.learning`
+
+#### Scenario: Integers, strings, booleans, nulls and containers still publish
+
+- **GIVEN** a `learn` invocation whose body carries only 64-bit integers, strings, booleans, nulls, arrays and objects
+- **WHEN** the helper runs
+- **THEN** it SHALL publish the record
+

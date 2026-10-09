@@ -602,9 +602,16 @@ fn write_hook_file(hook_path: &Path, new_body: &str) -> Result<(), PawError> {
 /// Returns the absolute, trimmed path. The output of `git rev-parse` may be
 /// relative to the worktree, so we canonicalise it against the worktree root
 /// when it is not already absolute.
-fn git_rev_parse_path(worktree: &Path, flag: &str) -> Result<PathBuf, PawError> {
+///
+/// `GIT_DIR` and `GIT_COMMON_DIR` are removed from the child's environment:
+/// git-paw runs inside tmux panes and git hooks, both of which can export
+/// them, and an inherited value would make `rev-parse` answer for a DIFFERENT
+/// repository than `worktree` — silently resolving the wrong `.git`.
+pub(crate) fn git_rev_parse_path(worktree: &Path, flag: &str) -> Result<PathBuf, PawError> {
     let output = std::process::Command::new("git")
         .current_dir(worktree)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_COMMON_DIR")
         .args(["rev-parse", flag])
         .output()
         .map_err(|e| PawError::AgentsMdError(format!("failed to run git rev-parse {flag}: {e}")))?;

@@ -58,7 +58,13 @@ fn status_label(status: &SessionStatus) -> &'static str {
 /// exists.
 #[must_use]
 pub fn session_status(ctx: &RepoContext) -> Option<SessionSnapshot> {
-    let session = session::find_session_for_repo(&ctx.root).ok().flatten()?;
+    // Owner-resolving lookup: `git paw mcp` is routinely started inside an
+    // agent worktree with no `--repo`, and a worktree root never equals the
+    // repository root. Read-only, so widening the match is safe here — see
+    // `session::find_session_for_repo` for why mutating commands must not.
+    let session = session::find_session_for_repo_or_owner(&ctx.root)
+        .ok()
+        .flatten()?;
 
     // Live per-agent status, if the broker is reachable.
     let live = ctx

@@ -320,9 +320,37 @@ pub fn save_session(session: &Session) -> Result<(), PawError> {
 /// Finds the session associated with a given repository path.
 ///
 /// Scans all `.json` files in the sessions directory and returns the first
-/// session whose `repo_path` matches the given path.
+/// session whose `repo_path` matches the given path EXACTLY (modulo
+/// canonicalisation).
+///
+/// The exactness is a safety boundary, not an implementation detail. Every
+/// mutating command (`stop`, `purge`, `add`, `remove`, `pause`, `start`'s
+/// recover/resume dispatch) resolves its repository with
+/// [`crate::git::validate_repo`], which inside an agent worktree returns that
+/// WORKTREE's root. If this lookup resolved a worktree to its owning
+/// repository, those commands would silently act on the parent session from
+/// inside an agent's worktree — `purge --force` deleting sibling worktrees and
+/// branches, `stop` killing the whole session. Read-only consumers that
+/// legitimately want the owning repository's session use
+/// [`find_session_for_repo_or_owner`] instead.
 pub fn find_session_for_repo(repo_path: &Path) -> Result<Option<Session>, PawError> {
     find_session_for_repo_in(repo_path, &sessions_dir()?)
+}
+
+/// Finds the session for `repo_path`, falling back to the session of the
+/// repository that OWNS `repo_path` when there is no exact match.
+///
+/// This is the READ-ONLY lookup for a process that legitimately runs inside an
+/// agent worktree and wants the session it belongs to — specifically
+/// `git paw mcp`, which an agent's CLI spawns with the agent's worktree as its
+/// working directory and no `--repo`. A linked worktree's root never equals
+/// the repository root, so the exact lookup alone leaves such a server with no
+/// broker URL and nowhere to publish.
+///
+/// It SHALL NOT be used by a command that mutates session state: see
+/// [`find_session_for_repo`] for why.
+pub fn find_session_for_repo_or_owner(repo_path: &Path) -> Result<Option<Session>, PawError> {
+    find_session_for_repo_or_owner_in(repo_path, &sessions_dir()?)
 }
 
 /// Deletes a session file by name.
@@ -376,7 +404,10 @@ pub fn load_session_from(session_name: &str, dir: &Path) -> Result<Option<Sessio
     Ok(Some(session))
 }
 
-/// Finds the session for a repo path, scanning the given directory.
+/// Finds the session whose `repo_path` is EXACTLY `repo_path`, scanning the
+/// given directory.
+///
+/// See [`find_session_for_repo`] for why this match must stay exact.
 pub fn find_session_for_repo_in(repo_path: &Path, dir: &Path) -> Result<Option<Session>, PawError> {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -420,10 +451,62 @@ pub fn find_session_for_repo_in(repo_path: &Path, dir: &Path) -> Result<Option<S
     Ok(None)
 }
 
+/// [`find_session_for_repo_or_owner`] scanning the given directory.
+///
+/// Tries the exact match FIRST and only resolves the owning repository on a
+/// miss, so the common case costs no subprocess at all — the drive loop's
+/// session-instance guard calls this on every check.
+pub fn find_session_for_repo_or_owner_in(
+    repo_path: &Path,
+    dir: &Path,
+) -> Result<Option<Session>, PawError> {
+    if let Some(session) = find_session_for_repo_in(repo_path, dir)? {
+        return Ok(Some(session));
+    }
+    let Some(owner) = owning_repo_root(repo_path) else {
+        return Ok(None);
+    };
+    if owner == canonical_or_raw(repo_path) {
+        // `repo_path` IS the owning repository — the exact pass already
+        // covered it; a second identical scan would find nothing new.
+        return Ok(None);
+    }
+    find_session_for_repo_in(&owner, dir)
+}
+
 /// Canonicalises a path for repo-identity comparison, falling back to the raw
 /// path when canonicalization fails (e.g. the directory no longer exists).
 fn canonical_or_raw(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Resolves `path` to the root of the repository that owns it.
+///
+/// `git rev-parse --git-common-dir` names the COMMON git directory — the main
+/// repository's `.git`, shared by every linked worktree — so its parent is the
+/// owning repository's root whether `path` is the main checkout or sits inside
+/// one of its worktrees. The result is canonicalised for comparison with a
+/// session's recorded `repo_path`.
+///
+/// Returns `None` whenever the answer would not be a plain checkout's root:
+/// `path` is not inside a git repository, git is unavailable, or the common
+/// directory is not a `.git` directory — which is the case for a BARE
+/// repository (where `rev-parse` answers `.`, i.e. the repository itself) and
+/// for a `--separate-git-dir` layout. Failing closed matters here: the caller
+/// uses the answer to decide which session a path belongs to, and a wrong
+/// answer is worse than no answer.
+///
+/// Goes through [`crate::agents::git_rev_parse_path`], which strips an
+/// inherited `GIT_DIR` / `GIT_COMMON_DIR` from the child environment so a
+/// pane or hook that exported one cannot redirect the lookup at another
+/// repository.
+fn owning_repo_root(path: &Path) -> Option<PathBuf> {
+    let common = crate::agents::git_rev_parse_path(path, "--git-common-dir").ok()?;
+    let common = canonical_or_raw(&common);
+    if common.file_name() != Some(std::ffi::OsStr::new(".git")) {
+        return None;
+    }
+    Some(canonical_or_raw(common.parent()?))
 }
 
 /// Whether `session` belongs to the repository at `repo_root`, comparing
@@ -562,6 +645,14 @@ pub fn repo_session_path(repo_root: &Path, session_name: &str) -> PathBuf {
 /// Creates `<repo>/.git-paw/sessions/` if absent, then writes
 /// `<session_name>.json` via a temp-file-and-rename so a concurrent
 /// `sweep.sh` read never sees a partial document.
+///
+/// The scratch `<session_name>.tmp` is UNLINKED first when something is
+/// already there. `fs::write` follows a symlink, so a (tracked, therefore
+/// attacker-supplied in a hostile repository) link sitting at that path would
+/// redirect the write at its target — and this path is written on every
+/// launch, recovery and resume. Nothing legitimately owns that scratch name,
+/// so removing it is always safe. The final rename needs no such care: rename
+/// replaces a symlink rather than following it.
 pub fn write_repo_session_file(repo_root: &Path, file: &RepoSessionFile) -> Result<(), PawError> {
     let dir = repo_sessions_dir(repo_root);
     fs::create_dir_all(&dir).map_err(|e| {
@@ -574,6 +665,14 @@ pub fn write_repo_session_file(repo_root: &Path, file: &RepoSessionFile) -> Resu
 
     let final_path = dir.join(format!("{}.json", file.session_name));
     let tmp_path = dir.join(format!("{}.tmp", file.session_name));
+    if fs::symlink_metadata(&tmp_path).is_ok() {
+        fs::remove_file(&tmp_path).map_err(|e| {
+            PawError::SessionError(format!(
+                "failed to clear stale per-repo session temp file '{}': {e}",
+                tmp_path.display()
+            ))
+        })?;
+    }
     fs::write(&tmp_path, json.as_bytes()).map_err(|e| {
         PawError::SessionError(format!("failed to write per-repo session temp file: {e}"))
     })?;
@@ -1122,6 +1221,186 @@ mod tests {
 
         assert_eq!(found.session_name, "paw-project-b");
         assert_eq!(found.repo_path, PathBuf::from("/Users/test/code/project-b"));
+    }
+
+    /// `fs::write` follows a symlink, so a link at the scratch
+    /// `<session>.tmp` path would redirect the discovery write at its target.
+    /// The writer must unlink it first and leave the target untouched.
+    #[cfg(unix)]
+    #[test]
+    fn write_repo_session_file_does_not_write_through_a_symlinked_temp_path() {
+        let repo = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "untouched").unwrap();
+
+        let dir = repo_sessions_dir(repo.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("paw-x.tmp")).unwrap();
+
+        let file = RepoSessionFile {
+            session_name: "paw-x".to_string(),
+            agents: Vec::new(),
+            orchestrator: None,
+        };
+        write_repo_session_file(repo.path(), &file).expect("write must succeed");
+
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "untouched",
+            "the symlink target must not be written through"
+        );
+        let written = std::fs::read_to_string(repo_session_path(repo.path(), "paw-x")).unwrap();
+        assert!(
+            written.contains("paw-x"),
+            "the discovery file itself must still be written; got:\n{written}"
+        );
+    }
+
+    /// Builds a repository with one embedded agent worktree and a saved
+    /// session receipt for the repository, returning
+    /// `(sessions_dir, sandbox, repo_root, worktree_root)`. The temp dirs are
+    /// returned so the caller keeps them alive.
+    fn repo_with_worktree_and_session() -> (TempDir, TempDir, PathBuf, PathBuf) {
+        let sessions = TempDir::new().unwrap();
+        let sandbox = TempDir::new().unwrap();
+        let repo = sandbox.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let git = |args: &[&str], cwd: &Path| {
+            let out = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"], &repo);
+        git(&["config", "user.email", "t@e.st"], &repo);
+        git(&["config", "user.name", "Test"], &repo);
+        std::fs::write(repo.join("README.md"), "x").unwrap();
+        git(&["add", "."], &repo);
+        git(&["commit", "-q", "-m", "init"], &repo);
+
+        // An embedded agent worktree, as `git paw start` creates.
+        let worktree = repo.join(".git-paw").join("worktrees").join("feat-x");
+        git(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat/x",
+                worktree.to_str().unwrap(),
+            ],
+            &repo,
+        );
+
+        let mut session = sample_session();
+        session.repo_path = repo.canonicalize().unwrap();
+        save_session_in(&session, sessions.path()).unwrap();
+
+        (sessions, sandbox, repo, worktree)
+    }
+
+    /// Spec scenario "A worktree root resolves to its repository's session"
+    /// (`session-state`): a linked worktree's root never equals the
+    /// repository root, so the OWNER-RESOLVING lookup must resolve the
+    /// worktree to the repository that owns it before matching.
+    #[test]
+    fn owner_lookup_matches_a_linked_worktree_root_via_its_owning_repository() {
+        let (sessions, _sandbox, _repo, worktree) = repo_with_worktree_and_session();
+
+        let from_root = find_session_for_repo_or_owner_in(&worktree, sessions.path())
+            .unwrap()
+            .expect("a worktree root must resolve to its repository's session");
+        assert_eq!(from_root.session_name, "paw-my-project");
+
+        // A path INSIDE the worktree resolves the same way.
+        let nested = worktree.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let from_nested = find_session_for_repo_or_owner_in(&nested, sessions.path())
+            .unwrap()
+            .expect("a path inside a worktree must resolve to its repository's session");
+        assert_eq!(from_nested.session_name, "paw-my-project");
+    }
+
+    /// The SAFETY boundary behind the two lookups: the exact-match lookup —
+    /// the one every mutating command uses — must NOT resolve a worktree to
+    /// its owning repository's session. If it did, `git paw stop` / `purge`
+    /// run from inside an agent worktree would act on the parent session.
+    #[test]
+    fn exact_lookup_does_not_resolve_a_worktree_to_its_owning_repository() {
+        let (sessions, _sandbox, repo, worktree) = repo_with_worktree_and_session();
+
+        assert!(
+            find_session_for_repo_in(&worktree, sessions.path())
+                .unwrap()
+                .is_none(),
+            "the exact lookup must not see the parent repository's session from \
+             inside an agent worktree — mutating commands resolve their repo to \
+             the worktree root and would act on the wrong session"
+        );
+
+        // The repository's own root still matches, of course.
+        assert!(
+            find_session_for_repo_in(&repo, sessions.path())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// A BARE repository has no checkout to own anything: `git rev-parse
+    /// --git-common-dir` answers `.` (the repository directory itself), whose
+    /// parent is the containing directory — an unrelated path. The lookup must
+    /// fail closed rather than claim that directory owns the path.
+    #[test]
+    fn owner_lookup_returns_none_inside_a_bare_repository() {
+        let sessions = TempDir::new().unwrap();
+        let sandbox = TempDir::new().unwrap();
+        let bare = sandbox.path().join("repo.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        let out = std::process::Command::new("git")
+            .current_dir(&bare)
+            .args(["init", "-q", "--bare"])
+            .output()
+            .expect("git init --bare");
+        assert!(out.status.success());
+
+        // A session registered for the bare repo's PARENT — what the buggy
+        // parent-of-`.` resolution would wrongly match.
+        let mut session = sample_session();
+        session.repo_path = sandbox.path().canonicalize().unwrap();
+        save_session_in(&session, sessions.path()).unwrap();
+
+        assert_eq!(owning_repo_root(&bare), None);
+        assert!(
+            find_session_for_repo_or_owner_in(&bare, sessions.path())
+                .unwrap()
+                .is_none(),
+            "a bare repository must not resolve to its containing directory's session"
+        );
+    }
+
+    /// The owner-resolving lookup prefers an EXACT match: when the worktree
+    /// itself has a session receipt, that one is returned rather than the
+    /// owning repository's.
+    #[test]
+    fn owner_lookup_prefers_an_exact_match_over_the_owner() {
+        let (sessions, _sandbox, _repo, worktree) = repo_with_worktree_and_session();
+
+        let mut own = sample_session();
+        own.session_name = "paw-the-worktree-itself".to_string();
+        own.repo_path = worktree.canonicalize().unwrap();
+        save_session_in(&own, sessions.path()).unwrap();
+
+        let found = find_session_for_repo_or_owner_in(&worktree, sessions.path())
+            .unwrap()
+            .expect("an exact match exists");
+        assert_eq!(found.session_name, "paw-the-worktree-itself");
     }
 
     #[test]

@@ -409,19 +409,32 @@ Discovered configuration:
 USAGE
 }
 
+# Abort a subcommand that needs the session when none could be resolved.
+#
+# Resolution is primary-then-secondary: the per-repo discovery file under
+# `.git-paw/sessions/` is the real surface (it carries the agent roster), and
+# an inference from the live multiplexer (`$TMUX`) is the secondary path, used
+# when the supervisor attached to a pre-existing session. When neither
+# resolves, say so explicitly and exit non-zero rather than letting the
+# subcommand report an empty result as though it had done its work.
 require_session() {
   if [[ -z "${SESSION}" ]]; then
-    echo "sweep.sh: no session found under ${SESSIONS_DIR}" >&2
+    echo "sweep.sh: no session found — no discovery file under ${SESSIONS_DIR}" \
+         "and no live session to infer from (\$TMUX unset)" >&2
     exit 3
+  fi
+  if [[ -z "${SESSION_FILE}" ]]; then
+    echo "sweep.sh: warning: session '${SESSION}' was inferred from \$TMUX;" \
+         "no discovery file under ${SESSIONS_DIR}, so panes cannot be mapped to agents" >&2
   fi
 }
 
-# Publish a JSON BrokerMessage payload to /publish.
+# Publish a JSON BrokerMessage payload to /publish via the shared preamble's
+# status-checking publisher: a publish the broker rejects prints its error to
+# stderr and returns non-zero, so no subcommand reports a rejected publish as
+# done.
 publish() {
-  local payload=$1
-  curl -s -X POST "${BROKER}/publish" \
-    -H "Content-Type: application/json" \
-    -d "${payload}"
+  paw_publish "${BROKER}" "$1"
 }
 
 cmd_snapshot() {
@@ -570,7 +583,15 @@ cmd_status() {
   # Pipe curl into python via `-c` so the script body doesn't compete
   # with the curl body for stdin (bash heredocs win over pipes, so
   # `python3 - <<'PY'` swallowed the pipe content and read its own body).
-  curl -s "${BROKER}/status" | SHOW_ALL=${show_all} "${PY}" -c "$(cat <<'PY'
+  # Known agents come from the session's own roster (`supervisor` plus every
+  # discovery-file `branch_id`), so an agent on any branch prefix — a
+  # spec-driven `spec/…` branch, a `fix/…` branch, anything the operator chose
+  # — is shown rather than hidden as a phantom. Without a discovery file the
+  # roster is empty and the filter falls back to the broker's own agent-id
+  # rule (`supervisor`, or a `<prefix>-<name>` / `<prefix>/<name>` slug).
+  local roster
+  roster=$(roster_agent_ids)
+  curl -s "${BROKER}/status" | SHOW_ALL=${show_all} ROSTER="${roster}" "${PY}" -c "$(cat <<'PY'
 import json, os, re, sys
 try:
     data = json.load(sys.stdin)
@@ -578,11 +599,18 @@ except Exception as exc:  # noqa: BLE001
     print(f"sweep.sh: failed to parse broker /status: {exc}", file=sys.stderr)
     sys.exit(5)
 show_all = os.environ.get("SHOW_ALL") == "1"
-valid = re.compile(r"^(supervisor|feat[-/].+)$")
+known = {line.strip() for line in os.environ.get("ROSTER", "").splitlines() if line.strip()}
+broker_rule = re.compile(r"^(supervisor|[a-z0-9][a-z0-9-]*[/-][a-z0-9][a-z0-9-]*)$")
+def is_known(aid):
+    if aid == "supervisor":
+        return True
+    if known:
+        return aid in known
+    return bool(broker_rule.match(aid))
 phantoms = []
 for a in data.get("agents", []):
     aid = a.get("agent_id", "?")
-    if not show_all and not valid.match(aid):
+    if not show_all and not is_known(aid):
         phantoms.append(aid)
         continue
     print("{:40s} {:10s} {:>5}s".format(
@@ -678,7 +706,7 @@ print(json.dumps({
 }))
 PY
 )
-  publish "${payload}" >/dev/null
+  publish "${payload}" >/dev/null || exit 1
   echo "feedback (${gate}) -> ${target}"
 }
 
@@ -701,7 +729,7 @@ print(json.dumps({
 }))
 PY
 )
-  publish "${payload}" >/dev/null
+  publish "${payload}" >/dev/null || exit 1
   echo "verified: ${target}"
 }
 
@@ -745,7 +773,10 @@ print(json.dumps({
 }))
 PY
 )
-    publish "${payload}" >/dev/null
+    # Both acks must land: the pair only stops re-escalating when each agent
+    # has been told. A publish the broker rejects exits non-zero here rather
+    # than letting the success line claim a delivery that did not happen.
+    publish "${payload}" >/dev/null || exit 1
   done
   echo "conflict-ack: ${a} + ${b} on ${file}"
 }
@@ -818,7 +849,7 @@ PY
   if [[ ${rc} -ne 0 ]]; then
     exit "${rc}"
   fi
-  publish "${payload}" >/dev/null
+  publish "${payload}" >/dev/null || exit 1
   echo "supervisor status published"
 }
 
@@ -830,7 +861,10 @@ PY
 # documents the per-category body shape). The id is a stable 16-hex content
 # hash and the timestamp is the current UTC time; both are shaped internally so
 # the caller supplies only simple args. A <body-json> that is not a JSON object
-# is rejected (non-zero exit, stderr diagnostic) and nothing is published.
+# is rejected (non-zero exit, stderr diagnostic) and nothing is published, as
+# is a body carrying a non-integer number, a negative zero, an integer outside
+# the 64-bit range, or a string that is not valid UTF-8 (see the canonical-form
+# note in the body below).
 cmd_learn() {
   local category=${1:-}
   local title=${2:-}
@@ -841,21 +875,166 @@ cmd_learn() {
   fi
   local payload rc
   payload=$("${PY}" - "${category}" "${title}" "${body}" <<'PY'
-import hashlib, json, sys
+import json, sys
 from datetime import datetime, timezone
 
 category, title, body_raw = sys.argv[1], sys.argv[2], sys.argv[3]
+
+
+class BadNumberLiteral(Exception):
+    """A number whose canonical form the aggregator would not reproduce."""
+
+    def __init__(self, literal, reason):
+        super().__init__(literal)
+        self.literal = literal
+        self.reason = reason
+
+
+def reject_float_literal(raw):
+    raise BadNumberLiteral(raw, "a non-integer number")
+
+
+def reject_constant_literal(raw):
+    raise BadNumberLiteral(raw, "a non-finite number")
+
+
+def checked_int_literal(raw):
+    # The RAW literal is the only place the sign of a negative zero survives:
+    # Python folds `-0` to the int 0 and renders it `0`, while the aggregator
+    # renders it `-0.0`, so the two canonical forms would differ and the same
+    # record would get two ids. Caught here rather than after parsing, where
+    # the sign is already gone.
+    if raw.lstrip().startswith("-") and int(raw) == 0:
+        raise BadNumberLiteral(raw, "a negative zero")
+    return int(raw)
+
+
 try:
-    body = json.loads(body_raw)
+    body = json.loads(
+        body_raw,
+        parse_float=reject_float_literal,
+        parse_constant=reject_constant_literal,
+        parse_int=checked_int_literal,
+    )
+except BadNumberLiteral as exc:
+    print(
+        f"sweep.sh: learn <body-json> carries {exc.reason} ({exc.literal}); "
+        "learning bodies carry 64-bit integers, strings, booleans, null, "
+        "arrays and objects",
+        file=sys.stderr,
+    )
+    sys.exit(6)
 except ValueError as exc:
     print(f"sweep.sh: learn <body-json> is not valid JSON: {exc}", file=sys.stderr)
     sys.exit(6)
 if not isinstance(body, dict):
     print("sweep.sh: learn <body-json> must be a JSON object", file=sys.stderr)
     sys.exit(6)
-ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-canon = category + "|" + title + "|" + json.dumps(body, sort_keys=True)
-rec_id = hashlib.sha1(canon.encode("utf-8")).hexdigest()[:16]
+
+# Numbers are restricted to 64-bit integers because the canonical form must
+# render BYTE-IDENTICALLY here and in the aggregator, and only integers do.
+# Python and the aggregator disagree on exponent-form floats (1e+16 / 1e-05
+# against 1e16 / 1e-5) and on negative zero (0 against -0.0), and an integer
+# outside the 64-bit range is a float on the aggregator side and an exact int
+# here — in every case the two publishers would hash different strings and
+# assign the same record two ids. Learning bodies carry counts and labels, so
+# rejecting is the honest answer; a silent mismatch is not.
+#
+# Floats and negative zero are caught by the parse hooks above, which still
+# see the raw literal; the walk below covers the 64-bit range and strings that
+# are not encodable as UTF-8, where the parsed value is enough and a path makes
+# the message useful.
+INT_MIN = -(2 ** 63)
+INT_MAX = 2 ** 64 - 1
+
+
+def reject_unencodable_text(text, what, path):
+    # A `\udXXX` escape parses to a LONE SURROGATE, which is not encodable as
+    # UTF-8 — so hashing the canonical form (or sending the payload) would die
+    # with a UnicodeEncodeError traceback rather than a diagnostic. The
+    # aggregator cannot hold such a string at all (Rust `String` is valid
+    # UTF-8), so there is no id to agree on either way.
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        print(
+            f"sweep.sh: learn <body-json> {path} {what} is not valid UTF-8 "
+            f"({text!r}); a lone surrogate escape (\\udXXX) cannot be encoded "
+            "or hashed",
+            file=sys.stderr,
+        )
+        sys.exit(6)
+
+
+def reject_unrepresentable_numbers(value, path):
+    if isinstance(value, bool):
+        return
+    if isinstance(value, str):
+        reject_unencodable_text(value, "string", path)
+        return
+    if isinstance(value, float):
+        print(
+            f"sweep.sh: learn <body-json> {path} is a non-integer number ({value!r}); "
+            "learning bodies carry 64-bit integers, strings, booleans, null, "
+            "arrays and objects",
+            file=sys.stderr,
+        )
+        sys.exit(6)
+    if isinstance(value, int):
+        if not INT_MIN <= value <= INT_MAX:
+            print(
+                f"sweep.sh: learn <body-json> {path} is outside the 64-bit integer "
+                f"range ({value})",
+                file=sys.stderr,
+            )
+            sys.exit(6)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            reject_unencodable_text(key, "key", path)
+            reject_unrepresentable_numbers(item, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            reject_unrepresentable_numbers(item, f"{path}[{index}]")
+
+
+reject_unrepresentable_numbers(body, "body")
+now = datetime.now(timezone.utc)
+ts = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def canonical(value):
+    # Mirrors the aggregator canonicaliser exactly (supervisor-learnings,
+    # "Deterministic id for idempotent re-emission"): an object renders as
+    # {key:value,...} with keys in ascending order and written UNQUOTED, an
+    # array as [item,...] in its own order, and every other value as its
+    # compact JSON text.
+    if isinstance(value, dict):
+        inner = ",".join(f"{k}:{canonical(value[k])}" for k in sorted(value))
+        return "{" + inner + "}"
+    if isinstance(value, list):
+        return "[" + ",".join(canonical(v) for v in value) + "]"
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def fnv1a64(text):
+    # 64-bit FNV-1a over the UTF-8 bytes; offset basis and prime are pinned by
+    # the same requirement, so the helper and the aggregator assign the same
+    # id to the same logical record.
+    h = 0xCBF29CE484222325
+    for b in text.encode("utf-8"):
+        h ^= b
+        h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+# Supervisor learnings are cross-cutting, so the branch id is empty. The title
+# is deliberately NOT part of the canonical form — two phrasings of the same
+# record must dedupe to one id.
+canon = "|".join(
+    [category, "", canonical(body), now.strftime("%Y-%m-%dT%H")]
+)
+rec_id = format(fnv1a64(canon), "016x")
 print(json.dumps({
     "type": "agent.learning",
     "payload": {
@@ -873,23 +1052,21 @@ PY
   if [[ ${rc} -ne 0 ]]; then
     exit "${rc}"
   fi
-  publish "${payload}" >/dev/null
+  publish "${payload}" >/dev/null || exit 1
   echo "learning published (${category})"
 }
 
 # Resolve the agent_id owning a tmux pane via its current path. Pane indices
 # are NOT alphabetical or CLI-arg order, so we match pane_current_path against
-# the session JSON's worktree paths and slugify the matching branch.
+# the per-repo discovery file's `agents` roster — each entry carries the
+# broker agent id (`branch_id`, already slugified by git-paw) and the
+# `worktree_path` it occupies. The longest matching worktree path wins, so a
+# worktree nested inside another resolves to the inner agent.
 resolve_agent_for_path() {
   local path=$1
   [[ -z "${SESSION_FILE}" || -z "${path}" ]] && return
   SESSION_FILE="${SESSION_FILE}" PANE_PATH="${path}" "${PY}" -c "$(cat <<'PY'
-import json, os, re
-def slug(b):
-    s = b.lower()
-    s = re.sub(r'[^a-z0-9_]', '-', s)
-    s = re.sub(r'-+', '-', s).strip('-')
-    return s or 'agent'
+import json, os
 sf = os.environ["SESSION_FILE"]
 path = os.path.realpath(os.environ["PANE_PATH"])
 try:
@@ -897,16 +1074,39 @@ try:
 except Exception:  # noqa: BLE001
     raise SystemExit(0)
 best, best_len = None, -1
-for wt in d.get("worktrees", []):
-    wp = wt.get("worktree_path", "")
-    if not wp:
+for agent in d.get("agents", []):
+    wp = agent.get("worktree_path", "")
+    aid = agent.get("branch_id", "")
+    if not wp or not aid:
         continue
     rp = os.path.realpath(wp)
     if path == rp or path.startswith(rp + os.sep):
         if len(rp) > best_len:
-            best, best_len = wt.get("branch"), len(rp)
+            best, best_len = aid, len(rp)
 if best:
-    print(slug(best))
+    print(best)
+PY
+)"
+}
+
+# Print this session's ROSTER agent ids, one per line: every `branch_id` in the
+# per-repo discovery file's `agents` array. `supervisor` is NOT printed — it is
+# always known and the caller treats it separately, so it needs no roster entry.
+# Prints nothing when no discovery file is present, which is the caller's
+# signal to fall back to the broker's own agent-id rule rather than a
+# branch-name pattern.
+roster_agent_ids() {
+  [[ -z "${SESSION_FILE}" ]] && return
+  SESSION_FILE="${SESSION_FILE}" "${PY}" -c "$(cat <<'PY'
+import json, os
+try:
+    d = json.load(open(os.environ["SESSION_FILE"]))
+except Exception:  # noqa: BLE001
+    raise SystemExit(0)
+for agent in d.get("agents", []):
+    aid = agent.get("branch_id", "")
+    if aid:
+        print(aid)
 PY
 )"
 }

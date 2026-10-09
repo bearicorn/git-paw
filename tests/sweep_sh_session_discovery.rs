@@ -100,17 +100,24 @@ fn sweep_sh_discovers_session_name_and_broker_port() {
         .expect("git paw init");
     assert!(init_out.status.success());
 
-    // Seed a session JSON with a non-default session name.
+    // Seed a per-repo discovery file with a non-default session name, in the
+    // shape `write_repo_discovery_file` produces: a `session_name` plus an
+    // `agents` roster of `branch_id` / `worktree_path` / `cli` / `pane_index`
+    // entries. (A fixture modelling the GLOBAL session-state shape —
+    // `worktrees[].branch` — is a document git-paw never writes here, and was
+    // how the helper's wrong-shape reader kept passing.)
     let sessions_dir = tmp.path().join(".git-paw/sessions");
     fs::create_dir_all(&sessions_dir).expect("mkdir sessions");
     let session_json = serde_json::json!({
         "session_name": "paw-myproject",
-        "repo_path": tmp.path().to_string_lossy(),
-        "project_name": "myproject",
-        "created_at": "2026-01-01T00:00:00Z",
-        "status": "stopped",
-        "mode": "bare",
-        "worktrees": [],
+        "agents": [
+            {
+                "branch_id": "feat-x",
+                "worktree_path": tmp.path().join(".git-paw/worktrees/feat-x").to_string_lossy(),
+                "cli": "claude",
+                "pane_index": 1,
+            }
+        ],
     });
     fs::write(
         sessions_dir.join("paw-myproject.json"),

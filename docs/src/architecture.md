@@ -289,6 +289,20 @@ start` writes a **per-repo** discovery file at
 roster from inside the repo (without reaching into the XDG state dir). `git paw
 add` / `remove` rewrite it with the updated roster; `purge` removes it.
 
+**Every path that creates or rebuilds the session's panes (re)writes it**, not
+just the first launch — the bare launch, the spec-driven launch with or
+without supervisor mode, the supervisor launch, **recovery of a stopped
+session**, and **restart of a paused session**. The last two matter because
+they change the layout: recovery rebuilds every pane from the saved receipt,
+and a resume splits a fresh dashboard pane into the live session at whatever
+index tmux assigns. A file left by the original launch would then record pane
+indices that no longer describe the session. Recovery rewrites it from the
+offsets of the layout it just rebuilt; the resume path reads each agent's pane
+index back from the running session (`list-panes` matched on
+`pane_current_path`) rather than assuming the launch-time offsets, and derives
+the `orchestrator` entry from the resumed session's mode so it survives a
+missing file.
+
 Its shape — stable for sweep.sh and forward-compatible (consumers ignore
 unknown keys):
 

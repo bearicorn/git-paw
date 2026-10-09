@@ -199,3 +199,52 @@ fn cmd_status_publish_keeps_c_cat_heredoc_shape() {
         );
     }
 }
+
+/// `broker-agent-helper` scenario "Fixtures use the shape git-paw writes": a
+/// test that models the per-repo discovery file must use the `agents` roster
+/// shape `write_repo_discovery_file` produces, never the GLOBAL
+/// session-state shape (`worktrees[]` entries carrying `branch`) that lives
+/// in the platform data directory.
+///
+/// Two fixtures disagreeing on this is exactly how `sweep.sh`'s wrong-shape
+/// reader kept passing against a document git-paw never writes, so the guard
+/// is a source scan: any test that writes under `.git-paw/sessions/` must not
+/// carry a `"worktrees":` JSON key.
+#[test]
+fn discovery_file_fixtures_never_use_the_global_session_shape() {
+    let tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut offenders: Vec<String> = Vec::new();
+    let entries = std::fs::read_dir(&tests_dir).unwrap_or_else(|e| {
+        panic!("read {}: {e}", tests_dir.display());
+    });
+    for entry in entries {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        // Skip this file: it necessarily spells both markers to describe the
+        // rule it enforces.
+        if path.file_name().and_then(|n| n.to_str()) == Some("sweep_sh_conventions.rs") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("read {}: {e}", path.display());
+        });
+        if !body.contains(".git-paw/sessions") {
+            continue;
+        }
+        if body.contains("\"worktrees\":") {
+            offenders.push(
+                path.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+            );
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these tests model the per-repo discovery file with the GLOBAL \
+         session-state shape (`\"worktrees\":`); use the `agents` roster of \
+         `branch_id` / `worktree_path` / `cli` / `pane_index` instead: {offenders:?}"
+    );
+}
