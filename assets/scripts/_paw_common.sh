@@ -20,6 +20,7 @@
 #   discover_broker_url                        [broker] bind + port
 #   discover_docs_base_url                     top-level docs_base_url
 #   discover_prompt_profile_field <f> <def>    resolved CLI prompt-shape profile field
+#   paw_publish <broker-url> <payload>         POST /publish, non-zero on rejection
 #   slugify <branch>                           broker agent_id slug rules
 
 # Name used in this file's diagnostics. Each helper sets it before sourcing;
@@ -176,6 +177,42 @@ discover_prompt_profile_field() {
   else
     printf '%s\n' "${val}"
   fi
+}
+
+# POST a JSON BrokerMessage to `<broker-url>/publish` and CHECK the answer.
+#
+#   paw_publish <broker-url> <payload-json>
+#
+# Prints the broker's response body on stdout when it accepts the publish
+# (any 2xx). On any other status — or no response at all — prints the broker's
+# error body to stderr and returns non-zero, so a publish the broker rejected
+# is never reported as done. A caller that genuinely wants fire-and-forget
+# must say so explicitly (`paw_publish … || true`).
+paw_publish() {
+  local url=$1 payload=$2
+  local body status rc
+  body=$(mktemp "${TMPDIR:-/tmp}/paw-publish.XXXXXX") || {
+    echo "${PAW_SCRIPT_NAME}: cannot create a temporary file for the publish response" >&2
+    return 1
+  }
+  status=$(curl -sS -o "${body}" -w '%{http_code}' -X POST "${url}/publish" \
+    -H "Content-Type: application/json" \
+    -d "${payload}" 2>>"${body}")
+  rc=$?
+  if [[ ${rc} -ne 0 || -z "${status}" || "${status}" == "000" ]]; then
+    echo "${PAW_SCRIPT_NAME}: publish to ${url}/publish failed — no response from the broker" >&2
+    cat "${body}" >&2
+    rm -f "${body}"
+    return 1
+  fi
+  if [[ "${status}" != 2* ]]; then
+    echo "${PAW_SCRIPT_NAME}: broker rejected the publish (HTTP ${status})" >&2
+    cat "${body}" >&2
+    rm -f "${body}"
+    return 1
+  fi
+  cat "${body}"
+  rm -f "${body}"
 }
 
 # Slugify a branch name the same way the broker does (lowercase, non

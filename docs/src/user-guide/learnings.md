@@ -319,10 +319,30 @@ same `id`, so a consumer can dedupe re-emissions; a genuine recurrence in a
 later hour gets a fresh `id`. This lets the aggregator re-run a sweep
 idempotently without flooding consumers with duplicates.
 
-**Note:** record ids changed once in this release (v0.17.0) when the hash
-implementation was switched from platform-dependent `DefaultHasher` to
-stable FNV-1a. Existing ids from v0.16.x are now invalid; re-run your
-aggregator to regenerate them.
+**The bundled `sweep.sh learn` helper uses the same scheme.** The supervisor
+publishes qualitative learnings through
+`.git-paw/scripts/sweep.sh learn <category> <title> <body-json>`, and that
+helper computes its `id` with exactly the form above — over the category, an
+empty branch id (supervisor learnings are cross-cutting), the canonical body,
+and the current UTC hour bucket. The two publishers therefore assign the same
+id to the same logical record, and a consumer can dedupe across both. The
+title is NOT part of the canonical form, so rephrasing it does not mint a new
+record.
+
+Because the canonical form has to render byte-identically on both sides, the
+helper accepts only numbers it can reproduce exactly: **64-bit integers**. A
+body carrying a non-integer number (`0.5`, `1e16`) or an integer beyond the
+64-bit range is refused with a diagnostic and nothing is published — the two
+serialisers disagree on those (`1e+16` against `1e16`), and a record published
+under an id the aggregator cannot reproduce would silently defeat the dedup.
+Learning bodies carry counts and labels, so this costs nothing in practice.
+
+**Note:** record ids changed once in this release (v0.17.0): the aggregator's
+hash moved from platform-dependent `DefaultHasher` to stable FNV-1a, and
+`sweep.sh learn` — which had been computing a truncated SHA-1 over a different
+canonical form, giving the same record two different ids depending on which
+publisher emitted it — moved onto the shared scheme. Existing ids from v0.16.x
+are now invalid; re-run your aggregator to regenerate them.
 
 Branch-scoped records (`stuck_duration`, `recovery_cycles`) are routed to
 that branch's inbox and are retrievable with:

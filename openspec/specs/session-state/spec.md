@@ -52,6 +52,10 @@ Test: `session::tests::loading_nonexistent_session_returns_none`
 
 The system SHALL scan all session files and return the session matching a given repository path.
 
+The default lookup SHALL match a session's repository path EXACTLY: a path that is the root of — or lies inside — a linked worktree SHALL NOT resolve to the owning repository's session. This exactness is a safety boundary. Every command that MUTATES session state (`stop`, `purge`, `add`, `remove`, `pause`, and `start`'s recover/resume dispatch) resolves its repository to the root of the checkout it is run from, which inside an agent worktree is that WORKTREE's root; were the default lookup to resolve the owner, such a command run by an agent in its own worktree would act on the whole session — deleting sibling worktrees and branches, or killing the session.
+
+The system SHALL additionally provide a SEPARATE, read-only owner-resolving lookup that returns the session of the repository that OWNS a given path, by resolving a linked worktree to that repository. It SHALL try the exact match first and resolve the owner only on a miss. It SHALL be used ONLY by the MCP server's repository context and its read-only session view, so a `git paw mcp` spawned by an agent's CLI from inside the agent's worktree with no `--repo` finds the session and its broker. No mutating command SHALL use it.
+
 #### Scenario: Finds correct session among multiple
 - **GIVEN** two sessions for different repositories
 - **WHEN** `find_session_for_repo()` is called with one repo path
@@ -72,6 +76,36 @@ Test: `session::tests::find_returns_none_when_no_repo_matches`
 - **THEN** it SHALL return `None`
 
 Test: `session::tests::find_returns_none_when_no_sessions_exist`
+
+#### Scenario: A worktree root resolves to its repository's session
+
+- **GIVEN** an active session for a repository and one of that session's agent worktrees
+- **WHEN** `find_session_for_repo_or_owner()` is called with the worktree's root
+- **THEN** it SHALL return the repository's session
+
+#### Scenario: The owner-resolving lookup prefers an exact match
+
+- **GIVEN** a session recorded for an agent worktree's own root and another for the repository that owns it
+- **WHEN** `find_session_for_repo_or_owner()` is called with the worktree's root
+- **THEN** it SHALL return the worktree's own session, not the owner's
+
+#### Scenario: The default lookup does not cross the worktree boundary
+
+- **GIVEN** an active session for a repository and one of that session's agent worktrees
+- **WHEN** `find_session_for_repo()` is called with the worktree's root
+- **THEN** it SHALL return `None`
+
+#### Scenario: A mutating command run inside an agent worktree does not act on the session
+
+- **GIVEN** an active session and one of its agent worktrees
+- **WHEN** `git paw stop` or `git paw purge --force` is run with that worktree as the working directory
+- **THEN** the session SHALL remain alive, its branches and its sibling agents' worktrees SHALL remain, and the command SHALL report that there is no session for this repository
+
+#### Scenario: The MCP server started in a worktree finds the broker
+
+- **GIVEN** an active broker-enabled session and `git paw mcp` started with its working directory inside an agent worktree and no `--repo`
+- **WHEN** the server resolves its repository context
+- **THEN** its broker URL SHALL be the session's broker URL, not absent
 
 ### Requirement: Delete session by name
 
@@ -320,11 +354,13 @@ The restart-from-pause flow (specced in the broker-lifecycle delta) SHALL read t
 `.git-paw/sessions/paw-<project>.json` describing the launched
 session. This is the discovery surface the bundled
 `sweep.sh` helper reads. The file SHALL be written on launch
-and removed on `purge`. "Any flags" includes the spec-driven
-launch without supervisor mode (`--specs` / `--from-all-specs`
-with no supervisor): every launch path SHALL write the file, so
-the helper can discover every session regardless of how it was
-started.
+and removed on `purge`. Every path through which `git paw start`
+creates or rebuilds the session's panes SHALL (re)write it — the
+bare launch, the spec-driven launch with or without supervisor
+mode, the supervisor launch, recovery of a stopped session, and
+restart of a paused session — and each agent entry's `pane_index`
+SHALL identify the pane that agent occupies in the resulting
+session.
 
 #### Scenario: start writes the per-repo JSON
 
@@ -332,17 +368,33 @@ started.
 - **THEN** `.git-paw/sessions/paw-<project>.json` SHALL exist
   describing the session (name + agent list)
 
+#### Scenario: A spec-driven launch without supervisor mode writes the per-repo JSON
+
+- **WHEN** `git paw start --specs <names>` succeeds without supervisor mode
+- **THEN** `.git-paw/sessions/paw-<project>.json` SHALL exist with one
+  `agents` entry per launched spec branch
+- **AND** the bundled helper SHALL discover the session from it without relying on running inside the session
+
+#### Scenario: Recovery rewrites the per-repo JSON
+
+- **GIVEN** a stopped session whose per-repo JSON is missing
+- **WHEN** `git paw start` recovers it
+- **THEN** `.git-paw/sessions/paw-<project>.json` SHALL exist and list
+  every recovered agent with the pane index it occupies in the rebuilt
+  session
+
+#### Scenario: Restart from pause rewrites the per-repo JSON
+
+- **GIVEN** a paused session
+- **WHEN** `git paw start` resumes it
+- **THEN** `.git-paw/sessions/paw-<project>.json` SHALL list every agent
+  with the pane index it occupies in the resumed session
+
 #### Scenario: purge removes the per-repo JSON
 
 - **GIVEN** an active session with the per-repo JSON present
 - **WHEN** the user runs `git paw purge --force`
 - **THEN** the per-repo JSON SHALL be removed
-
-#### Scenario: A spec-driven launch without supervisor mode writes the per-repo JSON
-
-- **WHEN** `git paw start --specs <names>` succeeds without supervisor mode
-- **THEN** `.git-paw/sessions/paw-<project>.json` SHALL exist describing the session (name + agent list)
-- **AND** the bundled helper SHALL discover the session from it without relying on running inside the session
 
 ### Requirement: Per-repo JSON shape matches sweep.sh expectations
 

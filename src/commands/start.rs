@@ -25,7 +25,7 @@ use git_paw::tmux;
 
 use super::helpers::{
     agent_pane_offset, attach_session_logging, config_to_custom_defs, dashboard_command,
-    to_interactive_cli, warn_if_broker_is_exposed,
+    orchestrator_entry_for_mode, to_interactive_cli, warn_if_broker_is_exposed,
 };
 use super::recover::recover_session;
 use super::supervisor::cmd_supervisor;
@@ -251,6 +251,19 @@ pub(crate) fn cmd_start(
         if let Some(summary) = provisioned.hook_summary() {
             println!("  {branch}: {summary}");
         }
+
+        // Provision the bundled helper scripts the agent's boot block invokes
+        // into this worktree's `.git-paw/scripts/` (idempotent, executable),
+        // with the same gates `attach_agent` uses — `broker.sh` when the broker
+        // is enabled, `docs-fetch.sh` when `docs_base_url` is configured. A
+        // fresh worktree checkout has none (the directory is gitignored), so
+        // without this the agent's relative `.git-paw/scripts/broker.sh` call
+        // fails until it hand-copies from `assets/`.
+        git_paw::init::provision_worktree_helpers(
+            &wt.path,
+            broker_config.enabled,
+            config.docs_base_url.is_some(),
+        )?;
 
         // Inject AGENTS.md with skill content when broker is enabled.
         // Non-supervisor `start` flow has no resolved spec backends —
@@ -633,6 +646,16 @@ fn launch_spec_session(
             println!("  {branch}: {summary}");
         }
 
+        // Same seam as `cmd_start` / `attach_agent`: provision the bundled
+        // helper scripts the agent's boot block invokes into this worktree's
+        // `.git-paw/scripts/`, gated on the broker being enabled (`broker.sh`)
+        // and `docs_base_url` being configured (`docs-fetch.sh`).
+        git_paw::init::provision_worktree_helpers(
+            &wt.path,
+            broker_config.enabled,
+            config.docs_base_url.is_some(),
+        )?;
+
         // Set up AGENTS.md with spec + skill content
         let rendered_skill = skill_template.as_ref().map(|tmpl| {
             git_paw::skills::render(
@@ -828,6 +851,23 @@ pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result
         session::save_session(&updated)?;
     }
 
+    // Config is loaded BEST-EFFORT, once, for the three consumers below: the
+    // broker-exposure warning, the pending-prompt submit delays, and the
+    // discovery file's orchestrator entry. A resume recreates the dashboard
+    // pane and re-spawns the broker, so a config that no longer parses must not
+    // abort what follows — that would leave the session half-resumed, with no
+    // saved state update and no discovery file. Every consumer has a sane
+    // fallback (no warning, the built-in submit delay, no orchestrator entry),
+    // so defaults are strictly better than an error here.
+    let config = config::load_config(repo_root, None).unwrap_or_else(|e| {
+        eprintln!(
+            "warning: could not load config while resuming '{}' ({e}); \
+             continuing with defaults for submit delays and the discovery file",
+            updated.session_name
+        );
+        PawConfig::default()
+    });
+
     // Recreate the dashboard pane only when the original session had a
     // broker enabled. Without a broker there is no dashboard pane to
     // recreate; pause+resume on a no-broker session is purely the tmux
@@ -835,11 +875,9 @@ pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result
     if existing.broker_port.is_some() {
         // Resuming re-spawns the broker, so the exposure warning belongs here
         // too — the dashboard pane's own copy is hidden by the alternate
-        // screen. Best-effort: a config that will not load is the dashboard's
-        // problem to report, and must not break the resume.
-        if let Ok(config) = config::load_config(repo_root, None) {
-            warn_if_broker_is_exposed(&config.broker);
-        }
+        // screen. Best-effort, like the load above: a config that will not load
+        // is the dashboard's problem to report, and must not break the resume.
+        warn_if_broker_is_exposed(&config.broker);
 
         let dashboard_command = dashboard_command();
         let repo_str = repo_root.to_string_lossy().to_string();
@@ -904,7 +942,6 @@ pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result
     if has_pending {
         let session_name = updated.session_name.clone();
         let offset = agent_pane_offset(&updated);
-        let config = config::load_config(repo_root, None)?;
         for (idx, wt) in updated.worktrees.iter_mut().enumerate() {
             if let Some(pending) = wt.pending_boot_prompt.take() {
                 let delay = resolve_submit_delay_ms(&wt.cli, &config.clis);
@@ -914,6 +951,42 @@ pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result
     }
 
     session::save_session(&updated)?;
+
+    // Rewrite the per-repo discovery file `sweep.sh` reads. A resume does not
+    // rebuild the layout: it splits a NEW dashboard pane into the live session
+    // at whatever index tmux assigns, so every agent's pane index can shift
+    // relative to what the original launch recorded. Read the live indices back
+    // (`list-panes` with `pane_current_path`, matched to each worktree) rather
+    // than assuming the launch-time offsets.
+    let offset = agent_pane_offset(&updated);
+    let agents = updated
+        .worktrees
+        .iter()
+        .enumerate()
+        .map(|(idx, wt)| session::RepoAgentEntry {
+            branch_id: git_paw::broker::messages::slugify_branch(&wt.branch),
+            worktree_path: wt.worktree_path.clone(),
+            cli: wt.cli.clone(),
+            pane_index: tmux::resolve_pane_index_for_worktree(
+                &updated.session_name,
+                &wt.worktree_path,
+            )
+            .ok()
+            .flatten()
+            .unwrap_or(offset + idx),
+        })
+        .collect();
+    // The orchestrator entry is DERIVED from the resumed session's mode, as
+    // recovery derives it — reading it back from the existing discovery file
+    // would lose it exactly when the file is missing, which is the case this
+    // rewrite exists for.
+    let orchestrator = orchestrator_entry_for_mode(updated.mode, &config);
+    crate::write_repo_discovery_file_with_agents(
+        repo_root,
+        &updated.session_name,
+        agents,
+        orchestrator,
+    );
 
     attach_or_print_hint(&existing.session_name)
 }

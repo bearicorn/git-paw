@@ -71,7 +71,13 @@ impl RepoContext {
     ///
     /// Reads the active session receipt (if any) to populate
     /// [`RepoContext::broker_url`]; a missing or stopped session simply
-    /// leaves it `None`. Resolves the advertised server identity from the
+    /// leaves it `None`. The receipt is looked up with
+    /// [`session::find_session_for_repo_or_owner`], because an agent's CLI
+    /// spawns `git paw mcp` with the agent's WORKTREE as its working
+    /// directory and no `--repo` — and a worktree root never equals the
+    /// repository root. This widening is confined to the MCP server's
+    /// read-only session view; mutating commands keep the exact match.
+    /// Resolves the advertised server identity from the
     /// merged config's `[mcp].name`, defaulting to `"git-paw"` when unset (or
     /// when the config cannot be loaded).
     #[must_use]
@@ -80,7 +86,7 @@ impl RepoContext {
             let candidate = root.join(".git-paw");
             candidate.is_dir().then_some(candidate)
         };
-        let broker_url = session::find_session_for_repo(&root)
+        let broker_url = session::find_session_for_repo_or_owner(&root)
             .ok()
             .flatten()
             .as_ref()

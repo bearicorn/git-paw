@@ -46,6 +46,13 @@ internally so you never hand-roll the JSON:
 .git-paw/scripts/broker.sh --agent {{BRANCH_ID}} status "<one-line what you are doing>"
 ```
 
+**A publish the broker rejects is loud.** Every `broker.sh` publish subcommand
+checks the broker's response. When the broker does not accept the publish — any
+non-2xx status, or no response at all because the broker is not running — the
+helper prints the broker's error to stderr and **exits non-zero**. Treat a
+non-zero exit as "this event never reached the broker": read the error, fix the
+cause, and re-publish. Do not move on as though it had been delivered.
+
 The heartbeat reuses the existing `agent.status` shape, so no new wire-format
 variant is needed and the broker treats it identically to watcher-driven status
 updates. The helper publishes with `modified_files: []`; your actual dirty-file

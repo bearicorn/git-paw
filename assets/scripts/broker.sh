@@ -26,7 +26,7 @@
 #   artifact [--exports a,b] [--files a,b] — publish agent.artifact (done)
 #   blocked <needs> <from>                 — publish agent.blocked
 #   question <text>                        — publish agent.question
-#   intent <summary> <files> [ttl]         — publish agent.intent
+#   intent <summary> <files> [ttl]         — publish agent.intent (ttl default 900s)
 #   poll [since]                           — GET this agent's broker inbox
 
 set -u
@@ -88,6 +88,11 @@ done
 
 BROKER=$(discover_broker_url)
 
+# Default TTL for `intent` when the caller gives none. The broker requires
+# `valid_for_seconds` on every `agent.intent`, so the helper always sends one;
+# 900s (15 minutes) is the TTL the coordination skill's examples use.
+DEFAULT_INTENT_TTL_SECONDS=900
+
 usage() {
   cat >&2 <<USAGE
 usage: $0 [--agent <id>] <subcommand> [args]
@@ -96,7 +101,8 @@ usage: $0 [--agent <id>] <subcommand> [args]
   artifact [--exports a,b] [--files a,b] publish agent.artifact (status="done") — code-less DONE fallback
   blocked <needs> <from>                 publish agent.blocked with dependency info
   question <text>                        publish agent.question
-  intent <summary> <files> [ttl]         publish agent.intent (files: comma-separated; ttl: valid_for_seconds)
+  intent <summary> <files> [ttl]         publish agent.intent (files: comma-separated;
+                                         ttl: valid_for_seconds, default ${DEFAULT_INTENT_TTL_SECONDS})
   poll [since]                           GET <broker>/messages/<agent-id>?since=<n> and print the inbox
 
 The agent id comes from --agent <id> (the boot block passes the pre-expanded
@@ -109,12 +115,12 @@ Discovered configuration:
 USAGE
 }
 
-# POST a JSON BrokerMessage payload to /publish.
+# POST a JSON BrokerMessage payload to /publish via the shared preamble's
+# status-checking publisher: a publish the broker rejects prints its error to
+# stderr and returns non-zero, so no subcommand reports a rejected publish as
+# done.
 publish() {
-  local payload=$1
-  curl -s -X POST "${BROKER}/publish" \
-    -H "Content-Type: application/json" \
-    -d "${payload}"
+  paw_publish "${BROKER}" "$1"
 }
 
 cmd_status() {
@@ -218,20 +224,23 @@ cmd_intent() {
   if [[ -z "${summary}" || -z "${files}" ]]; then
     echo "usage: $0 intent <summary> <files> [valid_for_seconds]" >&2
     echo "  files: comma-separated list of paths the agent is about to touch" >&2
+    echo "  valid_for_seconds: defaults to ${DEFAULT_INTENT_TTL_SECONDS}" >&2
     exit 2
   fi
   local agent payload
   agent=$(resolve_agent)
-  payload=$(TTL="${ttl}" "${PY}" -c "$(cat <<'PY'
+  payload=$(TTL="${ttl}" DEFAULT_TTL="${DEFAULT_INTENT_TTL_SECONDS}" "${PY}" -c "$(cat <<'PY'
 import json, os, sys
 agent, summary, files = sys.argv[1], sys.argv[2], sys.argv[3]
 payload = {
     "files": [p.strip() for p in files.split(",") if p.strip()],
     "summary": summary,
 }
-ttl = os.environ.get("TTL", "").strip()
-if ttl:
-    payload["valid_for_seconds"] = int(ttl)
+# The broker requires valid_for_seconds on every agent.intent, so an omitted
+# TTL takes the documented default rather than being left off the wire (which
+# the broker answers with 400).
+ttl = os.environ.get("TTL", "").strip() or os.environ["DEFAULT_TTL"]
+payload["valid_for_seconds"] = int(ttl)
 print(json.dumps({"type": "agent.intent", "agent_id": agent, "payload": payload}))
 PY
 )" "${agent}" "${summary}" "${files}")

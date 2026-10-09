@@ -72,6 +72,14 @@ Each helper SHALL be invocable at a single stable path, so that the command
 classifier can recognise it by that path. The absence of a broad `curl *`
 grant SHALL NOT depend on any seeded settings-file allowlist.
 
+The `broker.sh intent` subcommand SHALL always publish a `valid_for_seconds`
+field, because the broker requires it: when the caller supplies no TTL the
+helper SHALL send a default of `900` seconds. Every publish subcommand of both
+helpers SHALL check the broker's HTTP response: when the broker does not accept
+the publish (any non-2xx status, or no response), the helper SHALL print the
+broker's error to stderr and exit non-zero, and SHALL NOT report the publish as
+done.
+
 #### Scenario: status publishes agent.status
 
 - **WHEN** `broker.sh status booting` is invoked
@@ -103,8 +111,22 @@ grant SHALL NOT depend on any seeded settings-file allowlist.
 - **WHEN** `broker.sh intent <summary> <files> [valid_for_seconds]` is
   invoked
 - **THEN** the helper SHALL POST an `agent.intent` message carrying the
-  summary, the files the agent is about to touch, and (when supplied) a
-  `valid_for_seconds` field
+  summary, the files the agent is about to touch, and a
+  `valid_for_seconds` field (the supplied value, or the default)
+
+#### Scenario: intent without a TTL is accepted by the broker
+
+- **GIVEN** a running broker
+- **WHEN** `broker.sh intent "wire auth" src/auth.rs` is invoked with no TTL
+- **THEN** the published `agent.intent` SHALL carry `valid_for_seconds = 900`
+- **AND** the broker SHALL accept it with `202`
+
+#### Scenario: A rejected publish is not silent
+
+- **GIVEN** a running broker that answers a publish with `400`
+- **WHEN** a `broker.sh` or `sweep.sh` publish subcommand sends that publish
+- **THEN** the helper SHALL exit non-zero
+- **AND** SHALL print the broker's error to stderr
 
 #### Scenario: status-publish plain form preserves the v0.5.0 shape
 
@@ -198,7 +220,7 @@ if such a shape is reintroduced, identifying the offending line.
 
 ### Requirement: Helpers provisioned into agent worktrees
 
-`git paw start` and `git paw add` SHALL provision the bundled helper scripts an agent invokes into that agent's worktree at `.git-paw/scripts/`, making them present and executable before the agent boots, so the agent never has to hand-copy a helper from `assets/`. The scripts SHALL be sourced from the same bundled assets `git paw init` uses (matching the running binary's version), and provisioning SHALL be idempotent — attaching to a fresh or reused worktree (re)writes the scripts rather than failing. `broker.sh` SHALL be provisioned whenever the broker is enabled; `docs-fetch.sh` SHALL be provisioned whenever `docs_base_url` is configured (mirroring the docs-fetch skill's injection gate).
+`git paw start` and `git paw add` SHALL provision the bundled helper scripts an agent invokes into that agent's worktree at `.git-paw/scripts/`, making them present and executable before the agent boots, so the agent never has to hand-copy a helper from `assets/`. This SHALL hold on every launch path that creates an agent worktree — the supervisor launch, the bare launch, the spec-driven launch with or without supervisor mode, and `git paw add` — since an agent's need for the helper does not depend on how its session was started. The scripts SHALL be sourced from the same bundled assets `git paw init` uses (matching the running binary's version), and provisioning SHALL be idempotent — attaching to a fresh or reused worktree (re)writes the scripts rather than failing. `broker.sh` SHALL be provisioned whenever the broker is enabled; `docs-fetch.sh` SHALL be provisioned whenever `docs_base_url` is configured (mirroring the docs-fetch skill's injection gate).
 
 #### Scenario: start provisions the broker helper into each worktree
 
@@ -206,6 +228,19 @@ if such a shape is reintroduced, identifying the offending line.
 - **WHEN** `git paw start` sets up an agent's worktree
 - **THEN** `<worktree>/.git-paw/scripts/broker.sh` exists and is executable before the agent's boot prompt is submitted
 - **AND** the agent does not need to copy the helper from `assets/`
+
+#### Scenario: A bare launch provisions the helper
+
+- **GIVEN** a broker-enabled session launched with `git paw start --branches <branch>` (no supervisor mode, no specs)
+- **WHEN** the agent worktrees are set up
+- **THEN** each worktree's `.git-paw/scripts/broker.sh` exists and is executable before that agent's pane is launched
+
+#### Scenario: A spec-driven launch without supervisor mode provisions the helper
+
+- **GIVEN** a broker-enabled session launched with `--specs` and no supervisor mode
+- **WHEN** the agent worktrees are set up
+- **THEN** each worktree's `.git-paw/scripts/broker.sh` exists and is executable before that agent's prompt is submitted
+- **AND** no agent needs to copy the helper from `assets/` in order to publish its first status
 
 #### Scenario: add provisions the helper into a mid-session worktree
 
@@ -531,4 +566,44 @@ The bundled coordination guidance SHALL tell agents that a `[conflict-ack]` `err
 - **WHEN** the bundled coordination skill is read
 - **THEN** its description of `agent.feedback` SHALL name the `[conflict-ack]` entry as an exception to "errors are problems to fix"
 - **AND** SHALL state that the agent is to do nothing in response — no fix, no re-published `agent.artifact`, and no pausing of its edits on that file
+
+### Requirement: Bundled helpers read the per-repo discovery file's agent roster
+
+The bundled helper scripts SHALL resolve agents from the per-repo discovery file (`.git-paw/sessions/<session>.json`) using that file's own shape — the `agents` roster, whose entries carry `branch_id`, `worktree_path`, `cli` and `pane_index` — and SHALL NOT read the global session-state shape (`worktrees` entries carrying `branch`). Mapping a pane's working directory to its agent SHALL therefore succeed against a discovery file written by any launch path. Test fixtures that model the discovery file SHALL use the same shape, so the helper's tests cannot pass against a document git-paw never writes.
+
+A helper MAY additionally infer the session from its own environment when it runs inside the session's multiplexer, as a secondary path. When no session can be resolved, the helper SHALL say so explicitly rather than degrading every subcommand to an empty result.
+
+`sweep.sh status` SHALL decide which broker agents are phantoms from the same roster: an agent id is known when it is `supervisor` or equals a roster entry's `branch_id`, whatever branch prefix the agent's branch uses (for example the configurable spec `branch_prefix`). It SHALL NOT recognise agents by a hard-coded branch-name pattern such as `feat[-/]…`. When no discovery file exists, it SHALL fall back to the broker's own agent-id rule — `supervisor`, or a `<prefix>-<name>` / `<prefix>/<name>` slug with any prefix.
+
+#### Scenario: A pane path resolves to its agent from the discovery file
+
+- **GIVEN** a per-repo discovery file whose `agents` roster contains an agent with `branch_id` `feat-x` and `worktree_path` `/repo/.git-paw/worktrees/feat-x`
+- **WHEN** the helper resolves the agent for a pane whose working directory is inside that worktree
+- **THEN** it SHALL resolve `feat-x`
+
+#### Scenario: Fixtures use the shape git-paw writes
+
+- **WHEN** the helper's tests construct a discovery file
+- **THEN** they SHALL use the `agents` roster shape written by the per-repo discovery writer
+
+#### Scenario: No active session is reported explicitly
+
+- **GIVEN** a repository with no active session
+- **WHEN** a bundled helper subcommand that needs the session is invoked
+- **THEN** it SHALL report that no session was found
+- **AND** SHALL NOT exit as though it had done its work
+
+#### Scenario: An agent on a non-feat branch is not a phantom
+
+- **GIVEN** a discovery file whose `agents` roster contains `spec-add-auth` (a spec-driven branch under the default `spec/` prefix) and a broker `/status` listing `supervisor`, `spec-add-auth` and `a`
+- **WHEN** `sweep.sh status` is invoked
+- **THEN** it SHALL show rows for `supervisor` and `spec-add-auth`
+- **AND** SHALL list only `a` as a phantom
+
+#### Scenario: Without a discovery file the broker's id rule decides phantoms
+
+- **GIVEN** no discovery file and a broker `/status` listing `supervisor`, `fix-db-timeout` and `a`
+- **WHEN** `sweep.sh status` is invoked
+- **THEN** it SHALL show rows for `supervisor` and `fix-db-timeout`
+- **AND** SHALL list only `a` as a phantom
 

@@ -73,6 +73,22 @@ RUST_LOG=debug git paw mcp --repo /path/to/repo
 If no repository can be found, the server prints a clear error to stderr and
 exits non-zero — it never silently serves nothing.
 
+**Finding the session and its broker from inside a worktree.** File-serving
+tools keep the resolution above: inside a worktree, the repository IS that
+worktree. The *session* lookup is deliberately wider — a worktree root never
+equals the repository root, so matching it directly would leave a server
+started by an agent's CLI (its working directory is the agent's worktree, and
+it is given no `--repo`) with no session and no broker URL. The server
+therefore resolves a worktree to the repository that **owns** it before looking
+the session up, trying the exact path first and falling back to the owner only
+on a miss. `get_session_status` and the broker URL in the server's context
+come from that lookup.
+
+This widening is confined to the MCP server's read-only view. Every `git paw`
+command that mutates session state — `stop`, `purge`, `add`, `remove`,
+`pause`, and `start`'s recover/resume dispatch — keeps the exact match, so
+running one inside an agent worktree never acts on the parent session.
+
 ### Server identity
 
 In the MCP `initialize` handshake the server advertises `serverInfo.name =

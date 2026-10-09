@@ -33,6 +33,15 @@ publishes as `agent_id = "supervisor"`, so you never hand-roll the JSON:
 
 Notes:
 
+- **A publish the broker rejects is loud.** Every `sweep.sh` publish verb —
+  `status-publish`, `verified`, `feedback-gate`, `conflict-ack`, `learn` —
+  checks the broker's response. When the broker does not accept it (any
+  non-2xx status, or no response at all), the helper prints its error to
+  stderr and **exits non-zero** instead of printing its "published" line. A
+  non-zero exit means the event never reached the broker: read the error, fix
+  the cause (a malformed target agent id, a stopped broker), and re-publish.
+  Do not record the verb as done. The agent-side `broker.sh` behaves
+  identically.
 - The top-level `agent_id` is `"supervisor"` (the recipient is the broker's
   agent record for the supervisor itself).
 - `phase` is your current lifecycle phase. `phase` is an open string — the

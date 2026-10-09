@@ -74,8 +74,29 @@ worktree branch. Run `.git-paw/scripts/broker.sh --help` for the full surface.
 | `artifact [--exports a,b] [--files a,b]` | `agent.artifact` (`status:"done"`) — the code-less DONE fallback |
 | `blocked <needs> <from>` | `agent.blocked` with dependency info |
 | `question <text>` | `agent.question` |
-| `intent <summary> <files> [valid_for_seconds]` | `agent.intent` (forward-coordination file claim) |
+| `intent <summary> <files> [valid_for_seconds]` | `agent.intent` (forward-coordination file claim); the TTL defaults to **900** seconds when omitted |
 | `poll [since]` | reads `GET <broker>/messages/<agent-id>?since=<n>` — this agent's inbox |
+
+`valid_for_seconds` is a required field of `agent.intent`, so the helper always
+sends one: give a TTL explicitly when you want a different window, and the
+default of 900 seconds (15 minutes) applies otherwise.
+
+**A publish the broker rejects is loud.** Every publish subcommand checks the
+broker's HTTP response. When the broker does not accept the publish — any
+non-2xx status, or no response at all because the broker is not running — the
+helper prints the broker's error to stderr and **exits non-zero**; it never
+reports the publish as done. Treat a non-zero exit as "this event did not
+reach the broker" and fix the cause (a malformed agent id, a stopped broker)
+rather than moving on. The same holds for the supervisor-side `sweep.sh`
+publish verbs.
+
+**The helpers are refreshed on every attach.** `git paw start` and
+`git paw add` (re)write `<worktree>/.git-paw/scripts/` from the bundled assets
+of the binary that launched the session, on every launch path, so a worktree's
+helper always matches that binary's version. Re-attaching a worktree that
+already has the scripts rewrites them rather than failing — which also means
+**local edits to a worktree's helper copy are overwritten**. Edit
+`assets/scripts/` (when developing git-paw itself) rather than a deployed copy.
 
 **Why a script and not a `git paw publish` subcommand?** The helper is an
 agent-internal mechanism. A user-facing subcommand would surface in `--help`

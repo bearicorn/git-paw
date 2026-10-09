@@ -266,7 +266,24 @@ pub fn provision_worktree_helpers(
 /// (the scripts are treated as binary-managed content — users with local
 /// edits SHALL back the file up before re-running `git paw init`). Shared by
 /// the `sweep.sh` and `broker.sh` installers.
+///
+/// REFUSES when `path` is a symlink. `fs::write` and `set_permissions` both
+/// follow links, so a link committed at `.git-paw/scripts/broker.sh` in a
+/// hostile repository would have this overwrite its target with the helper's
+/// content AND chmod it `0755` — and provisioning now runs on every launch
+/// path, into every agent worktree. A symlink there is never legitimate (the
+/// directory holds binary-managed files), so the safe answer is to stop and
+/// name the path rather than guess what the operator meant.
 fn install_script(path: &Path, content: &str) -> Result<(), PawError> {
+    if let Ok(meta) = fs::symlink_metadata(path)
+        && meta.file_type().is_symlink()
+    {
+        return Err(PawError::InitError(format!(
+            "refusing to write bundled helper through a symlink at '{}' — \
+             remove it and re-run; `.git-paw/scripts/` holds binary-managed files",
+            path.display()
+        )));
+    }
     fs::write(path, content)
         .map_err(|e| PawError::InitError(format!("failed to write '{}': {e}", path.display())))?;
 
@@ -1575,6 +1592,45 @@ test_command = "just check"
         {
             true
         }
+    }
+
+    /// `fs::write` and `set_permissions` both follow symlinks, so a link
+    /// committed at `.git-paw/scripts/broker.sh` in a hostile repository would
+    /// have provisioning overwrite its target and chmod it `0755`. Provisioning
+    /// must refuse and name the path, leaving the target untouched.
+    #[cfg(unix)]
+    #[test]
+    fn provision_refuses_to_write_a_helper_through_a_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let worktree = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let victim = outside.path().join("victim.txt");
+        fs::write(&victim, "untouched").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let scripts = worktree.path().join(".git-paw").join("scripts");
+        fs::create_dir_all(&scripts).unwrap();
+        std::os::unix::fs::symlink(&victim, scripts.join("broker.sh")).unwrap();
+
+        let err = provision_worktree_helpers(worktree.path(), true, false)
+            .expect_err("provisioning must refuse to write through a symlink");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("symlink") && msg.contains("broker.sh"),
+            "the error must name the refusal and the path; got: {msg}"
+        );
+
+        assert_eq!(
+            fs::read_to_string(&victim).unwrap(),
+            "untouched",
+            "the symlink target must not be overwritten"
+        );
+        assert_eq!(
+            fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the symlink target must not be chmod-ed"
+        );
     }
 
     // Scenario: start provisions the broker helper into each worktree — after a

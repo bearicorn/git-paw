@@ -719,6 +719,24 @@ fn write_repo_discovery_file(
             pane_index: pane_offset + idx,
         })
         .collect();
+    write_repo_discovery_file_with_agents(repo_root, session_name, agents, orchestrator);
+}
+
+/// [`write_repo_discovery_file`] for a caller that has already resolved each
+/// agent's pane index.
+///
+/// The offset form above assumes agents occupy a contiguous run of panes
+/// starting at `pane_offset` — true of every path that BUILDS the layout.
+/// Restart-from-pause does not build it: it splits a new dashboard pane into a
+/// live session at whatever index tmux assigns, so the agent indices are read
+/// back from the running session instead of derived. Best-effort, like the
+/// offset form: a write failure is a warning, not a launch failure.
+fn write_repo_discovery_file_with_agents(
+    repo_root: &Path,
+    session_name: &str,
+    agents: Vec<session::RepoAgentEntry>,
+    orchestrator: Option<session::RepoOrchestratorEntry>,
+) {
     let file = session::RepoSessionFile {
         session_name: session_name.to_string(),
         agents,
