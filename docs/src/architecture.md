@@ -595,9 +595,12 @@ enabled; `git paw status` uses the bind and port to probe the broker, and
 `git paw purge` uses `broker_log_path` to clean up that session's broker log. `mode` (`bare`
 or `supervisor`) records the pane layout so recovery rebuilds the same shape.
 `branch_created` records whether git-paw created the branch (rather than
-reusing an existing one). A worktree entry can also carry
-`pending_boot_prompt`, `runtime_slot`, and `cli_session_id`; each is omitted
-when unset.
+reusing an existing one). A worktree entry can also carry `base_branch` (the
+branch a git-paw-created branch started from, so teardown can tell an
+already-merged branch from an unmerged one), `pending_boot_prompt`,
+`runtime_slot`, `cli_session_id`, and `spec_id` (the id of the spec the agent
+was launched from, absent for a bare `git paw start` or a `git paw add`
+without `--from-spec`); each is omitted when unset.
 
 ### Atomic writes
 

@@ -483,6 +483,53 @@ struct AttachedAgent {
 /// new branch) share one implementation — guaranteeing an added agent is
 /// byte-identical to a start-time agent and that future boot-prompt fixes only
 /// have to land here.
+/// Builds the dashboard's learnings aggregator, seeded from the persisted
+/// session.
+///
+/// `session` is the receipt `cmd_dashboard` loaded for this repository. When
+/// it is present, [`LearningsAggregator::seed_from_session`] registers every
+/// agent AND records the spec each was launched from — seeding the roster
+/// alone leaves the agent → spec mapping empty, which reports every forward
+/// conflict cross-spec even between two agents launched from the same spec.
+/// When no receipt is found there is nothing to seed, and classification
+/// falls back to cross-spec exactly as before.
+///
+/// Extracted from `cmd_dashboard` so the seeding is reachable from a test:
+/// the wiring is the whole point of `supervisor-boot-wiring`, and a correct
+/// helper nobody calls is the defect this change exists to fix.
+fn build_learnings_aggregator(
+    learnings_path: std::path::PathBuf,
+    supervisor: &SupervisorConfig,
+    session: Option<&Session>,
+    broker_enabled: bool,
+) -> broker::learnings::LearningsAggregator {
+    let mut aggregator = broker::learnings::LearningsAggregator::new(learnings_path);
+    aggregator.set_broker_publish(
+        supervisor
+            .learnings_config
+            .broker_publish
+            .resolve(broker_enabled),
+    );
+    if let Some(session) = session {
+        aggregator.seed_from_session(session);
+    }
+    aggregator
+}
+
+/// Assembles an agent pane's CLI invocation: the configured CLI, then its
+/// approval flags, then the resolved `session_id_args` — each appended only
+/// when non-empty, so a CLI with neither is invoked bare.
+fn agent_cli_command(cli: &str, flags: &str, session_id_args: Option<&str>) -> String {
+    let mut command = cli.to_string();
+    for part in [flags, session_id_args.unwrap_or_default()] {
+        if !part.is_empty() {
+            command.push(' ');
+            command.push_str(part);
+        }
+    }
+    command
+}
+
 fn attach_agent(
     ctx: &AttachContext,
     branch: &str,
@@ -587,15 +634,7 @@ fn attach_agent(
         .as_deref()
         .and_then(|id| config::resolve_session_id_args(ctx.agent_cli, id, ctx.clis));
 
-    let mut cli_command = ctx.agent_cli.to_string();
-    if !ctx.agent_flags.is_empty() {
-        cli_command.push(' ');
-        cli_command.push_str(ctx.agent_flags);
-    }
-    if let Some(args) = &session_id_args {
-        cli_command.push(' ');
-        cli_command.push_str(args);
-    }
+    let cli_command = agent_cli_command(ctx.agent_cli, ctx.agent_flags, session_id_args.as_deref());
 
     let boot_block = git_paw::skills::build_boot_block(
         branch,
@@ -620,6 +659,7 @@ fn attach_agent(
             pending_boot_prompt: None,
             runtime_slot: provisioned.runtime_slot,
             cli_session_id,
+            spec_id: spec_entry.map(|s| s.id.clone()),
         },
     })
 }
@@ -1019,8 +1059,19 @@ fn cmd_dashboard() -> Result<(), PawError> {
         .unwrap_or_default();
 
     // Look up the saved session once: needed for the per-session broker log
-    // name, the broker watcher target list AND to discover the supervisor
-    // pane_map for the auto-approve thread.
+    // name, the broker watcher target list, the learnings aggregator's
+    // agent -> spec mapping AND to discover the supervisor pane_map for the
+    // auto-approve thread.
+    //
+    // This read happens once, with no retry, and `cmd_supervisor` writes the
+    // receipt *after* spawning this pane (deliberately: a session that failed
+    // to start must not be recorded). This pane therefore races a receipt that
+    // is normally already on disk by the time the binary has started. The
+    // watcher targets have always depended on winning that race; the learnings
+    // seeding now does too, and losing it degrades silently — no receipt means
+    // no agent -> spec mapping, so every forward conflict reports cross-spec.
+    // If that degradation is ever observed, the fix is a bounded retry here,
+    // not reordering the write.
     let saved_session = session::find_session_for_repo(&repo_root)?;
 
     // One log per session, so two repositories never write — or purge — the
@@ -1081,16 +1132,12 @@ fn cmd_dashboard() -> Result<(), PawError> {
         .as_ref()
         .filter(|s| s.enabled && s.learnings)
     {
-        let learnings_path = repo_root.join(".git-paw").join("session-learnings.md");
-        let mut aggregator = broker::learnings::LearningsAggregator::new(learnings_path);
-        aggregator.set_broker_publish(
-            sup.learnings_config
-                .broker_publish
-                .resolve(broker_config.enabled),
+        let aggregator = build_learnings_aggregator(
+            repo_root.join(".git-paw").join("session-learnings.md"),
+            sup,
+            saved_session.as_ref(),
+            broker_config.enabled,
         );
-        for target in &watch_targets {
-            aggregator.register_agent(&target.agent_id);
-        }
         broker_state.attach_learnings(std::sync::Arc::new(std::sync::Mutex::new(aggregator)));
     }
 
@@ -1901,6 +1948,140 @@ mod tests {
     use std::process::Command as StdCommand;
     use std::time::UNIX_EPOCH;
     use tempfile::TempDir;
+
+    /// `agent_cli_command` appends only the parts that carry text, so a CLI
+    /// with no flags and no session-id args is invoked bare, and a resolved
+    /// but empty `session_id_args` template adds no trailing space.
+    #[test]
+    fn agent_cli_command_appends_only_non_empty_parts() {
+        assert_eq!(agent_cli_command("claude", "", None), "claude");
+        assert_eq!(
+            agent_cli_command("claude", "--dangerous", None),
+            "claude --dangerous"
+        );
+        assert_eq!(
+            agent_cli_command("claude", "", Some("--session-id abc")),
+            "claude --session-id abc",
+            "session-id args attach even when the CLI has no approval flags"
+        );
+        assert_eq!(
+            agent_cli_command("claude", "--dangerous", Some("--session-id abc")),
+            "claude --dangerous --session-id abc",
+            "flags precede the session-id args"
+        );
+        // A `session_id_args` template that resolves to the empty string
+        // (`session_id_args = ""`) must not leave a dangling separator.
+        assert_eq!(agent_cli_command("claude", "", Some("")), "claude");
+        assert_eq!(
+            agent_cli_command("claude", "--dangerous", Some("")),
+            "claude --dangerous"
+        );
+    }
+
+    /// A session receipt whose worktree entries carry the given
+    /// `(branch, spec_id)` pairs — the shape a spec-driven launch saves.
+    fn receipt_with(entries: &[(&str, Option<&str>)]) -> Session {
+        Session {
+            session_name: "paw-repo".to_string(),
+            repo_path: PathBuf::from("/repo"),
+            project_name: "repo".to_string(),
+            created_at: UNIX_EPOCH,
+            status: SessionStatus::Active,
+            worktrees: entries
+                .iter()
+                .map(|(branch, spec_id)| WorktreeEntry {
+                    branch: (*branch).to_string(),
+                    worktree_path: PathBuf::from(format!("/repo/wt/{branch}")),
+                    cli: "claude".to_string(),
+                    branch_created: false,
+                    base_branch: None,
+                    pending_boot_prompt: None,
+                    runtime_slot: None,
+                    cli_session_id: None,
+                    spec_id: spec_id.map(str::to_string),
+                })
+                .collect(),
+            broker_port: None,
+            broker_bind: None,
+            broker_log_path: None,
+            mode: SessionMode::Bare,
+            dashboard_pane: None,
+        }
+    }
+
+    /// A `[conflict-detector]`-tagged forward-conflict feedback message
+    /// naming `from` and `other`, as the detector emits it.
+    fn forward_conflict(from: &str, other: &str) -> git_paw::broker::messages::BrokerMessage {
+        git_paw::broker::messages::BrokerMessage::Feedback {
+            agent_id: from.to_string(),
+            payload: git_paw::broker::messages::FeedbackPayload {
+                from: "conflict-detector".to_string(),
+                errors: vec![format!(
+                    "[conflict-detector] forward conflict with {other} on src/main.rs"
+                )],
+            },
+        }
+    }
+
+    /// `supervisor-learnings`' "The spec mapping is seeded from the persisted
+    /// session": attaching the aggregator for a session SHALL be the only call
+    /// needed for it to learn the mapping.
+    ///
+    /// This asserts the *wiring*, not the helper. `seed_from_session` has its
+    /// own unit tests, but those would stay green if `cmd_dashboard` never
+    /// called it — which is exactly the class of defect this change fixes.
+    #[test]
+    fn dashboard_aggregator_is_seeded_from_the_session_receipt() {
+        let tmp = TempDir::new().expect("tempdir");
+        let receipt = receipt_with(&[
+            ("feat/x", Some("003-user-list")),
+            ("feat/y", Some("003-user-list")),
+        ]);
+        let mut aggregator = build_learnings_aggregator(
+            tmp.path().join("session-learnings.md"),
+            &SupervisorConfig::default(),
+            Some(&receipt),
+            false,
+        );
+
+        aggregator.record_detector_message(&forward_conflict("feat-x", "feat-y"));
+        aggregator.record_detector_message(&forward_conflict("feat-y", "feat-x"));
+        aggregator.flush().expect("flush learnings");
+
+        let md = std::fs::read_to_string(aggregator.file_path()).expect("learnings file written");
+        assert!(
+            md.contains("forward-conflict-intra-spec"),
+            "the dashboard must seed the agent -> spec mapping from the receipt, so a \
+             same-spec forward conflict classifies intra-spec; got:\n{md}"
+        );
+        assert!(
+            md.contains("003-user-list"),
+            "the flushed bullet must name the spec both agents were launched from; got:\n{md}"
+        );
+    }
+
+    /// No receipt means nothing to seed: the aggregator is still built and
+    /// still classifies, falling back to cross-spec as it did before.
+    #[test]
+    fn dashboard_aggregator_without_a_receipt_falls_back_to_cross_spec() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut aggregator = build_learnings_aggregator(
+            tmp.path().join("session-learnings.md"),
+            &SupervisorConfig::default(),
+            None,
+            false,
+        );
+
+        aggregator.record_detector_message(&forward_conflict("feat-x", "feat-y"));
+        aggregator.record_detector_message(&forward_conflict("feat-y", "feat-x"));
+        aggregator.flush().expect("flush learnings");
+
+        let md = std::fs::read_to_string(aggregator.file_path()).expect("learnings file written");
+        assert!(
+            !md.contains("forward-conflict-intra-spec"),
+            "with no receipt there is no mapping, so nothing may classify intra-spec; got:\n{md}"
+        );
+    }
 
     // Byte-identical safety net (D1 / task 1.3): each per-backend boot-prompt
     // framing sentence, relocated from a compiled match arm into its own
@@ -2748,6 +2929,7 @@ mod tests {
                 pending_boot_prompt: None,
                 runtime_slot: None,
                 cli_session_id: None,
+                spec_id: None,
             }],
             broker_port: None,
             broker_bind: None,
@@ -2828,6 +3010,7 @@ mod tests {
                 pending_boot_prompt: None,
                 runtime_slot: None,
                 cli_session_id: None,
+                spec_id: None,
             }],
             broker_port: None,
             broker_bind: None,

@@ -1217,6 +1217,34 @@ command = "{probe_cli}"
              probe log:\n{log_contents}"
         );
     }
+
+    // `session-state`'s "A spec-driven launch records each agent's spec id":
+    // the saved session carries, per agent, the id of the spec it was launched
+    // from — a bijection onto the discovered spec set. Branch naming is not
+    // asserted here (it is the spec backend's concern), only that every entry
+    // records a spec and that together they cover each spec exactly once.
+    let session_json =
+        fs::read_to_string(sessions_dir_under(home.path()).join(format!("{session_name}.json")))
+            .expect("saved session file");
+    let saved: serde_json::Value =
+        serde_json::from_str(&session_json).expect("session file is valid JSON");
+    let worktrees = saved["worktrees"]
+        .as_array()
+        .expect("session records a worktrees array");
+    let mut recorded: Vec<&str> = worktrees
+        .iter()
+        .map(|wt| {
+            wt["spec_id"].as_str().unwrap_or_else(|| {
+                panic!("every spec-driven agent must record a spec_id; entry: {wt}")
+            })
+        })
+        .collect();
+    recorded.sort_unstable();
+    assert_eq!(
+        recorded, expected,
+        "each agent's worktree entry must carry the spec_id it was launched from; \
+         session file:\n{session_json}"
+    );
 }
 
 /// `boot-block`'s "Boot-block injection failure is non-fatal" scenario: an

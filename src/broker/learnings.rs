@@ -430,6 +430,31 @@ impl LearningsAggregator {
             .insert(agent_id.to_string(), spec_id.to_string());
     }
 
+    /// Seeds the aggregator's roster and agent → spec mapping from a
+    /// persisted [`Session`](crate::session::Session).
+    ///
+    /// Each worktree entry registers its agent (keyed by
+    /// [`slugify_branch`](super::messages::slugify_branch), matching how the
+    /// dashboard derives a `WatchTarget`'s `agent_id`) and, when the entry
+    /// recorded the spec it was launched from, contributes that spec id to
+    /// the mapping forward-conflict classification reads. This replaces the
+    /// caller-side `register_agent` loop: registering alone leaves every
+    /// mapping empty, so an intra-spec forward conflict would be reported
+    /// cross-spec.
+    ///
+    /// An entry with no recorded `spec_id` is still registered, and its
+    /// conflicts classify cross-spec — the documented fallback for an agent
+    /// launched without a spec.
+    pub fn seed_from_session(&mut self, session: &crate::session::Session) {
+        for wt in &session.worktrees {
+            let agent_id = super::messages::slugify_branch(&wt.branch);
+            self.register_agent(&agent_id);
+            if let Some(spec_id) = &wt.spec_id {
+                self.set_spec_id(&agent_id, spec_id);
+            }
+        }
+    }
+
     /// Returns the path the aggregator flushes to.
     #[must_use]
     pub fn file_path(&self) -> &Path {
@@ -1736,6 +1761,121 @@ mod tests {
             }
             other => panic!("expected cross-spec, got {other:?}"),
         }
+    }
+
+    /// Builds a persisted session whose worktree entries carry the given
+    /// `(branch, spec_id)` pairs. Mirrors what a spec-driven launch saves.
+    fn session_with(entries: &[(&str, Option<&str>)]) -> crate::session::Session {
+        crate::session::Session {
+            session_name: "paw-repo".to_string(),
+            repo_path: PathBuf::from("/repo"),
+            project_name: "repo".to_string(),
+            created_at: UNIX_EPOCH,
+            status: crate::session::SessionStatus::Active,
+            worktrees: entries
+                .iter()
+                .map(|(branch, spec_id)| crate::session::WorktreeEntry {
+                    branch: (*branch).to_string(),
+                    worktree_path: PathBuf::from(format!("/repo/wt/{branch}")),
+                    cli: "claude".to_string(),
+                    branch_created: false,
+                    base_branch: None,
+                    pending_boot_prompt: None,
+                    runtime_slot: None,
+                    cli_session_id: None,
+                    spec_id: spec_id.map(str::to_string),
+                })
+                .collect(),
+            broker_port: None,
+            broker_bind: None,
+            broker_log_path: None,
+            mode: crate::session::SessionMode::Bare,
+            dashboard_pane: None,
+        }
+    }
+
+    /// Spec scenario "The spec mapping is seeded from the persisted session":
+    /// attaching the aggregator to a session is the only call needed for it to
+    /// learn that both agents belong to the same spec.
+    #[test]
+    fn seed_from_session_classifies_same_spec_agents_intra_spec() {
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        a.seed_from_session(&session_with(&[
+            ("feat/x", Some("003-user-list")),
+            ("feat/y", Some("003-user-list")),
+        ]));
+
+        a.record_detector_message(&feedback(
+            "feat-x",
+            &["[conflict-detector] forward conflict with feat-y on src/main.rs"],
+        ));
+        a.record_detector_message(&feedback(
+            "feat-y",
+            &["[conflict-detector] forward conflict with feat-x on src/main.rs"],
+        ));
+
+        let events = a.conflict_events();
+        assert_eq!(events.len(), 1);
+        match &events[0].category {
+            ConflictCategory::ForwardConflictIntraSpec {
+                agents, spec_id, ..
+            } => {
+                assert_eq!(agents, &vec!["feat-x".to_string(), "feat-y".to_string()]);
+                assert_eq!(spec_id, "003-user-list");
+            }
+            other => panic!("expected intra-spec, got {other:?}"),
+        }
+    }
+
+    /// Spec scenario "An agent without a recorded spec classifies cross-spec":
+    /// the known spec is still named in the bullet and the unknown one renders
+    /// as nothing at all rather than an empty spec id.
+    #[test]
+    fn seed_from_session_classifies_unrecorded_spec_cross_spec() {
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        a.seed_from_session(&session_with(&[
+            ("feat/x", Some("003-user-list")),
+            ("feat/y", None),
+        ]));
+
+        a.record_detector_message(&feedback(
+            "feat-x",
+            &["[conflict-detector] forward conflict with feat-y on src/main.rs"],
+        ));
+        a.record_detector_message(&feedback(
+            "feat-y",
+            &["[conflict-detector] forward conflict with feat-x on src/main.rs"],
+        ));
+
+        let events = a.conflict_events();
+        assert_eq!(events.len(), 1);
+        match &events[0].category {
+            ConflictCategory::ForwardConflictCrossSpec { agents, .. } => {
+                assert_eq!(agents, &vec!["feat-x".to_string(), "feat-y".to_string()]);
+            }
+            other => panic!("expected cross-spec, got {other:?}"),
+        }
+
+        a.flush().unwrap();
+        let md = read_md(a.file_path());
+        let bullet = md
+            .lines()
+            .find(|l| l.contains("forward-conflict-cross-spec"))
+            .unwrap_or_else(|| panic!("cross-spec bullet must be flushed; got:\n{md}"));
+        assert!(
+            bullet.contains("003-user-list"),
+            "bullet must name the known spec; got: {bullet}"
+        );
+        assert!(
+            !bullet.contains("specs 003-user-list,"),
+            "bullet must not render the unrecorded agent as an empty spec id; got: {bullet}"
+        );
+        assert!(
+            !bullet.contains(", )") && !bullet.contains("( "),
+            "bullet must not render an empty spec id; got: {bullet}"
+        );
     }
 
     #[test]

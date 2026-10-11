@@ -111,7 +111,13 @@ reported via a `[conflict-detector]`-tagged `agent.feedback` or
 - **Forward conflicts** — two agents' `agent.intent` declarations overlap
   (recorded with a `forward-conflict-…` label). Use these to spot specs that
   were decomposed too coarsely (two parallel agents both expected to own the
-  same file).
+  same file). A forward conflict is labelled `forward-conflict-intra-spec`
+  when both agents were launched from the same spec and
+  `forward-conflict-cross-spec` when they came from different ones, using the
+  spec each agent's worktree recorded at launch. An agent started without a
+  spec (a bare `git paw start`, or `git paw add` without `--from-spec`) has no
+  recorded spec, so its forward conflicts classify cross-spec; only the specs
+  that are known are named in the bullet.
 - **In-flight conflicts** — two agents are modifying the same file at once.
 - **Ownership violations** — an agent edited a file claimed by another
   agent's active `agent.intent`. Records the violator, the owner, and the

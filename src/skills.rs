@@ -912,6 +912,60 @@ pub fn governance_section_paths(
     out
 }
 
+/// Assembles the supervisor's boot context: the rendered supervisor skill
+/// with the drive-loop directive resolved, followed by the
+/// `## Governance documents` section when `[governance]` configures at
+/// least one path.
+///
+/// This is the single assembly the supervisor launch uses to write the
+/// supervisor's managed block in the repository-root `AGENTS.md`, so a
+/// configured `[governance]` table reaches every launched supervisor
+/// session rather than only a prompt assembled outside the launch path
+/// (boot-block: *Governance section follows the supervisor skill content*).
+///
+/// The governance section is separated from the skill content by exactly
+/// one blank line, and the skill body is newline-terminated first. When
+/// no governance path is configured the result is byte-identical to
+/// [`with_drive_loop_directive`]'s output.
+///
+/// A configured path whose value is the empty string is treated as unset:
+/// the configuration chapter documents `constitution = ""` as the way to
+/// opt out of Spec Kit constitution auto-wiring, and that opt-out must not
+/// render a blank `- constitution: ` bullet.
+#[must_use]
+pub fn supervisor_boot_context(
+    supervisor_md: &str,
+    unattended: bool,
+    governance: &crate::config::GovernanceConfig,
+) -> String {
+    /// Treats an unset *or empty* path as "not configured" (design D1).
+    fn configured(path: Option<&PathBuf>) -> Option<&Path> {
+        path.map(PathBuf::as_path)
+            .filter(|p| !p.as_os_str().is_empty())
+    }
+
+    let body = with_drive_loop_directive(supervisor_md, unattended);
+    let section = governance_section_paths(
+        configured(governance.adr.as_ref()),
+        configured(governance.test_strategy.as_ref()),
+        configured(governance.security.as_ref()),
+        configured(governance.dod.as_ref()),
+        configured(governance.constitution.as_ref()),
+    );
+    if section.is_empty() {
+        return body;
+    }
+
+    let mut out = String::with_capacity(body.len() + section.len() + 2);
+    out.push_str(&body);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(&section);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4409,6 +4463,78 @@ Your approval role this session is escalation-driven, in this order each cycle:\
             out.contains(EXPECTED),
             "drive-loop-directive region must render byte-identical to the \
              pre-relocation DRIVE_LOOP_DIRECTIVE constant; got:\n{out}"
+        );
+    }
+
+    // boot-block: `Governance section follows the supervisor skill content`.
+    // The unattended drive-loop directive and the governance section share one
+    // boot context, and the section follows the skill body.
+    #[test]
+    fn supervisor_boot_context_appends_governance_after_the_drive_loop_directive() {
+        let tmpl = resolve("supervisor").unwrap();
+        let rendered = render(
+            &tmpl,
+            "supervisor",
+            "http://localhost:9119",
+            "proj",
+            &GateCommands::default(),
+            &[],
+        );
+        let governance = crate::config::GovernanceConfig {
+            dod: Some(PathBuf::from("docs/dod.md")),
+            ..Default::default()
+        };
+        let out = supervisor_boot_context(&rendered, true, &governance);
+
+        let directive_pos = out
+            .find("## Unattended: a drive loop is running")
+            .expect("unattended boot context keeps the drive-loop directive");
+        let governance_pos = out
+            .find("\n## Governance documents\n")
+            .expect("configured governance renders the start-of-line heading");
+        assert!(
+            governance_pos > directive_pos,
+            "governance section must follow the skill content (incl. the drive-loop \
+             directive); got directive@{directive_pos} governance@{governance_pos}"
+        );
+        assert!(
+            out.contains("- dod: docs/dod.md"),
+            "configured dod path must render as a bullet; got:\n{out}"
+        );
+    }
+
+    // Design D1: `constitution = ""` is the documented Spec Kit opt-out, so an
+    // empty path counts as unset rather than rendering a blank bullet.
+    #[test]
+    fn supervisor_boot_context_treats_an_empty_path_as_unset() {
+        let governance = crate::config::GovernanceConfig {
+            dod: Some(PathBuf::from("docs/dod.md")),
+            constitution: Some(PathBuf::new()),
+            ..Default::default()
+        };
+        let out = supervisor_boot_context("BASE SKILL", false, &governance);
+        assert!(
+            out.contains("- dod: docs/dod.md"),
+            "the configured path still renders; got:\n{out}"
+        );
+        assert!(
+            !out.contains("- constitution:"),
+            "an empty constitution path must render no bullet; got:\n{out}"
+        );
+    }
+
+    // With nothing configured the boot context is byte-identical to the
+    // drive-loop-resolved skill, so an unconfigured session is unchanged.
+    #[test]
+    fn supervisor_boot_context_without_governance_matches_the_skill_body() {
+        let governance = crate::config::GovernanceConfig::default();
+        let input = format!(
+            "BASE SKILL\n{DRIVE_LOOP_REGION_BEGIN}\nloop text\n{DRIVE_LOOP_REGION_END}\nTAIL"
+        );
+        assert_eq!(
+            supervisor_boot_context(&input, false, &governance),
+            with_drive_loop_directive(&input, false),
+            "no configured path must leave the boot context byte-identical"
         );
     }
 

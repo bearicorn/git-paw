@@ -824,10 +824,13 @@ pub(crate) fn cmd_supervisor(
         owned_files: None,
         // When unattended, append the drive-loop coordination directive so the
         // supervisor consumes the loop's escalations instead of blanket-approving
-        // (supervisor-loop-escalation-tiering).
-        skill_content: Some(git_paw::skills::with_drive_loop_directive(
+        // (supervisor-loop-escalation-tiering), then the `## Governance documents`
+        // section so a configured `[governance]` table reaches the launched
+        // session (boot-block: governance follows the supervisor skill content).
+        skill_content: Some(git_paw::skills::supervisor_boot_context(
             &supervisor_md,
             unattended,
+            &config.governance,
         )),
         inter_agent_rules: None,
     };

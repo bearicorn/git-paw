@@ -7,6 +7,11 @@
 //!   (task 12.6)
 //! - `Supervisor registers itself on startup` (task 12.11, merged in)
 //!
+//! Plus, from boot-block:
+//!
+//! - `A launched supervisor session carries the governance section`
+//! - `A launched supervisor session without governance paths is unchanged`
+//!
 //! Skips if tmux is unavailable.
 
 use std::fs;
@@ -112,4 +117,141 @@ cli = "echo"
     assert!(indices.contains(&"1"), "pane 1 (dashboard) missing");
     assert!(indices.contains(&"2"), "pane 2 (agent a) missing");
     assert!(indices.contains(&"3"), "pane 3 (agent b) missing");
+}
+
+/// Launches `git paw start --supervisor` with the given `.git-paw/config.toml`
+/// body, kills the resulting tmux session, and returns the supervisor's boot
+/// context as written at the repository root.
+///
+/// This is the observable the boot-block requirement names. The requirement
+/// text calls it "the repository-root `AGENTS.md`"; git-paw writes that
+/// combined view to the gitignored sidecar
+/// [`git_paw::agents::SIDECAR_REL_PATH`] rather than the tracked file, so the
+/// managed block never contaminates a commit. For the supervisor the worktree
+/// root *is* the repository root, so the sidecar sits at
+/// `<repo>/.git-paw/AGENTS.local.md` — that is the file pane 0's CLI reads.
+fn supervisor_agents_md_after_launch(config: &str) -> String {
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let _proc_env = tmux_env.apply_to_process();
+
+    let paw_dir = tr.path().join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    fs::write(paw_dir.join("config.toml"), config).expect("write config");
+
+    let home = TempDir::new().expect("home tempdir");
+    let mut start = cmd();
+    tmux_env.apply_assert(&mut start);
+    let out = start
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .args(["start", "--supervisor", "--branches", "a"])
+        .timeout(Duration::from_secs(10))
+        .output()
+        .expect("run start");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "supervisor start failed; stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let agents_md = fs::read_to_string(tr.path().join(git_paw::agents::SIDECAR_REL_PATH))
+        .expect("supervisor launch writes the repo-root AGENTS.md sidecar");
+
+    if let Some(session_name) = stdout
+        .lines()
+        .find(|l| l.contains("tmux attach -t"))
+        .and_then(|l| l.split_whitespace().last())
+    {
+        let _ = StdCommand::new("tmux")
+            .env("TMUX_TMPDIR", tmux_env.socket_dir())
+            .args(["kill-session", "-t", session_name])
+            .status();
+    }
+
+    agents_md
+}
+
+#[test]
+#[serial]
+fn launched_supervisor_boot_context_carries_the_governance_section() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+
+    let agents_md = supervisor_agents_md_after_launch(
+        r#"
+default_cli = "echo"
+
+[supervisor]
+enabled = true
+cli = "echo"
+
+[governance]
+dod = "docs/dod.md"
+"#,
+    );
+
+    // The supervisor skill mentions `## Governance documents` inline (inside
+    // backticks) when describing what to look for; the injected section uses
+    // the heading at start-of-line, so the `\n## ...\n` form distinguishes
+    // "section actually inserted" from "prose names the heading".
+    assert!(
+        agents_md.contains("\n## Governance documents\n"),
+        "launched supervisor AGENTS.md must carry the start-of-line governance heading, got:\n{agents_md}"
+    );
+    assert!(
+        agents_md.contains("- dod: docs/dod.md"),
+        "launched supervisor AGENTS.md must carry the configured dod bullet, got:\n{agents_md}"
+    );
+
+    let skill_pos = agents_md
+        .find("\n## Supervisor Skills")
+        .expect("Supervisor Skills heading must exist in the supervisor's boot context");
+    let governance_pos = agents_md
+        .find("\n## Governance documents\n")
+        .expect("governance heading must exist when a path is configured");
+    assert!(
+        governance_pos > skill_pos,
+        "governance section must follow the supervisor skill content, got skill@{skill_pos} governance@{governance_pos}"
+    );
+
+    // The requirement also positions the section before any per-agent task
+    // content. The managed block renders `### Spec` / `### File Ownership`
+    // ahead of the skill content, so the section can only satisfy that by the
+    // supervisor carrying no task content at all — which is what makes the
+    // supervisor's assignment different from a coding agent's. Pin it, so
+    // giving the supervisor a spec later cannot silently invert the order.
+    assert!(
+        !agents_md.contains("\n### Spec\n") && !agents_md.contains("\n### File Ownership\n"),
+        "the supervisor's boot context must carry no per-agent task content, or the \
+         governance section would no longer precede it; got:\n{agents_md}"
+    );
+}
+
+#[test]
+#[serial]
+fn launched_supervisor_without_governance_paths_has_no_governance_section() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+
+    let agents_md = supervisor_agents_md_after_launch(
+        r#"
+default_cli = "echo"
+
+[supervisor]
+enabled = true
+cli = "echo"
+"#,
+    );
+
+    assert!(
+        !agents_md.contains("\n## Governance documents\n"),
+        "an unconfigured [governance] table must leave the boot context without the section, got:\n{agents_md}"
+    );
 }

@@ -8,6 +8,13 @@
 //! executable behaviour is unit-tested in `git_paw::coordination`; these
 //! scenarios cover the prose-only requirements that have no other asserting
 //! test.
+//!
+//! The `pane_resolution_*` tests cover the adjacent `skill-agent` capability's
+//! pane→agent resolution requirement: the section SHALL resolve a pane's
+//! `pane_current_path` through the `agents` roster recorded in
+//! `.git-paw/sessions/<session>.json`, SHALL NOT teach a basename-shape rule,
+//! and SHALL state the cached map is re-resolved after `git paw add` /
+//! `git paw remove`.
 
 use std::fs;
 
@@ -18,14 +25,24 @@ fn supervisor_skill() -> String {
 
 /// The routing section, lower-cased, for case-insensitive substring scans.
 fn routing_section() -> String {
+    section_starting_with("### Routing through the supervisor")
+}
+
+/// The pane→agent resolution section, lower-cased and whitespace-collapsed.
+fn pane_resolution_section() -> String {
+    section_starting_with("### Resolve pane to agent via pane_current_path")
+}
+
+/// Extracts the `### ` section opened by `heading`, collapsing whitespace so
+/// substring checks are robust to line wrapping, and lower-casing it.
+fn section_starting_with(heading: &str) -> String {
     let skill = supervisor_skill();
     let start = skill
-        .find("### Routing through the supervisor")
-        .expect("supervisor.md has a Routing through the supervisor section");
+        .find(heading)
+        .unwrap_or_else(|| panic!("supervisor.md has a `{heading}` section"));
     let rest = &skill[start..];
     // Section runs until the next top-level (`### `) heading.
     let end = rest[1..].find("\n### ").map_or(rest.len(), |idx| idx + 1);
-    // Collapse whitespace so substring checks are robust to line wrapping.
     rest[..end]
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -214,6 +231,64 @@ fn no_inference_backend_for_prompt() {
     assert!(
         section.contains("shall not pipe") || section.contains("never from spawning"),
         "must state /tell does not pipe a prompt into another CLI to generate content"
+    );
+}
+
+// skill-agent scenario "Supervisor skill resolves panes against the session's
+// recorded worktree paths" — the pane-resolution section names the per-repo
+// session file and the roster fields that carry the mapping.
+#[test]
+fn pane_resolution_names_session_file_roster_fields() {
+    let section = pane_resolution_section();
+    // The roster must be named, not merely alluded to: a bare `agents` token
+    // would still match the word elsewhere in the section, so pin the phrase.
+    for token in [
+        ".git-paw/sessions/",
+        "`agents` roster",
+        "worktree_path",
+        "branch_id",
+    ] {
+        assert!(
+            section.contains(token),
+            "pane-resolution section must name `{token}` as the mapping source, got:\n{section}"
+        );
+    }
+}
+
+// skill-agent scenario "Supervisor skill resolves panes against the session's
+// recorded worktree paths" (second THEN) — no basename-shape rule and no
+// project-prefixed example basename.
+#[test]
+fn pane_resolution_teaches_no_basename_shape_rule() {
+    let section = pane_resolution_section();
+    assert!(
+        !section.contains("-feat-"),
+        "pane-resolution section must not carry a `<project>-feat-<branch>` basename shape \
+         or a project-prefixed example basename, got:\n{section}"
+    );
+    assert!(
+        !section.contains("myproj"),
+        "pane-resolution section must stay project-agnostic (no `myproj` example), got:\n{section}"
+    );
+    assert!(
+        section.contains("placement"),
+        "pane-resolution section must explain that the worktree directory name depends on \
+         the configured worktree placement, got:\n{section}"
+    );
+}
+
+// skill-agent scenario "Supervisor skill re-resolves after the roster changes".
+#[test]
+fn pane_resolution_re_resolves_after_add_or_remove() {
+    let section = pane_resolution_section();
+    assert!(
+        section.contains("git paw add") && section.contains("git paw remove"),
+        "pane-resolution section must state the cached mapping is re-resolved after \
+         `git paw add` / `git paw remove`, got:\n{section}"
+    );
+    assert!(
+        section.contains("re-resolve"),
+        "pane-resolution section must name the re-resolution explicitly, got:\n{section}"
     );
 }
 
