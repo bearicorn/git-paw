@@ -321,6 +321,8 @@ pub(crate) fn cmd_start(
             pending_boot_prompt: None,
             runtime_slot: provisioned.runtime_slot,
             cli_session_id: None,
+            // Bare launch: no spec drove this branch.
+            spec_id: None,
         });
     }
 
@@ -720,6 +722,9 @@ fn launch_spec_session(
             pending_boot_prompt: None,
             runtime_slot: provisioned.runtime_slot,
             cli_session_id: None,
+            spec_id: spec_by_branch
+                .get(branch.as_str())
+                .map(|entry| entry.id.clone()),
         });
     }
 

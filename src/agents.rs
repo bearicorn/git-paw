@@ -833,6 +833,51 @@ pub fn remove_session_boot_block(repo_root: &Path) -> Result<(), PawError> {
 mod tests {
     use super::*;
 
+    /// `boot-block`'s "Section position is between skill and task content":
+    /// the governance section rides at the tail of `skill_content`, and the
+    /// managed block renders `### Spec` / `### File Ownership` *before* that,
+    /// so the section can only precede task content when the assignment
+    /// carries none. The supervisor's assignment is the one that carries
+    /// none — pin both halves, so neither the block's section order nor the
+    /// supervisor's assignment shape can invert it unnoticed.
+    #[test]
+    fn task_content_precedes_skill_content_in_the_managed_block() {
+        let with_task = generate_worktree_section(&WorktreeAssignment {
+            branch: "feat/x".to_string(),
+            cli: "claude".to_string(),
+            spec_content: Some("SPEC BODY".to_string()),
+            owned_files: Some(vec!["src/lib.rs".to_string()]),
+            skill_content: Some("SKILL BODY\n\n## Governance documents\n".to_string()),
+            inter_agent_rules: None,
+        });
+        let spec_pos = with_task.find("### Spec").expect("spec heading rendered");
+        let owned_pos = with_task
+            .find("### File Ownership")
+            .expect("ownership heading rendered");
+        let skill_pos = with_task.find("SKILL BODY").expect("skill body rendered");
+        assert!(
+            spec_pos < skill_pos && owned_pos < skill_pos,
+            "task content renders before skill content; a governance section at the \
+             tail of skill_content therefore CANNOT precede task content"
+        );
+
+        // The supervisor's assignment shape (see `cmd_supervisor`): no spec,
+        // no owned files, so the governance tail is last and the requirement
+        // holds vacuously.
+        let supervisor = generate_worktree_section(&WorktreeAssignment {
+            branch: "supervisor".to_string(),
+            cli: "claude".to_string(),
+            spec_content: None,
+            owned_files: None,
+            skill_content: Some("SKILL BODY\n\n## Governance documents\n".to_string()),
+            inter_agent_rules: None,
+        });
+        assert!(
+            !supervisor.contains("### Spec") && !supervisor.contains("### File Ownership"),
+            "the supervisor assignment must carry no task content; got:\n{supervisor}"
+        );
+    }
+
     // Byte-identical safety net (D1 / task 1.3): the inter-agent rules block
     // and the three git hook bodies, relocated from compiled `push_str`/
     // `format!` calls into bundled assets, must render exactly as before.

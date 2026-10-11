@@ -359,6 +359,7 @@ mod tests {
             pending_boot_prompt: None,
             runtime_slot: None,
             cli_session_id: cli_session_id.map(String::from),
+            spec_id: None,
         }
     }
 

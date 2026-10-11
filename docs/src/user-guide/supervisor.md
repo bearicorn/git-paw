@@ -585,10 +585,17 @@ beside the repo under the sibling placement. Matching it against the
 (`.git-paw/sessions/<session>.json`) gives the owning agent's `branch_id` — the
 authoritative `agent_id` (with the slash form `feat/<branch>` for git
 operations). A pane whose `pane_current_path` is
-`<repo>/.git-paw/worktrees/feat-auth` belongs to agent `feat-auth`.
+`<repo>/.git-paw/worktrees/feat-auth` belongs to agent `feat-auth`. Because
+the directory name depends on the configured placement, the match is against
+the recorded `worktree_path`, never against the directory's basename.
+
+The session file's roster also records a `pane_index`, but that is a
+launch-time value and is **not** used for routing — the live
+`pane_current_path` match is.
 
 The supervisor agent builds the `{pane_index → agent_id}` map once per
-session and reuses it; re-resolution only happens when the supervisor
+session and reuses it. It re-resolves the map after `git paw add` or
+`git paw remove` — tmux renumbers panes on layout changes — and whenever it
 notices an inconsistency.
 
 The bundled `.git-paw/scripts/sweep.sh` invokes this command on every sweep

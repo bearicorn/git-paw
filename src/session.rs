@@ -213,6 +213,23 @@ pub struct WorktreeEntry {
     /// byte-identically to before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_session_id: Option<String>,
+
+    /// Id of the [`SpecEntry`](crate::specs::SpecEntry) this agent was
+    /// launched from, when the launch was spec-driven.
+    ///
+    /// Every launch path that creates an agent from a spec — the spec-driven
+    /// launch with or without supervisor mode, and `git paw add --from-spec` —
+    /// records that spec's id here. It is the launch-time fact consumers need
+    /// long after the spec itself may have been archived or renamed: the
+    /// learnings aggregator seeds its agent → spec mapping from this field to
+    /// classify forward conflicts as intra-spec or cross-spec.
+    ///
+    /// `None` for a launch without a spec (bare `git paw start`,
+    /// `git paw add <branch>`), and on every session file written before this
+    /// field existed. Omitted from JSON when `None`, so an entry without a
+    /// spec serializes byte-identically to before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_id: Option<String>,
 }
 
 /// Persisted session state for a git-paw session.
@@ -929,6 +946,7 @@ mod tests {
                     pending_boot_prompt: None,
                     runtime_slot: None,
                     cli_session_id: None,
+                    spec_id: None,
                 },
                 WorktreeEntry {
                     branch: "fix/api".to_string(),
@@ -939,6 +957,7 @@ mod tests {
                     pending_boot_prompt: None,
                     runtime_slot: None,
                     cli_session_id: None,
+                    spec_id: None,
                 },
                 WorktreeEntry {
                     branch: "feature/logging".to_string(),
@@ -949,6 +968,7 @@ mod tests {
                     pending_boot_prompt: None,
                     runtime_slot: None,
                     cli_session_id: None,
+                    spec_id: None,
                 },
             ],
             broker_port: None,
@@ -1185,6 +1205,75 @@ mod tests {
         assert!(
             !written.contains("cli_session_id"),
             "absent id must not be serialized; got:\n{written}"
+        );
+    }
+
+    // -- spec_id: additive optional field (session-state) --
+
+    /// Spec scenario "A spec-driven launch records each agent's spec id":
+    /// an entry launched from a spec round-trips that spec's id.
+    #[test]
+    fn saved_session_round_trips_spec_id_intact() {
+        let dir = TempDir::new().unwrap();
+        let mut session = sample_session();
+        session.worktrees[0].spec_id = Some("003-user-list".into());
+        session.worktrees[1].spec_id = Some("004-error-handling".into());
+        save_session_in(&session, dir.path()).unwrap();
+
+        let loaded = load_session_from("paw-my-project", dir.path())
+            .unwrap()
+            .expect("session should exist");
+
+        assert_eq!(
+            loaded.worktrees[0].spec_id.as_deref(),
+            Some("003-user-list")
+        );
+        assert_eq!(
+            loaded.worktrees[1].spec_id.as_deref(),
+            Some("004-error-handling")
+        );
+    }
+
+    /// Spec scenario "Older session files load with no spec id".
+    #[test]
+    fn state_file_without_spec_id_loads_with_none() {
+        // A state file written before the field existed must still load, with
+        // every worktree reporting no launch spec.
+        let dir = TempDir::new().unwrap();
+        let json = r#"{
+            "session_name": "paw-legacy",
+            "repo_path": "/Users/test/code/legacy",
+            "project_name": "legacy",
+            "created_at": "2024-03-23T13:20:00Z",
+            "status": "active",
+            "worktrees": [
+                {
+                    "branch": "feature/auth",
+                    "worktree_path": "/Users/test/code/legacy-feature-auth",
+                    "cli": "claude",
+                    "branch_created": false
+                }
+            ]
+        }"#;
+        std::fs::write(dir.path().join("paw-legacy.json"), json).unwrap();
+
+        let loaded = load_session_from("paw-legacy", dir.path())
+            .unwrap()
+            .expect("legacy session should load");
+        assert_eq!(loaded.worktrees[0].spec_id, None);
+    }
+
+    /// Spec scenario "A launch without a spec records no spec id": the key is
+    /// absent from the written JSON, so a bare launch serializes exactly as
+    /// it did before the field existed.
+    #[test]
+    fn absent_spec_id_is_omitted_from_serialized_state() {
+        let dir = TempDir::new().unwrap();
+        save_session_in(&sample_session(), dir.path()).unwrap();
+        let written = std::fs::read_to_string(dir.path().join("paw-my-project.json")).unwrap();
+        assert!(
+            !written.contains("spec_id"),
+            "absent spec id must not be serialized; got:\n{written}"
         );
     }
 

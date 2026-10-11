@@ -7,22 +7,21 @@
 //! documents` section between the supervisor skill content and any
 //! subsequent task content.
 //!
-//! These tests assemble the boot prompt exactly the way `cmd_supervisor` in
-//! `src/main.rs` does it: resolve and render the supervisor skill, then
-//! concatenate the output of [`git_paw::skills::governance_section_paths`]
-//! with a blank-line separator when it is non-empty. Calling the path-based
-//! helper directly avoids the dependency on the `GovernanceConfig` type
-//! (owned by the parallel `feat/governance-config` change) while still
-//! exercising the same renderer that the public
-//! `governance_section(&GovernanceConfig)` wrapper will delegate to.
+//! These tests assemble the boot prompt through the very function the
+//! supervisor launch calls — [`git_paw::skills::supervisor_boot_context`] —
+//! rather than re-implementing the concatenation locally. A hand-written
+//! copy of the assembly is exactly the defect `supervisor-boot-wiring`
+//! fixes: it passed while the production launch path never rendered the
+//! section at all.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use git_paw::skills::{governance_section_paths, render, resolve};
+use git_paw::config::GovernanceConfig;
+use git_paw::skills::{render, resolve, supervisor_boot_context};
 
-/// Assemble the supervisor pane's full boot-prompt body exactly like
-/// `cmd_supervisor` does: rendered skill + (optional) governance section
-/// separated by a blank line.
+/// Assemble the supervisor pane's full boot-prompt body the way
+/// `cmd_supervisor` does: the rendered skill handed to
+/// [`supervisor_boot_context`] together with the governance config.
 fn assemble_supervisor_boot_prompt(
     adr: Option<&Path>,
     test_strategy: Option<&Path>,
@@ -30,8 +29,22 @@ fn assemble_supervisor_boot_prompt(
     dod: Option<&Path>,
     constitution: Option<&Path>,
 ) -> String {
+    let skill = render_supervisor_skill();
+    let governance = GovernanceConfig {
+        adr: adr.map(PathBuf::from),
+        test_strategy: test_strategy.map(PathBuf::from),
+        security: security.map(PathBuf::from),
+        dod: dod.map(PathBuf::from),
+        constitution: constitution.map(PathBuf::from),
+        ..Default::default()
+    };
+    supervisor_boot_context(&skill, false, &governance)
+}
+
+/// The rendered supervisor skill, before any governance assembly.
+fn render_supervisor_skill() -> String {
     let tmpl = resolve("supervisor").expect("supervisor skill resolves");
-    let skill = render(
+    render(
         &tmpl,
         "supervisor",
         "http://127.0.0.1:9119",
@@ -41,40 +54,14 @@ fn assemble_supervisor_boot_prompt(
             ..Default::default()
         },
         &[],
-    );
-    let governance = governance_section_paths(adr, test_strategy, security, dod, constitution);
-    if governance.is_empty() {
-        skill
-    } else {
-        let mut out = String::with_capacity(skill.len() + governance.len() + 1);
-        out.push_str(&skill);
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push('\n');
-        out.push_str(&governance);
-        out
-    }
+    )
 }
 
 #[test]
 fn supervisor_boot_prompt_with_no_governance_paths_omits_section() {
     let prompt = assemble_supervisor_boot_prompt(None, None, None, None, None);
 
-    let baseline = {
-        let tmpl = resolve("supervisor").expect("supervisor skill resolves");
-        render(
-            &tmpl,
-            "supervisor",
-            "http://127.0.0.1:9119",
-            "project",
-            &git_paw::skills::GateCommands {
-                test_command: Some("just check"),
-                ..Default::default()
-            },
-            &[],
-        )
-    };
+    let baseline = git_paw::skills::with_drive_loop_directive(&render_supervisor_skill(), false);
 
     assert_eq!(
         prompt, baseline,

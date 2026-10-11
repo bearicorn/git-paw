@@ -255,17 +255,29 @@ The canonical resolution command asks tmux directly:
 tmux display-message -t paw-{{PROJECT_NAME}}:0.<pane> -p '#{pane_current_path}'
 ```
 
-The output is the pane's working directory — typically the agent's worktree
-path. Its basename ends in `<project>-feat-<branch>`, which is the authoritative
-`agent_id` (with the slash form `feat/<branch>`). For example, a pane whose
-`pane_current_path` ends in `myproj-feat-auth` is the agent `feat-auth`.
+The output is the pane's working directory — for a coding-agent pane, that
+agent's worktree path. Resolve it to an agent by matching it against the
+`worktree_path` entries of the `agents` roster in the per-repo session file
+`.git-paw/sessions/<session>.json`; the matching entry's `branch_id` is the
+authoritative `agent_id` (the branch name with `/` slugified to `-`). That
+roster also records a `pane_index`, but it describes the layout as of the last
+time the file was written and is NOT the routing source — the live
+`pane_current_path` match is.
+
+Do NOT derive the `agent_id` from the directory's basename or from any naming
+shape. The worktree directory name depends on the configured worktree
+placement — a child worktree carries no project prefix — and in either
+placement the directory's slug need not equal the `agent_id`. The recorded
+`worktree_path` is the only authority.
 
 Loop over every coding-agent pane index at session start, build a
 `{pane_index → agent_id}` map once, and reuse it for the rest of the session.
-Re-resolve only when you notice an inconsistency (e.g. a pane has clearly
-moved). The bundled `.git-paw/scripts/sweep.sh` invokes this command on every
-sweep iteration — if the helper is missing for any reason, falling back to
-this `tmux display-message` invocation directly is the right escape hatch.
+Re-resolve the map after `git paw add` or `git paw remove`, since tmux
+renumbers panes on layout changes, and whenever you notice an inconsistency
+(e.g. a pane has clearly moved). The bundled `.git-paw/scripts/sweep.sh`
+invokes this command on every sweep iteration — if the helper is missing for
+any reason, falling back to this `tmux display-message` invocation directly is
+the right escape hatch.
 
 ### Observe and drive a peer pane via tmux
 

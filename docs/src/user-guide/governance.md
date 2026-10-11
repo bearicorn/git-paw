@@ -31,6 +31,8 @@ All five fields are optional. List only the docs you have. Paths are resolved re
 
 For Spec Kit projects, `governance.constitution` auto-wires to `.specify/memory/constitution.md` when `[specs] type = "speckit"`. You only need to set `constitution` explicitly if you keep it somewhere else, or want to disable the auto-wiring (set it to `""`).
 
+At launch, the configured paths reach the supervisor as a `## Governance documents` section in the supervisor's managed block of the repository-root `AGENTS.md`, placed after the supervisor skill content so the agent reads them in the same context as its own instructions. A path left unset — or set to the empty string, as with the `constitution = ""` opt-out above — contributes no bullet, and a `[governance]` table with no paths at all adds no section.
+
 See [Configuration → Governance](../configuration/README.md#governance) for the full field reference and merging rules.
 
 ## Illustrative examples
