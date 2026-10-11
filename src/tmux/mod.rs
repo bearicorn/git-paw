@@ -34,7 +34,7 @@ pub use session::{
 #[cfg(test)]
 pub(crate) use layout::rebalance_agent_rows_with;
 #[cfg(test)]
-pub(crate) use readiness::{gate_pane_generic, relaunch_cli_into_pane};
+pub(crate) use readiness::{PaneCli, gate_pane_generic, gate_pane_with, relaunch_cli_into_pane};
 #[cfg(test)]
 pub(crate) use session::{
     attach_with, classify_liveness, detach_client_with, has_live_agent_pane_with,

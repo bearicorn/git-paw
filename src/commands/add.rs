@@ -283,6 +283,7 @@ pub(crate) fn cmd_add(
         gate_pane_or_fail_on_dialog(
             &updated.session_name,
             new_pane_idx,
+            &agent_cli,
             &pane.cli_command,
             &config.clis,
         )?;

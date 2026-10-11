@@ -482,6 +482,26 @@ The two hooks fail in deliberately opposite directions:
 
 Register custom AI CLIs that aren't in git-paw's built-in detection list.
 
+A `[clis.<name>]` entry has two distinct names, and they are used for
+different things:
+
+- **`command` is what the pane launches.** Every launch path — the bare
+  start, the spec-driven start, the supervisor pane, `git paw add`, and
+  session recovery — spawns the entry's `command`, not the key. It is
+  emitted as exactly one shell word: single-quoted (with embedded single
+  quotes escaped) whenever it contains any character outside the portable
+  safe set `A-Z a-z 0-9 _ - . / + , : @ %`, so a path containing spaces or
+  shell metacharacters is neither word-split nor expanded. Approval flags
+  and session-id / resume arguments are appended after it.
+- **The `<name>` key is the CLI's identity.** Approval-flag, session-id and
+  resume-template, prompt-profile, settle-delay, and MCP-capability lookups
+  all resolve against the key, as does the `cli` recorded in each saved
+  worktree entry. A CLI name with no matching entry (a built-in detected
+  CLI, or an explicit pass-through name) launches under that name unchanged.
+
+So `[clis.claude-variant] command = "claude"` launches `claude` while every
+per-CLI override and the saved session still read `claude-variant`.
+
 ### Via config file
 
 ```toml
@@ -523,6 +543,11 @@ approval_args = { "full-auto" = "--dangerously-skip-permissions" }
 # assigned, no resume on recovery).
 session_id_args = "--session-id {{SESSION_ID}}"
 resume_args = "--resume {{SESSION_ID}}"
+# Whether this CLI speaks MCP, deciding which form of the coordination boot
+# block it receives. Unset by default (and omitted from written config), in
+# which case the built-in MCP-capable set decides. Only set `true` once
+# git-paw's MCP server is registered for THIS CLI — see the field table.
+# mcp = true
 
 # Per-field overrides of the CLI's terminal-shape markers (readiness
 # banner, approval-prompt wording, …), consulted before the embedded
@@ -533,7 +558,7 @@ approval_markers = ["proceed? (y/n)"]
 
 | Field | Required | Purpose |
 |-------|----------|---------|
-| `command` | yes | Command or path to the CLI binary. |
+| `command` | yes | Command or path to the CLI binary — what the pane launches, emitted as one shell word. Must be non-empty; a blank value is rejected at config load, naming the entry. |
 | `display_name` | no | Human-readable name shown in prompts. |
 | `submit_delay_ms` | no | Boot-prompt settle delay (ms) before the submit `Enter`; per-CLI so the launcher stays CLI-agnostic. |
 | `settings_path` | no | Path to the CLI's claude-format settings file. git-paw does not write to it; its parent directory joins the memory-isolation protected-path set. |
@@ -541,6 +566,7 @@ approval_markers = ["proceed? (y/n)"]
 | `session_id_args` | no | Template (containing `{{SESSION_ID}}`) for the flag(s) that assign a fresh session identifier at launch. Consulted **before** the built-in table (`claude` only); a CLI resolving neither launches unchanged, with no id recorded. |
 | `resume_args` | no | Template (containing `{{SESSION_ID}}`) for the flag(s) that resume a previously assigned session. Appended on recovery when the worktree's recorded id and this CLI's resolved template are both present; a template omitting the placeholder is rejected at config load. |
 | `prompt_profile` | no | Per-field overrides of the CLI's terminal-shape markers, consulted before the embedded Claude Code default. Carries no permission policy — see [CLI Prompt-Shape Profiles](../user-guide/cli-prompt-profiles.md). |
+| `mcp` | no | Boolean. Whether this CLI identity speaks MCP, selecting the MCP publish-tool form of the coordination boot block over the `broker.sh` helper form. Unset by default and omitted when the config is written back. |
 
 Every configured `settings_path` also feeds the **protected-path set** used
 by the auto-approve classifier's memory-isolation rule: the file's parent
@@ -549,6 +575,32 @@ subtrees are treated as operator territory, so a coding agent's write
 targeting them escalates as a danger-class prompt instead of ever being
 auto-approved. See the
 [supervisor decision order](../user-guide/supervisor.md#decision-order).
+
+### `mcp` and the boot-block form
+
+Whether a CLI receives the MCP tool form of the
+[coordination boot block](../user-guide/coordination.md#mcp-tool-form) is
+resolved in this order:
+
+1. `mcp = true` or `mcp = false` on the matching `[clis.<name>]` entry;
+2. otherwise the built-in MCP-capable set — exactly `claude`, `codex`,
+   `cursor-agent`, and `agy`;
+3. otherwise not MCP-capable, so the `broker.sh` helper form is used.
+
+The lookup uses the CLI **identity** (the `[clis.<name>]` key, or the
+built-in / pass-through name), never the resolved `command`. That is why
+`[clis.claude-oss] command = "claude"` does not inherit `claude`'s MCP form:
+a variant typically reads a different config directory, which may not have
+git-paw's MCP server registered.
+
+> **Warning:** setting `mcp = true` for a CLI that does not have git-paw's
+> MCP server registered strands the agent at boot — the boot block names
+> publish tools the agent cannot call, so its very first coordination step
+> fails. Register the server for that CLI first (see
+> [MCP](../user-guide/mcp.md)), then opt in.
+
+A config without an `mcp` key loads and behaves exactly as it did before the
+field existed.
 
 ### Via command line
 

@@ -527,6 +527,7 @@ fn config_survives_save_and_load() {
                 prompt_profile: None,
                 session_id_args: None,
                 resume_args: None,
+                mcp: None,
             },
         )]),
         presets: HashMap::from([(
@@ -634,6 +635,7 @@ fn custom_cli_empty_approval_args_omitted_on_serialize() {
         prompt_profile: None,
         session_id_args: None,
         resume_args: None,
+        mcp: None,
     };
     let serialized = toml::to_string_pretty(&cli).unwrap();
     assert!(
@@ -657,6 +659,36 @@ fn custom_cli_invalid_approval_args_key_rejected() {
     assert!(
         err.to_string().contains("yolo-mode"),
         "error should name the invalid key, got: {err}"
+    );
+}
+
+#[test]
+fn custom_cli_empty_command_rejected_naming_the_entry() {
+    // `command` is what the pane launches; a blank one would quote to an
+    // empty shell word and fail with a "command not found" naming nothing.
+    for blank in ["", "   "] {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_file(&path, &format!("[clis.mycli]\ncommand = \"{blank}\"\n"));
+
+        let err = load_config_file(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("mycli"),
+            "error should name the offending entry, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn custom_cli_non_empty_command_still_loads() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(&path, "[clis.mycli]\ncommand = \"mycli\"\n");
+
+    let config = load_config_file(&path).unwrap().unwrap();
+    assert_eq!(
+        config.clis.get("mycli").map(|c| c.command.as_str()),
+        Some("mycli")
     );
 }
 
@@ -2042,6 +2074,7 @@ fn cli_with_approval_args(command: &str, args: &[(&str, &str)]) -> CustomCli {
         prompt_profile: None,
         session_id_args: None,
         resume_args: None,
+        mcp: None,
     }
 }
 
@@ -2113,6 +2146,7 @@ fn cli_with_session_templates(
         prompt_profile: None,
         session_id_args: session_id_args.map(String::from),
         resume_args: resume_args.map(String::from),
+        mcp: None,
     }
 }
 
@@ -3764,6 +3798,7 @@ fn clis_with_submit_delay(cli: &str, submit_delay_ms: Option<u64>) -> HashMap<St
             prompt_profile: None,
             session_id_args: None,
             resume_args: None,
+            mcp: None,
         },
     );
     clis
@@ -3814,4 +3849,172 @@ fn no_cli_name_is_hardcoded_in_the_resolver() {
             "{cli} must use the agnostic default, not a hardcoded value"
         );
     }
+}
+
+// --- launch_command: identity → the command the pane actually runs ---
+
+/// A `[clis]` table with one entry mapping `name` to `command`.
+fn clis_with_command(name: &str, command: &str) -> HashMap<String, CustomCli> {
+    let mut clis = HashMap::new();
+    clis.insert(
+        name.to_string(),
+        CustomCli {
+            command: command.to_string(),
+            display_name: None,
+            submit_delay_ms: None,
+            settings_path: None,
+            approval_args: HashMap::new(),
+            prompt_profile: None,
+            session_id_args: None,
+            resume_args: None,
+            mcp: None,
+        },
+    );
+    clis
+}
+
+#[test]
+fn launch_command_substitutes_the_configured_command_for_the_key() {
+    // The documented [clis.claude-variant] command = "claude" example: the
+    // pane must run `claude`, never the key (which is not a binary).
+    let clis = clis_with_command("claude-variant", "claude");
+
+    let cmd = launch_command("claude-variant", &clis);
+
+    assert_eq!(cmd, "claude");
+    assert!(
+        !cmd.contains("claude-variant"),
+        "the key must not reach the pane: {cmd}"
+    );
+}
+
+#[test]
+fn launch_command_falls_back_to_name_without_entry() {
+    // A built-in detected CLI, or an explicit pass-through name, launches
+    // exactly as it did before this change.
+    let empty: HashMap<String, CustomCli> = HashMap::new();
+
+    assert_eq!(launch_command("codex", &empty), "codex");
+    assert_eq!(launch_command("cursor", &empty), "cursor");
+    assert_eq!(
+        launch_command("codex --flag", &empty),
+        "codex --flag",
+        "an unconfigured identity carrying flags passes through whole"
+    );
+}
+
+#[test]
+fn launch_command_leaves_a_safe_set_command_unquoted() {
+    // Bare names and plain paths stay readable in pane scrollback.
+    for command in ["claude", "/usr/local/bin/claude", "my-agent.v2+beta:1"] {
+        let clis = clis_with_command("ident", command);
+        assert_eq!(
+            launch_command("ident", &clis),
+            command,
+            "{command} is entirely in the portable safe set and must not be quoted"
+        );
+    }
+}
+
+#[test]
+fn launch_command_preserves_trailing_text() {
+    let clis = clis_with_command("claude-oss", "/usr/local/bin/claude");
+
+    assert_eq!(
+        launch_command("claude-oss --model opus", &clis),
+        "/usr/local/bin/claude --model opus"
+    );
+}
+
+#[test]
+fn launch_command_quotes_path_with_space_as_one_shell_word() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // A real executable at a path containing a space, printing a marker.
+    let dir = TempDir::new().unwrap();
+    let bin_dir = dir.path().join("My Tools");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let stub = bin_dir.join("my-agent");
+    fs::write(&stub, "#!/bin/sh\necho PAW_LAUNCH_MARKER\n").unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let stub_str = stub.to_string_lossy().into_owned();
+    let clis = clis_with_command("my-agent", &stub_str);
+
+    let cmd = launch_command("my-agent", &clis);
+
+    assert_eq!(
+        cmd,
+        format!("'{stub_str}'"),
+        "a path with a space must be emitted as one single-quoted word"
+    );
+
+    // The decisive check: a real POSIX shell runs the stub at that exact
+    // path, rather than word-splitting into `<dir>/My` plus an argument.
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&cmd)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "shell failed to run {cmd}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "PAW_LAUNCH_MARKER"
+    );
+}
+
+#[test]
+fn launch_command_quotes_a_command_carrying_shell_metacharacters() {
+    // Config is user input interpolated into a shell line; it must never be
+    // able to run a second command.
+    let clis = clis_with_command("evil", "claude; touch /tmp/pwned");
+
+    assert_eq!(
+        launch_command("evil", &clis),
+        "'claude; touch /tmp/pwned'",
+        "metacharacters must be made literal, not left to the shell"
+    );
+}
+
+#[test]
+fn custom_cli_mcp_field_round_trips_and_is_skipped_when_unset() {
+    let mut unset = clis_with_command("plain", "claude");
+    let text = toml::to_string(&unset).unwrap();
+    assert!(
+        !text.contains("mcp"),
+        "an unset mcp field must not be serialized: {text}"
+    );
+    let back: HashMap<String, CustomCli> = toml::from_str(&text).unwrap();
+    assert_eq!(back, unset, "the unset round-trip must be lossless");
+
+    if let Some(entry) = unset.get_mut("plain") {
+        entry.mcp = Some(true);
+    }
+    let text = toml::to_string(&unset).unwrap();
+    assert!(text.contains("mcp = true"), "expected mcp = true in {text}");
+    let back: HashMap<String, CustomCli> = toml::from_str(&text).unwrap();
+    assert_eq!(back, unset);
+
+    // And false survives too — it is an explicit opt-OUT, not an absence.
+    if let Some(entry) = unset.get_mut("plain") {
+        entry.mcp = Some(false);
+    }
+    let text = toml::to_string(&unset).unwrap();
+    let back: HashMap<String, CustomCli> = toml::from_str(&text).unwrap();
+    assert_eq!(back.get("plain").and_then(|c| c.mcp), Some(false));
+}
+
+#[test]
+fn a_config_without_mcp_loads_unchanged() {
+    // Backward compatibility: a pre-existing [clis] entry parses with mcp
+    // absent and behaves exactly as before.
+    let parsed: HashMap<String, CustomCli> =
+        toml::from_str("[claude-oss]\ncommand = \"claude\"\n").unwrap();
+
+    assert_eq!(parsed.get("claude-oss").and_then(|c| c.mcp), None);
+    assert_eq!(launch_command("claude-oss", &parsed), "claude");
 }

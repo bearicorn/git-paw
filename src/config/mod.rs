@@ -25,7 +25,7 @@ mod tests;
 
 pub use broker::{BrokerConfig, WatcherConfig};
 pub use cli::{
-    CustomCli, Preset, add_custom_cli, add_custom_cli_to, remove_custom_cli,
+    CustomCli, Preset, add_custom_cli, add_custom_cli_to, launch_command, remove_custom_cli,
     remove_custom_cli_from, resolve_submit_delay_ms,
 };
 pub use dashboard::{BrokerLogConfig, DashboardConfig};
@@ -657,6 +657,7 @@ pub(crate) fn load_config_file(path: &Path) -> Result<Option<PawConfig>, PawErro
         Ok(contents) => {
             let config: PawConfig = toml::from_str(&contents)
                 .map_err(|e| PawError::ConfigError(format!("{}: {e}", path.display())))?;
+            validate_cli_commands(&config, path)?;
             validate_approval_args(&config, path)?;
             validate_session_templates(&config, path)?;
             for warning in worktree_runtime_warnings(&config) {
@@ -667,6 +668,25 @@ pub(crate) fn load_config_file(path: &Path) -> Result<Option<PawConfig>, PawErro
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(PawError::ConfigError(format!("{}: {e}", path.display()))),
     }
+}
+
+/// Rejects a `[clis.<name>].command` that is empty or only whitespace.
+///
+/// [`launch_command`] substitutes `command` into the pane's launch line, so
+/// a blank one quotes to an empty shell word and the pane fails with a bare
+/// "command not found" naming nothing. Failing the load instead names the
+/// entry the operator has to fix.
+fn validate_cli_commands(config: &PawConfig, path: &Path) -> Result<(), PawError> {
+    for (name, cli) in &config.clis {
+        if cli.command.trim().is_empty() {
+            return Err(PawError::ConfigError(format!(
+                "{}: [clis.{name}] command is empty; set it to the binary or \
+                 path the pane should launch",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Rejects `[clis.<name>].approval_args` maps whose keys are not one of the

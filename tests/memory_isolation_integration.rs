@@ -42,6 +42,7 @@ fn config_with_cli_settings(name: &str, settings: &Path) -> PawConfig {
             prompt_profile: None,
             session_id_args: None,
             resume_args: None,
+            mcp: None,
         },
     );
     config

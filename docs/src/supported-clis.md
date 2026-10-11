@@ -16,7 +16,7 @@ git-paw auto-detects these AI coding CLIs on your PATH:
 | Droid | `droid` | Factory's coding agent CLI | See project docs | No |
 | Pi | `pi` | Terminal coding agent | See project docs | No |
 | Junie | `junie` | JetBrains' coding agent CLI | See project docs | No |
-| Cursor | `cursor` | Cursor's command-line tool | See project docs | No |
+| Cursor Agent | `cursor-agent` | Cursor's agent CLI | See project docs | No |
 | GitHub Copilot CLI | `copilot` | GitHub Copilot in the terminal | See project docs | No |
 | cn | `cn` | Continue's coding agent CLI | See project docs | No |
 | Kilo Code | `kilo` | Kilo Code's coding agent CLI | See project docs | No |
@@ -31,6 +31,22 @@ in it; add `session_id_args` / `resume_args` to a `[clis.<name>]`
 override (see [Custom CLIs](configuration/README.md#custom-clis)) to
 enable resume for a CLI that supports it but isn't in git-paw's
 built-in table yet.
+
+The Cursor row names `cursor-agent`, Cursor's agent CLI. The bare `cursor`
+binary is the Cursor *editor* launcher on most installations, so git-paw no
+longer auto-detects it as an AI CLI. This affects auto-detection only — if
+`cursor` is the command you want a pane to launch, any of these still
+resolves it unchanged:
+
+- `git paw start --cli cursor`,
+- a `[clis.cursor]` entry (see [Custom CLIs](configuration/README.md#custom-clis)),
+- a saved session whose recorded `cli` is `cursor`.
+
+Spec-driven selection and `git paw add` validate availability against the
+detected list, so there a `[clis.cursor]` entry is the route to take.
+`default_cli` is **not** an escape hatch: it only pre-selects a row in the
+interactive picker, and the picker is built from the detected list — an
+undetected `cursor` has no row to pre-select, so the setting has no effect.
 
 ## How Detection Works
 

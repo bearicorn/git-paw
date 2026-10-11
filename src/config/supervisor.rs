@@ -1029,6 +1029,7 @@ pub fn approval_flags(cli: &str, level: &ApprovalLevel) -> &'static str {
 ///         prompt_profile: None,
 ///         session_id_args: None,
 ///         resume_args: None,
+///         mcp: None,
 ///     },
 /// );
 /// assert_eq!(

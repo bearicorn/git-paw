@@ -19,7 +19,9 @@ use super::helpers::{dashboard_command, warn_if_broker_is_exposed};
 use super::supervisor::resolve_supervisor_flags;
 use crate::attach_or_print_hint;
 
-/// Builds the recovery-time CLI launch command for `entry`: the bare CLI id,
+/// Builds the recovery-time CLI launch command for `entry`: the command
+/// configured for the entry's CLI identity ([`config::launch_command`] —
+/// `entry.cli` is the `[clis.<name>]` key, not necessarily a binary name),
 /// the resolved approval flags for `approval` (`supervisor-config`'s "every
 /// launch path that spawns a worker CLI" requirement — recovery is a launch
 /// path like any other), and, when the entry carries an assigned
@@ -39,10 +41,11 @@ fn cli_command_for_recovery<S: std::hash::BuildHasher>(
     clis: &HashMap<String, CustomCli, S>,
 ) -> String {
     let agent_flags = config::resolve_approval_flags(&entry.cli, &approval, clis);
+    let launch = config::launch_command(&entry.cli, clis);
     let mut cli_command = if agent_flags.is_empty() {
-        entry.cli.clone()
+        launch
     } else {
-        format!("{} {agent_flags}", entry.cli)
+        format!("{launch} {agent_flags}")
     };
     if let Some(id) = entry.cli_session_id.as_deref()
         && let Some(args) = config::resolve_resume_args(&entry.cli, id, clis)
@@ -285,10 +288,11 @@ fn recover_supervisor_session(
         .unwrap_or(supervisor_cfg.agent_approval);
     let supervisor_flags =
         resolve_supervisor_flags(&supervisor_cli, supervisor_approval, &config.clis);
+    let supervisor_launch = config::launch_command(&supervisor_cli, &config.clis);
     let supervisor_cli_command = if supervisor_flags.is_empty() {
-        supervisor_cli.clone()
+        supervisor_launch
     } else {
-        format!("{supervisor_cli} {supervisor_flags}")
+        format!("{supervisor_launch} {supervisor_flags}")
     };
 
     let layout = git_paw::supervisor::layout::supervisor_layout(existing.worktrees.len())?;
@@ -431,6 +435,7 @@ mod tests {
                 prompt_profile: None,
                 session_id_args: None,
                 resume_args: Some("--continue {{SESSION_ID}}".to_string()),
+                mcp: None,
             },
         );
         assert_eq!(
