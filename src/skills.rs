@@ -29,7 +29,11 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json;
+use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
+
+use crate::config::CustomCli;
 
 /// The embedded coordination skill, compiled into the binary.
 ///
@@ -395,21 +399,43 @@ fn slugify_branch(branch: &str) -> String {
     crate::broker::messages::slugify_branch(branch)
 }
 
-/// CLI names known to speak MCP (Model Context Protocol) well enough to
-/// receive the MCP tool form of the boot block (capability `mcp-agent-
-/// publish`). An unrecognized name — including any custom `[clis.<name>]`
-/// entry this list has no opinion on — is treated as non-MCP (design D4): a
-/// boot block naming tools a CLI cannot call would strand the agent at t=0,
+/// Built-in CLI identities known to speak MCP (Model Context Protocol) well
+/// enough to receive the MCP tool form of the boot block (capability
+/// `mcp-agent-publish`). This is step 2 of [`cli_speaks_mcp`]'s resolution
+/// order — consulted only when the identity's `[clis.<name>]` entry does not
+/// state an explicit `mcp` value.
+///
+/// An identity this list has no opinion on is treated as non-MCP (design D4):
+/// a boot block naming tools a CLI cannot call would strand the agent at t=0,
 /// so the safe default is the helper-script form.
-const MCP_CAPABLE_CLIS: &[&str] = &["claude", "codex", "cursor", "agy"];
+const MCP_CAPABLE_CLIS: &[&str] = &["claude", "codex", "cursor-agent", "agy"];
 
-/// Returns whether `cli_name` is known to speak MCP. See
-/// [`MCP_CAPABLE_CLIS`]. `cli_name` may carry trailing flags (e.g. `"claude
-/// --foo"`); only the leading binary name is matched.
+/// Returns whether the CLI *identity* `cli` speaks MCP, deciding which form of
+/// the boot block it receives.
+///
+/// Resolution order, all keyed on the leading whitespace-delimited token of
+/// `cli` (identities may carry trailing flags, e.g. `"claude --foo"`):
+///
+/// 1. An explicit `mcp = true` / `mcp = false` on the matching
+///    `[clis.<token>]` entry wins outright — including over the built-in
+///    table, so a built-in MCP CLI can be opted out.
+/// 2. Otherwise the built-in [`MCP_CAPABLE_CLIS`] table.
+/// 3. Otherwise not MCP-capable, so the helper-script form is used.
+///
+/// The lookup uses the identity — the `[clis.<name>]` key, or a built-in /
+/// pass-through name — and deliberately never the resolved launch command.
+/// `[clis.claude-oss] command = "claude"` is a variant that reads a different
+/// config dir, which may not have git-paw's MCP server registered; inheriting
+/// `claude`'s MCP form from the command's basename would hand that agent a
+/// boot block naming tools it cannot call and strand it at t=0. The user opts
+/// in with `mcp = true` once the server is registered for that variant.
 #[must_use]
-pub fn cli_speaks_mcp(cli_name: &str) -> bool {
-    let leading = cli_name.split_whitespace().next().unwrap_or(cli_name);
-    MCP_CAPABLE_CLIS.contains(&leading)
+pub fn cli_speaks_mcp<S: BuildHasher>(cli: &str, clis: &HashMap<String, CustomCli, S>) -> bool {
+    let identity = cli.split_whitespace().next().unwrap_or(cli);
+    match clis.get(identity).and_then(|entry| entry.mcp) {
+        Some(explicit) => explicit,
+        None => MCP_CAPABLE_CLIS.contains(&identity),
+    }
 }
 
 /// Builds the standardized boot instruction block for agent initialization.
@@ -4638,24 +4664,93 @@ Your approval role this session is escalation-driven, in this order each cycle:\
         );
     }
 
-    /// `boot-block` scenarios "Non-MCP CLI receives the helper form" and
-    /// "Unknown MCP support falls back to the helper form": both collapse to
-    /// `mcp_capable: false` at the render layer — [`cli_speaks_mcp`] is what
-    /// tells them apart at the call site, and an unrecognized name resolves
-    /// to `false` there (design D4).
+    /// A one-entry `[clis]` table: identity `name`, launching `command`, with
+    /// the given explicit MCP opt-in / opt-out (or `None` for "unset").
+    fn clis_with_mcp(name: &str, command: &str, mcp: Option<bool>) -> HashMap<String, CustomCli> {
+        let mut clis = HashMap::new();
+        clis.insert(
+            name.to_string(),
+            CustomCli {
+                command: command.to_string(),
+                display_name: None,
+                submit_delay_ms: None,
+                settings_path: None,
+                approval_args: HashMap::new(),
+                prompt_profile: None,
+                session_id_args: None,
+                resume_args: None,
+                mcp,
+            },
+        );
+        clis
+    }
+
+    /// `boot-block` scenario "Built-in MCP-capable set names Cursor's agent
+    /// CLI", plus the older "Non-MCP CLI receives the helper form" /
+    /// "Unknown MCP support falls back to the helper form": with no `[clis]`
+    /// entries the built-in table decides, and an unrecognized identity —
+    /// including the `cursor` *editor* launcher — resolves to `false` (D4).
     #[test]
     fn cli_speaks_mcp_known_clis_true_unknown_clis_false() {
-        for known in ["claude", "codex", "cursor", "agy"] {
-            assert!(cli_speaks_mcp(known), "{known} should be MCP-capable");
-        }
-        for unknown in ["aider", "vibe", "some-custom-cli", ""] {
+        let none: HashMap<String, CustomCli> = HashMap::new();
+
+        for known in ["claude", "codex", "cursor-agent", "agy"] {
             assert!(
-                !cli_speaks_mcp(unknown),
+                cli_speaks_mcp(known, &none),
+                "{known} should be MCP-capable"
+            );
+        }
+        for unknown in ["cursor", "aider", "vibe", "some-custom-cli", ""] {
+            assert!(
+                !cli_speaks_mcp(unknown, &none),
                 "{unknown:?} is not known MCP-capable and must default to false (D4)"
             );
         }
-        // Trailing flags don't defeat the match on the leading binary name.
-        assert!(cli_speaks_mcp("claude --dangerously-skip-permissions"));
+        // Trailing flags don't defeat the match on the leading identity token.
+        assert!(cli_speaks_mcp(
+            "claude --dangerously-skip-permissions",
+            &none
+        ));
+    }
+
+    /// `boot-block` scenario "A custom CLI opts in to the MCP form": an
+    /// explicit `mcp = true` makes an identity the built-in table has never
+    /// heard of MCP-capable.
+    #[test]
+    fn cli_speaks_mcp_honours_config_opt_in() {
+        let clis = clis_with_mcp("claude-oss", "claude", Some(true));
+
+        assert!(
+            cli_speaks_mcp("claude-oss", &clis),
+            "an explicit mcp = true must make the identity MCP-capable"
+        );
+    }
+
+    /// `boot-block` scenario "A built-in MCP CLI can be opted out": an
+    /// explicit `mcp = false` wins over the built-in table, so `claude`
+    /// falls back to the helper-script form.
+    #[test]
+    fn cli_speaks_mcp_honours_config_opt_out() {
+        let clis = clis_with_mcp("claude", "claude", Some(false));
+
+        assert!(
+            !cli_speaks_mcp("claude", &clis),
+            "an explicit mcp = false must beat the built-in MCP-capable table"
+        );
+    }
+
+    /// `boot-block` scenario "A custom CLI without the field keeps the helper
+    /// form". The decisive case for D4: `command = "claude"` is a built-in
+    /// MCP binary, yet the identity `claude-oss` must NOT inherit its MCP
+    /// form — capability is read off the identity, never the launch command.
+    #[test]
+    fn cli_speaks_mcp_unset_custom_cli_falls_back_to_helper() {
+        let clis = clis_with_mcp("claude-oss", "claude", None);
+
+        assert!(
+            !cli_speaks_mcp("claude-oss", &clis),
+            "capability must not be inferred from the launch command's basename"
+        );
     }
 
     /// `boot-block` scenario "Both forms carry the same four events": the

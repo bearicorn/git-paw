@@ -309,7 +309,10 @@ pub(crate) fn cmd_start(
         builder = builder.add_pane(tmux::PaneSpec {
             branch: branch.clone(),
             worktree: wt_str,
-            cli_command: apply_approval_flags(cli, &agent_flags),
+            cli_command: apply_approval_flags(
+                &config::launch_command(cli, &config.clis),
+                &agent_flags,
+            ),
         });
 
         worktree_entries.push(WorktreeEntry {
@@ -398,12 +401,19 @@ pub(crate) fn cmd_start(
         for (idx, (branch, cli)) in selection.mappings.iter().enumerate() {
             let pane_idx = if broker_config.enabled { idx + 1 } else { idx };
             let agent_flags = config::resolve_approval_flags(cli, approval, &config.clis);
-            let cli_command = apply_approval_flags(cli, &agent_flags);
-            gate_pane_or_fail_on_dialog(&tmux_session.name, pane_idx, &cli_command, &config.clis)?;
+            let cli_command =
+                apply_approval_flags(&config::launch_command(cli, &config.clis), &agent_flags);
+            gate_pane_or_fail_on_dialog(
+                &tmux_session.name,
+                pane_idx,
+                cli,
+                &cli_command,
+                &config.clis,
+            )?;
             let boot_block = git_paw::skills::build_boot_block(
                 branch,
                 &broker_config.url(),
-                git_paw::skills::cli_speaks_mcp(cli),
+                git_paw::skills::cli_speaks_mcp(cli, &config.clis),
             );
 
             let args =
@@ -710,7 +720,10 @@ fn launch_spec_session(
         builder = builder.add_pane(tmux::PaneSpec {
             branch: branch.clone(),
             worktree: wt_str,
-            cli_command: apply_approval_flags(cli, &agent_flags),
+            cli_command: apply_approval_flags(
+                &config::launch_command(cli, &config.clis),
+                &agent_flags,
+            ),
         });
 
         worktree_entries.push(WorktreeEntry {
@@ -805,14 +818,21 @@ fn launch_spec_session(
     for (idx, (branch, cli)) in mappings.iter().enumerate() {
         let pane_idx = idx + pane_offset;
         let agent_flags = config::resolve_approval_flags(cli, approval, &config.clis);
-        let cli_command = apply_approval_flags(cli, &agent_flags);
-        gate_pane_or_fail_on_dialog(&tmux_session.name, pane_idx, &cli_command, &config.clis)?;
+        let cli_command =
+            apply_approval_flags(&config::launch_command(cli, &config.clis), &agent_flags);
+        gate_pane_or_fail_on_dialog(
+            &tmux_session.name,
+            pane_idx,
+            cli,
+            &cli_command,
+            &config.clis,
+        )?;
         let task_prompt = build_task_prompt(spec_by_branch.get(branch.as_str()).copied());
         let prompt = if broker_config.enabled {
             let boot_block = git_paw::skills::build_boot_block(
                 branch,
                 &broker_config.url(),
-                git_paw::skills::cli_speaks_mcp(cli),
+                git_paw::skills::cli_speaks_mcp(cli, &config.clis),
             );
             combine_boot_and_task_prompt(&boot_block, &task_prompt)
         } else {
@@ -996,14 +1016,19 @@ pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result
     attach_or_print_hint(&existing.session_name)
 }
 
-/// Appends `flags` to `cli` with a single separating space, or returns `cli`
-/// unchanged when `flags` is empty — no trailing separator — matching the
-/// supervisor path's (`attach_agent`'s) pane-command construction.
-fn apply_approval_flags(cli: &str, flags: &str) -> String {
+/// Appends `flags` to `command` with a single separating space, or returns
+/// `command` unchanged when `flags` is empty — no trailing separator —
+/// matching the supervisor path's (`attach_agent`'s) pane-command
+/// construction.
+///
+/// `command` is the pane's *launch command* (see
+/// [`config::launch_command`]), not the CLI identity: approval flags are
+/// resolved by identity but appended after the command the pane runs.
+fn apply_approval_flags(command: &str, flags: &str) -> String {
     if flags.is_empty() {
-        cli.to_string()
+        command.to_string()
     } else {
-        format!("{cli} {flags}")
+        format!("{command} {flags}")
     }
 }
 

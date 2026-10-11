@@ -2249,6 +2249,7 @@ fn gate_pane_for_injection_uses_the_resolved_cli_profile() {
             }),
             session_id_args: None,
             resume_args: None,
+            mcp: None,
         },
     );
     let profile = crate::config::resolve_prompt_profile("mycli", &clis);
@@ -2262,6 +2263,97 @@ fn gate_pane_for_injection_uses_the_resolved_cli_profile() {
     assert_eq!(
         classify_pane_readiness_with_profile("mycli-ready> ", &profile),
         PaneReadiness::Ready
+    );
+}
+
+/// `cli-resolution` capability, "Readiness gate uses the identity's prompt
+/// profile": with `[clis.claude-oss] command = "claude"` plus a
+/// `prompt_profile.readiness_markers` override, the gate SHALL classify
+/// readiness using the override's markers (resolved from the IDENTITY) and a
+/// bare-shell relaunch SHALL send the LAUNCH COMMAND. Resolving the profile
+/// from the launch string instead would silently fall back to Claude's
+/// markers, and relaunching the identity would type a non-existent binary.
+#[test]
+fn gate_pane_resolves_profile_by_identity_and_relaunches_command() {
+    let mut clis: std::collections::HashMap<String, crate::config::CustomCli> =
+        std::collections::HashMap::new();
+    clis.insert(
+        "claude-oss".to_string(),
+        crate::config::CustomCli {
+            command: "claude".to_string(),
+            display_name: None,
+            submit_delay_ms: None,
+            settings_path: None,
+            approval_args: std::collections::HashMap::new(),
+            prompt_profile: Some(crate::config::CliPromptProfileOverride {
+                readiness_markers: Some(vec!["oss-ready>".to_string()]),
+                ..Default::default()
+            }),
+            session_id_args: None,
+            resume_args: None,
+            mcp: None,
+        },
+    );
+
+    // `gate_pane_with` is the real wiring `gate_pane_for_injection` uses:
+    // it is handed BOTH strings and makes the identity-vs-command choice
+    // itself. Swapping the two inside it would fail this test.
+    let cli_id = "claude-oss";
+    let cli_command = crate::config::launch_command(cli_id, &clis);
+    assert_eq!(cli_command, "claude");
+
+    // The pane shows ONLY the identity's overridden marker. Claude's own
+    // markers are absent, so a profile resolved from the launch command
+    // ("claude", which has no entry and so falls back to Claude's default)
+    // would never classify this pane ready.
+    let mut relaunched: Vec<String> = Vec::new();
+    let outcome = gate_pane_with(
+        test_budget(),
+        &PaneCli {
+            cli_id,
+            cli_command: &cli_command,
+            clis: &clis,
+        },
+        || Some("oss-ready> ".to_string()),
+        |command| relaunched.push(command.to_string()),
+        |_| {},
+        |_| {},
+    );
+    assert_eq!(
+        outcome,
+        ReadinessOutcome::Ready,
+        "the profile must come from the identity, not the launch command"
+    );
+    assert!(relaunched.is_empty(), "a ready pane is never relaunched");
+
+    // Confirms the above is a real discriminator and not a coincidence: the
+    // same capture under the launch command's profile is NOT ready.
+    let wrong_profile = crate::config::resolve_prompt_profile(&cli_command, &clis);
+    assert_eq!(
+        classify_pane_readiness_with_profile("oss-ready> ", &wrong_profile),
+        PaneReadiness::Indeterminate,
+        "resolving by launch command must be the broken behaviour this split prevents"
+    );
+
+    // A persistent bare shell relaunches the COMMAND, never the identity.
+    let mut relaunched: Vec<String> = Vec::new();
+    let outcome = gate_pane_with(
+        test_budget(),
+        &PaneCli {
+            cli_id,
+            cli_command: &cli_command,
+            clis: &clis,
+        },
+        || Some("user@host:~$ ".to_string()),
+        |command| relaunched.push(command.to_string()),
+        |_| {},
+        |_| {},
+    );
+    assert_eq!(outcome, ReadinessOutcome::FellBack);
+    assert_eq!(
+        relaunched,
+        vec!["claude".to_string()],
+        "the [clis] key is not a binary and must never be typed into the pane"
     );
 }
 

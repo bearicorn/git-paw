@@ -2278,6 +2278,7 @@ Do you want to proceed?";
                 prompt_profile: None,
                 session_id_args: None,
                 resume_args: None,
+                mcp: None,
             },
         );
         let set = ProtectedPaths::derive(&config, None);

@@ -516,11 +516,15 @@ fn build_learnings_aggregator(
     aggregator
 }
 
-/// Assembles an agent pane's CLI invocation: the configured CLI, then its
+/// Assembles an agent pane's CLI invocation: the launch command, then its
 /// approval flags, then the resolved `session_id_args` — each appended only
 /// when non-empty, so a CLI with neither is invoked bare.
-fn agent_cli_command(cli: &str, flags: &str, session_id_args: Option<&str>) -> String {
-    let mut command = cli.to_string();
+///
+/// `command` is the pane's *launch command* ([`config::launch_command`]),
+/// not the CLI identity: flags and session-id args are resolved by identity
+/// but appended after the command the pane actually runs.
+fn agent_cli_command(command: &str, flags: &str, session_id_args: Option<&str>) -> String {
+    let mut command = command.to_string();
     for part in [flags, session_id_args.unwrap_or_default()] {
         if !part.is_empty() {
             command.push(' ');
@@ -634,12 +638,19 @@ fn attach_agent(
         .as_deref()
         .and_then(|id| config::resolve_session_id_args(ctx.agent_cli, id, ctx.clis));
 
-    let cli_command = agent_cli_command(ctx.agent_cli, ctx.agent_flags, session_id_args.as_deref());
+    // The pane launches the identity's configured `[clis.<name>].command`
+    // (falling back to the identity itself when unconfigured); every resolver
+    // above and the `cli` recorded below stay keyed by `ctx.agent_cli`.
+    let cli_command = agent_cli_command(
+        &config::launch_command(ctx.agent_cli, ctx.clis),
+        ctx.agent_flags,
+        session_id_args.as_deref(),
+    );
 
     let boot_block = git_paw::skills::build_boot_block(
         branch,
         &ctx.broker_config.url(),
-        git_paw::skills::cli_speaks_mcp(ctx.agent_cli),
+        git_paw::skills::cli_speaks_mcp(ctx.agent_cli, ctx.clis),
     );
     let task_prompt = build_task_prompt(spec_entry);
 
@@ -673,14 +684,19 @@ fn attach_agent(
 /// healthy running agent — so this returns `Err` instead of injecting. Every
 /// other outcome (`Ready` or `FellBack`) proceeds exactly as before; the
 /// caller injects the prompt regardless.
+///
+/// `cli_id` is the CLI's identity (the `[clis.<name>]` key or a built-in /
+/// pass-through name), which resolves the readiness markers; `cli_command` is
+/// what the pane actually runs and is what a bare-shell relaunch types.
 fn gate_pane_or_fail_on_dialog<S: std::hash::BuildHasher>(
     session_name: &str,
     pane_index: usize,
+    cli_id: &str,
     cli_command: &str,
     clis: &std::collections::HashMap<String, config::CustomCli, S>,
 ) -> Result<(), PawError> {
     dialog_stuck_result(
-        tmux::gate_pane_for_injection(session_name, pane_index, cli_command, clis),
+        tmux::gate_pane_for_injection(session_name, pane_index, cli_id, cli_command, clis),
         session_name,
         pane_index,
         cli_command,

@@ -3724,6 +3724,7 @@ mod tests {
                         prompt_profile: None,
                         session_id_args: None,
                         resume_args: None,
+                        mcp: None,
                     },
                 )
             })
@@ -3849,6 +3850,7 @@ mod tests {
                 prompt_profile: None,
                 session_id_args: None,
                 resume_args: None,
+                mcp: None,
             },
         );
         let protected = ProtectedPaths::derive(&config, None);
@@ -6862,6 +6864,7 @@ mod tests {
                 }),
                 session_id_args: None,
                 resume_args: None,
+                mcp: None,
             },
         );
         let merge_check = FakeMergeCheck::default();

@@ -275,6 +275,22 @@ where
     ReadinessOutcome::FellBack
 }
 
+/// A pane's CLI, as the two names the launch path keeps apart.
+///
+/// `cli_id` is the identity — the `[clis.<name>]` key, or a built-in /
+/// pass-through name — and keys every per-CLI lookup. `cli_command` is what
+/// the pane actually runs ([`crate::config::launch_command`]). They coincide
+/// for a CLI with no `[clis]` entry and diverge for a variant whose
+/// `command` differs from its key.
+pub(crate) struct PaneCli<'a, S> {
+    /// The CLI identity, which resolves the prompt profile.
+    pub cli_id: &'a str,
+    /// The command a bare-shell relaunch types into the pane.
+    pub cli_command: &'a str,
+    /// The merged `[clis]` table the profile is resolved against.
+    pub clis: &'a HashMap<String, CustomCli, S>,
+}
+
 /// Gate an agent pane before boot-block injection (design D1, G1; dialog
 /// handling GP-03b).
 ///
@@ -290,25 +306,72 @@ where
 /// [`ReadinessOutcome::DialogStuck`] for what the caller must do when it
 /// cannot be resolved.
 ///
-/// The readiness markers used are resolved for `cli_command` via
-/// [`resolve_prompt_profile`] against `clis` (`cli-prompt-profiles`
+/// The readiness markers used are resolved for `cli_id` — the CLI's
+/// *identity* (the `[clis.<name>]` key or a built-in / pass-through name) —
+/// via [`resolve_prompt_profile`] against `clis` (`cli-prompt-profiles`
 /// capability): a CLI with a configured `[clis.<name>].prompt_profile`
 /// override is gated on its own readiness markers rather than Claude's.
+///
+/// `cli_id` and `cli_command` are separate because an entry's
+/// `[clis.<name>].command` may differ from its key
+/// ([`crate::config::launch_command`]): the profile must be looked up under
+/// the key, while the relaunch must type the command the pane can actually
+/// run. Resolving the profile from the launch string would silently fall back
+/// to Claude's markers for any variant whose command differs from its key.
 #[must_use]
 pub fn gate_pane_for_injection<S: std::hash::BuildHasher>(
     session_name: &str,
     pane_index: usize,
+    cli_id: &str,
     cli_command: &str,
     clis: &HashMap<String, CustomCli, S>,
 ) -> ReadinessOutcome {
-    let profile = resolve_prompt_profile(cli_command, clis);
-    gate_pane_generic(
+    gate_pane_with(
         ReadinessBudget::default(),
-        &profile,
+        &PaneCli {
+            cli_id,
+            cli_command,
+            clis,
+        },
         || crate::supervisor::permission_prompt::capture_pane(session_name, pane_index),
-        || relaunch_cli_into_pane(&RealCommandRunner, session_name, pane_index, cli_command),
+        |command| relaunch_cli_into_pane(&RealCommandRunner, session_name, pane_index, command),
         std::thread::sleep,
         |digit| answer_dialog_in_pane(&RealCommandRunner, session_name, pane_index, digit),
+    )
+}
+
+/// The identity-vs-command wiring behind [`gate_pane_for_injection`], with
+/// the tmux I/O injected.
+///
+/// It owns the one decision that distinguishes the two strings: the prompt
+/// profile is resolved from `cli_id`, and `relaunch` is handed `cli_command`.
+/// Split out so a test can assert that wiring without a live pane — driving
+/// [`gate_pane_generic`] directly cannot, because the caller would have to
+/// pick the profile and the relaunch argument itself and would merely be
+/// re-asserting its own fixture.
+pub(crate) fn gate_pane_with<C, R, Sl, A, S>(
+    budget: ReadinessBudget,
+    cli: &PaneCli<'_, S>,
+    capture: C,
+    mut relaunch: R,
+    sleep: Sl,
+    answer: A,
+) -> ReadinessOutcome
+where
+    C: FnMut() -> Option<String>,
+    R: FnMut(&str),
+    Sl: FnMut(Duration),
+    A: FnMut(u8),
+    S: std::hash::BuildHasher,
+{
+    let profile = resolve_prompt_profile(cli.cli_id, cli.clis);
+    gate_pane_generic(
+        budget,
+        &profile,
+        capture,
+        || relaunch(cli.cli_command),
+        sleep,
+        answer,
     )
 }
 

@@ -863,10 +863,14 @@ pub(crate) fn cmd_supervisor(
     let repo_str = repo_root.to_string_lossy().to_string();
     let dashboard_command = dashboard_command();
 
+    // The pane launches the supervisor CLI identity's configured
+    // `[clis.<name>].command`; `supervisor_cli` stays the identity that
+    // resolved `supervisor_flags`, the prompt profile, and the settle delay.
+    let supervisor_launch = config::launch_command(&supervisor_cli, &config.clis);
     let supervisor_cli_command = if supervisor_flags.is_empty() {
-        supervisor_cli.clone()
+        supervisor_launch
     } else {
-        format!("{supervisor_cli} {supervisor_flags}")
+        format!("{supervisor_launch} {supervisor_flags}")
     };
 
     let supervisor_pane = tmux::PaneSpec {
@@ -1038,7 +1042,7 @@ pub(crate) fn cmd_supervisor(
     let supervisor_boot_block = git_paw::skills::build_boot_block(
         "supervisor",
         &broker_config.url(),
-        git_paw::skills::cli_speaks_mcp(&supervisor_cli),
+        git_paw::skills::cli_speaks_mcp(&supervisor_cli, &config.clis),
     );
     let supervisor_framing = build_supervisor_framing();
     let supervisor_prompt = format!("{supervisor_boot_block}\n\n{supervisor_framing}");
@@ -1046,6 +1050,7 @@ pub(crate) fn cmd_supervisor(
     gate_pane_or_fail_on_dialog(
         &tmux_session.name,
         0,
+        &supervisor_cli,
         &supervisor_pane.cli_command,
         &config.clis,
     )?;
@@ -1054,12 +1059,13 @@ pub(crate) fn cmd_supervisor(
     for (idx, prompt) in agent_prompts.iter().enumerate() {
         // Per-branch delay: a spec-driven session can resolve a distinct CLI
         // per branch (GP-10), and each CLI's configured settle delay differs.
-        let agent_delay =
-            resolve_submit_delay_ms(&effective_agent_cli(&branches[idx]), &config.clis);
+        let agent_cli = effective_agent_cli(&branches[idx]);
+        let agent_delay = resolve_submit_delay_ms(&agent_cli, &config.clis);
         let pane_idx = git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET + idx;
         gate_pane_or_fail_on_dialog(
             &tmux_session.name,
             pane_idx,
+            &agent_cli,
             &agent_panes[idx].cli_command,
             &config.clis,
         )?;

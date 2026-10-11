@@ -290,7 +290,7 @@ git-paw auto-detects the following AI coding CLIs when they are on `PATH`. The l
 | Droid | `droid` |
 | Pi | `pi` |
 | Junie | `junie` |
-| Cursor Agent | `cursor` |
+| Cursor Agent | `cursor-agent` |
 | GitHub Copilot CLI | `copilot` |
 | cn | `cn` |
 | Kilo Code | `kilo` |

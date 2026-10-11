@@ -848,6 +848,7 @@ mod tests {
                 }),
                 session_id_args: None,
                 resume_args: None,
+                mcp: None,
             },
         );
         let profile = crate::config::resolve_prompt_profile("mycli", &clis);
@@ -1413,6 +1414,7 @@ mod tests {
                 prompt_profile: None,
                 session_id_args: None,
                 resume_args: None,
+                mcp: None,
             },
         );
         ProtectedPaths::derive(&config, None)

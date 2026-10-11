@@ -29,9 +29,33 @@ use std::path::{Path, PathBuf};
 
 /// Known AI CLI binary names to scan for on PATH.
 const KNOWN_CLIS: &[&str] = &[
-    "claude", "codex", "agy", "aider", "vibe", "qwen", "amp", "opencode", "cline", "droid", "pi",
-    "junie", "cursor", "copilot", "cn", "kilo", "kimi",
+    "claude",
+    "codex",
+    "agy",
+    "aider",
+    "vibe",
+    "qwen",
+    "amp",
+    "opencode",
+    "cline",
+    "droid",
+    "pi",
+    "junie",
+    "cursor-agent",
+    "copilot",
+    "cn",
+    "kilo",
+    "kimi",
 ];
+
+/// The known AI CLI binary names this crate auto-detects on PATH.
+///
+/// Exposed read-only so documentation-sync guards can compare the roster with
+/// the Supported AI CLIs tables without duplicating the list.
+#[must_use]
+pub fn known_cli_names() -> &'static [&'static str] {
+    KNOWN_CLIS
+}
 
 /// How a CLI was discovered.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +117,7 @@ fn derive_display_name(binary_name: &str) -> String {
 fn known_display_name(binary_name: &str) -> String {
     match binary_name {
         "agy" => "Antigravity".to_string(),
+        "cursor-agent" => "Cursor Agent".to_string(),
         other => derive_display_name(other),
     }
 }
@@ -254,16 +279,15 @@ mod tests {
 
     #[test]
     fn all_known_clis_detected_when_present() {
-        let all_names = [
-            "claude", "codex", "agy", "aider", "vibe", "qwen", "amp", "opencode", "cline", "droid",
-            "pi", "junie", "cursor", "copilot", "cn", "kilo", "kimi",
-        ];
-        let (_dir, path) = fake_path_with_binaries(&all_names);
+        // Sourced from the roster itself, so adding a CLI to KNOWN_CLIS
+        // cannot leave this test silently checking a stale list.
+        let all_names = known_cli_names();
+        let (_dir, path) = fake_path_with_binaries(all_names);
 
         let result = detect_known_clis_in(Some(&path.as_os_str().to_os_string()));
 
         assert_eq!(result.len(), all_names.len());
-        for name in &all_names {
+        for name in all_names {
             assert!(
                 result.iter().any(|c| c.binary_name == *name),
                 "expected '{name}' to be detected"
@@ -393,6 +417,38 @@ mod tests {
             result2.is_empty(),
             "gemini must not auto-detect after the agy swap (re-add via [clis.gemini] only)"
         );
+    }
+
+    #[test]
+    fn cursor_agent_detected_and_editor_launcher_not_known() {
+        // Both binaries present: only Cursor's agent CLI is an AI CLI…
+        let (_dir, path) = fake_path_with_binaries(&["cursor", "cursor-agent"]);
+        let result = detect_known_clis_in(Some(&path.as_os_str().to_os_string()));
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].binary_name, "cursor-agent");
+        assert_eq!(result[0].display_name, "Cursor Agent");
+        assert_eq!(result[0].source, CliSource::Detected);
+
+        // …and the bare editor launcher never auto-detects on its own.
+        let (_dir2, path2) = fake_path_with_binaries(&["cursor"]);
+        let result2 = detect_known_clis_in(Some(&path2.as_os_str().to_os_string()));
+        assert!(
+            result2.is_empty(),
+            "the cursor editor launcher must not auto-detect (re-add via [clis.cursor] only)"
+        );
+    }
+
+    #[test]
+    fn known_cli_names_exposes_the_detection_roster() {
+        // The roster's observable content, for the docs-sync guard that reads
+        // it. That every name in it is detectable is covered by
+        // `all_known_clis_detected_when_present`, which now sources its list
+        // from this function.
+        let names = known_cli_names();
+        assert!(names.contains(&"cursor-agent"));
+        assert!(!names.contains(&"cursor"));
+        assert!(names.contains(&"claude"));
     }
 
     #[test]

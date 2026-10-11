@@ -608,6 +608,37 @@ mod tests {
         );
     }
 
+    /// `cli-resolution` scenario "An explicit `cursor` CLI still passes
+    /// through". `cursor` left the auto-detection roster (it is the Cursor
+    /// *editor* launcher; the agent CLI is `cursor-agent`), so it is absent
+    /// from the available list here — yet `--cli cursor` must still map every
+    /// branch to `cursor` unchanged, with no CLI prompt and no validation
+    /// against detection.
+    #[test]
+    fn explicit_cursor_cli_passes_through_without_detection() {
+        // This prompter errors out of select_cli(), so reaching it fails the
+        // test rather than silently substituting a detected CLI.
+        let prompter = TrackingPrompter::cancel_on_cli(vec![0, 1]);
+        let branches = test_branches();
+        let clis = test_clis();
+        assert!(
+            !clis.iter().any(|c| c.binary_name == "cursor"),
+            "the scenario requires cursor to be absent from the available list"
+        );
+
+        let result =
+            run_selection(&prompter, &branches, &clis, Some("cursor"), None, None).unwrap();
+
+        assert_eq!(
+            result.mappings,
+            vec![
+                ("feature/auth".to_string(), "cursor".to_string()),
+                ("fix/api".to_string(), "cursor".to_string()),
+            ],
+            "every branch must carry the pass-through CLI name unchanged"
+        );
+    }
+
     #[test]
     fn branches_flag_skips_branch_prompt_but_prompts_for_cli_uniform() {
         let prompter = TrackingPrompter::uniform(vec![], "beta");
