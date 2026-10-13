@@ -29,12 +29,12 @@ Test: `tests/e2e_tests.rs::broker_session_full_lifecycle` (and every other `git 
 
 #### Scenario: A test that calls `tmux new-session` directly uses a dedicated socket
 
-- **GIVEN** a test in `tests/auto_approve_integration.rs` or `tests/prompt_inbox_integration.rs` that constructs a `std::process::Command::new("tmux")` to run `new-session`
+- **GIVEN** a test in `tests/sweep_sh_approve.rs` (or any other integration test) that constructs a `std::process::Command::new("tmux")` to run `new-session`
 - **WHEN** the test sets up its `Command` builder
 - **THEN** the builder SHALL apply `tmux_test_env()` exactly as a `git paw start` test would
 - **AND** the resulting session SHALL appear only on the test-owned socket
 
-Test: `tests/auto_approve_integration.rs::*` and `tests/prompt_inbox_integration.rs::*` — every direct `tmux new-session` site applies the helper.
+Test: `tests/sweep_sh_approve.rs::*` — every direct `tmux new-session` site applies the helper.
 
 #### Scenario: Two `Command` builders in the same test share a socket when intended
 

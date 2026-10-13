@@ -1,6 +1,6 @@
 ---
 name: export-agnosticism
-description: Keep everything git-paw EXPORTS to a consumer project-agnostic across every export surface — bundled skills, shell scripts and mirrored logic (code), the init default config, allowlist/classifier presets, injected AGENTS.md sections / boot blocks / git hooks / settings seeding, and templates. Use whenever a change adds or edits any exported asset. Codifies the export-surface inventory, the agnosticism rule, how to stay agnostic per surface, the enforcing audits, and the review-gate checklist.
+description: Keep everything git-paw EXPORTS to a consumer project-agnostic across every export surface — bundled skills, shell scripts and mirrored logic (code), the init default config, any agent-CLI allow rules git-paw seeds, injected AGENTS.md sections / boot blocks / git hooks / settings seeding, and templates. Use whenever a change adds or edits any exported asset. Codifies the export-surface inventory, the agnosticism rule, how to stay agnostic per surface, the enforcing audits, and the review-gate checklist.
 license: MIT
 compatibility: git-paw
 ---
@@ -37,12 +37,12 @@ export.
   Compiled code keeps the assembly around them (placeholder substitution, conditional inclusion,
   per-backend selection, dedupe, region gating) — only the sentences live in the asset.
 - **Scripts & mirrored logic (code)** — `assets/scripts/{sweep,broker,docs-fetch}.sh`, including
-  the auto-approve **classifier** logic mirrored into `sweep.sh`.
+  the live-prompt gate mirrored into `sweep.sh` from `supervisor::permission_prompt`.
 - **Init default config** — the `.git-paw/config.toml` that `git paw init` generates.
-- **Allowlists / classifier presets** — the dev-command-allowlist preset, the `auto_approve`
-  safe-command classifier, the curl / broker-helper allowlist seeding. `render_dev_allowlist_preset`
-  stays compiled — it is generated *from* the allowlist constant so the documented preset cannot
-  drift from what is actually auto-approved; do not move it to a hand-editable asset.
+- **Seeded agent-CLI allow rules** — any permission rule git-paw writes into a consumer's agent
+  CLI settings. git-paw seeds none today; a change that starts doing so (e.g. `git paw setup-cli`)
+  adds an export surface and must be checked here. A seeded rule names a git-paw helper by its
+  stable path — never a consumer toolchain verb, and never a wildcard.
 - **Injected artifacts** — the pane **boot block**, the marker-delimited git-paw section injected
   into the consumer's `AGENTS.md`, **git hooks** (post-commit / pre-push / pre-commit, script
   bodies bundled at `assets/hooks/*.sh` — the installation mechanism itself stays compiled), CLI
@@ -52,14 +52,16 @@ export.
 
 ## How to stay agnostic (per surface)
 
-- **Toolchain verbs** — source from the resolved stack preset (`[supervisor.common_dev_allowlist]`)
-  / consumer config; NEVER hard-code `cargo`/`just`/`openspec`/`npm`/`pytest`/`go` as universally
-  safe or required. The classifier must not treat git-paw's toolchain as always-safe for every
-  consumer (this is the exact leak that survived a whole cycle — the `auto_approve` classifier).
+- **Toolchain verbs** — source from consumer config (the `[supervisor]` gate-command keys);
+  NEVER hard-code `cargo`/`just`/`openspec`/`npm`/`pytest`/`go` as universally safe or required.
+  The retired `auto_approve` classifier is the cautionary case: it baked a verb set that was
+  either git-paw's own toolchain or a guess at the consumer's, and the leak survived a whole
+  cycle. Prefer exporting no verb list at all.
 - **Config defaults** — all-commented examples with multi-stack `# or:` disclaimers; no active
   git-paw-specific default value.
-- **Allowlists** — a universal tier + opt-in named stack presets; **path-scoped** grants (never
-  `curl *` / `cd *`); least-privilege.
+- **Seeded allow rules** — **path-scoped** grants naming a git-paw helper script (never
+  `curl *` / `cd *`, never a consumer toolchain verb); least-privilege; and seeded only with the
+  consumer's explicit consent.
 - **Skills / injected prose** — no stack tokens; region-gate opsx/OpenSpec prose
   (`<!-- opsx-role-gating:begin/end -->`); wrap legitimate preset enumerations in
   `<!-- allowlist-prose -->` sentinels; defer commit-message format to the consumer.
@@ -76,8 +78,7 @@ export.
   vendor product names/paths (e.g. `Claude Code`, `.claude/`) outside an `<!-- allowlist-prose -->`
   span — the mechanism that keeps a deliberate CLI enumeration legal without making vendor naming
   an accident.
-- The `auto_approve` classifier stack-neutrality guard (`src/supervisor/auto_approve.rs`) + its
-  `sweep.sh` parity tests.
+- The live-prompt gate's `sweep.sh`↔Rust parity tests (`tests/sweep_sh_live_gate_parity.rs`).
 - The generated-default-config "all commented / multi-stack" test (`src/config.rs`).
 
 **Standing rule:** a NEW export surface MUST ship with an agnosticism guard. If you add an

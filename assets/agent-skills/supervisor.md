@@ -320,20 +320,22 @@ your own input and interrupts the command you are mid-way through running.
 `sweep.sh` targets agent panes by design; when you send keys directly,
 always pass an explicit agent pane index and confirm it is not 0.
 
-By default (an attended session), you are the sole approver: sweep and
-approve classifier-safe prompts yourself, as usual.
+In an attended session nothing approves permission prompts in the background.
+Your own sweep is how a stuck agent's prompt reaches the human — relay what you
+find and approve only on the human's word (see **Who decides a permission
+prompt**).
 
 <!-- drive-loop-directive:begin -->
 ## Unattended: a drive loop is running
 
-An in-process drive loop is auto-approving classifier-safe permission prompts on every pane this session. It owns mechanical approval of safe prompts — do NOT blanket-sweep-and-approve them yourself, or you will race the loop.
+An in-process drive loop is sweeping every pane this session. It approves nothing: every live permission prompt it finds is escalated into THIS pane and recorded on the broker, and the rest of the wave keeps moving. No git-paw component approves permission prompts.
 
 The loop is the pump; you are the brain. It does not merely park what it cannot decide — it types each judgment call straight into THIS pane and moves on without waiting for you, and it nudges you to run an orchestration sweep on a longer cadence. A task prompt arriving here with no human behind it is the loop handing you work; see **Judgment calls handed to you** for the four kinds and how to decide each.
 
-Your approval role this session is escalation-driven, in this order each cycle:
+Your role this session is escalation-driven, in this order each cycle:
 
-1. **Drain the loop's escalations first.** Prompts the loop could not classify safe are injected here AND recorded as review items in your broker inbox — the inbox is the backstop for anything that arrived while this pane was busy. Reason about each and either approve the specific escalated pane (`.git-paw/scripts/sweep.sh approve <pane>`) or publish feedback — before anything else, so blocked agents unblock fastest.
-2. **Then run your normal sweep** — verification, merge, conflict handling, detect-stuck, and status — as usual, but WITHOUT blanket-approving safe prompts (the loop owns those).
+1. **Drain the loop's escalations first.** Each escalated permission prompt is injected here AND recorded as a review item in your broker inbox — the inbox is the backstop for anything that arrived while this pane was busy. Relay each one to the human, naming the agent and the pending command, and run `.git-paw/scripts/sweep.sh approve <pane>` only when the human explicitly tells you to. For any other escalation, reason about it and publish feedback or an answer — before anything else, so blocked agents unblock fastest.
+2. **Then run your normal sweep** — verification, merge, conflict handling, detect-stuck, and status — as usual. Do not wait for prompts to clear on their own; nothing will clear them but the human's decision.
 <!-- drive-loop-directive:end -->
 
 ### Cross-worktree git — `git -C <path>`, never `cd <path> && git`
@@ -365,11 +367,11 @@ to print the result.
 
 The probe text varies from one run to the next (a different captured
 code, different trailing output), so the CLI's command-string permission
-whitelisting never matches the next invocation — every run raises a
-fresh approval prompt and the loop stalls on the same safe command
-forever. A bare, prefix-matchable command is approved once and
-generalises across every later run, which is exactly what the CLI's own
-permission-prefix matching and git-paw's classifier rely on.
+matching never matches the next invocation — every run raises a fresh
+approval prompt, and each one now waits on a human. A bare,
+prefix-matchable command is allowed once by the CLI's own rules and
+generalises across every later run, which is exactly what that
+permission-prefix matching relies on.
 
 This is about the *probe wrapper*, not about the exit status itself:
 keep observing and acting on whether a command succeeded or failed —
@@ -490,12 +492,13 @@ curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
 
 ### Judgment calls handed to you
 
-In an unattended session the drive loop is a **pump, not a brain**: it
-mechanically approves the classifier-safe permission prompts, and whenever it
-meets something that needs judgment it types that judgment call straight into
-your pane and moves on. It does not wait for you. So a task prompt can appear
-in your pane with no human behind it — that is the loop handing you work, and
-deciding it is your job, not the human's.
+In an unattended session the drive loop is a **pump, not a brain**: it sweeps
+panes, escalates every permission prompt it finds, and whenever it meets
+something that needs judgment it types that judgment call straight into your
+pane and moves on. It does not wait for you. So a task prompt can appear in
+your pane with no human behind it — that is the loop handing you work, and
+deciding it is your job, not the human's. The one exception is a permission
+prompt: those are the human's to decide, and your job is to relay them.
 
 Four kinds of judgment call reach you this way. For each, decide from the
 project's own specs plus the cross-agent state already visible on the broker.
@@ -538,36 +541,42 @@ over. The loop will also nudge you to run an orchestration sweep on a longer
 cadence — that nudge is your cue to re-read the broker state and pick up
 whatever is still open, including anything a busy pane missed.
 
-### The tiered permission model
+### Who decides a permission prompt
 
-When a coding agent's CLI would prompt for a blocked command, decide whether
-to approve it by working down three tiers, in order:
+You do not. Three parties decide, in this order:
 
-1. **The worker's CLI-native permission check runs first.** Its own
-   permission mode (auto-accept-edits, plan mode, an allowlisted prefix, …)
-   decides most commands before you are ever asked — this tier is the CLI's
-   own business, not yours.
-2. **If the CLI would prompt, consult git-paw's safe-command policy —
-   evaluated authoritatively via `git paw __classify <command>`.** This is
-   the single source shared with the mechanical drive loop's auto-approver,
-   so this skill never maintains a parallel authoritative list that could
-   drift from it. Run the check directly, or through
-   `.git-paw/scripts/sweep.sh approve <pane>`, which resolves through the
-   same classifier.
-3. **If the command is not classified safe, escalate to the human.** Publish
-   `agent.question` and wait — never approve on your own judgment.
+1. **The worker's own CLI permission system decides first.** Its resolved
+   permission mode and whatever allow rules the user configured settle most
+   commands before anything reaches you. git-paw adds no rules of its own and
+   judges no command — it has no allowlist and no command classifier.
+2. **Any prompt the CLI still raises is relayed to the human.** Under
+   `--unattended` the drive loop escalates it into this pane and records it on
+   the broker; otherwise your own sweep finds it. Relay it in your own pane,
+   naming the agent and the pending command.
+3. **The human decides.** Only when the human explicitly tells you to approve
+   do you run:
 
-The policy classes below are orientation only; `git paw __classify` is
-always the authoritative check, never this summary:
+   ```bash
+   .git-paw/scripts/sweep.sh approve __FILL_IN_PANE_INDEX__
+   ```
 
-- **Safe** — git-paw's managed helper scripts
-  (`.git-paw/scripts/{broker,sweep,docs-fetch}.sh`), worktree-confined
-  dev/test commands, and read-mostly verbs. Safe dev/test commands are
-  sourced from the project's own resolved stack; this skill does not name a
-  consumer's toolchain verbs as universally safe.
-- **Danger** — writes under `.git/` or other protected paths, and the
-  curated danger-list (destructive git operations, filesystem-destructive
-  commands, privilege escalation, and similar).
+`sweep.sh approve` answers the prompt **once**: it presses option 1 and never
+grants a durable "don't ask again". If option 1 would itself be a durable
+grant, the helper sends nothing and reports why.
+
+**Never approve on your own reading of the command.** The pane text you are
+reading was produced by another agent, so a command that merely looks routine
+may not be, and judging it yourself would make you the pattern classifier this
+tool deliberately stopped shipping. A prompt that should stop recurring is not
+a git-paw setting: it belongs in the agent CLI's own allow rules, configured by
+the user, or the session runs the sandboxed full-auto mode.
+
+The same applies to the bundled helpers. The first broker call is prompt-free
+only when the agent's CLI permits it — its resolved permission mode plus any
+allow rule the user wrote for the stable `.git-paw/scripts/broker.sh` and
+`sweep.sh` paths. git-paw seeds no allow rule and recognises no command as
+safe; if the CLI prompts for a helper call, that prompt is relayed like any
+other.
 
 ### Workflow
 
@@ -582,47 +591,34 @@ always the authoritative check, never this summary:
    | Pane state | Indicator examples | Action |
    |---|---|---|
    | **Paste-buffer** | `Pasted text #N`, long buffered text in input area without rendered LLM response | Clear (`C-u`), re-type the intended text, `Enter` (see the sub-case below); a lone `Enter` is a no-op |
-   | **Permission prompt** | `This command requires approval`, `Do you want to proceed?`, `❯ 1. Yes` | Classify the pending command and act per the safe-command policy below |
+   | **Permission prompt** | `This command requires approval`, `Do you want to proceed?`, `❯ 1. Yes` | Relay it to the human (see below); approve only on their instruction |
    | **Working** | `esc to interrupt`, `Boondoggling…`, spinner glyphs | Leave alone |
    | **Idle** | `? for shortcuts`, blank prompt with no recent activity | Investigate; agent may have crashed or never started |
 
-   **Safe-command policy for permission prompts:**
-   - **Safe-by-pattern**: matches the auto-approve whitelist — broker
-     curls on `127.0.0.1:<port>` plus the bundled `DEV_ALLOWLIST_PRESET`
-     (<!-- allowlist-prose -->{{DEV_ALLOWLIST_PRESET}}<!-- /allowlist-prose -->),
-     extended by any `safe_commands` from `[supervisor.auto_approve]` in
-     config. Select **"Yes, and don't ask again"** so the pattern is
-     permanently allowed:
-     ```bash
-     .git-paw/scripts/sweep.sh approve __FILL_IN_PANE_INDEX__
-     ```
-   - **Confined-to-worktree**: file edits, reads, `git -C <agent-worktree>`
-     operations bounded to the agent's own worktree. Select **"Yes, allow
-     all edits"** (typically also `Down` + `Enter`).
-   - **Unknown / wider scope**: anything else — escalate via
-     `agent.question`. Do NOT auto-approve.
+   **Handling a permission prompt:** relay it to the human, naming the
+   agent and the pending command, and say what it is waiting on. Do not
+   judge the command yourself and do not approve it. Only when the human
+   explicitly tells you to do you run
+   `.git-paw/scripts/sweep.sh approve __FILL_IN_PANE_INDEX__`, which answers
+   once and never grants a durable permission. The full ladder is in **Who
+   decides a permission prompt**.
 
-   This proactive sweep complements (does **NOT** replace) the existing
-   `[supervisor.auto_approve]` background poll thread. The poll thread is
-   reactive (acts on stall threshold elapsing); the sweep is proactive
-   (acts within seconds of supervisor attach). Together they cover both the
-   first-few-seconds window after launch and any prompts that appear later.
+   No git-paw component approves prompts in the background, so this sweep is
+   not a complement to anything — within the first-few-seconds window after
+   attach it is the only thing that will notice a prompt at all, and on an
+   unattended session the drive loop's escalations arrive alongside it.
 
-   **Approvals fire only on a re-confirmed live prompt, and never on pane 0.**
-   Every keystroke approval — the `sweep.sh approve` helper above and the
-   `[supervisor.auto_approve]` poll thread alike — passes through the
-   broker-mediated-approvals send gate: it re-captures the target pane
-   immediately before sending and dispatches keys only when a permission-prompt
-   marker still anchors the modal block — the narrow last-4-line tail at the
-   capture's true end, or, at a bounded offset above it, the footer line
-   itself together with a numbered option line nearby (never a bare mention
-   of the footer text). A prompt that cleared between your decision and the
-   send therefore receives **no** stray keys
-   (which would otherwise land as literal chat text). The gate also refuses
-   pane 0 (your own pane): `sweep.sh approve 0` sends nothing and reports the
-   exclusion, and the auto-approver never blind-sends into pane 0. Clearing your
-   own prompt is a separate, non-blind action — never blind send-keys to
-   pane 0.
+   **An approval fires only on a re-confirmed live prompt, and never on
+   pane 0.** `sweep.sh approve` re-captures the target pane immediately before
+   sending and dispatches keys only when a permission-prompt marker still
+   anchors the modal block — the narrow last-4-line tail at the capture's true
+   end, or, at a bounded offset above it, the footer line itself together with
+   a numbered option line nearby (never a bare mention of the footer text). A
+   prompt that cleared between the human's decision and the send therefore
+   receives **no** stray keys (which would otherwise land as literal chat
+   text). The helper also refuses pane 0 (your own pane): `sweep.sh approve 0`
+   sends nothing and reports the exclusion. Clearing your own prompt is a
+   separate, non-blind action — never blind send-keys to pane 0.
 
 2. **Watch** — poll `/status` and `/messages/supervisor` every ~30 seconds. React to
    `agent.artifact`, `agent.blocked`, and `agent.status` events. The filesystem watcher
@@ -631,14 +627,14 @@ always the authoritative check, never this summary:
 
    **Continuous-iteration pane sweep.** On **every** monitoring-loop iteration —
    not just at attach time — sweep every coding-agent pane via
-   `.git-paw/scripts/sweep.sh snapshot` and apply the §1.5
-   safe-command policy to any permission prompt you find. Three mechanisms cover
-   the full lifecycle: §1.5 launch-time sweep runs **once** at attach (first-few-
-   seconds window); this §2 continuous sweep runs on **each monitoring loop
-   iteration** (steady-state); the reactive `[supervisor.auto_approve]` background
-   poll thread (see "Auto-approve permission prompts" below) is a fallback for
-   when your iteration is offline or its cadence is too slow. They coexist — none
-   replaces another.
+   `.git-paw/scripts/sweep.sh snapshot` and relay any permission prompt you find
+   to the human, exactly as in §1.5. Two mechanisms cover the lifecycle: the
+   §1.5 launch-time sweep runs **once** at attach (first-few-seconds window),
+   and this §2 continuous sweep runs on **each monitoring loop iteration**
+   (steady-state). There is no third, background mechanism and no fallback
+   approver — a prompt neither sweep surfaces simply waits. On an unattended
+   session the drive loop escalates prompts to you as well, but it approves
+   none of them.
 3. **Stall detection** — if an agent's `last_seen` hasn't advanced in 5 minutes (no file
     changes, no commits), investigate:
     - Capture the agent's pane: `.git-paw/scripts/sweep.sh capture __FILL_IN_PANE_INDEX__`
@@ -652,7 +648,7 @@ always the authoritative check, never this summary:
       ```
       tmux send-keys -t paw-{{PROJECT_NAME}}:0.__FILL_IN_PANE_INDEX__ "You appear stalled. If you are blocked on another agent's work, publish agent.blocked by running: curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish -H 'Content-Type: application/json' -d '{\"type\":\"agent.blocked\",\"agent_id\":\"__FILL_IN_YOUR_AGENT_ID__\",\"payload\":{\"needs\":\"__FILL_IN_WHAT_YOU_NEED__\",\"from\":\"__FILL_IN_BLOCKING_AGENT_ID__\"}}'" Enter
       ```
-    - If the agent is stuck on a permission prompt: approve it (`.git-paw/scripts/sweep.sh approve __FILL_IN_PANE_INDEX__`) or send guidance.
+    - If the agent is stuck on a permission prompt: relay it to the human, naming the agent and the pending command, and approve it (`.git-paw/scripts/sweep.sh approve __FILL_IN_PANE_INDEX__`) only once they tell you to. Sending guidance instead is always available to you.
     - **Paste-buffer recovery** — if the pane shows a paste-buffer indicator
       (the CLI has buffered long pasted content, or a directive you already
       sent, but never submitted it), recover by clearing the stale input line
@@ -1537,19 +1533,17 @@ When the loop completes (every branch merged or skipped), publish a final
     your specific question and wait for human guidance before proceeding.
 - **Use questions for human judgment.** When you need human decision-making (trade-offs,
     priorities, intent clarification), publish `agent.question` instead of guessing.
-- **Absorb routine approvals.** You — the supervisor agent — are the rubber-stamp
-    gate for dev-essential permission prompts. On every monitoring iteration
-    (per the §2 continuous-iteration sweep + §1.5 safe-command policy), sweep
-    every coding-agent pane and approve routine prompts directly. Routine
-    families come from the bundled `DEV_ALLOWLIST_PRESET`
-    (<!-- allowlist-prose -->{{DEV_ALLOWLIST_PRESET}}<!-- /allowlist-prose -->),
-    plus broker curls on `127.0.0.1:<port>` and the project's `safe_commands`
-    extras from `[supervisor.auto_approve]`. The **human is the escalation
-    audience ONLY** for non-routine cases: cross-agent conflicts that need
-    design judgement, scope/spec decisions, destructive operations outside an
-    agent's own worktree, and anything novel or surprising. When in doubt,
-    escalate via `agent.question`; when patterns are familiar, absorb and
-    move on.
+- **Relay permission prompts; never approve on your own judgment.** On every
+    monitoring iteration (per the §2 continuous-iteration sweep and the §1.5
+    launch sweep), sweep every coding-agent pane and relay each permission
+    prompt you find to the human, naming the agent and the pending command.
+    Run `.git-paw/scripts/sweep.sh approve <pane>` only when the human
+    explicitly tells you to — a command looking familiar is not a reason, and
+    there is no routine family you may wave through. See **Who decides a
+    permission prompt**. The human remains the audience for the other
+    escalations too: cross-agent conflicts that need design judgement,
+    scope/spec decisions, destructive operations outside an agent's own
+    worktree, and anything novel or surprising.
 
 <!-- opsx-role-gating:begin -->
 ### Handling an opsx-role-gating revert request
@@ -1583,60 +1577,23 @@ skilled, surfaced step in your pane (the v0.5.0 "supervisor owns merges"
 doctrine), and git-paw itself never runs `git revert` on your behalf.
 
 <!-- opsx-role-gating:end -->
-### Auto-approve permission prompts
-
-When `[supervisor.auto_approve]` is enabled in `.git-paw/config.toml`, git-paw runs a
-background poll thread alongside this supervisor session. The thread:
-
-1. Polls `/status` every `stall_threshold_seconds` (default 30s, minimum 5s).
-2. For each agent in a non-terminal status whose `last_seen` is older than the
-    threshold, captures the pane via `tmux capture-pane -p`.
-3. Classifies the pending command (`Curl`, `Cargo`, `Git`, or `Unknown`).
-4. If the captured command matches the safe-command whitelist (broker
-    curls on `127.0.0.1:<port>` plus the bundled `DEV_ALLOWLIST_PRESET`
-    — <!-- allowlist-prose -->{{DEV_ALLOWLIST_PRESET}}<!-- /allowlist-prose --> —
-    extended by any `safe_commands` from config), dispatches the resolved
-    option digit + `Enter` via separate `tmux send-keys` calls.
-5. Otherwise, publishes an `agent.question` to your inbox so you can decide.
-
-Every auto-approval is logged as an `agent.status` message tagged `auto_approved` so
-you can audit decisions after the session.
-
-**Approval-level presets** (`approval_level` in config):
-
-- `safe` (default) — approve every entry in the built-in whitelist.
-- `conservative` — drop `git push` and `curl` from the whitelist.
-- `off` — disable auto-approval entirely (forces `enabled = false`).
-
-**To disable** auto-approval for a single session, set:
-
-```toml
-[supervisor.auto_approve]
-enabled = false
-```
-
-or pick `approval_level = "off"`. The supervisor poll thread will not run and you will
-see every prompt manually as before.
-
-The first broker call never trips a permission prompt because the agent's CLI runs under
-its own resolved permission mode and git-paw's command classifier recognises the bundled
-`.git-paw/scripts/broker.sh` / `sweep.sh` helpers by their stable path — no settings-file
-allowlist is seeded or required.
-
 ### Out-of-worktree write violations
 
 An observed **out-of-worktree write attempt** by a coding agent is a
-**boundary violation**, not routine friction. You observe it as either:
+**boundary violation**, not routine friction. Nothing in git-paw detects this
+for you — you observe it yourself, as either:
 
-- a **danger-class escalation on the protected-path rule** — the classifier
-  flags a write targeting operator config/memory territory (home-level CLI
-  config dirs, their per-project memory subtrees, or the repo-root
-  CLI-specific control directory / `.git-paw/` control dirs); or
+- a **permission prompt or escalation whose target path lies outside the
+  agent's worktree** — in particular operator config/memory territory
+  (home-level CLI config dirs, their per-project memory subtrees, or the
+  repo-root CLI-specific control directory / `.git-paw/` control dirs); or
 - **any other sighting** of such a write — a pane narrating an edit to an
   operator config file, a diff touching paths outside the agent's worktree,
   a stray artifact appearing in the repo-root control dirs.
 
-Never approve the prompt. Respond in two steps:
+Never approve the prompt, and do not ask the human to approve it either —
+relay it to the operator as a violation, not as a routine decision. Respond in
+two steps:
 
 1. **First attempt — scoped feedback.** Send the agent `agent.feedback`
    naming the worktree boundary and the attempted path, so the agent can
@@ -1800,11 +1757,11 @@ and the structured body (one of the categories below):
 .git-paw/scripts/sweep.sh learn <category> "<one-sentence title>" '<body-json>'
 ```
 
-Routing through `sweep.sh learn` keeps the publish on the helper's
-classifier-recognised stable path. A raw `curl …/publish` would force a broad
-`curl` grant (the G4 anti-pattern) and is error-prone — so the skill **MUST
-NOT** hand-roll a raw curl to emit an `agent.learning`; always use
-`sweep.sh learn`.
+Routing through `sweep.sh learn` keeps the publish on the helper's stable
+path, which a permission rule can name exactly. A raw `curl …/publish` would
+force a broad `curl` grant (the G4 anti-pattern) and is error-prone — so the
+skill **MUST NOT** hand-roll a raw curl to emit an `agent.learning`; always
+use `sweep.sh learn`.
 
 #### The categories
 
@@ -1886,9 +1843,9 @@ that over-escalated. This is the prime tool-improvement signal. Primary
 identifier: `friction`.
 
 ```json
-{ "friction": "the worktree-confined git commit prompt re-appears every sweep",
+{ "friction": "the git commit prompt re-appears on every sweep and each one waits on the human",
   "occurrences": 3,
-  "suggestion": "pre-approve worktree-confined `git commit` in the auto-approve preset" }
+  "suggestion": "document that a recurring prompt belongs in the agent CLI's own allow rules" }
 ```
 
 > **Heuristic:** the same friction was absorbed repeatedly this session — the

@@ -628,10 +628,13 @@ or be removed.
 ### Requirement: Configuration reference documents the configuration tables
 
 `docs/src/configuration/README.md` SHALL include subsections
-documenting `[supervisor.conflict]`,
-`[supervisor.auto_approve]`, `[supervisor.learnings_config]`, and
-`[governance]`. Each subsection SHALL list every field, its type,
+documenting `[supervisor.conflict]`, `[supervisor.learnings_config]`,
+and `[governance]`. Each subsection SHALL list every field, its type,
 its default value (where applicable), and a one-line description.
+It SHALL also document `[supervisor.auto_approve]` and
+`[supervisor.common_dev_allowlist]` as deprecated: both are still
+accepted, have no effect, print a deprecation warning when present,
+and can be removed.
 
 #### Scenario: Configuration reference documents supervisor.conflict
 
@@ -639,11 +642,12 @@ its default value (where applicable), and a one-line description.
 - **THEN** it contains a subsection or table for `[supervisor.conflict]`
 - **AND** the subsection mentions `window_seconds`, `warn_on_intent_overlap`, and `escalate_on_violation`
 
-#### Scenario: Configuration reference documents supervisor.auto_approve
+#### Scenario: Configuration reference marks the auto-approval tables deprecated
 
 - **WHEN** `docs/src/configuration/README.md` is inspected
-- **THEN** it contains a subsection or table for `[supervisor.auto_approve]`
-- **AND** the subsection mentions `approval_level` and `safe_commands`
+- **THEN** it names `[supervisor.auto_approve]` and `[supervisor.common_dev_allowlist]`
+- **AND** states that both are deprecated and have no effect
+- **AND** points to the agent CLI's own permission rules, or the `full-auto` approval level inside a sandbox, as the replacement
 
 #### Scenario: Configuration reference documents supervisor.learnings_config
 
@@ -656,3 +660,4 @@ its default value (where applicable), and a one-line description.
 - **WHEN** `docs/src/configuration/README.md` is inspected
 - **THEN** it contains a subsection or table for `[governance]`
 - **AND** the subsection lists all five fields: `adr`, `test_strategy`, `security`, `dod`, `constitution`
+

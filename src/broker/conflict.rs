@@ -2859,17 +2859,17 @@ mod tests {
     #[test]
     fn detector_named_cross_kind_same_name_conflict_includes_hint() {
         // Spec: Named regions of different kinds with the same name
-        // intersect conservatively — `function DEV_ALLOWLIST_PRESET` vs
-        // `block DEV_ALLOWLIST_PRESET` conflicts with the conservative hint.
+        // intersect conservatively — `function SHARED_REGION_NAME` vs
+        // `block SHARED_REGION_NAME` conflicts with the conservative hint.
         let a = intent_msg_with_regions(
             "feat-x",
-            &[("src/config.rs", vec![func("DEV_ALLOWLIST_PRESET")])],
+            &[("src/config.rs", vec![func("SHARED_REGION_NAME")])],
             "x",
             600,
         );
         let b = intent_msg_with_regions(
             "feat-y",
-            &[("src/config.rs", vec![block("DEV_ALLOWLIST_PRESET")])],
+            &[("src/config.rs", vec![block("SHARED_REGION_NAME")])],
             "y",
             600,
         );
@@ -2879,7 +2879,7 @@ mod tests {
         if let BrokerMessage::Feedback { payload, .. } = &x_fb[0] {
             let err = &payload.errors[0];
             assert!(err.contains("forward conflict"));
-            assert!(err.contains("DEV_ALLOWLIST_PRESET"));
+            assert!(err.contains("SHARED_REGION_NAME"));
             assert!(
                 err.contains(CROSS_KIND_HINT),
                 "named cross-kind conflict must carry the conservative hint; got: {err}"

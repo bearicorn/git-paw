@@ -341,9 +341,8 @@ fn broker_off_file_only_still_renders_four_sections() {
         assert!(!a.broker_publish_enabled());
         // A v0.5.0 deterministic signal so the file also carries a v0.5.0
         // section in the same session.
-        for _ in 0..6 {
-            a.record_auto_approve("git status");
-        }
+        a.record_feedback("feat-x");
+        a.record_verified("feat-x");
     }
     state.attach_learnings(Arc::clone(&agg));
 
@@ -374,8 +373,11 @@ fn broker_off_file_only_still_renders_four_sections() {
 
     let md = std::fs::read_to_string(&md_path).expect("file written");
     // v0.5.0 deterministic section preserved.
-    assert!(md.contains("### Permission patterns"), "{md}");
-    assert!(md.contains("- `git status` auto-approved 6 times"), "{md}");
+    assert!(md.contains("### Recovery cycles"), "{md}");
+    assert!(
+        md.contains("- feat-x: 1 feedback cycle before verifying"),
+        "{md}"
+    );
     // The four new sections present alongside it.
     for section in FOUR_SECTIONS {
         assert!(md.contains(section), "missing `{section}` in:\n{md}");

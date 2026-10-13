@@ -4,7 +4,7 @@ This walkthrough shows how to launch git-paw in **supervisor mode** — git-paw'
 
 ## What Supervisor Mode Does
 
-Supervisor mode with a spec flag (`git paw start --supervisor --from-all-specs`) launches every pending spec as its own coding agent in a background tmux pane and gives you an interactive supervisor agent in the foreground pane. (Bare `git paw start --supervisor`, with no spec flag, opens the interactive branch picker instead.) The supervisor automatically launches all agents per spec, runs the configured `test_command` between merges, walks branches in topological order based on declared dependencies, publishes a final summary status when the run is complete, and auto-approves common safe permission prompts (e.g. `git commit`, broker `curl` calls, and your declared stack's toolchain verbs such as `cargo test` for `stacks = ["rust"]`) so the run can proceed unattended.
+Supervisor mode with a spec flag (`git paw start --supervisor --from-all-specs`) launches every pending spec as its own coding agent in a background tmux pane and gives you an interactive supervisor agent in the foreground pane. (Bare `git paw start --supervisor`, with no spec flag, opens the interactive branch picker instead.) The supervisor automatically launches all agents per spec, runs the configured `test_command` between merges, walks branches in topological order based on declared dependencies, and publishes a final summary status when the run is complete. It does **not** approve permission prompts: whether a command runs without asking is your agent CLI's decision, and anything it prompts for is escalated to you. For a run that proceeds without stopping, pre-approve the commands in that CLI's own allow rules, or use `approval = "full-auto"` inside a [sandbox](user-guide/sandbox.md).
 
 ## Prerequisites
 
@@ -82,11 +82,9 @@ The full reference lives in [Configuration → Supervisor](configuration/README.
 | `[supervisor].test_command` | Command run after each agent reports `done` and again after every merge. |
 | `[supervisor].agent_approval` | `"manual"`, `"auto"`, or `"full-auto"` — translates into CLI permission flags for the coding agents. |
 | `[supervisor].approval` | The supervisor pane's **own** level, decoupled from `agent_approval` (unset → inherits it). Set `"full-auto"` for [unattended runs](user-guide/supervisor.md#run-the-supervisor-pane-at-native-full-auto) without dropping agent guardrails. |
-| `[supervisor.auto_approve].enabled` | Master switch for git-paw's safe-prompt auto-dismisser. |
-| `[supervisor.auto_approve].safe_commands` | Project-specific command prefixes appended to the composed safe list. |
-| `[supervisor.auto_approve].approval_level` | `"off"`, `"conservative"`, or `"safe"` preset for the auto-approve whitelist. |
-| `[supervisor.common_dev_allowlist].stacks` | Named stack presets (`rust` / `node` / `python` / `go`) whose toolchain verbs are folded into the auto-approve whitelist and the rendered skill guidance (e.g. `["rust"]` makes `cargo test` auto-approve). |
-| `[supervisor.common_dev_allowlist].extra` | Project-specific prefix patterns appended to the built-in preset (e.g. `["pnpm test", "deno fmt"]`). Also folded into the auto-approve whitelist. |
+| `[supervisor].manual_approvals_log` | Records every prompt an `--unattended` run escalates, for `git paw approvals` to aggregate (default on). |
+
+> `[supervisor.auto_approve]` and `[supervisor.common_dev_allowlist]` are **deprecated and have no effect** — they still parse so old configs load, but each file declaring them warns once. Pre-approve routine commands in your agent CLI's own allow rules instead. See [Deprecated auto-approval tables](configuration/README.md#deprecated-auto-approval-tables).
 
 See [Configuration → Broker](configuration/README.md#broker) for `[broker]` settings and [Configuration → Dashboard](configuration/README.md#dashboard) if you want the live broker-message panel turned on.
 
@@ -151,4 +149,4 @@ checks per doc, and illustrative starting-point examples for each doc type.
 - [User Guide → Agent Coordination](user-guide/coordination.md) — broker message types and how agents talk to each other.
 - [User Guide → Dashboard](user-guide/dashboard.md) — dashboard pane status table (pane 1 in supervisor mode, pane 0 otherwise), controls, and configuration.
 - [User Guide → Governance](user-guide/governance.md) — pointing the supervisor at your project's existing governance docs.
-- [Configuration → Supervisor](configuration/README.md#supervisor) — every supervisor and `auto_approve` field with defaults.
+- [Configuration → Supervisor](configuration/README.md#supervisor) — every supervisor field with defaults.

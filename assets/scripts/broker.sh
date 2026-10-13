@@ -15,11 +15,12 @@
 #     the boot block passes) or, absent one, from slugifying the current
 #     worktree branch (mirrors sweep.sh's resolve_agent_for_path slug rules).
 #
-# Wrapping every agent->broker curl behind one stable script path means the
-# classifier recognises this script path (`.git-paw/scripts/broker.sh`)
-# instead of requiring a broad `curl *` allowlist rule, removing the
-# boot-publish dead-stall (v0.7.0 dogfood) where the first register curl
-# raised an unanswerable permission prompt.
+# Wrapping every agent->broker curl behind one stable script path means a
+# permission rule scoped to that exact path (`.git-paw/scripts/broker.sh`)
+# can allow it, instead of requiring a broad `curl *` rule. That is what
+# removed the boot-publish dead-stall (v0.7.0 dogfood) where the first
+# register curl raised an unanswerable permission prompt. git-paw does not
+# write that rule for you -- it is the agent CLI's own allow rule to grant.
 #
 # Subcommands implemented (per agent-broker-helper §D1):
 #   status <message>                       — publish agent.status (working)

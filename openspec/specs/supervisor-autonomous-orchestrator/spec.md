@@ -2,24 +2,27 @@
 
 ## Purpose
 The pump-to-brain layer of unattended operation. When a supervisor (orchestrator) pane is present, the drive loop hands each judgment call it cannot make mechanically — a `danger`/`unknown` prompt, a worker's `agent.question`, a `committed`/`done` artifact's merge decision, and a non-converging (correction-exhausted) branch — to the orchestrator pane by injecting it as a task prompt, in addition to the uniform broker record, so the smart model is actively triggered rather than relied on to poll an inbox nobody reads. A longer-cadence nudge asks the orchestrator to re-run its sweep; worker-directed nudges stop only once a worker has finished (`done`/`verified`), never for the `blocked`/`committed` states the correction loop must still reach; injection is skipped while the pane shows a prompt or is mid-response and never blocks the wave; and with no supervisor pane nothing is injected, so a pure `--unattended` run is byte-for-byte the prior behavior. The orchestrator's judgment-call responsibilities are documented project-agnostically in the bundled supervisor skill.
-
 ## Requirements
 ### Requirement: Judgment calls are handed to the orchestrator pane
 
-The drive loop SHALL hand a live judgment call — a prompt classified `danger` or
-`unknown`, an ambiguous `agent.question`, or a merge decision — to the orchestrator
-by injecting it as a prompt into the orchestrator's pane (in addition to recording
-it on the broker) whenever an orchestrator (supervisor CLI) pane is present under
-unattended operation. The loop SHALL NOT block the wave waiting on the
-orchestrator's response.
+The drive loop SHALL hand a live judgment call to the orchestrator by injecting it as a prompt into the orchestrator's pane (in addition to recording it on the broker) whenever an orchestrator (supervisor CLI) pane is present under unattended operation. A judgment call is a live permission prompt on a worker pane, an ambiguous `agent.question`, or a merge decision. The loop SHALL NOT block the wave waiting on the orchestrator's response.
 
-#### Scenario: An unknown prompt is injected into the orchestrator pane
+A permission-prompt hand-off SHALL name the agent and the prompted command and SHALL ask the orchestrator to relay the prompt to the human. It SHALL NOT ask the orchestrator to decide or approve the prompt itself.
 
-- **GIVEN** an unattended session with an orchestrator pane present and a worker showing a prompt classified `unknown`
+#### Scenario: A live permission prompt is injected into the orchestrator pane
+
+- **GIVEN** an unattended session with an orchestrator pane present and a worker showing a live permission prompt
 - **WHEN** the drive loop processes the escalation
-- **THEN** the loop SHALL inject the judgment call into the orchestrator's pane
+- **THEN** the loop SHALL inject the hand-off into the orchestrator's pane
 - **AND** SHALL still record the escalation on the broker
 - **AND** SHALL continue progressing the other workers without blocking
+
+#### Scenario: The permission-prompt hand-off asks for a relay, not a decision
+
+- **GIVEN** a permission-prompt escalation for agent `feat-a` and command `ls -la`
+- **WHEN** its hand-off text is rendered
+- **THEN** the text SHALL name `feat-a` and `ls -la` and ask the orchestrator to relay the prompt to the human
+- **AND** SHALL NOT tell the orchestrator to decide the prompt or approve the pane itself
 
 #### Scenario: An ambiguous question is injected into the orchestrator pane
 
@@ -37,7 +40,7 @@ orchestrator's response.
 ### Requirement: Orchestration-sweep nudge on a longer cadence
 
 The drive loop SHALL nudge the orchestrator pane to run an orchestration sweep on a
-cadence longer than its per-tick approval sweep, so the orchestrator periodically
+cadence longer than its per-tick pane sweep, so the orchestrator periodically
 reconsiders spawn order, merge sequencing, and blocked workers without a human
 trigger. The nudge SHALL follow the send-keys nudge discipline — the text followed
 by a separate `Enter` keystroke.

@@ -97,7 +97,7 @@ pub enum Command {
                       git paw start --specs   # opens spec picker (TTY required)\n  \
                       git paw start --dry-run\n  \
                       git paw start --preset backend\n  \
-                      git paw start --supervisor   # auto-approve safe prompts via [supervisor.auto_approve]\n  \
+                      git paw start --supervisor   # launch with an orchestrator pane\n  \
                       git paw start --no-supervisor  # disable supervisor for this session (overrides config)\n  \
                       git paw start --no-rebase   # skip rebasing agent branches onto the default branch"
     )]
@@ -203,15 +203,22 @@ pub enum Command {
         ///
         /// Engages supervisor mode (equivalent to `--supervisor`) and then
         /// drives an in-process loop that sweeps the supervisor pane and every
-        /// coding-agent pane on a ~15s cadence: it auto-approves
-        /// classifier-safe permission prompts, escalates risky/unknown prompts
-        /// for later human review WITHOUT blocking the rest of the wave,
-        /// detects completion, and exits with a summary. Designed for detached
+        /// coding-agent pane on a ~15s cadence: it escalates EVERY live
+        /// permission prompt for a human decision WITHOUT blocking the rest of
+        /// the wave, recovers buffered input, detects completion and CLI
+        /// unavailability, and exits with a summary. Designed for detached
         /// operation — it does not require an attached interactive terminal.
+        ///
+        /// It approves nothing. git-paw makes no safety decision about an
+        /// agent's command, so a prompt the agent CLI raises waits for a
+        /// human. For a run that is genuinely prompt-free, give the agent CLI
+        /// its own allow rules for the commands your workflow needs, or run it
+        /// in `full-auto` inside the documented sandbox — see the security
+        /// posture chapter.
         ///
         /// The loop is the pump and the supervisor pane is the brain. When a
         /// supervisor (orchestrator) pane is present, each judgment call — a
-        /// risky/unknown prompt, a worker's question, a merge decision — is also
+        /// permission prompt, a worker's question, a merge decision — is also
         /// injected into that pane so the smart model is actively triggered
         /// instead of relied on to poll an inbox, and a longer-cadence nudge asks
         /// it to re-run its orchestration sweep. The loop never waits on it, so
@@ -235,7 +242,7 @@ pub enum Command {
             long,
             default_value_t = false,
             conflicts_with = "no_supervisor",
-            help = "Run the supervisor wave to completion with no human babysitting (auto-approve safe prompts, escalate the rest, detect completion, exit with a summary)"
+            help = "Drive the supervisor wave to completion unattended: escalate every permission prompt for a human decision without blocking the wave, detect completion, exit with a summary (approves nothing)"
         )]
         unattended: bool,
     },
@@ -510,44 +517,6 @@ pub enum Command {
     )]
     Dashboard,
 
-    /// Internal: classify a permission-prompt capture read from stdin
-    #[command(
-        hide = true,
-        name = "__classify",
-        about = "Internal: classify a permission-prompt capture read from stdin",
-        long_about = "Internal subcommand used by the bundled sweep.sh helper to classify a \
-                      permission-prompt pane capture with git-paw's own safe-command \
-                      classifier, so the helper and the in-tool auto-approver cannot \
-                      disagree.\n\n\
-                      Reads the capture on stdin and prints `<class> <option-index>`, where \
-                      class is safe, danger, or unknown. With --resolve-option only the \
-                      option index is printed.\n\n\
-                      Read-only: it classifies and never sends a keystroke, contacts the \
-                      broker, or writes a file. Not intended for direct invocation.\n\n\
-                      MUST be invoked from inside the target repository (the supervisor \
-                      pane's working directory, which is what sweep.sh does): the config \
-                      and the repo-root half of the protected-path set are both derived \
-                      from the CURRENT WORKING DIRECTORY, not from --worktree-root. A \
-                      mismatch degrades the whitelist safely — a missing config falls back \
-                      to the stack-neutral built-ins, so FEWER commands classify safe — but \
-                      it also points the repo-root `.claude/` + `.git-paw/` protected \
-                      entries at the wrong repository, which weakens that rule. Run it \
-                      from the repo root."
-    )]
-    Classify {
-        /// Worktree root the worktree-confined classification rules resolve against.
-        #[arg(
-            long,
-            value_name = "PATH",
-            help = "Worktree root the worktree-confined rules resolve against"
-        )]
-        worktree_root: Option<PathBuf>,
-
-        /// Print only the option index to select, omitting the class.
-        #[arg(long, help = "Print only the option index to select")]
-        resolve_option: bool,
-    },
-
     /// Internal: print one resolved CLI prompt-shape profile field
     #[command(
         hide = true,
@@ -607,15 +576,18 @@ pub enum Command {
         session: Option<String>,
     },
 
-    /// Report manually-approved command patterns for a session
+    /// Report the permission prompts a session escalated for a human decision
     #[command(
-        about = "Report manually-approved command patterns for a session",
-        long_about = "Lists the command patterns you manually approved during a session — the \
-                      prompts the auto-approve preset did NOT match — sorted by how often each \
-                      was approved. Each row carries a SUGGEST hint for where the pattern might \
-                      be promoted: the project-local allowlist (project-specific scripts/paths) \
-                      or the bundled dev-allowlist preset (general commands like `make <target>`). \
-                      The suggestion is a hint, not a rule.\n\n\
+        about = "Report the permission prompts a session escalated for a human decision",
+        long_about = "Lists the command patterns an unattended run escalated for you to decide, \
+                      sorted by how often each came up. These are the prompts your agent CLI \
+                      raised and git-paw relayed — git-paw approves none of them itself.\n\n\
+                      Each row carries a SUGGEST hint naming which of the agent CLI's OWN \
+                      allowlists could absorb the pattern so it stops prompting: the project \
+                      allowlist for project-specific scripts and paths, the user allowlist for \
+                      general commands like `make <target>`. Acting on it means editing that \
+                      CLI's settings — git-paw writes no permission rule. The suggestion is a \
+                      hint, not a rule.\n\n\
                       Reads `.git-paw/sessions/<session>.manual-approvals.jsonl`. Defaults to the \
                       active session; pass --session to target another. Recording is controlled by \
                       `[supervisor] manual_approvals_log` (default on).\n\n\
@@ -1073,6 +1045,35 @@ mod tests {
     }
 
     // -- Task 1.3 / cli-parsing: --unattended flag --
+
+    /// Spec scenario "--unattended appears in help output" (`cli-parsing`):
+    /// the help must describe driving the wave and ESCALATING prompts, and
+    /// must not claim it auto-approves anything — a user who reads the old
+    /// wording would leave a run unattended expecting prompts to clear
+    /// themselves.
+    #[test]
+    fn start_help_describes_unattended_as_escalating_not_approving() {
+        let err = Cli::try_parse_from(["git-paw", "start", "--help"])
+            .expect_err("--help exits via Err(DisplayHelp)");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+
+        assert!(
+            help.contains("--unattended"),
+            "start --help must surface --unattended; got: {help}"
+        );
+        let lower = help.to_lowercase();
+        assert!(
+            lower.contains("escalate"),
+            "the help must say it escalates prompts; got: {help}"
+        );
+        for claim in ["auto-approve", "auto approve", "approve safe"] {
+            assert!(
+                !lower.contains(claim),
+                "the help must not claim it approves anything ({claim:?}); got: {help}"
+            );
+        }
+    }
 
     #[test]
     fn start_unattended_with_no_supervisor_is_rejected() {
@@ -1674,7 +1675,7 @@ mod tests {
         let help = Cli::try_parse_from(["git-paw", "--help"])
             .unwrap_err()
             .to_string();
-        for hidden in ["__dashboard", "__classify", "__prompt-profile", "selftest"] {
+        for hidden in ["__dashboard", "__prompt-profile", "selftest"] {
             assert!(
                 !help.contains(hidden),
                 "root --help must not surface internal subcommand {hidden:?}; got: {help}"
@@ -1695,7 +1696,6 @@ mod tests {
         for args in [
             vec!["selftest"],
             vec!["__dashboard"],
-            vec!["__classify"],
             vec!["__prompt-profile", "--field", "approval_markers"],
         ] {
             assert!(
@@ -1703,6 +1703,23 @@ mod tests {
                 "hidden subcommand {args:?} should still parse"
             );
         }
+    }
+
+    /// Spec scenario "No classifier subcommand exists"
+    /// (`approval-command-safety`, *git-paw makes no safety decision about an
+    /// agent's command*): the retired `__classify` subcommand is GONE, not
+    /// merely hidden. Parsing it must fail as an unrecognised subcommand, so a
+    /// script that still calls it breaks loudly instead of silently getting a
+    /// different behaviour.
+    #[test]
+    fn classify_subcommand_is_not_recognised() {
+        let err = Cli::try_parse_from(["git-paw", "__classify"])
+            .expect_err("__classify must no longer parse");
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::InvalidSubcommand,
+            "__classify must fail as an unrecognised subcommand; got: {err}"
+        );
     }
 
     #[test]
@@ -1817,43 +1834,6 @@ mod tests {
     fn dashboard_parses() {
         let cli = parse(&["__dashboard"]);
         assert!(matches!(cli.command.unwrap(), Command::Dashboard));
-    }
-
-    // -- __classify subcommand --
-
-    #[test]
-    fn classify_parses_with_no_flags() {
-        let cli = parse(&["__classify"]);
-        match cli.command.unwrap() {
-            Command::Classify {
-                worktree_root,
-                resolve_option,
-            } => {
-                assert!(worktree_root.is_none());
-                assert!(!resolve_option);
-            }
-            other => panic!("expected Classify, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn classify_parses_worktree_root_and_resolve_option() {
-        let cli = parse(&[
-            "__classify",
-            "--worktree-root",
-            "/tmp/wt",
-            "--resolve-option",
-        ]);
-        match cli.command.unwrap() {
-            Command::Classify {
-                worktree_root,
-                resolve_option,
-            } => {
-                assert_eq!(worktree_root, Some(PathBuf::from("/tmp/wt")));
-                assert!(resolve_option);
-            }
-            other => panic!("expected Classify, got {other:?}"),
-        }
     }
 
     // -- Approvals subcommand --

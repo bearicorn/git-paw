@@ -87,10 +87,11 @@ five-gate framework" sections — is the exemplar to model yours on.
 With the plan authored and "verified" defined:
 
 ```bash
-# Attended: you watch the panes; the dashboard auto-approves the safe set.
+# Attended: you watch the panes and answer the permission prompts yourself.
 git paw start --specs my-change --supervisor
 
-# Unattended: the in-process loop drives to completion with no human in the seat.
+# Unattended: the in-process loop drives to completion, escalating every
+# permission prompt to you rather than answering it.
 git paw start --specs my-change --supervisor --unattended
 ```
 

@@ -1,5 +1,5 @@
 //! `git paw` supervisor mode — the auto-start flow (`cmd_supervisor`), the
-//! in-process unattended drive loop, the auto-approve thread wiring, and
+//! in-process unattended drive loop and its manual-decision log wiring, and
 //! supervisor-mode resolution. Extracted verbatim from `main.rs`
 //! (code-analysis-refactor R2d).
 //!
@@ -33,9 +33,9 @@ use super::helpers::{
 use super::recover::recover_session;
 use super::start::restart_from_pause;
 use crate::{
-    AttachContext, SpecMode, UNATTENDED_ENV, apply_spec_mode, attach_agent,
-    gate_pane_or_fail_on_dialog, invalidate_if_stale, reattach_active_session_or_refuse,
-    resolve_submit_delay_ms, submit_prompt_to_pane, write_repo_discovery_file,
+    AttachContext, SpecMode, apply_spec_mode, attach_agent, gate_pane_or_fail_on_dialog,
+    invalidate_if_stale, reattach_active_session_or_refuse, resolve_submit_delay_ms,
+    submit_prompt_to_pane, write_repo_discovery_file,
 };
 
 /// Loads the repo config from the current working directory and resolves
@@ -147,159 +147,6 @@ fn publish_supervisor_question(question: &str, broker_url: &str) -> Result<(), P
         },
     };
     publish_to_broker_http(broker_url, &msg)
-}
-
-/// Per-session classifier wiring for [`spawn_auto_approve_thread`], bundled
-/// so the spawn signature stays under the argument-count lint.
-pub(crate) struct AutoApproveWiring {
-    /// Agent ID → tmux pane index.
-    pub(crate) pane_map: std::collections::HashMap<String, usize>,
-    /// Agent ID → worktree root for the boundary-scoped classifier rules.
-    pub(crate) worktree_map: std::collections::HashMap<String, std::path::PathBuf>,
-    /// Manual-decision recorder for forwarded prompts.
-    pub(crate) recorder: git_paw::supervisor::manual_approvals::ManualDecisionRecorder,
-    /// Protected-path set for the operator config/memory danger rule
-    /// (`agent-memory-isolation`).
-    pub(crate) protected_paths: git_paw::supervisor::auto_approve::ProtectedPaths,
-    /// Repository root, from which each pane's exclusive approval claim path is
-    /// built (`supervisor-unattended-operation`).
-    pub(crate) repo_root: std::path::PathBuf,
-    /// Resolved prompt-shape profile (`cli-prompt-profiles` capability) for
-    /// this session's CLI, consulted by the poll loop's approval-marker
-    /// detection.
-    pub(crate) profile: config::CliPromptProfile,
-}
-
-/// Spawns a background thread that periodically polls the broker `/status`
-/// endpoint and dispatches auto-approval keystrokes for stalled agents.
-///
-/// Returns `None` when [`config::AutoApproveConfig`] is absent or the
-/// resolved config has `enabled = false`. Otherwise returns a stop flag
-/// (set to `true` to ask the thread to exit) and the thread handle for
-/// joining.
-///
-/// The poll period is the resolved `stall_threshold_seconds`, capped to
-/// the spec's minimum of 5s. Errors fetching the broker `/status` endpoint
-/// are logged once per occurrence — they do not abort the thread.
-pub(crate) fn spawn_auto_approve_thread(
-    session_name: String,
-    broker_url: String,
-    config: Option<config::AutoApproveConfig>,
-    dev_allowlist: config::CommonDevAllowlistConfig,
-    wiring: AutoApproveWiring,
-) -> Option<(
-    std::sync::Arc<std::sync::atomic::AtomicBool>,
-    std::thread::JoinHandle<()>,
-)> {
-    let AutoApproveWiring {
-        pane_map,
-        worktree_map,
-        recorder,
-        protected_paths,
-        repo_root,
-        profile,
-    } = wiring;
-    let cfg = config?.resolved();
-    if !cfg.enabled {
-        return None;
-    }
-    let period = std::time::Duration::from_secs(
-        cfg.stall_threshold_seconds
-            .max(git_paw::config::AutoApproveConfig::MIN_STALL_THRESHOLD_SECONDS),
-    );
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let stop_clone = stop.clone();
-
-    let handle = std::thread::spawn(move || {
-        use git_paw::supervisor::approve::TmuxKeyDispatcher;
-        use git_paw::supervisor::poll::{
-            PollContext, TmuxPaneInspector, fetch_status_over_http, tick_from_status,
-        };
-
-        // The forwarder is invoked by `drive_outcomes` only on the
-        // forward-to-human branch (`TickOutcome::Forwarded`) — auto-approved
-        // prompts take the `Approved` branch and never reach it. That makes it
-        // the single, accurate call site for recording manual-decision-required
-        // commands (approval-pattern-surfacing §3, design D2 option A).
-        struct BrokerForwarder {
-            broker_url: String,
-            recorder: git_paw::supervisor::manual_approvals::ManualDecisionRecorder,
-        }
-        impl git_paw::supervisor::poll::QuestionForwarder for BrokerForwarder {
-            fn forward_question(
-                &mut self,
-                agent_id: &str,
-                kind: git_paw::supervisor::permission_prompt::PermissionType,
-                captured: &str,
-            ) {
-                let question = format!(
-                    "{agent_id} is stalled on a permission prompt classified as {kind:?}; \
-                     please review the pane and decide manually."
-                );
-                let msg = git_paw::broker::messages::BrokerMessage::Question {
-                    agent_id: "supervisor".to_string(),
-                    payload: git_paw::broker::messages::QuestionPayload { question },
-                };
-                if let Err(e) =
-                    git_paw::broker::publish::publish_to_broker_http(&self.broker_url, &msg)
-                {
-                    eprintln!("auto-approve: failed to forward question to dashboard: {e}");
-                }
-
-                // Record the manual-decision-required command. On the first
-                // sighting this returns a `permission_pattern` learning to
-                // publish (when learnings are enabled).
-                if let Some(learning) = self.recorder.record_forwarded(agent_id, captured)
-                    && let Err(e) = git_paw::broker::publish::publish_to_broker_http(
-                        &self.broker_url,
-                        &learning,
-                    )
-                {
-                    eprintln!("auto-approve: failed to publish permission_pattern learning: {e}");
-                }
-            }
-        }
-
-        let inspector = TmuxPaneInspector;
-        let resolver = move |id: &str| pane_map.get(id).copied();
-        let worktree_resolver = move |id: &str| worktree_map.get(id).cloned();
-        let mut dispatcher = TmuxKeyDispatcher;
-        let mut forwarder = BrokerForwarder {
-            broker_url: broker_url.clone(),
-            recorder,
-        };
-
-        while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
-            std::thread::sleep(period);
-            if stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                break;
-            }
-            let rows = match fetch_status_over_http(&broker_url) {
-                Ok(rows) => rows,
-                Err(e) => {
-                    eprintln!("auto-approve: broker /status fetch failed: {e}");
-                    continue;
-                }
-            };
-            let mut ctx = PollContext {
-                state: None,
-                session: &session_name,
-                repo_root: &repo_root,
-                config: &cfg,
-                dev_allowlist: &dev_allowlist,
-                resolver: &resolver,
-                inspector: &inspector,
-                dispatcher: &mut dispatcher,
-                forwarder: &mut forwarder,
-                worktree_resolver: &worktree_resolver,
-                protected_paths: &protected_paths,
-                broker_url: Some(&broker_url),
-                profile: &profile,
-            };
-            let _ = tick_from_status(&rows, &mut ctx);
-        }
-    });
-    Some((stop, handle))
 }
 
 /// Resolves the supervisor pane's approval flags at its effective level,
@@ -940,20 +787,11 @@ pub(crate) fn cmd_supervisor(
         worktree_entries.push(attached.entry);
     }
 
-    let mut env_vars: Vec<(String, String)> = if broker_config.enabled {
+    let env_vars: Vec<(String, String)> = if broker_config.enabled {
         vec![("GIT_PAW_BROKER_URL".to_string(), broker_config.url())]
     } else {
         Vec::new()
     };
-    if unattended {
-        // Injected into the session environment (before the dashboard pane is
-        // split, so that pane inherits it): the `__dashboard` subprocess reads
-        // it to DISABLE its auto-approve thread. For an unattended session the
-        // in-process drive loop is the sole approver, so two approvers never
-        // race on the same pane (D1).
-        env_vars.push((UNATTENDED_ENV.to_string(), "1".to_string()));
-    }
-
     let mut tmux_session = tmux::build_supervisor_session(
         &project,
         Some(session_name.clone()),
@@ -1119,9 +957,8 @@ pub(crate) fn cmd_supervisor(
 /// session (supervisor-launch step 15, `unattended-operation`).
 ///
 /// Builds the coding-agent roster from the saved session (each pane resolved by
-/// `worktree_path`, per D2), resolves the classifier whitelist and
-/// worktree-write policy from `[supervisor.auto_approve]`, points the summary at
-/// the broker log and the learnings file, then drives the loop to an exit
+/// `worktree_path`, per D2), wires the manual-decision log, points the summary
+/// at the broker log and the learnings file, then drives the loop to an exit
 /// condition and prints the summary. Blocks in the foreground process; requires
 /// no attached interactive terminal.
 fn drive_unattended_loop(
@@ -1156,28 +993,35 @@ fn drive_unattended_loop(
         .flatten()
         .map_or(state.created_at, |s| s.created_at);
 
-    // The classifier the loop consumes mirrors the dashboard poll loop's
-    // resolved whitelist + worktree-write policy so unattended and attended
-    // sessions auto-approve the same set.
-    let auto_approve = supervisor_cfg
-        .auto_approve
-        .clone()
-        .unwrap_or_default()
-        .resolved();
-
-    // Loaded once and reused: the operator config/memory danger rule's
-    // protected-path derivation, and the `[clis]` table the nudge path
-    // resolves its settle delay from. Config parse problems degrade to the
-    // defaults-only derivation rather than aborting the loop.
+    // Loaded once and reused: the `[clis]` table the nudge path resolves its
+    // settle delay from. Config parse problems degrade to the defaults rather
+    // than aborting the loop.
     let loaded_config = config::load_config(repo_root, None).unwrap_or_default();
-    let protected_paths =
-        git_paw::supervisor::auto_approve::ProtectedPaths::derive(&loaded_config, Some(repo_root));
+
+    let broker_url = broker_config.enabled.then(|| broker_config.url());
+
+    // The manual-decision log: every permission prompt the loop escalates is
+    // recorded so `git paw approvals` can tell the user which commands keep
+    // needing a human. Recording is opt-OUT (`manual_approvals_log`, default
+    // on); the first sighting of a pattern also emits a `permission_pattern`
+    // learning, gated separately on `[supervisor] learnings`. This is the
+    // only caller, so the resolution is inlined here (design D6).
+    let recorder = git_paw::supervisor::manual_approvals::ManualDecisionRecorder::new(
+        git_paw::supervisor::manual_approvals::log_path(repo_root, session_name),
+        supervisor_cfg.manual_approvals_log_enabled(),
+        supervisor_cfg.learnings,
+        state.project_name.clone(),
+        supervisor_cfg
+            .cli
+            .clone()
+            .or_else(|| loaded_config.default_cli.clone()),
+    );
 
     let options = DriveRunOptions {
-        broker_url: broker_config.enabled.then(|| broker_config.url()),
-        whitelist: auto_approve.effective_whitelist(&supervisor_cfg.common_dev_allowlist),
-        approve_worktree_writes: auto_approve.approve_worktree_writes(),
-        protected_paths,
+        broker_url: broker_url.clone(),
+        manual_decisions: Box::new(git_paw::supervisor::drive::RecorderManualDecisionSink::new(
+            recorder, broker_url,
+        )),
         correction: supervisor_cfg.correction.clone(),
         learnings_enabled: supervisor_cfg.learnings,
         broker_log_hint: state

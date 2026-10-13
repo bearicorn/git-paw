@@ -56,7 +56,7 @@
     },
     {
       "compatibility": "git-paw",
-      "description": "Keep everything git-paw EXPORTS to a consumer project-agnostic across every export surface — bundled skills, shell scripts and mirrored logic (code), the init default config, allowlist/classifier presets, injected AGENTS.md sections / boot blocks / git hooks / settings seeding, and templates. Use whenever a change adds or edits any exported asset. Codifies the export-surface inventory, the agnosticism rule, how to stay agnostic per surface, the enforcing audits, and the review-gate checklist.",
+      "description": "Keep everything git-paw EXPORTS to a consumer project-agnostic across every export surface — bundled skills, shell scripts and mirrored logic (code), the init default config, any agent-CLI allow rules git-paw seeds, injected AGENTS.md sections / boot blocks / git hooks / settings seeding, and templates. Use whenever a change adds or edits any exported asset. Codifies the export-surface inventory, the agnosticism rule, how to stay agnostic per surface, the enforcing audits, and the review-gate checklist.",
       "id": ".agents/skills/export-agnosticism/SKILL.md",
       "license": "MIT",
       "metadata": null,
@@ -74,7 +74,7 @@
     },
     {
       "compatibility": "git-paw",
-      "description": "Review a change for harm potential from two angles — SECURITY (external bad actors attacking the tool or the consumer's environment) and SAFETY (the blast radius of a rogue or mistaken agent git-paw itself runs, with real, often auto-approved, execution power). Use when a change touches allowlists, process spawning, paths, untrusted input, secrets, dependencies, command classification, worktree confinement, or git/file operations. Covers least-privilege, injection, secrets, and dependencies for security; and out-of-worktree actions, irreversible git, persistence, and exfiltration for safety.",
+      "description": "Review a change for harm potential from two angles — SECURITY (external bad actors attacking the tool or the consumer's environment) and SAFETY (the blast radius of a rogue or mistaken agent git-paw itself runs, with real execution power under whatever permission mode its CLI resolves — up to full-auto, where nothing prompts). Use when a change touches allowlists (including any agent-CLI allow rule git-paw seeds), keystroke dispatch, process spawning, paths, untrusted input, secrets, dependencies, prompt detection, worktree confinement, or git/file operations. Covers least-privilege, injection, secrets, and dependencies for security; and out-of-worktree actions, irreversible git, persistence, and exfiltration for safety.",
       "id": ".agents/skills/security-and-safety-review/SKILL.md",
       "license": "MIT",
       "metadata": null,

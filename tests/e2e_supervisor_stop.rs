@@ -175,9 +175,14 @@ fn stop_kills_tmux_and_shuts_down_broker() {
     );
 }
 
+/// Spec scenario "An attended session runs no auto-approver"
+/// (`approval-auto`), stop half: a session that DECLARES the deprecated
+/// `[supervisor.auto_approve] enabled = true` still tears down cleanly, and
+/// no `auto_approved` status appears in the broker log at any point — the
+/// table parses for compatibility and does nothing.
 #[test]
 #[serial]
-fn stop_in_supervisor_mode_terminates_auto_approve() {
+fn stop_tears_down_cleanly_with_the_deprecated_auto_approve_table() {
     if !tmux_available() {
         eprintln!("skipping: tmux not available");
         return;
@@ -204,9 +209,12 @@ fn stop_in_supervisor_mode_terminates_auto_approve() {
     assert!(out.status.success(), "start failed; stdout:\n{stdout}");
     let session_name = extract_session_name(&stdout).expect("session name in stdout");
 
-    // Record the time just before stop. Anything `auto_approved` published
-    // AFTER this instant indicates a stray thread.
-    let t_stop = Instant::now();
+    // Nothing may ever publish `auto_approved`: no approver exists to do it.
+    let log_before = read_broker_log(home.path());
+    assert!(
+        !log_before.contains("auto_approved"),
+        "a declared (deprecated) auto_approve table must start no approver; broker log:\n{log_before}"
+    );
 
     let mut stop = cmd();
     tmux_env.apply_assert(&mut stop);
@@ -223,12 +231,7 @@ fn stop_in_supervisor_mode_terminates_auto_approve() {
     // Give a moment for any in-flight auto_approve tick to land.
     std::thread::sleep(Duration::from_millis(500));
 
-    // The session state dir is fixed (git_paw::session::session_state_dir).
-    // We cannot read it cleanly without exposing internals, so we use a
-    // structural assertion: stop's stdout must not error and the tmux
-    // session must be gone (proving the dashboard subprocess holding the
-    // auto-approve thread terminated).
-    let _elapsed = t_stop.elapsed();
+    let log_after = read_broker_log(home.path());
     let tmux_gone = StdCommand::new("tmux")
         .env("TMUX_TMPDIR", tmux_env.socket_dir())
         .args(["has-session", "-t", &session_name])
@@ -236,8 +239,34 @@ fn stop_in_supervisor_mode_terminates_auto_approve() {
         .map_or(true, |s| !s.success());
     kill_session(&session_name, tmux_env.socket_dir());
     assert!(
-        tmux_gone,
-        "tmux session must be killed after stop; the auto-approve thread lives \
-         in the dashboard subprocess which dies with the pane"
+        !log_after.contains("auto_approved"),
+        "no auto_approved status may appear at any point; broker log:\n{log_after}"
     );
+    assert!(tmux_gone, "tmux session must be killed after stop");
+}
+
+/// Reads every `*.broker.log` under the test's isolated `HOME` (where
+/// `session_state_dir()` resolves to), concatenated.
+fn read_broker_log(home: &std::path::Path) -> String {
+    fn walk(dir: &std::path::Path, out: &mut String) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".broker.log"))
+                && let Ok(text) = fs::read_to_string(&path)
+            {
+                out.push_str(&text);
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(home, &mut out);
+    out
 }

@@ -2,7 +2,6 @@
 
 ## Purpose
 Makes the published documentation site machine-consumable by generating, deterministically from the mdBook sources at build time, an `llms.txt` index, a `sitemap.xml`, a `robots.txt`, and per-page structured metadata so an agent can identify pages and target sections without fetching siblings and the machine-readable surface never drifts from the published content, and bundles a path-allowlisted `docs-fetch` helper and agent skill that let coding agents discover (via `llms.txt`) and retrieve documentation pages or sections on demand from a configurable docs base URL — injected only when `docs_base_url` is explicitly set, shipping no doc content in the binary or boot prompt, and degrading gracefully so a fetch failure never blocks the agent.
-
 ## Requirements
 ### Requirement: llms.txt index
 
@@ -54,11 +53,12 @@ The `llms.txt`, `sitemap.xml`, `robots.txt`, and per-page metadata SHALL be gene
 
 ### Requirement: Bundled docs-fetch skill and helper
 
-git-paw SHALL bundle an agent skill and a `docs-fetch` helper script, and `git paw init` SHALL install the helper into the project's `.git-paw/scripts/` directory and grant the agent allowlist that exact script path — never a broad `curl` grant — mirroring the least-privilege model of the existing broker helper.
+git-paw SHALL bundle an agent skill and a `docs-fetch` helper script, and `git paw init` SHALL install the helper into the project's `.git-paw/scripts/` directory at a single stable path, so that a permission rule scoped to that exact script path can allow it. Consulting docs through the helper SHALL NOT require a broad `curl` grant, mirroring the least-privilege model of the existing broker helper.
 
-#### Scenario: init installs and path-allowlists the helper
+#### Scenario: init installs the helper at an exact path
 - **WHEN** `git paw init` runs in a project
-- **THEN** the `docs-fetch` helper is present under `.git-paw/scripts/` and the agent allowlist grants that exact helper path (not a wildcard `curl` command)
+- **THEN** the `docs-fetch` helper is present at `.git-paw/scripts/docs-fetch.sh`
+- **AND** the bundled docs-fetch skill invokes it by that exact path, so no wildcard `curl` permission is needed to use it
 
 #### Scenario: the skill instructs invoking the helper, not raw curl
 - **WHEN** the bundled docs-fetch skill is rendered into an agent's instructions
@@ -123,3 +123,4 @@ Documentation lookup SHALL be best-effort: on an unreachable site or missing pag
 #### Scenario: no doc content is bundled or boot-injected
 - **WHEN** an agent session starts with the docs-fetch skill enabled
 - **THEN** no documentation page content is embedded in the binary or the boot prompt; the agent retrieves docs only on demand via the helper
+

@@ -43,19 +43,6 @@ learnings = true
 [supervisor.learnings_config]
 flush_interval_seconds = 60
 
-# Dev-command allowlist. git-paw is a Rust + just + mdBook + OpenSpec repo:
-# the curated `rust` stack plus its remaining toolchain verbs.
-[supervisor.common_dev_allowlist]
-enabled = true
-stacks = ["rust"]
-extra = ["openspec", "just", "mdbook build"]
-
-[supervisor.auto_approve]
-enabled = true
-approval_level = "safe"
-stall_threshold_seconds = 30
-safe_commands = []
-
 [supervisor.conflict]
 window_seconds = 120
 warn_on_intent_overlap = true

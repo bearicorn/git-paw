@@ -1,14 +1,14 @@
 //! Lockstep tests for the live-prompt gate: the bundled `sweep.sh` marker
 //! detection must agree with the Rust gate
-//! (`git_paw::supervisor::auto_approve::is_live_prompt`) on shared fixtures
+//! (`git_paw::supervisor::permission_prompt::is_live_prompt`) on shared fixtures
 //! (capability `automatic-approval`, scenario "Detection agrees across
 //! auto-approver and sweep helper", change `approve-send-gate-hardening`).
 //!
-//! The shell half is driven through `sweep.sh classify`, whose first gate is
-//! the same structural liveness check `approve` uses (`run_classifier`): a
-//! non-live capture prints `no-op (not live)`, anything else means the gate
-//! saw a live prompt. The suite needs no tmux and no broker — `classify`
-//! reads the capture from stdin.
+//! The shell half is driven through `sweep.sh approve`, which is now the only
+//! consumer of the shell gate: a non-live capture makes it report
+//! `cleared before send`, and any other outcome means the gate saw a live
+//! prompt. The suite needs no real tmux and no broker — a recording fake
+//! `tmux` on `$PATH` serves the fixture as the pane capture.
 //!
 //! `cli-prompt-profiles` capability (D3): since `LIVE_PROMPT_MARKERS_REGEX` /
 //! `LIVE_PROMPT_OPTION_REGEX` are now sourced from `git paw __prompt-profile`
@@ -20,12 +20,11 @@
 
 use std::fmt::Write as _;
 use std::fs;
-use std::io::Write;
 use std::path::Path;
-use std::process::{Command as StdCommand, Stdio};
+use std::process::Command as StdCommand;
 
 use git_paw::config::claude_prompt_profile;
-use git_paw::supervisor::auto_approve::is_live_prompt;
+use git_paw::supervisor::permission_prompt::is_live_prompt;
 use tempfile::TempDir;
 
 fn init_git_repo(dir: &Path) {
@@ -62,8 +61,8 @@ fn install_sweep(repo: &Path) -> std::path::PathBuf {
 }
 
 /// Directory holding the freshly built binary, prepended to the child's
-/// `PATH` so `git paw __prompt-profile` (and `__classify`) resolve to THIS
-/// build rather than falling back to sweep.sh's hardcoded defaults.
+/// `PATH` so `git paw __prompt-profile` resolves to THIS build rather than
+/// falling back to sweep.sh's hardcoded defaults.
 fn built_bin_dir() -> std::path::PathBuf {
     assert_cmd::cargo::cargo_bin("git-paw")
         .parent()
@@ -71,35 +70,80 @@ fn built_bin_dir() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-/// Runs the shell half of the live-prompt gate on `capture`: pipes it into
-/// `sweep.sh classify` and returns whether the helper saw a LIVE prompt.
+/// Writes the per-repo discovery JSON so sweep.sh resolves `session_name`
+/// without `$TMUX`.
+fn write_session_json(repo: &Path) {
+    let dir = repo.join(".git-paw/sessions");
+    fs::create_dir_all(&dir).expect("mk sessions dir");
+    let body = "{\n  \"session_name\": \"paw-parity\",\n  \"agents\": []\n}";
+    fs::write(dir.join("paw-parity.json"), body).expect("write session json");
+}
+
+/// Installs a fake `tmux` that serves `$FAKE_TMUX_CAPTURE` for `capture-pane`
+/// and swallows everything else, so the gate can be exercised on a fixture
+/// with no real tmux server.
+fn install_fake_tmux(repo: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = repo.join("fakebin");
+    fs::create_dir_all(&bin).expect("mk fakebin");
+    let tmux = bin.join("tmux");
+    fs::write(
+        &tmux,
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+           capture-pane) cat \"${FAKE_TMUX_CAPTURE}\" ;;\n\
+         esac\n\
+         exit 0\n",
+    )
+    .expect("write fake tmux");
+    let mut perms = fs::metadata(&tmux).expect("stat fake tmux").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&tmux, perms).expect("chmod fake tmux");
+    bin
+}
+
+/// Runs the shell half of the live-prompt gate on `capture`: lays it behind a
+/// fake tmux, runs `sweep.sh approve`, and returns whether the helper saw a
+/// LIVE prompt.
+///
+/// `approve` is the gate's only remaining consumer, so this drives the
+/// production path rather than a test-only entry point. Its guards past the
+/// gate (option 1 missing, or option 1 reading as a durable grant) still mean
+/// the gate fired — only `cleared before send` means it did not.
 fn sweep_sees_live(repo: &Path, sweep: &Path, capture: &str) -> bool {
+    let fakebin = install_fake_tmux(repo);
+    write_session_json(repo);
+    let capture_file = repo.join("parity-capture.txt");
+    fs::write(&capture_file, capture).expect("write capture fixture");
     let path = format!(
-        "{}:{}",
+        "{}:{}:{}",
+        fakebin.display(),
         built_bin_dir().display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mut child = StdCommand::new("bash")
+    let out = StdCommand::new("bash")
         .arg(sweep)
-        .arg("classify")
+        .args(["approve", "2"])
         .current_dir(repo)
         .env("PATH", path)
+        .env("FAKE_TMUX_CAPTURE", &capture_file)
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn sweep.sh classify");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(capture.as_bytes())
-        .expect("write capture");
-    let out = child.wait_with_output().expect("wait");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    !stdout.contains("no-op (not live)")
+        .output()
+        .expect("run sweep.sh approve");
+    // Each fixture gets a fresh pane claim; the previous run released it on
+    // exit, but drop any stale file so a fixture is never skipped as claimed.
+    let _ = fs::remove_file(repo.join(".git-paw/tmp/approve-pane-2.claim"));
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !combined.contains("claimed by another approver"),
+        "the parity probe must not be blocked by a stale claim: {combined}"
+    );
+    !combined.contains("cleared before send")
 }
 
 /// A bare confirmation question followed by ordinary command output and a
@@ -257,7 +301,7 @@ fn fixtures() -> Vec<(&'static str, String, bool)> {
             // does not START the line either).
             "grep-style output echoing the footer text is not a live modal",
             "grep -rn \"esc to cancel\" src/\n\
-             src/supervisor/auto_approve.rs:1378:const LIVE_PROMPT_FOOTER_MARKERS: &[&str] = &[\"esc to cancel\"];\n\
+             src/supervisor/permission_prompt.rs:1378:const LIVE_PROMPT_FOOTER_MARKERS: &[&str] = &[\"esc to cancel\"];\n\
              done searching\n\
              no further prompts found\n\
              agent waiting for next instruction\n\

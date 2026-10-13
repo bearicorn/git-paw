@@ -12,10 +12,11 @@
 #   - the docs base URL from <repo>/.git-paw/config.toml top-level
 #     `docs_base_url` (default: git-paw's published documentation site).
 #
-# Wrapping every docs->agent curl behind one stable script path means the
-# classifier recognises this script path (`.git-paw/scripts/docs-fetch.sh`)
-# instead of requiring a broad `curl *` allowlist rule, matching the by-path
-# model of the broker helper.
+# Wrapping every docs->agent curl behind one stable script path means a
+# permission rule scoped to that exact path (`.git-paw/scripts/docs-fetch.sh`)
+# can allow it, instead of requiring a broad `curl *` rule -- matching the
+# by-path model of the broker helper. git-paw does not write that rule for
+# you; it is the agent CLI's own allow rule to grant.
 #
 # Documentation is fetched ON DEMAND from the configured site; no doc content
 # is shipped inside this script or the binary. Lookup is best-effort: on an

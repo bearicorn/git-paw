@@ -15,8 +15,8 @@ test side.
 ## Why these standards — non-functional requirements
 
 Every rule here serves a quality attribute; the standards are how git-paw resolves the tensions
-between them. Its **defining** NFRs — because it auto-approves commands and runs unattended in real
-repos, into a v1.0.0 freeze — are **security & safety**, **reliability under unattended operation**,
+between them. Its **defining** NFRs — because it launches agents with real execution power and
+runs unattended in real repos, into a v1.0.0 freeze — are **security & safety**, **reliability under unattended operation**,
 and **stability / back-compat**, above the usual maintainable/testable/documented. When NFRs
 conflict, resolve by precedence: **Safety → Reliability → Contract stability → Internal quality →
 DX**. Two rules fall straight out and bind every change: **security wins ties** (deny-by-default,
@@ -44,7 +44,7 @@ never silently**. Full set, conflict table, and the review-gate test:
 - **Domain newtypes with smart constructors** for injection-prone strings — `SessionName`,
   `BranchSlug`, `WorktreePath`. Sanitize/quote once at construction so downstream code can't
   interpolate a raw untrusted string. (Kills the session-name / path-quoting bug class.)
-- **Hidden-subcommand IPC seam** (`__dashboard`, `__classify`). When a shell helper needs Rust
+- **Hidden-subcommand IPC seam** (`__dashboard`, `__prompt-profile`). When a shell helper needs Rust
   logic, expose `git paw __<verb>` and let the shell shell out — never re-implement the logic
   in bash. One source of truth; the export stays a thin client. When a change touches **any
   exported asset**, follow the `export-agnosticism` skill (`.agents/skills/export-agnosticism/SKILL.md`)

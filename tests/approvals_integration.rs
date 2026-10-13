@@ -171,9 +171,11 @@ fn approvals_lists_three_patterns_with_counts_and_suggestions() {
             predicate::str::contains("make integration-test")
                 .and(predicate::str::contains("./scripts/deploy-staging.sh"))
                 .and(predicate::str::contains("podman build -t paw-ci ."))
-                // Promotion hints: a `./` path → project allowlist; generics → preset.
+                // Promotion hints, both naming the agent CLI's own allow
+                // rules: a `./` path → its project-scoped rules; a generic
+                // command → its user-scoped rules.
                 .and(predicate::str::contains("project allowlist"))
-                .and(predicate::str::contains("bundled preset candidate"))
+                .and(predicate::str::contains("user allowlist"))
                 .and(predicate::str::contains("PATTERN"))
                 .and(predicate::str::contains("COUNT"))
                 .and(predicate::str::contains("SUGGEST")),
@@ -220,7 +222,7 @@ fn approvals_json_has_documented_shape() {
     let top = &approvals[0];
     assert_eq!(top["pattern"], "make integration-test");
     assert_eq!(top["count"], 2);
-    assert_eq!(top["suggested_target"], "bundled-preset");
+    assert_eq!(top["suggested_target"], "user-allowlist");
     assert_eq!(top["first_seen"], "2026-05-29T12:00:00Z");
     assert_eq!(top["last_seen"], "2026-05-29T12:30:00Z");
     // Each entry carries every documented field.

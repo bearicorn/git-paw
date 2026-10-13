@@ -121,10 +121,10 @@ fn send_line(session: &str, pane: usize, line: &str) {
 /// Runs `sweep.sh approve <pane>` from the repo and returns combined
 /// stdout+stderr.
 ///
-/// The helper resolves its option index by delegating to `git paw __classify`,
-/// so the freshly built binary is prepended to `PATH` for the child: without
-/// it the delegation yields no verdict and `approve` correctly fails closed
-/// (sending nothing), which is a different scenario from the ones here.
+/// The helper reads the durable-grant marker from `git paw __prompt-profile`,
+/// so the freshly built binary is prepended to `PATH` for the child; without
+/// it the helper falls back to its built-in marker, which is a different
+/// scenario from the ones here.
 fn run_approve(repo: &Path, sweep: &Path, pane: &str) -> String {
     let bin = assert_cmd::cargo::cargo_bin("git-paw");
     let bin_dir = bin.parent().expect("built binary has a parent dir");
@@ -162,17 +162,20 @@ fn approve_sends_keys_on_live_prompt() {
     write_session_json(repo.path(), &session);
     create_session_with_panes(&session);
 
-    // A live prompt: the permission-prompt footer lands in the pane tail.
+    // A live prompt: the permission-prompt footer AND the numbered option
+    // list land in the pane tail. The option list is part of the fixture
+    // because `approve` now confirms option 1 is really on screen before
+    // pressing it — a question with no options is not a modal it can answer.
     send_line(
         &session,
         2,
-        "printf 'Bash command\\n  cargo test\\nDo you want to proceed? '",
+        "printf 'Bash command\\n  cargo test\\nDo you want to proceed?\\n 1. Yes\\n 2. No\\n Esc to cancel '",
     );
 
     let out = run_approve(repo.path(), &sweep, "2");
     assert!(
-        out.contains("approved pane 2"),
-        "live prompt must be approved, got: {out}"
+        out.contains("approved pane 2 (option 1)"),
+        "live prompt must be answered once with option 1, got: {out}"
     );
     assert!(
         !out.contains("cleared before send"),

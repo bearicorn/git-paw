@@ -9,113 +9,24 @@ git-paw clears an unattended agent's safe permission prompts through three compl
 
 These layers form one set: the keystroke gate decides WHETHER a prompt is safe to approve, the send-gate re-confirm decides whether it is STILL LIVE to dispatch at the last instant, and file-edit auto-approval extends the safe-classification set to worktree-confined filesystem operations.
 ## Requirements
-### Requirement: Auto-approval keystroke sequence
-
-When a detected prompt is classified safe, the system SHALL send the agent CLI's "approve and remember" keystroke sequence to the pane via `tmux send-keys`.
-
-The keystroke send SHALL pass through the `broker-mediated-approvals` approval-send gate: immediately before dispatching the keystroke sequence, the system SHALL re-capture the target pane and confirm the prompt's live structural markers are present at the capture's tail, per the Live-prompt gate — a window wide enough to span a full multi-option prompt block, not a fixed ~4-line tail. When the re-confirm capture shows the prompt has cleared between classification and send, the system SHALL dispatch NO keystrokes (no stray input). The system SHALL also refuse to dispatch the sequence into pane index 0 (the supervisor's own pane) via this blind send-keys path.
-
-#### Scenario: Default Claude approval sequence
-
-- **GIVEN** a Claude pane displaying a permission prompt for an allowlisted curl command
-- **WHEN** auto-approval fires AND the immediate-before-send re-confirm capture shows the prompt is still live (structural markers present at the tail)
-- **THEN** the system SHALL send the resolved option digit followed by `Enter` (per "Option-index selection for Yes/No prompts") to the pane via `tmux send-keys -t <session>:<pane>`
-
-#### Scenario: Each keystroke sent separately
-
-- **GIVEN** auto-approval is firing against a re-confirmed live prompt
-- **WHEN** the keystrokes are dispatched
-- **THEN** the system SHALL invoke `tmux send-keys` once per logical key (the resolved option digit, then `Enter`) rather than as a single concatenated string
-
-#### Scenario: Cleared prompt suppresses the keystroke sequence
-
-- **GIVEN** a prompt that classified safe at detection time
-- **WHEN** the immediate-before-send re-confirm capture no longer shows the prompt's live structural markers at the tail
-- **THEN** the system SHALL dispatch NO keystrokes to the pane
-- **AND** the agent's CLI input SHALL receive no stray characters
-
-#### Scenario: Auto-approval never types into pane 0
-
-- **GIVEN** a safe-classified prompt whose resolved target pane index is 0
-- **WHEN** auto-approval would fire
-- **THEN** the system SHALL dispatch NO keystrokes via the blind send-keys path
-- **AND** the prompt SHALL be left for the non-blind supervisor-pane path
-
-### Requirement: No auto-approval for unsafe or unknown classes
-
-The auto-approver SHALL only fire when classification returns a known-safe class AND the prompt is LIVE (see the "Live-prompt gate" requirement below). When the prompt is not live, or the classification is `Unknown` (or any other non-safe class), auto-approval SHALL NOT fire.
-
-When auto-approval declines to fire because the classification is `Unknown` (or any other non-safe class), the prompt SHALL be surfaced to the human via the supervisor pane — by publishing an `agent.question` whose `agent_id` is the originating coding-agent slug and whose `payload.question` describes the unclassified prompt. The supervisor agent (running inside its own tmux pane) consumes that question from its inbox and replies via `tmux send-keys` to the agent pane. The dashboard's role is observation only — the v0.4 "prompts inbox" panel that surfaced these questions inline was removed in this change (see the `dashboard` capability's "No prompt-inbox panel" requirement).
-
-#### Scenario: Unknown class is left for human
-
-- **GIVEN** a detected prompt classified `PermissionType::Unknown`
-- **WHEN** the supervisor poll loop runs
-- **THEN** auto-approval SHALL NOT fire
-- **AND** the prompt SHALL be surfaced to the human via the supervisor pane (typically by publishing an `agent.question` to the broker, which the supervisor agent then handles in its own pane)
-
-#### Scenario: Disabled config disables firing
-
-- **GIVEN** `[supervisor.auto_approve] enabled = false`
-- **WHEN** any detected prompt arrives
-- **THEN** auto-approval SHALL NOT fire regardless of classification
-
-#### Scenario: Safe class with non-live prompt does not fire
-
-- **GIVEN** a capture whose command slice classifies safe but whose footer marker `Esc to cancel` is NOT in the last ~4 non-blank lines
-- **WHEN** the supervisor poll loop runs
-- **THEN** auto-approval SHALL NOT fire (the prompt is not live)
-
-### Requirement: Auto-approval is logged
-
-Every auto-approval action SHALL be recorded in the broker message log so the human can audit decisions after the session.
-
-#### Scenario: Approval emits broker message
-
-- **GIVEN** auto-approval fires for agent `feat-foo` for a `cargo test` prompt
-- **WHEN** the keystrokes are sent
-- **THEN** the broker SHALL receive an `agent.status` (or equivalent log) message tagged `auto_approved` containing the agent id and the matched whitelist entry
-
-#### Scenario: Logged before keystrokes
-
-- **GIVEN** auto-approval fires
-- **WHEN** the action is recorded
-- **THEN** the log entry SHALL be appended before the `tmux send-keys` call so a crash mid-action still leaves an audit trail
-
-### Requirement: Integration with stall detection
-
-Auto-approval SHALL be triggered from the stall-detection loop, not run as an independent timer, so it only fires when an agent is genuinely stuck.
-
-#### Scenario: Healthy agent not approved
-
-- **GIVEN** an agent that is publishing status updates within the stall threshold
-- **WHEN** the supervisor poll loop runs
-- **THEN** detection SHALL NOT capture its pane and auto-approval SHALL NOT fire
-
-#### Scenario: Stalled agent approved
-
-- **GIVEN** an agent whose `last_seen` is older than the configured stall threshold
-- **WHEN** the supervisor poll loop runs
-- **THEN** detection SHALL capture its pane and, if classification is safe, auto-approval SHALL fire
-
 ### Requirement: Live-prompt gate
 
-The auto-approver SHALL act on a prompt only when it is LIVE, and SHALL reliably detect both single- and multi-option permission prompts. A prompt is live when the pane capture contains the prompt's structural markers — the numbered Yes/No option glyphs and/or the `Do you want to proceed?` marker, together with the `Esc to cancel` footer — within a window anchored on the modal block itself. Detection SHALL search upward from the end of the capture rather than inspecting a fixed count of trailing lines, and SHALL tolerate a bounded region of non-prompt content between the modal and the end of the capture (up to 13 non-blank trailing lines below the footer, in the shipped implementation), so a CLI that renders a task list, status strip, or progress footer below its input area does not hide a live modal. The inspected window SHALL remain wide enough to span a full multi-option prompt block (`Do you want to proceed?` + N options + footer), so a prompt offering a "don't ask again" option is detected rather than missed. The tolerated trailing region SHALL be bounded, so a prompt that has genuinely scrolled out of view still fails the gate. The extended tolerance SHALL apply only when the modal's actual SHAPE is present, not a bare mention of its footer text: the footer marker (such as `Esc to cancel`) MUST anchor the START of a line (after decoration stripping, with an optional leading parenthesis), AND a numbered option line MUST be present within the wider block window above it. A confirmation-question line on its own, or the footer text merely appearing mid-line (narration describing the UI, or grep-style output echoing a matching line), SHALL be judged by the narrow tail alone and SHALL NOT extend the tolerance — because an answered prompt can leave its question in the transcript followed by a few lines of ordinary command output, and treating a bare substring mention as live would dispatch an approval digit as stray chat input. Even when the footer-and-option shape is present, the extended tolerance SHALL NOT apply if an idle input-box line (the CLI's composer sigil, not an option line) appears anywhere between the matched footer and the capture's true end — a real live modal REPLACES the input box while it is up, so a quoted modal (e.g. a full permission prompt copied into tool output, such as the supervisor's own pane echoing another pane's capture) followed by the pane's own idle composer box is not a live prompt even though the footer and option shape both match. When these markers are absent, the system SHALL treat the capture as containing no live prompt and SHALL NOT send any keystrokes, regardless of classification — preventing a supervisor that is merely narrating about a pane (or a scrolled-away earlier prompt) from tripping a phantom approval.
+Prompt detection SHALL treat a prompt as present only when it is LIVE, and SHALL reliably detect both single- and multi-option permission prompts. A prompt is live when the pane capture contains the prompt's structural markers — the numbered Yes/No option glyphs and/or the `Do you want to proceed?` marker, together with the `Esc to cancel` footer — within a window anchored on the modal block itself. Detection SHALL search upward from the end of the capture rather than inspecting a fixed count of trailing lines, and SHALL tolerate a bounded region of non-prompt content between the modal and the end of the capture (up to 13 non-blank trailing lines below the footer, in the shipped implementation), so a CLI that renders a task list, status strip, or progress footer below its input area does not hide a live modal. The inspected window SHALL remain wide enough to span a full multi-option prompt block (`Do you want to proceed?` + N options + footer), so a prompt offering a "don't ask again" option is detected rather than missed. The tolerated trailing region SHALL be bounded, so a prompt that has genuinely scrolled out of view still fails the gate. The extended tolerance SHALL apply only when the modal's actual SHAPE is present, not a bare mention of its footer text: the footer marker (such as `Esc to cancel`) MUST anchor the START of a line (after decoration stripping, with an optional leading parenthesis), AND a numbered option line MUST be present within the wider block window above it. A confirmation-question line on its own, or the footer text merely appearing mid-line (narration describing the UI, or grep-style output echoing a matching line), SHALL be judged by the narrow tail alone and SHALL NOT extend the tolerance — because an answered prompt can leave its question in the transcript followed by a few lines of ordinary command output, and treating a bare substring mention as live would raise a phantom escalation or land an approval digit as stray chat input. Even when the footer-and-option shape is present, the extended tolerance SHALL NOT apply if an idle input-box line (the CLI's composer sigil, not an option line) appears anywhere between the matched footer and the capture's true end — a real live modal REPLACES the input box while it is up, so a quoted modal (e.g. a full permission prompt copied into tool output, such as the supervisor's own pane echoing another pane's capture) followed by the pane's own idle composer box is not a live prompt even though the footer and option shape both match. When these markers are absent, the system SHALL treat the capture as containing no live prompt: it SHALL NOT escalate a prompt for it and SHALL NOT send any approval keystrokes — preventing a supervisor that is merely narrating about a pane (or a scrolled-away earlier prompt) from tripping a phantom escalation or a phantom approval.
 
 Before dispatching approval keystrokes, the sender SHALL re-confirm the prompt is still live on a FRESH capture taken immediately prior to sending. If the prompt has cleared in the interim (the agent moved on, or another approver won the race), the sender SHALL send nothing, so approval digits can never land as stray chat input.
 
-The in-tool auto-approver and the bundled `sweep.sh approve` helper SHALL use the same live-prompt markers and the same anchoring discipline so their detection agrees.
+The drive loop's prompt detector and the bundled `sweep.sh approve` helper SHALL use the same live-prompt markers and the same anchoring discipline so their detection agrees.
 
-#### Scenario: Live single-option prompt fires
+#### Scenario: Live single-option prompt is detected
 
-- **GIVEN** a capture whose tail includes `Esc to cancel` and whose command slice classifies safe
-- **WHEN** the poll loop runs
-- **THEN** the live-prompt gate SHALL pass and auto-approval MAY fire
+- **GIVEN** a capture whose tail includes `Esc to cancel`
+- **WHEN** the drive loop evaluates it
+- **THEN** the live-prompt gate SHALL pass and the prompt SHALL be treated as live
 
 #### Scenario: Live multi-option prompt is detected
 
 - **GIVEN** a capture whose tail is a multi-option permission prompt (`Do you want to proceed?`, a numbered option list including a "don't ask again" option, and `Esc to cancel`)
-- **WHEN** the poll loop (or `sweep.sh approve`) inspects it
+- **WHEN** the drive loop (or `sweep.sh approve`) inspects it
 - **THEN** the prompt SHALL be detected as live — the detection SHALL NOT report "no live prompt" merely because `Do you want to proceed?` sits above a narrow tail window
 
 #### Scenario: Trailing task region does not hide a live modal
@@ -136,13 +47,13 @@ The in-tool auto-approver and the bundled `sweep.sh approve` helper SHALL use th
 
 - **GIVEN** a capture whose question line `Do you want to proceed?` is followed by four lines of ordinary command output and a shell prompt, with no option list and no `Esc to cancel` footer after it
 - **WHEN** the live-prompt gate evaluates it
-- **THEN** the gate SHALL fail and the system SHALL NOT send keystrokes, even though the question line lies within the bounded trailing region
+- **THEN** the gate SHALL fail, and the system SHALL neither escalate it nor send keystrokes, even though the question line lies within the bounded trailing region
 
-#### Scenario: Footer absent does not fire
+#### Scenario: Footer absent is not live
 
-- **GIVEN** a capture that mentions a safe command in prose but whose tail does NOT contain the prompt's option glyphs or `Esc to cancel`
-- **WHEN** the poll loop runs
-- **THEN** the live-prompt gate SHALL fail and the system SHALL NOT send keystrokes
+- **GIVEN** a capture that mentions a command in prose but whose tail does NOT contain the prompt's option glyphs or `Esc to cancel`
+- **WHEN** the drive loop evaluates it
+- **THEN** the live-prompt gate SHALL fail and the system SHALL neither escalate it nor send keystrokes
 
 #### Scenario: Scrolled-away prompt still fails the gate
 
@@ -176,132 +87,19 @@ The in-tool auto-approver and the bundled `sweep.sh approve` helper SHALL use th
 
 #### Scenario: Prompt cleared before send sends nothing
 
-- **GIVEN** the gate classified a prompt live and decided to approve
+- **GIVEN** `sweep.sh approve` found a prompt live and is about to send the approval
 - **WHEN** a fresh capture taken immediately before sending shows the prompt has cleared
 - **THEN** the sender SHALL send no keystrokes, so no approval digit lands as stray chat input
 
-#### Scenario: Detection agrees across auto-approver and sweep helper
+#### Scenario: Detection agrees across the drive loop and the sweep helper
 
-- **WHEN** the same multi-option prompt capture is evaluated by the in-tool auto-approver and by `sweep.sh approve`
+- **WHEN** the same multi-option prompt capture is evaluated by the drive loop's prompt detector and by `sweep.sh approve`
 - **THEN** both SHALL agree it is a live prompt (shared marker set and shared anchoring discipline)
 
 #### Scenario: Parity holds for captures carrying a trailing region
 
-- **WHEN** a capture carrying a trailing task region is evaluated by the in-tool auto-approver and by the bundled `sweep.sh` mirror
+- **WHEN** a capture carrying a trailing task region is evaluated by the drive loop's prompt detector and by the bundled `sweep.sh` mirror
 - **THEN** both SHALL return the same liveness verdict
-
-### Requirement: Worktree-confined git add and git commit pre-approval
-
-The classifier SHALL pre-approve `git add` and `git commit` prompts when the agent's working directory resolves inside its worktree root, using the same canonicalize-then-`starts_with(worktree_root)` boundary check as worktree-confined file edits. This pre-approval SHALL allow an unattended agent to stage and commit its own work without stalling on the approval prompt. `git push` SHALL NOT be covered by this requirement — it is on the danger-list and SHALL always escalate.
-
-#### Scenario: Worktree git commit auto-approves
-
-- **GIVEN** an agent whose cwd canonicalizes inside its worktree root
-- **AND** a live prompt whose command slice is `git commit -m "feat: x"`
-- **WHEN** the classifier runs
-- **THEN** the command SHALL classify safe-by-pattern and auto-approval SHALL dispatch the approval keystrokes
-
-#### Scenario: Worktree git add auto-approves
-
-- **GIVEN** the same in-worktree agent
-- **AND** a live prompt whose command slice is `git add -A`
-- **WHEN** the classifier runs
-- **THEN** the command SHALL classify safe-by-pattern and auto-approval SHALL fire
-
-#### Scenario: git push still escalates despite worktree confinement
-
-- **GIVEN** the same in-worktree agent
-- **AND** a live prompt whose command slice is `git push`
-- **WHEN** the classifier runs
-- **THEN** the danger-list SHALL win and the classifier SHALL escalate; auto-approval SHALL NOT fire
-
-### Requirement: Broad grant restricted to allowlisted non-arbitrary-code verbs
-
-The auto-approver SHALL select a prompt's permanent broad grant option ("Yes, and don't
-ask again for: X"), when the prompt offers one, only when X is NOT an arbitrary-code
-runner AND either X has already been classified safe / worktree-confined by the decision
-order, or X's leading verb is in the read-mostly allowlist (per
-`safe-command-classification`).
-The classification gate is what lets a routine stack command — one safe only through the
-resolved `[supervisor.common_dev_allowlist]` preset, such as `cargo test`, whose verb is
-not read-mostly — be permanently allowed instead of re-prompting on every identical
-occurrence (per `supervisor-unattended-operation`'s **Auto-approval prefers a durable
-grant for a safe prompt**). A command that did NOT classify safe is escalated, so no
-option is selected for it at all.
-
-Arbitrary-code runners SHALL include `python`, `bash -c`, `sh -c`, `eval`, `node`, and
-any command containing a bare ` -c ` code-string flag. For an arbitrary-code runner the
-auto-approver SHALL select the one-time "Yes" option and SHALL NEVER select the permanent
-broad grant, whatever its classification — so an interpreter run of a worktree-resident
-script stays a one-time approval even though it classifies safe.
-
-#### Scenario: Allowlisted verb takes the broad grant
-
-- **GIVEN** a live 3-option prompt for `git status` offering "Yes, and don't ask again for: git status"
-- **WHEN** the auto-approver fires
-- **THEN** it SHALL select the broad-grant option (option 2)
-
-#### Scenario: A safe-classified stack command takes the broad grant
-
-- **GIVEN** a live 3-option prompt for `cargo test --lib`, safe through the resolved allowlist but with a verb that is not read-mostly
-- **WHEN** the auto-approver fires
-- **THEN** it SHALL select the broad-grant option (option 2)
-
-#### Scenario: An unclassified command takes no broad grant
-
-- **GIVEN** a live 3-option prompt for a command that matched no safe rule
-- **WHEN** the auto-approver evaluates it
-- **THEN** it SHALL escalate and SHALL NOT select the permanent broad-grant option
-
-#### Scenario: python -c never gets a permanent broad grant
-
-- **GIVEN** a live 3-option prompt for `python3 -c "import os; os.remove('x')"`
-- **WHEN** the auto-approver fires
-- **THEN** it SHALL select the one-time "Yes" option (option 1)
-- **AND** it SHALL NOT select the permanent broad-grant option
-
-#### Scenario: bash -c never gets a permanent broad grant
-
-- **GIVEN** a live 3-option prompt for `bash -c "do-thing"`
-- **WHEN** the auto-approver fires
-- **THEN** it SHALL select the one-time "Yes" option and SHALL NOT take the broad grant
-
-### Requirement: Option-index selection for Yes/No prompts
-
-When dispatching approval keystrokes, the auto-approver SHALL select the option index according to the prompt shape. For a 2-option Yes/No prompt, option 1 SHALL be "Yes" and SHALL be selected. For a 3-option Yes / Yes-and-don't-ask-again / No prompt, the auto-approver SHALL select option 2 (the broad grant) only when the broad-grant rule permits (per "Broad grant restricted to allowlisted non-arbitrary-code verbs"), and otherwise SHALL select option 1 (one-time Yes).
-
-The bundled `sweep.sh approve` helper SHALL follow the same option-index selection: it SHALL parse the numbered option list from the fresh pre-send capture and dispatch the selected option's digit followed by `Enter`. It SHALL NOT dispatch a blind cursor-movement sequence (e.g. `Down` + `Enter`) whose landing option depends on the prompt shape — on a 2-option Yes/No prompt such a sequence selects "No", and on a 3-option prompt it takes the permanent broad grant without consulting the broad-grant rule.
-
-#### Scenario: Two-option prompt selects Yes
-
-- **GIVEN** a live 2-option Yes/No prompt for a safe command
-- **WHEN** the auto-approver fires
-- **THEN** it SHALL select option 1 (Yes)
-
-#### Scenario: Three-option prompt with allowlisted verb selects the broad grant
-
-- **GIVEN** a live 3-option prompt for an allowlisted non-arbitrary-code command
-- **WHEN** the auto-approver fires
-- **THEN** it SHALL select option 2 (Yes, and don't ask again)
-
-#### Scenario: Three-option prompt with arbitrary-code runner selects one-time Yes
-
-- **GIVEN** a live 3-option prompt for `python3 -c "..."`
-- **WHEN** the auto-approver fires
-- **THEN** it SHALL select option 1 (one-time Yes), not option 2
-
-#### Scenario: Sweep helper approves a 2-option prompt affirmatively
-
-- **GIVEN** a live 2-option Yes/No prompt on an agent pane
-- **WHEN** the operator runs `sweep.sh approve <pane>`
-- **THEN** the helper SHALL send the digit `1` then `Enter` (selecting Yes)
-- **AND** SHALL NOT send `Down` + `Enter`
-
-#### Scenario: Sweep helper respects the broad-grant rule on 3-option prompts
-
-- **GIVEN** a live 3-option prompt for an arbitrary-code runner (e.g. `bash -c "..."`)
-- **WHEN** the operator runs `sweep.sh approve <pane>`
-- **THEN** the helper SHALL select option 1 (one-time Yes), agreeing with the in-tool auto-approver's option resolution
 
 ### Requirement: Approval keystrokes require a re-confirmed live prompt
 
@@ -342,7 +140,7 @@ A permission-prompt marker matched only in scrollback above the Live-prompt gate
 
 The approval-send gate SHALL refuse to dispatch approval keystrokes to pane index 0 (the supervisor's own pane). When the resolved target pane index is 0, the gate SHALL send no keystrokes and SHALL report that pane 0 is excluded from blind send-keys.
 
-Clearing the supervisor pane's own prompt is a distinct action handled by a non-blind path (the unattended drive loop) and is outside this gate; the blind send-keys gate SHALL NOT type into pane 0 under any classification.
+No git-paw component SHALL send approval keystrokes to pane 0 by any other path. A permission prompt on the supervisor's own pane is answered by the human at that pane; the drive loop only escalates it (see `supervisor-unattended-operation`, *The drive loop covers the supervisor's own pane 0*).
 
 #### Scenario: Pane 0 is never sent blind keystrokes
 
@@ -357,113 +155,49 @@ Clearing the supervisor pane's own prompt is a distinct action handled by a non-
 - **WHEN** the approval-send gate runs
 - **THEN** the gate SHALL dispatch the approval keystrokes to pane 2
 
-### Requirement: Approval dedup keys on command or agent identity, not prompt text
+#### Scenario: The drive loop sends no approval keystrokes to pane 0
 
-When the system deduplicates pending or repeated approvals so a single awaiting prompt is not acted on multiple times, it SHALL key the dedup on the command identity (the command text the modal is asking about) and/or the agent/pane identity, or SHALL rely on wait-for-clear (the prompt's disappearance after it is answered). The system SHALL NOT compute the dedup key from the captured prompt's boilerplate/footer text (e.g. the shared "Do you want to proceed?" footer).
-
-#### Scenario: Distinct commands are not collapsed by shared footer
-
-- **GIVEN** two successive permission prompts on the same agent — one for `cargo test` and one for `git push` — that share the identical permission-prompt footer text
-- **WHEN** the dedup logic evaluates them
-- **THEN** the two prompts SHALL be treated as distinct approval events (keyed on their differing command identity)
-- **AND** the second prompt SHALL NOT be suppressed as a duplicate of the first
-
-#### Scenario: Repeated capture of the same unanswered prompt is deduped
-
-- **GIVEN** the same agent remains on the same unanswered permission prompt across consecutive sweep iterations
-- **WHEN** the dedup logic evaluates the repeated detection
-- **THEN** the repeated detection SHALL be treated as the same approval event (keyed on command/agent identity, or recognised as not-yet-cleared)
-- **AND** the system SHALL NOT generate a duplicate approval action for the unchanged prompt
+- **GIVEN** an `--unattended` session whose supervisor pane (pane 0) shows a live permission prompt
+- **WHEN** the drive loop sweeps pane 0
+- **THEN** no keystroke answering the prompt SHALL be sent to pane 0
 
 ### Requirement: Approval gate reuses existing broker variants
 
-The approval-send gate's approval-trigger signal and its escalation channel SHALL reuse the existing `BrokerMessage` variants defined in `broker-messages`. The trigger that a pane is awaiting approval SHALL be the synthetic `agent.status` with `phase: "stuck-on-prompt"` (per `stuck-prompt-detection`); escalation of an unsafe or unclassifiable prompt SHALL reuse `agent.question` (per `automatic-approval`); supervisor→agent replies SHALL reuse `agent.feedback` or the supervisor `/tell` path. This change SHALL NOT introduce a new `BrokerMessage` variant or a per-CLI permission hook.
+Escalating a live permission prompt, and the signals around it, SHALL reuse the existing `BrokerMessage` variants defined in `broker-messages`. The trigger that a pane is waiting on a prompt SHALL be the synthetic `agent.status` with `phase: "stuck-on-prompt"` (per `stuck-prompt-detection`). The escalation of a live permission prompt SHALL reuse `agent.question`, and its question text SHALL name the originating agent and the prompted command. Supervisor→agent replies SHALL reuse `agent.feedback` or the supervisor `/tell` path. The system SHALL NOT define a `BrokerMessage` variant or a per-CLI permission hook dedicated to permission prompts.
 
-#### Scenario: No new broker message variant is introduced
+#### Scenario: Escalation of a live prompt reuses agent.question
 
-- **WHEN** the broker message envelope is inspected after this change
-- **THEN** the set of `BrokerMessage` variants SHALL be unchanged (the seven variants `Status`, `Artifact`, `Blocked`, `Verified`, `Feedback`, `Question`, `Intent`)
-- **AND** the approval-trigger and escalation signals SHALL be expressed using those existing variants
+- **GIVEN** a live permission prompt on agent `feat-a`'s pane in an `--unattended` session
+- **WHEN** the drive loop escalates it
+- **THEN** the broker SHALL receive an `agent.question` whose question text names `feat-a` and the prompted command
 
-#### Scenario: Escalation of an unsafe prompt reuses agent.question
+#### Scenario: No permission-prompt message variant exists
 
-- **GIVEN** a re-confirmed live prompt that the classifier deems unsafe or unknown
-- **WHEN** the gate escalates the prompt for human review
-- **THEN** the escalation SHALL be published as an `agent.question` whose `agent_id` is the originating agent's slug
-- **AND** no new message type SHALL be sent
+- **WHEN** the broker message envelope is inspected
+- **THEN** no `BrokerMessage` variant SHALL be dedicated to permission prompts or approvals
+- **AND** the stuck-on-prompt trigger SHALL be expressed as an `agent.status`
 
-### Requirement: Worktree-confined file operations classify as safe
+### Requirement: Approval keystrokes are sent only by an explicit approve action
 
-The auto-approve classifier SHALL recognise Claude's
-filesystem-prompt patterns (write / edit / create / delete)
-and SHALL classify them as safe-by-pattern when the resolved
-target path is inside the agent's worktree root. The
-classifier SHALL canonicalize paths before the
-`starts_with(worktree_root)` check to prevent symlink-escape.
+Approval keystrokes SHALL reach an agent pane only through the bundled `sweep.sh approve <pane>` action, run explicitly by a human or by the orchestrator. No git-paw process SHALL send approval keystrokes on its own initiative. The `--unattended` drive loop, the `__dashboard` process and every other git-paw subcommand SHALL detect and escalate permission prompts but SHALL NOT answer them. The explicit approve action SHALL always select the one-time "Yes" option and SHALL never select a durable "don't ask again" grant (see `broker-agent-helper`, *sweep.sh approve re-confirms a live prompt before sending keys*).
 
-#### Scenario: In-worktree file create is auto-approved
+#### Scenario: An unattended run sends no approval keystrokes
 
-- **GIVEN** an agent on `feat/cold-start-ci-parity` whose
-  worktree root is `/path/to/git-paw-feat-cold-start-ci-parity/`
-- **WHEN** Claude prompts "Do you want to allow this write
-  to Containerfile?" (resolving to the worktree root)
-- **THEN** the classifier SHALL return safe-by-pattern, and
-  the auto-approve sweep SHALL dispatch the approval
-  keystrokes
+- **GIVEN** an `--unattended` session whose coding-agent pane shows a live permission prompt
+- **WHEN** the drive loop sweeps that pane on several consecutive ticks
+- **THEN** no keystroke answering the prompt SHALL be sent to that pane
 
-#### Scenario: Out-of-worktree file create requires manual approval
+#### Scenario: An attended session runs no auto-approver
 
-- **GIVEN** the same agent
-- **WHEN** Claude prompts a write to `/etc/hosts` (or any
-  path resolving outside the worktree)
-- **THEN** the classifier SHALL NOT return safe-by-pattern,
-  and the existing manual-prompt flow SHALL run
+- **GIVEN** an attended supervisor session with the broker enabled and a configuration that still declares `[supervisor.auto_approve] enabled = true`
+- **WHEN** a coding-agent pane shows a live permission prompt
+- **THEN** no git-paw process SHALL send a keystroke to that pane
+- **AND** the `__dashboard` process SHALL NOT run an auto-approve thread
 
-#### Scenario: Symlink-escape attempt does not bypass the boundary
+#### Scenario: The explicit approve action answers once
 
-- **GIVEN** a malicious prompt whose path contains `..`
-  resolving outside the worktree
-- **WHEN** the classifier canonicalizes the path
-- **THEN** the resolved path SHALL be checked against the
-  worktree root via `starts_with`, and the symlink-escape
-  attempt SHALL fail the safety check
-
-### Requirement: approve_worktree_writes config field
-
-The system SHALL accept
-`[supervisor.auto_approve].approve_worktree_writes` as a
-boolean config field defaulting to `true`. When `false`, the
-classifier SHALL NOT recognise file-operation prompts as
-safe-by-pattern even when the target is inside the worktree;
-manual prompts SHALL run as before this change.
-
-#### Scenario: Default true auto-approves
-
-- **GIVEN** no `[supervisor.auto_approve]` section in
-  config (or `approve_worktree_writes` unset)
-- **WHEN** a worktree-confined file prompt fires
-- **THEN** the classifier SHALL auto-approve
-
-#### Scenario: Explicit false reverts to manual
-
-- **GIVEN** `[supervisor.auto_approve].approve_worktree_writes
-  = false`
-- **WHEN** a worktree-confined file prompt fires
-- **THEN** the classifier SHALL NOT auto-approve; the user
-  SHALL see the manual prompt
-
-### Requirement: Backwards compatibility with shell auto-approve
-
-The file-operation category SHALL be additive — existing
-shell-command auto-approval (cargo / npm / pytest / pip /
-mvn / make / gradle / docker / git / curl) SHALL continue to
-work exactly as in v0.5.0.
-
-#### Scenario: Shell auto-approve still fires
-
-- **GIVEN** a Claude prompt for `cargo build`
-- **WHEN** the classifier runs
-- **THEN** the shell auto-approve SHALL fire (unchanged
-  from v0.5.0); the new file-operation category SHALL NOT
-  interfere
+- **GIVEN** a coding-agent pane showing a live permission prompt
+- **WHEN** a human runs `sweep.sh approve <pane>` for it
+- **THEN** the helper SHALL send `1` followed by `Enter`
+- **AND** SHALL NOT select any durable "don't ask again" option
 

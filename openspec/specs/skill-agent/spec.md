@@ -453,17 +453,13 @@ The sub-case SHALL:
 
 The embedded `supervisor.md` skill SHALL include explicit guidance for the supervisor agent's initial launch-time monitoring sweep. The guidance SHALL:
 
-1. State that immediately after attaching to the session, the supervisor SHALL inspect every coding-agent pane via `tmux capture-pane`.
+1. State that immediately after attaching to the session, the supervisor SHALL inspect every coding-agent pane via `tmux capture-pane` (through `sweep.sh snapshot` / `sweep.sh capture <pane>`).
 2. Classify what each pane is showing into the categories:
    - `paste-buffer state` → apply the paste-buffer recovery sub-case (above).
-   - `permission prompt` (e.g. `This command requires approval`, `Do you want to proceed?`) → classify the pending command and act per the safe-command policy (below).
+   - `permission prompt` (e.g. `This command requires approval`, `Do you want to proceed?`) → relay the prompt to the human, naming the agent and the pending command, and approve it with `sweep.sh approve <pane>` only on the human's explicit instruction.
    - `working / esc to interrupt` → leave alone, agent is doing its thing.
    - `idle / ? for shortcuts` → agent has finished or never started; investigate.
-3. For panes showing a permission prompt, classify the pending command:
-   - **Safe-by-pattern**: matches the existing auto-approve safe-command whitelist (`curl http://127.0.0.1:<broker_port>/...`, `cargo fmt|clippy|test|build`, `git commit`, `git push`, plus any `safe_commands` from `[supervisor.auto_approve]` in config). The supervisor SHALL select the "Yes, and don't ask again" option (typically `Down` + `Enter`) so the pattern is permanently allowed for that agent.
-   - **Confined-to-worktree**: file edits / reads / `git -C <worktree>` operations within the agent's own worktree are safe; select "Yes, allow all edits" or equivalent (`Down` + `Enter`).
-   - **Unknown / wider scope**: anything else SHALL escalate via `agent.question` to the dashboard, not be auto-approved.
-4. State that this proactive sweep complements (does NOT replace) the existing `[supervisor.auto_approve]` background poll thread; the proactive sweep handles permissions that appear within the first few seconds of launch when the poll thread's stall threshold has not yet elapsed.
+3. State that the same handling applies on every later sweep, not only at launch. No git-paw component approves prompts in the background, so the supervisor's sweep (or, under `--unattended`, the drive loop's escalation) is how a prompt reaches the human.
 
 #### Scenario: Supervisor skill mentions proactive launch-time permission sweep
 
@@ -476,23 +472,17 @@ The embedded `supervisor.md` skill SHALL include explicit guidance for the super
 - **THEN** it identifies the four pane categories: paste-buffer state, permission prompt, working, and idle
 - **AND** it maps each category to a default action
 
-#### Scenario: Supervisor skill describes the safe-command auto-approve heuristic
+#### Scenario: Supervisor skill relays permission prompts to the human
 
 - **WHEN** the launch-time sweep section is inspected
-- **THEN** it instructs the supervisor to recognise `curl http://127.0.0.1:` as a broker call and approve via "Yes, and don't ask again"
-- **AND** it states that the "don't ask again" option is preferred so future broker calls auto-allow without further intervention
-- **AND** it mentions that file edits and `git -C <worktree>` operations confined to the agent's own worktree are also safe-by-default
+- **THEN** it instructs the supervisor to relay every permission prompt to the human, naming the agent and the pending command
+- **AND** it instructs the supervisor to run `sweep.sh approve <pane>` only on the human's explicit instruction
 
-#### Scenario: Supervisor skill escalates unknown permission prompts
-
-- **WHEN** the launch-time sweep section is inspected
-- **THEN** it instructs the supervisor to escalate via `agent.question` (rather than auto-approve) for any permission prompt that does not match the safe-command or confined-to-worktree patterns
-
-#### Scenario: Supervisor skill says proactive sweep complements the auto-approve thread
+#### Scenario: Supervisor skill does not rely on a background approver
 
 - **WHEN** the launch-time sweep section is inspected
-- **THEN** it explicitly states that the proactive sweep complements (does NOT replace) the existing `[supervisor.auto_approve]` background poll thread
-- **AND** it explains the rationale (proactive sweep covers the first-few-seconds window before the poll thread's stall threshold elapses)
+- **THEN** it SHALL NOT reference an `[supervisor.auto_approve]` background poll thread
+- **AND** it SHALL state that no git-paw component approves prompts in the background
 
 ### Requirement: Supervisor skill — corrected agent.verified curl example
 
@@ -809,36 +799,6 @@ The existing governance-verification sub-step in the Spec Audit Procedure sectio
 - **THEN** it SHALL instruct the supervisor to compute "what the change added/removed" from the merge-base of the branch tip and the integration target (`git merge-base <integration-target> <tip>`), NOT from a stale integration tip
 - **AND** it SHALL state the rationale that diffing against a stale integration tip makes a behind-tip or rebased branch show spurious mass deletions or additions
 
-### Requirement: Supervisor skill — continuous-sweep absorption doctrine
-
-The embedded `supervisor.md` skill SHALL codify that absorbing routine inner-agent permission prompts is the supervisor agent's continuous responsibility, not a launch-time-only activity. Specifically:
-
-1. The skill's "Workflow" section's `Watch` step (currently §2) SHALL state that on every monitoring-loop iteration, the supervisor agent applies the launch-time safe-command policy (currently §1.5) to every coding-agent pane — not only at attach time. The wording SHALL make clear that the proactive sweep runs on every iteration, while the reactive `[supervisor.auto_approve]` background poll thread remains a fallback for when the supervisor agent is offline or its iteration cadence is too slow.
-
-2. The skill's "Rules" section SHALL contain a bullet stating that the supervisor agent absorbs routine approvals as part of its job, and that the human is the escalation audience for non-routine decisions. The bullet SHALL enumerate routine cases (dev-essential prompts: `git commit`, `cargo test|build|fmt|clippy`, `mdbook build`, `git stash`, `git restore`, common shell reads like `awk`, `grep`, `python3 -c '...'`) and non-routine cases (cross-agent conflicts requiring design judgement, scope/spec decisions, destructive operations outside an agent's own worktree, anything novel or surprising). The framing SHALL be that the supervisor is the rubber-stamp gate and the human is only invoked when judgement is required.
-
-3. The skill SHALL NOT delete the existing launch-time sweep guidance (§1.5) or the `[supervisor.auto_approve]` poll-thread description; the continuous-iteration guidance complements both. The intent is that all three mechanisms (launch sweep, continuous sweep, reactive poll thread) cover the full lifecycle: launch sweep handles the first-few-seconds window before the supervisor's monitoring loop starts iterating, the continuous sweep covers steady-state operation, and the poll thread is a fallback when the supervisor agent itself is unavailable.
-
-#### Scenario: Supervisor skill instructs continuous-iteration safe-command sweep
-
-- **WHEN** the embedded supervisor skill's `Watch` step (or equivalent monitoring-loop section) is inspected
-- **THEN** it explicitly instructs the supervisor agent to sweep every coding-agent pane on every iteration and apply the safe-command policy from the launch-time sweep section
-- **AND** the wording SHALL distinguish the continuous sweep from the launch-time sweep and the reactive poll thread (all three coexist; the continuous sweep is the steady-state mechanism)
-
-#### Scenario: Supervisor skill Rules section codifies routine-approval absorption
-
-- **WHEN** the embedded supervisor skill's `Rules` section is inspected
-- **THEN** it contains a bullet stating that the supervisor agent absorbs routine approvals and the human is the escalation audience
-- **AND** the bullet enumerates routine dev-essential prompt categories (cargo / git / mdbook / shell-read families)
-- **AND** the bullet enumerates non-routine cases that SHALL be escalated (cross-agent conflicts, scope/spec decisions, destructive ops outside a worktree, anything novel)
-
-#### Scenario: Supervisor skill keeps the existing launch-time sweep and poll-thread guidance intact
-
-- **WHEN** the embedded supervisor skill is inspected after this requirement is implemented
-- **THEN** the existing §1.5 launch-time pane sweep guidance is still present
-- **AND** the existing `[supervisor.auto_approve]` background poll thread description is still present
-- **AND** the new continuous-sweep guidance complements (does NOT replace) either of the above
-
 ### Requirement: Coordination skill SHALL teach per-group commit cadence
 
 The embedded `assets/agent-skills/coordination.md` skill SHALL contain a section (heading text approximately "Commit cadence" or "Per-group commit cadence") that instructs the coding agent to commit after completing each numbered task group (e.g. `## 1.`, `## 2.`) in the change's `tasks.md`. The section SHALL state:
@@ -1067,30 +1027,6 @@ The skill SHALL NOT contain `for p in ... ; do tmux capture-pane ...` style loop
 - **WHEN** the embedded supervisor skill is inspected
 - **THEN** the skill SHALL NOT contain the literal string `<agent-id>` or `<your question>` or `<your specific question>` inside any documented curl payload `agent_id` or payload-text field
 - **AND** any remaining placeholder syntax in examples SHALL use clearly-broken forms like `__FILL_IN__` so accidental submission produces an obvious error rather than phantom agents
-
-### Requirement: Skill-content tests SHALL cover all rendered subsections named in archived prompt-submit-fix scenarios
-
-Three new tests in `src/skills.rs::tests` SHALL assert behaviour of the rendered supervisor skill content that the `prompt-submit-fix` archive's `agent-skills/spec.md` scenarios required but did not cover with dedicated tests:
-
-1. **Launch-time-sweep proactive instruction** — assert the rendered skill contains prose instructing the supervisor agent to inspect every pane immediately after attaching (i.e. before any stall threshold elapses).
-2. **Escalation via `agent.question` for unknown prompts** — assert the launch-sweep section instructs escalation via `agent.question` for permission prompts that do not match the safe-command or confined-to-worktree patterns.
-3. **"Complements not replaces" cross-reference** — assert the launch-sweep section explicitly states the proactive sweep complements (does NOT replace) the `[supervisor.auto_approve]` background poll thread.
-
-#### Scenario: Launch-sweep proactive instruction test exists
-
-- **WHEN** the test module in `src/skills.rs` is inspected
-- **THEN** a behavioural test (e.g. `supervisor_skill_documents_proactive_launch_sweep`) SHALL exist
-- **AND** SHALL assert the rendered supervisor skill content contains prose tied to the first-few-seconds-after-attach window
-
-#### Scenario: Unknown-prompt escalation test exists
-
-- **WHEN** the test module is inspected
-- **THEN** a behavioural test SHALL exist asserting the rendered skill instructs `agent.question` escalation for unknown permission prompts
-
-#### Scenario: Complements-not-replaces cross-reference test exists
-
-- **WHEN** the test module is inspected
-- **THEN** a behavioural test SHALL exist asserting the rendered skill contains "complements" / "does NOT replace" language tying the launch sweep to the `[supervisor.auto_approve]` poll thread
 
 ### Requirement: Dashboard input-handling SHALL be tested for the supervisor-as-pane removed-inbox scenarios
 
@@ -1490,22 +1426,6 @@ The section SHALL NOT hard-code any stack's install command or artifact names (p
 - **WHEN** the rendered coordination skill's worktree-environment section is inspected
 - **THEN** it SHALL NOT contain a hard-coded stack package-manager command or artifact name (it SHALL refer to "your stack's install step" rather than a specific package-manager invocation), so it passes the export-agnosticism conformance audit
 
-### Requirement: Supervisor skill — tiered permission model and safe-command policy
-
-The embedded supervisor skill SHALL document the tiered permission model the supervisor applies when deciding whether a worker's blocked command may be approved: (1) the worker's CLI-native permission check runs first; (2) if the CLI would prompt, the supervisor consults git-paw's safe-command policy, evaluated authoritatively via `git paw __classify <command>` — the single source shared with the mechanical drive loop, so the skill never maintains a parallel authoritative list that could drift; (3) if the command is not classified safe, the supervisor escalates to the human. The skill SHALL summarise the policy classes as orientation — safe (git-paw's managed helper scripts, worktree-confined dev/test commands, read-mostly verbs) and danger (writes under `.git/` or protected paths, the curated danger-list) — while directing the supervisor to `git paw __classify` as the authoritative check. The skill SHALL be stack-agnostic: it SHALL NOT enumerate a consumer's toolchain verbs as universally safe; safe dev/test commands are sourced from the resolved stack.
-
-#### Scenario: The supervisor skill documents the tiered permission ladder
-
-- **WHEN** the supervisor skill is rendered
-- **THEN** it SHALL describe the order — CLI-native permission check, then git-paw's safe-command classification via `git paw __classify`, then escalation to the human
-- **AND** it SHALL direct the supervisor to use `git paw __classify` as the authoritative safe-command check
-
-#### Scenario: The safe-command policy is single-sourced and stack-agnostic
-
-- **WHEN** the rendered supervisor skill's permission section is inspected
-- **THEN** it SHALL direct the supervisor to `git paw __classify` rather than a hand-maintained authoritative allowlist
-- **AND** it SHALL NOT hard-code a consumer's stack toolchain verbs as universally safe
-
 ### Requirement: Coordination skill teaches file-reading and scratch-file discipline
 
 The embedded coordination skill SHALL include a section instructing the agent how to inspect files and capture command output efficiently, without naming any specific CLI's tools.
@@ -1539,4 +1459,26 @@ The guidance SHALL be expressed in terms of capability classes rather than named
 - **THEN** it SHALL NOT contain the name of any specific AI CLI
 - **AND** it SHALL NOT contain the name of any tool belonging to one specific CLI
 - **AND** it SHALL express the instruction in terms of capability classes available to any CLI
+
+### Requirement: Supervisor skill — permission decisions belong to the agent CLI and the human
+
+The embedded supervisor skill SHALL document who decides a worker's permission prompt, in this order:
+
+1. The worker's CLI-native permission system runs first: its resolved permission mode and its own allow rules. git-paw adds no rules of its own.
+2. Any prompt the CLI raises is relayed to the human. Under `--unattended` the drive loop escalates it to the supervisor's pane and the broker. Otherwise the supervisor's own sweep finds it.
+3. The human decides. The supervisor carries out an approval with `sweep.sh approve <pane>` only on the human's explicit instruction.
+
+The skill SHALL state that `sweep.sh approve` answers a prompt once (option 1) and never grants a durable "don't ask again". It SHALL state that a prompt which should not recur belongs in the agent CLI's own allow rules, configured by the user. The skill SHALL NOT describe any command, command family or helper path as safe to approve, SHALL NOT reference a git-paw command classifier, and SHALL NOT enumerate any toolchain's verbs as approvable.
+
+#### Scenario: The supervisor skill documents the permission ladder
+
+- **WHEN** the supervisor skill is rendered
+- **THEN** it SHALL describe the order: the CLI's own permission system, then relay to the human, then an explicit `sweep.sh approve` on the human's instruction
+- **AND** it SHALL state that `sweep.sh approve` answers once and never grants "don't ask again"
+
+#### Scenario: The supervisor skill names no command as safe
+
+- **WHEN** the rendered supervisor skill is inspected
+- **THEN** it SHALL NOT contain `git paw __classify`, a dev-command allowlist enumeration, or an instruction to absorb routine approvals
+- **AND** it SHALL NOT instruct the supervisor to select a "don't ask again" option
 

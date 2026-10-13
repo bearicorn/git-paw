@@ -101,11 +101,12 @@ Each worktree's `.git-paw/AGENTS.local.md` sidecar includes:
     questions. The helper (installed by `git paw init`, alongside the
     supervisor's `sweep.sh`) discovers the broker URL and shapes the JSON, so
     the boot block carries no raw `curl` or broker URL. Nothing is seeded
-    into the agent CLI's settings file: the helper runs without a prompt
-    because of the CLI's resolved permission mode and git-paw's command
-    classifier, which recognises the helper by its stable path
-    (`.git-paw/scripts/broker.sh`) instead of needing a broad `curl` rule —
-    see [Coordination](./coordination.md#broker-helper).
+    into the agent CLI's settings file, and git-paw answers no prompt on the
+    agent's behalf. Whether the helper runs without prompting is the CLI's
+    own decision; because it always lives at the stable path
+    `.git-paw/scripts/broker.sh`, one permission rule you write there covers
+    every call instead of a broad `curl` rule — see
+    [Coordination](./coordination.md#broker-helper).
 
 The supervisor-mode boot prompt does not duplicate any of this content — it
 points at the sidecar. If a change is updated on disk during a session (e.g.

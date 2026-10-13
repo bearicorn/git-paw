@@ -143,7 +143,7 @@ This split applies only where a format is a contract, not to every struct in the
 
 | Area | Status |
 |---|---|
-| Command classifier (`git paw __classify`) | Already a pure decision |
+| Live-prompt gate (`supervisor::permission_prompt`) | Already a pure decision |
 | Dashboard | Already Model-View-Update — a functional core for a terminal UI |
 | Process execution (`CommandRunner`) | Already a port with a test fake; not yet used everywhere |
 | MCP server | Already layered one way (`query` → `tools` → `server`) and talks to the broker over HTTP |

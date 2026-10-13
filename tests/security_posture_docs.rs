@@ -29,7 +29,8 @@ fn contains_all(haystack: &str, needles: &[&str]) -> Vec<String> {
 }
 
 // Scenario: Disclaimer is present and reachable (README + mdBook), describing
-// arbitrary-code execution, the blast radius, and each control's (non-)guarantees.
+// arbitrary-code execution, the blast radius, the (non-)guarantees of each
+// control that actually exists, and the fact that git-paw approves no prompt.
 #[test]
 fn disclaimer_present_in_readme_and_mdbook_naming_every_control() {
     let posture = read("docs/src/user-guide/security-posture.md");
@@ -38,9 +39,8 @@ fn disclaimer_present_in_readme_and_mdbook_naming_every_control() {
         &[
             "arbitrary code",
             "blast radius",
-            "classifier",
-            "allowlist",
-            "protected-path",
+            // The three controls that remain.
+            "permission system",
             "sandbox",
             "remote control",
         ],
@@ -58,18 +58,101 @@ fn disclaimer_present_in_readme_and_mdbook_naming_every_control() {
     );
 }
 
-// Scenario: Controls are not overstated — the disclaimer states the classifier is
-// heuristic and the sandbox default is write-integrity, not confidentiality.
+// Scenario: Disclaimer is present and reachable — "it states that git-paw
+// approves no permission prompt on its own".
+#[test]
+fn disclaimer_states_git_paw_approves_no_prompt() {
+    let posture = read("docs/src/user-guide/security-posture.md").to_lowercase();
+    assert!(
+        posture.contains("approves no permission prompt"),
+        "the disclaimer must state plainly that git-paw approves no permission prompt on its own"
+    );
+    assert!(
+        posture.contains("no safety judgement") || posture.contains("makes no safety"),
+        "the disclaimer must state that git-paw makes no safety judgement about an agent's command"
+    );
+}
+
+// Scenario: Controls are not overstated — a CLI allow rule is only as narrow as
+// it is written, a full-auto mode skips the prompts entirely, and the sandbox
+// default is write-integrity, not confidentiality.
 #[test]
 fn disclaimer_states_control_limits_honestly() {
     let posture = read("docs/src/user-guide/security-posture.md").to_lowercase();
     assert!(
-        posture.contains("heuristic") && posture.contains("not a security boundary"),
-        "the disclaimer must state the classifier is heuristic, not a boundary"
+        posture.contains("only as narrow as the rules you wrote"),
+        "the disclaimer must state that a CLI allow rule is only as narrow as it is written"
+    );
+    assert!(
+        posture.contains("skips the prompts entirely"),
+        "the disclaimer must state that a full-auto level skips the prompts entirely"
     );
     assert!(
         posture.contains("not the work area") || posture.contains("not the confidentiality"),
         "the disclaimer must state the sandbox protects the machine around the worktree, not its contents/confidentiality"
+    );
+    assert!(
+        posture.contains("write-integrity"),
+        "the disclaimer must state the sandbox default protects write-integrity only"
+    );
+    assert!(
+        posture.contains("not cover network"),
+        "the disclaimer must state the sandbox does not cover network/resource/socket vectors by default"
+    );
+}
+
+// Scenario: No classifier is presented as a control — the control list must not
+// offer a git-paw command classifier, a git-paw command allowlist, or a git-paw
+// protected-paths rule as something that protects the reader. The words may
+// still appear, but only to say the mechanism is retired.
+#[test]
+fn no_classifier_is_presented_as_a_control() {
+    let posture = read("docs/src/user-guide/security-posture.md");
+
+    // Only the table's own rows count as "the control list": the first cell of
+    // each `|`-delimited row names a control the reader is offered. Prose
+    // around the table may still mention a retired mechanism — to say it is
+    // retired — without presenting it as a control.
+    let section = posture
+        .split_once("## What the controls do")
+        .map(|(_, rest)| rest.split("\n## ").next().unwrap_or(rest).to_string())
+        .expect("security-posture.md must keep its control-table section");
+    let control_names: Vec<String> = section
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with('|'))
+        .filter_map(|l| l.trim_start_matches('|').split('|').next())
+        .map(|cell| cell.trim().to_lowercase())
+        .filter(|cell| !cell.is_empty() && !cell.starts_with("---") && cell != "control")
+        .collect();
+    assert!(
+        !control_names.is_empty(),
+        "the control table must still list controls; parsed none from:\n{section}"
+    );
+    for name in &control_names {
+        for retired in ["classifier", "allowlist", "protected-path", "danger"] {
+            assert!(
+                !name.contains(retired),
+                "the control table must not offer {name:?} as a control: {retired:?} is retired"
+            );
+        }
+    }
+
+    // And the chapter must say so explicitly rather than just going quiet.
+    let lower = posture.to_lowercase();
+    assert!(
+        lower.contains("retired") && lower.contains("have no effect"),
+        "the chapter must state that the classifier and its config tables are retired and have no effect"
+    );
+
+    // The durable-grant residue the retirement leaves behind must be called out.
+    assert!(
+        lower.contains("don't ask again") && lower.contains("removes none"),
+        "the chapter must state that durable grants written by earlier versions persist and are removed by nothing"
+    );
+    assert!(
+        lower.contains("never edits or deletes it"),
+        "the chapter must state that git-paw never edits or deletes the CLI's settings file"
     );
 }
 

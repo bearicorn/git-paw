@@ -23,9 +23,9 @@ use serial_test::serial;
 use tempfile::TempDir;
 
 use git_paw::broker::delivery::publish_message;
-use git_paw::broker::learnings::{LearningsAggregator, PERMISSION_PATTERN_THRESHOLD};
+use git_paw::broker::learnings::LearningsAggregator;
 use git_paw::broker::messages::{
-    ArtifactPayload, BlockedPayload, BrokerMessage, FeedbackPayload, StatusPayload, VerifiedPayload,
+    ArtifactPayload, BlockedPayload, BrokerMessage, FeedbackPayload, VerifiedPayload,
 };
 use git_paw::broker::{BrokerState, WatchTarget, start_broker_with};
 use git_paw::config::BrokerConfig;
@@ -57,18 +57,6 @@ fn watch_target(agent: &str, tmp: &TempDir) -> WatchTarget {
         agent_id: agent.to_string(),
         cli: "claude".to_string(),
         worktree_path: tmp.path().to_path_buf(),
-    }
-}
-
-fn make_status(agent: &str, status: &str, message: Option<&str>) -> BrokerMessage {
-    BrokerMessage::Status {
-        agent_id: agent.to_string(),
-        payload: StatusPayload {
-            status: status.to_string(),
-            modified_files: vec![],
-            message: message.map(str::to_string),
-            ..Default::default()
-        },
     }
 }
 
@@ -178,19 +166,6 @@ fn multi_session_appends_h2_with_all_categories() {
             ),
         );
 
-        // Permission patterns: enough auto-approves to cross the default
-        // threshold.
-        for _ in 0..=PERMISSION_PATTERN_THRESHOLD {
-            publish_message(
-                &handle.state,
-                &make_status(
-                    "feat-x",
-                    "auto_approved",
-                    Some("auto_approved: matched cargo check"),
-                ),
-            );
-        }
-
         // Fifth-category seed: register a block that has no subsequent
         // artifact in this session — the shutdown flush MUST capture it
         // under the `### Where agents got stuck` H3 with the
@@ -207,7 +182,6 @@ fn multi_session_appends_h2_with_all_categories() {
         "### Conflict events",
         "### Where agents got stuck",
         "### Recovery cycles",
-        "### Permission patterns",
         "unresolved at session end",
     ] {
         assert!(

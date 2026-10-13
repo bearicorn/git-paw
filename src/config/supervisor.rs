@@ -150,11 +150,14 @@ pub struct SupervisorConfig {
     /// relaxing it is a deliberate, supervisor-scoped choice).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalLevel>,
-    /// Auto-approval configuration for safe permission prompts.
+    /// **Deprecated: parsed for compatibility; no effect.**
     ///
-    /// When present, the supervisor automatically approves stalled agents
-    /// whose pending command matches an entry in the safe-command whitelist.
-    /// See [`AutoApproveConfig`] for the per-field semantics.
+    /// Configured the retired auto-approver. No git-paw process approves a
+    /// permission prompt any more, so no field here changes any behaviour.
+    /// It still parses and round-trips so an older configuration loads
+    /// unchanged; a file declaring it gets one deprecation warning per
+    /// process. To stop routine commands prompting, use the agent CLI's own
+    /// allow rules, or run `full-auto` inside the documented sandbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_approve: Option<AutoApproveConfig>,
     /// Conflict detector configuration.
@@ -182,15 +185,21 @@ pub struct SupervisorConfig {
     /// `learnings` field.
     #[serde(default)]
     pub learnings_config: LearningsConfig,
-    /// Common dev-command allowlist configuration.
+    /// **Deprecated: parsed for compatibility; no effect.**
     ///
-    /// Declares a curated preset of dev-loop prefix patterns
-    /// (`cargo build`, `git commit`, ...) composed into the supervisor's
-    /// own auto-approve whitelist and rendered into the bundled supervisor
-    /// skill's permission guidance. See [`CommonDevAllowlistConfig`] for
-    /// field semantics.
-    #[serde(default)]
-    pub common_dev_allowlist: CommonDevAllowlistConfig,
+    /// Declared a curated preset of dev-loop prefix patterns composed into
+    /// the retired auto-approve whitelist. git-paw approves no permission
+    /// prompt, so nothing consumes it. It still parses and round-trips so an
+    /// older configuration loads unchanged; a file declaring it gets one
+    /// deprecation warning per process.
+    ///
+    /// `Option` rather than a defaulted struct so a save never writes a table
+    /// the user did not declare — before this change, saving any
+    /// `[supervisor]` config emitted an empty
+    /// `[supervisor.common_dev_allowlist]`, which would then warn forever.
+    /// "Declared" is exactly `is_some()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub common_dev_allowlist: Option<CommonDevAllowlistConfig>,
     /// Whether the broker emits a `supervisor.verify-now` nudge to the
     /// supervisor inbox when an agent publishes an
     /// `agent.artifact { status: "committed" }`.
@@ -608,34 +617,26 @@ impl SupervisorConfig {
     }
 }
 
-/// Configuration for the common dev-command allowlist preset.
+/// **Deprecated: parsed for compatibility; no effect.**
 ///
-/// The universal preset is a curated set of stack-neutral, repeatedly-
-/// prompted dev-loop commands (non-destructive git verbs plus read-only
-/// `find` / `grep` / `sed -n`) composed into the supervisor's own
-/// auto-approve whitelist and rendered into the bundled supervisor skill's
-/// permission guidance, so agents do not hit a permission prompt for each
-/// variant of these commands. Stack-specific patterns are opt-in via
-/// `stacks` (named presets `rust` / `node` / `python` / `go`) and/or
-/// the free-form `extra` list. See `src/supervisor/dev_allowlist.rs`
-/// for the preset constants.
+/// Declared a curated preset of dev-loop command prefixes that were composed
+/// into the retired auto-approve whitelist and rendered into the bundled
+/// supervisor skill's permission guidance. git-paw approves no permission
+/// prompt and ships no allowlist, so nothing reads any field here.
+///
+/// Every field is kept, with its type and default, so an existing
+/// configuration loads and round-trips unchanged. To stop routine commands
+/// prompting, add them to the agent CLI's own allow rules.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommonDevAllowlistConfig {
-    /// Parsed for config compatibility; has no effect.
-    ///
-    /// The preset's `stacks` / `extra` patterns are always composed into
-    /// the auto-approve whitelist and the rendered skill guidance
-    /// regardless of this flag.
+    /// Deprecated: parsed for compatibility; has no effect.
     #[serde(default = "CommonDevAllowlistConfig::default_enabled")]
     pub enabled: bool,
     /// Named, curated stack presets the repository opts into.
     ///
-    /// Each entry names a built-in stack preset (`rust` / `node` /
-    /// `python` / `go`) whose curated prefix bundle is composed in
-    /// addition to the universal preset. Unknown names contribute
-    /// nothing. Defaults to empty — a fresh repo gets only the
-    /// universal preset, never a toolchain it does not use. See
-    /// `src/supervisor/dev_allowlist.rs::stack_preset`.
+    /// Deprecated: parsed for compatibility; has no effect. Named a
+    /// built-in stack preset (`rust` / `node` / `python` / `go`) whose
+    /// curated prefix bundle joined the retired auto-approve whitelist.
     #[serde(default)]
     pub stacks: Vec<String>,
     /// Additional project-specific prefix patterns appended to the
@@ -787,7 +788,7 @@ impl ConflictConfig {
 ///   `git push` and `curl` entries AFTER composition, so the strip governs
 ///   built-ins, stack patterns, and configured extras alike.
 /// - `Safe` — the built-in default; auto-approve the whole composed
-///   whitelist (see [`AutoApproveConfig::effective_whitelist`]).
+///   whitelist.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ApprovalLevelPreset {
@@ -800,26 +801,26 @@ pub enum ApprovalLevelPreset {
     Safe,
 }
 
-/// Configuration for the supervisor auto-approval feature.
+/// **Deprecated: parsed for compatibility; no effect.**
 ///
-/// Auto-approval detects permission prompts in stalled agent panes via
-/// `tmux capture-pane`, classifies the pending command, and dispatches the
-/// resolved option digit + `Enter` keystrokes when the command matches the
-/// whitelist.
+/// Configured the retired auto-approver, which detected permission prompts
+/// in stalled agent panes, classified the pending command, and typed the
+/// approval. git-paw makes no safety decision about an agent's command any
+/// more, so no field here changes any behaviour.
 ///
-/// Embedded as `Option<AutoApproveConfig>` on [`SupervisorConfig`] so
-/// existing configs without an `[supervisor.auto_approve]` table continue
-/// to round-trip identically.
+/// Every field is kept, with its type and default, so an existing
+/// configuration loads and round-trips unchanged. A file declaring the table
+/// gets one deprecation warning per process. To run prompt-free, use the
+/// agent CLI's own allow rules, or `full-auto` inside the documented
+/// sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AutoApproveConfig {
     /// Master enable flag. When `false`, no detection or approval runs.
     #[serde(default = "AutoApproveConfig::default_enabled")]
     pub enabled: bool,
-    /// Project-specific safe-command prefixes appended to the composed
-    /// whitelist defaults — the stack-neutral built-ins from
-    /// [`default_safe_commands()`](crate::supervisor::auto_approve::default_safe_commands)
-    /// plus the resolved `[supervisor.common_dev_allowlist]` patterns (see
-    /// [`Self::effective_whitelist`]).
+    /// Deprecated: parsed for compatibility; has no effect. Held
+    /// project-specific safe-command prefixes appended to the retired
+    /// composed whitelist.
     #[serde(default)]
     pub safe_commands: Vec<String>,
     /// Threshold (in seconds) of `last_seen` staleness before an agent in
@@ -860,92 +861,12 @@ impl Default for AutoApproveConfig {
 }
 
 impl AutoApproveConfig {
-    /// Minimum stall threshold in seconds. Anything lower is clamped to
-    /// avoid pathological poll loops.
-    pub const MIN_STALL_THRESHOLD_SECONDS: u64 = 5;
-
     fn default_enabled() -> bool {
         true
     }
 
     fn default_stall_threshold_seconds() -> u64 {
         30
-    }
-
-    /// Returns a copy of this config with preset rules applied and the
-    /// stall threshold floor enforced.
-    ///
-    /// - When `approval_level == Off`, `enabled` is forced to `false`.
-    /// - When `stall_threshold_seconds < MIN_STALL_THRESHOLD_SECONDS`, the
-    ///   value is clamped and a warning is written to stderr.
-    #[must_use]
-    pub fn resolved(&self) -> Self {
-        let mut out = self.clone();
-        if out.approval_level == ApprovalLevelPreset::Off {
-            out.enabled = false;
-        }
-        if out.stall_threshold_seconds < Self::MIN_STALL_THRESHOLD_SECONDS {
-            eprintln!(
-                "warning: [supervisor.auto_approve] stall_threshold_seconds = {} clamped to {}s minimum",
-                out.stall_threshold_seconds,
-                Self::MIN_STALL_THRESHOLD_SECONDS
-            );
-            out.stall_threshold_seconds = Self::MIN_STALL_THRESHOLD_SECONDS;
-        }
-        out
-    }
-
-    /// Returns whether worktree-confined file operations are auto-approved.
-    ///
-    /// Resolves the optional [`Self::approve_worktree_writes`] field to its
-    /// effective boolean: an absent value (the common case — no
-    /// `[supervisor.auto_approve]` section, or the field omitted) defaults to
-    /// `true`.
-    #[must_use]
-    pub fn approve_worktree_writes(&self) -> bool {
-        self.approve_worktree_writes.unwrap_or(true)
-    }
-
-    /// Returns the effective whitelist for this config, composed from three
-    /// sources in order, de-duplicated:
-    ///
-    /// 1. the **stack-neutral built-ins**
-    ///    ([`default_safe_commands()`](crate::supervisor::auto_approve::default_safe_commands));
-    /// 2. the **resolved dev-allowlist patterns** —
-    ///    [`effective_patterns`](crate::supervisor::dev_allowlist::effective_patterns)
-    ///    over `[supervisor.common_dev_allowlist]` `stacks` + `extra`, so a
-    ///    project's declared stack contributes its toolchain verbs (e.g. the
-    ///    `rust` stack contributes `cargo test`) from the same declaration
-    ///    that seeds the CLI allowlist;
-    /// 3. the **configured extension** `[supervisor.auto_approve]
-    ///    safe_commands`.
-    ///
-    /// The `Conservative` preset strip (`git push` and `curl` entries) is
-    /// applied AFTER composition so it governs the whole composed set.
-    /// `Off` and `Safe` return the composed union unchanged.
-    #[must_use]
-    pub fn effective_whitelist(&self, dev_allowlist: &CommonDevAllowlistConfig) -> Vec<String> {
-        let mut out: Vec<String> = crate::supervisor::auto_approve::default_safe_commands()
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
-        for pat in crate::supervisor::dev_allowlist::effective_patterns(
-            &dev_allowlist.stacks,
-            &dev_allowlist.extra,
-        ) {
-            if !out.contains(&pat) {
-                out.push(pat);
-            }
-        }
-        for extra in &self.safe_commands {
-            if !out.iter().any(|e| e == extra) {
-                out.push(extra.clone());
-            }
-        }
-        if self.approval_level == ApprovalLevelPreset::Conservative {
-            out.retain(|cmd| !cmd.starts_with("git push") && !cmd.starts_with("curl"));
-        }
-        out
     }
 }
 

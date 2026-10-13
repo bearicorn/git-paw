@@ -7,43 +7,57 @@ Records every command the auto-approve loop forwards for a manual human decision
 
 The system SHALL append one JSON object per line to
 `.git-paw/sessions/<session>.manual-approvals.jsonl` for each
-command the auto-approve poll loop forwards to the human for a
-manual decision (a prompt the bundled preset / worktree
-classifier did NOT match). Each entry SHALL include `timestamp`
-(ISO 8601 UTC), `agent_id`, `pattern` (the captured command),
-and `first_seen` (boolean). The system SHALL NOT log
-auto-approved (preset-matched) commands.
+live permission prompt the `--unattended` drive loop escalates
+for a human decision. Each entry SHALL include `timestamp`
+(ISO 8601 UTC), `agent_id`, `pattern` (the prompted command),
+and `first_seen` (boolean).
 
-The supervisor poll loop cannot observe the in-pane Yes/No
-keystroke (it runs outside the agent's CLI process), so it
-records the prompts it forwards for a manual decision — the
-honest, observable signal. The recorded semantic is "a command
-that required a manual decision", a superset of approvals (see
-design D2).
+git-paw cannot observe the in-pane answer to a prompt (it runs
+outside the agent's CLI process), so it records the prompts it
+escalates for a manual decision — the honest, observable
+signal. The recorded semantic is "a command that required a
+manual decision", a superset of approvals.
 
-#### Scenario: A forwarded prompt appends a JSONL line
+The drive loop SHALL record one entry per escalation it emits.
+A prompt suppressed by the loop's escalation dedup window SHALL
+NOT be recorded again. An escalation that is not a permission
+prompt (a CLI-unavailability banner, a wedged nudge, or a
+correction-loop signal) SHALL NOT be recorded. The
+`[supervisor].manual_approvals_log` opt-out and the first-seen
+learnings dispatch SHALL apply to these records. Attended
+sessions run no drive loop and therefore record no entries.
 
-- **GIVEN** an active session whose poll loop detects a prompt
-  the preset does not match
-- **WHEN** the loop forwards it to the human for a manual
-  decision
+#### Scenario: A drive-loop escalation appends a JSONL line
+
+- **GIVEN** an `--unattended` session whose drive loop finds a
+  live permission prompt on an agent pane
+- **WHEN** the loop escalates it
 - **THEN** the system SHALL append one JSON line to the
   session's manual-decision log with the required fields
   populated
 
-#### Scenario: Auto-approved commands are not logged
+#### Scenario: A deduplicated drive-loop escalation is logged once
 
-- **GIVEN** a poll loop that matches a command against the
-  bundled DEV_ALLOWLIST_PRESET (the `Approved` branch)
-- **WHEN** the command is auto-approved
+- **GIVEN** a drive loop that sees the same unresolved prompt
+  on the same agent in consecutive sweeps within its dedup
+  window
+- **WHEN** both sweeps run
+- **THEN** the system SHALL append exactly one manual-decision
+  log entry for it
+
+#### Scenario: Non-prompt escalations are not logged
+
+- **GIVEN** a drive loop that records a `cli-unavailable`
+  escalation for an agent whose pane shows a usage-limit banner
+- **WHEN** the escalation is recorded
 - **THEN** the system SHALL NOT append a manual-decision log
-  entry
+  entry for it
 
 #### Scenario: first_seen is true exactly once per pattern per session
 
-- **GIVEN** a session in which the same pattern is forwarded
-  twice in succession
-- **WHEN** both forwards are logged
+- **GIVEN** a session in which the same pattern is recorded
+  twice
+- **WHEN** both records are logged
 - **THEN** the first log entry SHALL carry `first_seen: true`
   and the second SHALL carry `first_seen: false`
 
@@ -114,12 +128,15 @@ table).
 ### Requirement: Promotion-target heuristic
 
 The aggregator SHALL classify each pattern with a suggested
-promotion target. Patterns matching project-specific
-heuristics (paths starting with `./`, paths under the
-worktree root, contains the project or branch name) SHALL be
-suggested for the `project allowlist`. Other patterns SHALL
-be suggested as `bundled preset candidate`. The suggestion
-SHALL be presented as a hint, not a rule.
+promotion target in the agent CLI's own permission rules.
+Patterns matching project-specific heuristics (paths starting
+with `./`, paths under the worktree root, contains the project
+or branch name) SHALL be suggested for the `project allowlist`,
+the CLI's project-scoped rules. Other patterns SHALL be
+suggested for the `user allowlist`, the CLI's user-scoped
+rules. The suggestion SHALL be presented as a hint, not a rule:
+acting on it is the user's choice, made in that CLI's own
+settings.
 
 #### Scenario: Project-specific path suggested for project allowlist
 
@@ -127,12 +144,11 @@ SHALL be presented as a hint, not a rule.
 - **WHEN** the aggregator classifies it
 - **THEN** the suggested target SHALL be `project allowlist`
 
-#### Scenario: Generic command suggested for bundled preset
+#### Scenario: Generic command suggested for the user allowlist
 
 - **GIVEN** the pattern `make integration-test`
 - **WHEN** the aggregator classifies it
-- **THEN** the suggested target SHALL be `bundled preset
-  candidate`
+- **THEN** the suggested target SHALL be `user allowlist`
 
 ### Requirement: Learnings dispatch on first_seen
 
@@ -173,13 +189,13 @@ The system SHALL accept
 `[supervisor].manual_approvals_log` as a boolean config field
 (default `true`). When the field is `false`, the system
 SHALL NOT write to the log file AND SHALL NOT emit
-learnings records derived from manual approvals.
+learnings records derived from manual decisions.
 
-#### Scenario: Opt-out suppresses log writes
+#### Scenario: The opt-out applies to the drive loop
 
-- **GIVEN** `[supervisor].manual_approvals_log = false`
-- **WHEN** the poll loop forwards a prompt for a manual
-  decision
+- **GIVEN** `[supervisor].manual_approvals_log = false` and an
+  `--unattended` session
+- **WHEN** the drive loop escalates a prompt
 - **THEN** the system SHALL NOT append to the JSONL log AND
   SHALL NOT emit any `permission_pattern` learning record
 
@@ -194,9 +210,9 @@ learnings records derived from manual approvals.
 ### Requirement: Permission-pattern learning is extracted from the prompt slice
 
 The `permission_pattern` learning SHALL derive its command pattern from the same
-prompt slice the classifier uses to detect the pending command, NOT from surrounding
-pane text (an accept-edits diff line, a subsequent command's output). When the slice
-does not yield a value that parses as a command, the system SHALL produce no
+command slice the drive loop's escalation reports for the pending prompt, NOT from
+surrounding pane text (an accept-edits diff line, a subsequent command's output). When
+the slice does not yield a value that parses as a command, the system SHALL produce no
 `permission_pattern` learning for that observation rather than record a spurious one.
 
 #### Scenario: The pattern comes from the pending command, not adjacent text

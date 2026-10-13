@@ -143,8 +143,8 @@ impl Repo {
         fs::write(&log_file, "").expect("create tmux log");
 
         // Fake tmux first, then the freshly built binary: `sweep.sh approve`
-        // resolves its option index by delegating to `git paw __classify`, so
-        // THIS build must be the `git-paw` that `git paw` finds.
+        // reads the durable-grant marker through `git paw __prompt-profile`,
+        // so THIS build must be the `git-paw` that `git paw` finds.
         let path = format!(
             "{}:{}:{}",
             self.dir.path().join("fakebin").display(),

@@ -31,12 +31,18 @@ pub struct CustomCli {
     pub submit_delay_ms: Option<u64>,
     /// Optional path to this CLI's claude-format settings file.
     ///
-    /// git-paw does not write to this file. Its parent directory joins the
-    /// agent-memory-isolation protected-path set
-    /// ([`crate::supervisor::auto_approve::ProtectedPaths::derive`]), so a
-    /// claude-family variant reading a non-default config dir (e.g.
-    /// `~/.claude-oss/settings.json`) gets that directory protected too. A
-    /// leading `~` is expanded to the home directory.
+    /// **Parse-only.** git-paw never reads or writes this file. It records
+    /// where a claude-family variant keeps its settings (e.g. a `claude-oss`
+    /// entry on `~/.claude-oss/settings.json`) for an operator's own
+    /// reference and for a later change that may act on it. A leading `~` is
+    /// expanded to the home directory.
+    ///
+    /// It previously also seeded the classifier's protected-path set, which
+    /// refused to auto-approve writes into operator territory. With nothing
+    /// approving automatically, every such write already reaches a human, so
+    /// that set and its derivation are gone. The field is kept because
+    /// config keys are a frozen surface: an existing config must still load
+    /// and round-trip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings_path: Option<String>,
     /// Per-approval-level flag overrides, consulted BEFORE the built-in

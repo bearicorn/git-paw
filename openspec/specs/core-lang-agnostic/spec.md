@@ -29,12 +29,13 @@ into the supervisor session context for use by skill rendering.
 
 ### Requirement: New placeholder substitutions in skill rendering
 
-The skill rendering pipeline SHALL substitute three new
-placeholders in the bundled supervisor skill:
-`{{DOC_TOOL_COMMAND}}`, `{{DEV_ALLOWLIST_PRESET}}`, and
+The skill rendering pipeline SHALL substitute two placeholders in the
+bundled supervisor skill: `{{DOC_TOOL_COMMAND}}` and
 `{{SPEC_PATH_DOCTRINE}}`. Substitutions SHALL be applied via the
 existing `{{...}}` substitution machinery used for the v0.5.0
-five-gate placeholders.
+five-gate placeholders. The bundled skills SHALL NOT carry a
+`{{DEV_ALLOWLIST_PRESET}}` placeholder or any other enumeration of
+commands presented as approvable.
 
 #### Scenario: DOC_TOOL_COMMAND substitutes config value
 
@@ -43,15 +44,11 @@ five-gate placeholders.
 - **THEN** every occurrence of `{{DOC_TOOL_COMMAND}}` SHALL be
   replaced with `cargo doc --no-deps` in the rendered skill body
 
-#### Scenario: DEV_ALLOWLIST_PRESET renders from constant
+#### Scenario: No dev-allowlist placeholder remains
 
-- **WHEN** the supervisor skill is rendered
-- **THEN** `{{DEV_ALLOWLIST_PRESET}}` SHALL be replaced with a
-  prose enumeration generated from
-  `src/supervisor/dev_allowlist::DEV_ALLOWLIST_PRESET`, and the
-  rendered enumeration SHALL include every constant entry such
-  that adding a new entry to the constant changes the rendered
-  output without a skill-template edit
+- **WHEN** the bundled supervisor and coordination skill templates are inspected
+- **THEN** neither SHALL contain `{{DEV_ALLOWLIST_PRESET}}`
+- **AND** the rendered supervisor skill SHALL NOT contain a dev-command allowlist enumeration
 
 #### Scenario: SPEC_PATH_DOCTRINE renders per resolved backend
 
@@ -115,9 +112,9 @@ The CI test suite SHALL include a no-leak audit that renders the
 supervisor skill against fixture configurations for each spec
 backend and SHALL assert no token from a forbidden list appears
 in the rendered output outside explicitly-allowed spans. The
-forbidden list SHALL include at minimum `cargo` (outside allowlist
-prose), `rustdoc`, `.rs:` (as a hardcoded source-path marker),
-`Cargo.toml`, and `rustc`.
+forbidden list SHALL include at minimum `cargo` (outside an
+explicitly-allowed span), `rustdoc`, `.rs:` (as a hardcoded
+source-path marker), `Cargo.toml`, and `rustc`.
 
 The audit SHALL additionally cover every bundled asset carrying agent-facing prose, not
 only the supervisor skill, so prose relocated out of compiled code is subject to the same
@@ -138,15 +135,16 @@ accident.
 #### Scenario: Audit catches a Rust-leak regression
 
 - **GIVEN** a supervisor skill template edited to add a literal
-  `cargo test` outside the allowlist-prose sentinel span
+  `cargo test` outside the allowed-span sentinels
 - **WHEN** the no-leak audit runs
 - **THEN** the audit SHALL fail and SHALL identify the offending
   token plus its location
 
-#### Scenario: Sentinel-comment scope excludes allowlist prose
+#### Scenario: Sentinel-comment scope excludes an allowed span
 
-- **GIVEN** the rendered `{{DEV_ALLOWLIST_PRESET}}` enumeration
-  legitimately contains `cargo test` as one entry
+- **GIVEN** a bundled asset whose `<!-- allowlist-prose -->` …
+  `<!-- /allowlist-prose -->` span legitimately contains a
+  forbidden token
 - **WHEN** the no-leak audit runs
 - **THEN** that occurrence SHALL be excluded from the audit via
   the sentinel-comment scoping and SHALL NOT cause a failure
@@ -313,12 +311,6 @@ Compiled code SHALL retain the assembly around that prose: placeholder substitut
 conditional inclusion, per-backend selection, deduplication, and region gating. The
 requirement governs where sentences are *authored*, not how they are composed.
 
-Prose that is **generated from a compiled constant specifically so it cannot drift from
-that constant** SHALL remain compiled. The rendered dev-allowlist enumeration is the
-governing example: deriving it from the allowlist constant is what guarantees the
-documented allowlist matches what is actually auto-approved, and a hand-editable asset
-would let the two diverge silently and widen the approval surface.
-
 #### Scenario: Agent-facing prose lives in an asset
 
 - **WHEN** the sources of agent-facing prose are inspected
@@ -340,10 +332,4 @@ would let the two diverge silently and widen the approval surface.
 
 - **WHEN** the binary runs with no accompanying asset files on disk
 - **THEN** all relocated prose SHALL still render from the compile-time embedded copies
-
-#### Scenario: Constant-derived prose stays compiled
-
-- **WHEN** the dev-allowlist enumeration is rendered
-- **THEN** it SHALL be generated from the compiled allowlist constant
-- **AND** SHALL NOT be sourced from a separately editable asset
 

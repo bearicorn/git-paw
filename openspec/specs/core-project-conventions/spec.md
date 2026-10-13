@@ -12,11 +12,12 @@ SHALL include (at minimum) entries for: `--specs-format`,
 `--no-supervisor`, `start --force`, the Spec Kit backend
 (`[specs] type = "speckit"`), the `[governance]` config table,
 the `[supervisor.conflict]` config table, the
-`[supervisor.auto_approve]` config table, the
 `[supervisor.learnings_config]` config table, `agent.intent`
 forward coordination, automatic conflict detection
 (forward / in-flight / ownership), and learnings mode (the
-`.git-paw/session-learnings.md` output file).
+`.git-paw/session-learnings.md` output file). The Features list
+SHALL NOT present automatic approval of permission prompts as a
+feature.
 
 #### Scenario: README Features section mentions Spec Kit
 
@@ -42,6 +43,12 @@ forward coordination, automatic conflict detection
 - **THEN** it contains the substring `--specs-format`
 - **AND** it contains the substring `--no-supervisor`
 - **AND** it contains the substring `--force` (in a `start --force` context)
+
+#### Scenario: README Features section does not advertise auto-approval
+
+- **WHEN** the README's Features section is inspected
+- **THEN** it SHALL NOT contain `[supervisor.auto_approve]`
+- **AND** it SHALL NOT describe git-paw as auto-approving permission prompts
 
 ### Requirement: AGENTS.md dependency table matches `Cargo.toml`
 

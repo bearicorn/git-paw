@@ -104,8 +104,8 @@ match core::decide_approval(&tail, profile_for(agent), &policy) {
 - Test the decision with data: fixture in, decision out, no fakes.
 - Effects can be returned as data (`Vec<Effect>`) when a step has several; that also gives a
   dry-run and an audit trail for free.
-- Migrate one decision at a time, starting with the nearly pure ones. Precedents: the classifier
-  behind `git paw __classify`, and the dashboard's MVU `update`.
+- Migrate one decision at a time, starting with the nearly pure ones. Precedents: the
+  live-prompt gate in `supervisor::permission_prompt`, and the dashboard's MVU `update`.
 
 ## 4. Adapters — compile-time, in-tree, zero new dependencies
 

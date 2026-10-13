@@ -79,7 +79,7 @@ If a custom CLI's command cannot be found (the binary doesn't exist at the speci
 ## Prompt-shape detection
 
 The list above is git-paw's *binary* detection — it says which CLIs it can
-launch. Separately, the supervisor and auto-approve detectors recognise a
+launch. Separately, the supervisor's prompt detectors recognise a
 launched CLI's terminal surface (its ready banner, permission-prompt
 wording, and so on) via a **prompt-shape profile**. git-paw ships only the
 Claude Code profile, embedded in the binary; no other CLI in the table above

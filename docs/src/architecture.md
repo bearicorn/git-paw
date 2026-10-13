@@ -33,17 +33,17 @@ It describes the code as it is today. For the structure the code is moving towar
 │  broker/               supervisor/               specs/               │
 │  ├── mod.rs            ├── mod.rs                ├── mod.rs           │
 │  ├── server.rs         ├── approval_gate.rs      ├── openspec.rs      │
-│  ├── messages.rs       ├── approve.rs            ├── markdown.rs      │
-│  ├── delivery.rs       ├── auto_approve.rs       ├── speckit.rs       │
-│  ├── conflict.rs       ├── branch_refresh.rs     ├── superpowers.rs   │
-│  ├── learnings.rs      ├── claim.rs              └── resolve.rs       │
-│  ├── watcher.rs        ├── dev_allowlist.rs                           │
-│  └── publish.rs        ├── drive.rs              opsx/                │
-│                        ├── layout.rs             ├── mod.rs           │
-│                        ├── manual_approvals.rs   └── role_guard.rs    │
-│                        ├── permission_prompt.rs                       │
-│                        ├── poll.rs               coordination/        │
-│                        └── stall.rs              ├── mod.rs           │
+│  ├── messages.rs       ├── branch_refresh.rs     ├── markdown.rs      │
+│  ├── delivery.rs       ├── claim.rs              ├── speckit.rs       │
+│  ├── conflict.rs       ├── drive.rs              ├── superpowers.rs   │
+│  ├── learnings.rs      ├── keys.rs               └── resolve.rs       │
+│  ├── watcher.rs        ├── layout.rs                                  │
+│  └── publish.rs        ├── manual_approvals.rs   opsx/                │
+│                        └── permission_prompt.rs  ├── mod.rs           │
+│                                                  └── role_guard.rs    │
+│                                                                       │
+│                                                  coordination/        │
+│                                                  ├── mod.rs           │
 │                                                  ├── inventory.rs     │
 │                                                  └── tell.rs          │
 ├───────────────────────────────────────────────────────────────────────┤
@@ -60,8 +60,8 @@ It describes the code as it is today. For the structure the code is moving towar
 
 | Module | File | Purpose |
 |--------|------|---------|
-| **Entry point** | `src/main.rs`, `src/lib.rs` | `main.rs` parses arguments and dispatches each subcommand to its handler; it still holds the `purge` handler and the hidden `__dashboard` / `__classify` / `__prompt-profile` subcommands. `lib.rs` is the library target the binary and the integration tests share — internal, not a stable API. |
-| **Commands** | `src/commands/` | One handler module per subcommand: `start.rs` (fresh launch, reattach, restart-from-pause, spec-driven launch), `supervisor.rs` (`cmd_supervisor`, the unattended drive-loop wiring, the dashboard auto-approve thread), `recover.rs`, `add.rs`, `remove.rs`, `pause.rs`, `stop.rs`, `status.rs`, `attach.rs`, `approvals.rs`, `replay.rs`, `clis.rs` (`list-clis` / `add-cli` / `remove-cli`), `completions.rs`, plus shared `helpers.rs`. |
+| **Entry point** | `src/main.rs`, `src/lib.rs` | `main.rs` parses arguments and dispatches each subcommand to its handler; it still holds the `purge` handler and the hidden `__dashboard` / `__prompt-profile` subcommands. `lib.rs` is the library target the binary and the integration tests share — internal, not a stable API. |
+| **Commands** | `src/commands/` | One handler module per subcommand: `start.rs` (fresh launch, reattach, restart-from-pause, spec-driven launch), `supervisor.rs` (`cmd_supervisor` and the unattended drive-loop wiring), `recover.rs`, `add.rs`, `remove.rs`, `pause.rs`, `stop.rs`, `status.rs`, `attach.rs`, `approvals.rs`, `replay.rs`, `clis.rs` (`list-clis` / `add-cli` / `remove-cli`), `completions.rs`, plus shared `helpers.rs`. |
 | **CLI** | `src/cli.rs` | Argument parsing with clap v4 derive macros. Defines all subcommands, flags (`--from-all-specs`, `--specs`, `--specs-format`, `--supervisor`, `--no-supervisor`, `--force`, ...), and help text. |
 | **Detection** | `src/detect.rs` | Scans `PATH` for known AI CLI binaries (`KNOWN_CLIS`). Resolves custom CLIs from config. Merges and deduplicates. |
 | **Git** | `src/git.rs` | Validates git repos, lists branches (local + remote, deduplicated), creates/removes worktrees, derives safe directory names. |
@@ -85,7 +85,7 @@ It describes the code as it is today. For the structure the code is moving towar
 | **Random** | `src/random.rs` | Version-4 UUIDs built from OS randomness (no `uuid` dependency), used for CLI session ids. |
 | **Dashboard** | `src/dashboard.rs`, `src/dashboard/` | The `git paw __dashboard` TUI (status table + Broker log panel). Detail below. |
 | **Broker** | `src/broker/` | HTTP coordination server (axum) with watcher + conflict detector + learnings subsystems. Detail below. |
-| **Supervisor** | `src/supervisor/` | Supervisor-mode subsystems (unattended drive loop, auto-approve classifier and dispatch, approval send gate and per-pane claim, stall detection, permission prompts, manual-approval log, branch refresh, dev-command presets, pane layout). Detail below. |
+| **Supervisor** | `src/supervisor/` | Supervisor-mode subsystems (unattended drive loop, permission-prompt detection, the approval send gate and per-pane claim, keystroke dispatch, manual-decision log, branch refresh, pane layout). Detail below. |
 | **Specs** | `src/specs/` | Spec scanning. Four backends (`openspec`, `markdown`, `speckit`, `superpowers`); `mod.rs` holds the dispatch entry point and `resolve.rs` resolves `--specs` names. |
 | **opsx** | `src/opsx/` | OpenSpec role-gating guard (`role_guard.rs`): run by the broker on every committed `agent.artifact`, it flags archive activity by a non-supervisor agent per `[opsx] role_gating`. Inert unless the spec engine is OpenSpec. |
 | **MCP** | `src/mcp/` | `git paw mcp`. Model Context Protocol server over stdio. Read-only tools expose coordination, governance, docs, specs, session, learnings, skills, git, and source-browsing state to MCP-aware clients; the one write surface is four agent-scoped publish tools that publish only as the calling worktree's own agent. Runs standalone (no session/broker/supervisor required; broker-backed reads degrade to empty results). Detail below. |
@@ -129,18 +129,14 @@ format_agent_rows, …}` resolving from the parent module.
 | File | Purpose |
 |------|---------|
 | `src/supervisor/mod.rs` | Module root declaring the submodules below. The supervisor launch itself (`cmd_supervisor`) lives in `src/commands/supervisor.rs`. |
-| `src/supervisor/approval_gate.rs` | The send gate every in-binary approver passes through: refuses pane 0, takes a fresh capture of the target pane immediately before sending, and dispatches keys only if the prompt is still live. |
-| `src/supervisor/approve.rs` | Auto-approval keystroke dispatch: selects the prompt's option index, publishes an `agent.status` audit entry, then sends the option digit and `Enter` as two separate `tmux send-keys` calls. |
-| `src/supervisor/auto_approve.rs` | Safe-command classifier: command-slice extraction and normalisation, the danger-list, `.git/` and protected-path write checks, worktree-confined rules, the composed whitelist, and option selection. Backs the hidden `git paw __classify` subcommand. |
+| `src/supervisor/approval_gate.rs` | The shared live-prompt gate (`live_prompt_in_tail`) and the escalation dedup key. |
 | `src/supervisor/branch_refresh.rs` | Pure precondition check for the opt-in post-merge branch refresh (`[supervisor] branch_refresh`): a branch is rebased only when every gate passes. The drive loop resolves the inputs. |
-| `src/supervisor/claim.rs` | Exclusive per-pane approval claim. Every approver — the drive loop, the dashboard auto-approver, and the bundled `sweep.sh approve` in its own process — atomically creates `<repo>/.git-paw/tmp/approve-pane-<N>.claim` before sending a keystroke, so two can never both approve one pane. Non-blocking (a held pane is skipped, not waited on), released by RAII, and stealable once untouched past a 10s TTL so a hard-killed approver cannot wedge a pane. |
-| `src/supervisor/dev_allowlist.rs` | `[supervisor.common_dev_allowlist]` preset data: the always-on universal tier (non-destructive git verbs plus read-only `find` / `grep` / `sed -n`) and the opt-in `rust` / `node` / `python` / `go` stack presets, composed into the supervisor's own auto-approve whitelist and rendered into the bundled supervisor skill's permission guidance. |
-| `src/supervisor/drive.rs` | The `--unattended` drive loop, run in-process by `cmd_supervisor`: ~15 s sweeps of every pane, auto-approval, non-blocking escalation, hand-offs to the supervisor pane, the optional correction loop and branch refresh, completion detection, and the exit summary. |
+| `src/supervisor/claim.rs` | Exclusive per-pane keystroke claim. Every sender — the drive loop's nudge and buffered-input recovery, and the bundled `sweep.sh approve` in its own process — atomically creates `<repo>/.git-paw/tmp/approve-pane-<N>.claim` before sending a keystroke, so two can never both type into one pane. Non-blocking (a held pane is skipped, not waited on), released by RAII, and stealable once untouched past a 10s TTL so a hard-killed sender cannot wedge a pane. |
+| `src/supervisor/drive.rs` | The `--unattended` drive loop, run in-process by `cmd_supervisor`: ~15 s sweeps of every pane, non-blocking escalation of every live permission prompt, hand-offs to the supervisor pane, buffered-input recovery, the optional correction loop and branch refresh, completion detection, and the exit summary. It sends no approval keystroke. |
+| `src/supervisor/keys.rs` | The `KeyDispatcher` seam and its `tmux send-keys` implementation, used by the drive loop's nudge and input-recovery paths. |
 | `src/supervisor/layout.rs` | Supervisor-as-pane tmux layout: pane 0 supervisor, pane 1 dashboard, agent panes 2 onwards in the bottom-row grid (row-height proportions documented below). |
-| `src/supervisor/manual_approvals.rs` | Records each command forwarded for a manual decision to `.git-paw/sessions/<session>.manual-approvals.jsonl`, aggregates the log, and suggests a promotion target for `git paw approvals`. |
-| `src/supervisor/permission_prompt.rs` | Pane classification for permission-prompt detection (`tmux capture-pane` parsing). |
-| `src/supervisor/poll.rs` | One tick of the dashboard-side auto-approve loop: detect stalled agents, capture and classify each pane, approve safe live prompts, forward the rest as questions. The loop thread runs in the `__dashboard` process. |
-| `src/supervisor/stall.rs` | Stall detection: agents whose status is not terminal (`done` / `verified` / `blocked` / `committed`) and whose `last_seen` exceeds the threshold. |
+| `src/supervisor/manual_approvals.rs` | Records each prompt the drive loop escalates for a human decision to `.git-paw/sessions/<session>.manual-approvals.jsonl`, aggregates the log, and suggests which of the agent CLI's own allowlists could absorb the pattern for `git paw approvals`. |
+| `src/supervisor/permission_prompt.rs` | All permission-prompt detection: `tmux capture-pane`, the approval-marker scan, the live-prompt gate and its anchoring windows, input-box and rule-line parsing, and extraction of the prompted command slice or file-operation target path. Reports what is on screen; decides nothing about the command. |
 
 ### `src/specs/` modules
 
@@ -362,9 +358,6 @@ Dashboard pane process (git paw __dashboard):
 ├── Learnings flush thread (std::thread; opt-in via [supervisor] learnings = true)
 │   └── Flushes the aggregator (src/broker/learnings.rs), fed on every publish,
 │       to .git-paw/session-learnings.md (default every 60s, plus once at shutdown)
-├── Auto-approve thread (supervisor mode with [supervisor.auto_approve] enabled,
-│   │                    not --unattended)
-│   └── Runs src/supervisor/poll.rs ticks against stalled panes
 └── Main thread
     └── ratatui dashboard (800ms idle tick; a keystroke wakes it immediately)
 ```

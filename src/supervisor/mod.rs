@@ -1,18 +1,20 @@
-//! Supervisor-side helpers for the auto-approve patterns feature.
+//! Supervisor-side helpers.
 //!
-//! See `openspec/changes/auto-approve-patterns/` for the spec contracts.
-//! The submodules here keep auto-approval logic out of `main.rs` and
-//! testable in isolation.
+//! The submodules here keep the supervisor's pane handling — permission-prompt
+//! detection, keystroke dispatch, the per-pane claim, the unattended drive
+//! loop and the manual-decision log — out of `main.rs` and testable in
+//! isolation.
+//!
+//! None of them approves a permission prompt. git-paw makes no safety
+//! decision about an agent's command; the agent CLI's own permission system
+//! or the human decides, and the only approval path is an explicit
+//! `sweep.sh approve`.
 
 pub mod approval_gate;
-pub mod approve;
-pub mod auto_approve;
 pub mod branch_refresh;
 pub mod claim;
-pub mod dev_allowlist;
 pub mod drive;
+pub mod keys;
 pub mod layout;
 pub mod manual_approvals;
 pub mod permission_prompt;
-pub mod poll;
-pub mod stall;

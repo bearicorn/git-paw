@@ -65,7 +65,7 @@ fn absent_optional_config_resolves_to_defaults() {
             },
         ),
         (
-            "[supervisor] without [supervisor.common_dev_allowlist] → allowlist enabled default true, extra empty",
+            "[supervisor] without [supervisor.common_dev_allowlist] → table undeclared",
             "[supervisor]\n\
                  enabled = true\n\
                  cli = \"claude\"\n\
@@ -75,8 +75,7 @@ fn absent_optional_config_resolves_to_defaults() {
                  window_seconds = 60\n",
             |c| {
                 let supervisor = c.supervisor.as_ref().unwrap();
-                assert!(supervisor.common_dev_allowlist.enabled);
-                assert!(supervisor.common_dev_allowlist.extra.is_empty());
+                assert!(supervisor.common_dev_allowlist.is_none());
             },
         ),
         (
@@ -852,13 +851,15 @@ fn template_section_families() -> std::collections::BTreeSet<String> {
 }
 
 #[test]
-fn generated_template_documents_the_six_added_sections() {
+fn generated_template_documents_the_added_sections() {
     let template = generate_default_config();
+    // `[supervisor.auto_approve]` was in this list until the classifier was
+    // retired. It is deliberately absent now — see
+    // `default_template_omits_the_deprecated_auto_approval_tables`.
     for header in [
         "# [mcp]",
         "# [layout]",
         "# [broker.watcher]",
-        "# [supervisor.auto_approve]",
         "# [supervisor.learnings_config]",
         "# [governance]",
     ] {
@@ -874,6 +875,14 @@ fn generated_template_covers_every_documented_config_section() {
     // Parity guard: every TOML table documented in the configuration
     // reference must have a corresponding commented stanza in the init
     // template, so the two cannot silently drift apart.
+    //
+    // DEPRECATED tables are the one exception, and must be: the reference
+    // documents them precisely to tell users they have no effect and should
+    // be removed, while the template must not seed a table that would then
+    // warn on every load. Documenting a deprecation is the opposite of
+    // offering it as a setting.
+    const DEPRECATED_SECTIONS: &[&str] =
+        &["supervisor.auto_approve", "supervisor.common_dev_allowlist"];
     let reference = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/src/configuration/README.md"),
     )
@@ -897,7 +906,11 @@ fn generated_template_covers_every_documented_config_section() {
     );
 
     let template = template_section_families();
-    let missing: Vec<_> = documented.difference(&template).cloned().collect();
+    let missing: Vec<_> = documented
+        .difference(&template)
+        .filter(|s| !DEPRECATED_SECTIONS.contains(&s.as_str()))
+        .cloned()
+        .collect();
     assert!(
         missing.is_empty(),
         "config sections documented in the reference but missing a commented stanza \
@@ -1283,7 +1296,7 @@ fn supervisor_round_trips_through_save_and_load() {
             conflict: ConflictConfig::default(),
             learnings: false,
             learnings_config: LearningsConfig::default(),
-            common_dev_allowlist: CommonDevAllowlistConfig::default(),
+            common_dev_allowlist: None,
             verify_on_commit_nudge: None,
             strict_branch_guard: None,
             auto_revert: None,
@@ -1626,141 +1639,6 @@ fn doc_tool_command_flows_into_gate_commands() {
 }
 
 // --- CommonDevAllowlistConfig ---
-
-#[test]
-fn supervisor_common_dev_allowlist_defaults_when_section_absent() {
-    let tmp = TempDir::new().unwrap();
-    let path = tmp.path().join("config.toml");
-    write_file(&path, "[supervisor]\nenabled = true\n");
-
-    let config = load_config_file(&path).unwrap().unwrap();
-    let supervisor = config.supervisor.unwrap();
-    assert!(supervisor.common_dev_allowlist.enabled);
-    assert!(supervisor.common_dev_allowlist.stacks.is_empty());
-    assert!(supervisor.common_dev_allowlist.extra.is_empty());
-}
-
-#[test]
-fn supervisor_common_dev_allowlist_stacks_parsed() {
-    let tmp = TempDir::new().unwrap();
-    let path = tmp.path().join("config.toml");
-    write_file(
-        &path,
-        "[supervisor]\nenabled = true\n\
-             [supervisor.common_dev_allowlist]\nstacks = [\"rust\", \"node\"]\n",
-    );
-
-    let config = load_config_file(&path).unwrap().unwrap();
-    let supervisor = config.supervisor.unwrap();
-    assert_eq!(
-        supervisor.common_dev_allowlist.stacks,
-        vec!["rust".to_string(), "node".to_string()],
-    );
-    // extra still defaults to empty; enabled stays true.
-    assert!(supervisor.common_dev_allowlist.extra.is_empty());
-    assert!(supervisor.common_dev_allowlist.enabled);
-}
-
-#[test]
-fn supervisor_common_dev_allowlist_disabled_opt_out() {
-    let tmp = TempDir::new().unwrap();
-    let path = tmp.path().join("config.toml");
-    write_file(
-        &path,
-        "[supervisor]\nenabled = true\n\
-             [supervisor.common_dev_allowlist]\nenabled = false\n",
-    );
-
-    let config = load_config_file(&path).unwrap().unwrap();
-    let supervisor = config.supervisor.unwrap();
-    assert!(!supervisor.common_dev_allowlist.enabled);
-    // extra still defaults to empty.
-    assert!(supervisor.common_dev_allowlist.extra.is_empty());
-}
-
-#[test]
-fn supervisor_common_dev_allowlist_extra_parsed() {
-    let tmp = TempDir::new().unwrap();
-    let path = tmp.path().join("config.toml");
-    write_file(
-        &path,
-        "[supervisor]\nenabled = true\n\
-             [supervisor.common_dev_allowlist]\nextra = [\"pnpm test\", \"deno fmt\"]\n",
-    );
-
-    let config = load_config_file(&path).unwrap().unwrap();
-    let supervisor = config.supervisor.unwrap();
-    assert_eq!(
-        supervisor.common_dev_allowlist.extra,
-        vec!["pnpm test".to_string(), "deno fmt".to_string()],
-    );
-    // enabled stays at default true.
-    assert!(supervisor.common_dev_allowlist.enabled);
-}
-
-#[test]
-fn supervisor_common_dev_allowlist_round_trips_through_save_and_load() {
-    let tmp = TempDir::new().unwrap();
-    let config_path = tmp.path().join("config.toml");
-
-    let original = PawConfig {
-        supervisor: Some(SupervisorConfig {
-            enabled: true,
-            common_dev_allowlist: CommonDevAllowlistConfig {
-                enabled: false,
-                stacks: vec!["rust".into(), "node".into()],
-                extra: vec!["pnpm test".into(), "uv pip install".into()],
-            },
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    save_config_to(&config_path, &original).unwrap();
-    let loaded = load_config_file(&config_path).unwrap().unwrap();
-    assert_eq!(loaded.supervisor, original.supervisor);
-}
-
-#[test]
-fn effective_whitelist_ignores_common_dev_allowlist_enabled_false() {
-    let cfg = AutoApproveConfig::default();
-    let dev = CommonDevAllowlistConfig {
-        enabled: false,
-        stacks: vec!["rust".to_string()],
-        extra: vec![],
-    };
-    let wl = cfg.effective_whitelist(&dev);
-    // The `enabled` field is parsed for compatibility but has no effect.
-    // Even when enabled = false, the whitelist is composed normally with
-    // universal patterns and stack presets.
-    for pattern in crate::supervisor::dev_allowlist::DEV_ALLOWLIST_PRESET {
-        assert!(
-            wl.iter().any(|c| c == pattern),
-            "whitelist should have universal preset pattern: {pattern}",
-        );
-    }
-    assert!(
-        wl.iter().any(|c| c == "cargo test"),
-        "whitelist should have rust stack preset (cargo test)",
-    );
-}
-
-#[test]
-fn generated_default_config_template_contains_common_dev_allowlist_section() {
-    let template = generate_default_config();
-    assert!(
-        template.contains("[supervisor.common_dev_allowlist]"),
-        "default template should document the new sub-table",
-    );
-    assert!(
-        template.contains("extra ="),
-        "template should illustrate the extra field",
-    );
-    assert!(
-        template.contains("stacks ="),
-        "template should illustrate the stacks field",
-    );
-}
 
 // --- LearningsConfig (learnings-mode) ---
 
@@ -2269,6 +2147,204 @@ fn broker_config_round_trip() {
 
 // --- AutoApproveConfig (auto-approve-patterns / approval-configuration) ---
 
+// The two tables below are DEPRECATED: they parse for compatibility and have
+// no effect. The tests here pin exactly that — that an old configuration
+// still loads and round-trips, that a file declaring either is warned about
+// once, and that a file declaring neither is left alone.
+
+/// Spec scenario "An old configuration with both tables loads with one
+/// warning" (`supervisor-config`), warning-text half: the pure helper names
+/// BOTH tables when both are declared.
+#[test]
+fn deprecated_table_warning_names_both_declared_tables() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(
+        &path,
+        "[supervisor]\nenabled = true\n\
+         [supervisor.auto_approve]\nenabled = true\n\
+         [supervisor.common_dev_allowlist]\nstacks = [\"rust\"]\n",
+    );
+    let config = load_config_file(&path).unwrap().unwrap();
+    let warning = crate::config::deprecated_table_warning(&config)
+        .expect("a config declaring both tables must warn");
+    assert!(warning.contains("[supervisor.auto_approve]"), "{warning}");
+    assert!(
+        warning.contains("[supervisor.common_dev_allowlist]"),
+        "{warning}"
+    );
+    assert!(
+        warning.contains("no effect"),
+        "the warning must say the tables do nothing: {warning}"
+    );
+}
+
+/// Spec scenario "The warning names only the declared table": a config
+/// declaring just one must not name the other, or the user goes looking for
+/// a table they never wrote.
+#[test]
+fn deprecated_table_warning_names_only_the_declared_table() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(
+        &path,
+        "[supervisor]\nenabled = true\n[supervisor.auto_approve]\nenabled = true\n",
+    );
+    let config = load_config_file(&path).unwrap().unwrap();
+    let warning = crate::config::deprecated_table_warning(&config).expect("must warn");
+    assert!(warning.contains("[supervisor.auto_approve]"), "{warning}");
+    assert!(
+        !warning.contains("[supervisor.common_dev_allowlist]"),
+        "an undeclared table must not be named: {warning}"
+    );
+}
+
+/// Spec scenario "A configuration without the tables produces no warning".
+#[test]
+fn deprecated_table_warning_is_none_without_the_tables() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(&path, "[supervisor]\nenabled = true\ncli = \"claude\"\n");
+    let config = load_config_file(&path).unwrap().unwrap();
+    assert!(crate::config::deprecated_table_warning(&config).is_none());
+    // And a configuration with no [supervisor] section at all.
+    let path2 = tmp.path().join("bare.toml");
+    write_file(&path2, "default_cli = \"claude\"\n");
+    let bare = load_config_file(&path2).unwrap().unwrap();
+    assert!(crate::config::deprecated_table_warning(&bare).is_none());
+}
+
+/// Spec scenario "Declared tables round-trip": every field of both tables
+/// survives a load → save → load cycle with its value intact, so a user who
+/// has not yet deleted them loses nothing.
+#[test]
+fn declared_deprecated_tables_round_trip_with_values_preserved() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(
+        &path,
+        "[supervisor]\nenabled = true\n\
+         [supervisor.auto_approve]\n\
+         enabled = false\n\
+         safe_commands = [\"just smoke\"]\n\
+         stall_threshold_seconds = 60\n\
+         approval_level = \"conservative\"\n\
+         approve_worktree_writes = false\n\
+         [supervisor.common_dev_allowlist]\n\
+         enabled = false\n\
+         stacks = [\"rust\", \"node\"]\n\
+         extra = [\"pnpm test\"]\n",
+    );
+    let loaded = load_config_file(&path).unwrap().unwrap();
+
+    let saved = tmp.path().join("saved.toml");
+    write_file(&saved, &toml::to_string_pretty(&loaded).unwrap());
+    let reloaded = load_config_file(&saved).unwrap().unwrap();
+
+    let sup = reloaded.supervisor.as_ref().unwrap();
+    let aa = sup.auto_approve.as_ref().expect("auto_approve round-trips");
+    assert!(!aa.enabled);
+    assert_eq!(aa.safe_commands, vec!["just smoke".to_string()]);
+    assert_eq!(aa.stall_threshold_seconds, 60);
+    assert_eq!(aa.approval_level, ApprovalLevelPreset::Conservative);
+    assert_eq!(aa.approve_worktree_writes, Some(false));
+
+    let dev = sup
+        .common_dev_allowlist
+        .as_ref()
+        .expect("common_dev_allowlist round-trips");
+    assert!(!dev.enabled);
+    assert_eq!(dev.stacks, vec!["rust".to_string(), "node".to_string()]);
+    assert_eq!(dev.extra, vec!["pnpm test".to_string()]);
+}
+
+/// Spec scenario "An undeclared table is not written on save": before this
+/// change `common_dev_allowlist` was a defaulted struct, so saving ANY
+/// `[supervisor]` config emitted an empty `[supervisor.common_dev_allowlist]`
+/// — which would then warn forever about a table the user never wrote.
+#[test]
+fn undeclared_dev_allowlist_table_is_not_written_on_save() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(&path, "[supervisor]\nenabled = true\ncli = \"claude\"\n");
+    let loaded = load_config_file(&path).unwrap().unwrap();
+
+    let serialised = toml::to_string_pretty(&loaded).unwrap();
+    assert!(
+        !serialised.contains("[supervisor.common_dev_allowlist]"),
+        "a save must not add a table the user did not declare:\n{serialised}"
+    );
+    assert!(
+        !serialised.contains("[supervisor.auto_approve]"),
+        "nor the other one:\n{serialised}"
+    );
+
+    // And re-loading the saved file still warns about nothing.
+    let saved = tmp.path().join("saved.toml");
+    write_file(&saved, &serialised);
+    let reloaded = load_config_file(&saved).unwrap().unwrap();
+    assert!(crate::config::deprecated_table_warning(&reloaded).is_none());
+}
+
+/// The clamp is gone with the approver it protected: a zero threshold is now
+/// just an inert number, and warning about it would be noise about a field
+/// that does nothing.
+#[test]
+fn zero_stall_threshold_is_accepted_without_a_clamp_warning() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(
+        &path,
+        "[supervisor]\nenabled = true\n\
+         [supervisor.auto_approve]\nstall_threshold_seconds = 0\n",
+    );
+    let config = load_config_file(&path).unwrap().unwrap();
+    let aa = config.supervisor.unwrap().auto_approve.unwrap();
+    assert_eq!(
+        aa.stall_threshold_seconds, 0,
+        "the value is parsed verbatim, not clamped"
+    );
+}
+
+/// A pre-v0.5 configuration — no supervisor sub-tables at all — still loads.
+#[test]
+fn pre_v0_5_config_without_supervisor_tables_loads() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(
+        &path,
+        "default_cli = \"claude\"\n[broker]\nenabled = true\nport = 9119\n",
+    );
+    let config = load_config_file(&path).unwrap().unwrap();
+    assert!(config.supervisor.is_none());
+    assert!(crate::config::deprecated_table_warning(&config).is_none());
+}
+
+/// Spec scenario "Template omits the deprecated auto-approval tables"
+/// (`core-init`): `git paw init`'s default template must not seed either
+/// table, and a config generated from it must load silently.
+#[test]
+fn default_template_omits_the_deprecated_auto_approval_tables() {
+    let template = generate_default_config();
+    assert!(
+        !template.contains("[supervisor.auto_approve]"),
+        "the template must not seed the deprecated auto-approve table"
+    );
+    assert!(
+        !template.contains("[supervisor.common_dev_allowlist]"),
+        "the template must not seed the deprecated dev-allowlist table"
+    );
+
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(&path, &template);
+    let config = load_config_file(&path).unwrap().unwrap();
+    assert!(
+        crate::config::deprecated_table_warning(&config).is_none(),
+        "a freshly generated config must produce no deprecation warning"
+    );
+}
+
 #[test]
 fn auto_approve_section_parses_full_body() {
     let tmp = TempDir::new().unwrap();
@@ -2302,17 +2378,6 @@ fn auto_approve_enabled_defaults_to_true_when_omitted() {
     let config = load_config_file(&path).unwrap().unwrap();
     let aa = config.supervisor.unwrap().auto_approve.unwrap();
     assert!(aa.enabled, "enabled should default to true");
-}
-
-#[test]
-fn auto_approve_off_preset_forces_disabled() {
-    let cfg = AutoApproveConfig {
-        enabled: true,
-        approval_level: ApprovalLevelPreset::Off,
-        ..AutoApproveConfig::default()
-    };
-    let resolved = cfg.resolved();
-    assert!(!resolved.enabled, "Off preset must force enabled = false");
 }
 
 // --- Bug 8: [broker.watcher] republish_working_ttl_seconds ---
@@ -2361,256 +2426,6 @@ fn watcher_ttl_parses_from_broker_table() {
     let config = load_config_file(&path).unwrap().unwrap();
     assert_eq!(config.broker.watcher.republish_working_ttl_seconds, Some(0));
     assert_eq!(config.broker.watcher.republish_working_ttl_seconds(), 0);
-}
-
-#[test]
-fn approve_worktree_writes_defaults_to_true_when_absent() {
-    // Spec scenario: default true auto-approves (field unset).
-    let cfg = AutoApproveConfig::default();
-    assert!(
-        cfg.approve_worktree_writes(),
-        "absent approve_worktree_writes must resolve to true"
-    );
-}
-
-#[test]
-fn approve_worktree_writes_explicit_false_resolves_false() {
-    // Spec scenario: explicit false reverts to manual.
-    let cfg = AutoApproveConfig {
-        approve_worktree_writes: Some(false),
-        ..AutoApproveConfig::default()
-    };
-    assert!(!cfg.approve_worktree_writes());
-}
-
-#[test]
-fn approve_worktree_writes_parses_from_toml() {
-    let tmp = TempDir::new().unwrap();
-    let path = tmp.path().join("config.toml");
-    write_file(
-        &path,
-        "[supervisor]\nenabled = true\n[supervisor.auto_approve]\napprove_worktree_writes = false\n",
-    );
-    let config = load_config_file(&path).unwrap().unwrap();
-    let aa = config.supervisor.unwrap().auto_approve.unwrap();
-    assert_eq!(aa.approve_worktree_writes, Some(false));
-    assert!(!aa.approve_worktree_writes());
-}
-
-#[test]
-fn auto_approve_threshold_floor_clamps() {
-    let cfg = AutoApproveConfig {
-        stall_threshold_seconds: 0,
-        ..AutoApproveConfig::default()
-    };
-    let resolved = cfg.resolved();
-    assert_eq!(
-        resolved.stall_threshold_seconds,
-        AutoApproveConfig::MIN_STALL_THRESHOLD_SECONDS
-    );
-}
-
-#[test]
-fn auto_approve_safe_preset_keeps_defaults() {
-    let cfg = AutoApproveConfig {
-        approval_level: ApprovalLevelPreset::Safe,
-        ..AutoApproveConfig::default()
-    };
-    let wl = cfg.effective_whitelist(&CommonDevAllowlistConfig::default());
-    assert!(wl.iter().any(|c| c == "git commit"));
-    assert!(wl.iter().any(|c| c == "git push"));
-    assert!(wl.iter().any(|c| c.starts_with("curl")));
-    // The universal dev-allowlist patterns are folded in.
-    assert!(wl.iter().any(|c| c == "git diff"));
-}
-
-#[test]
-fn auto_approve_conservative_drops_push_and_curl() {
-    let cfg = AutoApproveConfig {
-        approval_level: ApprovalLevelPreset::Conservative,
-        ..AutoApproveConfig::default()
-    };
-    let wl = cfg.effective_whitelist(&CommonDevAllowlistConfig::default());
-    assert!(wl.iter().any(|c| c == "git commit"));
-    assert!(
-        !wl.iter().any(|c| c.starts_with("git push")),
-        "conservative drops git push"
-    );
-    assert!(
-        !wl.iter().any(|c| c.starts_with("curl")),
-        "conservative drops curl"
-    );
-}
-
-#[test]
-fn auto_approve_extras_are_unioned_with_defaults() {
-    let cfg = AutoApproveConfig {
-        safe_commands: vec!["just lint".to_string(), "just test".to_string()],
-        ..AutoApproveConfig::default()
-    };
-    let wl = cfg.effective_whitelist(&CommonDevAllowlistConfig::default());
-    assert!(wl.iter().any(|c| c == "grep"));
-    assert!(wl.iter().any(|c| c == "just lint"));
-    assert!(wl.iter().any(|c| c == "just test"));
-}
-
-#[test]
-fn auto_approve_empty_extras_keep_defaults() {
-    let cfg = AutoApproveConfig::default();
-    let wl = cfg.effective_whitelist(&CommonDevAllowlistConfig::default());
-    assert!(wl.iter().any(|c| c == "git commit"));
-    assert!(wl.iter().any(|c| c == "grep"));
-}
-
-/// Spec scenario "Default whitelist is stack-neutral": no stacks declared
-/// and no `safe_commands` — the composed whitelist carries no toolchain
-/// entries, but keeps the read-mostly verbs, `git commit`, and the
-/// broker-localhost curl prefix.
-#[test]
-fn effective_whitelist_default_is_stack_neutral() {
-    let cfg = AutoApproveConfig::default();
-    let wl = cfg.effective_whitelist(&CommonDevAllowlistConfig::default());
-    for gone in ["cargo", "openspec", "just"] {
-        assert!(
-            !wl.iter()
-                .any(|c| c == gone || c.starts_with(&format!("{gone} "))),
-            "stack-neutral default must not contain {gone} entries: {wl:?}"
-        );
-    }
-    for verb in crate::supervisor::auto_approve::READ_MOSTLY_VERBS {
-        assert!(wl.iter().any(|c| c == verb), "missing read-mostly {verb}");
-    }
-    assert!(wl.iter().any(|c| c == "git commit"));
-    assert!(wl.iter().any(|c| c == "curl http://127.0.0.1:"));
-    // Verify every universal preset pattern is present
-    for pattern in crate::supervisor::dev_allowlist::DEV_ALLOWLIST_PRESET {
-        assert!(
-            wl.iter().any(|c| c == pattern),
-            "whitelist missing universal preset pattern: {pattern}",
-        );
-    }
-}
-
-/// Spec scenario "Declared stack contributes its toolchain verbs": the
-/// rust stack preset contributes `cargo test` to the composed whitelist.
-#[test]
-fn effective_whitelist_rust_stack_contributes_cargo() {
-    use crate::supervisor::auto_approve::is_safe_command;
-    let cfg = AutoApproveConfig::default();
-    let dev = CommonDevAllowlistConfig {
-        stacks: vec!["rust".to_string()],
-        ..CommonDevAllowlistConfig::default()
-    };
-    let wl = cfg.effective_whitelist(&dev);
-    assert!(is_safe_command("cargo test --workspace", &wl));
-    assert!(is_safe_command("cargo fmt --check", &wl));
-}
-
-/// Spec scenario "Undeclared stack's verbs stay unknown": a node-stack
-/// project gets no cargo entries.
-#[test]
-fn effective_whitelist_node_stack_has_no_cargo() {
-    use crate::supervisor::auto_approve::is_safe_command;
-    let cfg = AutoApproveConfig::default();
-    let dev = CommonDevAllowlistConfig {
-        stacks: vec!["node".to_string()],
-        ..CommonDevAllowlistConfig::default()
-    };
-    let wl = cfg.effective_whitelist(&dev);
-    assert!(!is_safe_command("cargo test", &wl));
-    assert!(is_safe_command("npm test", &wl));
-}
-
-/// The `Conservative` strip applies AFTER composition, so it governs
-/// stack-contributed and `safe_commands` entries as well as built-ins.
-#[test]
-fn effective_whitelist_conservative_strips_post_composition() {
-    let cfg = AutoApproveConfig {
-        approval_level: ApprovalLevelPreset::Conservative,
-        safe_commands: vec!["curl -X POST".to_string()],
-        ..AutoApproveConfig::default()
-    };
-    let dev = CommonDevAllowlistConfig {
-        stacks: vec!["rust".to_string()],
-        ..CommonDevAllowlistConfig::default()
-    };
-    let wl = cfg.effective_whitelist(&dev);
-    assert!(
-        !wl.iter().any(|c| c.starts_with("curl")),
-        "conservative must strip curl entries from every source: {wl:?}"
-    );
-    assert!(
-        !wl.iter().any(|c| c.starts_with("git push")),
-        "conservative must strip git push contributed by the dev preset"
-    );
-    assert!(
-        wl.iter().any(|c| c == "cargo test"),
-        "stack-contributed non-push/curl entries survive the strip"
-    );
-}
-
-/// Spec scenario `auto-approve-patterns/safe-command-classification`:
-/// "Config adds project-specific patterns" — a TOML config with
-/// `safe_commands = ["just smoke"]` must yield an effective whitelist
-/// such that `is_safe_command("just smoke -v", &whitelist)` is true.
-/// "Config does not weaken defaults" — `safe_commands = []` must keep
-/// the built-in defaults available to `is_safe_command`.
-#[test]
-fn toml_extras_classify_via_is_safe_command_and_empty_extras_keep_defaults() {
-    use crate::supervisor::auto_approve::is_safe_command;
-
-    // (1) Extras case: a project-specific entry parsed from TOML must
-    //     classify a command using that prefix as safe.
-    let tmp = TempDir::new().unwrap();
-    let extras_path = tmp.path().join("extras.toml");
-    write_file(
-        &extras_path,
-        "[supervisor]\n\
-             enabled = true\n\
-             [supervisor.auto_approve]\n\
-             safe_commands = [\"just smoke\"]\n",
-    );
-    let extras_config = load_config_file(&extras_path).unwrap().unwrap();
-    let extras_supervisor = extras_config.supervisor.unwrap();
-    let extras_aa = extras_supervisor.auto_approve.unwrap();
-    let extras_whitelist = extras_aa.effective_whitelist(&extras_supervisor.common_dev_allowlist);
-    assert!(
-        is_safe_command("just smoke -v", &extras_whitelist),
-        "TOML extra `just smoke` must accept `just smoke -v`"
-    );
-    // The defaults must still be present alongside the extra.
-    assert!(
-        is_safe_command("grep -rn \"foo\" src/", &extras_whitelist),
-        "extras must not displace built-in defaults"
-    );
-
-    // (2) Empty extras: the effective whitelist must still classify the
-    //     composed defaults (e.g. `grep`) as safe.
-    let empty_path = tmp.path().join("empty.toml");
-    write_file(
-        &empty_path,
-        "[supervisor]\n\
-             enabled = true\n\
-             [supervisor.auto_approve]\n\
-             safe_commands = []\n",
-    );
-    let empty_config = load_config_file(&empty_path).unwrap().unwrap();
-    let empty_supervisor = empty_config.supervisor.unwrap();
-    let empty_aa = empty_supervisor.auto_approve.unwrap();
-    let empty_whitelist = empty_aa.effective_whitelist(&empty_supervisor.common_dev_allowlist);
-    assert!(
-        is_safe_command("grep -rn \"foo\" src/", &empty_whitelist),
-        "empty safe_commands must keep built-in defaults"
-    );
-    assert!(
-        is_safe_command("git commit -m hi", &empty_whitelist),
-        "empty safe_commands must keep `git commit` default"
-    );
-    // A command outside the defaults must still be rejected.
-    assert!(
-        !is_safe_command("rm -rf /tmp/foo", &empty_whitelist),
-        "empty safe_commands must not whitelist arbitrary commands"
-    );
 }
 
 // --- ConflictConfig (supervisor.conflict sub-table) ---
