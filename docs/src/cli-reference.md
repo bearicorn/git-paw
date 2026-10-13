@@ -101,7 +101,7 @@ Options:
       --no-supervisor                Disable supervisor for this session, overriding any [supervisor] enabled = true in config
       --force                        Bypass uncommitted-spec validation warning
       --no-rebase                    Skip rebasing existing agent branches onto the default branch before opening worktrees
-      --unattended                   Run the supervisor wave to completion with no human babysitting (auto-approve safe prompts, escalate the rest, detect completion, exit with a summary)
+      --unattended                   Run the supervisor wave to completion with no human babysitting (escalate every permission prompt for a human decision, detect completion, exit with a summary)
   -h, --help                         Print help
 ```
 
@@ -118,7 +118,7 @@ Options:
 | `--no-supervisor` | (flag) | Force supervisor mode off (highest precedence in the resolution chain). Mutually exclusive with `--supervisor`. |
 | `--force` | (flag) | Bypass the uncommitted-spec validation warning when launching from specs. |
 | `--no-rebase` | (flag) | Skip the default-on rebase of existing agent branches onto the repository's default branch. |
-| `--unattended` | (flag) | Run the supervisor wave to completion with no human in the seat: engages supervisor mode and drives an in-process loop that auto-approves classifier-safe prompts, escalates the rest for later review, detects completion, and exits with a summary. Mutually exclusive with `--no-supervisor`. |
+| `--unattended` | (flag) | Run the supervisor wave to completion with no human in the seat: engages supervisor mode and drives an in-process loop that escalates every live permission prompt for a human decision without blocking the wave, detects completion, and exits with a summary. It approves nothing. Mutually exclusive with `--no-supervisor`. |
 
 `--from-all-specs` and `--specs` are mutually exclusive — one launches every
 discovered spec, the other narrows to a subset or opens the picker.
@@ -126,12 +126,18 @@ discovered spec, the other narrows to a subset or opens the picker.
 `--unattended` engages supervisor mode (equivalent to also passing
 `--supervisor`) and then drives the wave to completion in-process instead of
 returning with an attach hint: it polls the panes on a ~15-second cadence,
-auto-approves classifier-**safe** permission prompts (including the
-supervisor's own pane), escalates risky/unknown prompts for later human review
-WITHOUT blocking the rest of the wave, and exits with a summary on completion,
-a stuck signal, or a ~25-minute heartbeat. It is designed for detached
-operation and needs no attached terminal. It is mutually exclusive with
-`--no-supervisor`. See [Supervisor → Unattended mode](user-guide/supervisor.md).
+escalates **every** live permission prompt it finds — on a coding pane or the
+supervisor's own — for a human decision WITHOUT blocking the rest of the wave,
+and exits with a summary on completion, a stuck signal, or a ~25-minute
+heartbeat. It is designed for detached operation and needs no attached
+terminal. It is mutually exclusive with `--no-supervisor`.
+
+**It approves nothing.** git-paw sends no approval keystroke on its own
+initiative; whether a command runs without a prompt is decided by the agent
+CLI's own permission system. For a run that truly does not stop, pre-approve
+the commands in that CLI's own allow rules, or use
+`[supervisor] approval = "full-auto"` inside the documented sandbox. See
+[Supervisor → Unattended mode](user-guide/supervisor.md).
 
 When a supervisor (orchestrator) pane is present, the loop additionally **hands
 each judgment call to that pane** — a risky/unknown prompt, a worker's question,
@@ -547,9 +553,10 @@ git paw replay feat/add-auth --session paw-my-project
 
 ## `git paw approvals`
 
-Report the command patterns the supervisor forwarded for a manual decision
-during a session — the prompts the auto-approve preset did not match — sorted
-by how often each was forwarded. See
+Report the permission prompts the `--unattended` drive loop escalated for a
+human decision during a session, sorted by how often each recurred. Attended
+sessions run no drive loop and record nothing, though this command still reads
+any log an earlier unattended run left behind. See
 [Manual approvals](user-guide/supervisor.md#manual-approvals) for the full
 workflow.
 
@@ -563,10 +570,11 @@ Options:
   -h, --help               Print help
 ```
 
-Each row carries a `SUGGEST` hint — `project allowlist` for project-specific
-patterns (a `./`-rooted script, or the project/branch name), `bundled preset
-candidate` otherwise. The hint is a starting point; the command never edits
-the preset or allowlist for you.
+Each row carries a `SUGGEST` hint naming which of the agent CLI's own
+allowlists could absorb the pattern — `project allowlist` for project-specific
+patterns (a `./`-rooted script, or the project/branch name), `user allowlist`
+otherwise. The hint is a starting point; the command never edits any settings
+file for you.
 
 **Examples:**
 ```bash

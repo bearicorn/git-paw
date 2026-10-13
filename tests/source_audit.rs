@@ -66,26 +66,58 @@ fn cmd_supervisor_does_not_reference_run_merge_loop() {
     );
 }
 
-// Maps to scenario `Auto-approve thread runs inside the dashboard subprocess`
-// from supervisor-as-pane (per design.md D2). The structural property is
-// asserted at the source level: cmd_supervisor MUST NOT call the
-// auto-approve spawner (`spawn_auto_approve_thread`). The spawner runs
-// inside `cmd_dashboard` only. (test-coverage-v0-5-0 task 13.1)
+/// Spec scenario "An attended session runs no auto-approver"
+/// (`approval-auto`), source half: the dashboard auto-approve thread is GONE,
+/// not merely disabled. None of its symbols may exist anywhere under `src/`,
+/// so no future wiring can resurrect it by accident.
+///
+/// A source-level audit, because the property is a NEGATIVE about the whole
+/// tree: a behavioural test can only show that one particular session did not
+/// approve, never that no code path could.
 #[test]
-fn cmd_supervisor_does_not_spawn_auto_approve_thread() {
-    let body = function_body("cmd_supervisor");
+fn no_auto_approve_thread_symbol_exists_under_src() {
+    let mut offenders: Vec<String> = Vec::new();
+    for symbol in [
+        "spawn_auto_approve_thread",
+        "auto_approve_pane",
+        "tick_from_status",
+    ] {
+        for (path, body) in src_files() {
+            if body.contains(symbol) {
+                offenders.push(format!("{symbol} in {path}"));
+            }
+        }
+    }
     assert!(
-        !body.contains("spawn_auto_approve_thread"),
-        "cmd_supervisor body must not call the auto-approve spawner; that thread \
-         runs inside cmd_dashboard's __dashboard subprocess"
+        offenders.is_empty(),
+        "the retired auto-approve thread's symbols must not exist under src/: {offenders:?}"
     );
+}
 
-    // Sanity: the spawner must still exist somewhere in supervisor.rs (otherwise
-    // the grep target has vanished and this test silently passes).
-    assert!(
-        SUPERVISOR_RS.contains("fn spawn_auto_approve_thread("),
-        "spawn_auto_approve_thread function is missing — update this test if it was renamed"
+/// Walks `src/` and yields every `.rs` file's path and contents.
+fn src_files() -> Vec<(String, String)> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && let Ok(body) = std::fs::read_to_string(&path)
+            {
+                out.push((path.display().to_string(), body));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut out,
     );
+    assert!(!out.is_empty(), "src/ must contain Rust files");
+    out
 }
 
 // supervisor-as-pane: cmd_supervisor must not self-publish a
@@ -297,4 +329,50 @@ fn dashboard_view_reads_only_the_model_and_performs_no_io() {
             "`src/dashboard/view.rs` must be pure — found the I/O marker `{io}`"
         );
     }
+}
+
+/// Spec scenario "No permission-prompt message variant exists"
+/// (`approval-auto`, requirement *Approval gate reuses existing broker
+/// variants*): escalating a permission prompt rides on `agent.question`, and
+/// the stuck-on-prompt trigger on `agent.status`. No wire variant is
+/// dedicated to prompts or approvals.
+///
+/// A source-level audit because the property is a closed-set negative over
+/// the enum: a behavioural test can show that today's escalation uses
+/// `agent.question`, but not that no OTHER variant exists for the purpose.
+#[test]
+fn no_broker_message_variant_is_dedicated_to_permission_prompts() {
+    let messages = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/broker/messages.rs"),
+    )
+    .expect("messages.rs is readable");
+
+    // The wire name of every variant, read from its serde rename.
+    let wire_names: Vec<String> = messages
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            let rest = l.strip_prefix("#[serde(rename = \"")?;
+            let name = rest.strip_suffix("\")]")?;
+            name.starts_with("agent.").then(|| name.to_string())
+        })
+        .collect();
+    assert!(
+        wire_names.len() >= 8,
+        "expected to find the agent.* wire names, got {wire_names:?}"
+    );
+
+    for name in &wire_names {
+        for forbidden in ["approv", "permission", "prompt"] {
+            assert!(
+                !name.contains(forbidden),
+                "no BrokerMessage variant may be dedicated to permission prompts, \
+                 found {name:?}; escalation reuses agent.question and the \
+                 stuck-on-prompt trigger reuses agent.status"
+            );
+        }
+    }
+    // The two variants the escalation path actually rides on must exist.
+    assert!(wire_names.iter().any(|n| n == "agent.question"));
+    assert!(wire_names.iter().any(|n| n == "agent.status"));
 }

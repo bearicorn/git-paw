@@ -28,10 +28,10 @@ Ask: **what is the smallest layer at which this behavior is observable?** Test t
 
 | The behavior is… | Layer | Where in git-paw |
 |---|---|---|
-| A pure / deterministic function — classifier rules, layout math, slugify, region-normalization, flag→value maps | **unit, table-driven** | `#[cfg(test)] mod tests {}` at the bottom of the module |
+| A pure / deterministic function — prompt-detection rules, layout math, slugify, region-normalization, flag→value maps | **unit, table-driven** | `#[cfg(test)] mod tests {}` at the bottom of the module |
 | A seam / boundary contract — config load+merge, session persist/recover, broker routing, an HTTP round-trip, git/worktree ops | **integration** | `tests/*.rs` with `assert_cmd` / `predicates` / `tempfile`; or the broker `oneshot` layer |
 | A whole flow / process-wiring / interactive path — tmux orchestration, prompt gating, `launch → session.json → panes`, `--from-specs` | **e2e** | `assert_cmd` for exit/stdout/state; the **PTY harness** for interactive prompts |
-| A shipped asset or prose contract — bundled skills, `sweep.sh`↔Rust classifier parity | **asset / parity** | `*_skill_content.rs`, `sweep_sh_*.rs` — assert stable anchors, never exact substrings |
+| A shipped asset or prose contract — bundled skills, `sweep.sh`↔Rust live-prompt-gate parity | **asset / parity** | `*_skill_content.rs`, `sweep_sh_*.rs` — assert stable anchors, never exact substrings |
 
 Prefer the **lowest** layer that still observes the behavior: it is faster and less flaky.
 Do **not** push pure logic up into e2e "to be realistic" — that just makes the suite slow
@@ -47,13 +47,13 @@ integration/e2e cap.
 **Unit (table-driven).** One test, many rows — never one test per variant/field/flag.
 ```rust
 #[test]
-fn classify_covers_each_command_class() {
-    for (input, expected) in [
-        ("cargo test", Safe),
-        ("rm -rf /", Danger),
+fn live_prompt_gate_covers_each_anchor_shape() {
+    for (capture, expected) in [
+        (footer_at_tail(), true),
+        (prompt_scrolled_away(), false),
         // one row per behavioral rule — a new rule adds a row, not a test
     ] {
-        assert_eq!(classify(input), expected, "input: {input}");
+        assert_eq!(is_live_prompt(&capture), expected, "capture: {capture}");
     }
 }
 ```
@@ -71,7 +71,7 @@ prompt and to synchronise — never to pixel-match.
 **Asset / parity.** Assert **stable anchors** (a required key, a command name, a structural
 marker) or keyword-sets — never a full exact substring of a bundled asset, which breaks on
 any wording edit. `sweep_sh_*` guards the *shipped bash artifact*, a different artifact from
-the Rust classifier — it is a sole guard, not a duplicate.
+the Rust gate it mirrors — it is a sole guard, not a duplicate.
 
 ## Step 3 — Consolidating a suite (net-first)
 

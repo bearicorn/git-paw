@@ -253,23 +253,6 @@ The system SHALL prepend a standardized boot instruction block to each agent pan
   - `{{BRANCH_ID}}` replaced with `"feat-errors"`
   - `{{GIT_PAW_BROKER_URL}}` replaced with `"http://127.0.0.1:9119"`
 
-### Requirement: Auto-approve common command classes
-
-The system SHALL detect and automatically approve common permission prompts to reduce manual intervention overhead. The auto-approve subsystem SHALL run inside the dashboard's `__dashboard` subprocess (which is long-lived for the duration of the dashboard pane), NOT inside the `cmd_supervisor` process (which now returns immediately after launching the session).
-
-#### Scenario: Permission prompts are detected via tmux capture
-
-- **GIVEN** an agent pane showing a permission prompt
-- **WHEN** the auto-approve subsystem (running inside the `__dashboard` process) polls
-- **THEN** the prompt SHALL be detected via `tmux capture-pane`
-
-#### Scenario: Auto-approve dies when dashboard pane is closed
-
-- **GIVEN** an active supervisor session with auto-approve enabled
-- **WHEN** the user kills the dashboard pane (pane 1)
-- **THEN** the auto-approve subsystem SHALL stop firing (it is a thread inside the `__dashboard` process)
-- **AND** subsequent permission prompts SHALL require manual approval
-
 ### Requirement: cmd_supervisor SHALL fall back to default SupervisorConfig when none configured
 
 `cmd_supervisor` SHALL NOT error with "supervisor mode enabled but `[supervisor]` config missing" when the loaded `PawConfig` lacks a `[supervisor]` block. Instead, `cmd_supervisor` SHALL synthesize a `SupervisorConfig::default()` value and resolve the supervisor CLI through the existing chain `[supervisor].cli > default_cli > error`.
@@ -894,7 +877,7 @@ shipped.
 The user-guide supervisor chapter SHALL include the following subsections (or equivalent headings):
 
 1. **Spec audit governance sub-step** — references `docs/src/user-guide/governance.md` and the five doc-checklist examples (DoD, ADR, security, test-strategy, constitution).
-2. **Common dev-command allowlist** — describes the preset, opt-out via `[supervisor.common_dev_allowlist].enabled = false`, and the `extra` field; cross-links to `docs/src/configuration/README.md`.
+2. **Agent permissions** — states that git-paw does not approve permission prompts; that whether an agent's command runs without a prompt is decided by the agent CLI's own permission system (the `[supervisor] agent_approval` / `approval` level mapped to CLI flags, the CLI's own allow rules, or `full-auto` inside a sandbox); that live prompts are escalated for a human decision and answered explicitly with `sweep.sh approve <pane>`; and that `[supervisor.auto_approve]` and `[supervisor.common_dev_allowlist]` are deprecated and have no effect. It cross-links to `docs/src/configuration/README.md` and `docs/src/user-guide/security-posture.md`.
 3. **Repo-configurable gate commands** — names the six `[supervisor]` gate-command keys (`test_command`, `lint_command`, `build_command`, `doc_build_command`, `spec_validate_command`, `fmt_check_command`, `security_audit_command`) and the `(not configured)` graceful-skip behaviour; cross-links to `docs/src/configuration/README.md`.
 4. **Broker-side conflict detector** — names the three failure shapes (forward, in-flight, ownership) and the `[conflict-detector]` token; cross-links to `docs/src/user-guide/conflict-detection.md`.
 5. **Learnings aggregator** — at minimum a one-line cross-link to `docs/src/user-guide/learnings.md`.
@@ -907,11 +890,12 @@ The user-guide supervisor chapter SHALL include the following subsections (or eq
 - **THEN** the content SHALL contain a heading or paragraph naming the governance sub-step inside spec audit
 - **AND** SHALL link to `docs/src/user-guide/governance.md`
 
-#### Scenario: Supervisor user-guide names the common dev-command allowlist
+#### Scenario: Supervisor user-guide explains agent permissions
 
 - **WHEN** the file is inspected
-- **THEN** it SHALL contain a section with a heading approximately "Common dev-command allowlist" or equivalent
-- **AND** SHALL mention `[supervisor.common_dev_allowlist]` and the `extra` field
+- **THEN** it SHALL contain a section with a heading approximately "Agent permissions" or equivalent
+- **AND** SHALL state that git-paw does not approve permission prompts and that the agent CLI's own permission system decides
+- **AND** SHALL name `[supervisor.auto_approve]` and `[supervisor.common_dev_allowlist]` as deprecated with no effect
 
 #### Scenario: Supervisor user-guide names the gate-command templating
 

@@ -6,62 +6,73 @@
 //! test-owned tmux socket, with an isolated `HOME` and an OS-assigned ephemeral
 //! broker port. The dummy CLI is a bash script that continuously reprints a
 //! permission-prompt footer so the drive loop always sees a live prompt in the
-//! capture tail; any approval keystrokes the loop sends land harmlessly on the
-//! script's ignored stdin. The test drives the wave to a terminal condition by
+//! capture tail. The loop must answer none of them: where a test needs to
+//! prove that negative, the dummy records every byte reaching its stdin to a
+//! marker file. The test drives the wave to a terminal condition by
 //! publishing to the broker over HTTP (the human/completion signal), then
 //! observes the child's exit status and printed summary.
 //!
-// # `unattended-operation` scenario → test map (task 8.4)
+// # `supervisor-unattended-operation` scenario → test map
 //
-// Every scenario in `specs/unattended-operation/spec.md` maps to at least one
-// behavioral test. `drive::…` names are unit tests in `src/supervisor/drive.rs`
-// (the loop exercised in memory with fakes — no tmux, no LLM); `e2e::…` names
-// are tests in this file (real tmux session + broker, no LLM, no TTY).
+// Every scenario in the capability's spec maps to at least one behavioral
+// test. `drive::…` names are unit tests in `src/supervisor/drive.rs` (the loop
+// exercised in memory with fakes — no tmux, no LLM); `e2e::…` names are tests
+// in this file (real tmux session + broker, no LLM, no TTY).
 //
-// - runs a session to completion + summary → e2e::auto_approves_safe_prompt_then_completes,
-//   drive::loop_approves_safe_prompt_then_exits_on_completion
+// - runs a session to completion + summary → e2e::escalates_live_prompt_then_completes,
+//   drive::loop_escalates_live_prompt_then_exits_on_completion
 // - polls on a ~15-second cadence → drive::cadence_constants_match_spec
 // - without --unattended the launch returns immediately → tests/e2e_supervisor_returns.rs
 //   (supervisor-launch), main::dispatch_unattended_routes_to_supervisor_launch_path
-// - drive loop is the sole auto-approver / dashboard thread disabled →
-//   main::dashboard_auto_approve_disabled_under_unattended
-// - classifier-safe prompt is auto-approved → e2e::auto_approves_safe_prompt_then_completes,
-//   drive::loop_approves_safe_prompt_then_exits_on_completion
-// - two-option Yes/No approved with "1" then Enter → drive::loop_approves_safe_prompt_then_exits_on_completion
-// - approval is logged before keystrokes → drive::loop_approves_safe_prompt_then_exits_on_completion,
-//   e2e::auto_approves_safe_prompt_then_completes (broker `auto_approved` observed)
-// - safe prompt on the supervisor pane is approved → e2e::approves_supervisor_pane_zero_safe_prompt,
-//   drive::loop_approves_supervisor_pane_safe_prompt
+// - a live prompt is escalated without blocking the other agent →
+//   e2e::escalates_live_prompt_without_blocking_other_agent,
+//   drive::loop_escalates_live_prompts_without_blocking_either_agent
+// - the escalation reaches the broker, the summary and the decision log →
+//   e2e::escalates_live_prompt_without_blocking_other_agent (broker question +
+//   summary entry + one manual-approvals.jsonl line)
+// - a drive-loop escalation appends a JSONL line →
+//   drive::a_drive_loop_escalation_appends_a_jsonl_line,
+//   e2e::escalates_live_prompt_without_blocking_other_agent
+// - a deduplicated escalation is logged once → drive::a_deduplicated_escalation_records_once
+// - non-prompt escalations are not logged →
+//   drive::a_cli_unavailable_escalation_records_no_manual_decision,
+//   drive::a_nudge_wedged_escalation_records_no_manual_decision,
+//   drive::a_correction_loop_signal_records_no_manual_decision
+// - the opt-out applies to the drive loop → drive::the_opt_out_applies_to_the_drive_loop,
+//   drive::the_opt_out_withholds_the_first_seen_learning
+// - a command formerly classified safe is escalated, not approved →
+//   drive::formerly_safe_command_is_escalated_not_approved,
+//   e2e::escalates_live_prompt_then_completes
+// - command text cannot steer the outcome → drive::command_text_cannot_steer_the_outcome
+// - a file-edit prompt is escalated by its target path →
+//   drive::file_edit_prompt_is_escalated_by_its_target_path
+// - a live prompt on the supervisor pane is escalated, not answered →
+//   e2e::escalates_supervisor_pane_zero_prompt_without_typing,
+//   drive::supervisor_pane_prompt_is_escalated_not_answered,
+//   drive::loop_escalates_supervisor_pane_prompt_without_typing
 // - pane 0 with no live prompt is left untouched → drive::loop_leaves_supervisor_pane_untouched_without_prompt
-// - pane-0 approval sends only minimal keystrokes → drive::loop_approves_supervisor_pane_safe_prompt
-// - no keystrokes when pane 0 not at a prompt → drive::loop_leaves_supervisor_pane_untouched_without_prompt
-// - prompt footer in the capture tail triggers action → drive::loop_approves_safe_prompt_then_exits_on_completion
+// - prompt footer in the capture tail triggers action → drive::loop_escalates_live_prompt_then_exits_on_completion
+// - a trailing task-list region does not hide a live modal →
+//   e2e::escalates_live_prompt_with_trailing_task_region
 // - prompt-like text in scrollback is ignored → drive::scrollback_prompt_is_not_acted_on
 // - each pane captured explicitly, never a shell for-loop → drive::sweep_captures_each_pane_exactly_once
 // - pane→agent resolution via pane_current_path → drive::resolves_coding_agent_by_path_not_index,
 //   drive::resolves_pane_zero_and_one_to_supervisor_and_dashboard
-// - a captured prompt is attributed to the correct agent → e2e::auto_approves_safe_prompt_then_completes
-//   (agent id `feat-alpha` observed), drive::resolves_coding_agent_by_path_not_index
 // - send-keys nudges send a follow-up Enter → drive::nudge_sends_text_then_a_separate_enter
-// - risky prompt escalated without blocking the wave → e2e::escalates_danger_without_blocking_other_agent,
-//   drive::loop_escalates_danger_without_blocking_other_agent
-// - unknown classification is escalated, not approved → drive::classifies_unknown_when_no_rule_matches
-//   (+ the shared escalation path in drive::loop_escalates_danger_without_blocking_other_agent)
 // - repeated identical alert is deduped in the window → drive::dedup_emits_once_per_window_for_repeated_prompt
 // - two distinct prompts sharing boilerplate not collapsed → drive::dedup_shape_distinguishes_commands_sharing_boilerplate
 // - pane with no broker presence is still watched → drive::sweeps_pane_with_no_broker_record
 // - N feedback→fix→re-verify cycles are tolerated → drive::loop_exits_on_heartbeat_when_never_completing
-// - PASS/FAIL verdict ends the loop → drive::completion_on_supervisor_verdict,
-//   e2e::auto_approves_safe_prompt_then_completes
-// - all-tasks-checked ends the loop → drive::completion_when_all_agents_checked,
-//   e2e::approves_supervisor_pane_zero_safe_prompt (completes via a verified agent)
+// - PASS/FAIL verdict ends the loop → drive::completion_on_supervisor_verdict
+// - all-tasks-checked ends the loop → drive::completion_when_all_agents_checked
 // - heartbeat fires after a prolonged run → drive::loop_exits_on_heartbeat_when_never_completing,
 //   e2e::heartbeat_exits_with_summary
 // - exit summary reports outcome + escalations → drive::summary_reports_outcome_states_and_escalations,
-//   e2e::escalates_danger_without_blocking_other_agent (summary read from stdout)
-// - friction absorbed during the run recorded as a learning → drive::loop_escalates_danger_without_blocking_other_agent
-// - wind-down synthesis records durable learnings → drive::loop_escalates_danger_without_blocking_other_agent
-// - drive loop exercised end-to-end without a real LLM → every e2e:: test here
+//   e2e::escalates_live_prompt_without_blocking_other_agent (summary read from stdout)
+// - an escalated prompt is recorded as a learning → drive::formerly_safe_command_is_escalated_not_approved
+// - wind-down synthesis records durable learnings → drive::loop_escalates_live_prompts_without_blocking_either_agent
+// - the claim guards the loop's own sends → drive::a_pane_claimed_by_another_sender_receives_no_typed_text
+// - drive loop is exercised end-to-end without a real LLM → every e2e:: test here
 
 use std::fs;
 use std::io::Read;
@@ -77,7 +88,7 @@ use git_paw::broker::messages::{ArtifactPayload, BrokerMessage};
 use git_paw::broker::publish::publish_to_broker_http;
 use git_paw::config::WorktreePlacement;
 use git_paw::git::worktree_path_for;
-use git_paw::supervisor::poll::fetch_status_over_http;
+use git_paw::supervisor::drive::fetch_status_over_http;
 
 mod helpers;
 use helpers::*;
@@ -130,7 +141,7 @@ fn write_prompt_dummy(dir: &Path, name: &str, shown_cmd: &str) -> PathBuf {
 /// permission prompt FOLLOWED by a persistent six-line task-list region below
 /// the footer — mirroring current Claude Code's chrome under its input area,
 /// the exact shape `live-prompt-tail-window` fixes detection for. Used by
-/// `unattended_auto_approves_safe_prompt_with_trailing_task_region`.
+/// `unattended_escalates_live_prompt_with_trailing_task_region`.
 fn write_prompt_dummy_with_trailing_region(dir: &Path, name: &str, shown_cmd: &str) -> PathBuf {
     let path = dir.join(name);
     let script = format!(
@@ -153,30 +164,42 @@ fn write_prompt_dummy_with_trailing_region(dir: &Path, name: &str, shown_cmd: &s
     path
 }
 
-/// Writes an executable dummy CLI that reprints a *branch-aware* prompt: agent
-/// panes on branch `danger_branch` show `danger_cmd`, every other agent shows
-/// `safe_cmd`. The pane runs in the agent's worktree, so the current branch
-/// selects the prompt — letting one shared CLI drive a danger prompt on one
-/// agent and a safe prompt on another in the same session.
-fn write_branch_aware_dummy(
+/// A dummy CLI that just holds its pane open with no prompt.
+fn plain_dummy() -> &'static str {
+    "cat"
+}
+
+/// Writes an executable dummy CLI that, on branch `prompt_branch`, reprints a
+/// live permission prompt for `shown_cmd` AND appends every byte that arrives
+/// on its stdin to `stdin_marker`; on any other branch it just holds the pane.
+///
+/// The marker file is what proves the negative the retirement turns on: the
+/// drive loop must send NO keystroke to a prompting pane, so after a run that
+/// swept this pane many times the file must still be empty. A dummy that
+/// merely ignored stdin could not tell "nothing was sent" from "something was
+/// sent and discarded".
+fn write_prompt_recorder_dummy(
     dir: &Path,
     name: &str,
-    danger_branch: &str,
-    danger_cmd: &str,
-    safe_cmd: &str,
+    prompt_branch: &str,
+    shown_cmd: &str,
+    stdin_marker: &Path,
 ) -> PathBuf {
     let path = dir.join(name);
+    let marker = stdin_marker.display();
     let script = format!(
         "#!/usr/bin/env bash\n\
-         # Test dummy CLI: reprint a branch-aware live permission prompt.\n\
+         # Test dummy CLI: reprint a live permission prompt and RECORD stdin.\n\
          branch=\"$(git rev-parse --abbrev-ref HEAD 2>/dev/null)\"\n\
-         if [ \"$branch\" = \"{danger_branch}\" ]; then cmd='{danger_cmd}'; else cmd='{safe_cmd}'; fi\n\
+         if [ \"$branch\" != \"{prompt_branch}\" ]; then exec cat; fi\n\
+         : > '{marker}'\n\
+         ( while IFS= read -r -n1 ch; do printf '%s' \"$ch\" >> '{marker}'; done ) &\n\
          while true; do\n\
-         \x20 printf 'Bash command\\n  %s\\nDo you want to proceed?\\n> 1. Yes\\n  2. No\\n(esc to cancel)\\n' \"$cmd\"\n\
+         \x20 printf 'Bash command\\n  {shown_cmd}\\nDo you want to proceed?\\n> 1. Yes\\n  2. No\\n(esc to cancel)\\n'\n\
          \x20 sleep 0.4\n\
          done\n"
     );
-    fs::write(&path, script).expect("write branch-aware dummy");
+    fs::write(&path, script).expect("write prompt-recorder dummy");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -187,9 +210,73 @@ fn write_branch_aware_dummy(
     path
 }
 
-/// A dummy CLI that just holds its pane open with no prompt.
-fn plain_dummy() -> &'static str {
-    "cat"
+/// Reads the session's broker log out of the test's isolated `HOME`, which is
+/// where `session_state_dir()` resolves to. Returns the concatenation of every
+/// `*.broker.log` found, or an empty string when none exists yet.
+fn read_broker_log(home: &Path) -> String {
+    fn walk(dir: &Path, out: &mut String) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".broker.log"))
+                && let Ok(text) = fs::read_to_string(&path)
+            {
+                out.push_str(&text);
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(home, &mut out);
+    out
+}
+
+/// Reads the session's manual-decision JSONL log out of the repo under test.
+///
+/// Globs `.git-paw/sessions/*.manual-approvals.jsonl` rather than rebuilding
+/// the session name, so the test does not re-derive a path the production
+/// code already owns. Returns the concatenation of every match, or an empty
+/// string when none exists.
+fn read_manual_decision_log(repo: &Path) -> String {
+    let dir = repo.join(".git-paw").join("sessions");
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".manual-approvals.jsonl"))
+            && let Ok(text) = fs::read_to_string(&path)
+        {
+            out.push_str(&text);
+        }
+    }
+    out
+}
+
+/// Polls until the broker log carries a line containing every needle, or the
+/// budget elapses.
+fn wait_for_broker_log(home: &Path, needles: &[&str], budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    loop {
+        let log = read_broker_log(home);
+        if log.lines().any(|l| needles.iter().all(|n| l.contains(n))) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
 }
 
 /// Writes an executable dummy CLI that continuously reprints `marker_line` —
@@ -440,12 +527,14 @@ fn unattended_heartbeat_exits_with_summary() {
     );
 }
 
-/// 8.1 — `--unattended` auto-approves a classifier-safe prompt on a coding-agent
-/// pane, detects the completion signal, and exits with a `completed` summary,
-/// with no real LLM.
+/// Spec scenario "A command formerly classified safe is escalated, not
+/// approved", end-to-end: `--unattended` escalates a live prompt for `ls -la`
+/// on a coding-agent pane rather than answering it, publishes no
+/// `auto_approved` status, still detects the completion signal, and exits
+/// `escalated-for-review` — with no real LLM.
 #[test]
 #[serial]
-fn unattended_auto_approves_safe_prompt_then_completes() {
+fn unattended_escalates_live_prompt_then_completes() {
     if !tmux_available() {
         eprintln!("skipping: tmux not available");
         return;
@@ -457,9 +546,10 @@ fn unattended_auto_approves_safe_prompt_then_completes() {
     let port = pick_broker_port();
     let url = format!("http://127.0.0.1:{port}");
 
-    // Agent "a" shows a safe (`ls`) prompt; the supervisor pane just holds.
-    let safe = write_prompt_dummy(tr.path(), "dummy_safe.sh", "ls -la");
-    write_config(tr.path(), port, plain_dummy(), &safe.to_string_lossy());
+    // Agent "a" sits on a live prompt for `ls -la` — a command the retired
+    // classifier called safe and auto-approved. The supervisor pane holds.
+    let prompt = write_prompt_dummy(tr.path(), "dummy_prompt.sh", "ls -la");
+    write_config(tr.path(), port, plain_dummy(), &prompt.to_string_lossy());
 
     let (mut child, stdout_path) = spawn_unattended(
         tr.path(),
@@ -475,19 +565,28 @@ fn unattended_auto_approves_safe_prompt_then_completes() {
         wait_for_broker(&url, Duration::from_secs(20)),
         "broker should come up on the ephemeral port"
     );
-    // The loop must actually auto-approve the safe prompt: it publishes
-    // `auto_approved` for the agent before the keystrokes.
-    let approved = wait_for_status(&url, "feat-alpha", "auto_approved", Duration::from_secs(25));
+    // The loop escalates it rather than answering it: an `agent.question`
+    // naming the agent and the command reaches the broker.
+    let escalated = wait_for_broker_log(
+        home.path(),
+        &["question:", "feat-alpha is waiting on", "ls -la"],
+        Duration::from_secs(25),
+    );
     // Signal completion via a supervisor terminal verdict, then let the loop exit.
     publish_terminal(&url, "supervisor", "done");
 
     let status = wait_child(&mut child, Duration::from_secs(30));
     let stdout = read_to_string(&stdout_path);
+    let broker_log = read_broker_log(home.path());
     kill_session(tmux_env.socket_dir(), &stdout);
 
     assert!(
-        approved,
-        "the safe prompt should have been auto-approved; stdout:\n{stdout}"
+        escalated,
+        "the prompt should have been escalated, not approved; stdout:\n{stdout}\nbroker log:\n{broker_log}"
+    );
+    assert!(
+        !broker_log.contains("auto_approved"),
+        "no auto_approved status may ever be published; broker log:\n{broker_log}"
     );
     let status = status.unwrap_or_else(|| panic!("child did not exit; stdout:\n{stdout}"));
     assert!(
@@ -495,8 +594,8 @@ fn unattended_auto_approves_safe_prompt_then_completes() {
         "unattended run should exit 0; stdout:\n{stdout}"
     );
     assert!(
-        stdout.contains("Unattended drive loop exited: completed"),
-        "summary should report completion; stdout:\n{stdout}"
+        stdout.contains("Unattended drive loop exited: escalated-for-review"),
+        "an unanswered prompt ends the run for review; stdout:\n{stdout}"
     );
 }
 
@@ -507,7 +606,7 @@ fn unattended_auto_approves_safe_prompt_then_completes() {
 /// auto-approve: the trailing chrome must not hide a live modal.
 #[test]
 #[serial]
-fn unattended_auto_approves_safe_prompt_with_trailing_task_region() {
+fn unattended_escalates_live_prompt_with_trailing_task_region() {
     if !tmux_available() {
         eprintln!("skipping: tmux not available");
         return;
@@ -519,8 +618,9 @@ fn unattended_auto_approves_safe_prompt_with_trailing_task_region() {
     let port = pick_broker_port();
     let url = format!("http://127.0.0.1:{port}");
 
-    let safe = write_prompt_dummy_with_trailing_region(tr.path(), "dummy_safe_chrome.sh", "ls -la");
-    write_config(tr.path(), port, plain_dummy(), &safe.to_string_lossy());
+    let prompt =
+        write_prompt_dummy_with_trailing_region(tr.path(), "dummy_prompt_chrome.sh", "ls -la");
+    write_config(tr.path(), port, plain_dummy(), &prompt.to_string_lossy());
 
     let (mut child, stdout_path) = spawn_unattended(
         tr.path(),
@@ -536,16 +636,21 @@ fn unattended_auto_approves_safe_prompt_with_trailing_task_region() {
         wait_for_broker(&url, Duration::from_secs(20)),
         "broker should come up on the ephemeral port"
     );
-    let approved = wait_for_status(&url, "feat-alpha", "auto_approved", Duration::from_secs(25));
+    let escalated = wait_for_broker_log(
+        home.path(),
+        &["question:", "feat-alpha is waiting on", "ls -la"],
+        Duration::from_secs(25),
+    );
     publish_terminal(&url, "supervisor", "done");
 
     let status = wait_child(&mut child, Duration::from_secs(30));
     let stdout = read_to_string(&stdout_path);
+    let broker_log = read_broker_log(home.path());
     kill_session(tmux_env.socket_dir(), &stdout);
 
     assert!(
-        approved,
-        "the safe prompt must still be auto-approved with trailing task-list chrome below it; stdout:\n{stdout}"
+        escalated,
+        "the prompt must still be DETECTED and escalated with trailing task-list chrome below it; stdout:\n{stdout}\nbroker log:\n{broker_log}"
     );
     let status = status.unwrap_or_else(|| panic!("child did not exit; stdout:\n{stdout}"));
     assert!(
@@ -554,12 +659,15 @@ fn unattended_auto_approves_safe_prompt_with_trailing_task_region() {
     );
 }
 
-/// 8.2 — a `danger` prompt on one agent is escalated for review WITHOUT blocking
-/// the wave: the other agent's safe prompt is still approved, and the run
-/// completes with the escalation listed in the summary.
+/// Spec scenario "A live prompt is escalated without blocking the other
+/// agent" (`supervisor-unattended-operation`): agent `feat/alpha` sits on a
+/// live prompt for `ls -la` and RECORDS every byte reaching its stdin, while
+/// `feat/beta` finishes normally. The run must escalate alpha's prompt to the
+/// broker, the summary and the manual-decision log, send alpha not one
+/// keystroke, and still exit 0.
 #[test]
 #[serial]
-fn unattended_escalates_danger_without_blocking_other_agent() {
+fn unattended_escalates_live_prompt_without_blocking_other_agent() {
     if !tmux_available() {
         eprintln!("skipping: tmux not available");
         return;
@@ -571,16 +679,16 @@ fn unattended_escalates_danger_without_blocking_other_agent() {
     let port = pick_broker_port();
     let url = format!("http://127.0.0.1:{port}");
 
-    // One shared branch-aware CLI: agent "a" shows a danger prompt (git push
-    // --force), agent "b" shows a safe prompt (ls). The launcher assigns the
-    // same default CLI to every agent pane, and the pane's current branch
-    // selects which prompt it reprints.
-    let dummy = write_branch_aware_dummy(
+    // One shared branch-aware CLI: the launcher assigns the same default CLI
+    // to every agent pane, and the pane's current branch decides what it does.
+    // `feat/alpha` prompts and records its stdin; `feat/beta` just holds.
+    let stdin_marker = out.path().join("alpha-stdin.bin");
+    let dummy = write_prompt_recorder_dummy(
         tr.path(),
-        "dummy_branch.sh",
+        "dummy_recorder.sh",
         "feat/alpha",
-        "git push --force origin main",
         "ls -la",
+        &stdin_marker,
     );
     write_config(tr.path(), port, plain_dummy(), &dummy.to_string_lossy());
 
@@ -598,18 +706,37 @@ fn unattended_escalates_danger_without_blocking_other_agent() {
         wait_for_broker(&url, Duration::from_secs(20)),
         "broker should come up on the ephemeral port"
     );
-    // Non-blocking: while agent "a" sits on an un-approvable danger prompt,
-    // agent "b"'s safe prompt is still approved and the wave keeps moving.
-    let b_progressed = wait_for_status(&url, "feat-beta", "auto_approved", Duration::from_secs(25));
+    // Alpha's prompt is escalated to the broker …
+    let escalated = wait_for_broker_log(
+        home.path(),
+        &["question:", "feat-alpha is waiting on", "ls -la"],
+        Duration::from_secs(25),
+    );
+    // … while beta is free to finish: the wave is not blocked on alpha.
+    publish_terminal(&url, "feat-beta", "done");
+    let beta_done = wait_for_status(&url, "feat-beta", "done", Duration::from_secs(25));
     publish_terminal(&url, "supervisor", "done");
 
     let status = wait_child(&mut child, Duration::from_secs(30));
     let stdout = read_to_string(&stdout_path);
+    let broker_log = read_broker_log(home.path());
+    let alpha_stdin = fs::read(&stdin_marker).unwrap_or_default();
     kill_session(tmux_env.socket_dir(), &stdout);
 
     assert!(
-        b_progressed,
-        "the other agent's safe prompt should still be approved (non-blocking); stdout:\n{stdout}"
+        escalated,
+        "alpha's prompt should be escalated; stdout:\n{stdout}\nbroker log:\n{broker_log}"
+    );
+    assert!(
+        beta_done,
+        "the other agent must still reach done (non-blocking); stdout:\n{stdout}"
+    );
+    // The whole point: across every sweep of a permanently prompting pane,
+    // not one byte was typed into it.
+    assert!(
+        alpha_stdin.is_empty(),
+        "no keystroke may reach the prompting pane; its stdin recorded {:?}; stdout:\n{stdout}",
+        String::from_utf8_lossy(&alpha_stdin)
     );
     let status = status.unwrap_or_else(|| panic!("child did not exit; stdout:\n{stdout}"));
     assert!(
@@ -621,18 +748,36 @@ fn unattended_escalates_danger_without_blocking_other_agent() {
         "summary should report the escalated outcome; stdout:\n{stdout}"
     );
     assert!(
-        stdout.contains("[danger]") && stdout.contains("git push"),
-        "the danger prompt should be listed as an escalation; stdout:\n{stdout}"
+        stdout.contains("[permission-prompt]") && stdout.contains("ls -la"),
+        "the prompt should be listed as an escalation under the one verdict; stdout:\n{stdout}"
     );
+
+    // Spec scenario "A drive-loop escalation appends a JSONL line": the same
+    // escalation also lands in the session's manual-decision log, exactly
+    // once, so `git paw approvals` can surface the command later. Alpha's
+    // pane prompted on every sweep of the run, so "exactly one" is also the
+    // dedup window doing its job end to end.
+    let decisions = read_manual_decision_log(tr.path());
+    let lines: Vec<&str> = decisions.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "exactly one manual-decision line expected; log was:\n{decisions}"
+    );
+    let entry: serde_json::Value =
+        serde_json::from_str(lines[0]).expect("the log line must be JSON");
+    assert_eq!(entry["agent_id"], "feat-alpha", "{entry}");
+    assert_eq!(entry["pattern"], "ls -la", "{entry}");
+    assert_eq!(entry["first_seen"], true, "{entry}");
 }
 
-/// 8.3 — the drive loop covers the supervisor's OWN pane 0: a classifier-safe
-/// prompt on the supervisor pane is auto-approved (verified via the broker
-/// audit status for `supervisor`), with the wave completing via the coding
-/// agent.
+/// Spec scenario "A live prompt on the supervisor pane is escalated, not
+/// answered" (`supervisor-unattended-operation`): the drive loop covers pane
+/// 0, but only to escalate it under the agent id `supervisor`. Nothing is
+/// typed into the supervisor's own pane, so its context is never polluted.
 #[test]
 #[serial]
-fn unattended_approves_supervisor_pane_zero_safe_prompt() {
+fn unattended_escalates_supervisor_pane_zero_prompt_without_typing() {
     if !tmux_available() {
         eprintln!("skipping: tmux not available");
         return;
@@ -644,10 +789,13 @@ fn unattended_approves_supervisor_pane_zero_safe_prompt() {
     let port = pick_broker_port();
     let url = format!("http://127.0.0.1:{port}");
 
-    // The SUPERVISOR pane shows a safe (`ls -la`) prompt; the coding agent
-    // just holds.
-    let safe = write_prompt_dummy(tr.path(), "dummy_sup.sh", "ls -la");
-    write_config(tr.path(), port, &safe.to_string_lossy(), plain_dummy());
+    // The SUPERVISOR pane shows a live `ls -la` prompt and records its own
+    // stdin; the coding agent just holds. Pane 0 runs in the repo root, which
+    // is on the default branch, so the recorder fires there.
+    let stdin_marker = out.path().join("pane0-stdin.bin");
+    let sup =
+        write_prompt_recorder_dummy(tr.path(), "dummy_sup.sh", "main", "ls -la", &stdin_marker);
+    write_config(tr.path(), port, &sup.to_string_lossy(), plain_dummy());
 
     let (mut child, stdout_path) = spawn_unattended(
         tr.path(),
@@ -663,19 +811,30 @@ fn unattended_approves_supervisor_pane_zero_safe_prompt() {
         wait_for_broker(&url, Duration::from_secs(20)),
         "broker should come up on the ephemeral port"
     );
-    // Pane 0 (supervisor) is covered by the sweep: its safe prompt is approved,
-    // logged as `auto_approved` for the `supervisor` agent id.
-    let approved = wait_for_status(&url, "supervisor", "auto_approved", Duration::from_secs(25));
+    // Pane 0 is covered by the sweep, but only to escalate: the question is
+    // published under the `supervisor` agent id.
+    let escalated = wait_for_broker_log(
+        home.path(),
+        &["question:", "supervisor is waiting on", "ls -la"],
+        Duration::from_secs(25),
+    );
     // Complete via the coding agent so the run exits.
     publish_terminal(&url, "feat-alpha", "verified");
 
     let status = wait_child(&mut child, Duration::from_secs(30));
     let stdout = read_to_string(&stdout_path);
+    let broker_log = read_broker_log(home.path());
+    let pane0_stdin = fs::read(&stdin_marker).unwrap_or_default();
     kill_session(tmux_env.socket_dir(), &stdout);
 
     assert!(
-        approved,
-        "the supervisor pane-0 safe prompt should have been auto-approved; stdout:\n{stdout}"
+        escalated,
+        "the pane-0 prompt should be escalated as `supervisor`; stdout:\n{stdout}\nbroker log:\n{broker_log}"
+    );
+    assert!(
+        pane0_stdin.is_empty(),
+        "no keystroke may reach pane 0; its stdin recorded {:?}; stdout:\n{stdout}",
+        String::from_utf8_lossy(&pane0_stdin)
     );
     let status = status.unwrap_or_else(|| panic!("child did not exit; stdout:\n{stdout}"));
     assert!(

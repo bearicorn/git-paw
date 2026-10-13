@@ -66,8 +66,8 @@ fn render_coordination_for(backends: &[SpecBackendKind]) -> String {
 
 /// Strips every `<!-- allowlist-prose -->...<!-- /allowlist-prose -->`
 /// span from `content` so the no-leak audit can scan the remaining
-/// prose without false-positives from the legitimate
-/// `DEV_ALLOWLIST_PRESET` enumeration.
+/// prose without false-positives from a deliberate, reviewable
+/// enumeration of known CLIs (the paste-buffer indicator list).
 fn strip_allowlist_prose(content: &str) -> String {
     let open = "<!-- allowlist-prose -->";
     let close = "<!-- /allowlist-prose -->";
@@ -288,11 +288,12 @@ fn bundled_skills_contain_no_exit_probe_guidance_and_rationale() {
             "{label} skill must name the exit-code-probe wrapper shape it forbids",
         );
 
-        // The rationale: per-run variation defeats command-string whitelisting.
+        // The rationale: per-run variation defeats the agent CLI's own
+        // command-string permission matching, so every run re-prompts.
         assert!(
-            body.contains("command-string permission\nwhitelisting")
-                || body.contains("command-string permission whitelisting"),
-            "{label} skill must explain the command-string-whitelisting rationale",
+            body.contains("command-string permission\nmatching")
+                || body.contains("command-string permission matching"),
+            "{label} skill must explain the command-string-matching rationale",
         );
         assert!(
             body.contains("approval prompt"),
@@ -369,14 +370,12 @@ fn standards_consult_step_passes_no_leak_audit_across_backends() {
 
 #[test]
 fn audit_excludes_allowlist_prose_via_sentinel() {
-    // The universal DEV_ALLOWLIST_PRESET is now stack-neutral, so the
-    // rendered baseline carries no forbidden token (a repo opts into
-    // `cargo` via the `rust` stack preset, not via the hardcoded
-    // universal set). The sentinel pair still wraps the placeholder so
-    // a stack-preset enumeration could legitimately surface a token
-    // there in future. Verify the sentinel pairing exists AND that a
-    // forbidden token placed *inside* a sentinel span is scoped out by
-    // the strip (the mechanism the audit relies on).
+    // After the classifier's retirement the only surviving sentinel span is
+    // the paste-buffer indicator list, which deliberately names a specific
+    // CLI. The rendered baseline therefore carries no forbidden token
+    // outside a span. Verify the sentinel pairing still exists AND that a
+    // forbidden token placed *inside* a sentinel span is scoped out by the
+    // strip (the mechanism the audit relies on).
     let rendered = render_supervisor_for(&[SpecBackendKind::OpenSpec]);
     assert!(
         rendered.contains("<!-- allowlist-prose -->"),
@@ -390,9 +389,45 @@ fn audit_excludes_allowlist_prose_via_sentinel() {
     // Inject a forbidden token inside a sentinel span and confirm the
     // audit still passes — the strip removes the span before scanning.
     let with_sentinel_token = format!(
-        "{rendered}\nsafe-by-pattern: <!-- allowlist-prose -->cargo (build, test)<!-- /allowlist-prose -->\n"
+        "{rendered}\nknown CLIs: <!-- allowlist-prose -->cargo (build, test)<!-- /allowlist-prose -->\n"
     );
     assert_no_forbidden_tokens(&with_sentinel_token, "sentinel-scoped-token");
+}
+
+/// `core-lang-agnostic` / Scenario: No dev-allowlist placeholder remains.
+///
+/// The classifier's retirement removed `{{DEV_ALLOWLIST_PRESET}}` and the
+/// constant behind it. Neither bundled template may carry the placeholder,
+/// and no rendered skill may present an enumeration of commands as
+/// approvable — that framing is exactly what the retirement removed.
+#[test]
+fn no_dev_allowlist_placeholder_remains() {
+    let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/agent-skills");
+    for name in ["supervisor.md", "coordination.md"] {
+        let raw = std::fs::read_to_string(assets.join(name))
+            .unwrap_or_else(|e| panic!("{name} is readable: {e}"));
+        assert!(
+            !raw.contains("{{DEV_ALLOWLIST_PRESET}}"),
+            "{name} must not carry the retired dev-allowlist placeholder"
+        );
+    }
+
+    // The rendered supervisor skill carries no allowlist enumeration and no
+    // reference to the retired classifier that produced one.
+    let rendered = render_supervisor_for(&[SpecBackendKind::OpenSpec]).to_lowercase();
+    for forbidden in [
+        "{{dev_allowlist_preset}}",
+        "dev_allowlist_preset",
+        "__classify",
+        "safe-command whitelist",
+        "auto-approve whitelist",
+        "safe_commands",
+    ] {
+        assert!(
+            !rendered.contains(forbidden),
+            "rendered supervisor skill must not enumerate approvable commands; found `{forbidden}`"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

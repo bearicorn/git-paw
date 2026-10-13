@@ -3,17 +3,21 @@
 //! A [`CliPromptProfile`] describes how one agent CLI's terminal surface
 //! *looks* — readiness markers, approval markers, live-prompt markers, and so
 //! on. It describes shape only: it has no field capable of expressing a
-//! permission decision. The danger list, protected-path rules, worktree
-//! boundary, broad-grant eligibility, and the approval send gate stay
-//! compiled in [`crate::supervisor::auto_approve`] and are never sourced from
-//! this type (design D1).
+//! permission decision — and after the classifier's retirement there is no
+//! permission decision in git-paw for it to express. What stays compiled,
+//! and is never sourced from this type, is the small security-relevant set:
+//! the live-prompt gate's window sizes and structural rules
+//! ([`crate::supervisor::permission_prompt`]), the pane-0 refusal, and
+//! `sweep.sh approve`'s rule that it presses option 1 and nothing else
+//! (design D1). A hostile profile can change what git-paw *recognises*; it
+//! cannot change what git-paw *does*.
 //!
 //! The Claude Code profile is embedded as the compiled default
 //! ([`claude_prompt_profile`]), populated verbatim from the literals that
 //! were previously scattered across `src/tmux/readiness.rs`,
 //! `src/supervisor/permission_prompt.rs`, `src/supervisor/drive.rs`,
-//! `src/supervisor/manual_approvals.rs`, `src/supervisor/auto_approve.rs`,
-//! and `src/coordination/inventory.rs`. [`resolve_prompt_profile`] merges a
+//! `src/supervisor/manual_approvals.rs`, and
+//! `src/coordination/inventory.rs`. [`resolve_prompt_profile`] merges a
 //! per-CLI override from `[clis.<name>].prompt_profile` over that default,
 //! field by field (D2) — an absent field never resolves empty.
 
@@ -45,7 +49,7 @@ pub struct CliPromptProfile {
     pub approval_markers: Vec<String>,
     /// Textual markers of a LIVE permission prompt: the confirmation
     /// question lead-in and the cancel footer (was
-    /// `supervisor::auto_approve::LIVE_PROMPT_PROCEED` /
+    /// `supervisor::permission_prompt::LIVE_PROMPT_PROCEED` /
     /// `LIVE_PROMPT_FOOTER`).
     pub live_prompt_markers: Vec<String>,
     /// Substrings identifying a pane actively producing a response, rather
@@ -58,19 +62,24 @@ pub struct CliPromptProfile {
     pub prompt_boilerplate_markers: Vec<String>,
     /// Lead-in forms of a command-confirmation header, e.g. `Bash command`
     /// or the inline `Bash(` form (was the hardcoded strings in
-    /// `supervisor::auto_approve::is_bash_command_header` /
+    /// `supervisor::permission_prompt::is_bash_command_header` /
     /// `extract_command_slice`).
     pub command_header_markers: Vec<String>,
     /// Regex source matching the lead-in of a filesystem-operation
     /// permission prompt, capturing the target path (was
-    /// `supervisor::auto_approve::file_prompt_regex`).
+    /// `supervisor::permission_prompt::file_prompt_regex`).
     pub file_prompt_pattern: String,
     /// Regex source matching a numbered option line, e.g. `1. …` / `2) …`
-    /// (was the hardcoded check in `supervisor::auto_approve::is_option_line`).
+    /// (was the hardcoded check in `supervisor::permission_prompt::is_option_line`).
     pub option_line_pattern: String,
     /// Substring identifying a durable ("don't ask again") broad-grant
-    /// option in a multi-option prompt (was the hardcoded string in
-    /// `supervisor::auto_approve::detect_prompt_shape`).
+    /// option in a multi-option prompt.
+    ///
+    /// Consumed by `sweep.sh approve`'s option-1 guard: the helper refuses to
+    /// press option 1 when that line itself carries this marker, because
+    /// answering would write a permanent permission rule the human did not
+    /// ask for. Relaxing the marker can only make the guard refuse MORE
+    /// often, so a profile cannot use it to widen what git-paw will press.
     pub broad_grant_marker: String,
     /// Prefixes identifying the CLI's input-box sigil, e.g. `>` / `❯` (was
     /// the hardcoded strings in `supervisor::drive::input_box_text`).

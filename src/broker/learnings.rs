@@ -1,9 +1,8 @@
 //! Broker-internal learnings aggregator.
 //!
 //! Observes the broker's publish-event stream and accumulates per-session
-//! signals — stuck durations, recovery cycles, conflict events, and
-//! permission patterns — that are flushed as human-readable bullets to
-//! `.git-paw/session-learnings.md`.
+//! signals — stuck durations, recovery cycles and conflict events — that are
+//! flushed as human-readable bullets to `.git-paw/session-learnings.md`.
 //!
 //! The aggregator does NOT publish back into the broker; the markdown file
 //! is its only output sink. See the `learnings-mode` `OpenSpec` change for
@@ -25,10 +24,6 @@ use super::messages::{BrokerMessage, LearningPayload};
 /// Substring marker that conflict-detector-originated messages prepend to
 /// their `errors`/`question` text.
 pub const CONFLICT_DETECTOR_TAG: &str = "[conflict-detector]";
-
-/// Default `count` threshold below which a permission-pattern entry is
-/// withheld at flush. See the `Permission-pattern signal` spec.
-pub const PERMISSION_PATTERN_THRESHOLD: u64 = 5;
 
 /// Category tag for conflict-detector-derived learnings.
 pub const CATEGORY_CONFLICT_EVENT: &str = "conflict_event";
@@ -310,12 +305,6 @@ pub struct LearningsAggregator {
     recovery_events: Vec<RecoveryCycleEntry>,
     /// Classified conflict events awaiting flush.
     conflict_events: Vec<ConflictEvent>,
-    /// Per-command-class auto-approve hit counts. Persisted across flushes
-    /// so a slow burn can eventually cross the threshold.
-    permission_counts: HashMap<String, u64>,
-    /// Command classes already emitted to the markdown file this session.
-    /// Each class produces at most one entry per session.
-    permission_emitted: HashMap<String, u64>,
     /// Cursor: number of `stuck_events` already written to the markdown.
     stuck_flushed: usize,
     /// Cursor: number of `recovery_events` already written to the markdown.
@@ -326,9 +315,6 @@ pub struct LearningsAggregator {
     h2_written: bool,
     /// Session start time, used for the H2 header and shutdown durations.
     session_start: SystemTime,
-    /// Per-flush threshold for permission patterns. Lower-count classes do
-    /// not appear in the markdown until they cross this threshold.
-    permission_threshold: u64,
     /// Agent → spec id mapping, used to classify forward conflicts as
     /// intra-spec vs cross-spec. May be empty.
     spec_ids: HashMap<String, String>,
@@ -357,32 +343,22 @@ pub struct LearningsAggregator {
 }
 
 impl LearningsAggregator {
-    /// Creates a new aggregator with default thresholds and an empty
-    /// agent → spec id mapping. Callers register agents via
-    /// [`Self::register_agent`] and the optional spec id via
-    /// [`Self::set_spec_id`].
+    /// Creates a new aggregator with an empty agent → spec id mapping.
+    /// Callers register agents via [`Self::register_agent`] and the optional
+    /// spec id via [`Self::set_spec_id`].
     #[must_use]
     pub fn new(file_path: PathBuf) -> Self {
-        Self::with_threshold(file_path, PERMISSION_PATTERN_THRESHOLD)
-    }
-
-    /// Like [`Self::new`] but with a custom permission-pattern threshold.
-    #[must_use]
-    pub fn with_threshold(file_path: PathBuf, permission_threshold: u64) -> Self {
         Self {
             pending_blocks: HashMap::new(),
             feedback_counts: HashMap::new(),
             stuck_events: Vec::new(),
             recovery_events: Vec::new(),
             conflict_events: Vec::new(),
-            permission_counts: HashMap::new(),
-            permission_emitted: HashMap::new(),
             stuck_flushed: 0,
             recovery_flushed: 0,
             conflict_flushed: 0,
             h2_written: false,
             session_start: SystemTime::now(),
-            permission_threshold,
             spec_ids: HashMap::new(),
             file_path,
             known_agents: Vec::new(),
@@ -507,16 +483,6 @@ impl LearningsAggregator {
         }
     }
 
-    /// Increments the per-class auto-approve counter. Threshold gating
-    /// happens at flush time.
-    pub fn record_auto_approve(&mut self, command_class: &str) {
-        let key = command_class.trim();
-        if key.is_empty() {
-            return;
-        }
-        *self.permission_counts.entry(key.to_string()).or_insert(0) += 1;
-    }
-
     /// Classifies a `[conflict-detector]`-tagged feedback or question
     /// message and (if it represents a new conflict event) accumulates an
     /// entry.
@@ -620,12 +586,7 @@ impl LearningsAggregator {
                     self.record_detector_message(msg);
                 }
             }
-            BrokerMessage::Status { agent_id, payload } => {
-                if payload.status == "auto_approved"
-                    && let Some(cls) = extract_command_class(payload.message.as_deref())
-                {
-                    self.record_auto_approve(&cls);
-                }
+            BrokerMessage::Status { agent_id, .. } => {
                 self.register_agent(agent_id);
             }
             BrokerMessage::Intent { agent_id, .. } => {
@@ -767,26 +728,11 @@ impl LearningsAggregator {
         let new_recovery = &self.recovery_events[self.recovery_flushed..];
         let new_conflicts = &self.conflict_events[self.conflict_flushed..];
 
-        let permission_entries: Vec<(String, u64)> = {
-            let mut entries: Vec<(String, u64)> = self
-                .permission_counts
-                .iter()
-                .filter(|(class, count)| {
-                    **count >= self.permission_threshold
-                        && self.permission_emitted.get(*class).copied().unwrap_or(0) < **count
-                })
-                .map(|(k, v)| (k.clone(), *v))
-                .collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            entries
-        };
-
         let new_qualitative = &self.qualitative_events[self.qualitative_flushed..];
 
         let has_any = !new_stuck.is_empty()
             || !new_recovery.is_empty()
             || !new_conflicts.is_empty()
-            || !permission_entries.is_empty()
             || !new_qualitative.is_empty();
         if !has_any {
             return Ok(());
@@ -817,12 +763,6 @@ impl LearningsAggregator {
                 let _ = writeln!(out, "- {}", render_recovery(ev));
             }
         }
-        if !permission_entries.is_empty() {
-            out.push_str("\n### Permission patterns\n");
-            for (class, count) in &permission_entries {
-                let _ = writeln!(out, "- {}", render_permission(class, *count));
-            }
-        }
 
         render_qualitative_sections(new_qualitative, &mut out);
 
@@ -845,9 +785,6 @@ impl LearningsAggregator {
             for ev in new_recovery {
                 records.push(record_from_recovery(ev, now));
             }
-            for (class, count) in &permission_entries {
-                records.push(record_from_permission(class, *count, now));
-            }
             records
         } else {
             Vec::new()
@@ -859,9 +796,6 @@ impl LearningsAggregator {
         self.recovery_flushed = self.recovery_events.len();
         self.conflict_flushed = self.conflict_events.len();
         self.qualitative_flushed = self.qualitative_events.len();
-        for (class, count) in &permission_entries {
-            self.permission_emitted.insert(class.clone(), *count);
-        }
         // Queue records only after the file write succeeded, so a failed
         // append never publishes a record that isn't also in the file.
         self.pending_publish.extend(records);
@@ -1091,13 +1025,6 @@ fn extract_regions(text: &str) -> Vec<String> {
     out
 }
 
-fn extract_command_class(message: Option<&str>) -> Option<String> {
-    let msg = message?;
-    msg.strip_prefix("auto_approved: matched ")
-        .map(|rest| rest.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
 /// Projects a classified conflict event into a `conflict_event`
 /// [`LearningRecord`]. Conflicts are cross-cutting (they implicate a pair of
 /// branches), so `branch_id` is `None` and the involved agents live in the
@@ -1194,23 +1121,6 @@ fn record_from_recovery(ev: &RecoveryCycleEntry, now: SystemTime) -> LearningRec
     }
 }
 
-/// Projects a permission-pattern entry into a `permission_pattern`
-/// [`LearningRecord`]. Permission patterns are cross-cutting (they describe
-/// the supervisor's auto-approve behaviour), so `branch_id` is `None`.
-fn record_from_permission(class: &str, count: u64, now: SystemTime) -> LearningRecord {
-    LearningRecord {
-        category: CATEGORY_PERMISSION_PATTERN.to_string(),
-        agent_id: LEARNINGS_AGENT_ID.to_string(),
-        branch_id: None,
-        title: render_permission(class, count),
-        body: serde_json::json!({
-            "command_class": class,
-            "count": count,
-        }),
-        timestamp: now,
-    }
-}
-
 fn render_conflict(cat: &ConflictCategory) -> String {
     match cat {
         ConflictCategory::ForwardConflictIntraSpec {
@@ -1274,16 +1184,13 @@ fn render_recovery(ev: &RecoveryCycleEntry) -> String {
     )
 }
 
-fn render_permission(class: &str, count: u64) -> String {
-    format!("`{class}` auto-approved {count} times")
-}
-
 // === Qualitative learnings (v0.6.0) ===
 
 /// The recognised qualitative categories paired with their file-section
 /// headers, in render order. Categories absent from this table fall through
 /// to the "Other learnings" section.
 const QUALITATIVE_SECTIONS: &[(&str, &str)] = &[
+    (CATEGORY_PERMISSION_PATTERN, "Permission patterns"),
     (CATEGORY_RECURRING_FAILURE_SHAPE, "Recurring failure shapes"),
     (CATEGORY_DOC_GAP, "Documentation gaps"),
     (CATEGORY_ADR_DRIFT, "ADR / architectural drift"),
@@ -1291,17 +1198,23 @@ const QUALITATIVE_SECTIONS: &[(&str, &str)] = &[
     (CATEGORY_TOOLING_FRICTION, "Tooling friction"),
 ];
 
-/// Returns `true` for the four v0.5.0 deterministic categories the aggregator
-/// produces itself. Used to drop the aggregator's own records when they flow
-/// back through the publish path, so only externally-published qualitative
-/// records are ingested for file rendering.
+/// Returns `true` for the deterministic categories the aggregator produces
+/// itself. Used to drop the aggregator's own records when they flow back
+/// through the publish path, so only externally-published records are
+/// ingested for file rendering.
+///
+/// `permission_pattern` is deliberately NOT in this set any more. It was,
+/// because the aggregator counted `auto_approved` statuses and emitted its
+/// own permission records, which would have double-rendered. With the
+/// classifier retired nothing publishes that status and the counter is gone,
+/// so the only producer left is the drive loop's manual-decision recorder
+/// publishing an `agent.learning`. Keeping the guard would silently drop
+/// every one of those and leave the `### Permission patterns` section
+/// unreachable.
 fn is_deterministic_category(category: &str) -> bool {
     matches!(
         category,
-        CATEGORY_CONFLICT_EVENT
-            | CATEGORY_STUCK_DURATION
-            | CATEGORY_RECOVERY_CYCLES
-            | CATEGORY_PERMISSION_PATTERN
+        CATEGORY_CONFLICT_EVENT | CATEGORY_STUCK_DURATION | CATEGORY_RECOVERY_CYCLES
     )
 }
 
@@ -1506,8 +1419,7 @@ fn secs_to_civil(secs: u64) -> (u64, u64, u64, u64, u64, u64) {
 mod tests {
     use super::*;
     use crate::broker::messages::{
-        ArtifactPayload, BlockedPayload, FeedbackPayload, QuestionPayload, StatusPayload,
-        VerifiedPayload,
+        ArtifactPayload, BlockedPayload, FeedbackPayload, QuestionPayload, VerifiedPayload,
     };
     use std::time::Duration;
     use tempfile::TempDir;
@@ -1566,18 +1478,6 @@ mod tests {
             agent_id: "supervisor".to_string(),
             payload: QuestionPayload {
                 question: text.to_string(),
-            },
-        }
-    }
-
-    fn auto_approve_status(agent: &str, class: &str) -> BrokerMessage {
-        BrokerMessage::Status {
-            agent_id: agent.to_string(),
-            payload: StatusPayload {
-                status: "auto_approved".to_string(),
-                modified_files: vec![],
-                message: Some(format!("auto_approved: matched {class}")),
-                ..Default::default()
             },
         }
     }
@@ -1946,39 +1846,6 @@ mod tests {
     }
 
     #[test]
-    fn permission_pattern_above_threshold_emits_entry() {
-        let tmp = TempDir::new().unwrap();
-        let mut a = agg(&tmp);
-        for _ in 0..23 {
-            a.record_auto_approve("cargo check");
-        }
-        a.flush().unwrap();
-        let md = read_md(a.file_path());
-        assert!(md.contains("### Permission patterns"));
-        assert!(md.contains("`cargo check` auto-approved 23 times"));
-    }
-
-    #[test]
-    fn permission_pattern_below_threshold_omitted_then_emitted_later() {
-        let tmp = TempDir::new().unwrap();
-        let mut a = agg(&tmp);
-        a.record_auto_approve("git status");
-        a.record_auto_approve("git status");
-        // Need at least one signal to flush — give it an artifact.
-        a.flush().unwrap();
-        let md1 = read_md(a.file_path());
-        assert!(!md1.contains("git status"));
-
-        // A later burst pushes the count over the default 5.
-        for _ in 0..5 {
-            a.record_auto_approve("git status");
-        }
-        a.flush().unwrap();
-        let md2 = read_md(a.file_path());
-        assert!(md2.contains("`git status` auto-approved 7 times"));
-    }
-
-    #[test]
     fn no_learnings_session_writes_nothing() {
         let tmp = TempDir::new().unwrap();
         let mut a = agg(&tmp);
@@ -1992,13 +1859,12 @@ mod tests {
     fn flush_writes_h2_header_once_per_session() {
         let tmp = TempDir::new().unwrap();
         let mut a = agg(&tmp);
-        for _ in 0..PERMISSION_PATTERN_THRESHOLD {
-            a.record_auto_approve("cargo check");
-        }
-        a.flush().unwrap();
-        // Add another signal and flush again — should NOT add a second H2.
         a.record_feedback("alpha");
         a.record_verified("alpha");
+        a.flush().unwrap();
+        // Add another signal and flush again — should NOT add a second H2.
+        a.record_feedback("beta");
+        a.record_verified("beta");
         a.flush().unwrap();
 
         let md = read_md(a.file_path());
@@ -2042,20 +1908,18 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("session-learnings.md");
         let mut a1 = LearningsAggregator::new(path.clone());
-        for _ in 0..PERMISSION_PATTERN_THRESHOLD {
-            a1.record_auto_approve("cargo check");
-        }
+        a1.record_feedback("alpha");
+        a1.record_verified("alpha");
         a1.flush().unwrap();
         let after_first = read_md(&path);
-        assert!(after_first.contains("`cargo check`"));
+        assert!(after_first.contains("alpha"));
 
         // Wait a second so the ISO timestamps differ.
         std::thread::sleep(Duration::from_secs(1));
 
         let mut a2 = LearningsAggregator::new(path.clone());
-        for _ in 0..PERMISSION_PATTERN_THRESHOLD {
-            a2.record_auto_approve("cargo fmt");
-        }
+        a2.record_feedback("beta");
+        a2.record_verified("beta");
         a2.flush().unwrap();
         let after_second = read_md(&path);
         // Prior content unchanged at the start of the file.
@@ -2063,7 +1927,7 @@ mod tests {
         // Two H2 headers in the file.
         let h2_count = after_second.matches("## Session Learnings — ").count();
         assert_eq!(h2_count, 2);
-        assert!(after_second.contains("`cargo fmt`"));
+        assert!(after_second.contains("beta"));
     }
 
     #[test]
@@ -2123,27 +1987,6 @@ mod tests {
             a.recovery_events().is_empty(),
             "an acknowledgement alone is not a recovery cycle"
         );
-    }
-
-    #[test]
-    fn observe_auto_approve_increments_counter() {
-        let tmp = TempDir::new().unwrap();
-        let mut a = agg(&tmp);
-        for _ in 0..PERMISSION_PATTERN_THRESHOLD {
-            a.observe(&auto_approve_status("feat-x", "cargo check"));
-        }
-        a.flush().unwrap();
-        assert!(read_md(a.file_path()).contains("`cargo check` auto-approved"));
-    }
-
-    #[test]
-    fn extract_command_class_parses_matched_entry() {
-        assert_eq!(
-            extract_command_class(Some("auto_approved: matched cargo check")),
-            Some("cargo check".to_string())
-        );
-        assert_eq!(extract_command_class(Some("auto_approved")), None);
-        assert_eq!(extract_command_class(None), None);
     }
 
     /// Spec scenario `Markdown file output / Empty categories are omitted`:
@@ -2234,8 +2077,12 @@ mod tests {
                 agent_id: "supervisor".to_string(),
                 branch_id: None,
                 category: "permission_pattern".to_string(),
-                title: "`cargo check` auto-approved 23 times".to_string(),
-                body: serde_json::json!({"command_class": "cargo check", "count": 23}),
+                title: "manual approval `cargo check` (suggest user allowlist)".to_string(),
+                body: serde_json::json!({
+                    "pattern": "cargo check",
+                    "count_so_far": 23,
+                    "suggested_target": "user-allowlist",
+                }),
                 timestamp: "2026-05-28T12:01:01Z".to_string(),
             },
         };
@@ -2421,13 +2268,11 @@ mod tests {
                 },
                 now,
             ),
-            record_from_permission("cargo check", 23, now),
         ];
         let expected_categories = [
             CATEGORY_CONFLICT_EVENT,
             CATEGORY_STUCK_DURATION,
             CATEGORY_RECOVERY_CYCLES,
-            CATEGORY_PERMISSION_PATTERN,
         ];
         for (record, expected_category) in records.iter().zip(expected_categories) {
             let msg = BrokerMessage::from(record);
@@ -2445,7 +2290,7 @@ mod tests {
     }
 
     #[test]
-    fn conflict_and_permission_records_are_cross_cutting_no_branch() {
+    fn conflict_records_are_cross_cutting_no_branch() {
         let now = ts_at(12, 1);
         let conflict = record_from_conflict(
             &ConflictCategory::InFlightConflict {
@@ -2453,9 +2298,7 @@ mod tests {
             },
             now,
         );
-        let permission = record_from_permission("cargo check", 9, now);
         assert_eq!(conflict.branch_id, None);
-        assert_eq!(permission.branch_id, None);
     }
 
     #[test]
@@ -2491,11 +2334,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut a = agg(&tmp);
         assert!(!a.broker_publish_enabled());
-        for _ in 0..PERMISSION_PATTERN_THRESHOLD {
-            a.record_auto_approve("cargo check");
-        }
+        a.record_feedback("feat-x");
+        a.record_verified("feat-x");
         a.flush().unwrap();
-        assert!(read_md(a.file_path()).contains("`cargo check`"));
+        assert!(read_md(a.file_path()).contains("### Recovery cycles"));
         assert!(
             a.take_pending_publish().is_empty(),
             "no records should be queued when broker publish is disabled"
@@ -2668,6 +2510,45 @@ mod tests {
         assert_eq!(read_md(a.file_path()), "");
     }
 
+    /// Spec scenario "Permission patterns" render path, after the classifier's
+    /// retirement: the only producer left is the drive loop's manual-decision
+    /// recorder, which publishes an `agent.learning`. Those records must reach
+    /// the file under the `### Permission patterns` heading.
+    ///
+    /// Before this change `permission_pattern` was treated as a deterministic
+    /// category and dropped on ingest, because the aggregator produced its own
+    /// from the `auto_approved` counter. With that counter gone, keeping the
+    /// guard would have silently discarded every escalated prompt.
+    #[test]
+    fn permission_pattern_learning_renders_under_its_heading() {
+        let tmp = TempDir::new().unwrap();
+        let mut a = agg(&tmp);
+        a.observe(&learning(
+            CATEGORY_PERMISSION_PATTERN,
+            "manual approval `cargo check` (suggest user allowlist)",
+            serde_json::json!({
+                "pattern": "cargo check",
+                "count": 1,
+                "suggested_target": "user-allowlist",
+            }),
+        ));
+        assert_eq!(
+            a.qualitative_events().len(),
+            1,
+            "a published permission_pattern record must be ingested, not dropped"
+        );
+        a.flush().unwrap();
+        let md = read_md(a.file_path());
+        assert!(
+            md.contains("### Permission patterns"),
+            "the section must render; got:\n{md}"
+        );
+        assert!(
+            md.contains("cargo check"),
+            "the pattern must appear; got:\n{md}"
+        );
+    }
+
     // Task 2.4: the v0.5.0 deterministic sections still render in their v0.5.0
     // shape, even when qualitative records are present in the same flush.
     #[test]
@@ -2675,9 +2556,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut a = agg(&tmp);
         // A v0.5.0 deterministic signal.
-        for _ in 0..PERMISSION_PATTERN_THRESHOLD {
-            a.record_auto_approve("git status");
-        }
+        a.record_feedback("feat-x");
+        a.record_verified("feat-x");
         // A qualitative signal in the same flush.
         a.observe(&learning(
             CATEGORY_DOC_GAP,
@@ -2687,9 +2567,9 @@ mod tests {
         a.flush().unwrap();
 
         let md = read_md(a.file_path());
-        // v0.5.0 permission-pattern section + bullet, byte-for-byte shape.
-        assert!(md.contains("### Permission patterns"));
-        assert!(md.contains("- `git status` auto-approved 5 times"));
+        // v0.5.0 recovery-cycle section + bullet, byte-for-byte shape.
+        assert!(md.contains("### Recovery cycles"));
+        assert!(md.contains("- feat-x: 1 feedback cycle before verifying"));
         // Qualitative section also present.
         assert!(md.contains("### Documentation gaps"));
     }
@@ -2836,9 +2716,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut a = agg(&tmp);
         // A v0.5.0 deterministic signal.
-        for _ in 0..PERMISSION_PATTERN_THRESHOLD {
-            a.record_auto_approve("cargo check");
-        }
+        a.record_feedback("feat-x");
+        a.record_verified("feat-x");
         // One of each of the four existing qualitative categories.
         a.observe(&learning(
             CATEGORY_RECURRING_FAILURE_SHAPE,
@@ -2882,8 +2761,11 @@ mod tests {
 
         let md = read_md(a.file_path());
         // v0.5.0 deterministic section unchanged.
-        assert!(md.contains("### Permission patterns"), "{md}");
-        assert!(md.contains("- `cargo check` auto-approved 5 times"), "{md}");
+        assert!(md.contains("### Recovery cycles"), "{md}");
+        assert!(
+            md.contains("- feat-x: 1 feedback cycle before verifying"),
+            "{md}"
+        );
         // The four existing qualitative sections + exact structured bullets.
         assert!(md.contains("### Recurring failure shapes"), "{md}");
         assert!(

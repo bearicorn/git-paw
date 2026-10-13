@@ -5,7 +5,7 @@ Runs an in-process drive loop under `git paw start --unattended` that keeps a su
 ## Requirements
 ### Requirement: Unattended drive loop runs a supervisor wave to completion
 
-When `git paw start --unattended` is invoked (supervisor mode active), the system SHALL run an in-process **drive loop** that keeps the multi-agent wave moving with no human in the seat: it SHALL poll on an approximately 15-second cadence, sweep the supervisor pane and every coding-agent pane, act on live prompts, detect completion, and then exit with a summary.
+When `git paw start --unattended` is invoked (supervisor mode active), the system SHALL run an in-process **drive loop** that keeps the multi-agent wave moving with no human in the seat. It SHALL poll on an approximately 15-second cadence, sweep the supervisor pane and every coding-agent pane, escalate live permission prompts for a human decision, detect completion, and then exit with a summary.
 
 The drive loop SHALL run in the foreground `git paw start --unattended` process (NOT inside the `__dashboard` subprocess) so that the process's exit status and summary belong to the `--unattended` invocation. The loop SHALL block until an exit condition is reached and SHALL NOT require an attached interactive terminal.
 
@@ -33,77 +33,22 @@ When `--unattended` is absent, the launch SHALL behave exactly as the v0.5.0 sup
 - **THEN** no drive loop SHALL run
 - **AND** the launch SHALL return with the standard attach hint (v0.5.0 behaviour unchanged)
 
-### Requirement: The drive loop is the sole auto-approver for unattended sessions
-
-For an `--unattended` session the in-process drive loop SHALL be the sole auto-approver. The dashboard's auto-approve thread (which runs inside the `__dashboard` subprocess for non-unattended sessions) SHALL be disabled for unattended sessions so that two approvers never race on the same pane.
-
-#### Scenario: Dashboard auto-approve thread is disabled under --unattended
-
-- **GIVEN** an `--unattended` supervisor session
-- **WHEN** the dashboard subprocess starts
-- **THEN** the dashboard's auto-approve thread SHALL NOT fire on any pane
-- **AND** the in-process drive loop SHALL be the only component sending approval keystrokes
-
-### Requirement: Auto-approve classifier-safe prompts
-
-When a swept pane shows a live prompt the drive loop SHALL classify it via the `auto-approve-classifier`. When the classification is safe, the loop SHALL approve the prompt by sending the agent CLI's documented "approve and remember" keystroke sequence per the `automatic-approval` capability (each logical key sent as a separate `tmux send-keys`). For a 2-option Yes/No prompt the loop SHALL send `"1"` then `Enter` directly rather than `Down`+`Enter`, because on a 2-option prompt `Down`+`Enter` selects the wrong option.
-
-Every auto-approval SHALL be recorded in the broker message log (per `automatic-approval`) before the keystrokes are sent.
-
-#### Scenario: Classifier-safe prompt is auto-approved
-
-- **GIVEN** a coding-agent pane showing a live permission prompt for a classifier-safe command (e.g. `cargo test`)
-- **WHEN** the drive loop sweeps the pane
-- **THEN** the loop SHALL send the documented approve-and-remember keystroke sequence to that pane
-- **AND** the wave SHALL continue without blocking
-
-#### Scenario: Two-option Yes/No prompt is approved with "1" then Enter
-
-- **GIVEN** a live 2-option Yes/No permission prompt classified safe
-- **WHEN** the drive loop approves it
-- **THEN** the loop SHALL send `"1"` followed by a separate `Enter`
-- **AND** SHALL NOT send `Down` then `Enter` for the 2-option prompt
-
-#### Scenario: Approval is logged before keystrokes
-
-- **GIVEN** the drive loop is about to auto-approve a safe prompt
-- **WHEN** the action is recorded
-- **THEN** the broker log entry SHALL be appended before the `tmux send-keys` call so a crash mid-action still leaves an audit trail
-
 ### Requirement: The drive loop covers the supervisor's own pane 0
 
-The drive loop SHALL sweep and act on the supervisor's OWN pane (pane 0), not just the coding-agent panes. The supervisor is an agent that hits permission prompts (e.g. running `sweep.sh`, `cargo test`, `git`); without coverage of pane 0 an unattended supervisor stalls on its first non-allowlisted prompt (v0.6.0 finding W15-3).
+The drive loop SHALL sweep the supervisor's OWN pane (pane 0), not just the coding-agent panes. On pane 0 it SHALL detect CLI unavailability, escalate a live permission prompt (under the agent id `supervisor`), and submit a buffered directive left on an idle input box. It SHALL NOT send approval keystrokes to pane 0. When pane 0 shows a live permission prompt, the loop SHALL NOT inject a hand-off or nudge into pane 0 while that prompt is up. The escalation is then carried by the broker and the exit summary.
 
-#### Scenario: Safe prompt on the supervisor pane is approved
+#### Scenario: A live prompt on the supervisor pane is escalated, not answered
 
-- **GIVEN** an `--unattended` session where the supervisor pane (pane 0) shows a live permission prompt for a classifier-safe command
+- **GIVEN** an `--unattended` session where the supervisor pane (pane 0) shows a live permission prompt
 - **WHEN** the drive loop sweeps pane 0
-- **THEN** the loop SHALL approve the supervisor pane's safe prompt
-- **AND** the supervisor SHALL NOT stall on that prompt
+- **THEN** the loop SHALL record a `permission-prompt` escalation for agent `supervisor` on the broker and in the summary
+- **AND** SHALL send no keystroke to pane 0
 
 #### Scenario: Pane 0 with no live prompt is left untouched
 
 - **GIVEN** the supervisor pane (pane 0) is mid-conversation with no live recognized permission prompt
 - **WHEN** the drive loop sweeps pane 0
 - **THEN** the loop SHALL send no keystrokes to pane 0
-
-### Requirement: Pane-0 approval must not pollute the supervisor's context
-
-A send-keys approver MUST NOT blindly type into pane 0 (v0.6.0 finding W15-13): clearing the supervisor's live prompt and polluting its conversation context are different failure modes. When the drive loop approves a prompt on pane 0 it SHALL send ONLY the minimal approval keystrokes that the live prompt consumes, and SHALL NOT send free-text or a trailing newline that would land in the supervisor's prompt box. When pane 0 shows no live recognized permission prompt, the loop SHALL send nothing to pane 0.
-
-#### Scenario: Pane-0 approval sends only the minimal approval keystrokes
-
-- **GIVEN** the supervisor pane shows a live recognized permission prompt classified safe
-- **WHEN** the drive loop approves it
-- **THEN** the loop SHALL send only the minimal approval keystrokes the prompt consumes
-- **AND** SHALL NOT send any free-text characters into the supervisor's prompt box
-- **AND** SHALL NOT send a stray trailing newline that would submit unintended input to the supervisor
-
-#### Scenario: No keystrokes when pane 0 is not at a prompt
-
-- **GIVEN** the supervisor pane is producing output but not displaying a live recognized permission prompt
-- **WHEN** the drive loop evaluates pane 0
-- **THEN** no keystrokes SHALL be sent to pane 0
 
 ### Requirement: Act only on a live prompt in the capture tail
 
@@ -206,29 +151,6 @@ When the drive loop sends a nudge to a pane (any text intended to be submitted),
 - **THEN** the escalation list SHALL contain a `nudge-wedged` entry naming that pane's agent
 - **AND** the same wedged line SHALL NOT produce more than one entry across successive sweeps
 
-### Requirement: Escalation of risky and unknown prompts is non-blocking
-
-When a live prompt is classified `danger` or `unknown` (not safe), the drive loop SHALL escalate it as a review item and SHALL NOT block the wave waiting on it. The loop SHALL surface the escalation (via the broker and in the exit summary) and SHALL continue sweeping and progressing the remaining agents. The wave SHALL NOT freeze indefinitely on a single risky prompt.
-
-The escalation SHALL always be **recorded uniformly on the broker** as a drainable review item, regardless of whether an orchestrator is running. When no orchestrator (supervisor CLI) pane is present, the escalation persists on the broker for the human/driver to read — behavior unchanged from before. When an orchestrator pane IS present under unattended operation, the loop SHALL additionally **hand the escalation to the orchestrator** by injecting it into the orchestrator's pane so the smart model is actively triggered rather than relied on to poll a dead inbox (see `supervisor-autonomous-orchestrator`). This active hand-off is the one place the loop is orchestrator-aware; the broker record itself stays uniform, and a no-orchestrator run is byte-for-byte the prior behavior.
-
-Correspondingly, the drive loop SHALL be the **sole approver of classifier-safe prompts**: it approves the `safe` set and escalates the rest. No other component blanket-approves safe prompts while the loop is running (see `supervisor-skill-discipline`). The loop's approvals and the orchestrator's escalation-driven approvals SHALL additionally be made mutually exclusive by an **enforced per-pane approval claim** (see "Approval on a pane is guarded by an exclusive per-pane claim"): before sending an approval keystroke to a pane, an approver MUST hold that pane's exclusive claim, so a double-approval on one pane is structurally impossible rather than reliant on the disjoint-set convention being obeyed.
-
-#### Scenario: Risky prompt is escalated without blocking the wave
-
-- **GIVEN** an `--unattended` session with two agents, one of which shows a live prompt classified `danger`
-- **WHEN** the drive loop sweeps the panes
-- **THEN** the loop SHALL NOT auto-approve the risky prompt
-- **AND** SHALL record the prompt as an escalation for review
-- **AND** SHALL continue progressing the other agent rather than blocking on the risky prompt
-
-#### Scenario: Unknown classification is escalated, not approved
-
-- **GIVEN** a live prompt the classifier returns as `unknown`
-- **WHEN** the drive loop evaluates it
-- **THEN** the loop SHALL NOT send approval keystrokes
-- **AND** SHALL surface the prompt for review (broker + summary)
-
 ### Requirement: Alert dedup keys on command/agent identity, never on boilerplate text
 
 When the drive loop escalates or records an alert, it SHALL dedup repeated alerts on the tuple `(agent_id, shape)` within an approximately 5-minute window, where `shape` is derived from the command/agent identity of the prompt (or a wait-for-clear token) and NOT from the prompt's boilerplate sentence text. The same prompt re-observed every poll SHALL produce ONE alert per window. Two genuinely-distinct prompts from the same agent SHALL NOT be collapsed merely because they share boilerplate text (v0.6.0 finding W15-19).
@@ -260,7 +182,7 @@ The drive loop's stall/stuck iteration SHALL be keyed on the tmux pane, not on a
 
 ### Requirement: Multiple feedback-fix-reverify cycles are tolerated
 
-The drive loop SHALL tolerate multiple feedback→fix→re-verify cycles per agent. An agent that has received feedback and is iterating SHALL NOT be treated as stuck. The loop SHALL NOT treat "not yet verified after N cycles" as a stuck or exit signal; only the explicit stuck/bloat signal, a genuinely risky prompt, a completion signal, or the heartbeat are exit/re-engage conditions.
+The drive loop SHALL tolerate multiple feedback→fix→re-verify cycles per agent. An agent that has received feedback and is iterating SHALL NOT be treated as stuck. The loop SHALL NOT treat "not yet verified after N cycles" as a stuck or exit signal. Only the explicit stuck/bloat signal, a live permission prompt (which is escalated), a completion signal, or the heartbeat are exit/re-engage conditions.
 
 #### Scenario: An agent iterating through N feedback cycles is not flagged stuck
 
@@ -344,12 +266,12 @@ The summary SHALL print a wave-level line `N/M branches merged` using the ref-de
 
 ### Requirement: The drive loop self-captures qualitative learnings
 
-Because an unattended wave has no human to hand-write findings, the drive loop SHALL self-capture qualitative learnings via the bundled `sweep.sh learn` subcommand (per `learnings-supervisor-observation-channel`) — opportunistically when it absorbs friction during the run, and once at wind-down as a synthesis pass. The loop SHALL NOT hand-roll raw curl to publish `agent.learning`.
+Because an unattended wave has no human to hand-write findings, the drive loop SHALL self-capture qualitative learnings via the bundled `sweep.sh learn` subcommand (per `learnings-supervisor-observation-channel`). It SHALL do so opportunistically when it escalates a prompt or absorbs other friction during the run, and once at wind-down as a synthesis pass. The loop SHALL NOT hand-roll raw curl to publish `agent.learning`.
 
-#### Scenario: Friction absorbed during the run is recorded as a learning
+#### Scenario: An escalated prompt is recorded as a learning
 
-- **GIVEN** an unattended drive loop that escalates a prompt it could not auto-approve
-- **WHEN** the loop absorbs that friction
+- **GIVEN** an unattended drive loop that escalates a live permission prompt
+- **WHEN** the loop records that friction
 - **THEN** the loop SHALL record a qualitative learning via `sweep.sh learn`
 - **AND** SHALL NOT publish the learning via raw curl
 
@@ -368,36 +290,8 @@ The `--unattended` drive loop SHALL be the supported mechanism for running a wav
 
 - **GIVEN** the `selftest` isolation harness with a dummy CLI scripted to emit a permission prompt and a completion signal
 - **WHEN** an `--unattended` drive loop runs against the isolated session
-- **THEN** the loop SHALL auto-approve the dummy safe prompt, detect the completion signal, and exit with a summary
+- **THEN** the loop SHALL escalate the dummy prompt without sending it any keystroke, detect the completion signal, and exit with a summary
 - **AND** the test SHALL require no real LLM backend and no interactive terminal
-
-### Requirement: Auto-approval prefers a durable grant for a safe prompt
-
-The drive loop SHALL select a prompt's broader "don't ask again" option, when the
-prompt offers one, for a command it has classified safe or worktree-confined, so a
-routine prompt is permanently allowed instead of re-prompting on every identical
-occurrence. When no durable option is offered, the loop SHALL fall back to the
-once-only option as before. The loop SHALL NOT select a durable grant for a command
-that did not classify safe / worktree-confined.
-
-#### Scenario: A safe prompt offering a durable option takes it
-
-- **GIVEN** a safe-classified prompt whose options are `1. Yes` and `2. Yes, and don't ask again for <cmd>`
-- **WHEN** the drive loop approves it
-- **THEN** it SHALL select the durable "don't ask again" option
-- **AND** the identical prompt SHALL NOT re-appear for that command on a later occurrence
-
-#### Scenario: A safe prompt with no durable option uses the once-only option
-
-- **GIVEN** a safe-classified 2-option `Yes` / `No` prompt with no durable grant
-- **WHEN** the drive loop approves it
-- **THEN** it SHALL select the once-only `Yes` option as before
-
-#### Scenario: A non-safe prompt is never granted durably
-
-- **GIVEN** a prompt that did NOT classify safe / worktree-confined
-- **WHEN** the drive loop evaluates it
-- **THEN** it SHALL NOT select any durable "don't ask again" option (it escalates instead)
 
 ### Requirement: Idle pane with buffered input is submitted
 
@@ -451,50 +345,40 @@ live-prompt scan nor the long stuck-detector would otherwise surface.
 
 ### Requirement: Approval on a pane is guarded by an exclusive per-pane claim
 
-Before any component sends an approval keystroke to an agent pane, it SHALL acquire an
-**exclusive per-pane claim**, and SHALL release it once the keystroke(s) for that approval
-are sent. The claim SHALL be an atomic filesystem claim — created via an atomic
-create-if-absent so two concurrent acquirers cannot both succeed — keyed by pane and
-located under a gitignored runtime directory. The claim SHALL be honored identically by
-the in-process drive loop (Rust) and the bundled `sweep.sh` approval helper (shell), so
-approvers in DIFFERENT processes cannot both approve the same pane. Acquisition SHALL be
-**non-blocking**: if the claim is already held, the approver SHALL skip that pane for this
-attempt (it SHALL NOT wait) and rely on a later tick, preserving the non-blocking
-escalation guarantee. The claim SHALL be released even on error (RAII in Rust, `trap` in
-shell) so a crashed or interrupted approver does not permanently wedge a pane.
+Before any component sends keystrokes that answer a prompt or submit input in an agent pane, it SHALL acquire an **exclusive per-pane claim**, and SHALL release it once those keystrokes are sent. This covers the explicit `sweep.sh approve <pane>` action and the drive loop's nudge, stale-input recovery and buffered-input submit. The claim SHALL be an atomic filesystem claim, created via an atomic create-if-absent so two concurrent acquirers cannot both succeed, keyed by pane and located under a gitignored runtime directory. The in-process drive loop (Rust) and the bundled `sweep.sh` helper (shell) SHALL honour the claim identically, so senders in DIFFERENT processes cannot both type into the same pane. Acquisition SHALL be **non-blocking**: if the claim is already held, the sender SHALL skip that pane for this attempt (it SHALL NOT wait) and rely on a later tick or a re-run, preserving the non-blocking escalation guarantee. The claim SHALL be released even on error (RAII in Rust, `trap` in shell), so a crashed or interrupted sender does not permanently wedge a pane.
 
 #### Scenario: An approver holds the pane's claim before sending
 
-- **GIVEN** an approver about to approve the live prompt on pane N
+- **GIVEN** `sweep.sh approve N` about to approve the live prompt on pane N
 - **WHEN** it dispatches the approval keystroke(s)
 - **THEN** it SHALL hold pane N's exclusive claim for the duration of the send
 
-#### Scenario: Two approvers race on one pane — exactly one sends
+#### Scenario: Two senders race on one pane — exactly one sends
 
-- **GIVEN** two approvers concurrently attempting to approve the live prompt on the same pane N
+- **GIVEN** two senders concurrently attempting to type into the same pane N
 - **WHEN** both try to acquire pane N's claim
-- **THEN** exactly one SHALL acquire the claim and send the approval
+- **THEN** exactly one SHALL acquire the claim and send its keystrokes
 - **AND** the other SHALL fail to acquire and SHALL NOT send any keystroke
 
 #### Scenario: Acquisition is non-blocking when the claim is held
 
-- **GIVEN** pane N's claim is currently held by another approver
+- **GIVEN** pane N's claim is currently held by another sender
 - **WHEN** an approver attempts to approve pane N
-- **THEN** it SHALL skip pane N for this attempt rather than block, and try again on a later tick
+- **THEN** it SHALL skip pane N for this attempt rather than block
 
 #### Scenario: The Rust loop and the shell helper are mutually exclusive
 
-- **GIVEN** the in-process drive loop holds pane N's claim
+- **GIVEN** the in-process drive loop holds pane N's claim while it submits buffered input or recovers a nudge
 - **WHEN** `sweep.sh approve N` runs in a separate process
 - **THEN** it SHALL observe the claim as held and SHALL NOT send an approval keystroke
-- **AND** the same exclusion SHALL hold in the reverse direction (shell holds it, Rust skips)
+- **AND** the same exclusion SHALL hold in the reverse direction (shell holds it, Rust skips its send)
 
 #### Scenario: The claim is released after the send and on error
 
-- **GIVEN** an approver that acquired pane N's claim and then finished sending (or hit an error)
-- **WHEN** the approval attempt returns
-- **THEN** pane N's claim SHALL be released so a later approver can acquire it
-- **AND** an approver that panics/errors mid-send SHALL NOT leave pane N permanently claimed
+- **GIVEN** a sender that acquired pane N's claim and then finished sending (or hit an error)
+- **WHEN** the attempt returns
+- **THEN** pane N's claim SHALL be released so a later sender can acquire it
+- **AND** a sender that panics/errors mid-send SHALL NOT leave pane N permanently claimed
 
 ### Requirement: The drive loop is bound to a specific session instance
 
@@ -553,7 +437,7 @@ When the roster contains no orchestrator pane, coding-pane detection SHALL work 
 - **GIVEN** an unattended drive loop with two coding agents, one of whose pane tails shows a CLI-unavailability marker
 - **WHEN** the loop sweeps the panes
 - **THEN** it SHALL record a `cli-unavailable` escalation naming that agent
-- **AND** it SHALL keep sweeping and approving the other agent's prompts
+- **AND** it SHALL keep sweeping the other agent's pane and escalating its prompts
 - **AND** the eventual summary SHALL NOT report the wave `completed`
 
 #### Scenario: A banner above a task-list footer is still detected
@@ -601,4 +485,41 @@ When the roster contains no orchestrator pane, coding-pane detection SHALL work 
 - **GIVEN** panes whose captures contain no `cli_unavailable_markers` text
 - **WHEN** the loop runs to a completion or heartbeat exit
 - **THEN** the outcome and exit status SHALL be identical to the behaviour before this requirement
+
+### Requirement: Every live permission prompt is escalated without blocking the wave
+
+When a swept pane, a coding-agent pane or the supervisor's own pane 0, shows a live permission prompt, the drive loop SHALL escalate it for a human decision and SHALL NOT answer it. The loop SHALL NOT block the wave waiting on that decision. It SHALL keep sweeping and progressing the remaining agents. The escalation SHALL carry the verdict label `permission-prompt`, the originating agent, and the prompted command: the command slice, or the file-prompt target path when the prompt has no command header. It SHALL be deduplicated per *Alert dedup keys on command/agent identity, never on boilerplate text*, so one unanswered prompt produces one escalation per dedup window.
+
+Each emitted escalation SHALL be recorded on the broker as a drainable review item. It SHALL appear in the exit summary's escalation list and SHALL be recorded in the manual-decision log (`approval-pattern-surfacing`). It SHALL also produce a `tooling_friction` learning through `sweep.sh learn`. The broker record SHALL be the same whether or not an orchestrator is running. When an orchestrator (supervisor CLI) pane is present, the loop SHALL also hand the escalation to that pane (see `supervisor-autonomous-orchestrator`). When none is present, the broker record and the summary are the whole escalation. A wave whose loop recorded any escalation SHALL be reported `escalated-for-review`, not `completed`.
+
+This requirement adds no exit condition. The loop keeps running until completion, the heartbeat, or another existing exit reason, even when every remaining agent is waiting on a prompt.
+
+#### Scenario: A live prompt is escalated without blocking the other agent
+
+- **GIVEN** an `--unattended` session with two agents, one of which shows a live permission prompt for `ls -la`
+- **WHEN** the drive loop sweeps the panes and the other agent finishes its work
+- **THEN** the loop SHALL record a `permission-prompt` escalation naming the prompting agent and `ls -la`
+- **AND** SHALL send no keystroke to the prompting pane
+- **AND** the other agent's work SHALL complete and the wave SHALL be reported `escalated-for-review`
+
+#### Scenario: The escalation reaches the broker, the summary and the decision log
+
+- **GIVEN** an `--unattended` session whose agent `feat-a` shows a live permission prompt
+- **WHEN** the drive loop escalates it
+- **THEN** the broker SHALL receive an `agent.question` naming `feat-a` and the prompted command
+- **AND** the exit summary's escalation list SHALL contain the prompt
+- **AND** the session's manual-decision log SHALL gain one entry for it
+
+#### Scenario: A file-edit prompt is escalated by its target path
+
+- **GIVEN** a live write-permission prompt with no command header, whose target is `src/lib.rs`
+- **WHEN** the drive loop escalates it
+- **THEN** the escalation's command SHALL be the target path `src/lib.rs`
+
+#### Scenario: A prompt nobody answers does not end the run
+
+- **GIVEN** an `--unattended` session whose only coding agent sits on an unanswered live prompt
+- **WHEN** the drive loop keeps sweeping
+- **THEN** the loop SHALL NOT exit for that reason alone
+- **AND** it SHALL exit only on completion, the heartbeat, or another existing exit reason
 

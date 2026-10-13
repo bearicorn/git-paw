@@ -1,50 +1,28 @@
-//! The `broker-mediated-approvals` approval-send gate.
+//! The shared live-prompt re-confirm and the approval dedup key.
 //!
-//! Every in-binary approver that clears an agent CLI permission prompt by
-//! sending keystrokes via `tmux send-keys` MUST pass through
-//! [`approval_send_gate`]. The gate closes the F5 blind-send-keys race
-//! (findings W15-13 / W15-19): between the moment an approval decision is made
-//! and the moment keys are dispatched, the prompt can clear (the agent moved
-//! on, a human answered first, or another approver won the race). Sending keys
-//! blind then lands them as literal chat text, polluting the agent's context
-//! and leaving stray unsubmitted commands.
+//! What survives the classifier's retirement from the
+//! `broker-mediated-approvals` work. No git-paw process sends approval
+//! keystrokes any more, so the in-binary send gate is gone; the discipline it
+//! enforced lives on in `assets/scripts/sweep.sh`'s `approve`, the only
+//! approval path left, which re-confirms the prompt on a fresh capture and
+//! refuses pane 0 in shell.
 //!
-//! The gate does three things, in order:
+//! Two pieces are still consumed in Rust:
 //!
-//! 1. Refuse pane index 0 — the supervisor's own pane is never sent blind
-//!    keystrokes (Decision 2).
-//! 2. Re-capture the target pane *immediately before* the send and confirm the
-//!    prompt's live structural markers are present at the capture's tail, per
-//!    the Live-prompt gate — a window wide enough to span a full multi-option
-//!    prompt block, not a fixed ~4-line tail (Decision 1;
-//!    `approve-send-gate-hardening`). This is a fresh capture — the
-//!    detection/decision-stage capture SHALL NOT substitute for it — and there
-//!    is deliberately no classification work or broker round-trip between the
-//!    re-confirm and the send.
-//! 3. Only on a re-confirmed live prompt does it dispatch the keys.
+//! - [`live_prompt_in_tail`] — the live-prompt structural check widened with
+//!   the profile's approval markers, so detection and the shell helper agree
+//!   on what "a live prompt" means.
+//! - [`approval_dedup_key`] — keys a repeated prompt on `(agent_id, command)`
+//!   so the drive loop escalates it once per window rather than every sweep.
 //!
-//! The tail check reuses the permission-prompt marker set shared with
-//! `permission-detection`
-//! ([`crate::supervisor::permission_prompt::APPROVAL_MARKERS`]) and the shell
-//! `stuck-prompt-detection` helper (`sweep.sh`'s `STUCK_MARKERS_REGEX`), so the
-//! Rust and shell approvers agree on what "a live prompt" means.
-//!
-//! This module adds **no** new `BrokerMessage` variant and **no** per-CLI
-//! permission hook (Decision 4) — the approval-trigger and escalation signals
-//! reuse the existing `agent.status` (`phase: "stuck-on-prompt"`) and
-//! `agent.question` variants.
+//! This module adds **no** `BrokerMessage` variant and **no** per-CLI
+//! permission hook: the escalation signal reuses the existing `agent.question`
+//! and `agent.status` variants.
 
 use crate::config::claude_prompt_profile;
-use crate::error::PawError;
-use crate::supervisor::approve::KeyDispatcher;
-use crate::supervisor::auto_approve::{
+use crate::supervisor::permission_prompt::{
     extract_command_slice, is_live_prompt, live_prompt_markers_at_tail,
 };
-
-/// Pane index reserved for the supervisor's own CLI. The blind send-keys gate
-/// never types into it under any classification; clearing pane 0's own prompt
-/// is a non-blind concern owned by the unattended drive loop.
-pub const SUPERVISOR_PANE_INDEX: usize = 0;
 
 /// Returns whether the prompt's live structural markers anchor the modal
 /// block of `capture`.
@@ -75,76 +53,6 @@ pub fn live_prompt_in_tail(capture: &str) -> bool {
         )
 }
 
-/// Abstraction over "capture the current text of a pane", so the gate's
-/// re-confirm step is testable without spawning tmux.
-///
-/// The production capture is a thin shim over
-/// [`crate::supervisor::permission_prompt::capture_pane`]; the poll loop's
-/// [`crate::supervisor::poll::PaneInspector`] is a `PaneCapturer` (it is a
-/// supertrait), so the loop passes its existing inspector straight through.
-pub trait PaneCapturer {
-    /// Returns the current captured text of pane `pane_index` in `session`,
-    /// or the empty string when the capture fails.
-    fn capture(&self, session: &str, pane_index: usize) -> String;
-}
-
-/// Outcome of a single [`approval_send_gate`] call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GateOutcome {
-    /// A live prompt was re-confirmed and the keystrokes were dispatched.
-    Sent,
-    /// The re-confirm capture showed no live prompt in the tail (the prompt
-    /// cleared between decision and send) — no keystrokes were dispatched.
-    PromptCleared,
-    /// The target pane index was 0 (the supervisor's own pane), excluded from
-    /// the blind send-keys path — no keystrokes were dispatched.
-    Pane0Excluded,
-}
-
-/// The single approval-send gate every in-binary keystroke approver passes
-/// through.
-///
-/// Refuses pane 0, re-captures `pane_index` in `session` via `capturer`,
-/// confirms a live prompt in the tail, and only then dispatches each key in
-/// `keys` through `dispatcher`. Returns the [`GateOutcome`] describing which
-/// branch was taken. The only error path is a `send-keys` failure once a live
-/// prompt has been confirmed.
-///
-/// Callers MUST NOT pre-filter on a stale capture and skip this gate — the
-/// re-capture here is the only point where "is the modal still up?" is true.
-pub fn approval_send_gate<C, D>(
-    capturer: &C,
-    dispatcher: &mut D,
-    session: &str,
-    pane_index: usize,
-    keys: &[String],
-) -> Result<GateOutcome, PawError>
-where
-    C: PaneCapturer,
-    D: KeyDispatcher,
-{
-    // Decision 2: pane 0 (supervisor) is excluded from blind send-keys under
-    // any classification, even a re-confirmed live prompt.
-    if pane_index == SUPERVISOR_PANE_INDEX {
-        return Ok(GateOutcome::Pane0Excluded);
-    }
-
-    // Decision 1: re-confirm a live prompt with a fresh capture immediately
-    // before the send. No classification work or broker round-trip sits
-    // between this capture and the dispatch below.
-    let capture = capturer.capture(session, pane_index);
-    if !live_prompt_in_tail(&capture) {
-        return Ok(GateOutcome::PromptCleared);
-    }
-
-    for key in keys {
-        dispatcher
-            .send_key(session, pane_index, key)
-            .map_err(|e| PawError::TmuxError(format!("send-keys {key} failed: {e}")))?;
-    }
-    Ok(GateOutcome::Sent)
-}
-
 /// Computes the dedup key for a pending/repeated approval, keyed on the
 /// **command identity** (the command text the modal is asking about) combined
 /// with the **agent identity** — never on the prompt's boilerplate/footer text
@@ -173,59 +81,6 @@ pub fn approval_dedup_key(agent_id: &str, capture: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Recording capturer that returns a fixed capture and counts calls, so a
-    /// test can assert the gate re-captured exactly once.
-    struct StubCapturer {
-        capture: String,
-        calls: std::cell::Cell<usize>,
-    }
-    impl StubCapturer {
-        fn new(capture: &str) -> Self {
-            Self {
-                capture: capture.to_string(),
-                calls: std::cell::Cell::new(0),
-            }
-        }
-    }
-    impl PaneCapturer for StubCapturer {
-        fn capture(&self, _session: &str, _pane_index: usize) -> String {
-            self.calls.set(self.calls.get() + 1);
-            self.capture.clone()
-        }
-    }
-
-    /// Recording dispatcher that captures every (session, pane, key) tuple.
-    struct Recorder {
-        events: Vec<(String, usize, String)>,
-    }
-    impl Recorder {
-        fn new() -> Self {
-            Self { events: Vec::new() }
-        }
-        fn keys(&self) -> Vec<&str> {
-            self.events.iter().map(|(_, _, k)| k.as_str()).collect()
-        }
-    }
-    impl KeyDispatcher for Recorder {
-        fn send_key(&mut self, session: &str, pane_index: usize, key: &str) -> std::io::Result<()> {
-            self.events
-                .push((session.to_string(), pane_index, key.to_string()));
-            Ok(())
-        }
-        fn send_text(
-            &mut self,
-            session: &str,
-            pane_index: usize,
-            text: &str,
-        ) -> std::io::Result<()> {
-            self.send_key(session, pane_index, text)
-        }
-    }
-
-    fn keys() -> Vec<String> {
-        vec!["Down".to_string(), "Enter".to_string()]
-    }
 
     // --- Task 5.1: tail check -------------------------------------------
 
@@ -284,60 +139,6 @@ Do you want to proceed?
     #[test]
     fn empty_capture_is_not_live() {
         assert!(!live_prompt_in_tail(""));
-    }
-
-    // --- Task 5.2: gate dispatches on live, nothing on cleared ----------
-
-    /// The gate dispatches the keys when the re-confirm capture shows a live
-    /// prompt in the tail, and it re-captures exactly once.
-    #[test]
-    fn gate_dispatches_on_reconfirmed_live_prompt() {
-        let capturer = StubCapturer::new("Bash command\n  cargo test\nDo you want to proceed?");
-        let mut rec = Recorder::new();
-        let outcome = approval_send_gate(&capturer, &mut rec, "paw-x", 2, &keys()).unwrap();
-        assert_eq!(outcome, GateOutcome::Sent);
-        assert_eq!(rec.keys(), vec!["Down", "Enter"]);
-        assert_eq!(capturer.calls.get(), 1, "gate must re-capture exactly once");
-    }
-
-    /// A cleared prompt (no marker in the tail) suppresses the send entirely.
-    #[test]
-    fn gate_sends_nothing_when_prompt_cleared() {
-        let capturer = StubCapturer::new("$ \nagent moved on\nall done\n");
-        let mut rec = Recorder::new();
-        let outcome = approval_send_gate(&capturer, &mut rec, "paw-x", 2, &keys()).unwrap();
-        assert_eq!(outcome, GateOutcome::PromptCleared);
-        assert!(rec.events.is_empty(), "cleared prompt => no keystrokes");
-    }
-
-    // --- Task 5.3: pane 0 refused, coding-agent pane approved -----------
-
-    /// Pane 0 is refused with no keystrokes and no capture, even when a live
-    /// prompt would be present (spec scenario "Pane 0 is never sent blind
-    /// keystrokes").
-    #[test]
-    fn gate_refuses_pane_zero() {
-        let capturer = StubCapturer::new("Do you want to proceed?");
-        let mut rec = Recorder::new();
-        let outcome = approval_send_gate(&capturer, &mut rec, "paw-x", 0, &keys()).unwrap();
-        assert_eq!(outcome, GateOutcome::Pane0Excluded);
-        assert!(rec.events.is_empty(), "pane 0 => no keystrokes");
-        assert_eq!(
-            capturer.calls.get(),
-            0,
-            "pane 0 is refused before any capture"
-        );
-    }
-
-    /// A coding-agent pane (index 2) with a live prompt is approved (spec
-    /// scenario "Coding agent panes are still approvable").
-    #[test]
-    fn gate_approves_coding_agent_pane_two() {
-        let capturer = StubCapturer::new("Bash command\n  cargo build\nDo you want to proceed?");
-        let mut rec = Recorder::new();
-        let outcome = approval_send_gate(&capturer, &mut rec, "paw-x", 2, &keys()).unwrap();
-        assert_eq!(outcome, GateOutcome::Sent);
-        assert!(rec.events.iter().all(|(_, p, _)| *p == 2));
     }
 
     // --- Task 5.4: dedup on command identity, not footer ----------------

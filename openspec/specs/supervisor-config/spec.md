@@ -151,7 +151,9 @@ The system SHALL provide a flag-resolution function that maps a CLI name and app
 
 3. **Fallback**: any CLI/level pair not covered above resolves to `""` (no flags).
 
-The `Auto` level SHALL resolve to a deterministic per-CLI flag rather than the empty string wherever the CLI provides a low-friction "accept edits" mode distinct from `Manual` and from full bypass, so an `Auto` pane does not silently inherit whatever default the CLI's config directory happens to carry. For Claude this is `--permission-mode acceptEdits` (auto-accept file edits; other command approvals still flow through the classifier / drive loop). Codex's `Auto` already resolves to `--sandbox workspace-write`. A CLI with no such mode keeps `""` and relies on the per-CLI `approval_args` override plus the classifier / drive-loop approval path.
+The `Auto` level SHALL resolve to a deterministic per-CLI flag rather than the empty string wherever the CLI provides a low-friction "accept edits" mode distinct from `Manual` and from full bypass, so an `Auto` pane does not silently inherit whatever default the CLI's config directory happens to carry. For Claude this is `--permission-mode acceptEdits`: it auto-accepts file edits, and every other command prompt is left to the CLI and, under the drive loop, escalated for a human decision. Codex's `Auto` already resolves to `--sandbox workspace-write`. A CLI with no such mode keeps `""` and relies on the per-CLI `approval_args` override; its prompts reach the human.
+
+The resolved approval flags are git-paw's only influence on whether an agent's command runs without a prompt. git-paw SHALL NOT approve a prompt the resolved mode leaves in place.
 
 The built-in rows SHALL be verified against each CLI's upstream documentation at implementation time; a row whose upstream flag has changed SHALL be corrected via spec amendment before the change lands. In particular, the Claude `Auto` value SHALL be confirmed against the live Claude Code `--permission-mode` enumeration (`default` / `acceptEdits` / `plan` / `bypassPermissions`) so that `Auto` maps to a real, deterministic mode rather than an unrecognised token.
 
@@ -322,78 +324,6 @@ The `[supervisor.conflict]` table SHALL be optional in `.git-paw/config.toml`. A
 - **THEN** loading SHALL succeed without error
 - **AND** `supervisor.conflict` SHALL contain default values
 
-### Requirement: Common dev allowlist sub-table
-
-The system SHALL extend `SupervisorConfig` with a nested
-`common_dev_allowlist: CommonDevAllowlistConfig` field (or equivalent
-name matching local serde conventions).
-
-`CommonDevAllowlistConfig` SHALL contain:
-
-- `enabled: bool` — defaults to `true` when the field or section is
-  absent from `.git-paw/config.toml`. Parsed for config compatibility
-  only; it SHALL have no behavioural effect. The resolved dev-allowlist
-  patterns are always composed into the auto-approve whitelist and the
-  rendered supervisor skill guidance, whatever its value.
-- `extra: Vec<String>` — defaults to empty when the field or section
-  is absent. User-supplied additional prefix patterns appended to the
-  built-in preset when the dev-allowlist patterns are resolved for the
-  auto-approve whitelist.
-
-The `[supervisor.common_dev_allowlist]` TOML table SHALL be fully
-optional. A config file with `[supervisor] enabled = true` and no
-nested `common_dev_allowlist` table SHALL load with `enabled = true`
-and `extra = []`.
-
-The field SHALL use `#[serde(default)]` so missing fields parse to the
-documented defaults rather than triggering parse errors.
-
-#### Scenario: Defaults when sub-table is absent
-
-- **GIVEN** a config file with `[supervisor] enabled = true` and no
-  `[supervisor.common_dev_allowlist]` section
-- **WHEN** the config is loaded
-- **THEN** `supervisor.common_dev_allowlist.enabled` SHALL be `true`
-- **AND** `supervisor.common_dev_allowlist.extra` SHALL be empty
-
-#### Scenario: Enabled false opt-out is honoured
-
-- **GIVEN** a config file with
-  `[supervisor.common_dev_allowlist] enabled = false`
-- **WHEN** the config is loaded
-- **THEN** `supervisor.common_dev_allowlist.enabled` SHALL be `false`
-
-#### Scenario: Enabled false does not change the composed whitelist
-
-- **GIVEN** a config file with
-  `[supervisor.common_dev_allowlist] enabled = false` and `stacks = ["rust"]`
-- **WHEN** the supervisor's effective auto-approve whitelist is composed
-- **THEN** it SHALL still contain the universal preset patterns and `cargo test`
-
-#### Scenario: Extra patterns parsed
-
-- **GIVEN** a config file with
-  `[supervisor.common_dev_allowlist] extra = ["pnpm test", "deno fmt"]`
-- **WHEN** the config is loaded
-- **THEN** `supervisor.common_dev_allowlist.extra` SHALL equal
-  `["pnpm test", "deno fmt"]`
-
-#### Scenario: Sub-table round-trips through save and load
-
-- **GIVEN** a `SupervisorConfig` with
-  `common_dev_allowlist = CommonDevAllowlistConfig { enabled: false, extra: vec!["x".to_string()] }`
-- **WHEN** the config is serialised to TOML and parsed back
-- **THEN** the round-trip loaded value SHALL equal the original
-
-#### Scenario: Pre-v0.5 configs load with defaults
-
-- **GIVEN** a `.git-paw/config.toml` produced before v0.5.0
-  (no `[supervisor.common_dev_allowlist]` table)
-- **WHEN** the config is loaded with the v0.5.0 binary
-- **THEN** loading SHALL succeed without error
-- **AND** `supervisor.common_dev_allowlist.enabled` SHALL be `true`
-- **AND** `supervisor.common_dev_allowlist.extra` SHALL be empty
-
 ### Requirement: SupervisorConfig SHALL carry six gate-command template fields
 
 `SupervisorConfig` in `src/config.rs` SHALL expose the following six optional fields beyond the existing `test_command`:
@@ -496,98 +426,6 @@ The `CustomCli` struct (`[clis.<name>]`) SHALL gain an optional `approval_args` 
 - **WHEN** the config is loaded
 - **THEN** loading SHALL fail with an error mentioning `yolo-mode`
 
-### Requirement: `[supervisor.auto_approve]` config section
-
-The system SHALL accept a `[supervisor.auto_approve]` table in `.git-paw/config.toml` to control auto-approval behaviour.
-
-#### Scenario: Default config when section absent
-
-- **GIVEN** a `.git-paw/config.toml` with no `[supervisor.auto_approve]` section
-- **WHEN** the config is loaded
-- **THEN** `AutoApproveConfig::default()` SHALL apply with `enabled = true`, `safe_commands = []` (defaults provided in code), and `stall_threshold_seconds = 30`
-
-#### Scenario: Backward-compatible parse
-
-- **GIVEN** an existing v0.3.0 config with no supervisor section
-- **WHEN** the config is loaded
-- **THEN** parsing SHALL succeed without error
-- **AND** the optional `supervisor.auto_approve` field SHALL serialise as `None` when not set
-
-### Requirement: Configurable enable flag
-
-The `enabled` field SHALL gate the entire auto-approval feature.
-
-#### Scenario: Disabled at runtime
-
-- **GIVEN** `[supervisor.auto_approve] enabled = false`
-- **WHEN** the supervisor poll loop runs
-- **THEN** detection SHALL NOT capture panes
-- **AND** auto-approval SHALL NOT fire
-- **AND** stall detection alone (without approval) MAY still run
-
-#### Scenario: Enabled by default
-
-- **GIVEN** the supervisor section is present but `enabled` is omitted
-- **WHEN** the config is loaded
-- **THEN** `enabled` SHALL default to `true`
-
-### Requirement: Configurable safe-command list
-
-The `safe_commands` field SHALL be a list of strings that are appended to the composed whitelist defaults (the stack-neutral built-ins plus the resolved dev-allowlist patterns, per `safe-command-classification`).
-
-#### Scenario: Custom command added
-
-- **GIVEN** `safe_commands = ["just smoke"]` in config
-- **WHEN** classification runs against the command `just smoke -v`
-- **THEN** `is_safe_command(...)` SHALL return `true`
-
-#### Scenario: Empty list keeps defaults
-
-- **GIVEN** `safe_commands = []`
-- **WHEN** classification runs against `grep -rn "foo" src/`
-- **THEN** `is_safe_command(...)` SHALL still return `true` (the composed defaults apply unchanged)
-
-### Requirement: Configurable stall threshold
-
-The `stall_threshold_seconds` field SHALL govern how long an agent's `last_seen` must be older than the current time before stall detection treats it as stuck.
-
-#### Scenario: Custom threshold
-
-- **GIVEN** `stall_threshold_seconds = 60`
-- **WHEN** an agent's `last_seen` is 45 seconds old
-- **THEN** stall detection SHALL NOT classify it as stalled
-
-#### Scenario: Threshold floor
-
-- **GIVEN** `stall_threshold_seconds = 0`
-- **WHEN** the config is loaded
-- **THEN** the system SHALL clamp the effective threshold to a minimum of 5 seconds to avoid pathological poll loops
-- **AND** SHALL emit a warning to stderr describing the clamp
-
-### Requirement: Approval level coarse switch
-
-The system SHALL accept a coarse `approval_level` field that maps to common policy presets.
-
-#### Scenario: `safe` preset
-
-- **GIVEN** `approval_level = "safe"`
-- **WHEN** the config is loaded
-- **THEN** the effective whitelist SHALL be the **composed** built-in defaults — the stack-neutral built-ins plus the resolved dev-allowlist patterns (per `safe-command-classification`) — with no user-supplied `safe_commands` extras
-- **AND** `enabled` SHALL be `true`
-
-#### Scenario: `conservative` preset
-
-- **GIVEN** `approval_level = "conservative"`
-- **WHEN** the config is loaded
-- **THEN** the effective whitelist SHALL exclude `git push` and `curl` entries
-- **AND** `enabled` SHALL be `true`
-
-#### Scenario: `off` preset
-
-- **GIVEN** `approval_level = "off"`
-- **WHEN** the config is loaded
-- **THEN** `enabled` SHALL be forced to `false` regardless of other fields
-
 ### Requirement: Resolved approval flags apply on every worker-launch path
 
 Every launch path that spawns a worker CLI SHALL build that pane's command from the resolved approval flags, so `agent_approval` and any `[clis.<name>].approval_args` override take effect regardless of which command started the session. The resolution chain itself is unchanged (per "Permission flag mapping"); what this requires is that no launch path bypass it.
@@ -617,4 +455,52 @@ A path that spawns a worker with the bare CLI name SHALL be treated as a defect:
 - **GIVEN** a CLI and approval level whose resolution yields an empty flag string
 - **WHEN** any launch path spawns that worker
 - **THEN** the pane command SHALL be the CLI alone, with no trailing separator
+
+### Requirement: Deprecated auto-approval tables are parsed but have no effect
+
+The system SHALL continue to accept the `[supervisor.auto_approve]` table (`enabled`, `safe_commands`, `stall_threshold_seconds`, `approval_level` with the values `off` / `conservative` / `safe`, and `approve_worktree_writes`) and the `[supervisor.common_dev_allowlist]` table (`enabled`, `stacks`, `extra`) with their existing field names and types, so configurations written for earlier versions load without error. Neither table nor any of its fields SHALL have any behavioural effect. No prompt is approved, no skill text is rendered and no threshold is applied because of them, and a value that previously triggered a clamp warning (such as `stall_threshold_seconds = 0`) SHALL NOT trigger one.
+
+A loaded table SHALL round-trip. Saving a configuration that declared either table SHALL write it back with its values. Saving a configuration that did not declare a table SHALL NOT add it.
+
+When a configuration file declares either table, the system SHALL print exactly one warning line to stderr for that file per git-paw process. The line SHALL name every deprecated table the file declares and state that it has no effect and can be removed. A file that declares neither table SHALL produce no such warning.
+
+#### Scenario: An old configuration with both tables loads with one warning
+
+- **GIVEN** a `.git-paw/config.toml` declaring `[supervisor.auto_approve]` with every field set and `[supervisor.common_dev_allowlist]` with `stacks = ["rust"]` and `extra = ["just lint"]`
+- **WHEN** a git-paw subcommand that loads the repository configuration runs
+- **THEN** loading SHALL succeed
+- **AND** stderr SHALL contain exactly one deprecation warning line, naming both `[supervisor.auto_approve]` and `[supervisor.common_dev_allowlist]`
+
+#### Scenario: The warning names only the declared table
+
+- **GIVEN** a configuration file that declares `[supervisor.auto_approve]` and not `[supervisor.common_dev_allowlist]`
+- **WHEN** it is loaded
+- **THEN** the deprecation warning SHALL name `[supervisor.auto_approve]`
+- **AND** SHALL NOT name `[supervisor.common_dev_allowlist]`
+
+#### Scenario: A configuration without the tables produces no warning
+
+- **GIVEN** a configuration file with a `[supervisor]` table and neither deprecated table
+- **WHEN** it is loaded
+- **THEN** loading SHALL succeed
+- **AND** no deprecation warning SHALL be printed
+
+#### Scenario: Declared tables round-trip
+
+- **GIVEN** a configuration declaring both tables with non-default values
+- **WHEN** it is loaded and saved back (for example by `git paw add-cli`)
+- **THEN** the saved file SHALL contain both tables with the same values
+
+#### Scenario: An undeclared table is not written on save
+
+- **GIVEN** a configuration with a `[supervisor]` table and no `[supervisor.common_dev_allowlist]` table
+- **WHEN** it is loaded and saved back
+- **THEN** the saved file SHALL NOT contain a `[supervisor.common_dev_allowlist]` table
+
+#### Scenario: The tables have no effect on a run
+
+- **GIVEN** a configuration declaring `[supervisor.auto_approve] safe_commands = ["ls"]` and `[supervisor.common_dev_allowlist] stacks = ["rust"]`
+- **WHEN** an `--unattended` run's agent pane shows a live permission prompt for `ls -la`
+- **THEN** the prompt SHALL be escalated
+- **AND** no keystroke SHALL be sent to that pane
 

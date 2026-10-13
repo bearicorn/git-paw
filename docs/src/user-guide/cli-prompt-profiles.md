@@ -1,6 +1,6 @@
 # CLI Prompt-Shape Profiles
 
-git-paw's supervisor and auto-approve detectors recognise an agent CLI's
+git-paw's supervisor and prompt detectors recognise an agent CLI's
 terminal surface — its "ready" banner, its permission-prompt wording, its
 mid-response footer — by matching known markers against captured pane text.
 A **prompt-shape profile** is the data that describes what one CLI's
@@ -41,14 +41,14 @@ heard of — resolves the full embedded default rather than an empty profile.
 | Field | Matches | Used by |
 |---|---|---|
 | `readiness_markers` | Substrings that positively identify the CLI's interactive ready state (as opposed to a bare shell prompt), gating boot-block injection. | `tmux::readiness::classify_pane_readiness` (boot-prompt injection gate) |
-| `approval_markers` | Substrings indicating the CLI is waiting for an approval decision. | `supervisor::permission_prompt::classify_capture` (poll-loop permission detection) |
-| `live_prompt_markers` | The confirmation-question lead-in (`"do you want to"`) and the cancel footer (`"esc to cancel"`) that anchor a LIVE (not scrolled-away) permission prompt. Detection searches upward from the end of the capture, tolerating up to 13 non-blank trailing lines of non-prompt content (a task list, a status strip) below the modal — but once the anchor has shifted past the capture's true end, liveness there requires the modal's actual SHAPE: the footer anchoring the START of a line (not merely appearing anywhere in it) together with a numbered option line nearby. A bare confirmation question, or the footer text only mentioned mid-sentence (narration, grep-style tool output), cannot re-confirm liveness there — an already-answered prompt can leave either behind followed by ordinary output. | `supervisor::auto_approve::is_live_prompt`, the approval send-gate re-confirm |
+| `approval_markers` | Substrings indicating the CLI is waiting for an approval decision. | `supervisor::permission_prompt` approval-marker scan (reports only that a prompt is present) |
+| `live_prompt_markers` | The confirmation-question lead-in (`"do you want to"`) and the cancel footer (`"esc to cancel"`) that anchor a LIVE (not scrolled-away) permission prompt. Detection searches upward from the end of the capture, tolerating up to 13 non-blank trailing lines of non-prompt content (a task list, a status strip) below the modal — but once the anchor has shifted past the capture's true end, liveness there requires the modal's actual SHAPE: the footer anchoring the START of a line (not merely appearing anywhere in it) together with a numbered option line nearby. A bare confirmation question, or the footer text only mentioned mid-sentence (narration, grep-style tool output), cannot re-confirm liveness there — an already-answered prompt can leave either behind followed by ordinary output. | `supervisor::permission_prompt::is_live_prompt`, the `sweep.sh approve` re-confirm |
 | `mid_response_markers` | Substrings identifying a pane actively producing a response (its interrupt footer showing) rather than sitting at its input box. | `supervisor::drive::pane_is_mid_response` (unattended drive loop) |
 | `prompt_boilerplate_markers` | Lower-cased substrings marking a captured line as prompt boilerplate (the question / choices) rather than the command awaiting a decision. | `supervisor::manual_approvals` pattern extraction |
-| `command_header_markers` | Lead-in forms of a command-confirmation header — a whole-line header form (e.g. `"Bash command"`) or an inline-embedding form ending in `(` (e.g. `"Bash("`). | `supervisor::auto_approve::extract_command_slice` |
-| `file_prompt_pattern` | Regex source matching the lead-in of a filesystem-operation permission prompt, capturing the target path. | `supervisor::auto_approve::extract_path_from_file_prompt` |
-| `option_line_pattern` | Regex source matching a numbered option line (`"1. …"`, `"2) …"`) once leading decoration is stripped. | `supervisor::auto_approve::is_option_line` |
-| `broad_grant_marker` | Substring identifying a durable ("don't ask again") broad-grant option in a multi-option prompt. | `supervisor::auto_approve::detect_prompt_shape` |
+| `command_header_markers` | Lead-in forms of a command-confirmation header — a whole-line header form (e.g. `"Bash command"`) or an inline-embedding form ending in `(` (e.g. `"Bash("`). | `supervisor::permission_prompt::extract_command_slice` |
+| `file_prompt_pattern` | Regex source matching the lead-in of a filesystem-operation permission prompt, capturing the target path. | `supervisor::permission_prompt::extract_path_from_file_prompt` |
+| `option_line_pattern` | Regex source matching a numbered option line (`"1. …"`, `"2) …"`) once leading decoration is stripped. | `supervisor::permission_prompt::is_option_line` |
+| `broad_grant_marker` | Substring identifying a durable ("don't ask again") broad-grant option in a multi-option prompt. | The `sweep.sh approve` option-1 guard: if the prompt's first option carries this wording, pressing it would write a permanent permission rule, so the helper sends nothing. |
 | `input_sigils` | Prefixes identifying the CLI's input-box sigil (e.g. `">"`, `"❯"`). | `supervisor::drive::input_box_text` (stranded-input recovery) |
 | `mode_accept_edits_markers` | Substrings identifying an accept-edits / bypass-permissions mode footer. | `coordination::inventory::detect_mode` |
 | `mode_interactive_markers` | Substrings identifying a visible interactive prompt. | `coordination::inventory::detect_mode` |
@@ -84,20 +84,28 @@ differ, and add more once you observe a detection gap in practice.
 
 A prompt-shape profile describes what a CLI's terminal **looks like**. It
 has **no field** through which it could express what a command is
-**allowed to do**. The following stay compiled, are never read from any
-profile or config file, and cannot be widened by one:
+**allowed to do** — git-paw decides that for no command anyway. What a
+profile also cannot touch is the discipline around *sending* a keystroke.
+The following stay compiled (or mirrored in the bundled `sweep.sh`), are
+never read from a profile, and cannot be widened by one:
 
-- the danger-command list
-- protected-path / worktree-boundary rules
-- the arbitrary-code-runner / broad-grant eligibility rule
-- the approval send gate
+- the **live-prompt gate's** anchoring windows and trailing-region bound —
+  a profile supplies the marker text, never how far from the end of a
+  capture a prompt may sit and still count as live
+- the **approval send gate's** fresh-capture re-confirm
+- the **pane-0 refusal**, which holds whatever a capture contains
+- the **`sweep.sh approve` option-1 rule**: it always answers with option
+  `1` and never another digit. A profile's `broad_grant_marker` can only
+  make the helper refuse to send (by marking option 1 as a durable grant),
+  never make it press something else.
 
 This boundary exists because a profile is configuration a coding agent's own
 worktree can influence (via `.git-paw/config.toml`); if a profile could
-alter a permission decision, an agent could widen the very gate meant to
-constrain it. If you find yourself wanting a profile field to affect
-*whether* a command is approved rather than *how the prompt looks*, that is
-a sign that a compiled rule change is needed instead.
+alter where a keystroke lands or when one is allowed, an agent could widen
+the very gate meant to constrain it. If you find yourself wanting a profile
+field to affect *whether* or *where* a keystroke is sent rather than *how
+the prompt looks*, that is a sign that a compiled rule change is needed
+instead.
 
 ### Do not ship a guessed profile
 

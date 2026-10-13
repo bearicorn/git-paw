@@ -142,26 +142,6 @@ When the learnings aggregator is attached to a session, that mapping SHALL be po
 - **THEN** it SHALL record a `forward-conflict-cross-spec` entry
 - **AND** the rendered bullet SHALL name `003-user-list` and SHALL NOT render an empty spec id
 
-### Requirement: Permission-pattern signal
-
-When the supervisor's auto-approve subsystem records a hit (existing v0.4 behaviour: an `agent.status` message tagged `auto_approved` with a command-class label), the aggregator SHALL increment a counter keyed on the command class. At each flush AND at session end, the aggregator SHALL record one entry per command class with `count` ≥ a configurable threshold (default 5; lower-count classes produce no entry to avoid noise).
-
-Each recorded permission-pattern entry contributes one bullet to the markdown file's "Permission patterns" section at the next flush.
-
-#### Scenario: High-count command class produces an entry
-
-- **GIVEN** 23 auto-approve hits across the session for command class `cargo check`
-- **WHEN** the aggregator flushes
-- **THEN** a permission-pattern entry SHALL be recorded with `command_class = "cargo check"`, `count = 23`
-- **AND** a corresponding bullet SHALL be appended to the markdown file under "Permission patterns"
-
-#### Scenario: Low-count command class produces no entry
-
-- **GIVEN** 2 auto-approve hits for command class `git status`
-- **WHEN** the aggregator flushes
-- **THEN** no permission-pattern entry SHALL be recorded for that class
-- **AND** the counter is preserved across flushes (a later session burst could push the count over the threshold)
-
 ### Requirement: Markdown file output
 
 The aggregator SHALL maintain `.git-paw/session-learnings.md` in the repository root. The file SHALL be append-only:
@@ -467,10 +447,11 @@ caller (the skill documents the per-category body).
 #### Scenario: learn needs no broad curl grant
 
 - **GIVEN** the command `.git-paw/scripts/sweep.sh learn tooling_friction "t" '{}'`
-- **WHEN** the safe-command classifier evaluates it
-- **THEN** it SHALL classify as safe under the managed helper-script rule (the
-  script path `.git-paw/scripts/sweep.sh`)
-- **AND** no broad `curl *` whitelist entry SHALL be required to publish a learning
+- **WHEN** a learning is published that way
+- **THEN** the invocation SHALL begin with the stable helper path
+  `.git-paw/scripts/sweep.sh`, so a permission rule scoped to that exact path
+  can name it
+- **AND** no broad `curl *` grant SHALL be required to publish a learning
 
 ### Requirement: Tooling-friction qualitative category
 

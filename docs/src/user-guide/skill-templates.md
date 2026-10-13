@@ -92,14 +92,8 @@ don't ship an API-doc generator.
 
 ### Backend-aware and constant-driven placeholders
 
-Three more placeholders make the bundled supervisor skill polyglot:
+Two more placeholders make the bundled supervisor skill polyglot:
 
-- `{{DEV_ALLOWLIST_PRESET}}` — substitutes a prose enumeration of every
-  entry in the bundled `DEV_ALLOWLIST_PRESET` constant. Adding a new
-  entry to the constant changes the rendered output without a
-  skill-template edit. The supervisor skill wraps the placeholder in
-  `<!-- allowlist-prose -->` sentinel comments so the CI no-leak audit
-  can scope the legitimate stack-named enumerations out of its scan.
 - `{{SPEC_PATH_DOCTRINE}}` — substitutes a per-backend paragraph that
   names where specs live and the matching workflow. The variants:
   - OpenSpec: `openspec/changes/<change>/{proposal,specs,tasks}.md` plus

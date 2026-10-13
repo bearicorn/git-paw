@@ -47,7 +47,7 @@ The supervisor pane is also not a watch target, so the broker cannot infer its `
 
 The `CLI` column is populated for **every** agent row, not just the supervisor. git-paw knows each pane's CLI at launch and pre-fills it authoritatively — coding agents from the watch-target map (the per-repo session JSON), the supervisor from `[supervisor].cli`/`default_cli`. Agents do **not** self-report their CLI (they would only be guessing). A row appears once its pane publishes a status, and its `CLI` column shows the pre-filled value; if a CLI somehow can't be resolved it shows a `?` placeholder rather than a blank cell.
 
-A coding-agent row can also show `stuck-on-prompt` in its `Status` column: the bundled `sweep.sh` helper's stuck detector publishes this `phase` directly on the stalled agent's own `agent.status` when its pane shows a permission-prompt marker and its heartbeat has stopped advancing (see [Decision order](supervisor.md#decision-order)). This is the one coding-agent phase outside the generic working/done/blocked/committed set in [Status Symbols](#status-symbols) above.
+A coding-agent row can also show `stuck-on-prompt` in its `Status` column: the bundled `sweep.sh` helper's stuck detector publishes this `phase` directly on the stalled agent's own `agent.status` when its pane shows a permission-prompt marker and its heartbeat has stopped advancing (see [Agent permissions](supervisor.md#agent-permissions)). This is the one coding-agent phase outside the generic working/done/blocked/committed set in [Status Symbols](#status-symbols) above.
 
 ### The roster holds only real agents
 

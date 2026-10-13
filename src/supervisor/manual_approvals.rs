@@ -1,13 +1,13 @@
 //! Manual-approval pattern recording, aggregation, and promotion heuristic.
 //!
-//! Implements the `approval-pattern-surfacing` capability. When the user
-//! manually approves a command that the auto-approve preset did *not* match,
-//! that pattern is appended to a per-session JSONL log at
+//! Implements the `approval-pattern-surfacing` capability. Every live
+//! permission prompt the `--unattended` drive loop escalates for a human
+//! decision is appended to a per-session JSONL log at
 //! `.git-paw/sessions/<session>.manual-approvals.jsonl`. The
 //! `git paw approvals` subcommand (see `cmd_approvals` in `main.rs`) reads the
 //! log, aggregates by pattern, and suggests a promotion target so the user can
-//! decide which patterns deserve promotion to the bundled preset or the
-//! project-local allowlist.
+//! decide which patterns deserve an allow rule in their agent CLI's own
+//! settings — git-paw has no allowlist of its own to promote into.
 //!
 //! The module is split into three concerns, each independently testable:
 //!
@@ -15,8 +15,8 @@
 //!    in-memory [`SeenPatterns`] tracker that computes `first_seen`.
 //! 2. **Aggregation** — [`aggregate`] groups the log lines by pattern and
 //!    computes count + first/last seen.
-//! 3. **Heuristic** — [`suggest_target`] classifies a pattern as a
-//!    project-allowlist or bundled-preset candidate.
+//! 3. **Heuristic** — [`suggest_target`] classifies a pattern as a candidate
+//!    for the agent CLI's project-scoped or user-scoped allow rules.
 //!
 //! The learnings dispatch ([`permission_pattern_learning`]) builds the
 //! `agent.learning` record that the recording call site publishes on a
@@ -163,11 +163,17 @@ impl SeenPatterns {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Suggestion {
     /// The pattern looks project-specific (local script path, project name, or
-    /// branch name) — suggest adding it to the project allowlist.
+    /// branch name) — suggest adding it to the agent CLI's project-scoped
+    /// allow rules.
     ProjectAllowlist,
     /// The pattern looks general (`make <target>`, `pnpm <script>`, …) —
-    /// suggest it as a candidate for the bundled dev-allowlist preset.
-    BundledPresetCandidate,
+    /// suggest adding it to the agent CLI's user-scoped allow rules, which
+    /// apply across every project the user runs.
+    ///
+    /// There is no bundled git-paw preset to promote into: git-paw ships no
+    /// allowlist and approves no prompt, so the only place a pattern can stop
+    /// prompting is the CLI's own settings.
+    UserAllowlist,
 }
 
 impl Suggestion {
@@ -176,7 +182,7 @@ impl Suggestion {
     pub fn label(self) -> &'static str {
         match self {
             Self::ProjectAllowlist => "project allowlist",
-            Self::BundledPresetCandidate => "bundled preset candidate",
+            Self::UserAllowlist => "user allowlist",
         }
     }
 
@@ -185,7 +191,7 @@ impl Suggestion {
     pub fn json_value(self) -> &'static str {
         match self {
             Self::ProjectAllowlist => "project-allowlist",
-            Self::BundledPresetCandidate => "bundled-preset",
+            Self::UserAllowlist => "user-allowlist",
         }
     }
 }
@@ -200,9 +206,11 @@ impl Suggestion {
 /// - the `branch_name` appears as a substring (when non-empty),
 /// - the `worktree_root` path appears as a substring (when provided).
 ///
-/// Otherwise the pattern looks general and is suggested as a **bundled preset
-/// candidate**. The checks are intentionally permissive (substring matches);
-/// the suggestion is a starting point for the user.
+/// Otherwise the pattern looks general and is suggested for the **user
+/// allowlist** — the agent CLI's user-scoped rules, which apply across every
+/// project. The checks are intentionally permissive (substring matches); the
+/// suggestion is a starting point for the user, who acts on it in that CLI's
+/// own settings.
 #[must_use]
 pub fn suggest_target(
     pattern: &str,
@@ -226,7 +234,7 @@ pub fn suggest_target(
             return Suggestion::ProjectAllowlist;
         }
     }
-    Suggestion::BundledPresetCandidate
+    Suggestion::UserAllowlist
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +374,7 @@ fn is_env_name_char(c: char) -> bool {
 ///
 /// 1. The prompted command slice — the text between the `Bash command` /
 ///    `Bash(` header and the confirmation question
-///    ([`extract_command_slice`](super::auto_approve::extract_command_slice)).
+///    ([`extract_command_slice`](super::permission_prompt::extract_command_slice)).
 /// 2. Failing that, a recognised file-operation prompt's target path (reusing
 ///    the auto-approve file-prompt extractor).
 ///
@@ -377,8 +385,8 @@ fn is_env_name_char(c: char) -> bool {
 /// spurious pattern is recorded.
 #[must_use]
 pub fn extract_forwarded_pattern(captured: &str) -> Option<String> {
-    super::auto_approve::extract_command_slice(captured)
-        .or_else(|| super::auto_approve::extract_path_from_file_prompt(captured))
+    super::permission_prompt::extract_command_slice(captured)
+        .or_else(|| super::permission_prompt::extract_path_from_file_prompt(captured))
         .map(|pattern| pattern.trim().to_string())
         .filter(|pattern| parses_as_command(pattern))
 }
@@ -610,7 +618,7 @@ mod tests {
     /// One row per promotion-heuristic signal: any project-specific signal (a
     /// `./` token, a project-name / branch-name / worktree-root substring, or a
     /// tie of several) resolves to the project allowlist; an otherwise-general
-    /// command falls through to the bundled-preset candidate. Empty
+    /// command falls through to the user allowlist. Empty
     /// project/branch signals must not false-match every pattern.
     #[test]
     fn suggest_target_classifies_each_signal() {
@@ -628,7 +636,7 @@ mod tests {
                 "myproj",
                 "feat/auth",
                 None,
-                Suggestion::BundledPresetCandidate,
+                Suggestion::UserAllowlist,
             ),
             (
                 "myproj-cli --build",
@@ -658,7 +666,7 @@ mod tests {
                 None,
                 Suggestion::ProjectAllowlist,
             ),
-            ("npm test", "", "", None, Suggestion::BundledPresetCandidate),
+            ("npm test", "", "", None, Suggestion::UserAllowlist),
         ] {
             assert_eq!(
                 suggest_target(pattern, project, branch, root),
@@ -749,7 +757,7 @@ mod tests {
             "feat/a",
             "make integration-test",
             1,
-            Suggestion::BundledPresetCandidate,
+            Suggestion::UserAllowlist,
             Some("claude"),
             SystemTime::UNIX_EPOCH,
         );
@@ -759,7 +767,7 @@ mod tests {
         assert_eq!(payload.category, CATEGORY_PERMISSION_PATTERN);
         assert_eq!(payload.body["pattern"], "make integration-test");
         assert_eq!(payload.body["count_so_far"], 1);
-        assert_eq!(payload.body["suggested_target"], "bundled-preset");
+        assert_eq!(payload.body["suggested_target"], "user-allowlist");
         assert_eq!(payload.body["cli"], "claude");
     }
 

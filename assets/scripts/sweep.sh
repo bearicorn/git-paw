@@ -17,9 +17,12 @@
 #   capture <pane>                      — single-pane full tail-50 capture
 #   approve <pane>                      — take the pane's exclusive approval claim,
 #                                         re-confirm live prompt on a fresh capture,
-#                                         then send the resolved option digit + Enter
-#                                         (option-index selection); refuses pane 0 and
-#                                         skips a pane another approver has claimed
+#                                         then answer it ONCE with option 1 + Enter;
+#                                         judges no command, never selects a durable
+#                                         grant; refuses pane 0 and skips a pane
+#                                         another approver has claimed. Run only by a
+#                                         human, or by the orchestrator on the human's
+#                                         explicit instruction
 #   status [--all]                      — broker /status, phantoms filtered by default
 #   worktrees-status                    — uncommitted-file count per agent worktree
 #   inbox                               — agent.question/feedback/blocked from supervisor inbox
@@ -255,27 +258,27 @@ STUCK_DEDUP_FILE="${PAW_DIR}/.sweep-stuck-dedup"
 # 4-line tail (block window: last 15 non-blank lines) at the capture's true
 # end. Detection also searches upward over a bounded trailing region above
 # that end -- see is_live_capture below for the full anchored-search and
-# footer-shape discipline. Sourced from the resolved profile so `approve` /
-# `classify` agree with the in-tool auto-approver
-# (src/supervisor/auto_approve.rs) on what "live" means.
+# footer-shape discipline. Sourced from the resolved profile so this helper
+# and the compiled detector (src/supervisor/permission_prompt.rs) agree on
+# what "live" means.
 LIVE_PROMPT_MARKERS_REGEX=$(discover_prompt_profile_field live_prompt_markers \
   'do you want to|esc to cancel')
 # Widest number of trailing non-blank lines of non-prompt content (a task
 # list, a status strip, a progress footer) tolerated between a modal's own
 # footer and the end of the capture. Mirrors LIVE_PROMPT_TRAILING_BOUND in
-# src/supervisor/auto_approve.rs -- keep both in lockstep.
+# src/supervisor/permission_prompt.rs -- keep both in lockstep.
 LIVE_PROMPT_TRAILING_BOUND=10
 # Marker drawn only while a modal is actively live -- never left behind by an
 # already-answered prompt -- so it is the only marker allowed to anchor a
 # match at a bounded offset above the capture's end. Mirrors
-# LIVE_PROMPT_FOOTER_MARKERS in src/supervisor/auto_approve.rs: a bare
+# LIVE_PROMPT_FOOTER_MARKERS in src/supervisor/permission_prompt.rs: a bare
 # confirmation question on its own must NOT extend past the narrow 4-line
 # tail, or an answered prompt followed by ordinary command output would
 # misread as live.
 LIVE_PROMPT_FOOTER_REGEX='esc to cancel'
 # Anchored form of the marker above: must START the line (once leading TUI
 # decoration and an optional open-paren are skipped), not merely appear
-# ANYWHERE in it. Mirrors is_footer_line in src/supervisor/auto_approve.rs.
+# ANYWHERE in it. Mirrors is_footer_line in src/supervisor/permission_prompt.rs.
 # Gate-review safety finding: a bare substring check at a bounded offset
 # above the capture's end also fires on narration ("the footer reads \"Esc to
 # cancel\" below it") or grep-style output that happens to echo the marker
@@ -288,14 +291,25 @@ LIVE_PROMPT_FOOTER_LINE_REGEX="^[[:space:]│─╭╮╰╯├┤┐└┘┌�
 # terminal-rendering detail shared by every CLI, not vendor prompt shape, so
 # it stays here; the digit/punctuation shape itself comes from the resolved
 # profile's option_line_pattern (mirrors strip_decoration + is_option_line in
-# src/supervisor/auto_approve.rs).
+# src/supervisor/permission_prompt.rs).
 _option_line_digit=$(discover_prompt_profile_field option_line_pattern '^[0-9][.)]')
 LIVE_PROMPT_OPTION_REGEX="^[[:space:]│─╭╮╰╯├┤┐└┘┌⎿❯●•*·]*${_option_line_digit#^}"
+# The same shape anchored on option ONE specifically. cmd_approve presses `1`,
+# so `1` is the only line whose wording it may act on -- matching any numbered
+# line would let it clear a prompt after inspecting option 2 or 3. Derived by
+# narrowing the profile pattern's digit class; if the override has no `[0-9]`
+# to narrow, fall back to a compiled literal rather than silently reusing the
+# any-digit pattern.
+_option_one_digit=${_option_line_digit//\[0-9\]/1}
+if [[ "${_option_one_digit}" == "${_option_line_digit}" ]]; then
+  _option_one_digit='^1[.)]'
+fi
+LIVE_PROMPT_OPTION_ONE_REGEX="^[[:space:]│─╭╮╰╯├┤┐└┘┌⎿❯●•*·]*${_option_one_digit#^}"
 unset _option_line_digit
 # The CLI's composer/input-line sigils (e.g. `>`, `❯`), sourced from the
 # resolved profile's input_sigils. A line carrying one of these with no
 # option-line text following it is a CANDIDATE idle input box -- mirrors
-# is_idle_input_box_line in src/supervisor/auto_approve.rs. Gate-review safety
+# is_idle_input_box_line in src/supervisor/permission_prompt.rs. Gate-review safety
 # finding: a real live modal REPLACES the input box while it is up, so an idle
 # input-box line appearing below a shape-gated footer match (e.g. the
 # supervisor's own pane echoing another pane's modal via `sweep.sh capture`,
@@ -308,6 +322,25 @@ unset _option_line_digit
 # another rule line, then the mode strip. A borderless sigil line only counts
 # as the input box when the line immediately above it is a pure rule line
 # (see is_idle_input_box_line); a bordered line always counts.
+# Durable-grant markers (the "and do not ask again" option wording).
+# cmd_approve refuses to press an option 1 that carries one, because that
+# answer writes a permanent permission rule the human did not ask for.
+#
+# TWO regexes, checked as OR, and that is deliberate. The profile-sourced one
+# carries the resolved CLI wording; `git paw __prompt-profile` already renders
+# its apostrophe as a both-forms character class, so the terminal may draw
+# either an ASCII apostrophe or the Unicode right single quote. But a profile
+# is operator-supplied data: an override NARROWING the marker to something
+# that never matches would disarm the guard entirely. So a compiled fallback
+# is ALWAYS checked alongside it -- a profile can widen what counts as a
+# durable grant, never shrink it. That is the fail-closed direction.
+#
+# The compiled fallback is punctuation-free on purpose: this file must stay
+# free of apostrophes, which desync quoting inside its `$(cat <<'PY' ... )`
+# heredocs.
+BROAD_GRANT_MARKER_REGEX=$(discover_prompt_profile_field broad_grant_marker 'ask again')
+BROAD_GRANT_COMPILED_REGEX='ask again'
+
 INPUT_SIGILS_REGEX=$(discover_prompt_profile_field input_sigils '>|❯')
 INPUT_BOX_LINE_REGEX="^[[:space:]]*│?[[:space:]]*(${INPUT_SIGILS_REGEX})"
 RULE_LINE_REGEX='^[─━═-]+$'
@@ -375,13 +408,14 @@ usage: $0 <subcommand> [args]
 
   snapshot                            capture-pane tail of every coding-agent pane
   capture <pane>                      single-pane full tail-50 capture
-  approve <pane>                      re-confirm live prompt on a fresh capture, then send
-                                      the resolved option digit + Enter; refuses pane 0;
-                                      skips a pane another approver has claimed
+  approve <pane>                      re-confirm live prompt on a fresh capture, then
+                                      answer it once with option 1 + Enter; judges no
+                                      command and never selects a durable grant;
+                                      refuses pane 0; skips a pane another approver
+                                      has claimed
   detect-stuck                        flag stuck agents (prompt/stream-timeout/bloat/no-progress/blocked)
   stuck-eval <agent> <last_seen> [checkbox_count] [commit_count] [blocked_age]
                                       (stdin: capture) run the stuck decision for one agent
-  classify [worktree-root]            (stdin: capture) auto-approve classification (escalate/approve/no-op)
   status [--all]                      broker /status, one line per agent (phantoms filtered)
   worktrees-status                    uncommitted-file count per agent worktree
   inbox                               supervisor inbox payloads (question/feedback/blocked)
@@ -539,8 +573,9 @@ cmd_approve() {
     return 0
   fi
   # Take the pane's exclusive claim before doing anything else that could send
-  # keys. git-paw's drive loop honours the same claim, so a pane it is already
-  # approving is left alone here (and vice versa) rather than approved twice.
+  # keys. git-paw's drive loop honours the same claim for its nudge and
+  # buffered-input sends, so this helper and the loop never type into the same
+  # pane at once.
   local claim
   claim=$(claim_path "${pane}")
   if ! acquire_pane_claim "${claim}"; then
@@ -548,31 +583,50 @@ cmd_approve() {
     return 0
   fi
   # Re-confirm a live permission prompt on a FRESH capture taken immediately
-  # before sending keys (structural markers at the tail), and resolve the
-  # option index from that same capture: run_classifier's RESOLVE_OPTION mode
-  # delegates to `git paw __classify --resolve-option`, so the index is the one
-  # the in-tool auto-approver would select — the same classifier decides both.
-  # If the prompt cleared between the decision and now, or the classifier
-  # produced no verdict, send NOTHING (no stray digits into the agent's CLI).
-  local cap opt rc=0
+  # before sending keys (structural markers at the tail). If the prompt cleared
+  # between the human deciding and now, send NOTHING -- a stray digit would
+  # land in the agent's input box.
+  local cap
   cap=$(tmux capture-pane -t "${SESSION}:0.${pane}" -p -S -50 2>/dev/null | tail -50)
-  opt=$(printf '%s' "${cap}" | run_classifier "${PROJECT_ROOT}" resolve) || rc=$?
-  if [[ ${rc} -ne 0 ]]; then
-    if [[ ${rc} -eq 3 ]]; then
-      echo "classifier produced no verdict, no keys sent (pane ${pane})"
-    else
-      echo "cleared before send, no keys sent (pane ${pane})"
-    fi
+  if ! is_live_capture "${cap}"; then
+    echo "cleared before send, no keys sent (pane ${pane})"
     return 0
   fi
-  # Dispatch the resolved option digit + Enter as two separate keystrokes —
-  # never a blind cursor-movement sequence, whose landing option depends on
-  # the prompt shape (Down+Enter selects "No" on a 2-option prompt and the
-  # permanent broad grant on a 3-option one).
-  tmux send-keys -t "${SESSION}:0.${pane}" "${opt}" >/dev/null 2>&1
+  # Answer ONCE, with option 1. This helper judges no command -- the decision
+  # to approve came from the human who ran it. Two guards stand between that
+  # decision and the keystroke:
+  #   1. option 1 must actually be on screen;
+  #   2. option 1 must not itself read as a durable grant. On some prompt
+  #      shapes the first option is "Yes, and do not ask again ...", and
+  #      pressing it would write a permanent permission rule into the agent
+  #      CLI's settings. git-paw never creates one of those on its own.
+  #
+  # Match option ONE specifically, and take the LAST such line in the capture.
+  # The live modal is the bottom-most thing on screen, so its option 1 is the
+  # last one; an earlier answered modal higher up cannot stand in for it. A
+  # fixed-size window would be wrong here -- the live gate tolerates up to 13
+  # trailing chrome lines, so a wrapped multi-option modal plus chrome can push
+  # option 1 out of any fixed tail, and the guard would then inspect option 2
+  # or 3 and clear a durable grant.
+  local opt1
+  opt1=$(grep -E "${LIVE_PROMPT_OPTION_ONE_REGEX}" <<<"${cap}" | tail -1)
+  if [[ -z "${opt1}" ]]; then
+    echo "no option 1 on screen, no keys sent (pane ${pane})"
+    return 0
+  fi
+  if grep -Eqi "${BROAD_GRANT_MARKER_REGEX}" <<<"${opt1}" \
+    || grep -Eqi "${BROAD_GRANT_COMPILED_REGEX}" <<<"${opt1}"; then
+    echo "option 1 reads as a durable grant, no keys sent (pane ${pane})"
+    return 0
+  fi
+  # Dispatch the digit and Enter as two separate keystrokes -- never a blind
+  # cursor-movement sequence, whose landing option depends on the prompt shape
+  # (Down+Enter selects "No" on a 2-option prompt and the permanent broad
+  # grant on a 3-option one).
+  tmux send-keys -t "${SESSION}:0.${pane}" 1 >/dev/null 2>&1
   sleep 0.05
   tmux send-keys -t "${SESSION}:0.${pane}" Enter >/dev/null 2>&1
-  echo "approved pane ${pane} (option ${opt})"
+  echo "approved pane ${pane} (option 1)"
 }
 
 cmd_status() {
@@ -1493,26 +1547,8 @@ cmd_stuck_eval() {
   printf '%s' "${cap}" | stuck_eval "${agent}" "${last_seen}" "${checkbox}" "${commit}" "${blocked_age}"
 }
 
-# Auto-approve classification. The classification RULES are not implemented
-# here: sweep.sh obtains its verdict by delegating to the hidden
-# `git paw __classify` subcommand, which runs git-paw's one Rust classifier
-# (src/supervisor/auto_approve.rs + classify_prompt in drive.rs) over the same
-# resolved whitelist, protected-path set and worktree-write policy the in-tool
-# auto-approver uses. No parallel implementation is left here to drift.
-#
-# Reads a pane capture on stdin; takes an optional worktree root (defaults to
-# the project root) forwarded to the worktree-confined rules. Prints one of:
-#   no-op (not live)
-#   escalate (danger|unknown)
-#   escalate (classifier unavailable)
-#   approve option=<N> (safe)
-cmd_classify() {
-  local root=${1:-${PROJECT_ROOT}}
-  run_classifier "${root}" ""
-}
-
 # Live-prompt gate (arg 1: the pane capture). Structural mirror of
-# live_prompt_markers_at_tail in src/supervisor/auto_approve.rs: anchors on
+# live_prompt_markers_at_tail in src/supervisor/permission_prompt.rs: anchors on
 # the modal block by searching upward from the end of the non-blank lines,
 # tolerating up to LIVE_PROMPT_TRAILING_BOUND trailing non-prompt lines (a
 # task list, a status strip, a progress footer) so a CLI that renders chrome
@@ -1545,9 +1581,8 @@ cmd_classify() {
 # the capture's true end -- a real live modal replaces the input box while it
 # is up, so seeing one below a footer means the footer is quoted/historical.
 #
-# Prompt DETECTION stays in the helper; only CLASSIFICATION moved to
-# `git paw __classify`. This gate runs BEFORE any delegation, so a pane with
-# no live prompt costs no subprocess and can never be approved.
+# This gate runs BEFORE any keystroke, so a pane with no live prompt can
+# never be typed into.
 
 # True when $1 is the CLI's idle input-box line, recognising BOTH shapes: a
 # `│`-bordered composer line, or a borderless composer line framed by a
@@ -1555,7 +1590,7 @@ cmd_classify() {
 # current Claude Code's real shape, ground-truthed against a live
 # `tmux capture-pane -p`). Either way, a numbered option line is never read as
 # the input box (the same selection-caret sigil also prefixes option lines).
-# Mirrors is_idle_input_box_line in src/supervisor/auto_approve.rs.
+# Mirrors is_idle_input_box_line in src/supervisor/permission_prompt.rs.
 is_idle_input_box_line() {
   local line="${1}" preceding="${2:-}"
   grep -Eq "${INPUT_BOX_LINE_REGEX}" <<<"${line}" || return 1
@@ -1640,62 +1675,6 @@ is_live_capture() {
   return 1
 }
 
-# Shared classifier invocation (stdin: pane capture). $1 = worktree root,
-# $2 = non-empty to run the approve-path RESOLVE_OPTION mode: liveness on the
-# fresh capture plus option-index resolution only -- prints the resolved option
-# digit (exit 0), or nothing when the prompt cleared (exit 1) or the classifier
-# produced no verdict (exit 3).
-#
-# Both `classify` and `approve` run this one function, and both take their
-# verdict from `git paw __classify`, so the classification and the
-# broad-grant rule cannot drift between them or from the in-tool
-# auto-approver -- there is one implementation, not two that agree. The
-# live-prompt gate above is the exception: it is still a bash mirror of the
-# Rust gate, kept honest by tests/sweep_sh_live_gate_parity.rs rather than by
-# construction.
-#
-# FAIL CLOSED: a missing `git paw` binary, an unrecognised subcommand, or any
-# other error yields no verdict -- the prompt escalates and is NEVER
-# auto-approved.
-run_classifier() {
-  local root=$1 resolve=${2:-} cap verdict class opt
-  cap=$(cat)
-
-  if ! is_live_capture "${cap}"; then
-    if [[ -n "${resolve}" ]]; then
-      return 1
-    fi
-    echo "no-op (not live)"
-    return 0
-  fi
-
-  local -a classify_args=(__classify --worktree-root "${root}")
-  if [[ -n "${resolve}" ]]; then
-    classify_args+=(--resolve-option)
-  fi
-  verdict=$(printf '%s' "${cap}" | git paw "${classify_args[@]}" 2>/dev/null)
-
-  if [[ -n "${resolve}" ]]; then
-    read -r opt <<<"${verdict}"
-    if [[ -z "${opt}" ]]; then
-      return 3
-    fi
-    printf '%s\n' "${opt}"
-    return 0
-  fi
-
-  read -r class opt <<<"${verdict}"
-  if [[ -z "${class}" || -z "${opt}" ]]; then
-    echo "escalate (classifier unavailable)"
-    return 0
-  fi
-  case "${class}" in
-    safe) echo "approve option=${opt} (safe)" ;;
-    danger) echo "escalate (danger)" ;;
-    *) echo "escalate (unknown)" ;;
-  esac
-}
-
 main() {
   local sub=${1:-}
   shift || true
@@ -1706,7 +1685,6 @@ main() {
     status) cmd_status "$@" ;;
     detect-stuck) cmd_detect_stuck "$@" ;;
     stuck-eval) cmd_stuck_eval "$@" ;;
-    classify) cmd_classify "$@" ;;
     worktrees-status) cmd_worktrees_status "$@" ;;
     inbox) cmd_inbox "$@" ;;
     feedback-gate) cmd_feedback_gate "$@" ;;

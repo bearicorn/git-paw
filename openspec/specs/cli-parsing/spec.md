@@ -774,7 +774,7 @@ Init invocations SHALL be idempotent: running `git paw init` a second time on a 
 
 The `start` subcommand SHALL accept an `--unattended` flag (boolean, default `false`). When passed, the parsed `StartArgs` SHALL have `unattended: bool` set to `true`. When omitted, `unattended` SHALL be `false`.
 
-The flag SHALL appear in `git paw start --help` output with a description naming the use case: run a supervisor wave to completion with no human babysitting (auto-approve classifier-safe prompts, escalate the rest for later review, detect completion, exit with a summary).
+The flag SHALL appear in `git paw start --help` output with a description naming the use case: drive a supervisor wave to completion in-process (escalate every permission prompt for a human decision without blocking the rest of the wave, detect completion, exit with a summary). The help text SHALL NOT claim that the flag approves prompts, and its long help SHALL state that prompt-free unattended runs need the agent CLI's own allow rules or the `full-auto` approval level inside a sandbox.
 
 `--unattended` engages supervisor mode: when `--unattended` is passed, the supervisor-mode resolution chain SHALL resolve supervisor mode active (equivalent to `--supervisor`) so the dispatch routes to the supervisor launch path. `--unattended` MAY be combined with `--supervisor`, `--from-all-specs` (and its alias `--from-specs`), `--specs`, `--cli`, and `--branches`.
 
@@ -805,7 +805,8 @@ The flag SHALL appear in `git paw start --help` output with a description naming
 
 - **WHEN** `git paw start --help` is run
 - **THEN** the output SHALL contain `--unattended`
-- **AND** the output SHALL describe the flag as running the wave to completion without human babysitting
+- **AND** the output SHALL describe the flag as driving the wave to completion and escalating permission prompts
+- **AND** the output SHALL NOT describe the flag as auto-approving prompts
 
 #### Scenario: --unattended engages supervisor mode
 

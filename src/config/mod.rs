@@ -663,10 +663,66 @@ pub(crate) fn load_config_file(path: &Path) -> Result<Option<PawConfig>, PawErro
             for warning in worktree_runtime_warnings(&config) {
                 eprintln!("warning: {}: {warning}", path.display());
             }
+            if let Some(warning) = deprecated_table_warning(&config)
+                && warn_once_for(path)
+            {
+                eprintln!("warning: {}: {warning}", path.display());
+            }
             Ok(Some(config))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(PawError::ConfigError(format!("{}: {e}", path.display()))),
+    }
+}
+
+/// Names the deprecated auto-approval tables a configuration declares, or
+/// `None` when it declares neither.
+///
+/// `[supervisor.auto_approve]` and `[supervisor.common_dev_allowlist]` still
+/// parse so an older configuration loads and round-trips unchanged, but
+/// nothing consumes them: git-paw approves no permission prompt. The warning
+/// says so and tells the user what to do instead.
+///
+/// Pure, and separate from the printing, so the wording is unit-testable
+/// without capturing stderr.
+#[must_use]
+pub fn deprecated_table_warning(config: &PawConfig) -> Option<String> {
+    let supervisor = config.supervisor.as_ref()?;
+    let mut declared: Vec<&str> = Vec::new();
+    if supervisor.auto_approve.is_some() {
+        declared.push("[supervisor.auto_approve]");
+    }
+    if supervisor.common_dev_allowlist.is_some() {
+        declared.push("[supervisor.common_dev_allowlist]");
+    }
+    if declared.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} {} deprecated and {} no effect (git-paw no longer approves \
+         permission prompts); remove {}. To stop routine commands prompting, \
+         use your agent CLI's own allow rules",
+        declared.join(", "),
+        if declared.len() == 1 { "is" } else { "are" },
+        if declared.len() == 1 { "has" } else { "have" },
+        if declared.len() == 1 { "it" } else { "them" },
+    ))
+}
+
+/// Returns whether the deprecation warning for `path` has not been printed
+/// yet in this process, recording it as printed.
+///
+/// Several subcommands load the same configuration more than once in a single
+/// run, so without this the user would see the same line two or three times
+/// for one file (design D7).
+fn warn_once_for(path: &Path) -> bool {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    let seen = SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    match seen.lock() {
+        Ok(mut set) => set.insert(path.to_path_buf()),
+        // A poisoned lock must not silence the warning.
+        Err(_) => true,
     }
 }
 
@@ -1051,23 +1107,6 @@ worktree_placement = "child"
 # warn_on_intent_overlap = true # emit feedback when two agent.intent declarations overlap
 # escalate_on_violation = true  # also publish agent.question to supervisor on ownership violations
 #
-# Auto-approve known-safe permission prompts in stalled agent panes so the
-# supervisor need not dismiss each by hand. The whitelist is composed from
-# stack-neutral built-ins plus the [supervisor.common_dev_allowlist] stacks /
-# extra patterns below (declare your toolchain there — e.g. stacks = ["rust"]
-# makes `cargo test` auto-approve). `approval_level` is a coarse preset
-# ("off" | "conservative" | "safe"); `safe_commands` are extra prefixes
-# appended to the composed whitelist; `stall_threshold_seconds` is the
-# last_seen lag before a stalled pane is polled (minimum 5);
-# `approve_worktree_writes` auto-approves file writes whose target resolves
-# inside the agent's worktree.
-# [supervisor.auto_approve]
-# enabled = true
-# safe_commands = ["just lint", "just test"]
-# stall_threshold_seconds = 30
-# approval_level = "safe"
-# approve_worktree_writes = true
-#
 # Learnings subsystem flush cadence. The master switch is the `learnings`
 # field on [supervisor] above; this sub-table only tunes the flush. Set
 # broker_publish = "force_off" to keep file-only output even when the broker
@@ -1090,16 +1129,6 @@ worktree_placement = "child"
 # max_cycles = 5
 # on_exhausted = "escalate"  # one of: "escalate", "abandon"
 # escalate_after_cycles = 3
-
-# Common dev-command allowlist. The universal preset (non-destructive git
-# verbs + find / grep / sed -n) is always composed into the supervisor's
-# auto-approve whitelist and its rendered skill guidance, so agents do not
-# hit a permission prompt for each variant. Opt into a toolchain's curated
-# patterns with stacks (named presets: rust / node / python / go); extend
-# with project-specific prefixes via extra.
-# [supervisor.common_dev_allowlist]
-# stacks = ["rust"]
-# extra = ["just", "mdbook build", "openspec validate"]
 
 # opsx (OpenSpec) role gating. When the session's spec engine is OpenSpec,
 # git-paw's post-commit guard detects archive activity (`/opsx:archive` /

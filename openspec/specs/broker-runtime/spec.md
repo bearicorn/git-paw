@@ -588,9 +588,9 @@ When `[broker] enabled = true` in config, the `start` flow SHALL insert a dashbo
 - **Bare `git paw start` and `git paw start --from-specs` (no supervisor):** dashboard at pane 0; coding agent panes start at pane 1. Same as v0.4.
 - **`git paw start --supervisor` (or `--from-specs --supervisor`):** dashboard at pane 1; supervisor agent at pane 0; coding agent panes start at pane 2. Updated in this change per the new supervisor-as-pane layout.
 
-When `[broker] enabled = false` (or absent), the start flow SHALL behave identically to v0.2.0 with no dashboard pane (and supervisor mode is not meaningful since auto-approve, dashboard, and broker-status all require the broker).
+When `[broker] enabled = false` (or absent), the start flow SHALL behave identically to v0.2.0 with no dashboard pane (and supervisor mode is not meaningful since the dashboard, broker status, and the drive loop's escalations all require the broker).
 
-The dashboard pane is in both cases a non-interactive TUI process; it does NOT receive a `tmux send-keys` boot block injection.
+The dashboard pane is in both cases a non-interactive TUI process; it does NOT receive a `tmux send-keys` boot block injection, and it sends no keystrokes to any other pane.
 
 #### Scenario: Broker enabled in bare-start mode adds dashboard as pane 0
 
@@ -747,27 +747,6 @@ When a session is active and has broker fields in its state, `git paw status` SH
 - **WHEN** `git paw status` is executed in repository B
 - **THEN** the broker line SHALL say the port is held by another repository
 - **AND** the output SHALL NOT report the broker as running
-
-### Requirement: Auto-approve thread location in dashboard subprocess
-
-When supervisor mode is active AND `[supervisor.auto_approve] enabled = true`, the auto-approve poll thread SHALL run inside the dashboard's `__dashboard` subprocess (the long-lived process running in the dashboard pane), NOT inside the `cmd_supervisor` process (which returns immediately after launching the session per the new supervisor-as-pane architecture).
-
-The auto-approve thread's responsibilities are unchanged: poll `/status` every `stall_threshold_seconds`, capture stalled panes, classify pending commands, dispatch approve keystrokes for safe commands, escalate unknowns via `agent.question`. Only the host process changes.
-
-#### Scenario: Auto-approve thread runs inside the dashboard subprocess
-
-- **GIVEN** an active supervisor mode session with auto-approve enabled
-- **WHEN** the dashboard's `__dashboard` subprocess starts
-- **THEN** it spawns the auto-approve poll thread alongside the broker + TUI rendering
-- **AND** `cmd_supervisor` SHALL NOT spawn a parallel auto-approve thread
-
-#### Scenario: Auto-approve thread terminates when dashboard pane is killed
-
-- **GIVEN** an active supervisor mode session with auto-approve running
-- **WHEN** the user kills the dashboard pane (via `tmux kill-pane` or pane exit)
-- **THEN** the `__dashboard` subprocess exits
-- **AND** the auto-approve thread terminates with it
-- **AND** the broker shuts down (per the existing "Stop flow" requirement)
 
 ### Requirement: Pause flow detaches client and stops broker without killing tmux
 

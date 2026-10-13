@@ -150,25 +150,31 @@ verification worktree never appears in the parent worktree's status.
 
 When the supervisor's boot context indicates a drive loop is running (an unattended session), the supervisor SHALL, each supervision cycle:
 
-1. **Drain the drive loop's escalations first** — read the loop's escalation/review items from its broker inbox, reason about each, and either targeted-approve the specific escalated pane or publish feedback. This precedes the rest of the sweep so agents blocked on a prompt the loop could not classify safe are unblocked fastest.
+1. **Drain the drive loop's escalations first.** Read the loop's escalation and review items from its broker inbox and act on each before the rest of the sweep. For a permission prompt, relay it to the human (in the supervisor's own pane, naming the agent and the command) and approve it with `sweep.sh approve <pane>` only when the human explicitly says so. For any other item, reason about it and publish feedback or an answer.
 2. **Then perform its normal sweep** — verification, merge orchestration, conflict handling, detect-stuck, and status publishing — as it otherwise would.
 
-While a drive loop is running, the supervisor SHALL NOT blanket-approve classifier-safe prompts by sweeping panes: the loop owns safe-prompt approval, and the supervisor acts only on prompts the loop escalated. This keeps the two approvers' actions disjoint (see `unattended-operation`) and removes the approval-dispatch race.
-
-When no drive loop is running (an attended supervisor session), the supervisor performs the full sweep INCLUDING approving classifier-safe prompts, as its sole-approver role requires — this preserves existing attended behaviour.
+Whether or not a drive loop is running, the supervisor SHALL NOT approve a permission prompt on its own judgment of the command's safety, and SHALL NOT sweep panes to approve prompts in bulk. In an attended session (no drive loop) it finds stuck-on-prompt agents through its own `sweep.sh detect-stuck` sweep and relays their prompts to the human in the same way.
 
 #### Scenario: With a loop running, escalations are handled before the sweep
 
 - **GIVEN** a supervisor whose boot context indicates a drive loop is running
 - **WHEN** it runs a supervision cycle
-- **THEN** it SHALL process the loop's escalations (targeted approve / feedback) before its verify/merge/status sweep
-- **AND** SHALL NOT blanket-approve classifier-safe prompts by sweeping panes
+- **THEN** it SHALL process the loop's escalations before its verify/merge/status sweep
+- **AND** SHALL relay each escalated permission prompt to the human rather than approving it
 
-#### Scenario: With no loop, the supervisor approves safe prompts itself
+#### Scenario: An approval follows an explicit human instruction
+
+- **GIVEN** the supervisor has relayed agent `feat-a`'s permission prompt to the human
+- **WHEN** the human tells the supervisor to approve it
+- **THEN** the supervisor SHALL run `sweep.sh approve <pane>` for `feat-a`'s pane
+- **AND** without such an instruction it SHALL NOT run `sweep.sh approve`
+
+#### Scenario: With no loop, the supervisor still does not approve on its own
 
 - **GIVEN** a supervisor whose boot context does NOT indicate a drive loop
-- **WHEN** it sweeps the panes
-- **THEN** it SHALL approve classifier-safe prompts itself as the sole approver
+- **WHEN** its sweep finds an agent stuck on a permission prompt
+- **THEN** it SHALL relay the prompt to the human
+- **AND** SHALL NOT approve it on its own judgment
 
 ### Requirement: Stream-timeout recovery section in supervisor skill
 
@@ -489,7 +495,6 @@ rather than a fail-fast-prone default.
 - **THEN** `{{TEST_COMMAND}}` SHALL resolve to `just verify` (the
   no-fail-fast, guard-neutralised recipe)
 
-
 ### Requirement: /agents inventory command in the supervisor pane
 
 The supervisor SHALL recognise an `/agents` directive typed in its
@@ -751,3 +756,4 @@ into another agent CLI.
   user-typed prompt, (b) inventory lookup, and (c) the chosen
   delivery (broker publish OR `tmux send-keys`), with no agent
   CLI process spawned to produce the prompt content
+

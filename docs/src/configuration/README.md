@@ -521,10 +521,9 @@ command = "claude"
 # paste, then sends Enter separately. Default suits most CLIs; raise it
 # for a CLI whose large-paste handling needs longer before submit lands.
 submit_delay_ms = 1500
-# Path to this CLI's claude-format settings file. git-paw does not write to
-# this file; its parent directory joins the agent-memory-isolation
-# protected-path set (below), so a variant reading a non-default config dir
-# gets that directory protected too. A leading `~` is expanded to the home
+# Path to this CLI's claude-format settings file. Parsed and preserved for
+# compatibility only: git-paw never reads, writes, or seeds this file, and
+# nothing in git-paw acts on it today. A leading `~` is expanded to the home
 # directory.
 settings_path = "~/.config/claude-variant/settings.json"
 # Per-approval-level flag overrides, consulted BEFORE git-paw's built-in
@@ -561,20 +560,20 @@ approval_markers = ["proceed? (y/n)"]
 | `command` | yes | Command or path to the CLI binary — what the pane launches, emitted as one shell word. Must be non-empty; a blank value is rejected at config load, naming the entry. |
 | `display_name` | no | Human-readable name shown in prompts. |
 | `submit_delay_ms` | no | Boot-prompt settle delay (ms) before the submit `Enter`; per-CLI so the launcher stays CLI-agnostic. |
-| `settings_path` | no | Path to the CLI's claude-format settings file. git-paw does not write to it; its parent directory joins the memory-isolation protected-path set. |
+| `settings_path` | no | Path to the CLI's claude-format settings file. **Parse-only**: accepted and preserved across a load/save round-trip so existing configurations keep working, but git-paw never reads, writes, or acts on it. |
 | `approval_args` | no | Map from approval-level name (`"manual"`, `"auto"`, `"full-auto"`) to the flags appended to the launch command at that level. Consulted **before** the [built-in flag table](#supervisor); an unknown level key is rejected at config load with an error naming the key. |
 | `session_id_args` | no | Template (containing `{{SESSION_ID}}`) for the flag(s) that assign a fresh session identifier at launch. Consulted **before** the built-in table (`claude` only); a CLI resolving neither launches unchanged, with no id recorded. |
 | `resume_args` | no | Template (containing `{{SESSION_ID}}`) for the flag(s) that resume a previously assigned session. Appended on recovery when the worktree's recorded id and this CLI's resolved template are both present; a template omitting the placeholder is rejected at config load. |
 | `prompt_profile` | no | Per-field overrides of the CLI's terminal-shape markers, consulted before the embedded Claude Code default. Carries no permission policy — see [CLI Prompt-Shape Profiles](../user-guide/cli-prompt-profiles.md). |
 | `mcp` | no | Boolean. Whether this CLI identity speaks MCP, selecting the MCP publish-tool form of the coordination boot block over the `broker.sh` helper form. Unset by default and omitted when the config is written back. |
 
-Every configured `settings_path` also feeds the **protected-path set** used
-by the auto-approve classifier's memory-isolation rule: the file's parent
-directory (e.g. `~/.config/claude-variant/`) and its `projects/**/memory`
-subtrees are treated as operator territory, so a coding agent's write
-targeting them escalates as a danger-class prompt instead of ever being
-auto-approved. See the
-[supervisor decision order](../user-guide/supervisor.md#decision-order).
+`settings_path` used to feed a protected-path set that the auto-approve
+classifier consulted before approving a write. That classifier is retired, so
+the field now has no effect at all — it is kept so existing configurations
+load and round-trip unchanged. Agent memory isolation is carried by the
+bundled skills' doctrine, and mechanically by deny rules in the agent CLI's
+own settings or by the [sandbox](../user-guide/sandbox.md). See
+[Agent permissions](../user-guide/supervisor.md#agent-permissions).
 
 ### `mcp` and the boot-block form
 
@@ -719,7 +718,8 @@ When the broker is enabled, git-paw injects the `GIT_PAW_BROKER_URL` environment
 > **Warning — a non-loopback `bind` removes a protection and adds exposure.**
 > The broker authenticates nothing: whoever reaches the port can read the whole
 > coordination log and publish any message, including guidance that coding
-> agents running with auto-approved execution will act on. On the default
+> agents will act on — up to whatever their CLI's permission mode lets them
+> run without asking. On the default
 > loopback `bind`, git-paw checks every request's `Host` header so a web page
 > cannot reach the broker by DNS rebinding. Setting `bind` to `"0.0.0.0"` or a
 > LAN address **disables that check** — git-paw cannot know your network's
@@ -847,7 +847,7 @@ branch_refresh = false
 | `approval` | (inherits `agent_approval`) | The SUPERVISOR pane's **own** permission level: `"manual"`, `"auto"`, or `"full-auto"`, decoupled from `agent_approval`. Unset → the supervisor pane inherits `agent_approval` exactly as before v0.11.0. Trusted-pane semantics: the supervisor runs in the repo root, not a scoped worktree, so `"full-auto"` here relaxes only the orchestrator pane while every coding agent keeps resolving from `agent_approval`. When `"full-auto"` resolves to no known flags for the CLI, git-paw warns at launch and starts the pane flagless (`auto` behavior) instead of failing |
 | `verify_on_commit_nudge` | `true` | When on, the broker posts a `supervisor.verify-now` message to the supervisor inbox on every `agent.artifact { status: "committed" }`, so the supervisor verifies each commit promptly on an explicit event instead of batching. Set `false` to fall back to sweep-cadence verification |
 | `strict_branch_guard` | `true` | When `true`, a per-worktree **pre-commit** hook refuses any commit whose checked-out branch differs from the branch the worktree was created for, blocking cross-worktree contamination (linked worktrees share `.git/refs`, so a stray `cd` can otherwise advance the wrong branch). Set `false` to disable *enforcement* — the **post-commit** hook still publishes an `agent.feedback` + `agent.learning` record when it detects a mismatch (detection without enforcement) |
-| `manual_approvals_log` | `true` | When `true`, commands the supervisor forwards for a manual decision (prompts the auto-approve preset did not match) are appended to `.git-paw/sessions/<session>.manual-approvals.jsonl` and surfaced via [`git paw approvals`](../cli-reference.md). On a pattern's first sighting a `permission_pattern` learning is also emitted (when `learnings = true`). Set `false` to suppress both the log writes and the learnings emission; the opt-out affects writes only, so `git paw approvals` still reads any pre-existing log |
+| `manual_approvals_log` | `true` | When `true`, every live permission prompt the `--unattended` drive loop escalates for a human decision is appended to `.git-paw/sessions/<session>.manual-approvals.jsonl` and surfaced via [`git paw approvals`](../cli-reference.md). Applies to `--unattended` runs only — an attended session runs no drive loop and records nothing. On a pattern's first sighting a `permission_pattern` learning is also emitted (when `learnings = true`). Set `false` to suppress both the log writes and the learnings emission; the opt-out affects writes only, so `git paw approvals` still reads any pre-existing log |
 | `no_progress_window_seconds` | `1500` (~25 min) | Read by `.git-paw/scripts/sweep.sh`: an agent is flagged `no-progress` when BOTH its completed-task-checkbox count AND its branch commit count stay unchanged for this many seconds. Set longer to tolerate long build/research steps, shorter to nudge sooner. Omitted → the documented default |
 | `context_bloat_threshold_k` | `250` (thousand tokens) | Read by `.git-paw/scripts/sweep.sh`: when an agent's pane shows a `/clear to save <N>k tokens` hint whose `N` meets or exceeds this value, the agent is proactively flagged `context-bloat` so the supervisor can pre-empt the eventual freeze. Omitted → the documented default |
 | `blocked_on_supervisor_window_seconds` | `900` (~15 min) | Read by `.git-paw/scripts/sweep.sh`: an agent whose latest unanswered `agent.blocked` names the supervisor as the blocker is flagged `blocked-on-supervisor` once it has waited longer than this window, forcing the supervisor to answer. Omitted → the documented default |
@@ -882,8 +882,14 @@ Any other CLI (or `manual` anywhere) resolves to no flags — use
 "accept edits" mode distinct from `manual` and from full bypass, rather than
 the empty string — an `auto` pane no longer silently inherits whatever
 default its CLI's config directory happens to carry. For Claude,
-`--permission-mode acceptEdits` auto-accepts file edits; shell commands still
-flow through the classifier / drive loop unchanged.
+`--permission-mode acceptEdits` has the CLI accept file edits without asking;
+shell commands still raise a prompt.
+
+These resolved flags are git-paw's **only** influence on what an agent runs
+without a prompt. git-paw approves no prompt itself: anything the chosen mode
+leaves prompting is escalated for a human decision under `--unattended`, and
+answered only by an explicit `sweep.sh approve`. See
+[Agent permissions](../user-guide/supervisor.md#agent-permissions).
 
 **Gate-command templating.** The eight `*_command` keys feed the supervisor
 skill's five verification gates (testing, regression analysis, spec audit, doc
@@ -921,183 +927,70 @@ verbatim — the supervisor agent recognises that as the same skip token.
 
 The supervisor translates the approval level into CLI-specific flags at launch (e.g. `--dangerously-skip-permissions` for Claude in full-auto mode).
 
-### Auto-approve safe permission prompts
+### Deprecated auto-approval tables
 
-When supervisor mode is enabled, git-paw can automatically approve common,
-known-safe permission prompts (`git commit`, broker `curl` calls, a declared stack's toolchain commands such as `cargo test`, etc.)
-in stalled agent panes so the supervisor does not have to dismiss every prompt by hand.
+`[supervisor.auto_approve]` and `[supervisor.common_dev_allowlist]` are
+**deprecated and have no effect.** They configured a git-paw command classifier
+that decided an agent's command was safe and then answered the permission
+prompt for it. That classifier is retired: three successive security reviews
+each found new command shapes it wrongly called safe, and each fix opened the
+next hole. git-paw now makes no safety judgement about an agent's command and
+approves no permission prompt.
+
+Both tables, and every field in them, **still parse and round-trip**, so an
+existing configuration loads and saves unchanged — nothing breaks and no
+migration is forced. But:
+
+- none of their values is consulted by anything;
+- each configuration file that declares either table prints **one deprecation
+  warning per process**, naming the tables it found, on stderr;
+- `git paw init` no longer writes either table into the default config.
 
 ```toml
+# Deprecated — parsed, warned about, and ignored.
 [supervisor.auto_approve]
 enabled = true
 safe_commands = ["just lint", "just test"]
 stall_threshold_seconds = 30
 approval_level = "safe"
 approve_worktree_writes = true
-```
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `enabled` | `true` | Master switch for auto-approval. Set to `false` to disable. |
-| `safe_commands` | `[]` | Project-specific command prefixes appended to the composed whitelist (see *Whitelist sourcing* below). |
-| `stall_threshold_seconds` | `30` | Seconds an agent's `last_seen` must lag before its pane is polled (minimum `5`). |
-| `approval_level` | `"safe"` | Coarse preset: `"off"`, `"conservative"`, or `"safe"`. |
-| `approve_worktree_writes` | `true` | Auto-approve file write/edit/create prompts whose target resolves **inside the agent's own worktree**. Set `false` to require manual approval for all file operations. |
-
-**Worktree-confined file edits.** Beyond the shell-command whitelist, auto-approval
-also covers an agent's filesystem write/edit/create prompts when the target path
-resolves inside that agent's own worktree root. The path from the prompt
-(e.g. `"Do you want to allow this write to Containerfile?"`) is canonicalized and
-checked with `starts_with(worktree_root)`, so a `..`/symlink path that escapes the
-worktree fails the check and still requires manual approval. Worktrees are isolated,
-so confining auto-approval to the worktree boundary is safe by construction; set
-`approve_worktree_writes = false` to opt out. Paths outside the worktree (the parent
-repo, your home directory, system paths) always require manual approval.
-
-**Whitelist sourcing.** The effective whitelist is composed from three
-sources, in order, de-duplicated:
-
-1. **Stack-neutral built-ins** — the read-mostly verbs (`curl`, `cat`, `ls`,
-   `grep`, `rg`, `git`, `echo`, `sed`, `awk`, `find`, `wc`, `head`, `tail`,
-   `jq`, `mkdir`, `touch`, `export`, `tmux`, `env`), plus `git commit`,
-   `git push`, and the broker-localhost prefix `curl http://127.0.0.1:`.
-   The built-ins carry **no** toolchain verbs.
-2. **Resolved dev-allowlist patterns** — the universal preset, the stack
-   presets selected by [`[supervisor.common_dev_allowlist]
-   stacks`](#common-dev-command-allowlist), and its `extra` entries. Declaring
-   `stacks = ["rust"]` is what makes `cargo test` auto-approve; a node-stack
-   project gets `npm test` instead and its `cargo` prompts escalate.
-3. **`safe_commands`** — the per-project extension above.
-
-A whitelist match is always subordinate to the danger-list: `git push`
-escalates even though the `git` verb is whitelisted. The bundled
-`sweep.sh classify` helper does not compose a whitelist of its own — it
-delegates to `git paw __classify`, which composes these same three sources
-from `.git-paw/config.toml` — so the helper and the in-tool auto-approver are
-the same classifier and cannot drift. See
-[Auto-approve classification](../user-guide/supervisor.md#auto-approve-classification).
-
-**`.git/` writes always escalate.** A filesystem write/edit/create prompt —
-or a shell write target — whose path resolves inside a repository `.git/`
-directory (`.git/config`, `.git/info/exclude`, `.git/hooks/…`) is a
-danger-class escalation at the same precedence as the curated danger-list,
-never auto-approved, even when the command's verb is otherwise whitelisted
-(`echo … >> .git/info/exclude` still escalates although `echo` is a
-read-mostly verb). This closes a gap where a supervisor sweep could
-auto-approve a mutation of git's own local configuration while "resolving" a
-false conflict. Reads never match, and ordinary `git` subcommands are
-unaffected — this rule only catches file-path writes.
-
-**git-paw's own managed helper scripts are always safe.** An invocation of
-one of git-paw's bundled coordination scripts —
-`.git-paw/scripts/{broker,sweep,docs-fetch}.sh`, invoked directly or via
-`bash …` — classifies safe regardless of the composed whitelist above.
-git-paw authors these scripts and they perform only bounded coordination
-actions (publishing status, polling the broker), so an unattended agent's
-boot-time call into one of them never needs to stall on a sweep waiting for a
-human. This is still subordinate to the danger-list: a chained danger
-operation (`sweep.sh snapshot && rm -rf /`) still escalates.
-
-> **Migration note (v0.11.0).** Earlier releases baked `cargo fmt`,
-> `cargo clippy`, `cargo test`, `cargo build`, `openspec`, and `just` into the
-> built-in whitelist for every project. These are no longer built in. If your
-> agents' toolchain prompts (e.g. `cargo test`) stopped auto-approving,
-> declare your stack once — `[supervisor.common_dev_allowlist]
-> stacks = ["rust"]` — and put anything bespoke (e.g. `just`, `openspec`) in
-> that section's `extra` or in `safe_commands`. This is strictly a
-> de-escalation: a project that never used cargo no longer auto-approves it.
-
-**Approval-level presets:**
-
-| Preset | Behavior |
-|--------|----------|
-| `off` | Forces `enabled = false`. No detection or approval runs. |
-| `conservative` | Drops `git push` and `curl` entries from the effective whitelist. The strip is applied **after** composition, so it governs built-ins, stack patterns, and configured extras alike. |
-| `safe` (default) | Approve every entry in the composed whitelist. |
-
-**How it works:** when an agent's status is non-terminal (`done`, `verified`, `blocked`,
-`committed` are skipped) and its `last_seen` exceeds the threshold, git-paw runs
-`tmux capture-pane`, classifies the pending command, and either dispatches
-the resolved option digit + `Enter` (if safe) or publishes an `agent.question` to the supervisor inbox
-(if not).
-
-Prompt-free broker calls come from the CLI's own resolved permission mode
-together with git-paw's command classifier, which recognises the bundled
-`.git-paw/scripts/{broker,sweep,docs-fetch}.sh` helpers by their stable path. No settings-file allowlist is
-written or required for this.
-
-### Common dev-command allowlist
-
-`[supervisor.common_dev_allowlist]` declares a curated preset of dev-loop
-command prefixes. The declaration feeds two consumers:
-
-- the [auto-approve classifier whitelist](#auto-approve-safe-permission-prompts),
-  so a declared stack's toolchain verbs (e.g. `cargo test` for
-  `stacks = ["rust"]`) auto-approve in a stalled agent pane;
-- the bundled supervisor skill's permission guidance, which renders the
-  resolved preset so the supervisor recognises the same patterns by eye.
-
-One stack declaration drives both, so they never drift.
-
-Each listed value is a command **prefix** (a verb or verb + subcommand) that
-subsumes every argument variant — `git diff` covers `git diff --stat
-HEAD~1`.
-
-The preset is split into two tiers:
-
-- a **universal** set that always applies — stack-neutral commands safe in any
-  repository regardless of language or toolchain;
-- **opt-in stack presets** (`rust` / `node` / `python` / `go`) plus a free-form
-  `extra` list for everything tied to a particular toolchain. A bare project
-  gets only the universal set and never a toolchain it does not use.
-
-```toml
 [supervisor.common_dev_allowlist]
+enabled = true
 stacks = ["rust"]
-extra = ["just", "mdbook build", "openspec validate"]
+extra = ["just check"]
 ```
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `enabled` | `true` | Parsed for config compatibility; has no effect. The preset's `stacks` / `extra` patterns are always composed into the auto-approve whitelist and the rendered skill guidance regardless of this flag. |
-| `stacks` | `[]` | Named, curated stack presets to opt into: `rust`, `node`, `python`, `go`. Resolves to the union of the universal preset, each selected stack, and `extra`. Unknown names contribute nothing. git-paw does **not** auto-detect your stack — selection is always explicit. |
-| `extra` | `[]` | Additional project-specific prefix patterns appended to the universal preset and any selected stacks. |
+Delete them whenever convenient. A configuration that git-paw v0.16.0 saved may
+carry a `[supervisor.common_dev_allowlist]` table you never wrote by hand; it
+will warn until you remove it.
 
-**Universal preset (always applied):**
+**What to use instead.** Deciding whether a command may run is the agent CLI's
+job:
 
-- **Git (read)**: `git status`, `git log`, `git diff`, `git show`, `git fetch`
-- **Git (write, non-destructive)**: `git commit`, `git push`, `git pull`,
-  `git merge`, `git stash`, `git add`, `git restore`, `git rm`
-- **Search (read-only)**: `find`, `grep`, `sed -n`
+- Move `safe_commands`, `stacks` and `extra` entries into **your agent CLI's own
+  allow rules** — its project-level or user-level allowlist. That is the only
+  place a standing grant can live, and it is what makes a routine `cargo test`
+  stop prompting. `git paw approvals` reports which prompts recur, with a hint
+  for which of those two allowlists fits.
+- For a run that must not stop for prompts at all, set
+  `[supervisor] approval = "full-auto"` and run inside the documented
+  [sandbox](../user-guide/sandbox.md). Note that `full-auto` skips the prompts
+  entirely, so nothing is escalated either.
+- `approve_worktree_writes` and the protected-path and `.git/`-write rules it
+  interacted with are gone. Those writes now reach a human like any other
+  prompt; for mechanical enforcement use deny rules in the CLI's own settings,
+  or the sandbox.
 
-**Named stack presets (opt-in via `stacks`):**
+See [Agent permissions](../user-guide/supervisor.md#agent-permissions) and the
+[Security Posture](../user-guide/security-posture.md).
 
-- **`rust`**: `cargo build`, `cargo test`, `cargo clippy`, `cargo fmt`,
-  `cargo check`, `cargo tree`, `cargo deny`, `cargo update`
-- **`node`**: `npm install`, `npm ci`, `npm test`, `npm run`, `pnpm install`,
-  `pnpm test`, `pnpm run`, `yarn install`, `yarn test`
-- **`python`**: `pytest`, `pip install`, `ruff`, `black`, `mypy`, `flake8`,
-  `uv pip`, `uv sync`
-- **`go`**: `go build`, `go test`, `go vet`, `go fmt`, `gofmt`, `go mod`,
-  `golangci-lint`
-
-Tools that don't belong to a named stack — `just`, `mdbook build`,
-`openspec …`, etc. — go in `extra` (git-paw's own repo opts into `rust` and
-lists those in `extra`).
-
-**Intentional exclusions:** the universal set and every curated stack preset
-omit destructive verbs — `cargo install`, `cargo run`, `cargo bench`, `go run`,
-package-manager `publish`/`uninstall`, `git rebase`, `git reset`,
-`git checkout`, `git push --force`, and `sed` without `-n`. Add any of these via
-`extra` if you accept the wider surface for your project (`extra` entries are
-never validated).
-
-**Behaviour:**
-
-- Independent of broker status — non-broker supervisor sessions still benefit
-  from the auto-approve whitelist composition.
-- No file is written anywhere: the preset only feeds the in-process
-  auto-approve whitelist and the rendered skill guidance.
+> **Durable grants the classifier already accepted.** Up to v0.16.0 the
+> classifier preferred the "Yes, and don't ask again" option for prompts it
+> judged safe, and your agent CLI persisted those as permanent permission rules
+> in its own settings file. Retiring the classifier stops new ones being
+> created; it removes none. Review that file and delete grants you did not
+> intend — git-paw never edits or deletes it.
 
 ### Conflict detector tuning
 

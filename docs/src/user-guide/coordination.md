@@ -102,9 +102,9 @@ already has the scripts rewrites them rather than failing — which also means
 agent-internal mechanism. A user-facing subcommand would surface in `--help`
 and produce confusing errors when run by a human (no broker, no session). A
 script under `.git-paw/scripts/` is unambiguously agent-internal, mirrors the
-supervisor's `sweep.sh`, and gives git-paw's command classifier a single
-stable path to recognise — see
-[Prompt-free boot calls](#prompt-free-boot-calls).
+supervisor's `sweep.sh`, and gives you a single stable path that one
+permission rule in your agent CLI can name — see
+[Boot calls and permission prompts](#boot-calls-and-permission-prompts).
 
 ## Boot-Prompt Injection
 
@@ -174,27 +174,31 @@ The MCP publish surface has no inbox or poll tool, so even the MCP form of
 the boot block reads the agent's inbox with
 `.git-paw/scripts/broker.sh --agent <id> poll`.
 
-## Prompt-free boot calls
+## Boot calls and permission prompts
 
-So an agent's first boot action never stalls on a permission prompt,
-prompt-free operation rests on two things — never on a settings file git-paw
-writes:
+Whether an agent's first boot action stalls on a permission prompt is decided
+by **the agent CLI's own permission system** — nothing in git-paw decides it,
+and git-paw grants nothing on your behalf. Two things are in play:
 
-- the agent CLI's own **resolved permission mode**, set via
-  `agent_approval` (see [Configuration →
-  Supervisor](../configuration/README.md#supervisor));
-- git-paw's **command classifier**, which recognises the bundled
-  `.git-paw/scripts/broker.sh` helper (and the `bash .git-paw/scripts/broker.sh`
-  form) by its **single stable path** — never a broad `curl *` rule and never
-  per-endpoint `curl` prefixes that could drift with URL normalisation or flag
-  order.
+- the agent CLI's **resolved permission mode**, set via `agent_approval`
+  (see [Configuration → Supervisor](../configuration/README.md#supervisor)).
+  Under a mode that still prompts for shell commands, the boot publish *will*
+  prompt;
+- **your own allow rules in that CLI.** The boot block always invokes the
+  helper at the single stable path `.git-paw/scripts/broker.sh` (or the
+  `bash .git-paw/scripts/broker.sh` form), precisely so one permission rule
+  scoped to that exact path covers every boot call — never a broad `curl *`
+  rule, and never per-endpoint `curl` prefixes that drift with URL
+  normalisation or flag order.
 
-git-paw does not write to any CLI's settings file for this — not the
-repo-root `.claude/settings.json`, not a per-worktree copy, and not a
-configured `[clis.<name>].settings_path`. Agents still do not prompt on
-preset-safe commands (`git status`, `grep`, `find`, a declared stack's
-build/test verbs, …) — the classifier and the resolved permission mode cover
-that without any file on disk.
+**git-paw writes to no CLI settings file** — not the repo-root
+`.claude/settings.json`, not a per-worktree copy, and not a configured
+`[clis.<name>].settings_path`. It also never answers the prompt for you: if
+the boot publish prompts, an `--unattended` run escalates it for a human
+decision like any other prompt, and the rest of the wave keeps moving. The
+same is true of routine dev commands (`git status`, `grep`, `find`, your
+stack's build/test verbs) — they run without asking only when the CLI's own
+mode or rules permit it.
 
 ### Boot Block Injection Modes
 
@@ -210,7 +214,7 @@ The boot block includes instructions for proper paste handling, particularly the
 
 - **Reliable Monitoring**: Agents self-report immediately on boot
 - **Consistent Behavior**: All agents follow the same coordination pattern
-- **No Permission Prompts**: The boot block calls the bundled `broker.sh` helper by its stable path, which git-paw's classifier recognises — the first broker call never stalls on a prompt
+- **One rule covers every boot call**: the boot block invokes the bundled `broker.sh` helper at one stable path, so a single permission rule in your agent CLI can allow it — rather than a broad `curl` grant. Whether it prompts at all is that CLI's decision; if it does, the prompt is escalated to you, never auto-answered
 - **Supervisor Visibility**: Questions and blockers surface to the dashboard promptly
 - **Audit Trail**: All boot operations are logged in the broker log
 
@@ -256,10 +260,12 @@ worktree is their entire writable territory:
   outside the worktree, the agent publishes `agent.question` describing the
   path and waits for an answer rather than writing.
 
-The permission classifier backs this boundary: writes targeting the
-protected-path set escalate as danger-class prompts that are never
-auto-approved (see the
-[supervisor decision order](supervisor.md#decision-order)), and the
+This boundary is carried by doctrine, not by a mechanical check in git-paw:
+a write targeting operator territory raises the CLI's own permission prompt,
+which is escalated to a human and never answered automatically (see
+[Agent permissions](supervisor.md#agent-permissions)). For mechanical
+enforcement, add deny rules in the agent CLI's own settings or use the
+[sandbox](sandbox.md). The
 supervisor treats an observed out-of-worktree write attempt as a boundary
 violation with scoped feedback and repeat-escalation (see
 [Out-of-worktree write violations](supervisor.md#out-of-worktree-write-violations)).

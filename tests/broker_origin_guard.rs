@@ -644,7 +644,7 @@ fn in_tree_rust_clients_are_unaffected() {
     git_paw::coordination::inventory::fetch_status_agents_over_http(&url)
         .expect("fetch_status_agents_over_http must pass the guard");
 
-    git_paw::supervisor::poll::fetch_status_over_http(&url)
+    git_paw::supervisor::drive::fetch_status_over_http(&url)
         .expect("fetch_status_over_http must pass the guard");
 
     assert_eq!(

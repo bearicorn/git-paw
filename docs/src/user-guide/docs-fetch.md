@@ -10,8 +10,8 @@ content in its boot prompt or guessing.
 The design mirrors the other bundled helpers (`broker.sh`, `sweep.sh`): the
 skill teaches *when and why* to consult the docs, and the helper does the
 fetch. The agent invokes one stable script path rather than hand-rolling
-`curl`, which lets git-paw's command classifier approve it by that exact path
-and keeps the behaviour deterministic.
+`curl`, so one permission rule in your agent CLI scoped to that exact path
+can cover every call, and the behaviour stays deterministic.
 
 ## What the agent gets
 
@@ -73,8 +73,10 @@ without the docs** in that case rather than block or retry in a loop.
 
 `git paw init` installs `docs-fetch.sh` into `.git-paw/scripts/` alongside
 `broker.sh`, `sweep.sh`, and the shared `_paw_common.sh` preamble they source.
-Nothing is seeded into the agent CLI's settings file: git-paw's command
-classifier recognises that exact script path — invoked directly or as
-`bash <path>` / `sh <path>` — as safe, never a broad `curl` wildcard. One
+Nothing is seeded into the agent CLI's settings file, and git-paw approves no
+prompt for it. The point of the stable path is that **you** can write one
+permission rule naming `.git-paw/scripts/docs-fetch.sh` — invoked directly or
+as `bash <path>` / `sh <path>` — instead of a broad `curl` wildcard. That one
 by-path rule covers every subcommand, so an agent consults the docs without any
-wildcard network permission.
+wildcard network permission. Without such a rule the helper simply prompts like
+any other command, and the prompt is escalated to you.

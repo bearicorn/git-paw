@@ -148,10 +148,13 @@ that never happened.
 
 ### Permission patterns
 
-How often auto-approve cleared permission prompts for a given matched
-allowlist entry (each auto-approval publishes an `agent.status` with status
-`auto_approved`). An entry appears only once it reaches 5 hits, so the list
-shows which commands your agents trip on most.
+Commands that repeatedly needed a human decision. git-paw approves no
+permission prompt, so this is not a count of automatic approvals: under
+`--unattended`, the first time the drive loop escalates a given command it
+emits a `permission_pattern` learning (when `manual_approvals_log` is also
+on). The list shows which commands your agents trip on most, so you can
+pre-approve them in your agent CLI's own allow rules. `git paw approvals`
+reports the same patterns with their full counts.
 
 ## Qualitative signals (v0.6.0)
 
@@ -264,7 +267,7 @@ headings and bullet shapes are the ones the aggregator writes):
 - feat-auth: 3 feedback cycles before verifying
 
 ### Permission patterns
-- `cargo test` auto-approved 23 times
+- `cargo test` escalated for a human decision (first seen; see `git paw approvals` for counts)
 
 ### Recurring failure shapes
 - import cycle between the auth and session modules: 3 instances across feat-auth, feat-api, feat-billing

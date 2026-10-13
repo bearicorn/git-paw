@@ -68,9 +68,9 @@ Because the bundled helpers cover the full `agent.status` surface (`phase` +
 broker `agent.status` publish through the helper and SHALL NOT contain a raw
 `curl …/publish` example whose body is an `agent.status`.
 
-Each helper SHALL be invocable at a single stable path, so that the command
-classifier can recognise it by that path. The absence of a broad `curl *`
-grant SHALL NOT depend on any seeded settings-file allowlist.
+Each helper SHALL be invocable at a single stable path, so that a permission
+rule scoped to that exact path can name it. Publishing through a helper SHALL
+NOT require a broad `curl *` permission grant.
 
 The `broker.sh intent` subcommand SHALL always publish a `valid_for_seconds`
 field, because the broker requires it: when the caller supplies no TTL the
@@ -173,9 +173,9 @@ done.
   `.git-paw/scripts/sweep.sh`
 - **WHEN** the supervisor publishes a phase-tagged `agent.status` via
   `sweep.sh status-publish --phase <p> --detail '<obj>' "<msg>"`
-- **THEN** the invocation SHALL be recognisable by that stable helper path
+- **THEN** the invocation SHALL begin with that stable helper path, so a
+  permission rule scoped to the exact path can name it
 - **AND** no broad `curl *` grant SHALL be required to publish the status
-- **AND** the guarantee SHALL NOT depend on a seeded settings-file allowlist
 
 ### Requirement: Helper poll subcommand
 
@@ -492,17 +492,41 @@ leaving the agent waiting indefinitely.
 
 ### Requirement: sweep.sh approve re-confirms a live prompt before sending keys
 
-The bundled `assets/scripts/sweep.sh` `approve <pane>` subcommand SHALL pass through the `broker-mediated-approvals` approval-send gate. Immediately before sending the sticky-yes keystrokes (`Down` then `Enter`), the subcommand SHALL run a fresh `tmux capture-pane` of the target pane and SHALL confirm a live permission-prompt marker is present within the last 4 non-blank lines of that capture. When the re-confirm capture shows no live prompt in the tail (the prompt has cleared), the subcommand SHALL send NO keystrokes and SHALL report that the prompt cleared.
+The bundled `assets/scripts/sweep.sh` `approve <pane>` subcommand SHALL answer a live permission prompt once, and only when a human or the orchestrator runs it explicitly; no git-paw process SHALL invoke it. It SHALL pass through the approval-send gate: after taking the pane's exclusive claim, and immediately before sending keys, it SHALL run a fresh `tmux capture-pane` of the target pane and SHALL confirm a live permission prompt per the Live-prompt gate (`approval-auto`). It SHALL then always answer with the one-time "Yes" option: the digit `1` followed by a separate `Enter`.
 
-#### Scenario: approve sends keys only when the prompt is still live
+The subcommand SHALL NOT consult a classifier or any other judgement of the pending command, SHALL NOT send a cursor-movement sequence, and SHALL NOT select any option other than `1`. Before sending, it SHALL confirm from the same fresh capture that a numbered option `1` is present and that its line is not a durable grant, meaning it does not contain the resolved prompt profile's broad-grant marker. When option `1` is missing or reads as a durable grant, it SHALL send NO keystrokes and SHALL report why. When the re-confirm capture shows no live prompt (the prompt has cleared), it SHALL send NO keystrokes and SHALL report that the prompt cleared.
 
-- **GIVEN** `sweep.sh approve <pane>` is invoked for a coding-agent pane whose fresh capture shows a permission-prompt marker within the last 4 non-blank lines
+#### Scenario: approve sends 1 then Enter when the prompt is still live
+
+- **GIVEN** `sweep.sh approve <pane>` is invoked for a coding-agent pane whose fresh capture shows a live 2-option Yes/No permission prompt
 - **WHEN** the subcommand runs
-- **THEN** it SHALL send `Down` then `Enter` to the pane via `tmux send-keys`
+- **THEN** it SHALL send `1` and then a separate `Enter` to the pane via `tmux send-keys`
+- **AND** SHALL NOT send `Down`
+
+#### Scenario: approve answers once on a three-option prompt
+
+- **GIVEN** a live prompt whose options are `1. Yes`, `2. Yes, and don't ask again for …` and `3. No`
+- **WHEN** `sweep.sh approve <pane>` runs
+- **THEN** it SHALL send `1` then `Enter`
+- **AND** SHALL NOT send `2`
+
+#### Scenario: approve does not judge the command
+
+- **GIVEN** a live 2-option prompt whose command is `git push --force origin main`
+- **WHEN** a human runs `sweep.sh approve <pane>` for it
+- **THEN** it SHALL send `1` then `Enter`, exactly as for any other live prompt
+- **AND** it SHALL NOT invoke `git paw __classify`
+
+#### Scenario: approve refuses an option 1 that reads as a durable grant
+
+- **GIVEN** a live prompt whose option `1` line contains the resolved broad-grant marker (e.g. `1. Yes, and don't ask again`)
+- **WHEN** `sweep.sh approve <pane>` runs
+- **THEN** it SHALL send NO keystrokes
+- **AND** it SHALL report that option 1 is a durable grant
 
 #### Scenario: approve sends nothing when the prompt has cleared
 
-- **GIVEN** `sweep.sh approve <pane>` is invoked for a pane whose fresh capture no longer shows a permission-prompt marker in the last 4 non-blank lines
+- **GIVEN** `sweep.sh approve <pane>` is invoked for a pane whose fresh capture no longer shows a live permission prompt
 - **WHEN** the subcommand runs
 - **THEN** it SHALL send NO keystrokes to the pane
 - **AND** it SHALL report that the prompt has cleared so no keys were sent

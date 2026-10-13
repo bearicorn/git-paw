@@ -147,9 +147,9 @@ to print the result.
 
 The probe text varies from one run to the next (a different captured
 code, different trailing output), so the CLI's command-string permission
-whitelisting never matches the next invocation — every run raises a
-fresh approval prompt, and your dev loop stalls on the same safe command
-forever instead of being approved once. A bare, prefix-matchable command
+matching never matches the next invocation — every run raises a fresh
+approval prompt, and your dev loop stalls waiting on a human instead of
+the command being allowed once. A bare, prefix-matchable command
 generalises across every later run.
 
 This is about the *probe wrapper*, not about the exit status itself:
@@ -251,10 +251,11 @@ persist belongs anywhere else on the machine.
 These locations belong to the OPERATOR, not to you. Writing there mutates
 state shared across sessions and agents: a memory file you overwrite is the
 operator's memory, and a settings file you append to changes what every
-future session is allowed to do. The permission classifier treats such
-writes as danger-class escalations — they are never auto-approved — but do
-not rely on the classifier: some persistence paths never raise a prompt at
-all, so the boundary is yours to respect whether or not anything asks.
+future session is allowed to do. If your CLI prompts before such a write,
+that prompt reaches a human and nothing approves it on your behalf — but do
+not rely on a prompt appearing at all: whether one is raised is your CLI's
+decision, and some persistence paths raise none. The boundary is yours to
+respect whether or not anything asks.
 
 **When a task appears to require writing outside your worktree, do not
 write — ask.** Publish `agent.question` describing the path and why the task

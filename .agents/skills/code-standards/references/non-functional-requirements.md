@@ -12,11 +12,11 @@ another, this file says which one wins.
 
 ### Top tier — git-paw's defining attributes
 
-git-paw **auto-approves commands** and **runs unattended in real repositories**, approaching a
+git-paw **launches agents with real execution power** and **runs unattended in real repositories**, approaching a
 v1.0.0 freeze. That makes three attributes existential (a failure here causes real harm, not
 mere annoyance):
 
-- **Security & safety** — drives: least-privilege, path-scoped allowlists · worktree /
+- **Security & safety** — drives: least-privilege, path-scoped allow rules · worktree /
   blast-radius confinement · injection newtypes (sanitize/quote at construction) · no secrets in
   flags or env · export-agnosticism · agent-memory-isolation.
 - **Reliability (unattended)** — drives: idempotency · graceful failure + recoverability
@@ -53,7 +53,7 @@ mere annoyance):
 
 | Conflict | Tension | Resolution |
 |---|---|---|
-| **Security ↔ Automation/DX** | Auto-approval is frictionless but expands blast radius. *The central tension.* | Security wins ties: deny-by-default, least-privilege path-scoped allowlists, conservative classifier, tiered approval (drive loop = safe set only; human/supervisor = the rest). The approval architecture *is* this resolution. |
+| **Security ↔ Automation/DX** | Removing prompts is frictionless but expands blast radius. *The central tension.* | Security wins ties: git-paw decides no command and approves no prompt — it detects and escalates, and a human answers. Where a grant is unavoidable it is deny-by-default, least-privilege and path-scoped, written by the consumer in their own agent CLI (or seeded only with explicit consent). |
 | **Stability/freeze ↔ Maintainability** | The freeze locks ugly serde/wire/CLI/`pub` surfaces you can't then clean up. | Freeze the observable surface; refactor freely *behind* it (behavior-preserving). Shrink the semver surface (`#[doc(hidden)]`, MSRV) *before* the freeze — now-or-never. The do-not-touch list is this encoded. |
 | **Security ↔ Back-compat** | A security fix changes observable behavior (e.g. sanitizing session names). | Security overrides compat — but as an explicit, *versioned*, migrated change, never silently; prefer additive/relax-only. |
 | **Testability ↔ Simplicity** | The `CommandRunner` seam adds indirection purely to enable mocking — vs "no abstractions for single-use code." | Add the seam only where behavior is otherwise untestable (the blind tmux/git runtime); it earns its keep by unlocking a whole e2e-only surface. |
@@ -80,7 +80,7 @@ Two caveats flip the middle:
 The supervisor asks: **does this change trade a higher NFR for a lower one?** If so, it must be
 justified (e.g. security overriding compat, with a migration) or rejected. Concretely:
 
-- No broadening of auto-approval without least-privilege, path-scoped scoping.
+- No new path that answers a permission prompt without a human; no broadening of a seeded grant without least-privilege, path-scoped scoping and explicit consent.
 - No change to the observable serde/wire/CLI surface during the freeze unless the change's spec
   declares it (a versioned, migrated break).
 - No telemetry or network egress of local content.

@@ -30,15 +30,22 @@ chain (see [Spec-driven launch](spec-driven-launch.md)).
 `git paw start --unattended` runs a supervisor wave to completion with **no
 human in the seat**. Without it, `git paw start --supervisor` builds the tmux
 session and returns immediately with an attach hint, expecting a human (or a
-throwaway pane-scraper script) to watch the panes, clear safe permission
-prompts, and notice when the work is done. `--unattended` folds that operator
-loop into the tool itself.
+throwaway pane-scraper script) to watch the panes, answer permission prompts,
+and notice when the work is done. `--unattended` folds the *driving* half of
+that operator loop into the tool itself.
 
 `--unattended` engages supervisor mode (you do not also need `--supervisor`),
 then — instead of returning — runs an **in-process drive loop** in the
 foreground `git paw start` process. It is designed for detached operation: it
 does not attach a terminal and does not replace your shell with an interactive
 supervisor CLI. It is mutually exclusive with `--no-supervisor`.
+
+> **`--unattended` approves nothing.** The loop detects live permission prompts
+> and escalates every one of them for a human decision; it never answers one.
+> For a run that genuinely does not stop for prompts, the decision has to be
+> made *before* the prompt exists — in your agent CLI's own allow rules, or by
+> launching at `[supervisor] approval = "full-auto"` inside the documented
+> [sandbox](./sandbox.md). See [Agent permissions](#agent-permissions).
 
 Each poll (~15 seconds) the loop:
 
@@ -57,12 +64,14 @@ Each poll (~15 seconds) the loop:
   actual shape (the footer anchoring a line, with an option list nearby), not
   a bare mention of the footer text in narration or tool output. Prompt-like
   text scrolled well past that bound is ignored.
-- **Auto-approves classifier-safe prompts** using the same
-  [auto-approve classification](#auto-approve-classification) the attended
-  dashboard approver uses. The supervisor's pane 0 is covered too, but is only
-  ever sent the minimal approval keystrokes the prompt consumes — never
-  free-text or a stray newline that could pollute the supervisor's
-  conversation.
+- **Escalates every live prompt, whatever the command is.** The loop makes no
+  judgement about the prompted command — `ls -la` and `rm -rf /` are handled
+  identically. The prompt is recorded on the broker as an `agent.question`,
+  handed to the supervisor pane to relay (when one is present), written to the
+  [manual-decision log](#manual-approvals), captured as a learning, and listed
+  in the exit summary. **No keystroke is sent.** The supervisor's own pane 0 is
+  swept the same way — a prompt there is escalated as agent `supervisor` and is
+  never typed into.
 - **Submits a directive left buffered on an idle pane.** A pane showing no
   live prompt and no mid-response marker, whose input box still holds
   unsubmitted text, has a stranded directive: the CLI swallowed the first
@@ -73,12 +82,13 @@ Each poll (~15 seconds) the loop:
   the live-prompt scan (there is no prompt) nor the ~25-minute stuck detector
   would otherwise surface that stall. A pane that is actively generating is
   never touched.
-- **Escalates risky/unknown prompts without blocking** — anything the
-  classifier does not consider safe is surfaced for later human review (via the
-  broker and the exit summary) while the rest of the wave keeps moving. A
-  single risky prompt on one agent never freezes the others. Repeated
-  escalations are deduplicated per `(agent, command-shape)` within a five-minute
-  window.
+- **Keeps the wave moving while a prompt waits.** An escalation is
+  non-blocking: one agent parked on a prompt never freezes the others, and the
+  loop does not wait for anyone to answer. Repeated escalations are
+  deduplicated per `(agent, command-shape)` within a five-minute window, so a
+  prompt still unanswered after that window is re-escalated as a reminder
+  rather than every fifteen seconds. A prompt nobody ever answers does not, on
+  its own, end the run — the wave ends on completion or the heartbeat.
 - **Hands judgment calls to the supervisor pane**, when one is present — see
   [The loop is a pump, the supervisor is the brain](#the-loop-is-a-pump-the-supervisor-is-the-brain).
 - **Re-engages a gate-failed worker**, when
@@ -169,8 +179,8 @@ published at least one status — a pane's first sweep of the run, before any
 that one tick. `git paw __prompt-profile --field cli_unavailable_markers`
 reads the exact same resolved field the loop does — it is a read path for the
 bundled `sweep.sh` helper's *other* detectors (stuck-shape, live-prompt) to
-stay in sync with the Rust side, not a second classifier: `sweep.sh` itself
-does not consult `cli_unavailable_markers` or classify a pane for CLI
+stay in sync with the Rust side, not a second detector: `sweep.sh` itself
+does not consult `cli_unavailable_markers` or evaluate a pane for CLI
 unavailability today.
 
 A `cli-unavailable` escalation is deduplicated on the agent and the matched
@@ -185,9 +195,9 @@ the orchestrator's own CLI dying — the exit summary says so explicitly
 (`No orchestrator pane was monitored for CLI unavailability this run.`)
 instead of implying coverage it does not have.
 
-For an unattended session the in-process loop is the **sole** approver: the
-dashboard subprocess's auto-approve thread is disabled so two approvers never
-race on the same pane.
+Nothing in an unattended session approves a prompt — the loop escalates and
+the human answers. The dashboard subprocess runs no approver either, attended
+or unattended; it renders the broker log and nothing more.
 
 ### Session-instance lifecycle
 
@@ -216,13 +226,11 @@ treated as a stuck signal — the loop lets agents iterate.
 
 ### The loop is a pump, the supervisor is the brain
 
-The drive loop is deliberately mechanical: it can approve a safe prompt, but it
-cannot decide *anything*. A supervisor CLI is the opposite — it can reason about
-anything, but only acts when something triggers it. Left uncombined, those two
-halves produce the failure the unattended mode was supposed to remove: the loop
-escalates every judgment call into a broker inbox, and in a headless run nobody
-ever reads it. The wave stalls on the first prompt the classifier could not
-place.
+The drive loop is deliberately mechanical: it cannot decide *anything*. A
+supervisor CLI is the opposite — it can reason about anything, but only acts
+when something triggers it. Left uncombined, those two halves produce the
+failure the unattended mode was supposed to remove: the loop escalates every
+judgment call into a broker inbox, and in a headless run nobody ever reads it.
 
 So when a **supervisor (orchestrator) pane is present**, the loop stops merely
 *recording* judgment calls and starts *handing them over*. It types the call
@@ -232,7 +240,7 @@ arrive that way:
 
 | Handed over | Trigger |
 |---|---|
-| A risky or unknown permission prompt | the classifier returned `danger` / `unknown` |
+| A live permission prompt — **to relay to the human, not to decide** | any live prompt was detected on a pane |
 | An ambiguous question | a worker published `agent.question` |
 | A merge decision | a worker published a terminal `agent.artifact` |
 | A non-converging branch | the correction loop's slow / exhausted signal |
@@ -244,13 +252,21 @@ Three properties make this safe to run unattended:
   a *trigger* laid on top of that record, not a replacement for it — so if the
   supervisor's pane happened to be busy, nothing is lost.
 - **The loop never waits.** A hand-off is fire-and-forget. The supervisor
-  deliberating over one call cannot freeze the wave; the other agents keep being
-  swept and approved.
+  deliberating over one call cannot freeze the wave; the other agents keep
+  being swept.
 - **Injection is guarded by a fresh capture.** Nothing is typed into a pane that
-  is showing a live permission prompt (that state belongs to the approval path,
-  which never types free text into pane 0) or that is mid-response. A task
-  landing in the middle of the supervisor's own turn would pollute its context,
-  so it is deferred instead.
+  is showing a live permission prompt or that is mid-response. A task landing in
+  the middle of the supervisor's own turn would pollute its context, so it is
+  deferred instead. A pane-0 prompt is therefore carried by the broker record
+  and the exit summary only.
+
+**A permission-prompt hand-off asks for a relay, not a decision.** The other
+three hand-offs ask the supervisor to *decide and act*. A permission prompt is
+different: deciding it from the pane text would make the orchestrator a
+classifier — one reading untrusted output, and so reachable by prompt
+injection. The hand-off text asks the supervisor to put the prompt in front of
+the human, naming the agent and the command, and to run
+`sweep.sh approve <pane>` only when the human explicitly says to.
 
 **A nudge is sent reliably, not fired and forgotten.** Typing text into a pane
 and immediately following it with `Enter` is not enough: on a paste-aware CLI
@@ -431,13 +447,18 @@ directory happened to carry — sometimes manual approval, sometimes something
 else, depending on machine state outside git-paw's control.
 
 `auto` now resolves to an explicit, deterministic flag per CLI wherever one
-exists: for Claude this is `--permission-mode acceptEdits` (file edits are
-auto-accepted; shell commands still flow through the classifier and drive
-loop exactly as before). Codex's `auto` already resolved to
-`--sandbox workspace-write`. A CLI with no such mode keeps the empty string
-and relies on the classifier / drive-loop approval path, or a
+exists: for Claude this is `--permission-mode acceptEdits` — file edits are
+accepted by the CLI without asking, while shell commands still raise a prompt,
+which git-paw escalates for you. Codex's `auto` already resolved to
+`--sandbox workspace-write`. A CLI with no such mode keeps the empty string and
+runs at whatever its own default is, unless you supply a
 [`[clis.<name>] approval_args`](../configuration/README.md#custom-clis)
 override.
+
+These resolved flags are **git-paw's only influence** on what an agent may run
+without asking. Everything the chosen mode leaves prompting stays prompting:
+git-paw escalates it and waits for you. See
+[Agent permissions](#agent-permissions).
 
 ### Launch reliability: acceptance dialogs and dead-pane detection
 
@@ -525,9 +546,9 @@ The supervisor emits these phase-tagged statuses through the bundled
 label and `--detail '<json-object>'` carries the structured body, while the
 plain `status-publish <message>` form (no flags) publishes the v0.5.0 shape
 unchanged. The helper shapes the `agent.status` payload internally, so the
-supervisor never hand-rolls the JSON, and git-paw's classifier recognises
-`.git-paw/scripts/sweep.sh` by its stable path — covering every phase without
-a broad `curl` rule.
+supervisor never hand-rolls the JSON. Because the helper always lives at the
+stable path `.git-paw/scripts/sweep.sh`, a permission rule in your agent CLI
+scoped to that exact path covers every phase without a broad `curl` rule.
 
 Every `sweep.sh` publish verb — `status-publish`, `verified`, `feedback-gate`,
 `conflict-ack`, `learn` — checks the broker's HTTP response. When the broker
@@ -653,319 +674,172 @@ Findings surface as standard `agent.feedback` errors tagged `[doc audit]`
 mixed in with other doc-audit gaps. See [Governance](governance.md) for the
 config schema and how the supervisor reads each doc.
 
-## Common dev-command allowlist
+## Agent permissions
 
-A bundled **universal** preset whitelists routine, stack-neutral dev commands
-— non-destructive git verbs (`git status`, `git diff`, `git add`,
-`git commit`, …) plus read-only `find`, `grep`, and `sed -n` — so the
-supervisor stops escalating every one of them. The preset always applies and
-ships with the launcher. The danger-list still wins over it: `git push` is in
-the preset but always escalates (see [Decision order](#decision-order)).
-Toolchain-specific commands (`cargo …`, `npm …`, `pytest`,
-`go …`) are **not** in the universal set — opt into them per stack.
+**git-paw does not approve permission prompts, and makes no judgement about
+whether an agent's command is safe.** It has no safe-command list, no danger
+list and no path-based safety rule. Whether a command runs without asking is
+decided entirely by the **agent CLI's own permission system**:
 
-To pull in a toolchain's curated patterns, name its stack preset; to add
-anything not covered by a named stack (e.g. `just`, `nox`, a custom test
-runner), use the `extra` field:
+1. **The CLI's resolved permission mode.** `[supervisor] agent_approval` (and
+   `approval` for the supervisor's own pane) maps to that CLI's native launch
+   flags — see [`auto` resolves to a deterministic permission
+   mode](#auto-resolves-to-a-deterministic-permission-mode). This is git-paw's
+   only influence on what runs unprompted.
+2. **The CLI's own allow and deny rules.** Whatever that CLI reads from its own
+   settings. Pre-approve your routine dev commands there; that is the only
+   place a standing grant can live. A grant is only as narrow as you write it.
+3. **A sandbox**, if you want a kernel-enforced boundary rather than a
+   policy one — see [Sandbox](./sandbox.md) and
+   [Security Posture](./security-posture.md).
 
-```toml
-[supervisor.common_dev_allowlist]
-stacks = ["rust", "python"]
-extra = ["just check", "nox -s tests"]
-```
+Anything the resolved mode leaves prompting *stays* prompting. git-paw's job
+starts there: it detects the live prompt and escalates it for a human decision
+(broker `agent.question`, the orchestrator pane, the
+[manual-decision log](#manual-approvals), and the exit summary) without
+blocking the rest of the wave. Then a human decides, and the approval is typed
+only by an explicit [`sweep.sh approve <pane>`](#the-explicit-approve-action).
 
-Both `stacks` entries and `extra` patterns are prefix-matched against the
-captured command line, the same way the universal patterns are. See
-[Configuration](../configuration/README.md) for the named-preset contents and
-the full schema.
+A fully prompt-free unattended run therefore needs the decision made *before*
+the prompt exists: either CLI allow rules covering everything the agents do, or
+`approval = "full-auto"` inside a sandbox. Without that, expect escalations.
 
-The universal preset feeds two consumers: the auto-approve classifier's
-whitelist below and the bundled supervisor skill's rendered permission
-guidance (`{{DEV_ALLOWLIST_PRESET}}`). Both are generated from the same
-constant, so they cannot drift. Declared `stacks` and `extra` patterns feed the
-classifier only — declaring `stacks = ["rust"]` is what makes a `cargo test`
-prompt auto-approve — and are not rendered into the skill text.
+> **Deprecated: `[supervisor.auto_approve]` and `[supervisor.common_dev_allowlist]`.**
+> Up to v0.16.0 these configured a git-paw command classifier that answered
+> prompts it judged safe. The classifier is retired: three successive security
+> reviews each found new command shapes it wrongly called safe, and each fix
+> opened the next hole. Both tables **still parse and round-trip**, so existing
+> configurations load unchanged — but they have **no effect**, and each
+> configuration file that declares them prints one deprecation warning per
+> process. Delete them at your leisure, and move any `safe_commands`, `stacks`
+> or `extra` entries into your agent CLI's own allow rules. See the
+> [configuration reference](../configuration/README.md#deprecated-auto-approval-tables).
+>
+> The classifier used to choose "Yes, and don't ask again" for prompts it
+> judged safe, and your CLI persisted those as **durable grants in its own
+> settings file**. Retirement stops new ones; it removes none. Review that file
+> and delete what you did not intend — git-paw never edits or deletes it.
 
 ### Run dev commands bare — no exit-code-probe wrappers
 
-The allowlist works because each grant is a bare command **prefix** that
-generalises across argument variants. Wrapping a command in an exit-code probe
-— `<cmd> && echo "EXIT $?"`, `<cmd>; echo $?`, `RC=$?; echo "$RC"` — defeats
-that: the probe text varies per run, so the CLI's command-string permission
-whitelisting never matches the next invocation and the command re-prompts every
-time. The bundled supervisor and coordination skills instruct agents to run dev
-commands bare and read the exit status directly; keep your own commands to the
-same shape so a whitelisted prefix actually suppresses the prompt.
+A CLI allow rule matches a command **prefix**, so it generalises across
+argument variants. Wrapping a command in an exit-code probe —
+`<cmd> && echo "EXIT $?"`, `<cmd>; echo $?`, `RC=$?; echo "$RC"` — defeats
+that: the probe text varies per run, so the CLI's command-string matching never
+matches the next invocation and the command re-prompts every time. The bundled
+supervisor and coordination skills instruct agents to run dev commands bare and
+read the exit status directly; keep your own commands to the same shape so a
+grant actually suppresses the prompt.
 
-git-paw's own classifier is forgiving about the two most common wrappers — it
-normalises a trailing `; echo …$?` / `; RC=$?` probe and a trailing
-`>/dev/null 2>&1` redirect away before matching (see
-[Auto-approve classification](#auto-approve-classification)) — but the *CLI's*
-own permission whitelisting is not, so a wrapped command still re-prompts the
-agent's CLI. Run them bare.
+(git-paw used to normalise the two most common wrappers away before
+classifying. With no classifier there is nothing to normalise for, and the
+*CLI's* own matching was never forgiving about them anyway. Run them bare.)
 
-## The tiered permission model
+### The explicit approve action
 
-The bundled supervisor skill teaches a three-tier model for deciding whether
-to approve a coding agent's blocked command:
+`sweep.sh approve <pane>` is the **only** path by which an approval keystroke
+reaches a pane, and nothing in git-paw runs it for you. A human runs it, or
+tells the orchestrator to run it. It answers the prompt **once**, with option
+`1`, and consults nothing about the command.
 
-1. The worker's own CLI-native permission check runs first — most commands
-   never reach a prompt at all.
-2. If the CLI does prompt, the supervisor consults git-paw's safe-command
-   policy, evaluated authoritatively via the hidden `git paw __classify`
-   subcommand — the same classifier the mechanical drive loop's
-   auto-approver uses (see
-   [Auto-approve classification](#auto-approve-classification) below for the
-   full decision order). The skill summarises the policy classes for
-   orientation — safe (git-paw's managed helper scripts, worktree-confined
-   dev/test commands, read-mostly verbs) and danger (writes under `.git/` or
-   protected paths, the curated danger-list) — but never maintains its own
-   parallel allowlist that could drift from the classifier.
-3. Anything `git paw __classify` does not mark safe escalates to the human.
+Four guards sit between that instruction and the keystroke.
 
-The bundled skill (`assets/agent-skills/supervisor.md`, "The tiered
-permission model") is the authoritative source for the exact prose; this
-section only summarises it. See
-[Auto-approve classification](#auto-approve-classification) for the
-classifier's full, current decision order.
+**Option 1, never a durable grant.** The helper dispatches the digit `1`
+followed by `Enter` as two separate keystrokes, reporting
+`approved pane <N> (option 1)`. It never dispatches a blind cursor-movement
+sequence — `Down` + `Enter` lands on `No` on a 2-option prompt and takes the
+permanent "don't ask again" grant on a 3-option one. Before sending it checks
+that a numbered option 1 really is on screen (and sends nothing if not), and
+that option 1 does not itself carry the prompt profile's broad-grant wording:
+on some prompt shapes the first option *is* "Yes, and don't ask again …", and
+pressing it would write a standing permission rule you did not ask for. In that
+case the helper sends nothing and says why. git-paw never creates a durable
+grant.
 
-## Auto-approve classification
+**Re-confirm before send.** Immediately before dispatching, the helper takes a
+**fresh capture** of the target pane and confirms the prompt's live structural
+markers still anchor the modal block (the same anchored search and
+bounded-trailing-region tolerance detection uses, not a fixed ~4-line scan). If
+the prompt cleared between the decision and the send — the agent moved on, or
+you answered it in the pane first — **no keystrokes are sent**, and the helper
+reports `cleared before send, no keys sent`. This closes the stray-input race
+where the option digit would otherwise land in the CLI's chat box as literal
+text, polluting context and leaving dangling unsubmitted commands.
 
-When `[supervisor.auto_approve]` is enabled, the poll loop classifies each
-captured permission prompt into **escalate-to-human** or **auto-approve**. The
-decision is deterministic and reviewable.
+**Pane 0 is excluded.** `sweep.sh approve 0` sends nothing and reports that
+pane 0 — the supervisor's own pane — is excluded, whatever the capture shows.
+The drive loop likewise never sends approval keystrokes to pane 0; a prompt
+there is escalated as agent `supervisor` and carried by the broker and the exit
+summary. The refusal is compiled in and cannot be changed by a prompt profile.
 
-The classifier is **single-source**: it exists once, in git-paw itself. The
-bundled `sweep.sh` helper does not carry its own copy — `sweep.sh classify`
-(fed a pane capture on stdin) obtains its verdict by delegating to the hidden
-`git paw __classify` subcommand, which runs that one classifier and prints the
-class (`safe` / `danger` / `unknown`) plus the option index to select. So the
-shell path and the in-tool auto-approver cannot merely *agree*; they are the
-same implementation and cannot drift. `sweep.sh approve` resolves its option
-index the same way.
+**One sender per pane, enforced.** Keystrokes can come from `sweep.sh approve`
+and from the drive loop's own nudge and buffered-input recovery. If two land on
+one pane, the second falls through onto whatever appears next. So before
+sending, every sender takes that pane's **exclusive claim**: an atomic
+create-if-absent of `<repo>/.git-paw/tmp/approve-pane-<N>.claim`, held across
+the send and released immediately after. Because the file system decides who
+wins, exactly one sender can hold a pane at a time, and the exclusion works
+across processes and languages — the shell helper and the binary compute the
+same path and honour each other's claims.
 
-`__classify` is read-only — it classifies a capture and sends no keystroke,
-contacts no broker, and writes no file. Whether the supervisor's own CLI
-prompts for it depends on the supervisor pane's own resolved permission mode
-(see [Run the supervisor pane at native
-full-auto](#run-the-supervisor-pane-at-native-full-auto)) — git-paw grants
-this subcommand into no settings file. If the binary cannot be reached the
-helper **fails closed**: it reports the missing verdict and the prompt is
-escalated, never auto-approved.
+Taking the claim never blocks. A sender that finds a pane already claimed
+**skips it** and moves on, retrying later; `sweep.sh approve` reports
+`pane <N> claimed by another approver, no keys sent` and names the claim file.
+Release is automatic on every exit path, including an error or a crash
+mid-send. If a sender is hard-killed (`SIGKILL`) with a claim held, the next
+one steals it after it has gone untouched for 10 seconds — so a crash costs one
+pane one sweep, never a permanent wedge. The claim directory is ephemeral and
+already gitignored; you never need to manage it by hand, though removing a
+stale file is harmless.
 
-Prompt *detection* is the one part that stays in the helper: the live-prompt
-gate below runs in `sweep.sh` before any delegation, so a pane showing no live
-prompt is a no-op.
+No new broker message is involved in any of this: the trigger that a pane is
+awaiting approval is the existing `agent.status` with
+`phase: "stuck-on-prompt"`, and an escalated prompt uses the existing
+`agent.question`.
 
-The classifier reads the prompted **command slice** — the text between the
-`Bash command` / `Bash(…)` header and the confirmation question — not the
-surrounding narration. A supervisor that merely *mentions* `rm -rf /` in prose
-is never mistaken for a prompt to run it.
+### What detection still does
 
-The slice is then **normalised**: a leading run of `VAR=value` environment
-assignments and a leading `env` / `nohup` invocation wrapper are stripped,
-then a trailing exit-code probe (`; echo …$?`, `; RC=$?`) and a trailing
-`>/dev/null 2>&1` discard redirect, so a routine gate command wrapped for the
-run environment or for reporting classifies as the bare command it is instead
-of being forced `Unknown` by text that differs on every run (the dogfood
-prefixes `TMPDIR=… cargo test`, `GIT_PAW_ALLOW_LIVE_SESSION=1 cargo test`,
-`env FOO=bar …`, and `nohup … &` all classify the same as the bare command).
-This is not a shell parser — only these specific forms are stripped — and
-every rule below, danger-list included, runs against the **normalised**
-command, so a wrapper can never downgrade an escalation: `git push; echo $?`
-and `FOO=bar rm -rf /` both still escalate, and a redirect to a real device
-(`> /dev/sda`) is left in place for the `> /dev/` danger pattern to catch.
+Prompt *detection* is the part git-paw keeps, and it is unchanged. The
+live-prompt gate decides whether a modal is actually on screen: at the
+capture's true end, a textual marker (the `Do you want to …` question or the
+`Esc to cancel` footer) within the last ~4 non-blank lines, or a numbered
+option line anchoring that tail with a textual marker within the last ~15
+non-blank lines. The search runs upward over a bounded trailing region, so a
+CLI that renders a task list or status strip under its input area cannot hide a
+live modal beneath that chrome; beyond the true end, liveness requires the
+modal's actual *shape* (a footer-shaped line plus an option list), never a bare
+mention of the footer text in narration or tool output, and a match is rejected
+outright if the CLI's idle input box appears below it — a real modal replaces
+the input box, so seeing one means the footer is a quoted copy.
 
-### Decision order
+Detection reports only that a prompt is present, and what command it is asking
+about (the text between the `Bash command` / `Bash(…)` header and the
+confirmation question, or the target path of a file-operation prompt). That
+command text is used for the escalation message, the dedup key and the
+manual-decision log — never to decide anything. A supervisor that merely
+*mentions* `rm -rf /` in prose is not a prompt to run it, and a prompt asking
+about `ls -la` gets exactly the same treatment as one asking about `rm -rf /`.
 
-1. **Live-prompt gate.** The classifier acts only when the prompt's
-   structural markers anchor the modal block, searched upward from the end of
-   the capture: at the capture's true end, a textual marker (the
-   `Do you want to …` question or the `Esc to cancel` footer) within the last
-   ~4 non-blank lines, or a numbered option line anchoring that tail with a
-   textual marker within the last ~15 non-blank lines. The wider block window
-   means **multi-option prompts** — `Do you want to proceed?` above a
-   numbered list with a "don't ask again" option — are detected and
-   auto-clearable rather than missed. The search also tolerates up to 13
-   non-blank trailing lines of non-prompt content below the modal — a task
-   list, a status strip, a progress footer the CLI renders under its input
-   area — so that chrome doesn't hide a still-live prompt; but once the
-   anchor shifts past the true end of the capture, re-confirming liveness
-   there requires the modal's actual SHAPE: the footer (`Esc to cancel`)
-   anchoring the START of a line, together with a numbered option line
-   nearby. A bare confirmation question is not enough there, nor is the
-   footer text merely mentioned mid-line (narration describing the UI, or
-   grep-style tool output echoing a matching line) — an already-answered
-   prompt can leave either behind followed by ordinary command output. A
-   prompt that has scrolled past the 13-line tolerance, or pane text that is
-   just narration with no modal around it, is treated as *not live* — no
-   keystrokes are sent. This kills phantom approvals.
-2. **Danger-list (escalate wins).** A curated danger-list is evaluated
-   **first** and overrides any allowlist match. It covers `rm -rf` / `rm -fr`,
-   `git push`, `--force` / `force-push`, `reset --hard`, `git rebase`,
-   branch-switching `git checkout `, `branch -D`, `git worktree remove`,
-   `clean -fd` / `clean -fdx`, `sudo`, `mkfs`, `dd if=`, `> /dev/`, `chmod -R`,
-   `chown -R`, and `pkill` / `kill`, plus a per-OS addendum (macOS `diskutil`
-   and raw `/dev/disk*`; Linux/WSL `/dev/sd*`, `/dev/nvme*`, `mkfs*`). A
-   danger match always escalates to you — even when the verb is otherwise
-   whitelisted (so `git push` escalates although `git` is a safe verb).
-3. **`.git/` writes (escalate wins).** Evaluated at the same precedence as
-   the danger-list: a filesystem write/edit/create prompt — or a shell write
-   target — whose path resolves inside a repository `.git/` directory (git's
-   own metadata: `.git/config`, `.git/info/exclude`, `.git/hooks/…`)
-   escalates as danger, never auto-approved. This closes a gap where a
-   supervisor sweep could auto-approve `echo '.git-paw/' >> .git/info/exclude`
-   while "resolving" a false conflict — silently mutating git's local
-   configuration, invisible to teammates. Reads never match, and ordinary
-   `git` subcommands (`git commit`, `git add`) are unaffected — this rule only
-   catches file-path writes.
-4. **Protected paths (escalate wins).** Evaluated at the same precedence as
-   the danger-list: a filesystem write/edit/create prompt — or a shell write
-   target (a `>` / `>>` redirect, `tee`, a `cp`/`mv`/`ln` destination,
-   `touch`, `mkdir`, `rm`, `truncate`, in-place `sed -i`) — whose path
-   resolves inside the **protected-path set** escalates as danger, never
-   auto-approved. The set is config-driven (no CLI product names hardcoded):
-   the home-level claude-format default (`~/.claude`), the directory named by
-   `CLAUDE_CONFIG_DIR`, the parent of every configured
-   `[clis.<name>].settings_path`, their `projects/**/memory` subtrees, and
-   the repo-root `.claude/` + `.git-paw/` control directories. Targets are
-   canonicalized before matching with the same fail-closed posture as the
-   worktree boundary check (a `..`/`~` spelling that syntactically reaches
-   into the set matches even when the path cannot be canonicalized). The
-   agent's own worktree is carved out — in-worktree writes are unaffected —
-   and **reads never match** (`cat ~/.claude/settings.json` is decided by the
-   other rules).
-5. **Scratch-path exception.** An `rm -rf` / `rm -fr` does *not* escalate when
-   **every** target is repo/OS scratch: `/tmp/paw-*`, `/private/tmp/paw-*`, a
-   `$TMPDIR`-rooted `paw-*`, or any path under `.git-paw/tmp/`. This also covers
-   `rm -rf "$VAR"` when `$VAR` resolves (via the captured environment or a
-   preceding `VAR=…` assignment) to such a path. If a variable cannot be
-   resolved, or **any** target lies outside the scratch set, the whole command
-   escalates (fail-safe).
-6. **git-paw's own managed helper scripts.** An invocation of one of
-   git-paw's own bundled coordination scripts —
-   `.git-paw/scripts/{broker,sweep,docs-fetch}.sh`, invoked directly or via
-   `bash …` — classifies safe. git-paw authors these scripts and they perform
-   only bounded coordination actions (publishing status, polling the broker),
-   so an unattended agent's boot-time call into one of them never needs to
-   stall on a sweep. This is still subordinate to the danger-list above: a
-   chained danger operation (`sweep.sh snapshot && rm -rf /`) still escalates.
-7. **Worktree-confined `git add` / `git commit`.** These pre-approve when the
-   agent's worktree resolves to a real directory (the same canonicalize-then-
-   `starts_with` boundary check used for file edits), so an unattended agent can
-   stage and commit its own work without stalling. `git push` is **not** covered
-   — the danger-list escalates it.
-8. **Worktree-confined dev-test shapes.** `bash -n <script>`, non-recursive
-   `chmod <mode> <path…>`, `mktemp` / `mktemp -d`, and interpreter runs of a
-   worktree-resident script (`bash`, `sh`, `python3`, `python`, `node`
-   followed by a worktree file) classify safe when **every** referenced path
-   resolves inside the agent's worktree (same canonicalized, fail-closed
-   boundary check). Inline `-c` code strings, shell metacharacters, and
-   out-of-worktree paths never match; `chmod -R` stays on the danger-list.
-   These rules apply only to panes with a known worktree — the supervisor
-   pane is unaffected. Interpreter runs are one-time approvals only (see the
-   arbitrary-code policy below).
-9. **Composed command whitelist.** The whitelist is composed from the
-   stack-neutral read-mostly verbs (`curl`, `cat`, `ls`, `grep`, `rg`, `git`,
-   `echo`, `sed`, `awk`, `find`, `wc`, `head`, `tail`, `jq`, `mkdir`, `touch`,
-   `export`, `tmux`, `env`, plus `git commit` and the broker-localhost curl
-   prefix), the resolved `[supervisor.common_dev_allowlist]` patterns (your
-   declared stack presets and `extra`), and your configured `safe_commands`.
-   Toolchain verbs are **not** built in — a `cargo test` prompt auto-approves
-   only when the `rust` stack is declared. This is subordinate to the
-   danger-list above.
-10. Anything else is **Unknown** and forwarded to you.
-
-### Re-confirm before send, and the pane 0 exclusion
-
-The live-prompt gate above runs at *detection*. A second, independent check
-runs at *send* time: immediately before dispatching the approval keystrokes,
-the approver takes a **fresh capture** of the target pane and confirms the
-prompt's live structural markers still anchor the modal block (the same
-anchored search and bounded-trailing-region tolerance as detection, not a
-fixed ~4-line scan). If the prompt cleared between the decision and the
-send — the agent moved on, or you answered it first — **no keystrokes are
-sent**, and `sweep.sh approve` reports `cleared before send, no keys sent`.
-This closes the stray-input race where the option digit would otherwise land
-in the CLI's chat box as literal text, polluting context and leaving dangling
-unsubmitted commands.
-
-The blind send-keys path also never targets **pane 0** (the supervisor's own
-pane): `sweep.sh approve 0` sends nothing and reports that pane 0 is excluded,
-and the auto-approver skips pane 0 entirely. Clearing the supervisor's own
-prompt is a distinct, non-blind concern.
-
-Both the bundled `sweep.sh approve` helper and the in-binary auto-approver pass
-through this same gate, so the shell path and the Rust path stay race-safe in
-lockstep. No new broker message is involved: the trigger that a pane is
-awaiting approval is the existing `agent.status` with `phase:
-"stuck-on-prompt"`, and an unsafe or unknown prompt is escalated with the
-existing `agent.question`.
-
-### One approver per pane, enforced
-
-The re-confirm above stops a *stale* approval. A different race remains: two
-approvers deciding on the same pane at the same time. Approval keystrokes can
-come from the unattended drive loop, from the dashboard auto-approver, and from
-`sweep.sh approve` run by your orchestrator model or by you — three separate
-processes. If two of them land on one pane, the second keystroke falls through
-onto whatever prompt appears next.
-
-So before sending, every approver takes that pane's **exclusive claim**: an
-atomic create-if-absent of `<repo>/.git-paw/tmp/approve-pane-<N>.claim`, held
-across the send and released immediately after. Because the file system decides
-who wins, exactly one approver can hold a pane at a time, and the exclusion
-works across processes and languages — the shell helper and the binary compute
-the same path and honour each other's claims.
-
-Taking the claim never blocks. An approver that finds a pane already claimed
-**skips it** and moves on to the rest of the wave, retrying on a later sweep;
-`sweep.sh approve` reports `pane <N> claimed by another approver, no keys sent`
-and names the claim file. Release is automatic on every exit path, including an
-error or a crash mid-send. If an approver is hard-killed (`SIGKILL`) with a
-claim held, the next approver steals it once it has gone untouched for 10
-seconds — so a crash costs one pane one sweep, never a permanent wedge. The
-claim directory is ephemeral and already gitignored; you never need to manage
-it by hand, though removing a stale file is harmless.
-
-### Option selection and the arbitrary-code policy
-
-When the classifier approves, it selects the prompt option by shape: a 2-option
-`Yes` / `No` prompt takes option 1 (`Yes`); a 3-option `Yes` /
-`Yes, and don't ask again` / `No` prompt **prefers** option 2 (the **permanent
-broad grant**). The preference is the point: a routine prompt granted once only
-re-appears on every identical occurrence, which is exactly the friction that
-stalls an unattended wave. So when a prompt offers a durable option, any command
-the classifier already decided was safe or worktree-confined takes it — not just
-a read-mostly verb, but a `cargo test` or `just check` that is safe through your
-declared stack preset. When no durable option is offered, the once-only `Yes` is
-used as before.
-
-Two things are never durably granted. A command that did **not** classify safe
-is escalated, so no option is selected for it at all. And arbitrary-code runners
-— `python`, `bash -c`, `sh -c`, `eval`, `node`, or any bare ` -c ` code-string
-flag — take the one-time `Yes` only, whatever the classification: a standing
-grant on `python -c` is effectively a standing grant on anything. That is why an
-interpreter run of a worktree-resident script classifies safe but stays a
-one-time approval.
-
-`sweep.sh approve <pane>` uses the same option-index selection, because it asks
-the same classifier for it: it feeds the fresh pre-send capture to
-`git paw __classify --resolve-option` and dispatches the **resolved option
-digit** followed by `Enter` (two separate keystrokes), reporting
-`approved pane <N> (option <digit>)`. It never dispatches a blind
-cursor-movement sequence — `Down` + `Enter` lands on `No` on a 2-option
-prompt and takes the permanent broad grant on a 3-option one. If the delegation
-yields no verdict the helper sends **nothing** and says so, distinctly from a
-prompt that cleared between the decision and the send.
+The window sizes, the trailing bound and the pane-0 refusal are compiled logic.
+A [CLI prompt profile](./cli-prompt-profiles.md) supplies the *literals*
+(markers, patterns) and can never widen the gate, change which option
+`approve` presses, or lift the pane-0 refusal.
 
 ## Out-of-worktree write violations
 
-An observed out-of-worktree write attempt by a coding agent — a danger-class
-escalation on the protected-path rule above, or any other sighting of such a
-write (pane narration, a diff touching operator paths, a stray artifact in
-the repo-root control dirs) — is a **boundary violation**, and the supervisor
-skill instructs a two-step response:
+An observed out-of-worktree write attempt by a coding agent — a permission
+prompt asking to write into operator territory, pane narration describing one,
+a diff touching operator paths, a stray artifact in the repo-root control dirs
+— is a **boundary violation**, and the supervisor skill instructs a two-step
+response:
+
+git-paw no longer has a mechanical check for this. The protected-path rule
+existed only to stop the retired classifier auto-approving such a write; with
+nothing approving automatically, a write prompt into operator territory
+reaches a human like every other prompt, and the supervisor relays it rather
+than approving it. The doctrine below is what carries the boundary; for
+mechanical enforcement use deny rules in your agent CLI's own settings, or the
+[sandbox](./sandbox.md).
 
 1. **First attempt — scoped feedback.** The supervisor sends the agent
    `agent.feedback` (via `sweep.sh feedback-gate <agent> scope …`) naming the
@@ -985,34 +859,40 @@ an outside write becomes a question instead.
 
 ## Manual approvals
 
-The preset only covers the commands it knows about. Everything else — a
-project-local script, a one-off `podman` invocation, an out-of-worktree file
-write — the supervisor **forwards to you** for a manual decision instead of
-auto-approving it. `git paw approvals` reports those forwarded commands so you
-can decide which deserve promotion to the bundled preset or your project
-allowlist, closing the loop on recurring prompts.
+Every prompt the `--unattended` drive loop escalates is a command that needed
+*you*. `git paw approvals` aggregates them, so you can see which prompts recur
+and decide which deserve a standing rule in your agent CLI's own allowlist —
+closing the loop on repeat friction.
+
+This is written by the **drive loop**, so it covers `--unattended` runs only.
+An attended session (`git paw start --supervisor` without `--unattended`) runs
+no loop and records nothing; `git paw approvals` still reads any log an
+earlier unattended run left behind.
 
 ### What gets recorded
 
-Each time the supervisor's poll loop forwards a command it could not
-auto-approve, it appends one JSON line to
-`.git-paw/sessions/<session>.manual-approvals.jsonl`:
+Each time the drive loop escalates a live permission prompt, it appends one
+JSON line to `.git-paw/sessions/<session>.manual-approvals.jsonl`:
 
 ```json
 { "timestamp": "2026-05-29T12:34:56Z", "agent_id": "feat-auth",
   "pattern": "make integration-test", "first_seen": true }
 ```
 
-The supervisor runs *outside* the agent's CLI pane, so it cannot see whether
-you ultimately pressed Yes or No on the prompt. What it records is the honest,
-observable signal: **a command that required a manual decision**. A command
-forwarded seven times is a strong allowlist candidate regardless of each
+The loop runs *outside* the agent's CLI pane, so it cannot see whether you
+ultimately pressed Yes or No on the prompt. What it records is the honest,
+observable signal: **a command that required a human decision**. A command
+escalated seven times is a strong allow-rule candidate regardless of each
 individual yes/no — the friction it causes is what you want to remove.
-Auto-approved (preset-matched) commands are **not** recorded.
 
-The `pattern` comes from the same **prompt slice** the classifier reads — the
-command between the `Bash command` / `Bash(…)` header and the confirmation
-question, or a file-operation prompt's target path. Surrounding pane text is
+Exactly one line is written per escalation: a prompt re-seen inside the
+five-minute dedup window is recorded once, and escalations that are not
+permission prompts — a `cli-unavailable` banner, a wedged nudge, a
+correction-loop signal — are not recorded here at all.
+
+The `pattern` comes from the escalation's own **prompt slice** — the command
+between the `Bash command` / `Bash(…)` header and the confirmation question,
+or a file-operation prompt's target path. Surrounding pane text is
 never scraped, so an accept-edits diff line or a previous command's output
 sitting next to the prompt cannot be recorded as if it were the command
 awaiting a decision. When neither source yields something that parses as a
@@ -1029,21 +909,22 @@ git paw approvals --session paw-other   # a specific session
 git paw approvals --limit 5             # top 5 patterns by count
 ```
 
-The text table sorts patterns by how often each was forwarded, with a
-`SUGGEST` hint for where to promote it:
+The text table sorts patterns by how often each was escalated, with a
+`SUGGEST` hint for which of your agent CLI's own allowlists could absorb it:
 
 ```text
 PATTERN                       COUNT  SUGGEST
-make integration-test             7  bundled preset candidate
+make integration-test             7  user allowlist
 ./scripts/deploy-staging.sh       3  project allowlist
-podman build -t paw-ci .          2  bundled preset candidate
+podman build -t paw-ci .          2  user allowlist
 ```
 
-A pattern is suggested for the **project allowlist** when it looks
+A pattern is suggested for the CLI's **project allowlist** when it looks
 project-specific (a `./`-rooted script path, or it contains the project or
-branch name); otherwise it is a **bundled preset candidate**. The `SUGGEST`
-column is a hint, not a rule — the suggestion is a starting point, and
-`git paw approvals` never edits the preset or the allowlist for you.
+branch name); otherwise it belongs in your **user allowlist**, where it
+benefits every project. Both are rules in the agent CLI's own settings — the
+`SUGGEST` column is a hint, not a rule, and `git paw approvals` never edits
+any settings file for you.
 
 When `[supervisor] learnings = true`, the first sighting of each pattern also
 emits a `permission_pattern` learning so it surfaces in
@@ -1051,8 +932,8 @@ emits a `permission_pattern` learning so it surfaces in
 
 ### Opting out
 
-Recording is on by default. To disable both the log writes and the derived
-learnings emission for a session:
+Recording is on by default for `--unattended` runs. To disable both the log
+writes and the derived learnings emission for a session:
 
 ```toml
 [supervisor]
@@ -1089,14 +970,10 @@ projects that don't ship an API-doc generator. See
 
 The bundled supervisor and coordination skills ship as a single template
 each, but they render per session against the project's stack and the
-resolved spec backend. Three placeholders make this work:
+resolved spec backend. Two placeholders make this work:
 
 - `{{DOC_TOOL_COMMAND}}` substitutes the `doc_tool_command` config value
   above so doc-audit prose names the actual API-doc tool for your stack.
-- `{{DEV_ALLOWLIST_PRESET}}` is generated from the bundled
-  `DEV_ALLOWLIST_PRESET` constant at render time, so adding a new
-  auto-approve family to the preset changes the supervisor's safe-command
-  prose without a skill-template edit.
 - `{{SPEC_PATH_DOCTRINE}}` renders a per-backend path doctrine: OpenSpec
   sessions see `openspec/changes/<name>/...` references, Spec Kit sessions
   see `.specify/specs/<feature>/...`, Markdown sessions see the flat
@@ -1106,8 +983,9 @@ resolved spec backend. Three placeholders make this work:
 
 A CI no-leak audit asserts that the rendered supervisor skill contains
 no stack-specific tokens (`cargo`, `rustdoc`, `.rs:`, `Cargo.toml`,
-`rustc`) outside the explicitly-allowed `<!-- allowlist-prose -->` span
-that contains the `DEV_ALLOWLIST_PRESET` enumeration.
+`rustc`) and no vendor product names outside the explicitly-allowed
+`<!-- allowlist-prose -->` span, which carries a deliberate CLI-specific
+enumeration (the paste-buffer marker wording).
 
 ## Verification runs the whole suite (never fail-fast)
 

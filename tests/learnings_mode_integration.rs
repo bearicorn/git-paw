@@ -12,9 +12,9 @@ use serial_test::serial;
 use tempfile::TempDir;
 
 use git_paw::broker::delivery::publish_message;
-use git_paw::broker::learnings::{LearningsAggregator, PERMISSION_PATTERN_THRESHOLD};
+use git_paw::broker::learnings::LearningsAggregator;
 use git_paw::broker::messages::{
-    ArtifactPayload, BlockedPayload, BrokerMessage, FeedbackPayload, StatusPayload, VerifiedPayload,
+    ArtifactPayload, BlockedPayload, BrokerMessage, FeedbackPayload, VerifiedPayload,
 };
 use git_paw::broker::{BrokerState, WatchTarget, start_broker_with};
 use git_paw::config::BrokerConfig;
@@ -38,18 +38,6 @@ fn broker_config() -> BrokerConfig {
         port: pick_broker_port(),
         bind: "127.0.0.1".to_string(),
         ..Default::default()
-    }
-}
-
-fn make_status(agent: &str, status: &str, message: Option<&str>) -> BrokerMessage {
-    BrokerMessage::Status {
-        agent_id: agent.to_string(),
-        payload: StatusPayload {
-            status: status.to_string(),
-            modified_files: vec![],
-            message: message.map(str::to_string),
-            ..Default::default()
-        },
     }
 }
 
@@ -163,19 +151,6 @@ fn broker_aggregator_writes_expected_sections_and_no_learning_variant_appears() 
         ),
     );
 
-    // Permission patterns: 6 auto-approves for `cargo check` (above default
-    // threshold of 5).
-    for _ in 0..=PERMISSION_PATTERN_THRESHOLD {
-        publish_message(
-            &handle.state,
-            &make_status(
-                "feat-x",
-                "auto_approved",
-                Some("auto_approved: matched cargo check"),
-            ),
-        );
-    }
-
     // Trigger an explicit flush via the shared handle (the timer is
     // configured for 1h, so we bypass it).
     {
@@ -191,8 +166,6 @@ fn broker_aggregator_writes_expected_sections_and_no_learning_variant_appears() 
     assert!(md.contains("feat-x: blocked"));
     assert!(md.contains("### Recovery cycles"));
     assert!(md.contains("feat-z"));
-    assert!(md.contains("### Permission patterns"));
-    assert!(md.contains("`cargo check` auto-approved"));
 
     // Broker message log MUST NOT contain any new variant — only the
     // pre-existing message types are allowed. Deserializing every entry
@@ -206,14 +179,7 @@ fn broker_aggregator_writes_expected_sections_and_no_learning_variant_appears() 
         assert!(
             matches!(
                 label,
-                "working"
-                    | "done"
-                    | "blocked"
-                    | "verified"
-                    | "feedback"
-                    | "question"
-                    | "auto_approved"
-                    | "idle"
+                "working" | "done" | "blocked" | "verified" | "feedback" | "question" | "idle"
             ),
             "unexpected status label in message log: {label}"
         );
@@ -370,17 +336,10 @@ fn periodic_flush_writes_accumulated_entries_on_timer() {
         return;
     };
 
-    // Observe 3 events, then sit back and let the timer flush them.
-    for _ in 0..(git_paw::broker::learnings::PERMISSION_PATTERN_THRESHOLD + 2) {
-        publish_message(
-            &handle.state,
-            &make_status(
-                "feat-x",
-                "auto_approved",
-                Some("auto_approved: matched cargo check"),
-            ),
-        );
-    }
+    // Observe a recovery cycle, then sit back and let the timer flush it.
+    publish_message(&handle.state, &make_feedback("feat-x", &["test failed"]));
+    publish_message(&handle.state, &make_feedback("feat-x", &["lint failed"]));
+    publish_message(&handle.state, &make_verified("feat-x"));
 
     // The file should not exist yet (the first tick is ~1s away).
     assert!(
@@ -393,7 +352,7 @@ fn periodic_flush_writes_accumulated_entries_on_timer() {
     while std::time::Instant::now() < deadline {
         if md_path.exists() {
             let content = std::fs::read_to_string(&md_path).unwrap();
-            if content.contains("`cargo check` auto-approved") {
+            if content.contains("### Recovery cycles") {
                 drop(handle);
                 return;
             }

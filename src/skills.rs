@@ -486,15 +486,16 @@ pub(crate) const DRIVE_LOOP_REGION_END: &str = "<!-- drive-loop-directive:end --
 
 /// Resolves the drive-loop directive region ([`DRIVE_LOOP_REGION_BEGIN`] /
 /// [`DRIVE_LOOP_REGION_END`]) already present in the supervisor skill's own
-/// content when `unattended` is true — an in-process drive loop is the sole
-/// approver of classifier-safe permission prompts, so the region tells the
-/// supervisor to consume the loop's escalations rather than blanket-approving
-/// (see the `supervisor-loop-escalation-tiering` spec), and that the loop
-/// hands judgment calls to this pane actively rather than parking them in an
-/// inbox (see `supervisor-autonomous-orchestrator`). When `unattended` is
-/// `false` the region is stripped (attended: the supervisor is the sole
-/// approver and performs the full sweep + approve, stated unconditionally
-/// elsewhere in the skill).
+/// content when `unattended` is true — an in-process drive loop escalates
+/// every live permission prompt and approves none, so the region tells the
+/// supervisor to drain the loop's escalations first and to relay each prompt
+/// to the human rather than answering it (see `boot-block` /
+/// *Drive-loop coordination in the supervisor boot context*), and that the
+/// loop hands judgment calls to this pane actively rather than parking them
+/// in an inbox (see `supervisor-autonomous-orchestrator`). When `unattended`
+/// is `false` the region is stripped; the attended supervisor finds prompts
+/// through its own sweep and relays them the same way, stated unconditionally
+/// elsewhere in the skill.
 #[must_use]
 pub fn with_drive_loop_directive(supervisor_md: &str, unattended: bool) -> String {
     render_opsx_regions(
@@ -589,10 +590,6 @@ pub struct GateCommands<'a> {
 ///   string when unset (the template prose is authored to read
 ///   naturally without it; this avoids a stray `(not configured)` in
 ///   places where empty reads fine).
-/// - `{{DEV_ALLOWLIST_PRESET}}` — substitutes a prose enumeration of
-///   every entry in `DEV_ALLOWLIST_PRESET`, generated from the
-///   constant so adding new entries does not require a skill-template
-///   edit. See [`render_dev_allowlist_preset`].
 /// - `{{SPEC_PATH_DOCTRINE}}` — substitutes a per-backend path doctrine
 ///   paragraph derived from the `backends` slice. Sessions resolving no
 ///   backend render a sentinel sentence; multi-backend sessions render
@@ -632,7 +629,6 @@ pub fn render(
     // `{{DOC_TOOL_COMMAND}}` is the exception: it renders as an empty
     // string when unset because the supervisor template is authored so
     // the surrounding prose reads naturally without the value (per D5).
-    let allowlist_prose = render_dev_allowlist_preset();
     let spec_doctrine = render_spec_path_doctrine(backends);
     let mut output = template
         .content
@@ -668,7 +664,6 @@ pub fn render(
             gates.security_audit_command.unwrap_or(NOT_CONFIGURED),
         )
         .replace("{{DOC_TOOL_COMMAND}}", gates.doc_tool_command.unwrap_or(""))
-        .replace("{{DEV_ALLOWLIST_PRESET}}", &allowlist_prose)
         .replace("{{SPEC_PATH_DOCTRINE}}", &spec_doctrine);
 
     // `{{CHANGE_ID}}` is intentionally NOT substituted: it is a
@@ -784,54 +779,6 @@ pub(crate) fn render_opsx_regions(input: &str, keep: bool, begin: &str, end: &st
 /// has been resolved for the session. Authored as a complete sentence so
 /// the rendered output is grammatical even when no backend is present.
 pub(crate) const SPEC_DOCTRINE_NO_BACKEND_SENTINEL: &str = "(no spec backend resolved for this session — see your project's documentation for where specs live.)";
-
-/// Renders the bundled `DEV_ALLOWLIST_PRESET` constant into a
-/// prose-friendly listing, grouped by first-word command family.
-///
-/// The output enumerates every entry from
-/// [`crate::supervisor::dev_allowlist::DEV_ALLOWLIST_PRESET`] so adding
-/// a new entry to the constant immediately changes the rendered prose
-/// without requiring a skill-template edit. Entries that share a
-/// prefix word (e.g. `cargo build`, `cargo test`) collapse into a
-/// single `cargo (build, test, …)` group; single-word entries (`just`,
-/// `find`, `grep`) appear bare. Multi-word entries with a unique first
-/// word (`sed -n`) appear verbatim.
-///
-/// The result is a single semicolon-separated paragraph fragment that
-/// callers can embed inline in skill prose.
-#[must_use]
-pub fn render_dev_allowlist_preset() -> String {
-    use crate::supervisor::dev_allowlist::DEV_ALLOWLIST_PRESET;
-
-    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
-    for entry in DEV_ALLOWLIST_PRESET {
-        let (head, tail) = match entry.split_once(' ') {
-            Some((h, t)) => (h.to_string(), Some(t.to_string())),
-            None => (entry.to_string(), None),
-        };
-        if let Some(existing) = groups.iter_mut().find(|(h, _)| h == &head) {
-            if let Some(t) = tail {
-                existing.1.push(t);
-            }
-        } else {
-            groups.push((head, tail.into_iter().collect()));
-        }
-    }
-
-    let parts: Vec<String> = groups
-        .into_iter()
-        .map(|(head, members)| {
-            if members.is_empty() {
-                head
-            } else if members.len() == 1 {
-                format!("{head} {}", members[0])
-            } else {
-                format!("{head} ({})", members.join(", "))
-            }
-        })
-        .collect();
-    parts.join("; ")
-}
 
 /// Renders the `{{SPEC_PATH_DOCTRINE}}` paragraph for the supervisor
 /// skill based on the resolved session backends.
@@ -1523,26 +1470,40 @@ mod tests {
             "repeat by the same agent must escalate to the operator"
         );
         assert!(
-            lowered.contains("danger-class escalation"),
-            "procedure must tie into the protected-path danger classification"
+            lowered.contains("relay it to the operator"),
+            "the procedure must relay a pending prompt to the operator, not approve it"
+        );
+        assert!(
+            !lowered.contains("danger-class escalation") && !lowered.contains("classifier"),
+            "the violation must not be described as detected by a git-paw classifier"
         );
     }
 
+    /// `supervisor-skill-discipline` / *Escalation-first, no blanket-approve
+    /// when a drive loop is running*: with a loop running the supervisor
+    /// drains escalations first and relays each prompt; with no loop it still
+    /// relays rather than approving on its own judgment.
     #[test]
-    fn supervisor_skill_defers_safe_approvals_to_drive_loop() {
+    fn supervisor_skill_relays_prompts_whether_or_not_a_loop_runs() {
         let tmpl = resolve("supervisor").unwrap();
-        assert!(
-            tmpl.content
-                .contains("do NOT blanket-sweep-and-approve them yourself"),
-            "supervisor skill must forbid blanket-approving safe prompts when a drive loop runs"
-        );
         assert!(
             tmpl.content.contains("Drain the loop's escalations first"),
             "supervisor skill must tell it to drain loop escalations before sweeping"
         );
         assert!(
-            tmpl.content.contains("sole approver"),
-            "supervisor skill must state it is the sole approver when no loop runs"
+            tmpl.content
+                .contains("Relay each one to the human, naming the agent and the pending command"),
+            "the unattended directive must relay each escalated prompt to the human"
+        );
+        assert!(
+            tmpl.content.contains(
+                "In an attended session nothing approves permission prompts in the background."
+            ),
+            "the attended note must state nothing approves prompts in the background"
+        );
+        assert!(
+            !tmpl.content.contains("sole approver"),
+            "no session makes the supervisor an approver of its own judgment"
         );
     }
 
@@ -2520,16 +2481,11 @@ mod tests {
         );
     }
 
+    // skill-agent / Scenario: Supervisor skill enumerates the four pane
+    // categories.
     #[test]
     fn supervisor_skill_launch_sweep_lists_four_pane_categories() {
-        let tmpl = resolve("supervisor").unwrap();
-        let lowered = tmpl.content.to_lowercase();
-        let start = lowered
-            .find("launch-time pane sweep")
-            .or_else(|| lowered.find("launch sweep"))
-            .expect("launch-time pane sweep heading should be present");
-        let window_end = (start + 2500).min(lowered.len());
-        let window = &lowered[start..window_end];
+        let window = launch_sweep_window();
         assert!(
             window.contains("paste-buffer") || window.contains("paste buffer"),
             "launch sweep should enumerate paste-buffer category"
@@ -2545,35 +2501,6 @@ mod tests {
         assert!(
             window.contains("idle"),
             "launch sweep should enumerate idle category"
-        );
-    }
-
-    #[test]
-    fn supervisor_skill_launch_sweep_references_down_enter_keystroke() {
-        let tmpl = resolve("supervisor").unwrap();
-        let lowered = tmpl.content.to_lowercase();
-        let start = lowered
-            .find("launch-time pane sweep")
-            .or_else(|| lowered.find("launch sweep"))
-            .expect("launch-time pane sweep heading should be present");
-        let window_end = (start + 2500).min(lowered.len());
-        let window = &lowered[start..window_end];
-        // Safe-command auto-approval uses Down to move to "Yes, don't ask
-        // again", then Enter to select it. Both keystrokes must be in the
-        // section so the supervisor agent knows the pattern.
-        assert!(
-            window.contains("down"),
-            "launch sweep should reference the Down keystroke for selecting 'don't ask again'"
-        );
-        assert!(
-            window.contains("enter"),
-            "launch sweep should reference the Enter keystroke for confirming approval"
-        );
-        // Confirm the "don't ask again" phrasing is present so future
-        // pattern allowlist behavior is documented in the skill.
-        assert!(
-            window.contains("don't ask again") || window.contains("don't ask"),
-            "launch sweep should mention the 'don't ask again' approval option"
         );
     }
 
@@ -3095,7 +3022,7 @@ mod tests {
 
     /// Task 6.3 / spec scenarios "Continuous sweep section includes a capture
     /// step" + "Wind-down section includes a synthesis pass": the sweep loop's
-    /// opportunistic capture step is ordered after approval clearing and stuck
+    /// opportunistic capture step is ordered after prompt relaying and stuck
     /// detection (terminal, non-blocking) and publishes via `sweep.sh learn`;
     /// the wind-down includes a synthesis pass that dedups by each category's
     /// primary identifier.
@@ -3104,14 +3031,14 @@ mod tests {
         let tmpl = resolve("supervisor").unwrap();
         let c = &tmpl.content;
 
-        // Opportunistic capture step, ordered after approval clearing
-        // (safe-command policy) and stuck detection (stall detection).
+        // Opportunistic capture step, ordered after prompt relaying
+        // (the launch-sweep handling block) and stuck detection.
         let capture = c
             .find("Opportunistic qualitative capture")
             .expect("sweep loop must include an opportunistic qualitative capture step");
         let approve = c
-            .find("Safe-command policy for permission prompts")
-            .expect("sweep loop must clear permission prompts");
+            .find("**Handling a permission prompt:**")
+            .expect("sweep loop must relay permission prompts");
         let stuck = c
             .find("**Stall detection**")
             .expect("sweep loop must run stuck detection");
@@ -3142,105 +3069,6 @@ mod tests {
             synth_window.contains("primary identifier"),
             "synthesis pass must dedup against in-session records by each category's primary identifier; window:\n{synth_window}"
         );
-    }
-
-    // -----------------------------------------------------------------
-    // render_dev_allowlist_preset (lang-agnostic-skills)
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn dev_allowlist_preset_renders_every_constant_entry() {
-        // Spec contract: every entry from the constant contributes to the
-        // rendered output such that adding a new entry to the constant
-        // would change the output without a skill-template edit. The prose
-        // groups entries by first word — `cargo build` shows as `cargo
-        // (build, …)`. We verify each entry's head word AND tail (if any)
-        // both appear, which would break the moment a new entry is added
-        // without re-rendering.
-        use crate::supervisor::dev_allowlist::DEV_ALLOWLIST_PRESET;
-        let prose = render_dev_allowlist_preset();
-        for entry in DEV_ALLOWLIST_PRESET {
-            let (head, tail) = match entry.split_once(' ') {
-                Some((h, t)) => (h, Some(t)),
-                None => (*entry, None),
-            };
-            assert!(
-                prose.contains(head),
-                "rendered preset must contain head word `{head}` from entry `{entry}`; got:\n{prose}"
-            );
-            if let Some(t) = tail {
-                assert!(
-                    prose.contains(t),
-                    "rendered preset must contain tail `{t}` from entry `{entry}`; got:\n{prose}"
-                );
-            }
-        }
-    }
-
-    // Task 4.2 / core-lang-agnostic spec scenario "Constant-derived prose
-    // stays compiled" (D2): a hand-editable asset here would let the
-    // documented allowlist drift from what is actually auto-approved — a
-    // security regression dressed as a refactor. Static-source guard,
-    // mirroring `build_task_prompt_is_deterministic_and_io_free` in main.rs:
-    // the function body must contain no `include_str!` — every sentence it
-    // renders is generated fresh from the `DEV_ALLOWLIST_PRESET` constant.
-    #[test]
-    fn dev_allowlist_preset_is_not_asset_sourced() {
-        let src = include_str!("skills.rs");
-        let needle = "pub fn render_dev_allowlist_preset";
-        let start = src
-            .find(needle)
-            .unwrap_or_else(|| panic!("render_dev_allowlist_preset signature not found"));
-        let body_start = src[start..].find('{').map_or_else(
-            || panic!("opening brace not found after signature"),
-            |o| start + o,
-        );
-        let mut depth: i32 = 0;
-        let mut end = body_start;
-        for (i, ch) in src[body_start..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = body_start + i + 1;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        assert!(end > body_start, "did not find closing brace");
-        let body = &src[body_start..end];
-        assert!(
-            !body.contains("include_str!"),
-            "render_dev_allowlist_preset must generate its prose from the compiled \
-             DEV_ALLOWLIST_PRESET constant, not a bundled asset; body:\n{body}"
-        );
-    }
-
-    #[test]
-    fn dev_allowlist_preset_groups_by_first_word() {
-        // `git status` and `git log` share `git`; the rendered prose
-        // must collapse them into a single `git (...)` group so the
-        // listing reads as families, not as a flat array.
-        let prose = render_dev_allowlist_preset();
-        let git_groups = prose.matches("git (").count();
-        assert_eq!(
-            git_groups, 1,
-            "multi-entry git prefix must collapse into a single grouped clause; got {git_groups} occurrences of `git (` in:\n{prose}"
-        );
-    }
-
-    #[test]
-    fn dev_allowlist_preset_preserves_single_word_entries() {
-        let prose = render_dev_allowlist_preset();
-        for bare in ["find", "grep"] {
-            assert!(
-                prose.contains(bare),
-                "bare single-word entry `{bare}` should appear verbatim in:\n{prose}"
-            );
-        }
     }
 
     // -----------------------------------------------------------------
@@ -3394,31 +3222,6 @@ mod tests {
         );
         assert_eq!(output, "API doc tool: ``");
         assert!(!output.contains("(not configured)"));
-    }
-
-    #[test]
-    fn render_dev_allowlist_preset_placeholder_substitutes() {
-        let tmpl = SkillTemplate {
-            name: "supervisor".into(),
-            content: "Allowed: {{DEV_ALLOWLIST_PRESET}}".into(),
-            source: Source::Embedded,
-            format: SkillFormat::Standardized,
-            metadata: None,
-            resource_paths: None,
-        };
-        let output = render(
-            &tmpl,
-            "supervisor",
-            "http://127.0.0.1:9119",
-            "git-paw",
-            &GateCommands::default(),
-            &[],
-        );
-        assert!(
-            output.contains("git (status"),
-            "rendered placeholder should embed the grouped preset prose; got:\n{output}"
-        );
-        assert!(!output.contains("{{DEV_ALLOWLIST_PRESET}}"));
     }
 
     #[test]
@@ -4426,12 +4229,16 @@ mod tests {
         assert_eq!(tmpl.source, cloned.source);
     }
 
-    // Drive-loop directive (supervisor boot-context injection when unattended)
+    // boot-block / Scenario: Unattended supervisor boot context announces the
+    // drive loop — the directive says a loop escalates prompts to this pane,
+    // that no component approves them, and that the supervisor relays each
+    // one to the human.
     #[test]
     fn drive_loop_directive_present_when_unattended() {
         let input = format!(
-            "BASE SKILL\n{DRIVE_LOOP_REGION_BEGIN}\na drive loop is running, do NOT \
-             blanket-approve, Drain the loop's escalations\n{DRIVE_LOOP_REGION_END}\nTAIL"
+            "BASE SKILL\n{DRIVE_LOOP_REGION_BEGIN}\na drive loop is running, it approves \
+             nothing, Drain the loop's escalations, relay each one to the human\
+             \n{DRIVE_LOOP_REGION_END}\nTAIL"
         );
         let out = with_drive_loop_directive(&input, true);
         assert!(out.contains("BASE SKILL"), "base content preserved");
@@ -4444,8 +4251,32 @@ mod tests {
             !out.contains(DRIVE_LOOP_REGION_BEGIN) && !out.contains(DRIVE_LOOP_REGION_END),
             "region markers themselves are always dropped"
         );
+
+        // The real bundled region, not just the fixture, must carry the
+        // escalate-and-relay contract.
+        let tmpl = resolve("supervisor").expect("supervisor skill resolves");
+        let rendered = render(
+            &tmpl,
+            "supervisor",
+            "http://localhost:9119",
+            "proj",
+            &GateCommands::default(),
+            &[],
+        );
+        let real = with_drive_loop_directive(&rendered, true);
+        let lower = real.to_lowercase();
+        assert!(
+            lower.contains("no git-paw component approves permission prompts"),
+            "the directive must state no component approves prompts; got:\n{real}"
+        );
+        assert!(
+            lower.contains("relay each one to the human"),
+            "the directive must tell the supervisor to relay each prompt; got:\n{real}"
+        );
     }
 
+    // boot-block / Scenario: Attended supervisor boot context omits the
+    // drive-loop directive.
     #[test]
     fn drive_loop_directive_absent_when_attended() {
         let input = format!(
@@ -4458,22 +4289,62 @@ mod tests {
         );
     }
 
-    // Byte-identical safety net (D1 / task 1.3): the bundled supervisor
-    // skill's drive-loop-directive region, once kept for an unattended
-    // session, carries this exact text — unchanged by the region's
-    // relocation from a compiled Rust constant into the asset itself.
+    // boot-block / Scenario: No boot context tells the supervisor to approve
+    // by pattern — neither the attended nor the unattended rendering may
+    // instruct approving a prompt judged safe, or selecting a durable grant.
+    #[test]
+    fn no_boot_context_tells_the_supervisor_to_approve_by_pattern() {
+        let tmpl = resolve("supervisor").expect("supervisor skill resolves");
+        let rendered = render(
+            &tmpl,
+            "supervisor",
+            "http://localhost:9119",
+            "proj",
+            &GateCommands::default(),
+            &[],
+        );
+        for unattended in [true, false] {
+            let out = with_drive_loop_directive(&rendered, unattended).to_lowercase();
+            for forbidden in [
+                "__classify",
+                "classifier-safe",
+                "safe-by-pattern",
+                "absorb routine approval",
+                "approve routine prompts",
+                "blanket-approv",
+            ] {
+                assert!(
+                    !out.contains(forbidden),
+                    "boot context (unattended={unattended}) must not teach approving by \
+                     pattern; found `{forbidden}`"
+                );
+            }
+            assert!(
+                !out.contains("select **\"yes, and don't ask again\"**"),
+                "boot context (unattended={unattended}) must not instruct selecting a \
+                 durable grant"
+            );
+        }
+    }
+
+    // Ground-truth safety net: the bundled supervisor skill's
+    // drive-loop-directive region, once kept for an unattended session,
+    // carries this exact text. Pinned byte-for-byte so a prose edit that
+    // weakens the "escalates, approves nothing" contract (boot-block /
+    // *Drive-loop coordination in the supervisor boot context*) cannot land
+    // unnoticed.
     #[test]
     fn drive_loop_directive_region_is_byte_identical_to_ground_truth() {
         const EXPECTED: &str = "## Unattended: a drive loop is running\n\
 \n\
-An in-process drive loop is auto-approving classifier-safe permission prompts on every pane this session. It owns mechanical approval of safe prompts — do NOT blanket-sweep-and-approve them yourself, or you will race the loop.\n\
+An in-process drive loop is sweeping every pane this session. It approves nothing: every live permission prompt it finds is escalated into THIS pane and recorded on the broker, and the rest of the wave keeps moving. No git-paw component approves permission prompts.\n\
 \n\
 The loop is the pump; you are the brain. It does not merely park what it cannot decide — it types each judgment call straight into THIS pane and moves on without waiting for you, and it nudges you to run an orchestration sweep on a longer cadence. A task prompt arriving here with no human behind it is the loop handing you work; see **Judgment calls handed to you** for the four kinds and how to decide each.\n\
 \n\
-Your approval role this session is escalation-driven, in this order each cycle:\n\
+Your role this session is escalation-driven, in this order each cycle:\n\
 \n\
-1. **Drain the loop's escalations first.** Prompts the loop could not classify safe are injected here AND recorded as review items in your broker inbox — the inbox is the backstop for anything that arrived while this pane was busy. Reason about each and either approve the specific escalated pane (`.git-paw/scripts/sweep.sh approve <pane>`) or publish feedback — before anything else, so blocked agents unblock fastest.\n\
-2. **Then run your normal sweep** — verification, merge, conflict handling, detect-stuck, and status — as usual, but WITHOUT blanket-approving safe prompts (the loop owns those).";
+1. **Drain the loop's escalations first.** Each escalated permission prompt is injected here AND recorded as a review item in your broker inbox — the inbox is the backstop for anything that arrived while this pane was busy. Relay each one to the human, naming the agent and the pending command, and run `.git-paw/scripts/sweep.sh approve <pane>` only when the human explicitly tells you to. For any other escalation, reason about it and publish feedback or an answer — before anything else, so blocked agents unblock fastest.\n\
+2. **Then run your normal sweep** — verification, merge, conflict handling, detect-stuck, and status — as usual. Do not wait for prompts to clear on their own; nothing will clear them but the human's decision.";
 
         let tmpl = resolve("supervisor").unwrap();
         let rendered = render(
@@ -5769,36 +5640,41 @@ Your approval role this session is escalation-driven, in this order each cycle:\
         );
     }
 
-    /// 8a.5 — Rules section bullet mentions absorbing routine approvals
-    /// AND at least three routine command families (now sourced from the
-    /// rendered `{{DEV_ALLOWLIST_PRESET}}` prose).
+    /// 8a.5 — the Rules section's permission bullet relays prompts to the
+    /// human and names no approvable command family
+    /// (`supervisor-skill-discipline` / *Escalation-first, no blanket-approve
+    /// when a drive loop is running*).
     #[test]
-    fn supervisor_skill_rules_bullet_mentions_routine_absorption() {
+    fn supervisor_skill_rules_bullet_relays_rather_than_absorbs() {
         let rendered = render_supervisor();
         let start = rendered.find("### Rules").expect("Rules section present");
         let end = rendered[start..]
-            .find("### Auto-approve permission prompts")
-            .map_or(rendered.len(), |p| start + p);
+            .find("\n### ")
+            .map_or(rendered.len(), |p| start + p + 1);
         let section = &rendered[start..end];
         let lower = section.to_lowercase();
         assert!(
-            lower.contains("absorb routine approval") || lower.contains("rubber-stamp"),
-            "Rules must include the routine-approval absorption framing; got:\n{section}"
+            lower.contains("relay permission prompts"),
+            "Rules must instruct relaying permission prompts; got:\n{section}"
         );
-        // The rules bullet embeds {{DEV_ALLOWLIST_PRESET}}, which now
-        // renders the stack-neutral universal preset grouped by first
-        // word: `git (status, log, diff, ...)`, `find`, `grep`,
-        // `sed -n`. Match against the universal families.
-        let mut family_hits = 0;
-        for family in ["git (", "find", "grep", "sed"] {
-            if section.contains(family) {
-                family_hits += 1;
-            }
-        }
         assert!(
-            family_hits >= 3,
-            "Rules bullet must enumerate at least 3 routine families; only {family_hits} found in:\n{section}",
+            lower.contains("never approve on your own judgment"),
+            "Rules must forbid approving on the supervisor's own judgment; got:\n{section}"
         );
+        assert!(
+            lower.contains("only when the human"),
+            "the approve must be conditioned on the human's explicit instruction; got:\n{section}"
+        );
+        for forbidden in [
+            "absorb routine approval",
+            "rubber-stamp",
+            "routine families come from",
+        ] {
+            assert!(
+                !lower.contains(forbidden),
+                "Rules must not carry the retired absorption framing; found `{forbidden}` in:\n{section}"
+            );
+        }
     }
 
     /// 8a.6 — Rules bullet also enumerates at least two non-routine
@@ -6142,76 +6018,73 @@ Your approval role this session is escalation-driven, in this order each cycle:\
         );
     }
 
-    // prompt-submit-fix coverage: ensure the supervisor skill's launch-time
-    // pane sweep section continues to teach the three timing/escalation/
-    // cross-reference contracts that the prompt-submit-fix change locked in.
-
-    #[test]
-    fn supervisor_skill_documents_proactive_launch_sweep() {
-        let tmpl = resolve("supervisor").unwrap();
+    /// The §1.5 launch-time pane sweep step, lower-cased with whitespace
+    /// collapsed so substring scans survive line rewrapping. Runs from the
+    /// `1.5` heading to the next top-level workflow step.
+    fn launch_sweep_window() -> String {
+        let tmpl = resolve("supervisor").expect("supervisor skill resolves");
         let lowered = tmpl.content.to_lowercase();
         let start = lowered
             .find("launch-time pane sweep")
             .or_else(|| lowered.find("launch sweep"))
             .expect("launch-time pane sweep heading should be present");
-        let window_end = (start + 2500).min(lowered.len());
-        let window = &lowered[start..window_end];
+        let rest = &lowered[start..];
+        let end = rest.find("\n2. **watch**").unwrap_or(rest.len());
+        rest[..end].split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    // skill-agent / Scenario: Supervisor skill mentions proactive launch-time
+    // permission sweep.
+    #[test]
+    fn supervisor_skill_documents_proactive_launch_sweep() {
+        let window = launch_sweep_window();
         assert!(
             window.contains("immediately after attaching")
-                || window.contains("before the poll thread")
                 || window.contains("first-few-seconds")
                 || window.contains("first few seconds"),
             "launch sweep should link the sweep to the first-few-seconds-after-attach window",
         );
     }
 
+    // skill-agent / Scenario: Supervisor skill relays permission prompts to
+    // the human.
     #[test]
-    fn supervisor_skill_launch_sweep_escalates_unknown_via_agent_question() {
-        let tmpl = resolve("supervisor").unwrap();
-        let lowered = tmpl.content.to_lowercase();
-        let start = lowered
-            .find("launch-time pane sweep")
-            .or_else(|| lowered.find("launch sweep"))
-            .expect("launch-time pane sweep heading should be present");
-        let window_end = (start + 2500).min(lowered.len());
-        let window = &lowered[start..window_end];
+    fn supervisor_skill_launch_sweep_relays_prompts_to_the_human() {
+        let window = launch_sweep_window();
         assert!(
-            window.contains("unknown") || window.contains("wider scope"),
-            "launch sweep should classify a third category for unknown/wider-scope prompts",
+            window.contains("relay it to the human"),
+            "launch sweep must instruct relaying the prompt to the human; window:\n{window}",
         );
         assert!(
-            window.contains("agent.question"),
-            "launch sweep should instruct agent.question escalation for unknown prompts",
+            window.contains("naming the agent and the pending command"),
+            "the relay must name the agent and the pending command; window:\n{window}",
         );
         assert!(
-            window.contains("escalate"),
-            "launch sweep should use the word 'escalate' alongside the agent.question instruction",
+            window.contains("sweep.sh approve"),
+            "launch sweep must name the explicit approve helper; window:\n{window}",
+        );
+        assert!(
+            window.contains("only when the human") && window.contains("explicitly tells you"),
+            "the approve must be conditioned on the human's explicit instruction; window:\n{window}",
         );
     }
 
+    // skill-agent / Scenario: Supervisor skill does not rely on a background
+    // approver.
     #[test]
-    fn supervisor_skill_launch_sweep_complements_auto_approve_thread() {
-        let tmpl = resolve("supervisor").unwrap();
-        let lowered = tmpl.content.to_lowercase();
-        let start = lowered
-            .find("launch-time pane sweep")
-            .or_else(|| lowered.find("launch sweep"))
-            .expect("launch-time pane sweep heading should be present");
-        let window_end = (start + 2500).min(lowered.len());
-        let window = &lowered[start..window_end];
+    fn supervisor_skill_launch_sweep_does_not_rely_on_a_background_approver() {
+        let window = launch_sweep_window();
         assert!(
-            window.contains("complements"),
-            "launch sweep should describe itself as complementing the auto-approve thread",
+            !window.contains("auto_approve"),
+            "launch sweep must not cross-reference an [supervisor.auto_approve] poll thread; window:\n{window}",
         );
         assert!(
-            window.contains("does not replace")
-                || window.contains("not replace")
-                || window.contains("does **not** replace"),
-            "launch sweep should explicitly say it does NOT replace the auto-approve thread",
+            !window.contains("poll thread"),
+            "launch sweep must not reference a background poll thread; window:\n{window}",
         );
         assert!(
-            window.contains("[supervisor.auto_approve]") || window.contains("auto_approve"),
-            "launch sweep should cross-reference the [supervisor.auto_approve] poll thread",
+            window.contains("no git-paw component approves prompts in the background"),
+            "launch sweep must state that nothing approves prompts in the background; window:\n{window}",
         );
     }
 

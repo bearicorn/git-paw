@@ -20,7 +20,7 @@
 //! - **Act only on a LIVE prompt** — the prompt's structural markers (option
 //!   glyphs / `Do you want to …` / `Esc to cancel`) at the capture's tail,
 //!   over a window spanning a full multi-option prompt block
-//!   ([`crate::supervisor::auto_approve::is_live_prompt`]); prompt-like text
+//!   ([`crate::supervisor::permission_prompt::is_live_prompt`]); prompt-like text
 //!   scrolled into history is ignored (D4).
 //! - **Explicit per-pane capture** — one `tmux capture-pane` per pane, never a
 //!   `for p in …` shell loop (D3).
@@ -45,12 +45,15 @@
 //! point [`run_drive_loop`] wires the real implementations.
 
 use std::collections::HashMap;
+use std::io::{Read as _, Write as _};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
 
 use regex::Regex;
+use serde::Deserialize;
 
 use crate::broker::messages::{BrokerMessage, FeedbackPayload};
 use crate::config::{
@@ -61,17 +64,13 @@ use crate::error::PawError;
 use crate::session::{self, SessionStatus};
 
 use super::approval_gate::{approval_dedup_key, live_prompt_in_tail};
-use super::approve::{KeyDispatcher, TmuxKeyDispatcher, approval_keystrokes};
-use super::auto_approve::{
-    LIVE_PROMPT_TAIL, ProtectedPaths, anchor_on_trailing_region, detect_prompt_shape,
-    extract_command_slice, extract_path_from_file_prompt, is_dangerous, is_git_dir_write,
-    is_idle_input_box_line, is_live_prompt, is_managed_script_invocation,
-    is_protected_path_violation, is_rule_line, is_safe_command, is_scratch_rm,
-    is_worktree_dev_test_op, is_worktree_file_op, is_worktree_git_op, normalize_command,
-    select_option_index, strip_input_sigil,
-};
 use super::claim::PaneClaim;
-use super::poll::{AgentStatusRow, fetch_status_over_http};
+use super::keys::{KeyDispatcher, TmuxKeyDispatcher};
+use super::permission_prompt::{
+    LIVE_PROMPT_TAIL, anchor_on_trailing_region, extract_command_slice,
+    extract_path_from_file_prompt, is_idle_input_box_line, is_live_prompt, is_rule_line,
+    strip_input_sigil,
+};
 
 /// Poll cadence: the loop re-sweeps every pane on approximately this interval.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(15);
@@ -226,146 +225,16 @@ fn paths_match(pane_path: &Path, worktree_root: &Path) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Prompt classification (the auto-approve-classifier the loop consumes)
+// Permission prompts
 // ---------------------------------------------------------------------------
 
-/// A prompt's three-way safety verdict.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PromptVerdict {
-    /// Safe to auto-approve. Carries the 1-based option index to select and the
-    /// name of the rule that matched (for the audit log).
-    Safe {
-        /// 1-based option index to select at the prompt.
-        option_index: u8,
-        /// Human-readable name of the classifier rule that matched.
-        matched: String,
-    },
-    /// A curated danger-list match — escalate, never auto-approve.
-    Danger,
-    /// An approval prompt whose command class is unrecognised — escalate.
-    Unknown,
-}
-
-impl PromptVerdict {
-    /// Short label for the exit summary / broker alert.
-    #[must_use]
-    pub fn label(&self) -> &'static str {
-        match self {
-            PromptVerdict::Safe { .. } => "safe",
-            PromptVerdict::Danger => "danger",
-            PromptVerdict::Unknown => "unknown",
-        }
-    }
-}
-
-/// Classifies a live prompt capture into a [`PromptVerdict`], mirroring the
-/// danger-first decision order the dashboard poll loop uses
-/// ([`crate::supervisor::poll`]): danger-list plus the `.git/`-write rule
-/// first (terminal escalate), then the scratch-`rm` exception, an invocation
-/// of one of git-paw's own managed helper scripts, the worktree-confined
-/// `git add`/`git commit` pre-approval, the worktree-confined dev-test
-/// shapes, the shell whitelist, and finally the worktree file-op boundary.
-/// Anything unmatched is [`PromptVerdict::Unknown`].
+/// Escalation verdict label for a live agent-CLI permission prompt.
 ///
-/// `worktree_root` is `None` for panes without a known worktree (the supervisor
-/// pane), which suppresses the worktree-scoped rules for that pane.
-///
-/// The slice is [`normalize_command`]-normalised first, so a routine command
-/// wrapped in a gate-reporting exit-code probe classifies as the bare command it
-/// is. Every rule below — danger-list included — runs against that normalised
-/// slice, so the wrapper can never downgrade an escalation.
-///
-/// The option index is resolved only once a safe rule has matched, so a prompt
-/// offering a durable "don't ask again" grant takes it for any safe /
-/// worktree-confined command rather than only a read-mostly verb.
-#[must_use]
-pub fn classify_prompt(
-    captured: &str,
-    whitelist: &[String],
-    worktree_root: Option<&Path>,
-    approve_worktree_writes: bool,
-    protected: &ProtectedPaths,
-) -> PromptVerdict {
-    let slice = prompt_command_slice(captured);
-
-    // Danger-first precedence: a curated danger-list match — or a write
-    // targeting the operator's protected config/memory territory
-    // (`agent-memory-isolation`) — is a terminal escalate that overrides any
-    // whitelist / safe-by-pattern match.
-    if is_dangerous(&slice)
-        || is_protected_path_violation(captured, &slice, protected, worktree_root)
-        || is_git_dir_write(captured, &slice, worktree_root)
-    {
-        return PromptVerdict::Danger;
-    }
-
-    // The safe rules, in the poll loop's precedence order:
-    // - the scratch-path exception (an `rm -rf` whose every target is repo/OS
-    //   scratch);
-    // - an invocation of one of git-paw's own bundled helper scripts
-    //   (GP-02b);
-    // - worktree-confined `git add` / `git commit` pre-approval;
-    // - worktree-confined dev-test shapes (`bash -n`, non-recursive chmod,
-    //   mktemp, interpreter-of-worktree-script);
-    // - the shell whitelist (read-mostly verbs + configured safe commands);
-    // - a write/edit/create prompt whose target resolves inside the worktree.
-    //
-    // The worktree-scoped rules are suppressed for panes without a known
-    // worktree (the supervisor pane).
-    let matched = if is_scratch_rm(&slice) {
-        Some("scratch-rm".to_string())
-    } else if is_managed_script_invocation(&slice, worktree_root) {
-        Some("managed-script".to_string())
-    } else if worktree_root.is_some_and(|root| is_worktree_git_op(&slice, root)) {
-        Some("worktree-git".to_string())
-    } else if worktree_root.is_some_and(|root| is_worktree_dev_test_op(&slice, root)) {
-        Some("worktree-dev-test".to_string())
-    } else if let Some(entry) = first_whitelist_match(&slice, whitelist) {
-        Some(entry)
-    } else if worktree_root
-        .is_some_and(|root| is_worktree_file_op(captured, root, approve_worktree_writes))
-    {
-        Some("worktree-file-op".to_string())
-    } else {
-        None
-    };
-
-    match matched {
-        Some(matched) => PromptVerdict::Safe {
-            option_index: select_option_index(detect_prompt_shape(captured), &slice, true),
-            matched,
-        },
-        None => PromptVerdict::Unknown,
-    }
-}
-
-/// Returns the normalised command slice a capture is classified against: the
-/// prompted command text ([`extract_command_slice`], falling back to the whole
-/// capture when no command header is present), with the gate-reporting wrappers
-/// stripped by [`normalize_command`].
-///
-/// [`classify_prompt`] derives its slice through this function, so exposing it
-/// lets the hidden `git paw __classify` subcommand resolve the option index for
-/// a non-[`PromptVerdict::Safe`] verdict from the exact same slice the
-/// classification saw, instead of re-deriving it.
-#[must_use]
-pub fn prompt_command_slice(captured: &str) -> String {
-    normalize_command(&extract_command_slice(captured).unwrap_or_else(|| captured.to_string()))
-}
-
-/// Returns the first whitelist entry that matches any line of `captured`, using
-/// the shared prefix/word-boundary semantics of
-/// [`is_safe_command`]. Mirrors the poll loop's private helper.
-fn first_whitelist_match(captured: &str, whitelist: &[String]) -> Option<String> {
-    for line in captured.lines() {
-        for entry in whitelist {
-            if is_safe_command(line, std::slice::from_ref(entry)) {
-                return Some(entry.clone());
-            }
-        }
-    }
-    None
-}
+/// There is exactly one: git-paw does not judge the prompted command, so it
+/// has nothing to say about the prompt beyond "a human needs to decide this".
+/// It replaced the retired classifier's `danger` / `unknown` pair, which
+/// implied a safety verdict git-paw cannot reliably make.
+const PERMISSION_PROMPT_VERDICT: &str = "permission-prompt";
 
 // ---------------------------------------------------------------------------
 // Dedup
@@ -835,11 +704,12 @@ pub struct Escalation {
 impl Escalation {
     /// Renders the supervisor-facing question text for this escalation.
     ///
-    /// The framing follows the verdict, because the two kinds ask the human for
-    /// different things. A classifier verdict means a pane is sitting on a
-    /// permission prompt that could not be auto-approved — review the pane. A
-    /// correction-loop verdict means a branch is not converging; there is no
-    /// prompt to review, so the text must not claim one.
+    /// The framing follows the verdict, because the kinds ask the human for
+    /// different things. A `permission-prompt` verdict means a pane is waiting
+    /// on a decision only a human can make, and says plainly that git-paw does
+    /// not approve prompts, so nobody waits for it to. A correction-loop
+    /// verdict means a branch is not converging; there is no prompt to review,
+    /// so the text must not claim one.
     #[must_use]
     pub fn question(&self) -> String {
         match self.verdict.as_str() {
@@ -855,9 +725,15 @@ impl Escalation {
                  Detail: {}",
                 self.agent_id, self.command
             ),
+            PERMISSION_PROMPT_VERDICT => format!(
+                "{} is waiting on a permission prompt that needs a human decision. \
+                 git-paw does not approve prompts — review the pane and answer it, or \
+                 tell the orchestrator to run `sweep.sh approve`. Command: {}",
+                self.agent_id, self.command
+            ),
             _ => format!(
-                "{} is stalled on a {} permission prompt the unattended loop could not \
-                 auto-approve; please review the pane and decide manually. Command: {}",
+                "{} is stalled and needs a human decision ({}). Please review the pane. \
+                 Detail: {}",
                 self.agent_id, self.verdict, self.command
             ),
         }
@@ -866,11 +742,18 @@ impl Escalation {
     /// Renders the task text injected into the orchestrator's pane for this
     /// escalation.
     ///
-    /// Where [`Self::question`] asks a *human* to review a pane, this asks the
-    /// *orchestrator* to decide and act — it can approve the escalated pane,
-    /// publish an answer, or declare the branch unrecoverable itself. The human
-    /// framing is deliberately not reused: telling a model to "review the pane
-    /// and decide manually" invites it to wait for someone else.
+    /// Most verdicts ask the *orchestrator* to decide and act — it can publish
+    /// an answer or declare a branch unrecoverable itself. The human framing is
+    /// deliberately not reused there: telling a model to "review the pane and
+    /// decide manually" invites it to wait for someone else.
+    ///
+    /// A `permission-prompt` verdict is the exception, and asks for a RELAY
+    /// rather than a decision (design D2). An orchestrator that approves on its
+    /// own reading of the command is just another command classifier — one
+    /// reading untrusted pane text, so exposed to prompt injection — and
+    /// git-paw's own bundled skill would be the thing teaching it to do that.
+    /// So the hand-off tells it to put the prompt in front of the human and to
+    /// run `sweep.sh approve` only when the human says so.
     ///
     /// A `"cli-unavailable"` verdict paraphrases its `command` instead of
     /// quoting it, since this text is typed into the orchestrator's own
@@ -892,6 +775,15 @@ impl Escalation {
                  cross-agent state and act on it; escalate to the human only if it is \
                  genuinely undecidable.",
                 self.agent_id
+            ));
+        }
+        if self.verdict == PERMISSION_PROMPT_VERDICT {
+            return one_line_capped(&format!(
+                "Relay to the human (permission-prompt / {}): that agent is waiting on a \
+                 permission prompt for: {}. Do NOT decide it yourself and do NOT approve \
+                 it on your own reading of the command. Tell the human what is being \
+                 asked and run `sweep.sh approve` only if they explicitly tell you to.",
+                self.agent_id, self.command
             ));
         }
         one_line_capped(&format!(
@@ -1088,7 +980,6 @@ pub trait Clock {
 pub trait AlertSink {
     /// Records an auto-approval in the broker log BEFORE keystrokes are sent
     /// (per `automatic-approval`), so a crash mid-action still leaves a trail.
-    fn log_approval(&mut self, agent_id: &str, matched: &str);
     /// Surfaces a risky/unknown prompt for later human review.
     fn escalate(&mut self, escalation: &Escalation);
 }
@@ -1097,6 +988,31 @@ pub trait AlertSink {
 pub trait LearningSink {
     /// Records a learning. `body` is a JSON object string.
     fn record(&mut self, category: &str, title: &str, body: &str);
+}
+
+/// Records a permission prompt the loop escalated for a human decision
+/// (`approval-pattern-surfacing`).
+///
+/// git-paw cannot observe the in-pane answer — it runs outside the agent's
+/// CLI process — so what it records is the prompt it *forwarded*, not an
+/// approval. The recorded semantic is "this command required a manual
+/// decision", a superset of approvals, and `git paw approvals` aggregates it
+/// into a hint about which commands belong in the agent CLI's own allow
+/// rules.
+///
+/// Only a live permission prompt is a subject here. A CLI-unavailability
+/// banner, a wedged nudge and a correction-loop signal are escalations too,
+/// but none of them is a command awaiting a decision, so none reaches this
+/// sink — see [`sweep_pane`], which calls it from the permission-prompt arm
+/// alone.
+pub trait ManualDecisionSink {
+    /// Records that `agent_id`'s pane, whose content is `captured`, is
+    /// waiting on a permission prompt that was escalated for a human.
+    ///
+    /// Called once per emitted escalation: after the dedup window has
+    /// admitted it, so a prompt re-seen inside the window is not recorded
+    /// twice.
+    fn record_forwarded(&mut self, agent_id: &str, captured: &str);
 }
 
 /// Performs the git-level actions of `supervisor-branch-refresh`: the two
@@ -1189,6 +1105,9 @@ pub struct DriveDeps<'a> {
     pub alerts: &'a mut dyn AlertSink,
     /// Records learnings.
     pub learnings: &'a mut dyn LearningSink,
+    /// Records each escalated permission prompt to the session's
+    /// manual-decision log (`approval-pattern-surfacing`).
+    pub manual_decisions: &'a mut dyn ManualDecisionSink,
     /// Performs branch-refresh git actions and worker notification.
     pub refresher: &'a mut dyn BranchRefresher,
     /// Wedged nudges recorded this run, deduped on `(agent_id, command)` so a
@@ -1232,13 +1151,6 @@ pub struct DriveConfig {
     /// Cadence of the orchestration-sweep nudge injected into the orchestrator
     /// pane — deliberately longer than `poll_interval`.
     pub orchestration_nudge_interval: Duration,
-    /// Effective safe-command whitelist.
-    pub whitelist: Vec<String>,
-    /// Whether in-worktree write/edit/create prompts auto-approve.
-    pub approve_worktree_writes: bool,
-    /// Protected-path set for the operator config/memory danger rule
-    /// (`agent-memory-isolation`).
-    pub protected_paths: ProtectedPaths,
     /// Correction-loop policy (`[supervisor.correction]`). The default leaves
     /// `auto_loopback` off, so the loop sends no re-engagement keystrokes.
     pub correction: CorrectionConfig,
@@ -1274,9 +1186,6 @@ impl Default for DriveConfig {
             heartbeat: HEARTBEAT_INTERVAL,
             dedup_window: DEDUP_WINDOW,
             orchestration_nudge_interval: ORCHESTRATION_NUDGE_INTERVAL,
-            whitelist: Vec::new(),
-            approve_worktree_writes: true,
-            protected_paths: ProtectedPaths::default(),
             correction: CorrectionConfig::default(),
             learnings_enabled: false,
             broker_log_hint: None,
@@ -1329,11 +1238,6 @@ pub fn drive_loop(
     instance: &dyn SessionInstanceGuard,
 ) -> DriveSummary {
     let coding_ids: Vec<String> = agents.iter().map(|a| a.agent_id.clone()).collect();
-    let worktree_by_id: HashMap<String, PathBuf> = agents
-        .iter()
-        .map(|a| (a.agent_id.clone(), a.worktree_path.clone()))
-        .collect();
-
     let mut dedup = DedupWindow::new(config.dedup_window);
     let mut escalations: Vec<Escalation> = Vec::new();
     let mut correction = CorrectionState::new();
@@ -1396,12 +1300,10 @@ pub fn drive_loop(
             let agent_id = agent_id.to_string();
             pane_by_agent.insert(agent_id.clone(), pane.pane_index);
 
-            let worktree_root = worktree_by_id.get(&agent_id).map(PathBuf::as_path);
             match sweep_pane(
                 ctx,
                 &pane,
                 &agent_id,
-                worktree_root,
                 deps,
                 config,
                 &mut dedup,
@@ -1411,7 +1313,7 @@ pub fn drive_loop(
                 PaneSweepOutcome::Escalated(escalation) => escalations.push(escalation),
                 PaneSweepOutcome::OrchestratorCliUnavailable(line) => {
                     // The brain is gone: exit at once rather than continue
-                    // blindly approving worker prompts (D4). The quoted line
+                    // blindly sweeping worker panes (D4). The quoted line
                     // reaches the summary through the escalation list, the
                     // same as every other detail the summary renders.
                     escalations.push(Escalation {
@@ -1901,6 +1803,7 @@ fn cli_unavailable_dedup_key(agent_id: &str, marker: &str) -> String {
 }
 
 /// What sweeping one pane found.
+#[derive(Debug)]
 enum PaneSweepOutcome {
     /// Nothing actionable — no live prompt, no CLI-unavailability marker.
     None,
@@ -1912,10 +1815,14 @@ enum PaneSweepOutcome {
     OrchestratorCliUnavailable(String),
 }
 
-/// Sweeps one pane: captures it, and when a LIVE prompt is in the tail either
-/// approves it (audit-logged first, then the option digit and `Enter` as two
-/// separate keystrokes, gated on a fresh re-confirm) or records a deduped
-/// escalation without blocking the rest of the wave.
+/// Sweeps one pane: captures it, and when a LIVE prompt is in the tail
+/// records a deduped escalation for a human decision without blocking the
+/// rest of the wave.
+///
+/// It answers NO prompt, whatever the command text says. Whether the prompted
+/// command may run is decided by the agent CLI's own permission system or by
+/// the human — a decision git-paw cannot make reliably from pane text, and no
+/// longer tries to.
 ///
 /// Before the live-prompt check, every pane's tail is also scanned for a
 /// CLI-unavailability marker (D4): the orchestrator pane signals an immediate
@@ -1935,7 +1842,6 @@ fn sweep_pane(
     ctx: SweepContext<'_>,
     pane: &PaneInfo,
     agent_id: &str,
-    worktree_root: Option<&Path>,
     deps: &mut DriveDeps<'_>,
     config: &DriveConfig,
     dedup: &mut DedupWindow,
@@ -1989,56 +1895,39 @@ fn sweep_pane(
         return PaneSweepOutcome::None;
     }
 
-    let verdict = classify_prompt(
-        &capture,
-        &config.whitelist,
-        worktree_root,
-        config.approve_worktree_writes,
-        &config.protected_paths,
-    );
-
-    match verdict {
-        PromptVerdict::Safe {
-            option_index,
-            matched,
-        } => {
-            // Log the approval BEFORE the keystrokes go out.
-            deps.alerts.log_approval(agent_id, &matched);
-            // This minimal sequence is what makes pane-0 approval safe: it
-            // consumes only the prompt, never landing free text or a stray
-            // newline in the supervisor's prompt box (W15-13).
-            let _ = send_approval(
-                deps.capturer,
-                deps.dispatcher,
-                ctx.repo_root,
-                session,
-                pane.pane_index,
-                option_index,
-            );
-            PaneSweepOutcome::None
-        }
-        PromptVerdict::Danger | PromptVerdict::Unknown => {
-            // Non-blocking escalation, deduped on (agent_id, shape).
-            let key = approval_dedup_key(agent_id, &capture);
-            if !dedup.should_emit(&key, deps.clock.now()) {
-                return PaneSweepOutcome::None;
-            }
-            let escalation = Escalation {
-                agent_id: agent_id.to_string(),
-                verdict: verdict.label().to_string(),
-                command: dedup_shape(&capture),
-            };
-            record_escalation(deps, ctx, &escalation);
-            // Opportunistic learning: the loop absorbed friction it could not
-            // auto-approve.
-            deps.learnings.record(
-                LEARNING_CATEGORY,
-                "unattended loop escalated a prompt",
-                &friction_learning_body(&escalation),
-            );
-            PaneSweepOutcome::Escalated(escalation)
-        }
+    // A live prompt. git-paw answers NONE of them: whether the prompted
+    // command may run is the agent CLI's decision (through its own resolved
+    // permission mode and allow rules) or the human's. The loop's job is to
+    // get it in front of a human without stalling the rest of the wave.
+    //
+    // Non-blocking escalation, deduped on (agent_id, shape) — a prompt still
+    // unanswered after the window is escalated again as a reminder.
+    let key = approval_dedup_key(agent_id, &capture);
+    if !dedup.should_emit(&key, deps.clock.now()) {
+        return PaneSweepOutcome::None;
     }
+    let escalation = Escalation {
+        agent_id: agent_id.to_string(),
+        verdict: PERMISSION_PROMPT_VERDICT.to_string(),
+        command: dedup_shape(&capture),
+    };
+    // Record the forwarded decision BEFORE the escalation goes out, and only
+    // on this arm. Sitting after `should_emit` means one emitted escalation
+    // produces exactly one log line — a prompt re-seen inside the dedup
+    // window returned above and never reaches here — and sitting on the
+    // permission-prompt arm alone keeps `cli-unavailable` banners, wedged
+    // nudges and correction-loop signals out of a log that `git paw
+    // approvals` reads as "commands that needed a human".
+    deps.manual_decisions.record_forwarded(agent_id, &capture);
+    record_escalation(deps, ctx, &escalation);
+    // Opportunistic learning: a prompt the CLI's own permission rules did not
+    // cover cost the wave a human round-trip.
+    deps.learnings.record(
+        LEARNING_CATEGORY,
+        "unattended loop escalated a prompt",
+        &friction_learning_body(&escalation),
+    );
+    PaneSweepOutcome::Escalated(escalation)
 }
 
 /// The mutable slice of one sweep the correction pass operates on, bundled so
@@ -2216,47 +2105,6 @@ fn worker_cli<'a>(rows: &'a [AgentStatusRow], agent_id: &str) -> &'a str {
     rows.iter()
         .find(|r| r.agent_id == agent_id && !r.cli.is_empty())
         .map_or("unknown", |r| r.cli.as_str())
-}
-
-/// Takes the pane's exclusive approval claim, re-confirms a live prompt with a
-/// fresh capture immediately before the send, then dispatches the option digit
-/// followed by a separate `Enter`.
-///
-/// Returns `Ok(true)` when the keystrokes were sent and `Ok(false)` when the
-/// send was skipped — either another approver holds the pane's claim, or the
-/// prompt cleared between the sweep and the send (no stray input either way).
-/// This gate applies to EVERY pane including pane 0 — the drive loop is the
-/// sole approver of classifier-safe prompts for an unattended session and is
-/// explicitly permitted to clear the supervisor's own safe prompts, but only
-/// with these minimal keystrokes.
-///
-/// The claim is what makes "sole approver" enforced rather than conventional: a
-/// pane already being driven by the orchestrator's `sweep.sh approve` (a
-/// separate process) is skipped this tick and retried on a later one, so the
-/// two can never both land a keystroke. It is held across the re-confirm AND
-/// the dispatch, and released by [`PaneClaim`]'s `Drop` on every return path
-/// including an error or a panic.
-fn send_approval(
-    capturer: &dyn PaneCapture,
-    dispatcher: &mut dyn KeyDispatcher,
-    repo_root: &Path,
-    session: &str,
-    pane_index: usize,
-    option_index: u8,
-) -> Result<bool, PawError> {
-    let Some(_claim) = PaneClaim::try_acquire(repo_root, pane_index) else {
-        return Ok(false); // another approver owns this pane — skip, never wait
-    };
-    let capture = capturer.capture(session, pane_index);
-    if !live_prompt_in_tail(&capture) {
-        return Ok(false);
-    }
-    for key in approval_keystrokes(option_index) {
-        dispatcher
-            .send_key(session, pane_index, &key)
-            .map_err(|e| PawError::TmuxError(format!("send-keys {key} failed: {e}")))?;
-    }
-    Ok(true)
 }
 
 /// Bounded number of clear (`C-u`) + re-type + `Enter` recovery attempts
@@ -2770,7 +2618,7 @@ fn resolved_agent_states(
 fn friction_learning_body(e: &Escalation) -> String {
     serde_json::json!({
         "observation": format!(
-            "unattended drive loop escalated a {} prompt from {} it could not auto-approve",
+            "unattended drive loop escalated a {} from {} for a human decision",
             e.verdict, e.agent_id
         ),
         "command": e.command,
@@ -2953,22 +2801,6 @@ struct BrokerAlertSink {
 }
 
 impl AlertSink for BrokerAlertSink {
-    fn log_approval(&mut self, agent_id: &str, matched: &str) {
-        let Some(url) = &self.broker_url else {
-            return;
-        };
-        let summary = format!("auto_approved: matched {matched}");
-        let msg = crate::broker::publish::build_status_message(
-            agent_id,
-            "auto_approved",
-            Some(summary),
-            None,
-        );
-        if let Err(e) = crate::broker::publish::publish_to_broker_http(url, &msg) {
-            eprintln!("drive: failed to publish auto-approve status for {agent_id}: {e}");
-        }
-    }
-
     fn escalate(&mut self, escalation: &Escalation) {
         let Some(url) = &self.broker_url else {
             return;
@@ -3021,6 +2853,51 @@ impl LearningSink for SweepLearningSink {
             .status();
         if let Err(e) = status {
             eprintln!("drive: failed to record learning via sweep.sh: {e}");
+        }
+    }
+}
+
+/// Production [`ManualDecisionSink`]: appends to the session's
+/// manual-decision JSONL log and publishes the first-seen learning.
+///
+/// The recorder owns the opt-out (`[supervisor] manual_approvals_log`) and
+/// the learnings gate, so this wrapper adds only the broker publish: on the
+/// first sighting of a pattern `record_forwarded` hands back a
+/// `permission_pattern` learning, which goes out over HTTP.
+///
+/// Every failure is a warning, never an abort. A wedged broker or an
+/// unwritable log must not stop the loop from escalating the prompt — the
+/// escalation is the thing the human actually needs; the log is bookkeeping.
+pub struct RecorderManualDecisionSink {
+    recorder: crate::supervisor::manual_approvals::ManualDecisionRecorder,
+    broker_url: Option<String>,
+}
+
+impl RecorderManualDecisionSink {
+    /// Wraps `recorder`, publishing any first-seen learning to `broker_url`
+    /// when one is configured.
+    #[must_use]
+    pub fn new(
+        recorder: crate::supervisor::manual_approvals::ManualDecisionRecorder,
+        broker_url: Option<String>,
+    ) -> Self {
+        Self {
+            recorder,
+            broker_url,
+        }
+    }
+}
+
+impl ManualDecisionSink for RecorderManualDecisionSink {
+    fn record_forwarded(&mut self, agent_id: &str, captured: &str) {
+        let Some(learning) = self.recorder.record_forwarded(agent_id, captured) else {
+            return;
+        };
+        let Some(url) = &self.broker_url else {
+            return;
+        };
+        if let Err(e) = crate::broker::publish::publish_to_broker_http(url, &learning) {
+            eprintln!("drive: failed to publish permission_pattern learning: {e}");
         }
     }
 }
@@ -3120,13 +2997,10 @@ impl MergeCheck for GitMergeCheck {
 pub struct DriveRunOptions {
     /// Broker `/status` + publish endpoint, or `None` when the broker is off.
     pub broker_url: Option<String>,
-    /// Effective safe-command whitelist the classifier consumes.
-    pub whitelist: Vec<String>,
-    /// Whether in-worktree write/edit/create prompts auto-approve.
-    pub approve_worktree_writes: bool,
-    /// Protected-path set for the operator config/memory danger rule
-    /// (`agent-memory-isolation`).
-    pub protected_paths: ProtectedPaths,
+    /// Sink for the manual-decision log, built from the supervisor config so
+    /// the `[supervisor] manual_approvals_log` opt-out and the learnings gate
+    /// are resolved once, in the caller.
+    pub manual_decisions: Box<dyn ManualDecisionSink>,
     /// Correction-loop policy resolved from `[supervisor.correction]`.
     pub correction: CorrectionConfig,
     /// Whether `[supervisor] learnings` is enabled (gates the exhaustion
@@ -3176,9 +3050,7 @@ pub fn run_drive_loop(
 ) -> Result<DriveSummary, PawError> {
     let DriveRunOptions {
         broker_url,
-        whitelist,
-        approve_worktree_writes,
-        protected_paths,
+        manual_decisions,
         correction,
         learnings_enabled,
         broker_log_hint,
@@ -3236,9 +3108,6 @@ pub fn run_drive_loop(
             "GIT_PAW_DRIVE_ORCHESTRATION_NUDGE_MS",
             ORCHESTRATION_NUDGE_INTERVAL,
         ),
-        whitelist,
-        approve_worktree_writes,
-        protected_paths,
         correction,
         learnings_enabled,
         broker_log_hint,
@@ -3250,6 +3119,7 @@ pub fn run_drive_loop(
         ..DriveConfig::default()
     };
 
+    let mut manual_decisions = manual_decisions;
     let mut deps = DriveDeps {
         enumerator: &enumerator,
         capturer: &capturer,
@@ -3260,6 +3130,7 @@ pub fn run_drive_loop(
         merge_check: &merge_check,
         alerts: &mut alerts,
         learnings: &mut learnings,
+        manual_decisions: manual_decisions.as_mut(),
         refresher: &mut refresher,
         wedged: Vec::new(),
     };
@@ -3274,6 +3145,84 @@ pub fn run_drive_loop(
         ));
     }
     Ok(summary)
+}
+
+// ---------------------------------------------------------------------------
+// Broker `/status` access
+// ---------------------------------------------------------------------------
+
+/// Subset of an agent record returned by the broker `/status` endpoint that
+/// the drive loop cares about.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentStatusRow {
+    /// Agent identifier (slugified branch name).
+    pub agent_id: String,
+    /// Status label (e.g. `"working"`, `"done"`).
+    pub status: String,
+    /// Seconds since the agent was last seen.
+    pub last_seen_seconds: u64,
+    /// CLI running in this agent's pane (e.g. `"claude"`), as reported by the
+    /// broker. Empty when the broker has no CLI on record for the agent.
+    #[serde(default)]
+    pub cli: String,
+    /// The agent's most recently reported modified-file set (the broker
+    /// watcher's tracked cleanliness signal). Empty when the broker has none
+    /// on record, or the field is absent from an older broker response.
+    /// Consumed by `supervisor-branch-refresh`'s cleanliness gate (design
+    /// D1) so a caller with only HTTP `/status` access never needs a second
+    /// working-tree probe.
+    #[serde(default)]
+    pub modified_files: Vec<String>,
+}
+
+/// Fetches the broker `/status` endpoint and returns the agent summary.
+///
+/// Used by the drive loop because the broker state lives in the dashboard
+/// process, not in the loop's own. Errors are surfaced so the caller can
+/// decide whether to retry. Still `pub` because
+/// `tests/unattended_drive_e2e.rs` drives the broker through it.
+pub fn fetch_status_over_http(broker_url: &str) -> Result<Vec<AgentStatusRow>, PawError> {
+    let addr = broker_url.strip_prefix("http://").unwrap_or(broker_url);
+    let socket_addr = if let Ok(a) = addr.parse() {
+        a
+    } else {
+        use std::net::ToSocketAddrs;
+        addr.to_socket_addrs()
+            .map_err(|e| PawError::SessionError(format!("invalid broker address {addr}: {e}")))?
+            .next()
+            .ok_or_else(|| {
+                PawError::SessionError(format!("broker address {addr} resolved to no addrs"))
+            })?
+    };
+
+    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(500))
+        .map_err(|e| PawError::SessionError(format!("failed to connect to broker: {e}")))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+
+    let request = format!("GET /status HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| PawError::SessionError(format!("failed to write status request: {e}")))?;
+
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+
+    // Find the JSON body (first `{` after the headers).
+    let body_start = response
+        .find("\r\n\r\n")
+        .map(|i| i + 4)
+        .ok_or_else(|| PawError::SessionError("malformed broker response".to_string()))?;
+    let body = &response[body_start..];
+
+    let parsed: StatusResponse = serde_json::from_str(body)
+        .map_err(|e| PawError::SessionError(format!("broker /status parse error: {e}")))?;
+    Ok(parsed.agents)
+}
+
+#[derive(Deserialize)]
+struct StatusResponse {
+    agents: Vec<AgentStatusRow>,
 }
 
 #[cfg(test)]
@@ -3528,14 +3477,9 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingAlerts {
-        approvals: Vec<(String, String)>,
         escalations: Vec<Escalation>,
     }
     impl AlertSink for RecordingAlerts {
-        fn log_approval(&mut self, agent_id: &str, matched: &str) {
-            self.approvals
-                .push((agent_id.to_string(), matched.to_string()));
-        }
         fn escalate(&mut self, escalation: &Escalation) {
             self.escalations.push(escalation.clone());
         }
@@ -3560,6 +3504,26 @@ mod tests {
             self.records
                 .push((category.to_string(), title.to_string(), body.to_string()));
         }
+    }
+
+    /// Records every `(agent_id, captured)` the loop forwards for a manual
+    /// decision, so a test can assert both the count and the payload.
+    #[derive(Default)]
+    struct RecordingManualDecisions {
+        calls: Vec<(String, String)>,
+    }
+    impl ManualDecisionSink for RecordingManualDecisions {
+        fn record_forwarded(&mut self, agent_id: &str, captured: &str) {
+            self.calls
+                .push((agent_id.to_string(), captured.to_string()));
+        }
+    }
+
+    /// Inert sink for the tests whose subject is not the decision log.
+    #[derive(Default)]
+    struct NoopManualDecisions;
+    impl ManualDecisionSink for NoopManualDecisions {
+        fn record_forwarded(&mut self, _agent_id: &str, _captured: &str) {}
     }
 
     /// Scripted, call-recording [`BranchRefresher`] fake.
@@ -3800,340 +3764,531 @@ mod tests {
         assert_eq!(resolve_pane_agent(1, "/repo", &agents), PaneRole::Dashboard);
     }
 
-    // --- classify_prompt ----------------------------------------------------
+    // --- every live prompt is escalated, none is approved -------------------
 
-    #[test]
-    fn classifies_safe_cargo_test() {
-        let whitelist = vec!["cargo test".to_string()];
-        let cap = live_safe_capture("cargo test --workspace");
-        let v = classify_prompt(&cap, &whitelist, None, false, &ProtectedPaths::default());
-        assert!(matches!(
-            v,
-            PromptVerdict::Safe {
-                option_index: 1,
-                ..
-            }
-        ));
+    /// Everything one direct [`sweep_pane`] call did.
+    struct SweepProbe {
+        outcome: PaneSweepOutcome,
+        keys: Vec<(usize, String)>,
+        escalations: Vec<Escalation>,
+        learnings: Vec<(String, String, String)>,
     }
 
-    #[test]
-    fn classifies_danger_git_push() {
-        let cap = "Bash command\n  git push origin main\nDo you want to proceed?\n(esc to cancel)";
-        assert_eq!(
-            classify_prompt(cap, &[], None, false, &ProtectedPaths::default()),
-            PromptVerdict::Danger
-        );
-    }
-
-    /// Spec scenario "Write to operator memory escalates as danger" through
-    /// the drive-loop classifier: a write targeting the protected set is
-    /// [`PromptVerdict::Danger`] — terminal, never auto-approved — at the
-    /// same precedence as the curated danger-list.
-    #[test]
-    fn classifies_protected_path_write_as_danger() {
-        let op_home = tempfile::tempdir().unwrap();
-        let mut config = crate::config::PawConfig::default();
-        config.clis.insert(
-            "myvariant".to_string(),
-            crate::config::CustomCli {
-                command: "myvariant".to_string(),
-                display_name: None,
-                submit_delay_ms: None,
-                approval_args: std::collections::HashMap::new(),
-                settings_path: Some(
-                    op_home
-                        .path()
-                        .join(".myvariant/settings.json")
-                        .to_string_lossy()
-                        .into_owned(),
-                ),
-                prompt_profile: None,
-                session_id_args: None,
-                resume_args: None,
-                mcp: None,
-            },
-        );
-        let protected = ProtectedPaths::derive(&config, None);
-        let worktree = tempfile::tempdir().unwrap();
-        // File-prompt path: a write into the operator's config dir.
-        let cap = format!(
-            "Do you want to allow this write to {}/settings.json?\n(esc to cancel)",
-            op_home.path().join(".myvariant").to_string_lossy()
-        );
-        assert_eq!(
-            classify_prompt(&cap, &[], Some(worktree.path()), true, &protected),
-            PromptVerdict::Danger
-        );
-        // Shell write target: an append via a whitelisted verb still escalates.
-        let cap = format!(
-            "Bash command\n  echo x >> {}/settings.json\nDo you want to proceed?\n(esc to cancel)",
-            op_home.path().join(".myvariant").to_string_lossy()
-        );
-        assert_eq!(
-            classify_prompt(
-                &cap,
-                &["echo".to_string()],
-                Some(worktree.path()),
-                true,
-                &protected
-            ),
-            PromptVerdict::Danger
-        );
-        // In-worktree writes are unaffected: same protected set, target
-        // inside the agent's own worktree.
-        let cap = "Do you want to allow this write to notes/memory.md?\n(esc to cancel)";
-        assert!(matches!(
-            classify_prompt(cap, &[], Some(worktree.path()), true, &protected),
-            PromptVerdict::Safe { .. }
-        ));
-    }
-
-    #[test]
-    fn classifies_unknown_when_no_rule_matches() {
-        let cap = "Bash command\n  frobnicate --all\nDo you want to proceed?\n(esc to cancel)";
-        assert_eq!(
-            classify_prompt(cap, &[], None, false, &ProtectedPaths::default()),
-            PromptVerdict::Unknown
-        );
-    }
-
-    /// GP-02b: an invocation of one of git-paw's own bundled helper scripts
-    /// classifies safe through the drive-loop classifier.
-    #[test]
-    fn classifies_managed_script_invocation_as_safe() {
-        let cap = live_safe_capture(".git-paw/scripts/broker.sh --agent feat-x status booting");
-        assert!(matches!(
-            classify_prompt(&cap, &[], None, false, &ProtectedPaths::default()),
-            PromptVerdict::Safe { .. }
-        ));
-    }
-
-    /// GP-04b: a write into a repository `.git/` directory is a terminal
-    /// danger escalation through the drive-loop classifier, even when the
-    /// verb (`echo`) is whitelisted.
-    #[test]
-    fn classifies_git_dir_write_as_danger() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
-            .args(["init", "-q", "-b", "main"])
-            .current_dir(tmp.path())
-            .status()
-            .expect("git init");
-        let cap = live_safe_capture("echo x >> .git/info/exclude");
-        assert_eq!(
-            classify_prompt(
-                &cap,
-                &["echo".to_string()],
-                Some(tmp.path()),
-                false,
-                &ProtectedPaths::default()
-            ),
-            PromptVerdict::Danger
-        );
-    }
-
-    /// Rider scenario: a worktree-confined dev-test shape classifies safe for
-    /// an agent pane (known worktree root)…
-    #[test]
-    fn classifies_worktree_dev_test_shape_safe_for_agent_pane() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("scripts")).unwrap();
-        std::fs::write(tmp.path().join("scripts/helper.sh"), "echo hi\n").unwrap();
-        let cap = live_safe_capture("bash -n scripts/helper.sh");
-        match classify_prompt(
-            &cap,
-            &[],
-            Some(tmp.path()),
-            false,
-            &ProtectedPaths::default(),
-        ) {
-            PromptVerdict::Safe { matched, .. } => assert_eq!(matched, "worktree-dev-test"),
-            other => panic!("expected Safe worktree-dev-test, got {other:?}"),
+    impl SweepProbe {
+        /// The single escalation this sweep produced.
+        fn escalation(&self) -> &Escalation {
+            assert_eq!(
+                self.escalations.len(),
+                1,
+                "expected exactly one escalation, got {:?}",
+                self.escalations
+            );
+            &self.escalations[0]
         }
     }
 
-    /// …and the supervisor pane, which has no worktree root, is unaffected:
-    /// the same capture stays Unknown (spec scenario "supervisor pane
-    /// unaffected").
-    #[test]
-    fn worktree_dev_test_shape_stays_unknown_without_worktree_root() {
-        let cap = live_safe_capture("bash -n scripts/helper.sh");
-        assert_eq!(
-            classify_prompt(&cap, &[], None, false, &ProtectedPaths::default()),
-            PromptVerdict::Unknown
-        );
-    }
-
-    // --- exit-probe normalization (A) ---------------------------------------
-
-    /// Spec scenario "A safe command with a trailing exit-code probe classifies
-    /// safe": through the loop's own classifier, the wrapped command reaches the
-    /// same verdict as the bare one.
-    #[test]
-    fn classifies_safe_command_wrapped_in_an_exit_code_probe() {
-        let whitelist = vec!["cargo test".to_string()];
-        let bare = classify_prompt(
-            &live_safe_capture("cargo test --lib"),
-            &whitelist,
-            None,
-            false,
-            &ProtectedPaths::default(),
-        );
-        let wrapped = classify_prompt(
-            &live_safe_capture("cargo test --lib; echo test-exit=$?"),
-            &whitelist,
-            None,
-            false,
-            &ProtectedPaths::default(),
-        );
-        assert!(matches!(bare, PromptVerdict::Safe { .. }));
-        assert_eq!(wrapped, bare, "the probe must not change the verdict");
-    }
-
-    /// Spec scenario "A trailing redirect is normalized away".
-    #[test]
-    fn classifies_safe_command_wrapped_in_a_discard_redirect() {
-        let whitelist = vec!["mdbook build".to_string()];
-        let bare = classify_prompt(
-            &live_safe_capture("mdbook build docs/"),
-            &whitelist,
-            None,
-            false,
-            &ProtectedPaths::default(),
-        );
-        let wrapped = classify_prompt(
-            &live_safe_capture("mdbook build docs/ >/dev/null 2>&1"),
-            &whitelist,
-            None,
-            false,
-            &ProtectedPaths::default(),
-        );
-        assert!(matches!(bare, PromptVerdict::Safe { .. }));
-        assert_eq!(wrapped, bare, "the redirect must not change the verdict");
-    }
-
-    /// Spec scenario "Normalization does not rescue a danger command": the
-    /// danger-list runs on the normalized slice, so the wrapper buys nothing.
-    #[test]
-    fn exit_probe_does_not_rescue_a_danger_command() {
-        let cap = live_safe_capture("git push --force origin main; echo $?");
-        assert_eq!(
-            classify_prompt(
-                &cap,
-                &["git".to_string()],
-                None,
-                false,
-                &ProtectedPaths::default()
-            ),
-            PromptVerdict::Danger
-        );
-    }
-
-    // --- durable-grant preference (C) ---------------------------------------
-
-    /// A 3-option capture: `Yes` / the durable "don't ask again" grant / `No`.
-    fn live_durable_capture(cmd: &str) -> String {
-        format!(
-            "Bash command\n  {cmd}\nDo you want to proceed?\n❯ 1. Yes\n  2. Yes, and don't ask again for: {cmd}\n  3. No\n(esc to cancel)"
-        )
-    }
-
-    /// Spec scenario "A safe prompt offering a durable option takes it": a
-    /// stack command safe only through the resolved allowlist — `cargo` is not a
-    /// read-mostly verb — still takes the durable grant, so the identical prompt
-    /// stops re-appearing.
-    #[test]
-    fn safe_prompt_with_a_durable_option_takes_it() {
-        let cap = live_durable_capture("cargo test --lib");
-        match classify_prompt(
-            &cap,
-            &["cargo test".to_string()],
-            None,
-            false,
-            &ProtectedPaths::default(),
-        ) {
-            PromptVerdict::Safe { option_index, .. } => assert_eq!(option_index, 2),
-            other => panic!("expected Safe, got {other:?}"),
-        }
-    }
-
-    /// Spec scenario "A safe prompt with no durable option uses the once-only
-    /// option".
-    #[test]
-    fn safe_prompt_without_a_durable_option_uses_option_one() {
-        let cap = live_safe_capture("cargo test --lib");
-        match classify_prompt(
-            &cap,
-            &["cargo test".to_string()],
-            None,
-            false,
-            &ProtectedPaths::default(),
-        ) {
-            PromptVerdict::Safe { option_index, .. } => assert_eq!(option_index, 1),
-            other => panic!("expected Safe, got {other:?}"),
-        }
-    }
-
-    /// Spec scenario "A non-safe prompt is never granted durably": an unmatched
-    /// command escalates, so no option — durable or otherwise — is selected.
-    #[test]
-    fn non_safe_prompt_is_never_granted_durably() {
-        let cap = live_durable_capture("frobnicate --all");
-        assert_eq!(
-            classify_prompt(&cap, &[], None, false, &ProtectedPaths::default()),
-            PromptVerdict::Unknown,
-            "an unclassified command escalates instead of taking a durable grant"
-        );
-    }
-
-    /// End-to-end through the loop: the durable option's digit (`2`) is what
-    /// actually goes out on the wire for a safe 3-option prompt.
-    #[test]
-    fn loop_dispatches_the_durable_option_digit() {
-        let agents = vec![AgentPane {
-            agent_id: "feat-a".to_string(),
-            worktree_path: PathBuf::from("/repo-feat-a"),
-            branch: "feat/a".to_string(),
-        }];
-        let enumerator = FakeEnumerator {
-            panes: vec![PaneInfo {
-                pane_index: 2,
-                pane_current_path: "/repo-feat-a".to_string(),
-            }],
-        };
-        let capturer = FakeCapturer::new(&[(2, &live_durable_capture("cargo test --lib"))]);
+    /// Sweeps one pane showing `capture` and reports what happened.
+    ///
+    /// Calls [`sweep_pane`] directly rather than driving the whole loop, so a
+    /// test asserts the sweep's own decision without a status script or a
+    /// completion condition in the way. No orchestrator pane, so nothing is
+    /// typed anywhere even on the hand-off path.
+    fn sweep_probe(capture: &str, agent_id: &str, pane_index: usize) -> SweepProbe {
+        let enumerator = FakeEnumerator { panes: Vec::new() };
+        let capturer = FakeCapturer::new(&[(pane_index, capture)]);
         let mut dispatcher = RecordingDispatcher::default();
-        // Complete on the first poll so exactly one sweep runs.
-        let status = ScriptedStatus::new(vec![vec![row("supervisor", "done")]]);
+        let status = ScriptedStatus::new(vec![Vec::new()]);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
+        let mut refresher = RecordingRefresher::default();
+        let messages = ScriptedMessages::none();
+        let tmp = tempfile::TempDir::new().expect("tmp repo root");
+        let outcome = {
+            let mut deps = DriveDeps {
+                enumerator: &enumerator,
+                capturer: &capturer,
+                dispatcher: &mut dispatcher,
+                status: &status,
+                messages: &messages,
+                clock: &clock,
+                merge_check: &FakeMergeCheck::default(),
+                alerts: &mut alerts,
+                learnings: &mut learnings,
+                manual_decisions: &mut manual_decisions,
+                refresher: &mut refresher,
+                wedged: Vec::new(),
+            };
+            let config = DriveConfig::default();
+            let mut dedup = DedupWindow::new(config.dedup_window);
+            let ctx = SweepContext {
+                session: "paw-test",
+                repo_root: tmp.path(),
+                orchestrator: None,
+                orchestrator_settle_delay: Duration::from_millis(0),
+            };
+            let pane = PaneInfo {
+                pane_index,
+                pane_current_path: "/repo-feat-a".to_string(),
+            };
+            sweep_pane(ctx, &pane, agent_id, &mut deps, &config, &mut dedup, &[])
+        };
+        SweepProbe {
+            outcome,
+            keys: dispatcher.events,
+            escalations: alerts.escalations,
+            learnings: learnings.records,
+        }
+    }
+
+    /// Spec scenario "A command formerly classified safe is escalated, not
+    /// approved" (`approval-command-safety`): `ls -la` was a read-mostly verb
+    /// the retired classifier auto-approved. It now escalates like any other
+    /// prompt, and no keystroke is dispatched.
+    #[test]
+    fn formerly_safe_command_is_escalated_not_approved() {
+        let probe = sweep_probe(&live_safe_capture("ls -la"), "feat-a", 2);
+        assert!(
+            matches!(probe.outcome, PaneSweepOutcome::Escalated(_)),
+            "expected an escalation, got {:?}",
+            probe.outcome
+        );
+        let e = probe.escalation();
+        assert_eq!(e.agent_id, "feat-a");
+        assert_eq!(e.verdict, PERMISSION_PROMPT_VERDICT);
+        assert_eq!(e.command, "ls -la");
+        assert!(
+            probe.keys.is_empty(),
+            "no keystroke may be dispatched, got {:?}",
+            probe.keys
+        );
+        assert_eq!(
+            probe.learnings.len(),
+            1,
+            "the escalation records one friction learning"
+        );
+    }
+
+    /// Spec scenario "A live prompt on the supervisor pane is escalated, not
+    /// answered" (`supervisor-unattended-operation`): pane 0 used to be the
+    /// one pane the loop was explicitly permitted to clear. It is now
+    /// escalate-only, under the agent id `supervisor`.
+    #[test]
+    fn supervisor_pane_prompt_is_escalated_not_answered() {
+        let probe = sweep_probe(&live_safe_capture("git status"), SUPERVISOR_AGENT_ID, 0);
+        assert!(
+            matches!(probe.outcome, PaneSweepOutcome::Escalated(_)),
+            "expected an escalation, got {:?}",
+            probe.outcome
+        );
+        let e = probe.escalation();
+        assert_eq!(e.agent_id, SUPERVISOR_AGENT_ID);
+        assert_eq!(e.verdict, PERMISSION_PROMPT_VERDICT);
+        assert!(
+            probe.keys.is_empty(),
+            "pane 0 must receive no keystroke, got {:?}",
+            probe.keys
+        );
+    }
+
+    /// Spec scenario "A file-edit prompt is escalated by its target path"
+    /// (`supervisor-unattended-operation`): a write/edit prompt carries no
+    /// `Bash command` header, so the escalation names the target path — the
+    /// same value the dedup key is built from.
+    #[test]
+    fn file_edit_prompt_is_escalated_by_its_target_path() {
+        let capture = "Do you want to make this edit to src/lib.rs?\n\
+                       ❯ 1. Yes\n  2. No\n(esc to cancel)";
+        let probe = sweep_probe(capture, "feat-a", 2);
+        assert!(
+            matches!(probe.outcome, PaneSweepOutcome::Escalated(_)),
+            "expected an escalation, got {:?}",
+            probe.outcome
+        );
+        assert_eq!(probe.escalation().command, "src/lib.rs");
+        assert!(
+            probe.keys.is_empty(),
+            "no keystroke may be dispatched, got {:?}",
+            probe.keys
+        );
+    }
+
+    /// Spec scenario "Command text cannot steer the outcome"
+    /// (`approval-command-safety`): every capture below classified `safe` on
+    /// the shipped 0.16.0 classifier — the false-SAFE evidence that retired
+    /// it (boundary poisoning, `$'…'` quoting, environment injection, code
+    /// execution through a read-mostly verb, secret reads, and the leaky
+    /// `git` family). The outcome no longer depends on the command text at
+    /// all: each escalates, and none dispatches a keystroke.
+    #[test]
+    fn command_text_cannot_steer_the_outcome() {
+        // Boundary poisoning: an approval marker INSIDE the command text used
+        // to move the command-slice boundary.
+        let poisoned = "Bash command\n  ls\n  rm -rf /important # [y/N]\n\
+                        Do you want to proceed?\n❯ 1. Yes\n  2. No\n(esc to cancel)";
+        let cases: &[&str] = &[
+            poisoned,
+            &live_safe_capture("git reset $'--hard' HEAD~1"),
+            &live_safe_capture("find . $'-delete'"),
+            &live_safe_capture("export GIT_SSH_COMMAND=id; git fetch"),
+            &live_safe_capture("awk 'BEGIN{system(\"id\")}'"),
+            &live_safe_capture("cat ~/.ssh/id_rsa"),
+            &live_safe_capture("git stash"),
+            &live_safe_capture("git paw purge"),
+        ];
+        for capture in cases {
+            let probe = sweep_probe(capture, "feat-a", 2);
+            assert!(
+                matches!(probe.outcome, PaneSweepOutcome::Escalated(_)),
+                "capture must escalate: {capture:?} (got {:?})",
+                probe.outcome
+            );
+            assert_eq!(
+                probe.escalation().verdict,
+                PERMISSION_PROMPT_VERDICT,
+                "one verdict for every prompt: {capture:?}"
+            );
+            assert!(
+                probe.keys.is_empty(),
+                "no keystroke may be dispatched for {capture:?}, got {:?}",
+                probe.keys
+            );
+        }
+    }
+
+    /// Spec scenario "The permission-prompt hand-off asks for a relay, not a
+    /// decision" (`supervisor-autonomous-orchestrator`, design D2): an
+    /// orchestrator that approves on its own reading of the command is just
+    /// another classifier, reading untrusted pane text. The hand-off must name
+    /// the agent and the command, ask for a relay, and withhold approval until
+    /// the human says so.
+    #[test]
+    fn permission_prompt_handoff_asks_for_a_relay() {
+        let e = Escalation {
+            agent_id: "feat-a".to_string(),
+            verdict: PERMISSION_PROMPT_VERDICT.to_string(),
+            command: "ls -la".to_string(),
+        };
+        let text = e.handoff_text();
+        assert!(text.contains("feat-a"), "must name the agent: {text}");
+        assert!(text.contains("ls -la"), "must name the command: {text}");
+        assert!(
+            text.to_ascii_lowercase().contains("relay"),
+            "must ask for a relay: {text}"
+        );
+        assert!(
+            !text.contains("Decide it now"),
+            "must NOT ask the orchestrator to decide it: {text}"
+        );
+
+        // The broker-facing question says plainly that git-paw approves none.
+        let q = e.question();
+        assert!(q.contains("feat-a") && q.contains("ls -la"), "{q}");
+        assert!(
+            q.contains("does not approve prompts"),
+            "the question must not imply git-paw might answer it: {q}"
+        );
+        assert!(
+            !q.to_ascii_lowercase().contains("auto-approve"),
+            "no auto-approve wording survives: {q}"
+        );
+    }
+
+    // --- the manual-decision log (approval-pattern-surfacing) --------------
+
+    /// Sweeps the same pane `sweeps` times through ONE dedup window, routing
+    /// every forwarded decision to `sink`.
+    ///
+    /// Sharing the window across sweeps is the point: it is what lets a test
+    /// distinguish "logged once per escalation" from "logged once per sweep".
+    fn sweep_n_with_sink(
+        capture: &str,
+        agent_id: &str,
+        pane_index: usize,
+        sweeps: usize,
+        sink: &mut dyn ManualDecisionSink,
+    ) -> Vec<Escalation> {
+        let enumerator = FakeEnumerator { panes: Vec::new() };
+        let capturer = FakeCapturer::new(&[(pane_index, capture)]);
+        let mut dispatcher = RecordingDispatcher::default();
+        let status = ScriptedStatus::new(vec![Vec::new()]);
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
         let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
-        let mut deps = DriveDeps {
-            enumerator: &enumerator,
-            capturer: &capturer,
-            dispatcher: &mut dispatcher,
-            status: &status,
-            messages: &messages,
-            clock: &clock,
-            merge_check: &FakeMergeCheck::default(),
-            alerts: &mut alerts,
-            learnings: &mut learnings,
-            refresher: &mut refresher,
-            wedged: Vec::new(),
-        };
-        let config = DriveConfig {
-            whitelist: vec!["cargo test".to_string()],
-            poll_interval: Duration::from_secs(1),
-            heartbeat: Duration::from_hours(1),
-            ..DriveConfig::default()
-        };
-        drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
+        let tmp = tempfile::TempDir::new().expect("tmp repo root");
+        {
+            let mut deps = DriveDeps {
+                enumerator: &enumerator,
+                capturer: &capturer,
+                dispatcher: &mut dispatcher,
+                status: &status,
+                messages: &messages,
+                clock: &clock,
+                merge_check: &FakeMergeCheck::default(),
+                alerts: &mut alerts,
+                learnings: &mut learnings,
+                manual_decisions: sink,
+                refresher: &mut refresher,
+                wedged: Vec::new(),
+            };
+            let config = DriveConfig::default();
+            let mut dedup = DedupWindow::new(config.dedup_window);
+            for _ in 0..sweeps {
+                let ctx = SweepContext {
+                    session: "paw-test",
+                    repo_root: tmp.path(),
+                    orchestrator: None,
+                    orchestrator_settle_delay: Duration::from_millis(0),
+                };
+                let pane = PaneInfo {
+                    pane_index,
+                    pane_current_path: "/repo-feat-a".to_string(),
+                };
+                sweep_pane(ctx, &pane, agent_id, &mut deps, &config, &mut dedup, &[]);
+            }
+        }
+        alerts.escalations
+    }
+
+    /// Spec scenario "A drive-loop escalation appends a JSONL line", sink
+    /// half: one escalated prompt produces exactly one sink call, carrying
+    /// the agent and the capture the pattern is later extracted from.
+    #[test]
+    fn one_escalation_records_one_manual_decision() {
+        let capture = live_safe_capture("ls -la");
+        let mut sink = RecordingManualDecisions::default();
+        let escalations = sweep_n_with_sink(&capture, "feat-a", 2, 1, &mut sink);
+
+        assert_eq!(escalations.len(), 1, "one escalation");
+        assert_eq!(sink.calls.len(), 1, "exactly one record: {:?}", sink.calls);
+        assert_eq!(sink.calls[0].0, "feat-a");
+        assert_eq!(sink.calls[0].1, capture);
+    }
+
+    /// Spec scenario "A deduplicated drive-loop escalation is logged once":
+    /// the same unresolved prompt seen again inside the dedup window emits no
+    /// second escalation, so it must emit no second log line either —
+    /// otherwise `git paw approvals` would count one stuck prompt once per
+    /// sweep and rank it above genuinely frequent commands.
+    #[test]
+    fn a_deduplicated_escalation_records_once() {
+        let capture = live_safe_capture("ls -la");
+        let mut sink = RecordingManualDecisions::default();
+        let escalations = sweep_n_with_sink(&capture, "feat-a", 2, 2, &mut sink);
+
+        assert_eq!(escalations.len(), 1, "the second sweep is deduped");
         assert_eq!(
-            dispatcher.events,
-            vec![(2, "2".to_string()), (2, "Enter".to_string())],
-            "the durable grant's digit, then a separate Enter"
+            sink.calls.len(),
+            1,
+            "the deduped sweep must not re-record: {:?}",
+            sink.calls
+        );
+    }
+
+    /// Spec scenario "Non-prompt escalations are not logged", CLI-unavailable
+    /// half: a usage-limit banner is an escalation, but it is not a command
+    /// awaiting a decision, so it must not enter a log `git paw approvals`
+    /// reads as "commands that needed a human".
+    #[test]
+    fn a_cli_unavailable_escalation_records_no_manual_decision() {
+        let mut sink = RecordingManualDecisions::default();
+        let escalations =
+            sweep_n_with_sink("You've hit your session limit", "feat-a", 2, 1, &mut sink);
+
+        assert_eq!(escalations.len(), 1, "the banner still escalates");
+        assert_eq!(escalations[0].verdict, "cli-unavailable");
+        assert!(
+            sink.calls.is_empty(),
+            "a banner is not a permission prompt: {:?}",
+            sink.calls
+        );
+    }
+
+    /// Spec scenario "Non-prompt escalations are not logged", wedged-nudge
+    /// half: an input box still holding a paste placeholder after recovery is
+    /// escalated as `nudge-wedged`. It is a stuck pane, not a pending
+    /// command, so nothing is recorded.
+    #[test]
+    fn a_nudge_wedged_escalation_records_no_manual_decision() {
+        let mut sink = RecordingManualDecisions::default();
+        let escalations = sweep_n_with_sink(
+            &idle_input_box("[Pasted text #1 +5 lines]"),
+            "feat-a",
+            2,
+            1,
+            &mut sink,
+        );
+
+        assert!(
+            escalations
+                .iter()
+                .any(|e| e.verdict == NUDGE_WEDGED_VERDICT),
+            "the wedged pane still escalates: {escalations:?}"
+        );
+        assert!(
+            sink.calls.is_empty(),
+            "a wedged nudge is not a permission prompt: {:?}",
+            sink.calls
+        );
+    }
+
+    /// Spec scenario "Non-prompt escalations are not logged", correction-loop
+    /// half: a branch that exhausts its correction budget is escalated by
+    /// `run_correction_pass`, never by the pane sweep, so no command is
+    /// recorded for it.
+    #[test]
+    fn a_correction_loop_signal_records_no_manual_decision() {
+        let agents = correction_agents();
+        let enumerator = correction_panes();
+        // No live prompt on the pane: the only escalations are the correction
+        // loop's own.
+        let capturer = FakeCapturer::new(&[(2, "standing by...\n$ ")]);
+        let mut dispatcher = RecordingDispatcher::default();
+        let status = ScriptedStatus::new(vec![vec![row("feat-a", "working")]]);
+        let messages = ScriptedMessages::new(
+            (0..6)
+                .map(|_| vec![gate_feedback("feat-a", "testing", "still failing")])
+                .collect(),
+        );
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = RecordingManualDecisions::default();
+        let mut refresher = RecordingRefresher::default();
+        {
+            let mut deps = DriveDeps {
+                enumerator: &enumerator,
+                capturer: &capturer,
+                dispatcher: &mut dispatcher,
+                status: &status,
+                messages: &messages,
+                clock: &clock,
+                merge_check: &FakeMergeCheck::default(),
+                alerts: &mut alerts,
+                learnings: &mut learnings,
+                manual_decisions: &mut manual_decisions,
+                refresher: &mut refresher,
+                wedged: Vec::new(),
+            };
+            let config = DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_secs(5),
+                correction: CorrectionConfig {
+                    auto_loopback: true,
+                    max_cycles: 3,
+                    on_exhausted: OnExhausted::Escalate,
+                    ..CorrectionConfig::default()
+                },
+                clis: zero_settle_delay_clis(),
+                ..DriveConfig::default()
+            };
+            drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
+        }
+
+        assert!(
+            alerts
+                .escalations
+                .iter()
+                .any(|e| e.verdict == CORRECTION_EXHAUSTED_VERDICT),
+            "the branch was flagged unrecoverable: {:?}",
+            alerts.escalations
+        );
+        assert!(
+            manual_decisions.calls.is_empty(),
+            "a correction-loop signal is not a permission prompt: {:?}",
+            manual_decisions.calls
+        );
+    }
+
+    /// Spec scenario "A drive-loop escalation appends a JSONL line",
+    /// cross-module: the production sink around a REAL
+    /// [`ManualDecisionRecorder`] writes the line to disk, with every field
+    /// the spec requires. Exercised end to end from one escalating sweep, so
+    /// the sweep → sink → recorder → file path is covered as a whole rather
+    /// than per-layer.
+    #[test]
+    fn a_drive_loop_escalation_appends_a_jsonl_line() {
+        let tmp = tempfile::TempDir::new().expect("tmp repo root");
+        let log = crate::supervisor::manual_approvals::log_path(tmp.path(), "paw-test");
+        let recorder = crate::supervisor::manual_approvals::ManualDecisionRecorder::new(
+            log.clone(),
+            true,
+            false,
+            "proj".to_string(),
+            Some("claude".to_string()),
+        );
+        let mut sink = RecorderManualDecisionSink::new(recorder, None);
+        sweep_n_with_sink(&live_safe_capture("ls -la"), "feat-a", 2, 1, &mut sink);
+
+        let body = std::fs::read_to_string(&log).expect("the log must exist");
+        let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 1, "exactly one line: {body}");
+        let entry: serde_json::Value =
+            serde_json::from_str(lines[0]).expect("the line must be JSON");
+        assert_eq!(entry["agent_id"], "feat-a");
+        assert_eq!(entry["pattern"], "ls -la");
+        assert_eq!(entry["first_seen"], true);
+        assert!(
+            entry["timestamp"]
+                .as_str()
+                .is_some_and(|t| t.ends_with('Z')),
+            "an ISO-8601 UTC timestamp: {entry}"
+        );
+    }
+
+    /// Spec scenario "The opt-out applies to the drive loop": with
+    /// `manual_approvals_log = false` — and learnings ON, so the gate under
+    /// test is the opt-out and not the learnings switch — the sweep still
+    /// escalates, but writes no file and returns no learning to publish.
+    #[test]
+    fn the_opt_out_applies_to_the_drive_loop() {
+        let tmp = tempfile::TempDir::new().expect("tmp repo root");
+        let log = crate::supervisor::manual_approvals::log_path(tmp.path(), "paw-test");
+        let recorder = crate::supervisor::manual_approvals::ManualDecisionRecorder::new(
+            log.clone(),
+            false, // manual_approvals_log = false
+            true,  // learnings = true
+            "proj".to_string(),
+            Some("claude".to_string()),
+        );
+        // No broker URL: a learning that somehow escaped the opt-out would
+        // have nowhere to go, so the file check below is the real assertion.
+        let mut sink = RecorderManualDecisionSink::new(recorder, None);
+        let escalations =
+            sweep_n_with_sink(&live_safe_capture("ls -la"), "feat-a", 2, 1, &mut sink);
+
+        assert_eq!(
+            escalations.len(),
+            1,
+            "the opt-out suppresses the LOG, never the escalation"
+        );
+        assert!(
+            !log.exists(),
+            "no log file may be written under the opt-out: {}",
+            log.display()
+        );
+    }
+
+    /// The opt-out is the recorder's own gate, so it also withholds the
+    /// first-seen learning the sink would otherwise publish.
+    #[test]
+    fn the_opt_out_withholds_the_first_seen_learning() {
+        let tmp = tempfile::TempDir::new().expect("tmp repo root");
+        let mut recorder = crate::supervisor::manual_approvals::ManualDecisionRecorder::new(
+            crate::supervisor::manual_approvals::log_path(tmp.path(), "paw-test"),
+            false,
+            true,
+            "proj".to_string(),
+            Some("claude".to_string()),
+        );
+        assert!(
+            recorder
+                .record_forwarded("feat-a", &live_safe_capture("ls -la"))
+                .is_none(),
+            "the opt-out returns no learning to publish"
         );
     }
 
@@ -4323,6 +4478,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
@@ -4335,6 +4491,7 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -4569,6 +4726,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
@@ -4581,6 +4739,7 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -4632,6 +4791,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
@@ -4644,6 +4804,7 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -4701,6 +4862,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
@@ -4713,11 +4875,11 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
         let config = DriveConfig {
-            whitelist: vec!["cargo test".to_string()],
             poll_interval: Duration::from_millis(0),
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
@@ -4739,10 +4901,16 @@ mod tests {
 
         assert_eq!(summary.outcome, DriveOutcome::SessionTornDown);
         assert_eq!(
-            dispatcher.events,
-            vec![(1, "1".to_string()), (1, "Enter".to_string())],
-            "only the first (pre-teardown) sweep's approval is sent — the loop \
-             must never act on a subsequently-created same-named session's panes"
+            alerts.escalations.len(),
+            1,
+            "only the first (pre-teardown) sweep acted — the loop must never \
+             act on a subsequently-created same-named session's panes: {:?}",
+            alerts.escalations
+        );
+        assert!(
+            dispatcher.events.is_empty(),
+            "no pane is typed into either way: {:?}",
+            dispatcher.events
         );
     }
 
@@ -4760,6 +4928,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
@@ -4772,6 +4941,7 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -4866,6 +5036,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
@@ -4878,6 +5049,7 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -4895,10 +5067,13 @@ mod tests {
         );
     }
 
-    // --- full loop: safe approval + completion (task 8.1 in-memory) --------
+    // --- full loop: escalation + completion (task 8.1 in-memory) ----------
 
+    /// Spec scenario "A command formerly classified safe is escalated, not
+    /// approved" (end-to-end through the loop): the live prompt is escalated,
+    /// the loop still detects completion, and NOTHING is typed into the pane.
     #[test]
-    fn loop_approves_safe_prompt_then_exits_on_completion() {
+    fn loop_escalates_live_prompt_then_exits_on_completion() {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
@@ -4922,14 +5097,14 @@ mod tests {
         ]);
         let mut dispatcher = RecordingDispatcher::default();
         // The agent's task is verified by the first status poll, so the loop
-        // approves the live safe prompt once, detects completion, and exits.
-        // (The fake capture does not clear after an approval, so completing on
-        // the first sweep keeps the approval count deterministic — mirroring
-        // the single-poll pane-0 approval test.)
+        // escalates the live prompt once, detects completion, and exits.
+        // (The fake capture never clears, so completing on the first sweep
+        // keeps the escalation count deterministic.)
         let status = ScriptedStatus::new(vec![vec![row("feat-a", "verified")]]);
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
@@ -4942,35 +5117,44 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
         let config = DriveConfig {
-            whitelist: vec!["cargo test".to_string()],
             poll_interval: Duration::from_secs(1),
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
         };
         let summary = drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
 
-        assert_eq!(summary.outcome, DriveOutcome::Completed);
-        // The safe prompt on the coding pane was approved with `1` then Enter.
-        assert_eq!(
-            dispatcher.events,
-            vec![(2, "1".to_string()), (2, "Enter".to_string())]
+        // The wave still finished — the escalation did not block it — but an
+        // unanswered prompt means the run ends for review, not clean.
+        assert_eq!(summary.outcome, DriveOutcome::EscalatedForReview);
+        // Pane 2 is the prompting pane: it receives nothing. (Pane 0 does get
+        // the orchestrator hand-off, which is free text, not an answer.)
+        assert!(
+            !dispatcher.events.iter().any(|(p, _)| *p == 2),
+            "the prompting pane must receive no keystroke; dispatched: {:?}",
+            dispatcher.events
         );
-        assert_eq!(alerts.approvals.len(), 1, "one approval logged");
-        assert!(alerts.escalations.is_empty(), "no escalations");
+        assert_eq!(alerts.escalations.len(), 1, "one escalation recorded");
+        assert_eq!(alerts.escalations[0].verdict, PERMISSION_PROMPT_VERDICT);
+        assert_eq!(alerts.escalations[0].command, "cargo test");
     }
 
     /// Spec scenario "The Rust loop and the shell helper are mutually
-    /// exclusive", reverse direction: another approver (here `sweep.sh`, which
-    /// creates the very same claim file from its own process) already holds
-    /// pane 2, so the loop dispatches NO keystroke for a prompt it classified
-    /// safe — and pane 3, unclaimed, is approved in the same sweep, proving the
-    /// skip is per-pane and does not block the wave.
+    /// exclusive", reverse direction: another sender (here `sweep.sh approve`,
+    /// which creates the very same claim file from its own process) already
+    /// holds pane 2, so the loop types NO free text into it while recovering
+    /// buffered input — and pane 3, unclaimed, is recovered in the same sweep,
+    /// proving the skip is per-pane and does not block the wave.
+    ///
+    /// The claim guards the keystrokes the loop still sends (its nudge,
+    /// stale-input and buffered-input recovery paths); it no longer guards an
+    /// approval, because the loop sends none.
     #[test]
-    fn a_pane_claimed_by_another_approver_receives_no_keystroke() {
+    fn a_pane_claimed_by_another_sender_receives_no_typed_text() {
         let agents = vec![
             AgentPane {
                 agent_id: "feat-a".to_string(),
@@ -4996,8 +5180,8 @@ mod tests {
             ],
         };
         let capturer = FakeCapturer::new(&[
-            (2, &live_safe_capture("cargo test")),
-            (3, &live_safe_capture("cargo test")),
+            (2, &idle_input_box("please continue with task 3")),
+            (3, &idle_input_box("please continue with task 3")),
         ]);
         let mut dispatcher = RecordingDispatcher::default();
         // Both agents are terminal on the first poll, so exactly one sweep runs
@@ -5009,6 +5193,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
@@ -5021,11 +5206,11 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
         let config = DriveConfig {
-            whitelist: vec!["cargo test".to_string()],
             poll_interval: Duration::from_secs(1),
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
@@ -5047,21 +5232,30 @@ mod tests {
             &AlwaysCurrentGuard,
         );
 
-        assert_eq!(
-            dispatcher.events,
-            vec![(3, "1".to_string()), (3, "Enter".to_string())],
-            "the claimed pane must receive nothing; the free pane is still approved"
+        assert!(
+            !dispatcher.literal_sends.iter().any(|(p, _)| *p == 2),
+            "the claimed pane must have no free text typed into it; literal sends were {:?}",
+            dispatcher.literal_sends
+        );
+        assert!(
+            dispatcher.literal_sends.iter().any(|(p, _)| *p == 3),
+            "the unclaimed pane is still recovered; literal sends were {:?}",
+            dispatcher.literal_sends
         );
         assert!(
             claimed.exists(),
-            "the loop must leave the other approver's claim in place"
+            "the loop must leave the other sender's claim in place"
         );
     }
 
-    // --- full loop: danger escalation is non-blocking (task 8.2 in-memory) --
+    // --- full loop: escalation is non-blocking (task 8.2 in-memory) -------
 
+    /// Spec scenario "A live prompt is escalated without blocking the other
+    /// agent" (`supervisor-unattended-operation`): both panes are prompting,
+    /// both escalate, neither is answered, and the wave still reaches its
+    /// exit instead of stalling on either one.
     #[test]
-    fn loop_escalates_danger_without_blocking_other_agent() {
+    fn loop_escalates_live_prompts_without_blocking_either_agent() {
         let agents = vec![
             AgentPane {
                 agent_id: "feat-a".to_string(),
@@ -5100,6 +5294,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
@@ -5112,30 +5307,37 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
         let config = DriveConfig {
-            whitelist: vec!["cargo build".to_string()],
             poll_interval: Duration::from_secs(1),
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
         };
         let summary = drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
 
-        // The danger prompt was escalated, NOT approved.
-        assert_eq!(alerts.escalations.len(), 1);
-        assert_eq!(alerts.escalations[0].agent_id, "feat-a");
-        assert_eq!(alerts.escalations[0].verdict, "danger");
-        // feat-b's safe prompt still got approved — the wave kept progressing.
-        assert!(
-            dispatcher.events.iter().any(|(p, _)| *p == 3),
-            "the other agent's safe prompt was still approved"
+        // Both prompts escalated under the one verdict, neither was answered
+        // — the command text (`git push --force` vs `cargo build`) makes no
+        // difference to the outcome.
+        let by_agent: Vec<(&str, &str)> = alerts
+            .escalations
+            .iter()
+            .map(|e| (e.agent_id.as_str(), e.verdict.as_str()))
+            .collect();
+        assert_eq!(
+            by_agent,
+            vec![
+                ("feat-a", PERMISSION_PROMPT_VERDICT),
+                ("feat-b", PERMISSION_PROMPT_VERDICT),
+            ],
+            "both panes escalate, under one verdict"
         );
-        // Never sent keystrokes to the danger pane.
         assert!(
-            !dispatcher.events.iter().any(|(p, _)| *p == 2),
-            "no keystrokes to the danger pane"
+            dispatcher.events.is_empty(),
+            "neither prompting pane may receive a keystroke, got {:?}",
+            dispatcher.events
         );
         assert_eq!(summary.outcome, DriveOutcome::EscalatedForReview);
         // A friction learning was recorded opportunistically + at wind-down.
@@ -5144,8 +5346,12 @@ mod tests {
 
     // --- pane 0 coverage (task 4.3 / W15-3 / W15-13) -----------------------
 
+    /// Spec scenario "The drive loop sends no approval keystrokes to pane 0"
+    /// (`approval-auto`): pane 0 is swept — its prompt reaches the broker and
+    /// the summary — but the loop types nothing into the supervisor's own
+    /// pane, so its context is never polluted by a stray digit.
     #[test]
-    fn loop_approves_supervisor_pane_safe_prompt() {
+    fn loop_escalates_supervisor_pane_prompt_without_typing() {
         let agents: Vec<AgentPane> = Vec::new();
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
@@ -5159,6 +5365,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
@@ -5171,21 +5378,32 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
         let config = DriveConfig {
-            whitelist: vec!["cargo test".to_string()],
             poll_interval: Duration::from_secs(1),
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
         };
         drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
-        // Pane 0 IS approved (W15-3) but only with the minimal digit+Enter
-        // (W15-13) — no free text.
+        assert!(
+            dispatcher.events.is_empty(),
+            "pane 0 must receive no keystroke at all, got {:?}",
+            dispatcher.events
+        );
         assert_eq!(
-            dispatcher.events,
-            vec![(0, "1".to_string()), (0, "Enter".to_string())]
+            alerts
+                .escalations
+                .iter()
+                .filter(
+                    |e| e.agent_id == SUPERVISOR_AGENT_ID && e.verdict == PERMISSION_PROMPT_VERDICT
+                )
+                .count(),
+            1,
+            "the pane-0 prompt is carried by the broker instead: {:?}",
+            alerts.escalations
         );
     }
 
@@ -5205,6 +5423,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
@@ -5217,6 +5436,7 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -5255,6 +5475,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
@@ -5267,6 +5488,7 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -5281,6 +5503,107 @@ mod tests {
         // (feedback-cycle tolerance, task 5.4).
         assert!(dispatcher.events.is_empty());
         assert!(alerts.escalations.is_empty());
+    }
+
+    /// Spec scenario "A prompt nobody answers does not end the run"
+    /// (`supervisor-unattended-operation`): with nothing approving prompts,
+    /// a pane can now sit on one indefinitely. The loop must keep driving
+    /// the rest of the wave and exit only on its normal conditions — an
+    /// unanswered prompt is not itself an exit condition.
+    ///
+    /// Distinct from `loop_exits_on_heartbeat_when_never_completing`, whose
+    /// pane shows no prompt at all: this one holds a LIVE prompt for every
+    /// sweep, which is the state the retirement makes common.
+    #[test]
+    fn a_prompt_nobody_answers_does_not_end_the_run() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
+        }];
+        let enumerator = FakeEnumerator {
+            panes: vec![PaneInfo {
+                pane_index: 2,
+                pane_current_path: "/repo-feat-a".to_string(),
+            }],
+        };
+        // The prompt never clears, and the agent never leaves `working`.
+        let capturer = FakeCapturer::new(&[(2, &live_safe_capture("ls -la"))]);
+        let mut dispatcher = RecordingDispatcher::default();
+        let status = ScriptedStatus::new(vec![vec![row("feat-a", "working")]]);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
+        let mut refresher = RecordingRefresher::default();
+        let messages = ScriptedMessages::none();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
+            refresher: &mut refresher,
+            wedged: Vec::new(),
+        };
+        let config = DriveConfig {
+            poll_interval: Duration::from_secs(1),
+            heartbeat: Duration::from_secs(30),
+            ..DriveConfig::default()
+        };
+        let summary = drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
+
+        // It ran to the HEARTBEAT — the only reason it stopped — rather than
+        // bailing out the moment a prompt went unanswered.
+        assert_eq!(
+            summary.outcome,
+            DriveOutcome::Heartbeat,
+            "an unanswered prompt must not be an exit condition of its own"
+        );
+        // The fake clock advances only by the poll interval, so reaching a
+        // 30s heartbeat means the loop really kept sweeping.
+        assert!(
+            !alerts.escalations.is_empty(),
+            "the prompt was escalated at least once"
+        );
+        assert!(
+            dispatcher.events.is_empty(),
+            "and never answered: {:?}",
+            dispatcher.events
+        );
+    }
+
+    /// Spec scenario "A prompted boot publish is escalated, not answered"
+    /// (`cli-resolution`): an agent's very first action is a `broker.sh`
+    /// status publish. When the CLI's permission mode prompts for it, that
+    /// prompt is escalated like any other — git-paw does not clear its own
+    /// helper's prompt to get the agent registered.
+    #[test]
+    fn a_prompted_boot_publish_is_escalated_not_answered() {
+        let capture = live_safe_capture(".git-paw/scripts/broker.sh --agent feat-a status booting");
+        let probe = sweep_probe(&capture, "feat-a", 2);
+        assert!(
+            matches!(probe.outcome, PaneSweepOutcome::Escalated(_)),
+            "a prompted boot publish must escalate, got {:?}",
+            probe.outcome
+        );
+        let e = probe.escalation();
+        assert_eq!(e.verdict, PERMISSION_PROMPT_VERDICT);
+        assert!(
+            e.command.contains("broker.sh"),
+            "the escalation names the helper invocation: {}",
+            e.command
+        );
+        assert!(
+            probe.keys.is_empty(),
+            "git-paw does not clear its own helper's prompt: {:?}",
+            probe.keys
+        );
     }
 
     // --- pane-keyed sweep: a pane with no broker record is still swept -------
@@ -5307,6 +5630,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
@@ -5319,19 +5643,23 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
         let config = DriveConfig {
-            whitelist: vec!["cargo test".to_string()],
             poll_interval: Duration::from_secs(1),
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
         };
         drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
         assert!(
-            dispatcher.events.iter().any(|(p, _)| *p == 2),
-            "a pane with no broker record was still swept and approved"
+            alerts
+                .escalations
+                .iter()
+                .any(|e| e.verdict == PERMISSION_PROMPT_VERDICT),
+            "a pane with no broker record was still swept and escalated: {:?}",
+            alerts.escalations
         );
     }
 
@@ -5360,6 +5688,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
@@ -5372,11 +5701,11 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
         let config = DriveConfig {
-            whitelist: vec!["cargo test".to_string()],
             poll_interval: Duration::from_secs(1),
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
@@ -5534,6 +5863,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -5545,6 +5875,7 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -5618,19 +5949,20 @@ mod tests {
             "it reads as advisory, not as work to do, got: {text}"
         );
 
-        // A classifier verdict keeps the prompt framing — accurate for it.
-        for verdict in ["danger", "unknown"] {
-            let prompt = Escalation {
-                agent_id: "feat-a".to_string(),
-                verdict: verdict.to_string(),
-                command: "git push --force origin main".to_string(),
-            };
-            let text = prompt.question();
-            assert!(
-                text.contains("permission prompt") && text.contains(verdict),
-                "a {verdict} prompt still asks the human to review the pane, got: {text}"
-            );
-        }
+        // A permission-prompt verdict keeps the prompt framing, and says
+        // plainly that git-paw will not answer it.
+        let prompt = Escalation {
+            agent_id: "feat-a".to_string(),
+            verdict: PERMISSION_PROMPT_VERDICT.to_string(),
+            command: "git push --force origin main".to_string(),
+        };
+        let text = prompt.question();
+        assert!(
+            text.contains("permission prompt")
+                && text.contains("does not approve prompts")
+                && text.contains("git push --force origin main"),
+            "a permission prompt asks the human to decide, got: {text}"
+        );
     }
 
     /// Safety finding: `handoff_text` is TYPED into the orchestrator's own
@@ -5679,6 +6011,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -5690,6 +6023,7 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -5734,6 +6068,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let before = clock.now();
         let repo = tempfile::tempdir().expect("temp repo root");
@@ -5748,6 +6083,7 @@ mod tests {
                 merge_check: &FakeMergeCheck::default(),
                 alerts: &mut alerts,
                 learnings: &mut learnings,
+                manual_decisions: &mut manual_decisions,
                 refresher: &mut refresher,
                 wedged: Vec::new(),
             };
@@ -5956,6 +6292,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -5967,6 +6304,7 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -6014,6 +6352,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -6025,6 +6364,7 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -6074,6 +6414,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let summary = {
             let mut deps = DriveDeps {
@@ -6086,6 +6427,7 @@ mod tests {
                 merge_check: &FakeMergeCheck::default(),
                 alerts: &mut alerts,
                 learnings: &mut learnings,
+                manual_decisions: &mut manual_decisions,
                 refresher: &mut refresher,
                 wedged: Vec::new(),
             };
@@ -6302,6 +6644,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -6313,6 +6656,7 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -6332,65 +6676,6 @@ mod tests {
         assert!(
             summary.exhausted.is_empty(),
             "a branch that passes never reaches the exhaustion policy"
-        );
-    }
-
-    /// Spec scenario "Prompt cleared before send sends nothing"
-    /// (`approve-send-gate-hardening`): the sweep capture shows a live safe
-    /// prompt, but the FRESH re-confirm capture taken immediately before
-    /// sending shows it cleared — zero keystrokes are dispatched, so no
-    /// approval digit lands as stray chat input.
-    #[test]
-    fn prompt_cleared_between_decision_and_send_sends_nothing() {
-        let agents = vec![AgentPane {
-            agent_id: "feat-a".to_string(),
-            worktree_path: PathBuf::from("/repo-feat-a"),
-            branch: "feat/a".to_string(),
-        }];
-        let enumerator = FakeEnumerator {
-            panes: vec![PaneInfo {
-                pane_index: 2,
-                pane_current_path: "/repo-feat-a".to_string(),
-            }],
-        };
-        let live = "Bash command\n  cargo test --workspace\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n(esc to cancel)";
-        let cleared = "$ cargo test --workspace\nrunning 5 tests\nall passed\n$ ";
-        let capturer = SequencedCapturer::new(&[live, cleared]);
-        let mut dispatcher = RecordingDispatcher::default();
-        let status = ScriptedStatus::new(vec![vec![row("supervisor", "done")]]);
-        let clock = FakeClock::new();
-        let mut alerts = RecordingAlerts::default();
-        let mut learnings = RecordingLearnings::default();
-        let mut refresher = RecordingRefresher::default();
-        let messages = ScriptedMessages::none();
-        let mut deps = DriveDeps {
-            enumerator: &enumerator,
-            capturer: &capturer,
-            dispatcher: &mut dispatcher,
-            status: &status,
-            messages: &messages,
-            clock: &clock,
-            merge_check: &FakeMergeCheck::default(),
-            alerts: &mut alerts,
-            learnings: &mut learnings,
-            refresher: &mut refresher,
-            wedged: Vec::new(),
-        };
-        let config = DriveConfig {
-            whitelist: vec!["cargo test".to_string()],
-            poll_interval: Duration::from_secs(1),
-            heartbeat: Duration::from_hours(1),
-            ..DriveConfig::default()
-        };
-        drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
-        assert!(
-            dispatcher.events.is_empty(),
-            "a prompt that cleared between decision and send must dispatch zero keystrokes"
-        );
-        assert_eq!(
-            alerts.approvals.len(),
-            1,
-            "the safe decision was made (and audit-logged) before the prompt cleared"
         );
     }
 
@@ -6445,6 +6730,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -6456,6 +6742,7 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -6482,6 +6769,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let messages = ScriptedMessages::none();
         let mut deps = DriveDeps {
@@ -6494,6 +6782,7 @@ mod tests {
             merge_check,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -6731,7 +7020,6 @@ mod tests {
                 poll_interval: Duration::from_secs(1),
                 heartbeat: Duration::from_hours(1),
                 default_branch: "main".to_string(),
-                whitelist: vec!["cargo test".to_string()],
                 ..DriveConfig::default()
             },
         );
@@ -6748,12 +7036,21 @@ mod tests {
             "{:?}",
             summary.escalations
         );
+        // feat-b's prompt is escalated too — the wave keeps moving, and
+        // neither pane is typed into.
         assert!(
-            dispatcher
-                .events
+            summary
+                .escalations
                 .iter()
-                .any(|(p, t)| *p == 3 && t == "Enter"),
-            "feat-b's safe prompt must still be approved: {:?}",
+                .any(|e| e.agent_id == "feat-b" && e.verdict == PERMISSION_PROMPT_VERDICT),
+            "feat-b's prompt must still be escalated: {:?}",
+            summary.escalations
+        );
+        // Only the orchestrator pane (0) is typed into, and only with the
+        // relay hand-off — neither worker pane receives a keystroke.
+        assert!(
+            dispatcher.events.iter().all(|(p, _)| *p == 0),
+            "no worker pane may be typed into: {:?}",
             dispatcher.events
         );
     }
@@ -6919,6 +7216,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let merge_check = FakeMergeCheck::default();
         let mut deps = DriveDeps {
@@ -6931,6 +7229,7 @@ mod tests {
             merge_check: &merge_check,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -6981,6 +7280,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let merge_check = FakeMergeCheck::default();
         let mut deps = DriveDeps {
@@ -6993,6 +7293,7 @@ mod tests {
             merge_check: &merge_check,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -7165,6 +7466,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = RecordingRefresher::default();
         let merge_check = FakeMergeCheck::default();
         let mut deps = DriveDeps {
@@ -7177,6 +7479,7 @@ mod tests {
             merge_check: &merge_check,
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -7273,11 +7576,12 @@ mod tests {
         );
     }
 
-    /// Spec: "An unknown prompt is injected into the orchestrator pane" — the
-    /// escalation is recorded on the broker AND handed to the orchestrator, while
-    /// the other worker keeps progressing (the wave never blocks on the hand-off).
+    /// Spec scenario "A live permission prompt is injected into the
+    /// orchestrator pane" — the escalation is recorded on the broker AND
+    /// handed to the orchestrator, while the wave never blocks on the
+    /// hand-off. Both workers are prompting, so both escalate.
     #[test]
-    fn unknown_prompt_is_handed_to_the_orchestrator_and_recorded_on_the_broker() {
+    fn live_prompt_is_handed_to_the_orchestrator_and_recorded_on_the_broker() {
         let agents = two_agents();
         let (dispatcher, alerts) = run_loop(
             &agents,
@@ -7297,7 +7601,6 @@ mod tests {
             ],
             &ScriptedMessages::none(),
             &DriveConfig {
-                whitelist: vec!["cargo build".to_string()],
                 poll_interval: Duration::from_secs(1),
                 heartbeat: Duration::from_hours(1),
                 ..DriveConfig::default()
@@ -7305,29 +7608,34 @@ mod tests {
         );
 
         // Recorded uniformly on the broker …
-        assert_eq!(alerts.escalations.len(), 1);
-        assert_eq!(alerts.escalations[0].agent_id, "feat-a");
-        assert_eq!(alerts.escalations[0].verdict, "unknown");
-        // … AND handed to the orchestrator's pane as a task prompt.
-        assert_text_then_separate_enter(&dispatcher, 0, "Judgment call handed to you");
+        assert_eq!(alerts.escalations.len(), 2, "{:?}", alerts.escalations);
+        assert!(
+            alerts
+                .escalations
+                .iter()
+                .all(|e| e.verdict == PERMISSION_PROMPT_VERDICT),
+            "{:?}",
+            alerts.escalations
+        );
+        // … AND handed to the orchestrator's pane as a relay request.
+        assert_text_then_separate_enter(&dispatcher, 0, "Relay to the human");
         assert!(
             injected(&dispatcher, 0, "feat-a"),
-            "the hand-off names the agent whose judgment call it is"
+            "the hand-off names the agent whose prompt it is"
         );
-        // The other worker's safe prompt was still approved this same sweep.
+        // Neither prompting pane was typed into — only pane 0 saw the relay.
         assert!(
-            dispatcher.events.contains(&(3, "1".to_string()))
-                && dispatcher.events.contains(&(3, "Enter".to_string())),
-            "the wave kept progressing; events were {:?}",
+            dispatcher.events.iter().all(|(p, _)| *p == 0),
+            "only the orchestrator pane is typed into; events were {:?}",
             dispatcher.events
         );
     }
 
     /// Spec: "No orchestrator present falls back to broker-only escalation" —
-    /// the same input records the escalation and injects into NO pane. This is
-    /// also the back-compat guarantee for a pure `--unattended` run.
+    /// the same input records the escalations and injects into NO pane. This
+    /// is also the back-compat guarantee for a pure `--unattended` run.
     #[test]
-    fn unknown_prompt_without_an_orchestrator_records_only_the_broker_escalation() {
+    fn live_prompt_without_an_orchestrator_records_only_the_broker_escalation() {
         let agents = two_agents();
         let (dispatcher, alerts) = run_loop(
             &agents,
@@ -7342,28 +7650,30 @@ mod tests {
             ],
             &ScriptedMessages::none(),
             &DriveConfig {
-                whitelist: vec!["cargo build".to_string()],
                 poll_interval: Duration::from_secs(1),
                 heartbeat: Duration::from_hours(1),
                 ..DriveConfig::default()
             },
         );
 
-        assert_eq!(alerts.escalations.len(), 1, "still recorded on the broker");
-        assert_eq!(alerts.escalations[0].verdict, "unknown");
+        assert_eq!(alerts.escalations.len(), 2, "still recorded on the broker");
+        assert!(
+            alerts
+                .escalations
+                .iter()
+                .all(|e| e.verdict == PERMISSION_PROMPT_VERDICT),
+            "{:?}",
+            alerts.escalations
+        );
         assert!(
             dispatcher.literal_sends.is_empty(),
             "no pane injection at all without an orchestrator; literal sends were {:?}",
             dispatcher.literal_sends
         );
-        // Only the safe pane's approval keystrokes went out — the escalated pane
-        // was never typed into, which is the prior behaviour exactly.
+        // With no orchestrator to relay to, nothing is typed anywhere at all.
         assert!(
-            dispatcher
-                .events
-                .iter()
-                .all(|(p, key)| *p == 3 && matches!(key.as_str(), "1" | "Enter")),
-            "only pane 3's approval keystrokes are expected; events were {:?}",
+            dispatcher.events.is_empty(),
+            "no keystroke is expected; events were {:?}",
             dispatcher.events
         );
     }
@@ -7606,6 +7916,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = refresher;
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -7617,6 +7928,7 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -7906,6 +8218,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = GitBranchRefresher {
             repo_root: repo_root.clone(),
             broker_url: None,
@@ -7920,6 +8233,7 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
@@ -7987,6 +8301,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut alerts = RecordingAlerts::default();
         let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
         let mut refresher = GitBranchRefresher {
             repo_root: repo_root.clone(),
             broker_url: None,
@@ -8001,6 +8316,7 @@ mod tests {
             merge_check: &FakeMergeCheck::default(),
             alerts: &mut alerts,
             learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
         };
