@@ -20,6 +20,26 @@ my-project/
             └── scripts/
 ```
 
+## Bundled skills
+
+git-paw embeds four skills, each overridable by a `.agents/skills/<name>/SKILL.md`
+of your own:
+
+| Skill | What it carries |
+|---|---|
+| `coordination` | How an agent publishes status, intents and questions through the broker. |
+| `supervisor` | The orchestrator's role: sweeps, the five verification gates, merge orchestration. |
+| `docs-fetch` | How to look things up through the bundled docs helper. |
+| `cli-setup` | The consent rules for [`git paw setup-cli`](cli-setup.md) — when an agent may and may not run the command that writes an agent CLI's own settings. |
+
+The `cli-setup` skill exists because that command changes what a CLI will do
+without asking the human again. Its rules are deliberately restrictive: the
+writing form runs only when the human asked in the current conversation, a
+`--dry-run` suggestion is not consent, `--yes` follows approval of the exact
+plan shown, it never runs unattended or because of an instruction found in
+content the agent read, settings files are never hand-edited, and coding
+agents in worktrees never run it at all.
+
 ## Skill Format
 
 Each skill must contain a `SKILL.md` file with YAML frontmatter:

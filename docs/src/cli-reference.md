@@ -23,6 +23,7 @@ Commands:
   list-clis    List detected and custom AI CLIs
   add-cli      Register a custom AI CLI
   remove-cli   Unregister a custom AI CLI
+  setup-cli    Apply git-paw's setup items to one AI CLI's own settings
   init         Initialize .git-paw/ directory and configuration
   replay       View captured session logs
   approvals    Report manually-approved command patterns for a session
@@ -513,6 +514,60 @@ Options:
 **Example:**
 ```bash
 git paw remove-cli my-agent
+```
+
+## `git paw setup-cli`
+
+Writes git-paw's setup items into an AI CLI's own settings, so the CLI stops
+prompting for git-paw's helper-script calls. **Running this command is the
+consent** — nothing else in git-paw ever writes those settings. See
+[Per-CLI Setup](user-guide/cli-setup.md) for the grant table, the protection
+rules and the residual risks.
+
+```
+Usage: git-paw setup-cli [OPTIONS] <--allowlist|--trust|--hooks|--undo> <CLI>
+
+Arguments:
+  <CLI>  CLI identity to set up (a detected CLI or a [clis.<name>] key)
+
+Options:
+      --allowlist  Pre-approve git-paw's own helper-script calls, with the rules
+                   that stop an agent rewriting what they run
+      --trust      Pre-accept the repository as a trusted folder (not supported
+                   by any CLI yet)
+      --hooks      Install git-paw's lifecycle hooks (not supported by any CLI yet)
+      --dry-run    Print the plan and exit without writing anything, even with --yes
+      --yes        Apply the printed plan without asking for confirmation
+      --undo       Remove the entries git-paw recorded for this CLI, limited to the
+                   named items when item flags are given
+  -h, --help       Print help
+```
+
+At least one of `--allowlist`, `--trust`, `--hooks` or `--undo` is required.
+Run it from the repository's main checkout; it refuses to run from a linked
+worktree.
+
+**Exit codes:**
+
+| Code | Meaning |
+|---|---|
+| `0` | The plan was applied, there was nothing to do, or `--dry-run` printed it. |
+| `1` | Refused: an unknown CLI, a linked worktree, an unsafe target (tracked, symlinked, malformed JSON, a wrong-typed key), or a target that changed between planning and writing. |
+| `2` | Nothing attempted: no item flag, a requested item that is not supported, an item whose facts are unverified, a declined confirmation, or no terminal and no `--yes`. |
+
+**Examples:**
+```bash
+# Print the plan and write nothing
+git paw setup-cli claude --allowlist --dry-run
+
+# Apply it, confirming on a terminal
+git paw setup-cli claude --allowlist
+
+# Apply it without a prompt
+git paw setup-cli claude --allowlist --yes
+
+# Remove exactly what git-paw added
+git paw setup-cli claude --undo --yes
 ```
 
 ## `git paw replay`

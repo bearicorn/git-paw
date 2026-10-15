@@ -3,7 +3,7 @@
 //! Defines the command-line interface using `clap` v4 with derive macros.
 //! All subcommands, flags, and options are declared here.
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 /// Spec format selector for the `--specs-format` flag.
@@ -492,6 +492,77 @@ pub enum Command {
         /// Name of the custom CLI to remove.
         #[arg(help = "Name of the custom CLI to remove")]
         name: String,
+    },
+
+    /// Apply git-paw's setup items to one AI CLI's own settings
+    #[command(
+        about = "Apply git-paw's setup items to one AI CLI's own settings",
+        long_about = "Writes git-paw's setup items into an AI CLI's own settings, so the CLI \
+                      stops prompting for git-paw's helper-script calls. Running this command \
+                      is the consent: nothing else in git-paw ever writes those settings.\n\n\
+                      The plan is always printed first - every file, every entry, and the \
+                      record git-paw keeps so it can undo exactly what it added. Nothing is \
+                      written without --yes or a confirmation on a terminal. Run it from the \
+                      repository's main checkout, not from a worktree.\n\n\
+                      Which items a CLI supports, and whether they have been verified against \
+                      that CLI, is reported by `git paw doctor`.\n\n\
+                      Exit codes: 0 applied or nothing to do, 1 refused, 2 nothing attempted \
+                      (no item flag, item not supported, declined, or no terminal and no \
+                      --yes).\n\n\
+                      Examples:\n  \
+                      git paw setup-cli claude --allowlist --dry-run\n  \
+                      git paw setup-cli claude --allowlist --yes\n  \
+                      git paw setup-cli claude --undo --yes",
+        group = ArgGroup::new("setup_action")
+            .args(["allowlist", "trust", "hooks", "undo"])
+            .multiple(true)
+            .required(true)
+    )]
+    SetupCli {
+        /// CLI identity to set up.
+        #[arg(help = "CLI identity to set up (a detected CLI or a [clis.<name>] key)")]
+        cli: String,
+
+        /// Pre-approve git-paw's helper-script calls.
+        #[arg(
+            long,
+            help = "Pre-approve git-paw's own helper-script calls, with the rules that stop an \
+                    agent rewriting what they run"
+        )]
+        allowlist: bool,
+
+        /// Pre-accept the repository as a trusted folder.
+        #[arg(
+            long,
+            help = "Pre-accept the repository as a trusted folder (not supported by any CLI yet)"
+        )]
+        trust: bool,
+
+        /// Install git-paw's lifecycle hooks.
+        #[arg(
+            long,
+            help = "Install git-paw's lifecycle hooks (not supported by any CLI yet)"
+        )]
+        hooks: bool,
+
+        /// Print the plan and exit without writing anything.
+        #[arg(
+            long,
+            help = "Print the plan and exit without writing anything, even with --yes"
+        )]
+        dry_run: bool,
+
+        /// Apply the plan without asking for confirmation.
+        #[arg(long, help = "Apply the printed plan without asking for confirmation")]
+        yes: bool,
+
+        /// Remove the entries git-paw recorded for this CLI.
+        #[arg(
+            long,
+            help = "Remove the entries git-paw recorded for this CLI, limited to the named \
+                    items when item flags are given"
+        )]
+        undo: bool,
     },
 
     /// Initialize .git-paw/ directory and configuration

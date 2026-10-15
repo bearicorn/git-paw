@@ -17,6 +17,7 @@ pub mod pause;
 pub mod recover;
 pub mod remove;
 pub mod replay;
+pub mod setup_cli;
 pub mod start;
 pub mod status;
 pub mod stop;

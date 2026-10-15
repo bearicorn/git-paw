@@ -200,6 +200,24 @@ same is true of routine dev commands (`git status`, `grep`, `find`, your
 stack's build/test verbs) — they run without asking only when the CLI's own
 mode or rules permit it.
 
+### Pre-approving the helper calls, with your consent
+
+If you would rather not answer those prompts at all, you can pre-approve
+git-paw's helper calls in the agent CLI's **own** allow rules:
+
+```bash
+git paw setup-cli <CLI> --allowlist --dry-run   # see exactly what it writes
+git paw setup-cli <CLI> --allowlist             # apply it
+```
+
+This is optional and consent-only: **you** run it, it prints its plan before
+writing anything, and `git paw setup-cli <CLI> --undo` takes back exactly what
+it added. No launch path, no drive loop and no MCP tool ever runs it. A call
+that runs without a prompt still does so only through the agent CLI's own
+permission system and the rules in its settings — git-paw makes no safety
+decision about any command. See [Per-CLI Setup](cli-setup.md) for the grant
+table, the protection rules that come with it, and the residual risks.
+
 ### Boot Block Injection Modes
 
 - **Supervisor Mode**: Boot block is prepended to each agent's task prompt, then submitted (injected, then a separate `Enter` after a settle delay)

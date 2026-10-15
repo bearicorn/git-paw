@@ -376,6 +376,10 @@ pub struct Probes {
     pub hygiene: HygieneProbe,
     /// FS-scoped sandbox backend availability.
     pub sandbox: SandboxProbe,
+    /// Per-CLI setup state (what `git paw setup-cli` has applied).
+    pub cli_setup: crate::cli_setup::doctor::SetupProbe,
+    /// Durable allow rules already in the project's CLI settings.
+    pub broad_grants: crate::cli_setup::doctor::BroadGrantProbe,
 }
 
 // ---------------------------------------------------------------------------
@@ -1010,6 +1014,10 @@ pub fn run_checks(probes: &Probes) -> Vec<CheckResult> {
     let mut checks = check_environment(&probes.environment);
     checks.push(check_sandbox(&probes.sandbox));
     checks.extend(check_clis(&probes.clis));
+    checks.extend(crate::cli_setup::doctor::check_cli_setup(&probes.cli_setup));
+    checks.extend(crate::cli_setup::doctor::check_broad_grants(
+        &probes.broad_grants,
+    ));
     checks.extend(check_config(&probes.config));
     checks.extend(check_spec_system(&probes.spec_system));
     checks.push(check_spec_cli(&probes.spec_cli));
@@ -1235,6 +1243,8 @@ fn collect_probes(repo_root: &Path, environment: EnvironmentProbe) -> Probes {
     Probes {
         environment,
         clis: probe_clis(&config),
+        cli_setup: probe_cli_setup(repo_root),
+        broad_grants: probe_broad_grants(repo_root),
         config: config_probe,
         spec_system: probe_spec_system(&config, repo_root),
         spec_cli: probe_spec_cli(&config, repo_root),
@@ -1347,6 +1357,89 @@ fn probe_spec_cli(config: &PawConfig, repo_root: &Path) -> SpecCliProbe {
         resolved_clis,
         ..default
     }
+}
+
+/// Reads the setup record, the files it names and the helper scripts a
+/// granted invocation would run.
+///
+/// Strictly read-only: nothing here creates, modifies or deletes a file.
+fn probe_cli_setup(repo_root: &Path) -> crate::cli_setup::doctor::SetupProbe {
+    use crate::cli_setup::{doctor as setup_doctor, record};
+
+    let runner = crate::command_runner::RealCommandRunner;
+    let Ok(layout) = crate::cli_setup::shell::resolve_layout(&runner, repo_root) else {
+        return setup_doctor::SetupProbe::default();
+    };
+    let entries = std::fs::read_to_string(record::record_path(&layout.git_common_dir))
+        .ok()
+        .and_then(|text| serde_json::from_str::<record::SetupRecord>(&text).ok())
+        .map(|rec| rec.entries)
+        .unwrap_or_default();
+
+    let mut files = std::collections::BTreeMap::new();
+    for entry in &entries {
+        files
+            .entry(entry.file.clone())
+            .or_insert_with(|| std::fs::read_to_string(&entry.file).ok());
+    }
+
+    // The main checkout plus every worktree of the current session: a granted
+    // relative path resolves against whichever of them a session runs in.
+    let mut roots = vec![repo_root.to_path_buf()];
+    roots.extend(session_worktree_roots(repo_root));
+    let helpers = setup_doctor::helper_paths(&roots)
+        .iter()
+        .filter_map(|p| setup_doctor::helper_state(p))
+        .collect();
+
+    setup_doctor::SetupProbe {
+        entries,
+        files,
+        helpers,
+    }
+}
+
+/// Returns the worktree roots of the repository's sessions, if any.
+///
+/// A granted helper path is relative, so it resolves against whichever
+/// directory a session runs in — the main checkout for the orchestrator, each
+/// agent's worktree for a worker. All of them are checked for drift.
+fn session_worktree_roots(repo_root: &Path) -> Vec<std::path::PathBuf> {
+    let Ok(dir) = std::fs::read_dir(crate::session::repo_sessions_dir(repo_root)) else {
+        return Vec::new();
+    };
+    let mut roots = Vec::new();
+    for entry in dir.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Ok(file) = serde_json::from_str::<crate::session::RepoSessionFile>(&text) {
+            roots.extend(file.agents.iter().map(|a| a.worktree_path.clone()));
+        }
+    }
+    roots
+}
+
+/// Reads the allowlist target file for the advisory, when it exists.
+fn probe_broad_grants(repo_root: &Path) -> crate::cli_setup::doctor::BroadGrantProbe {
+    use crate::cli_setup::{doctor as setup_doctor, facts};
+
+    for row in facts::FACT_TABLE {
+        if !row.declares(facts::SetupItem::Allowlist) {
+            continue;
+        }
+        let path = repo_root.join(row.allowlist_target);
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            return setup_doctor::BroadGrantProbe {
+                target: Some((path, content)),
+            };
+        }
+    }
+    setup_doctor::BroadGrantProbe::default()
 }
 
 /// Inspects `.git-paw/scripts/` against the binary's embedded helper scripts.

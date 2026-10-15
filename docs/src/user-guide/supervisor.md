@@ -1261,6 +1261,26 @@ to OpenSpec only.
 > where a coding agent archives a change now see guard feedback. Set
 > `role_gating = "off"` for the prior (no-guard) behaviour.
 
+## Per-CLI setup (consent-only)
+
+Agents call git-paw's helper scripts constantly, and under most agent CLIs
+every call raises a permission prompt. The supervisor does not make those
+prompts go away: a helper call runs without one only through the agent CLI's
+own permission system and the rules in its settings.
+
+You can pre-approve git-paw's own helper calls in that CLI's allow rules with
+[`git paw setup-cli <CLI> --allowlist`](cli-setup.md). It is optional and
+consent-only — you run it, it prints its plan first, and `--undo` takes back
+exactly what it added. Nothing in the supervisor, the drive loop or the MCP
+surface ever runs it, and it refuses to run from a linked worktree.
+
+The embedded `cli-setup` skill carries the rules an agent must follow around
+it (load it with the MCP `get_skill` tool under the name `cli-setup`). The
+supervisor skill restates the three that bind the orchestrator directly: run
+the writing form only when the human asked in the current conversation, pass
+`--yes` only after they approved the exact plan shown, and never run it
+during an unattended run.
+
 ## Merge orchestration
 
 Once every spec'd agent has published `agent.verified` (or the user

@@ -49,6 +49,8 @@ fn every_non_ok_check_carries_a_remedy() {
             available: true,
         },
         clis: Vec::new(),
+        cli_setup: crate::cli_setup::doctor::SetupProbe::default(),
+        broad_grants: crate::cli_setup::doctor::BroadGrantProbe::default(),
         config: ConfigProbe {
             path: ".git-paw/config.toml".into(),
             present: true,

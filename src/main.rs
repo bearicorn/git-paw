@@ -8,6 +8,8 @@ use std::path::Path;
 
 use clap::Parser;
 use dialoguer::Confirm;
+use git_paw::cli_setup::facts::SetupItem;
+use git_paw::cli_setup::render::{render_plan, render_undo_plan, render_unsupported};
 
 use git_paw::agents;
 use git_paw::broker;
@@ -147,6 +149,23 @@ fn run(command: Command) -> Result<(), PawError> {
             display_name,
         } => commands::clis::cmd_add_cli(&name, &command, display_name.as_deref()),
         Command::RemoveCli { name } => commands::clis::cmd_remove_cli(&name),
+        Command::SetupCli {
+            cli,
+            allowlist,
+            trust,
+            hooks,
+            dry_run,
+            yes,
+            undo,
+        } => cmd_setup_cli(&SetupCliArgs {
+            cli: &cli,
+            allowlist,
+            trust,
+            hooks,
+            dry_run,
+            yes,
+            undo,
+        }),
         Command::Dashboard => cmd_dashboard(),
         Command::PromptProfile { cli, field } => cmd_prompt_profile(cli.as_deref(), &field),
         Command::Init => git_paw::init::run_init(),
@@ -3989,5 +4008,170 @@ mod permission_seeding_removed_tests {
             "--dangerously-skip-permissions must precede --session-id, got: {}",
             attached.pane.cli_command
         );
+    }
+}
+
+/// The parsed `setup-cli` invocation, kept as one struct so the entry
+/// function takes a single argument rather than seven loose parameters.
+///
+/// The booleans mirror the command-line flags one for one; collapsing them
+/// into enums here would only re-encode what clap already parsed, and would
+/// hide which flag a given branch is reacting to.
+#[allow(clippy::struct_excessive_bools)]
+struct SetupCliArgs<'a> {
+    /// CLI identity named on the command line.
+    cli: &'a str,
+    /// `--allowlist`.
+    allowlist: bool,
+    /// `--trust`.
+    trust: bool,
+    /// `--hooks`.
+    hooks: bool,
+    /// `--dry-run`.
+    dry_run: bool,
+    /// `--yes`.
+    yes: bool,
+    /// `--undo`.
+    undo: bool,
+}
+
+impl SetupCliArgs<'_> {
+    /// Returns the requested items, in flag order.
+    fn items(&self) -> Vec<SetupItem> {
+        let mut items = Vec::new();
+        if self.allowlist {
+            items.push(SetupItem::Allowlist);
+        }
+        if self.trust {
+            items.push(SetupItem::Trust);
+        }
+        if self.hooks {
+            items.push(SetupItem::Hooks);
+        }
+        items
+    }
+}
+
+/// Entry layer for `git paw setup-cli`.
+///
+/// Owns everything the use case deliberately does not: printing the plan, the
+/// terminal check, the confirmation, and the mapping from outcome to exit
+/// code. Writing is gated three ways — the item must be supported, its facts
+/// must be verified, and the user must have confirmed (or passed `--yes`).
+fn cmd_setup_cli(args: &SetupCliArgs<'_>) -> Result<(), PawError> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
+    let repo_root = git_paw::git::validate_repo(&cwd)?;
+    let config = git_paw::config::load_config(&repo_root, None)?;
+    let runner = git_paw::command_runner::RealCommandRunner;
+
+    let request = commands::setup_cli::SetupRequest {
+        cli: args.cli.to_string(),
+        items: args.items(),
+        undo: args.undo,
+    };
+
+    match commands::setup_cli::prepare(&runner, &cwd, &config, &request)? {
+        commands::setup_cli::Prepared::Unsupported { cli, items } => {
+            print!("{}", render_unsupported(&cli, &items));
+            Err(PawError::NotAttempted(format!(
+                "nothing was written: {} not supported for `{cli}`",
+                if items.len() == 1 {
+                    "that setup item is"
+                } else {
+                    "those setup items are"
+                }
+            )))
+        }
+        commands::setup_cli::Prepared::Setup { plan, snapshots } => {
+            print!("{}", render_plan(&plan));
+            if args.dry_run {
+                return Ok(());
+            }
+            if plan.is_empty() {
+                // Nothing to do: no prompt, no write, success.
+                return Ok(());
+            }
+            if !plan.verified {
+                return Err(PawError::NotAttempted(format!(
+                    "nothing was written: these facts have not been verified against an \
+                     installed copy of `{}`, so writing is disabled — `--dry-run` still shows \
+                     the plan",
+                    plan.cli
+                )));
+            }
+            confirm_setup(args, "Apply this plan?")?;
+            let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+            let outcome = commands::setup_cli::apply_setup(&plan, &snapshots, &now)?;
+            println!(
+                "\nApplied {} entr{} across {} file{}.",
+                outcome.entries_added,
+                if outcome.entries_added == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
+                outcome.written.len(),
+                if outcome.written.len() == 1 { "" } else { "s" }
+            );
+            Ok(())
+        }
+        commands::setup_cli::Prepared::Undo {
+            plan,
+            record,
+            snapshots,
+        } => {
+            print!("{}", render_undo_plan(&plan));
+            if args.dry_run {
+                return Ok(());
+            }
+            if plan.is_empty() {
+                return Ok(());
+            }
+            confirm_setup(args, "Remove these entries?")?;
+            let outcome = commands::setup_cli::apply_undo(&plan, &record, &snapshots)?;
+            println!(
+                "\nRemoved {} entr{}.",
+                outcome.entries_removed,
+                if outcome.entries_removed == 1 {
+                    "y"
+                } else {
+                    "ies"
+                }
+            );
+            Ok(())
+        }
+    }
+}
+
+/// The confirmation gate shared by setup and undo.
+///
+/// `--yes` proceeds. On a terminal the user is asked, defaulting to No. Off a
+/// terminal there is nobody to ask, so nothing is written and the message
+/// names the flags that would proceed — a bare "Cancelled." would leave the
+/// user with no idea what to do next.
+fn confirm_setup(args: &SetupCliArgs<'_>, prompt: &str) -> Result<(), PawError> {
+    if args.yes {
+        return Ok(());
+    }
+    if !is_interactive_stdin() {
+        return Err(PawError::NotAttempted(
+            "nothing was written: the confirmation could not be shown because stdin is not a \
+             terminal — re-run with `--yes` to apply the printed plan, or `--dry-run` to preview \
+             it"
+            .into(),
+        ));
+    }
+    let approved = Confirm::new()
+        .with_prompt(prompt)
+        .default(false)
+        .interact()
+        .map_err(|e| PawError::SessionError(format!("confirmation prompt failed: {e}")))?;
+    if approved {
+        Ok(())
+    } else {
+        Err(PawError::NotAttempted(
+            "nothing was written: the plan was not approved".into(),
+        ))
     }
 }

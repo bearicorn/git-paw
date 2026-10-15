@@ -57,6 +57,17 @@ pub fn known_cli_names() -> &'static [&'static str] {
     KNOWN_CLIS
 }
 
+/// Returns whether `name` is a CLI identity from the built-in roster.
+///
+/// Identity, not availability: this answers "is this a CLI git-paw knows
+/// about", regardless of whether the binary is on `PATH`. `setup-cli` uses it
+/// to tell an unknown identity (an error) from a known one with no setup
+/// facts (reported as supporting no item).
+#[must_use]
+pub fn is_known_cli(name: &str) -> bool {
+    known_cli_names().contains(&name)
+}
+
 /// How a CLI was discovered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliSource {

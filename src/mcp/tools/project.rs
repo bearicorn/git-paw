@@ -231,3 +231,51 @@ impl GitPawMcpServer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::GetSkillParams;
+    use crate::mcp::RepoContext;
+    use crate::mcp::server::GitPawMcpServer;
+    use rmcp::handler::server::wrapper::Parameters;
+
+    fn server_for(root: std::path::PathBuf) -> GitPawMcpServer {
+        GitPawMcpServer::new(RepoContext {
+            root,
+            git_paw_dir: None,
+            broker_url: None,
+            server_name: "git-paw".to_string(),
+        })
+    }
+
+    /// `skill-agent` / Requirement: Embedded cli-setup skill, scenario
+    /// "The skill resolves and is served" — the MCP half: `get_skill` serves
+    /// `cli-setup` with the embedded content and source `embedded`.
+    #[test]
+    fn get_skill_serves_the_embedded_cli_setup_skill() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = server_for(tmp.path().to_path_buf());
+
+        let resp = server.get_skill(Parameters(GetSkillParams {
+            name: "cli-setup".to_string(),
+        }));
+
+        let skill = resp.0.skill.expect("cli-setup is served, not null");
+        assert_eq!(skill.name, "cli-setup");
+        assert_eq!(skill.source, "embedded");
+        assert!(
+            !skill.content.is_empty(),
+            "served skill carries the embedded content"
+        );
+        // Served content is rendered, not the raw template.
+        assert!(
+            !skill.content.contains("{{"),
+            "placeholders must be substituted in the served skill"
+        );
+        // It is the cli-setup skill and not some other embedded asset.
+        assert!(
+            skill.content.contains("git paw setup-cli"),
+            "served content must be the cli-setup skill body"
+        );
+    }
+}

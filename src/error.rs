@@ -11,6 +11,10 @@ pub mod exit_code {
     pub const ERROR: i32 = 1;
     /// User cancelled (Ctrl+C or empty selection).
     pub const USER_CANCELLED: i32 = 2;
+    /// The command wrote nothing because a condition for proceeding was not
+    /// met. Shares the cancellation code: nothing was attempted, so this is
+    /// not a failure the caller should treat as an error.
+    pub const NOT_ATTEMPTED: i32 = USER_CANCELLED;
 }
 
 /// Central error type for git-paw operations.
@@ -51,6 +55,18 @@ pub enum PawError {
     /// User cancelled via Ctrl+C or empty selection.
     #[error("Cancelled.")]
     UserCancelled,
+
+    /// The command wrote nothing because a condition for proceeding was not
+    /// met — a declined confirmation, a confirmation that could not be shown
+    /// because standard input is not a terminal, or a requested item that is
+    /// not supported or not enabled for its target.
+    ///
+    /// Unlike [`PawError::UserCancelled`], whose message is the bare
+    /// `Cancelled.`, the payload states the condition and, where one exists,
+    /// names the flag or command that proceeds — so the user can tell a
+    /// deliberate no-op apart from a silent cancellation.
+    #[error("{0}")]
+    NotAttempted(String),
 
     /// tmux operation failed.
     #[error("Tmux: {0}")]
@@ -109,6 +125,7 @@ impl PawError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::UserCancelled => exit_code::USER_CANCELLED,
+            Self::NotAttempted(_) => exit_code::NOT_ATTEMPTED,
             _ => exit_code::ERROR,
         }
     }
@@ -174,9 +191,10 @@ mod tests {
     // -----------------------------------------------------------------------
     // Exit-code mapping (behavioral contract)
     //
-    // The only two cases: `UserCancelled` maps to the dedicated cancel code,
-    // every other variant maps to the general error code. The general table
-    // samples a representative variant of each shape.
+    // Two variants report "nothing was done" rather than a failure —
+    // `UserCancelled` and `NotAttempted` — and both map to the dedicated
+    // code 2; every other variant maps to the general error code. The general
+    // table samples a representative variant of each shape.
     // -----------------------------------------------------------------------
 
     #[test]
@@ -188,7 +206,32 @@ mod tests {
     }
 
     #[test]
+    fn test_not_attempted_exit_code_and_message() {
+        // A confirmation that could not be shown because stdin is not a
+        // terminal: exit 2, and a message that names the flag which proceeds
+        // instead of the bare `Cancelled.` the user cannot act on.
+        let err = PawError::NotAttempted(
+            "nothing was written: the confirmation could not be shown because stdin is not a \
+             terminal — re-run with --yes to apply, or --dry-run to preview"
+                .into(),
+        );
+        assert_eq!(err.exit_code(), exit_code::NOT_ATTEMPTED);
+        assert_eq!(err.exit_code(), 2, "the contract pins the code itself");
+
+        let msg = err.to_string();
+        assert!(msg.contains("--yes"), "should name the flag that proceeds");
+        assert_ne!(
+            msg,
+            PawError::UserCancelled.to_string(),
+            "must not degrade to the bare cancellation message"
+        );
+        assert!(!msg.contains("Cancelled."), "should state the condition");
+    }
+
+    #[test]
     fn test_general_errors_exit_code() {
+        // Every variant other than `UserCancelled` and `NotAttempted`, which
+        // have their own cases above.
         let errors: Vec<PawError> = vec![
             PawError::NotAGitRepo,
             PawError::TmuxNotInstalled,

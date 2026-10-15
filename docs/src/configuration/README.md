@@ -560,7 +560,7 @@ approval_markers = ["proceed? (y/n)"]
 | `command` | yes | Command or path to the CLI binary — what the pane launches, emitted as one shell word. Must be non-empty; a blank value is rejected at config load, naming the entry. |
 | `display_name` | no | Human-readable name shown in prompts. |
 | `submit_delay_ms` | no | Boot-prompt settle delay (ms) before the submit `Enter`; per-CLI so the launcher stays CLI-agnostic. |
-| `settings_path` | no | Path to the CLI's claude-format settings file. **Parse-only**: accepted and preserved across a load/save round-trip so existing configurations keep working, but git-paw never reads, writes, or acts on it. |
+| `settings_path` | no | Path to the CLI's claude-format settings file. **Parse-only**: accepted and preserved across a load/save round-trip so existing configurations keep working, but git-paw never reads, writes, or acts on it — not even [`git paw setup-cli`](../user-guide/cli-setup.md), whose only target is the main checkout's project-local settings file. |
 | `approval_args` | no | Map from approval-level name (`"manual"`, `"auto"`, `"full-auto"`) to the flags appended to the launch command at that level. Consulted **before** the [built-in flag table](#supervisor); an unknown level key is rejected at config load with an error naming the key. |
 | `session_id_args` | no | Template (containing `{{SESSION_ID}}`) for the flag(s) that assign a fresh session identifier at launch. Consulted **before** the built-in table (`claude` only); a CLI resolving neither launches unchanged, with no id recorded. |
 | `resume_args` | no | Template (containing `{{SESSION_ID}}`) for the flag(s) that resume a previously assigned session. Appended on recovery when the worktree's recorded id and this CLI's resolved template are both present; a template omitting the placeholder is rejected at config load. |
@@ -600,6 +600,19 @@ git-paw's MCP server registered.
 
 A config without an `mcp` key loads and behaves exactly as it did before the
 field existed.
+
+### Files git-paw writes
+
+`setup-cli` adds no configuration field. It does write two files outside
+`.git-paw/`, both only when you run it:
+
+| Path | What it is |
+|---|---|
+| `<main checkout>/.claude/settings.local.json` | The `claude` allowlist item's only target. Merged into — every key and its order are preserved. |
+| `<git-common-dir>/git-paw/cli-setup.json` | The setup record: what git-paw wrote, so `--undo` can take back exactly that. Owner-only, inside the git directory, so it can never be committed and never shows up in any worktree's `git status`. |
+
+See [Per-CLI Setup](../user-guide/cli-setup.md).
+
 
 ### Via command line
 
@@ -885,10 +898,19 @@ default its CLI's config directory happens to carry. For Claude,
 `--permission-mode acceptEdits` has the CLI accept file edits without asking;
 shell commands still raise a prompt.
 
-These resolved flags are git-paw's **only** influence on what an agent runs
-without a prompt. git-paw approves no prompt itself: anything the chosen mode
-leaves prompting is escalated for a human decision under `--unattended`, and
-answered only by an explicit `sweep.sh approve`. See
+These resolved flags are git-paw's only **automatic** influence on what an
+agent runs without a prompt. git-paw approves no prompt itself: anything the
+chosen mode leaves prompting is escalated for a human decision under
+`--unattended`, and answered only by an explicit `sweep.sh approve`.
+
+One further influence exists, and only because you ask for it:
+[`git paw setup-cli <CLI> --allowlist`](../user-guide/cli-setup.md) writes
+path-scoped allow rules for git-paw's own helper scripts into the agent CLI's
+settings. Running that command is the consent — no launch, recovery, drive
+loop, dashboard or MCP tool ever applies it, it prints its plan before
+writing, and `--undo` removes exactly what it added. Those rules are then the
+**CLI's** rules, enforced by the CLI's own permission system; git-paw still
+decides nothing about any prompt. See
 [Agent permissions](../user-guide/supervisor.md#agent-permissions).
 
 **Gate-command templating.** The eight `*_command` keys feed the supervisor

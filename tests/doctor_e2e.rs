@@ -527,3 +527,108 @@ fn doctor_is_listed_in_the_root_help() {
         "the root help should surface doctor as the diagnostic entry point; got:\n{help}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Per-CLI setup checks (preflight-diagnostics: "The setup check is read-only
+// and never fails doctor", "The advisory never edits the file")
+// ---------------------------------------------------------------------------
+
+/// Reads every byte under a directory, so a comparison catches a rewrite that
+/// kept the same length and timestamp.
+fn byte_snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut out = BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                stack.push(path);
+            } else if let Ok(bytes) = std::fs::read(&path) {
+                out.insert(path, bytes);
+            }
+        }
+    }
+    out
+}
+
+#[test]
+#[serial]
+fn doctor_reports_setup_availability_before_anything_is_applied() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let (_code, document) = sandbox.doctor_json();
+    let setup = checks(&document)
+        .iter()
+        .find(|c| c["name"] == "claude setup")
+        .expect("a setup check for claude");
+    assert_eq!(setup["status"], "ok");
+    let detail = setup["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("allowlist"), "{detail}");
+}
+
+#[test]
+#[serial]
+fn doctor_leaves_the_record_the_settings_and_every_helper_byte_identical() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    // Apply setup for real, so there is a record, a settings file and the
+    // helper scripts a granted call would run.
+    sandbox
+        .paw(&["setup-cli", "claude", "--allowlist", "--yes"])
+        .assert()
+        .success();
+
+    let settings = sandbox.repo.join(".claude/settings.local.json");
+    let record = sandbox.repo.join(".git/git-paw/cli-setup.json");
+    assert!(settings.is_file(), "setup wrote the settings file");
+    assert!(record.is_file(), "setup wrote the record");
+
+    let before = byte_snapshot(&sandbox.repo);
+    let (code, document) = sandbox.doctor_json();
+    let after = byte_snapshot(&sandbox.repo);
+
+    assert_eq!(
+        before, after,
+        "doctor must not create, modify or delete anything"
+    );
+
+    // Neither check may ever be the reason doctor fails.
+    for check in checks(&document) {
+        let name = check["name"].as_str().unwrap_or_default();
+        if name == "claude setup" || name == "project CLI grants" {
+            assert_ne!(check["status"], "fail", "{check}");
+        }
+    }
+    assert!(
+        code == 0 || code == 1,
+        "doctor's own exit code is unaffected: {code}"
+    );
+}
+
+#[test]
+#[serial]
+fn doctor_lists_a_broad_grant_the_user_already_had() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let settings = sandbox.repo.join(".claude/settings.local.json");
+    std::fs::create_dir_all(settings.parent().expect("parent")).expect("mkdir");
+    std::fs::write(
+        &settings,
+        r#"{"permissions":{"allow":["Bash(git push:*)","Bash(npm run test:*)"]}}"#,
+    )
+    .expect("write settings");
+
+    let (_code, document) = sandbox.doctor_json();
+    let advisory = checks(&document)
+        .iter()
+        .find(|c| c["name"] == "project CLI grants")
+        .expect("the advisory check");
+    assert_eq!(advisory["status"], "warn");
+    let detail = advisory["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("Bash(git push:*)"), "{detail}");
+    assert!(!detail.contains("npm run test"), "{detail}");
+}

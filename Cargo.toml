@@ -19,7 +19,10 @@ console = "0.16.3"
 which = "8.0.2"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` keeps a `Value` map in insertion order instead of sorting
+# it. `git paw setup-cli` merges into the user's own CLI settings file, and
+# reordering keys git-paw never touched would churn their diff.
+serde_json = { version = "1", features = ["preserve_order"] }
 toml = "1.1.2"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "process"] }
 axum = "0.8"
