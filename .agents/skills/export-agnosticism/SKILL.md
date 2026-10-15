@@ -39,10 +39,15 @@ export.
 - **Scripts & mirrored logic (code)** — `assets/scripts/{sweep,broker,docs-fetch}.sh`, including
   the live-prompt gate mirrored into `sweep.sh` from `supervisor::permission_prompt`.
 - **Init default config** — the `.git-paw/config.toml` that `git paw init` generates.
-- **Seeded agent-CLI allow rules** — any permission rule git-paw writes into a consumer's agent
-  CLI settings. git-paw seeds none today; a change that starts doing so (e.g. `git paw setup-cli`)
-  adds an export surface and must be checked here. A seeded rule names a git-paw helper by its
-  stable path — never a consumer toolchain verb, and never a wildcard.
+- **Agent-CLI allow rules written by `git paw setup-cli`** — the permission rules the
+  `cli-setup` capability writes into a consumer's agent CLI settings. This surface is **live**:
+  `setup-cli --allowlist` writes path-scoped rules naming git-paw's own bundled helper scripts,
+  but only when the user runs the command — running it is the consent, and nothing else in
+  git-paw applies it. Every entry is a compiled constant derived from the fact row and the
+  repository root, never from a command argument, the consumer's config or repository content,
+  so two differently configured repositories get byte-identical entries. A rule names a git-paw
+  helper by its stable path — never a consumer toolchain verb, and never a wildcard. Any change
+  to the grant table is a change to this export surface.
 - **Injected artifacts** — the pane **boot block**, the marker-delimited git-paw section injected
   into the consumer's `AGENTS.md`, **git hooks** (post-commit / pre-push / pre-commit, script
   bodies bundled at `assets/hooks/*.sh` — the installation mechanism itself stays compiled), CLI
@@ -59,9 +64,10 @@ export.
   cycle. Prefer exporting no verb list at all.
 - **Config defaults** — all-commented examples with multi-stack `# or:` disclaimers; no active
   git-paw-specific default value.
-- **Seeded allow rules** — **path-scoped** grants naming a git-paw helper script (never
-  `curl *` / `cd *`, never a consumer toolchain verb); least-privilege; and seeded only with the
-  consumer's explicit consent.
+- **`setup-cli` allow rules** — **path-scoped** grants naming a git-paw helper script (never
+  `curl *` / `cd *`, never a consumer toolchain verb); least-privilege; written only on the
+  consumer's explicit consent (they ran the command, after seeing its plan); and never derived
+  from the consumer's configuration, stack or repository content.
 - **Skills / injected prose** — no stack tokens; region-gate opsx/OpenSpec prose
   (`<!-- opsx-role-gating:begin/end -->`); wrap legitimate preset enumerations in
   `<!-- allowlist-prose -->` sentinels; defer commit-message format to the consumer.

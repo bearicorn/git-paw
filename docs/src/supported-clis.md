@@ -48,6 +48,32 @@ detected list, so there a `[clis.cursor]` entry is the route to take.
 interactive picker, and the picker is built from the detected list — an
 undetected `cursor` has no row to pre-select, so the setting has no effect.
 
+## Per-CLI Setup Support
+
+[`git paw setup-cli`](user-guide/cli-setup.md) writes git-paw's setup items
+into a CLI's own settings. An item is available only when git-paw's compiled
+fact table declares it for that CLI **and** those facts have been verified
+against an installed copy of it.
+
+| CLI | `--allowlist` | `--trust` | `--hooks` |
+|-----|---------------|-----------|-----------|
+| `claude` | Supported, **verified** against Claude Code 2.1.220 (2026-10-15) | Not supported | Not supported |
+| Every other CLI | Not supported | Not supported | Not supported |
+
+Nothing is withheld here as a judgement about those CLIs — their settings
+formats simply have not been checked yet. The per-CLI audit that adds them is
+planned for v0.23.0. Until then `setup-cli` reports the item as not supported
+and writes nothing, which is the honest answer rather than a guess at a file
+format.
+
+A Claude Code **variant** registered under another name (a wrapper binary in
+a `[clis.<name>]` entry) has no row of its own, but is still covered by
+`git paw setup-cli claude`: the target settings file belongs to the
+repository, not to the binary.
+
+`git paw doctor` reports the current status for your installation.
+
+
 ## How Detection Works
 
 git-paw scans your `PATH` for each known binary name. If found, it records the full path and makes the CLI available for selection.

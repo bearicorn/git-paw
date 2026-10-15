@@ -71,6 +71,75 @@ classifier approving such a write; with nothing approving automatically, those
 prompts reach you like any other. To enforce those boundaries mechanically, use
 deny rules in the agent CLI's own settings, or the sandbox.
 
+## Writing into an agent CLI's settings
+
+git-paw writes a permission rule into an agent CLI's own settings in exactly
+one circumstance: you ran [`git paw setup-cli`](cli-setup.md). Running it is
+the consent. No other command, process or interface does it — not `start`,
+`add`, `init`, session recovery, the drive loop, the dashboard, or any tool
+exposed over MCP.
+
+**What it may write.** For `claude`, one file:
+`<main checkout>/.claude/settings.local.json`, plus one anchored line in the
+repository's shared `info/exclude` when the target is not already ignored.
+Never a file inside a worktree, never a user-level file, never the configured
+`[clis.<name>].settings_path`.
+
+**The grant.** Eleven allow entries naming git-paw's own helper scripts by
+relative path and fixed subcommand, from a compiled table. Nothing is derived
+from a command argument, your configuration or your repository content. No
+entry names `curl`, an interpreter, an absolute path or a directory wildcard.
+The keystroke-sending and verdict-publishing subcommands are deliberately
+excluded, and `sweep.sh approve` is pinned to an **ask** rule so it always
+reaches a human. See the full table in [Per-CLI Setup](cli-setup.md).
+
+**The tamper threat, and the mitigation.** A granted helper runs without a
+prompt, and it lives inside the agent's own worktree. In an edit-accepting
+mode the CLI would apply an agent's edit to that script without asking, after
+which the grant runs whatever the agent wrote — arbitrary code, unprompted. A
+quieter variant: the helpers read `.git-paw/config.toml`, so an edited broker
+address turns a granted publish into exfiltration.
+
+So the allowlist item never writes the grants alone. In the same file and the
+same replacement it writes `Edit(**/.git-paw/scripts/**)` to `deny` and
+`Edit(**/.git-paw/config.toml)` to `ask`. Both were confirmed against the
+installed CLI before the item shipped — including that the deny rule also
+blocks the filesystem commands the edit-accepting mode auto-approves
+(`sed -i`, `cp`, `mv`, `rm`, `touch`, and `cd`-prefixed forms), and that it
+covers both the Edit and the Write tool, at any depth, from a worker's
+directory and from a root session reaching into a worker's copy.
+
+**The gate.** An item is written only when its facts have been **verified**
+against an installed copy of that CLI. An unverified item can be planned with
+`--dry-run` but never written. The `claude` allowlist item ships verified
+against Claude Code 2.1.220 (2026-10-15); `git paw doctor` reports the
+current status.
+
+**Residual risks.** These remain even with the item applied:
+
+- An agent CLI other than the one with a fact row has no row, so nothing is
+  written for it — and nothing is pre-approved.
+- A separately installed MCP server or other tool that writes files outside
+  the CLI's permission system is not governed by these rules.
+- In `bypassPermissions` / `full-auto`, the grant adds no privilege because
+  nothing prompts — but the protection rules buy nothing either. Do not pair
+  the allowlist with those modes outside the [sandbox](sandbox.md).
+- In the CLI's own `auto` mode, its classifier decides edits.
+- `broker.sh --agent <other>` can publish under another agent's id. That is
+  pre-existing; broker-side identity is a later release. Verdict publishing
+  is deliberately not granted.
+- A write by the CLI itself (a "don't ask again" approval) landing between
+  git-paw's re-read and its rename would be lost. git-paw detects the change
+  and stops rather than clobbering it, but prefer to run setup when no
+  session is waiting on an approval.
+
+**A grant is not a safety judgement.** git-paw decides nothing about your
+prompts. Whether a call runs without one is decided entirely by the agent
+CLI's own permission system and the rules in its settings. `git paw doctor`
+additionally lists the broad allow rules already in that file, so you can see
+what earlier "don't ask again" answers left behind — it reports them and never
+edits them.
+
 ## Browser exposure — the broker's Host and Origin guard
 
 The coordination broker is an HTTP server on your loopback interface

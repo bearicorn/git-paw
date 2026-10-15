@@ -84,13 +84,53 @@ git paw doctor || echo "fix the ✗ findings before launching"
 | Group | Checks |
 |---|---|
 | **Environment** | `git` and `tmux` on `PATH` and at or above their minimum versions (git 2.5 for `git worktree`, tmux 1.8); the working directory is inside a git repository. Missing or too old is ✗. Also whether this OS's FS-scoped sandbox backend (`sandbox-exec` on macOS, `bwrap` on Linux/WSL) is on `PATH` — absent is ⚠ with a pointer to the [sandbox guide](sandbox.md), never ✗, because the sandbox is optional. |
-| **CLIs** | The AI CLIs that resolve on `PATH` — the known roster plus your `[clis.*]` entries. None resolving is ⚠, surfacing the `No AI CLIs found` launch failure before you hit it. |
+| **CLIs** | The AI CLIs that resolve on `PATH` — the known roster plus your `[clis.*]` entries. None resolving is ⚠, surfacing the `No AI CLIs found` launch failure before you hit it. Plus two read-only reports about [per-CLI setup](cli-setup.md): **setup state** and **broad grants** (below). |
 | **Config** | `.git-paw/config.toml` exists and parses (unparseable is ✗, absent is ⚠); the resolved `worktree_placement`; any key this version does not recognise (⚠, naming the key). |
 | **Spec system** | The explicitly configured spec format and how many specs it discovered. Unconfigured is ⚠ with the "add `[specs]` or pass `--specs-format`" guidance — there is no filesystem auto-detection. Also reports the effective spec-worker CLI: the CLI each discovered spec would actually launch with (its own `paw_cli` when set, else `default_spec_cli`). Warns (⚠) when a configured `default_spec_cli` is never actually reachable by any discovered spec — every one of them pins its own `paw_cli` instead — surfacing a silent mis-resolution (such as a spec-driven `--supervisor` launch quietly using an unexpected, unsandboxed CLI) rather than passing green. Informational (✓) when no specs or no `default_spec_cli` are configured — there's nothing to verify against yet. |
 | **Bundled scripts** | `sweep.sh`, `broker.sh`, `docs-fetch.sh`, and the shared `_paw_common.sh` preamble they source exist under `.git-paw/scripts/`, are executable, and match this binary's embedded copies. Missing or non-executable is ✗; content drift is ⚠ ("stale"). Also checks for a Python 3 interpreter, which every bundled script needs — absent is ⚠, not ✗, because core `start`/`add`/`remove` needs no Python. |
 | **Broker** | When `[broker] enabled = true`, that the configured `bind`/`port` is free or already serving a git-paw broker **for this repository**. A git-paw broker serving another repository is ⚠ with the `[broker] port` remedy — it is the clash that would refuse your next `git paw start`. A non-git-paw service on the port is a separate ⚠ with its own remedy. When disabled, an informational ✓ noting the pure-manual baseline. |
 | **Supervisor** | When `[supervisor] enabled = true`, that each configured gate command's binary resolves on `PATH` (✗ per missing binary) and that `sweep.sh` is installed. When disabled, an informational ✓. |
 | **Hygiene** | The required `.gitignore` entries (including `.git-paw/worktrees/`); session state; registered worktrees whose directory no longer exists. Each is ⚠. A receipt that claims active while its tmux session is **gone** gets the `git paw purge --stale` remedy, as does an orphaned worktree registration. A session whose tmux session is still up but whose agent panes have all dropped back to a bare shell (past a short launch grace period) is a separate finding: it names the session, says its agent panes exited, and its remedy is `git paw start`, which recovers it — `purge --stale` never purges such a session. |
+
+### The per-CLI setup checks
+
+Two checks report on [`git paw setup-cli`](cli-setup.md). Both are strictly
+read-only — they create, modify and delete nothing — and **neither can ever be
+the reason doctor fails**: they never report ✗.
+
+**Setup state**, one per CLI identity that has setup facts or record entries:
+
+- ✓ when nothing is applied, listing the available items and whether each is
+  verified or plan-only;
+- ✓ when every recorded entry is present, unchanged, and matches what this
+  binary would plan;
+- ⚠ when a recorded entry is missing or has been edited, with a remedy naming
+  `--undo`;
+- ⚠ when the applied entries are out of date against this version, with a
+  remedy naming `--undo` followed by re-applying;
+- ⚠ when a **granted helper script** differs from the copy this binary
+  bundles, naming its path. This one matters most: the allowlist lets that
+  script run without a prompt, so drift in it is drift in what runs
+  unprompted. Helpers are checked in the main checkout and in every session
+  worktree, because a granted path is relative and resolves against whichever
+  directory the session runs in.
+
+**Broad grants**, an advisory over the allowlist item's target file when it
+exists. It lists every `permissions.allow` entry whose shape grants more than
+one specific command — a bare tool rule, a single-word prefix grant, a shell
+or interpreter wrapper, a state-changing `git` or `git-paw` subcommand, a
+far-reaching command like `rm` or `curl` (a loopback `curl` is exempt), a
+file-tool rule anchored at the filesystem root or your home directory, or a
+helper grant broader than git-paw's own entry for that helper.
+
+Entries are abbreviated to the tool name and the first two words of the
+specifier, so a credential embedded later in a rule is never echoed. An
+unparseable file is reported as "not inspected", without its content.
+git-paw's own planned entries are never listed, whoever added them.
+
+This advisory is a report over stored rules, not a decision about any prompt.
+git-paw does not edit these entries and never acts on them — reviewing and
+removing the ones you did not intend is yours to do.
 
 ### The supervisor check is project-agnostic
 

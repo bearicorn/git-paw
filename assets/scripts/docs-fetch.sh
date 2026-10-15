@@ -15,8 +15,10 @@
 # Wrapping every docs->agent curl behind one stable script path means a
 # permission rule scoped to that exact path (`.git-paw/scripts/docs-fetch.sh`)
 # can allow it, instead of requiring a broad `curl *` rule -- matching the
-# by-path model of the broker helper. git-paw does not write that rule for
-# you; it is the agent CLI's own allow rule to grant.
+# by-path model of the broker helper. It is the agent CLI's own allow rule to
+# grant: git-paw writes no such rule automatically. `git paw setup-cli <CLI>
+# --allowlist` can write one -- for `find` only, never `get` -- into the main
+# checkout's local settings file, but only because the user ran it.
 #
 # Documentation is fetched ON DEMAND from the configured site; no doc content
 # is shipped inside this script or the binary. Lookup is best-effort: on an

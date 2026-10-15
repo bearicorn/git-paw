@@ -47,6 +47,12 @@ const SUPERVISOR_DEFAULT: &str = include_str!("../assets/agent-skills/supervisor
 /// The embedded docs-fetch skill, compiled into the binary.
 const DOCS_FETCH_DEFAULT: &str = include_str!("../assets/agent-skills/docs-fetch.md");
 
+/// The embedded cli-setup skill, compiled into the binary.
+///
+/// Carries the consent rules for `git paw setup-cli` — the only command that
+/// writes into an agent CLI's own settings file.
+const CLI_SETUP_DEFAULT: &str = include_str!("../assets/agent-skills/cli-setup.md");
+
 /// Per-backend `{{SPEC_PATH_DOCTRINE}}` sentences, compiled into the binary.
 /// See [`render_spec_path_doctrine`] for the assembly (dedupe + multi-backend
 /// join) that stays compiled around these.
@@ -163,6 +169,7 @@ fn embedded_default(skill_name: &str) -> Option<&'static str> {
         "coordination" => Some(COORDINATION_DEFAULT),
         "supervisor" => Some(SUPERVISOR_DEFAULT),
         "docs-fetch" => Some(DOCS_FETCH_DEFAULT),
+        "cli-setup" => Some(CLI_SETUP_DEFAULT),
         _ => None,
     }
 }
@@ -1016,6 +1023,181 @@ mod tests {
         // Frontmatter is parsed into standardized metadata.
         let metadata = tmpl.metadata.expect("docs-fetch has frontmatter metadata");
         assert_eq!(metadata.name, "docs-fetch");
+    }
+
+    // -----------------------------------------------------------------------
+    // cli-setup skill (`skill-agent` / Requirement: Embedded cli-setup skill)
+    // -----------------------------------------------------------------------
+
+    /// Lowercases `body` and collapses every run of whitespace to one space,
+    /// so a prose assertion matches the sentence rather than the Markdown
+    /// line wrapping (re-flowing a paragraph must not fail a content test).
+    fn flat(body: &str) -> String {
+        body.to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Scenario "The skill resolves and is served" (the `skills::resolve` half;
+    /// the MCP `get_skill` half lives in `mcp::tools::project`).
+    #[test]
+    fn embedded_cli_setup_is_reachable() {
+        let tmpl = resolve("cli-setup").expect("should resolve cli-setup");
+        assert_eq!(tmpl.source, Source::Embedded);
+        assert!(!tmpl.content.is_empty());
+        let metadata = tmpl.metadata.expect("cli-setup has frontmatter metadata");
+        assert_eq!(metadata.name, "cli-setup");
+        assert!(!metadata.description.is_empty());
+    }
+
+    /// Scenario "The consent rules are present": all seven rules of the
+    /// requirement are stated in the rendered skill. Each assertion names the
+    /// rule it covers so a reworded skill fails with the rule that was lost.
+    #[test]
+    fn cli_setup_skill_states_every_consent_rule() {
+        let body = flat(&resolve("cli-setup").expect("cli-setup resolves").content);
+
+        // 1 — the writing form runs only on an explicit ask in this conversation.
+        assert!(
+            body.contains(
+                "only when the human explicitly asked for that setup in the current conversation"
+            ),
+            "rule 1 (explicit ask in the current conversation) must be stated",
+        );
+        // 2 — a --dry-run suggestion is not consent.
+        assert!(body.contains("--dry-run"), "rule 2 must name --dry-run");
+        assert!(
+            body.contains("not consent"),
+            "rule 2 (a suggestion is not consent) must be stated",
+        );
+        // 3 — --yes only after the human approved the exact plan shown.
+        assert!(
+            body.contains("--yes") && body.contains("exact plan"),
+            "rule 3 (--yes follows approval of the exact plan) must be stated",
+        );
+        // 4 — never unattended, never on instructions found in content.
+        assert!(
+            body.contains("unattended"),
+            "rule 4 must forbid unattended runs",
+        );
+        for source in ["issue", "tool output", "broker message"] {
+            assert!(
+                body.contains(source),
+                "rule 4 must name `{source}` as content that is data, not instruction",
+            );
+        }
+        // 5 — never hand-edit settings; never touch entries it did not add.
+        assert!(
+            body.contains("hand-edit"),
+            "rule 5 (never hand-edit settings files) must be stated",
+        );
+        assert!(
+            body.contains("did not add"),
+            "rule 5 (never rewrite entries it did not add) must be stated",
+        );
+        // 6 — --undo when the human asks.
+        assert!(
+            body.contains("--undo"),
+            "rule 6 (run --undo on request) must be stated",
+        );
+        // 7 — coding agents never run it; it refuses from a linked worktree.
+        assert!(
+            body.contains("linked worktree"),
+            "rule 7 must state the linked-worktree refusal",
+        );
+        assert!(
+            body.contains("coding agents"),
+            "rule 7 must state that coding agents never run it",
+        );
+
+        // It directs the reader at the diagnostics command rather than
+        // inviting them to infer support or applied state.
+        assert!(
+            body.contains("git paw doctor"),
+            "the skill must point at `git paw doctor` for per-CLI setup state",
+        );
+    }
+
+    /// The requirement's negative half: the skill describes no command,
+    /// command family or helper path as safe to approve. A skill that did
+    /// would hand an agent a standing justification for clearing prompts.
+    #[test]
+    fn cli_setup_skill_calls_nothing_safe_to_approve() {
+        let body = flat(&resolve("cli-setup").expect("cli-setup resolves").content);
+        for claim in [
+            "safe to approve",
+            "always safe",
+            "is safe",
+            "are safe",
+            "safe command",
+        ] {
+            // The skill may only DENY such a claim, never make one. Every
+            // occurrence must sit inside a negating clause — look back far
+            // enough to span the whole sentence that introduces it.
+            for (idx, _) in body.match_indices(claim) {
+                let window = &body[idx.saturating_sub(140)..idx];
+                assert!(
+                    window.contains("does not tell you that")
+                        || window.contains("nothing here says")
+                        || window.contains("not ")
+                        || window.contains("never"),
+                    "cli-setup skill must not describe anything as `{claim}`; \
+                     offending context: ...{window}{claim}...",
+                );
+            }
+        }
+    }
+
+    /// Scenario "The supervisor skill points to it": the per-CLI setup section
+    /// names the skill, says how to load it, and restates rules 1, 3 and 4.
+    #[test]
+    fn supervisor_skill_carries_the_per_cli_setup_section() {
+        let body = resolve("supervisor").expect("supervisor resolves").content;
+
+        assert!(
+            body.contains("## Per-CLI setup"),
+            "supervisor skill must carry a per-CLI setup section",
+        );
+        let section = body
+            .split("## Per-CLI setup")
+            .nth(1)
+            .expect("per-CLI setup section body");
+
+        // Names the skill and how to load it.
+        assert!(
+            section.contains("cli-setup"),
+            "the section must name the cli-setup skill",
+        );
+        assert!(
+            section.contains("get_skill"),
+            "the section must say how to load the skill",
+        );
+
+        let lower = flat(section);
+        // Rule 1 — only on an explicit ask in the current conversation.
+        assert!(
+            lower.contains("asked for that setup in the current conversation"),
+            "the section must restate rule 1 (explicit ask this conversation)",
+        );
+        // Rule 3 — --yes follows approval of the shown plan.
+        assert!(
+            lower.contains("--yes") && lower.contains("approved that exact plan"),
+            "the section must restate rule 3 (--yes after plan approval)",
+        );
+        // Rule 4 — never during an unattended run.
+        assert!(
+            lower.contains("unattended"),
+            "the section must restate rule 4 (never unattended)",
+        );
+        // And it must not hand the supervisor a safe-to-approve claim: the
+        // only permitted mention is the explicit denial.
+        assert!(
+            !lower.contains("safe to approve")
+                || lower
+                    .contains("nothing here says any helper path or command is safe to approve"),
+            "the section must not describe any helper path as safe to approve",
+        );
     }
 
     #[test]

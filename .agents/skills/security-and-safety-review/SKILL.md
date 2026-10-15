@@ -20,10 +20,14 @@ of a diff.
 
 ## Security — external bad actors (Gate 5)
 
-- **Least privilege** — any allow rule git-paw seeds into an agent CLI is path-scoped and
-  minimal; never `curl *`, `cd *`, or a blanket grant, and never a consumer toolchain verb. Seed
-  only with the consumer's explicit consent. git-paw seeds nothing today, so a change that starts
-  seeding is a new surface, not an extension of an existing one.
+- **Least privilege** — any allow rule git-paw writes into an agent CLI is path-scoped and
+  minimal; never `curl *`, `cd *`, or a blanket grant, and never a consumer toolchain verb.
+  Exactly one command writes them: `git paw setup-cli <CLI> --allowlist`, and running it is the
+  consent — it prints its plan first, records what it wrote, and `--undo` removes exactly that.
+  Nothing else in git-paw writes a permission rule, so a change that lets any other path do so
+  is a new surface, not an extension of an existing one. A granted helper runs **without a
+  prompt**, so a grant is never reviewed alone: check that it ships with the rules protecting
+  the granted script from being rewritten by the agent it runs for.
 - **Injection-safe construction** — untrusted values (paths, branch/session names, config) are quoted
   or built through validating newtypes, never interpolated raw into a shell / tmux / git command.
 - **No secrets in flags or env** — secrets come from files, stdin, or IPC; never a flag (leaks to

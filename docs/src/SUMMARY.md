@@ -11,6 +11,7 @@
   - [Worktree Placement](user-guide/worktree-placement.md)
   - [Runtime Isolation](user-guide/runtime-isolation.md)
   - [Security Posture](user-guide/security-posture.md)
+  - [Per-CLI Setup](user-guide/cli-setup.md)
   - [FS-Scoped Sandbox](user-guide/sandbox.md)
   - [Spec-Driven Launch](user-guide/spec-driven-launch.md)
   - [Session Logging](user-guide/session-logging.md)

@@ -78,7 +78,7 @@ Test: `error::tests::test_cli_not_found_includes_cli_name`
 
 ### Requirement: Exit codes distinguish cancellation from errors
 
-`UserCancelled` SHALL exit with code 2; all other errors SHALL exit with code 1.
+`UserCancelled` and `NotAttempted` SHALL exit with code 2; all other errors SHALL exit with code 1. `NotAttempted` reports that a command wrote nothing because a condition for proceeding was not met — a declined confirmation, a confirmation that could not be shown because standard input is not a terminal, or a requested item that is not supported or not enabled for its target. Its message SHALL state that condition and, where one exists, name the flag or command that proceeds, and SHALL NOT read only `Cancelled.`.
 
 #### Scenario: UserCancelled exit code
 - **GIVEN** `PawError::UserCancelled`
@@ -87,8 +87,17 @@ Test: `error::tests::test_cli_not_found_includes_cli_name`
 
 Test: `error::tests::test_user_cancelled_exit_code`
 
+#### Scenario: NotAttempted exit code and message
+- **GIVEN** `PawError::NotAttempted` built for a confirmation that could not be shown, naming `--yes`
+- **WHEN** `exit_code()` is called and the error is formatted with `Display`
+- **THEN** `exit_code()` SHALL return `2`
+- **AND** the message SHALL name `--yes`
+- **AND** the message SHALL NOT be `Cancelled.`
+
+Test: `error::tests::test_not_attempted_exit_code_and_message`
+
 #### Scenario: General errors exit code
-- **GIVEN** any non-cancellation error variant
+- **GIVEN** any error variant other than `UserCancelled` and `NotAttempted`
 - **WHEN** `exit_code()` is called
 - **THEN** it SHALL return `1`
 

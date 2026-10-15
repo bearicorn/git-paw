@@ -454,3 +454,77 @@ fn test_purge_cancel_preserves_worktrees() {
         "worktree must survive a cancelled purge"
     );
 }
+
+// ---------------------------------------------------------------------------
+// setup-cli surface (cli-setup: "The setup-cli command applies named setup
+// items for one agent CLI", "Help documents every item and option")
+// ---------------------------------------------------------------------------
+
+#[test]
+fn setup_cli_help_documents_every_item_and_option() {
+    cmd()
+        .args(["setup-cli", "--help"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("--allowlist")
+                .and(predicate::str::contains("--trust"))
+                .and(predicate::str::contains("--hooks"))
+                .and(predicate::str::contains("--dry-run"))
+                .and(predicate::str::contains("--yes"))
+                .and(predicate::str::contains("--undo"))
+                // at least one example invocation
+                .and(predicate::str::contains("git paw setup-cli claude --allowlist")),
+        );
+}
+
+#[test]
+fn setup_cli_requires_an_item_flag_or_undo() {
+    // clap's usage error exits 2 and names the group's members.
+    cmd().args(["setup-cli", "claude"]).assert().code(2).stderr(
+        predicate::str::contains("--allowlist")
+            .and(predicate::str::contains("--trust"))
+            .and(predicate::str::contains("--hooks")),
+    );
+}
+
+#[test]
+fn setup_cli_accepts_undo_without_an_item_flag() {
+    // Parsing must succeed; the run then fails for want of a repository or a
+    // terminal, which is a different (non-usage) exit.
+    let out = cmd()
+        .args(["setup-cli", "claude", "--undo", "--dry-run"])
+        .current_dir(std::env::temp_dir())
+        .assert()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("required arguments were not provided"),
+        "--undo alone must parse: {stderr}"
+    );
+}
+
+#[test]
+fn setup_cli_accepts_an_item_flag_together_with_undo() {
+    let out = cmd()
+        .args(["setup-cli", "claude", "--undo", "--allowlist", "--dry-run"])
+        .current_dir(std::env::temp_dir())
+        .assert()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("required arguments were not provided"),
+        "item flags narrow an undo: {stderr}"
+    );
+}
+
+#[test]
+fn root_help_lists_setup_cli() {
+    cmd()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("setup-cli"));
+}

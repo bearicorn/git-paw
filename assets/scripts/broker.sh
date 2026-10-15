@@ -19,8 +19,12 @@
 # permission rule scoped to that exact path (`.git-paw/scripts/broker.sh`)
 # can allow it, instead of requiring a broad `curl *` rule. That is what
 # removed the boot-publish dead-stall (v0.7.0 dogfood) where the first
-# register curl raised an unanswerable permission prompt. git-paw does not
-# write that rule for you -- it is the agent CLI's own allow rule to grant.
+# register curl raised an unanswerable permission prompt. It is the agent
+# CLI's own allow rule to grant: git-paw writes no such rule automatically.
+# `git paw setup-cli <CLI> --allowlist` can write a path-scoped rule for this
+# helper into the main checkout's local settings file, but only because the
+# user ran it -- running it is the consent, it prints its plan first, and
+# `--undo` removes exactly what it added.
 #
 # Subcommands implemented (per agent-broker-helper §D1):
 #   status <message>                       — publish agent.status (working)

@@ -246,6 +246,7 @@ All examples below use `git paw`, but `git-paw` works identically.
 | `status` | Show session name, branches, CLIs, and state. |
 | `attach` | Reattach the terminal to the current repo's running session (v0.16.0+). |
 | `list-clis` / `add-cli` / `remove-cli` | Manage auto-detected and custom AI CLIs. |
+| `setup-cli` | Pre-approve git-paw's helper-script calls in one AI CLI's own settings. Consent-only: you run it, it prints its plan, and `--undo` takes back exactly what it added. |
 | `replay` | View session logs (`--list`, `--color`, `--session`). |
 | `approvals` | Report the command patterns you approved by hand during a session, with a hint on where to promote each (`--session`, `--limit`, `--json`). |
 | `mcp` | Read-only [MCP](https://modelcontextprotocol.io) server over stdio — no session or broker required (v0.7.0+). |

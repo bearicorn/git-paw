@@ -376,3 +376,95 @@ fn no_broker_message_variant_is_dedicated_to_permission_prompts() {
     assert!(wire_names.iter().any(|n| n == "agent.question"));
     assert!(wire_names.iter().any(|n| n == "agent.status"));
 }
+
+// ---------------------------------------------------------------------------
+// `approval-command-safety` / "No permission grants are seeded into agent CLI
+// settings files": nothing but the `setup-cli` command may reach the writing
+// layer.
+// ---------------------------------------------------------------------------
+
+/// Every file in `src/` that could call into the setup writers, with its
+/// repo-relative path.
+fn source_files() -> Vec<(String, String)> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                out.push((path.to_string_lossy().to_string(), text));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(std::path::Path::new("src"), &mut out);
+    assert!(out.len() > 20, "the source walk found almost nothing");
+    out
+}
+
+/// The scenario "Recovery and the drive loop write no setup entries" names two
+/// callers, but the guarantee is broader: **no** caller other than the
+/// `setup-cli` command may apply setup items or write the setup record.
+///
+/// An end-to-end test can only drive the paths it thinks to drive — it would
+/// miss a new one. This asserts the property at the source level instead, so
+/// recovery, the drive loop, the dashboard, the MCP server and anything added
+/// later are all covered at once: only the use case and its entry layer may
+/// name the writers.
+#[test]
+fn only_the_setup_cli_command_reaches_the_setup_writers() {
+    // The functions that actually mutate a settings file or the record.
+    const WRITERS: &[&str] = &["shell::apply", "shell::apply_undo", "shell::save_record"];
+    // Where those calls are legitimate: the writers themselves, the use case,
+    // and the entry layer that owns the prompt.
+    const ALLOWED: &[&str] = &[
+        "src/cli_setup/shell.rs",
+        "src/cli_setup/mod.rs",
+        "src/commands/setup_cli.rs",
+    ];
+
+    for (path, text) in source_files() {
+        let normalised = path.replace('\\', "/");
+        if ALLOWED.iter().any(|a| normalised.ends_with(a)) {
+            continue;
+        }
+        // The whole file is checked, not just the part before the first
+        // `#[cfg(test)]`: splitting there would leave everything after a test
+        // module unchecked, which is exactly where a planted call would hide.
+        // A module that legitimately drives the writers belongs in ALLOWED.
+        for writer in WRITERS {
+            assert!(
+                !text.contains(writer),
+                "{normalised} calls `{writer}` — only `git paw setup-cli` may write an \
+                 agent CLI's settings or the setup record. If this is deliberate, the \
+                 capability's central promise has changed and the spec must change first."
+            );
+        }
+    }
+}
+
+/// The same property from the other side: the use case is only ever reached
+/// from the command's entry layer, never from a launch, recovery or drive-loop
+/// path.
+#[test]
+fn no_launch_or_drive_path_invokes_the_setup_use_case() {
+    for (path, text) in source_files() {
+        let normalised = path.replace('\\', "/");
+        if normalised.ends_with("src/main.rs")
+            || normalised.ends_with("src/commands/setup_cli.rs")
+            || normalised.ends_with("src/commands/mod.rs")
+        {
+            continue;
+        }
+        assert!(
+            !text.contains("setup_cli::"),
+            "{normalised} references the setup use case — running setup is the user's \
+             explicit act, never a side effect of another command"
+        );
+    }
+}

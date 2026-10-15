@@ -358,6 +358,45 @@ mod tests {
         );
     }
 
+    /// `approval-command-safety` scenario "No MCP tool applies setup": the
+    /// MCP surface SHALL expose no tool that runs `git paw setup-cli`, writes
+    /// an agent CLI's settings file, or writes the setup record.
+    ///
+    /// Asserted over the live registry and its frozen allowlist, not over
+    /// `--help` text: a new tool shows up here, and `--help` enumerates no
+    /// tools at all.
+    #[test]
+    fn no_tool_applies_cli_setup_or_writes_cli_settings() {
+        let server = GitPawMcpServer::new(ctx());
+        let advertised: Vec<String> = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert!(
+            !advertised.is_empty(),
+            "the registry must actually advertise tools, or this guard is vacuous"
+        );
+
+        for name in advertised.iter().chain(
+            ALL_ALLOWED_TOOL_NAMES
+                .iter()
+                .map(|n| (*n).to_string())
+                .collect::<Vec<_>>()
+                .iter(),
+        ) {
+            let lowered = name.to_ascii_lowercase();
+            for forbidden in ["setup", "settings", "allowlist", "permission", "grant"] {
+                assert!(
+                    !lowered.contains(forbidden),
+                    "tool `{name}` looks like it touches CLI setup — setup is consent-only \
+                     and runs from the command line, never through MCP"
+                );
+            }
+        }
+    }
+
     /// `mcp-agent-publish` scenarios "No generic publish tool exists", "No
     /// verified publish tool", "No feedback publish tool", and "Agent id is
     /// derived, not supplied": adversarially inspect every advertised tool's

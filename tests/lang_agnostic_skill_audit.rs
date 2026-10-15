@@ -49,6 +49,21 @@ fn render_supervisor_for(backends: &[SpecBackendKind]) -> String {
     )
 }
 
+/// Renders the embedded `cli-setup` skill against `backends`. Used by the
+/// `cli-setup-consent` no-leak audit: the skill ships to every consumer, so
+/// it SHALL name no vendor product, vendor settings path or stack token.
+fn render_cli_setup_for(backends: &[SpecBackendKind]) -> String {
+    let tmpl = resolve("cli-setup").expect("cli-setup skill resolves");
+    render(
+        &tmpl,
+        "cli-setup",
+        "http://127.0.0.1:9119",
+        "git-paw",
+        &GateCommands::default(),
+        backends,
+    )
+}
+
 /// Renders the embedded coordination skill against `backends`. Used by the
 /// `coordination-context-budget` no-leak audit: the new "Context budget"
 /// section SHALL pass the same forbidden-token scan across every backend.
@@ -368,6 +383,72 @@ fn standards_consult_step_passes_no_leak_audit_across_backends() {
     }
 }
 
+/// `cli-setup-consent` / `skill-agent` scenario "The skill is project- and
+/// vendor-agnostic": the rendered `cli-setup` skill SHALL carry no vendor
+/// product name, vendor settings path, stack token or commit-convention
+/// prefix, across every spec backend. The skill carries no
+/// `<!-- allowlist-prose -->` span, so nothing is exempted from the scan.
+#[test]
+fn cli_setup_skill_passes_no_leak_audit_across_backends() {
+    for backends in [
+        vec![SpecBackendKind::OpenSpec],
+        vec![SpecBackendKind::SpecKit],
+        vec![SpecBackendKind::Markdown],
+        vec![SpecBackendKind::Superpowers],
+        vec![
+            SpecBackendKind::OpenSpec,
+            SpecBackendKind::SpecKit,
+            SpecBackendKind::Markdown,
+        ],
+        vec![],
+    ] {
+        let rendered = render_cli_setup_for(&backends);
+        // Sanity: the audited render is actually the cli-setup skill.
+        assert!(
+            rendered.contains("git paw setup-cli"),
+            "rendered cli-setup skill should describe the setup-cli command"
+        );
+        assert!(
+            !rendered.contains("<!-- allowlist-prose -->"),
+            "the cli-setup skill must not exempt any prose from the no-leak audit"
+        );
+        assert_no_forbidden_tokens(&rendered, "cli-setup");
+        assert_no_commit_convention(&rendered, "cli-setup");
+    }
+}
+
+/// Companion to the above for the supervisor skill's new per-CLI setup
+/// section: it is rendered as part of the supervisor skill, so it SHALL pass
+/// the same scan. Asserting the section is present keeps this from silently
+/// passing if the section is ever dropped.
+#[test]
+fn supervisor_per_cli_setup_section_passes_no_leak_audit_across_backends() {
+    for backends in [
+        vec![SpecBackendKind::OpenSpec],
+        vec![SpecBackendKind::SpecKit],
+        vec![SpecBackendKind::Markdown],
+        vec![],
+    ] {
+        let rendered = render_supervisor_for(&backends);
+        assert!(
+            rendered.contains("## Per-CLI setup"),
+            "rendered supervisor skill should include the per-CLI setup section"
+        );
+        let section = rendered
+            .split("## Per-CLI setup")
+            .nth(1)
+            .expect("per-CLI setup section body");
+        // Scan the section on its own so a leak there cannot hide behind an
+        // allowlist-prose span that belongs to an unrelated section.
+        assert!(
+            !section.contains("<!-- allowlist-prose -->"),
+            "the per-CLI setup section must not exempt its prose from the audit"
+        );
+        assert_no_forbidden_tokens(section, "supervisor-per-cli-setup");
+        assert_no_commit_convention(section, "supervisor-per-cli-setup");
+    }
+}
+
 #[test]
 fn audit_excludes_allowlist_prose_via_sentinel() {
     // After the classifier's retirement the only surviving sentinel span is
@@ -546,6 +627,7 @@ fn commit_convention_audit_catches_a_hardcoded_prefix_regression() {
 /// scenario "Hook assets are covered by the export audit").
 const AUDITED_PROSE_ASSETS: &[&str] = &[
     "assets/agent-skills/docs-fetch.md",
+    "assets/agent-skills/cli-setup.md",
     "assets/boot-block-template.md",
     "assets/boot-block-mcp-template.md",
     "assets/inter-agent-rules.md",
