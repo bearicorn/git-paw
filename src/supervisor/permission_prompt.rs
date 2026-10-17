@@ -23,6 +23,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 
 use crate::config::{CliPromptProfile, claude_prompt_profile};
+use crate::static_regex::static_regex;
 
 /// Captures the content of pane `pane_index` in `session` via
 /// `tmux capture-pane -p -t <session>:<pane>`.
@@ -78,10 +79,7 @@ pub fn has_approval_marker(captured: &str, profile: &CliPromptProfile) -> bool {
 /// (`cli-prompt-profiles` capability) rather than a compiled literal.
 fn file_prompt_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(&claude_prompt_profile().file_prompt_pattern)
-            .expect("embedded file-prompt pattern is valid")
-    })
+    RE.get_or_init(|| static_regex(claude_prompt_profile().file_prompt_pattern.as_str()))
 }
 
 /// Extracts the target path from a Claude filesystem-operation permission
@@ -147,10 +145,7 @@ fn strip_decoration(line: &str) -> &str {
 /// (`1. …`, `2) …`) once leading whitespace is trimmed.
 fn option_line_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(&claude_prompt_profile().option_line_pattern)
-            .expect("embedded option-line pattern is valid")
-    })
+    RE.get_or_init(|| static_regex(claude_prompt_profile().option_line_pattern.as_str()))
 }
 
 /// Returns `true` when a cleaned line is a numbered option (`1. …`, `2) …`).
@@ -496,6 +491,14 @@ pub fn is_live_prompt(capture: &str) -> bool {
 mod tests {
     use super::*;
     use std::fmt::Write as _;
+
+    /// `core-project-conventions`' "Every static pattern compiles under test":
+    /// forces every static regex in this module to compile.
+    #[test]
+    fn static_regexes_compile() {
+        assert!(file_prompt_regex().is_match("Do you want to allow this write to src/lib.rs?"));
+        assert!(option_line_regex().is_match("1. Yes"));
+    }
 
     /// Spec scenario "Approval prompt detected in working agent"
     /// (`approval-command-safety`): detection reports whether an approval

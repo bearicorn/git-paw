@@ -386,22 +386,23 @@ impl InventoryCache {
     /// # Errors
     /// Propagates any error from `refresh`; the previous snapshot (if any) is
     /// left untouched on failure.
-    ///
-    /// # Panics
-    /// Does not panic in practice: when the cache is stale `refresh` populates
-    /// the snapshot before it is unwrapped, so the `Some` invariant holds.
     pub fn get_or_refresh<F, E>(&mut self, now: Instant, refresh: F) -> Result<&AgentInventory, E>
     where
         F: FnOnce() -> Result<AgentInventory, E>,
     {
-        if !self.is_fresh_at(now) {
-            let snapshot = refresh()?;
-            self.snapshot = Some(snapshot);
-        }
-        Ok(self
-            .snapshot
-            .as_ref()
-            .expect("snapshot present after refresh"))
+        // Taking the snapshot out makes the "a snapshot exists here" state
+        // carry its own value, so the returned reference needs no assertion.
+        let snapshot = match self.snapshot.take() {
+            Some(cached) if now.duration_since(cached.refreshed_at) < self.max_age => cached,
+            previous => match refresh() {
+                Ok(rebuilt) => rebuilt,
+                Err(e) => {
+                    self.snapshot = previous;
+                    return Err(e);
+                }
+            },
+        };
+        Ok(self.snapshot.insert(snapshot))
     }
 }
 
@@ -755,6 +756,28 @@ mod tests {
             .unwrap();
         assert_eq!(calls.get(), 1, "stale cache must rebuild");
         assert!(cache.is_fresh_at(Instant::now()));
+    }
+
+    #[test]
+    fn failing_refresh_on_stale_cache_errors_and_keeps_the_previous_snapshot() {
+        let mut cache = InventoryCache::from_seconds(60);
+        let stale_at = Instant::now()
+            .checked_sub(Duration::from_mins(2))
+            .expect("instant in range");
+        cache.store(AgentInventory {
+            entries: Vec::new(),
+            refreshed_at: stale_at,
+        });
+        assert!(!cache.is_fresh_at(Instant::now()));
+
+        let result = cache.get_or_refresh(Instant::now(), || Err::<AgentInventory, _>("boom"));
+        assert_eq!(result.err(), Some("boom"), "the refresh error must surface");
+
+        let kept = cache.snapshot().expect("previous snapshot stays readable");
+        assert_eq!(
+            kept.refreshed_at, stale_at,
+            "a failed refresh must leave the previous snapshot untouched"
+        );
     }
 
     // --- build_inventory end-to-end against a fake broker (IO orchestration) ---

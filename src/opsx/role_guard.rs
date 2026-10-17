@@ -27,6 +27,7 @@ use crate::broker::learnings::{CATEGORY_PERMISSION_PATTERN, LearningRecord};
 use crate::broker::messages::{ArtifactPayload, BrokerMessage, FeedbackPayload};
 use crate::broker::{BrokerState, delivery};
 use crate::config::RoleGatingMode;
+use crate::static_regex::static_regex;
 
 /// The agent id that owns verification and archival. Any other id committing
 /// archive activity is a role-gating violation. Established by the v0.5.0
@@ -134,8 +135,7 @@ impl RoleGatingContext {
 fn archive_message_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"^chore\(specs\): archive [a-z0-9-]+; sync deltas to main specs$")
-            .expect("archive message regex compiles")
+        static_regex(r"^chore\(specs\): archive [a-z0-9-]+; sync deltas to main specs$")
     })
 }
 
@@ -143,18 +143,14 @@ fn archive_message_re() -> &'static Regex {
 /// (D1 signal 2, archive-move half).
 fn archive_move_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"openspec/changes/archive/[^/]+/").expect("archive move regex compiles")
-    })
+    RE.get_or_init(|| static_regex(r"openspec/changes/archive/[^/]+/"))
 }
 
 /// Matches an addition/update to a main spec `openspec/specs/<capability>/spec.md`
 /// (D1 signal 2, deltas-merged half).
 fn spec_addition_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"openspec/specs/[^/]+/spec\.md$").expect("spec addition regex compiles")
-    })
+    RE.get_or_init(|| static_regex(r"openspec/specs/[^/]+/spec\.md$"))
 }
 
 /// Whether a path touches the `OpenSpec` change/spec trees — the cheap
@@ -420,6 +416,18 @@ mod tests {
         CommitDiff {
             touched_paths: paths.iter().map(|s| (*s).to_string()).collect(),
         }
+    }
+
+    /// `core-project-conventions`' "Every static pattern compiles under test":
+    /// forces every static regex in this module to compile.
+    #[test]
+    fn static_regexes_compile() {
+        assert!(
+            archive_message_re()
+                .is_match("chore(specs): archive production-panic-free; sync deltas to main specs")
+        );
+        assert!(archive_move_re().is_match("openspec/changes/archive/some-change/proposal.md"));
+        assert!(spec_addition_re().is_match("openspec/specs/core-ci-hygiene/spec.md"));
     }
 
     // --- classify_commit (task 3.5) ---

@@ -12,6 +12,10 @@
 //! Depend on the `git-paw` CLI, not on this crate as a library.
 
 #![warn(missing_docs)]
+// `core-project-conventions`: no `unwrap()`/`expect()` in non-test code.
+// `clippy.toml` exempts `#[cfg(test)]` code; `just lint`'s `-D warnings`
+// turns a violation into a hard failure.
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 
 /// Default boot-prompt settle delay (ms) before the submit `Enter`, used
 /// for any CLI without a `[clis.<name>].submit_delay_ms` override.
@@ -52,6 +56,7 @@ pub mod session;
 mod skill_frontmatter;
 pub mod skills;
 pub mod specs;
+mod static_regex;
 pub mod supervisor;
 pub mod tmux;
 pub mod worktree_provision;

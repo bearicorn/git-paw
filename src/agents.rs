@@ -11,19 +11,17 @@ use std::sync::LazyLock;
 
 use crate::error::PawError;
 use crate::git::{exclude_from_git, no_assume_unchanged};
+use crate::static_regex::static_regex;
 
 /// Matches `PAW_SUPERVISOR_PID=<digits>` lines inside the agent marker file.
 ///
-/// Compiled once on first use via `LazyLock`. The `expect` is allowed by the
-/// project's panic-surface rules because the pattern is a static literal and
-/// the failure is unreachable at runtime.
+/// Compiled once on first use via `LazyLock`.
 static SUPERVISOR_PID_REGEX: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"PAW_SUPERVISOR_PID=\d+").expect("static regex compiles"));
+    LazyLock::new(|| static_regex(r"PAW_SUPERVISOR_PID=\d+"));
 
 /// Matches `PAW_LAST_VERIFIED_COMMIT=<value>` lines inside the agent marker file.
-static LAST_VERIFIED_COMMIT_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"PAW_LAST_VERIFIED_COMMIT=[^\n]+").expect("static regex compiles")
-});
+static LAST_VERIFIED_COMMIT_REGEX: LazyLock<regex::Regex> =
+    LazyLock::new(|| static_regex(r"PAW_LAST_VERIFIED_COMMIT=[^\n]+"));
 
 /// Start marker prefix used for detection (ignores trailing comment text).
 const START_MARKER_PREFIX: &str = "<!-- git-paw:start";
@@ -832,6 +830,14 @@ pub fn remove_session_boot_block(repo_root: &Path) -> Result<(), PawError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `core-project-conventions`' "Every static pattern compiles under test":
+    /// forces every static regex in this module to compile.
+    #[test]
+    fn static_regexes_compile() {
+        assert!(SUPERVISOR_PID_REGEX.is_match("PAW_SUPERVISOR_PID=123"));
+        assert!(LAST_VERIFIED_COMMIT_REGEX.is_match("PAW_LAST_VERIFIED_COMMIT=abc123"));
+    }
 
     /// `boot-block`'s "Section position is between skill and task content":
     /// the governance section rides at the tail of `skill_content`, and the

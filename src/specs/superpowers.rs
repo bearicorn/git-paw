@@ -15,6 +15,7 @@ use regex::Regex;
 use super::{SpecBackend, SpecBackendKind, SpecEntry};
 use crate::broker::messages::slugify_branch;
 use crate::error::PawError;
+use crate::static_regex::static_regex;
 
 /// Default directory holding superpowers plan files.
 pub(crate) const PLANS_DIR: &str = "docs/superpowers/plans";
@@ -152,10 +153,8 @@ impl Plan {
 
 fn task_heading_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        // `### Task <N>` with leniency on the trailing separator/name.
-        Regex::new(r"(?m)^###\s+Task\s+\d+").expect("task heading regex must compile")
-    })
+    // `### Task <N>` with leniency on the trailing separator/name.
+    RE.get_or_init(|| static_regex(r"(?m)^###\s+Task\s+\d+"))
 }
 
 /// Extracts a `**<name>:**` header field's same-line value, if present.
@@ -207,6 +206,13 @@ fn parse_plan(stem: &str, content: &str) -> Plan {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// `core-project-conventions`' "Every static pattern compiles under test":
+    /// forces every static regex in this module to compile.
+    #[test]
+    fn static_regexes_compile() {
+        assert!(task_heading_re().is_match("### Task 3 — wire it up"));
+    }
 
     const PLAN: &str = "# Add auth Implementation Plan\n\n\
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement.\n\n\

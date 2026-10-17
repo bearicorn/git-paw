@@ -62,6 +62,7 @@ use crate::config::{
 };
 use crate::error::PawError;
 use crate::session::{self, SessionStatus};
+use crate::static_regex::static_regex;
 
 use super::approval_gate::{approval_dedup_key, live_prompt_in_tail};
 use super::claim::PaneClaim;
@@ -2383,10 +2384,7 @@ fn input_box_text(capture: &str) -> Option<String> {
 /// (`cli-prompt-profiles` capability).
 fn paste_buffer_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(&claude_prompt_profile().paste_buffer_pattern)
-            .expect("embedded paste-buffer pattern is valid")
-    })
+    RE.get_or_init(|| static_regex(claude_prompt_profile().paste_buffer_pattern.as_str()))
 }
 
 /// Whether `capture`'s input box shows a paste-buffer placeholder — e.g.
@@ -3229,6 +3227,13 @@ struct StatusResponse {
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+
+    /// `core-project-conventions`' "Every static pattern compiles under test":
+    /// forces every static regex in this module to compile.
+    #[test]
+    fn static_regexes_compile() {
+        assert!(paste_buffer_regex().is_match("Pasted text #1"));
+    }
 
     /// Runs the loop against a throwaway repository root.
     ///

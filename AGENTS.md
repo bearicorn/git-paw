@@ -114,7 +114,7 @@ The project uses standard Rust development tools along with additional quality a
 - Clippy pedantic lints enabled (configured in `Cargo.toml` under `[lints.clippy]`)
 - All public functions and types must have doc comments (`///`)
 - All modules must have module-level doc comments (`//!`)
-- No `unwrap()` or `expect()` in non-test code — propagate errors with `?`
+- No `unwrap()` or `expect()` in non-test code — propagate errors with `?`. Enforced by `just lint`: `clippy::unwrap_used` / `clippy::expect_used` are enabled at the crate roots (`src/lib.rs`, `src/main.rs`), with tests exempt via the repo-root `clippy.toml`. Build-time regex patterns go through `src/static_regex.rs`, the only non-test code allowed to `expect()`
 - Use `PawError` variants from `error.rs` for all error cases
 - Use `thiserror` for library-level error types (`error.rs`)
 - Prefer `std::process::Command` for calling external tools (git, tmux)

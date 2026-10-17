@@ -27,6 +27,9 @@ It describes the code as it is today. For the structure the code is moving towar
 │  (newtypes)   (add/remove  (UUID v4)    (process-execution seam)      │
 │                lock)                                                  │
 │                                                                       │
+│  static_regex.rs                                                      │
+│  (one audited compiler for build-time regex patterns)                 │
+│                                                                       │
 │  worktree_provision.rs       dashboard.rs + dashboard/                │
 │  (env copies, ports, hooks)  (TUI: model, view, log panel)            │
 ├───────────────────────────────────────────────────────────────────────┤
@@ -84,6 +87,7 @@ It describes the code as it is today. For the structure the code is moving towar
 | **Domain** | `src/domain.rs` | Newtypes for injection-prone constructed strings — `SessionName`, `BranchSlug`, `WorktreePath` — plus `shell_quote` for paths interpolated into shell commands. |
 | **Lock** | `src/lock.rs` | Advisory `<repo>/.git-paw/.add-remove.lock` taken by `git paw add` and `git paw remove` so two concurrent pane splices cannot interleave. |
 | **Random** | `src/random.rs` | Version-4 UUIDs built from OS randomness (no `uuid` dependency), used for CLI session ids. |
+| **Static regex** | `src/static_regex.rs` | The single audited compiler for regex patterns fixed at build time. `static_regex(pattern: &'static str)` carries the only `#[allow(clippy::expect_used)]` in non-test code; every pattern routed through it is compiled by a unit test, so an invalid static pattern fails `cargo test` instead of panicking at run time. Patterns that arrive at run time are compiled by their caller with the error propagated. |
 | **Dashboard** | `src/dashboard.rs`, `src/dashboard/` | The `git paw __dashboard` TUI (status table + Broker log panel). Detail below. |
 | **Broker** | `src/broker/` | HTTP coordination server (axum) with watcher + conflict detector + learnings subsystems. Detail below. |
 | **Supervisor** | `src/supervisor/` | Supervisor-mode subsystems (unattended drive loop, permission-prompt detection, the approval send gate and per-pane claim, keystroke dispatch, manual-decision log, branch refresh, pane layout). Detail below. |

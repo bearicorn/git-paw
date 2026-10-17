@@ -87,7 +87,9 @@ fn parse(content: &str) -> Vec<LearningSection> {
             current = None;
             continue;
         }
-        if let Some(section) = current.as_ref() {
+        if let Some(section) = current.as_ref()
+            && let Some(entries) = map.get_mut(section)
+        {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -97,7 +99,7 @@ fn parse(content: &str) -> Vec<LearningSection> {
                 .or_else(|| trimmed.strip_prefix("* "))
                 .unwrap_or(trimmed)
                 .to_string();
-            map.get_mut(section).expect("section present").push(entry);
+            entries.push(entry);
         }
     }
 
