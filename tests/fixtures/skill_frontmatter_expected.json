@@ -65,7 +65,7 @@
     },
     {
       "compatibility": "git-paw",
-      "description": "Reshape a dogfood-built release branch into clean, changelog-worthy commits before the release PR. Use when a `feat/vX.Y.0-*` branch carries a messy history — many `--no-ff` per-change merges plus per-section, fixup, and up-front spec commits — that must become one conventional commit per change. Covers what \"changelog-worthy\" means against `cliff.toml`, the non-interactive content-preserving `read-tree` replay (the agent harness has no `git rebase -i`), the mandatory empty-`git diff` preservation gate, and per-commit buildability.",
+      "description": "Reshape a dogfood-built release branch into clean, changelog-worthy commits before the release PR. Use when a `feat/vX.Y.0-*` branch carries a messy history — many `--no-ff` per-change merges plus per-section, fixup, and up-front spec commits — that must become one conventional commit per change. Covers what \"changelog-worthy\" means against `cliff.toml`, the non-interactive content-preserving `commit-tree` replay (the agent harness has no `git rebase -i`), the mandatory empty-`git diff` preservation gate, and per-commit buildability.",
       "id": ".agents/skills/release-history-curation/SKILL.md",
       "license": "MIT",
       "metadata": null,
