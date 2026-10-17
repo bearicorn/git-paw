@@ -1,6 +1,6 @@
 ---
 name: release-history-curation
-description: Reshape a dogfood-built release branch into clean, changelog-worthy commits before the release PR. Use when a `feat/vX.Y.0-*` branch carries a messy history — many `--no-ff` per-change merges plus per-section, fixup, and up-front spec commits — that must become one conventional commit per change. Covers what "changelog-worthy" means against `cliff.toml`, the non-interactive content-preserving `read-tree` replay (the agent harness has no `git rebase -i`), the mandatory empty-`git diff` preservation gate, and per-commit buildability.
+description: Reshape a dogfood-built release branch into clean, changelog-worthy commits before the release PR. Use when a `feat/vX.Y.0-*` branch carries a messy history — many `--no-ff` per-change merges plus per-section, fixup, and up-front spec commits — that must become one conventional commit per change. Covers what "changelog-worthy" means against `cliff.toml`, the non-interactive content-preserving `commit-tree` replay (the agent harness has no `git rebase -i`), the mandatory empty-`git diff` preservation gate, and per-commit buildability.
 license: MIT
 compatibility: git-paw
 ---
@@ -60,25 +60,26 @@ trivial is surfaced.
    (its `openspec/changes/<change>/proposal.md` "## Why"). Derive the scope from what the code
    touches, not the change's folder name.
 
-4. **Reshape via a `read-tree` replay** — non-interactive, because the agent harness has no
+4. **Reshape via a `commit-tree` replay** — non-interactive, because the agent harness has no
    `git rebase -i` (it is TTY-gated). Snapshot each integration point's *whole tree* onto a fresh
-   linear parent chain:
+   linear parent chain, with plumbing that touches no index or worktree:
 
    ```bash
-   git checkout --detach <merge-base>
+   P=$(git rev-parse <merge-base>)
    # base commit(s) below the first merge — e.g. the up-front specs:
-   git read-tree <spec-base-commit>;  git commit -m "docs(specs): ..."
+   P=$(git commit-tree "<spec-base-commit>^{tree}" -p "$P" -m "docs(specs): ...")
    # one commit per backbone merge, oldest -> newest:
    for M in <M1> <M2> ... <Mn>; do
-     git read-tree "$M"                       # index := M's entire tree
-     git commit -m "<type(scope): subject>"   # commits the index onto current HEAD
+     P=$(git commit-tree "$M^{tree}" -p "$P" -F "msg-$M.txt")   # commit := M's entire tree
    done
-   git reset --hard HEAD                       # resync the worktree (read-tree left it stale)
+   echo "$P"                                                     # the new tip
    ```
 
-   Use whole trees (`read-tree`), never `git diff <a> <b> | git apply` — trees are binary- and
-   deletion-safe and cannot fuzz. Each resulting commit's tree is *exactly* that merge's tree; the
-   parent chain is clean and linear.
+   Use whole trees, never `git diff <a> <b> | git apply` — trees are binary- and deletion-safe and
+   cannot fuzz. Each resulting commit's tree is *exactly* that merge's tree; the parent chain is
+   clean and linear. Do not replay by checking out the merge-base and running `git read-tree` +
+   `git commit` + `git reset --hard`: every file the range deletes survives in that worktree as an
+   untracked leftover, which then aborts later checkouts and breaks the step-6 builds.
 
 5. **Content-preservation gate (mandatory).** `git diff <old-tip> <new-tip>` MUST be empty —
    curation reshapes history, it never changes delivered code. If it is non-empty, a tree was
@@ -89,14 +90,19 @@ trivial is surfaced.
    tip; spot-check intermediate commits (`git checkout <sha>` + `cargo check`/`just check`). Each
    commit corresponds to a real integration point, but a change that secretly depended on a *later*
    one will fail here — that exposes a mis-order to fix by reordering the replay or combining the
-   pair. Preview the notes with `git cliff --tag vX.Y.Z --unreleased` (or `just changelog`).
+   pair. Preview the notes with `git cliff --offline <merge-base>..<new-tip> --tag vX.Y.Z`:
+   `cliff.toml`'s GitHub integration fails on commits that are not pushed yet, and `--offline`
+   skips it.
 
-7. **Move the branch.** `git branch -f <branch> <new-tip>; git checkout <branch>`. Keep the
-   `backup/…` ref until `vX.Y.Z` is tagged.
+7. **Move the branch.** `git branch -f <branch> <new-tip>; git checkout <branch>`. If the branch
+   is checked out (and may hold uncommitted work), move only the ref instead:
+   `git update-ref refs/heads/<branch> <new-tip> <old-tip>`. The trees are identical, so the
+   checkout's index and working tree stay as they are. Keep the `backup/…` ref until `vX.Y.Z` is
+   tagged.
 
 ## Guardrails
 
-- **No `git rebase -i`** — TTY-gated in the agent harness. Use the `read-tree` replay (or
+- **No `git rebase -i`** — TTY-gated in the agent harness. Use the `commit-tree` replay (or
   `git rebase --onto` with a scripted `GIT_SEQUENCE_EDITOR`/`GIT_EDITOR`).
 - **The empty `git diff <old> <new>` is non-negotiable.** A non-empty diff means the reshape
   altered the delivered code — recover from the rescue ref, do not ship it.
