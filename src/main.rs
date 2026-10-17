@@ -612,8 +612,8 @@ fn attach_agent(
     // Either may be absent (coordination when broker is off; docs-fetch unless
     // `docs_base_url` is configured); the block carries whichever are present.
     let rendered_skill = git_paw::skills::combine_agent_skills(
-        ctx.coordination_template.map(&render_tmpl),
-        ctx.docs_fetch_template.map(&render_tmpl),
+        ctx.coordination_template.map(render_tmpl),
+        ctx.docs_fetch_template.map(render_tmpl),
     );
 
     let spec_content = spec_entry.map(|s| s.prompt.clone());

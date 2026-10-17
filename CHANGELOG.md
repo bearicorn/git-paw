@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-10-17
+
+### Features
+
+- *(cli)* Add git paw setup-cli to seed cli allow rules with consent
+- *(supervisor)* Retire the auto-approve classifier **BREAKING**
+- *(cli,config)* Launch a cli's configured command and detect cursor-agent **BREAKING**
+- *(broker)* Guard the listener against browser and foreign-host requests **BREAKING**
+- *(skills)* Teach read-tool and scratch-path discipline in the coordination skill
+- *(session,cli)* Capture worker cli session ids and resume them on recovery
+
+### Bug Fixes
+
+- *(error,ci)* Remove non-test panics, lint-enforce the rule and run the binary's tests
+- *(supervisor,session)* Wire governance docs and launch specs into the launch path
+- *(init,session)* Provision bundled helpers on every launch path
+- *(cli,tmux)* Report exited agent panes as stopped and identify panes by role
+- *(broker)* Refuse a port held by another repository's broker
+- *(broker)* Keep conflict escalation decisions across commits
+- *(cli)* Stop never asks for confirmation; remove its --force flag **BREAKING**
+- *(supervisor,cli)* Close the cli-unavailable detection gaps
+- *(learnings)* Derive learning ids from a stable fnv-1a hash
+- *(git,session)* Never delete a branch with unmerged commits on purge or remove
+- *(skills,mcp)* Correct false claims in shipped boot blocks, prompts and messages
+- *(mcp)* Accept the superpowers spec backend in startup validation
+- *(supervisor)* Anchor the live-prompt gate on the modal block
+- *(session)* Submit spec-driven boot prompts and gate every launch path on readiness
+- *(supervisor)* Verify drive-loop nudges by input-box state
+- *(skills)* Replace serde_yaml with a dependency-free frontmatter parser
+- *(supervisor)* Derive the drive-loop exit summary from git refs
+
+### Documentation
+
+- *(agents)* Replay curated history with commit-tree in release-history-curation
+- *(agents)* Add the target architecture guide and refresh stale docs
+- *(user-guide)* Document that sandbox-exec refuses setuid binaries
+- *(specs)* Spec the v0.17.0 reliability release changes
+
+### Testing
+
+- *(ci)* Isolate every session-touching test from the real session directory
 ## [0.16.0] - 2026-09-10
 
 ### Features
@@ -389,6 +430,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 - Add CLI tool for parallel AI coding sessions across git worktrees
+[0.17.0]: https://github.com/bearicorn/git-paw/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/bearicorn/git-paw/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/bearicorn/git-paw/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/bearicorn/git-paw/compare/v0.13.0...v0.14.0
