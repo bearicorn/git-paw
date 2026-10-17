@@ -19,8 +19,11 @@ pub(crate) fn cmd_replay(
         return git_paw::replay::display_list(&repo_root);
     }
 
-    // clap ensures branch is present when --list is absent
-    let branch = branch.expect("branch is required unless --list is passed");
+    // clap's `required_unless_present = "list"` rejects this first; the error
+    // is defence in depth should that attribute ever drift.
+    let branch = branch.ok_or_else(|| {
+        PawError::ReplayError("a branch is required unless --list is given".into())
+    })?;
     let session_name = git_paw::replay::resolve_session(&repo_root, session)?;
     let log_path = git_paw::replay::find_log(&repo_root, &session_name, &branch)?;
 

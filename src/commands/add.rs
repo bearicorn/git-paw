@@ -84,8 +84,12 @@ pub(crate) fn cmd_add(
         let cli = cli_flag.map(str::to_string).or_else(|| spec.cli.clone());
         (spec.branch.clone(), cli, Some(spec))
     } else {
+        // clap's `required_unless_present = "from_spec"` rejects this first;
+        // the error is defence in depth should that attribute ever drift.
         let branch = branch_arg
-            .expect("clap requires a branch when --from-spec is absent")
+            .ok_or_else(|| {
+                PawError::BranchError("a branch is required unless --from-spec is given".into())
+            })?
             .to_string();
         (branch, cli_flag.map(str::to_string), None)
     };

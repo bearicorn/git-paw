@@ -22,6 +22,7 @@ use regex::Regex;
 use crate::broker::messages::slugify_branch;
 use crate::error::PawError;
 use crate::specs::{SpecBackend, SpecBackendKind, SpecEntry};
+use crate::static_regex::static_regex;
 
 /// Phase number assigned to tasks that appear before any `## Phase N` heading.
 pub(crate) const IMPLICIT_PHASE_NUMBER: u32 = 0;
@@ -178,27 +179,18 @@ fn read_checklists(dir: &Path) -> Result<Vec<(String, String)>, PawError> {
 
 fn phase_heading_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        // `## Phase <N> <separator> <Name>` where separator is `:`, `—`, or `-`.
-        Regex::new(r"^##\s+Phase\s+(\d+)\s*[:\-\u{2014}]\s*(.+?)\s*$")
-            .expect("phase heading regex must compile")
-    })
+    // `## Phase <N> <separator> <Name>` where separator is `:`, `—`, or `-`.
+    RE.get_or_init(|| static_regex(r"^##\s+Phase\s+(\d+)\s*[:\-\u{2014}]\s*(.+?)\s*$"))
 }
 
 fn incomplete_task_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^-\s+\[\s\]\s+(T\d+)(\s+\[P\])?\s+(.+?)\s*$")
-            .expect("incomplete task regex must compile")
-    })
+    RE.get_or_init(|| static_regex(r"^-\s+\[\s\]\s+(T\d+)(\s+\[P\])?\s+(.+?)\s*$"))
 }
 
 fn complete_task_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^-\s+\[[xX]\]\s+(T\d+)(\s+\[P\])?\s+(.+?)\s*$")
-            .expect("complete task regex must compile")
-    })
+    RE.get_or_init(|| static_regex(r"^-\s+\[[xX]\]\s+(T\d+)(\s+\[P\])?\s+(.+?)\s*$"))
 }
 
 /// Parses Spec Kit `tasks.md` content into a list of [`Phase`] values.
@@ -219,10 +211,15 @@ pub(crate) fn parse_tasks_md(content: &str) -> Vec<Phase> {
         phases.len() - 1
     };
 
-    let ensure_implicit_phase = |phases: &mut Vec<Phase>, current_idx: &mut Option<usize>| {
-        if current_idx.is_none() {
-            let idx = push_phase(phases, IMPLICIT_PHASE_NUMBER, String::new());
-            *current_idx = Some(idx);
+    // Returns the current phase index, creating the implicit phase first when
+    // no `## Phase N` heading has been seen yet. Returning the index keeps the
+    // "a phase is always current here" invariant unrepresentable as `None`.
+    let ensure_implicit_phase = |phases: &mut Vec<Phase>,
+                                 current_idx: &mut Option<usize>|
+     -> usize {
+        match *current_idx {
+            Some(idx) => idx,
+            None => *current_idx.insert(push_phase(phases, IMPLICIT_PHASE_NUMBER, String::new())),
         }
     };
 
@@ -242,8 +239,7 @@ pub(crate) fn parse_tasks_md(content: &str) -> Vec<Phase> {
         }
 
         if let Some(caps) = incomplete_task_re().captures(line) {
-            ensure_implicit_phase(&mut phases, &mut current_phase_idx);
-            let idx = current_phase_idx.expect("ensure_implicit_phase set Some");
+            let idx = ensure_implicit_phase(&mut phases, &mut current_phase_idx);
             let phase_number = phases[idx].number;
             let task = Task {
                 id: caps[1].to_string(),
@@ -257,8 +253,7 @@ pub(crate) fn parse_tasks_md(content: &str) -> Vec<Phase> {
         }
 
         if let Some(caps) = complete_task_re().captures(line) {
-            ensure_implicit_phase(&mut phases, &mut current_phase_idx);
-            let idx = current_phase_idx.expect("ensure_implicit_phase set Some");
+            let idx = ensure_implicit_phase(&mut phases, &mut current_phase_idx);
             let phase_number = phases[idx].number;
             let task = Task {
                 id: caps[1].to_string(),
@@ -477,6 +472,15 @@ pub fn detect_constitution(specs_dir: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// `core-project-conventions`' "Every static pattern compiles under test":
+    /// forces every static regex in this module to compile.
+    #[test]
+    fn static_regexes_compile() {
+        assert!(phase_heading_re().is_match("## Phase 1: Setup"));
+        assert!(incomplete_task_re().is_match("- [ ] T001 [P] do the thing"));
+        assert!(complete_task_re().is_match("- [x] T002 do the other thing"));
+    }
 
     // --- backend / scan ---
 

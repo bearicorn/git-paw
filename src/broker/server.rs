@@ -19,6 +19,7 @@ use super::delivery;
 use super::messages::BrokerMessage;
 use super::origin;
 use super::{WatchTarget, watcher};
+use crate::static_regex::static_regex;
 
 /// Compiled-once regex matching the only `agent_id` shapes the broker accepts:
 /// `"supervisor"`, or a `{prefix}/{name}` / `{prefix}-{name}` slug whose two
@@ -36,17 +37,14 @@ use super::{WatchTarget, watcher};
 /// typo, or an unsubstituted `<agent-id>` label) from being accepted as an id.
 fn agent_id_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^(supervisor|[a-z0-9][a-z0-9-]*[/-][a-z0-9][a-z0-9-]*)$")
-            .expect("AGENT_ID_RE compiles")
-    })
+    RE.get_or_init(|| static_regex(r"^(supervisor|[a-z0-9][a-z0-9-]*[/-][a-z0-9][a-z0-9-]*)$"))
 }
 
 /// Compiled-once regex matching unfilled placeholder strings — exact match
 /// `<anything>` from start to end.
 fn placeholder_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^<.*>$").expect("PLACEHOLDER_RE compiles"))
+    RE.get_or_init(|| static_regex(r"^<.*>$"))
 }
 
 /// Build the HTTP 400 response for an `agent_id` that did not match
@@ -538,6 +536,14 @@ mod tests {
 
     fn test_router() -> Router {
         router(Arc::new(BrokerState::new(None)), true)
+    }
+
+    /// `core-project-conventions`' "Every static pattern compiles under test":
+    /// forces every static regex in this module to compile.
+    #[test]
+    fn static_regexes_compile() {
+        assert!(agent_id_regex().is_match("feat/add-auth"));
+        assert!(placeholder_regex().is_match("<agent-id>"));
     }
 
     /// A request builder pre-seeded with a loopback `Host`, as every real

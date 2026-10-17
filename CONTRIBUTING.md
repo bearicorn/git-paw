@@ -76,9 +76,31 @@ test(session): add recovery round-trip test
 
 - Run `just lint` before committing
 - Clippy is configured with `pedantic` warnings — address them
-- No `unwrap()` or `expect()` in non-test code
+- No `unwrap()` or `expect()` in non-test code — propagate errors with `?`
 - Every public item needs a `///` doc comment
 - Every module needs a `//!` module doc comment
+
+The no-panic rule is lint-enforced, not just convention. `src/lib.rs` and `src/main.rs`
+carry `#![warn(clippy::unwrap_used, clippy::expect_used)]`, so `just lint`
+(`cargo clippy --all-targets -- -D warnings`) fails on any new `unwrap()` or
+`expect()` in library or binary code. The repo-root `clippy.toml` sets
+`allow-unwrap-in-tests` and `allow-expect-in-tests`, so `#[test]` functions and
+`#[cfg(test)]` modules stay exempt; integration-test crates under `tests/` are
+outside the rule entirely (a panic there is a test failure, which is what you want).
+
+Two limits are worth knowing. Platform-gated code is linted only on a host where that
+`cfg` is active, and CI lints on Linux, so a violation inside a `#[cfg(target_os = "macos")]`
+block is on you to catch. And an `#[allow(clippy::expect_used)]` silences the lint by
+definition — the suppression set is pinned by
+`tests/production_panic_free.rs::static_regex_helper_is_the_only_panic_lint_suppression`
+instead, so adding one fails `cargo test`.
+
+The one exception is `src/static_regex.rs`. Every regex whose pattern is fixed at
+build time is compiled through its `static_regex(pattern: &'static str)` helper,
+which holds the sole `#[allow(clippy::expect_used)]` in non-test code; each pattern
+passed to it is compiled by a unit test, so a bad pattern fails `cargo test` instead
+of panicking in a shipped binary. A pattern that comes from configuration or other
+runtime input does not go through the helper — compile it and propagate the error.
 
 ### Where agent-facing text lives
 

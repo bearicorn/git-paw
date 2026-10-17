@@ -3,6 +3,11 @@
 //! Orchestrates multiple AI coding CLI sessions across git worktrees
 //! from a single terminal using tmux.
 
+// `core-project-conventions`: no `unwrap()`/`expect()` in non-test code.
+// `clippy.toml` exempts `#[cfg(test)]` code; `just lint`'s `-D warnings`
+// turns a violation into a hard failure.
+#![warn(clippy::unwrap_used, clippy::expect_used)]
+
 use std::io::IsTerminal;
 use std::path::Path;
 

@@ -72,6 +72,24 @@ Tests are organized as:
 - **No panics:** No `unwrap()` or `expect()` in non-test `src/` code
 - **Documentation:** `//!` module-level doc comments, `///` on all public items
 
+The no-panics rule is enforced by the lint gate. `src/lib.rs` and `src/main.rs` carry
+`#![warn(clippy::unwrap_used, clippy::expect_used)]`, so `cargo clippy --all-targets -- -D warnings`
+fails on a new `unwrap()` or `expect()` anywhere in library or binary code. The repo-root
+`clippy.toml` sets `allow-unwrap-in-tests = true` and `allow-expect-in-tests = true`, keeping
+`#[test]` functions and `#[cfg(test)]` modules exempt; integration-test crates under `tests/` are
+outside the rule.
+
+The gate has two limits. Platform-gated code is linted only on a host where that `cfg` is active,
+and CI lints on Linux, so a violation inside a macOS-only block will not be caught there. And an
+`#[allow(clippy::expect_used)]` silences the lint by construction, so the suppression set is pinned
+by a test (`static_regex_helper_is_the_only_panic_lint_suppression`) rather than by the gate.
+
+Regex patterns fixed at build time are compiled through `static_regex` in `src/static_regex.rs`,
+the single audited helper that holds the only `#[allow(clippy::expect_used)]` in non-test code.
+Every pattern passed to it is compiled by a unit test, so an invalid static pattern fails
+`cargo test` rather than panicking at run time. Patterns that arrive at run time (configuration or
+other input) are compiled directly, with the error propagated.
+
 ## Where agent-facing text lives
 
 Instructions, rules, directives, framing text and task-prompt scaffolding that an agent reads —

@@ -1,0 +1,5 @@
+# `core-project-conventions`: the crate roots enable `clippy::unwrap_used` and
+# `clippy::expect_used`. Test code is exempt — a panic in a test IS the failure
+# report, so `unwrap()`/`expect()` there is idiomatic.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
