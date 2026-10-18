@@ -1,0 +1,34 @@
+## 1. Broker client + thin dashboard
+
+- [ ] 1.1 `src/broker/client.rs`: `BrokerClient` (bounded-timeout `GET /status`, `GET /log?since=&wait=`, `POST /publish`, `POST /watch`, the repository-scoped stale-broker probe); migrate onto it `broker::publish::{publish_to_broker_http, register_watch_target_http, fetch_log_entries_over_http (with `orchestrator-read-surface`'s cursor + wait), fetch_log_over_http}`, `supervisor::drive::fetch_status_over_http` (moved out of the deleted `poll.rs` by v0.17.0), `coordination::inventory::fetch_status_agents_over_http` (`src/coordination/inventory.rs:442`, the MCP `get_session_status` reader) and the stale-broker probe (`broker::probe_broker*`, `src/broker/mod.rs:619`)
+- [ ] 1.2 `run_dashboard(client, shutdown)` / `run_dashboard_with_panes`: drop `BrokerState` + `BrokerHandle`; poll over HTTP at the 800–1000 ms idle cadence; log panel requests only entries after its cursor; restart detected from `/status` `uptime_seconds` going down (an empty `/log` holds the cursor), then re-read from 0 (history kept, no duplicates); the stalled-wave badge reads `wave` from `/status`
+- [ ] 1.3 Degraded state: status-line "broker unreachable" indicator, last snapshot retained, cleared on first success; unreachable is never an exit condition
+- [ ] 1.4 `__dashboard`: remove the `$TMUX` gate and all broker construction; resolve the URL from the saved session's `broker_port` / `broker_bind` whatever its status (not `mcp::broker_url_from_session`, which is `Active`-only, `src/mcp/mod.rs:107-110`), retrying while no receipt is saved; tests: connects while the session is recorded `Paused`; connects once a fresh launch saves its receipt; runs outside tmux; renders degraded with no broker; killing the dashboard leaves `/status` serving; the `broker-dashboard` scenarios (entry point, polling, orphan exit, outage resilience, degraded indicator)
+
+## 2. Broker host
+
+- [ ] 2.1 Extract `cmd_dashboard`'s state construction (verify-on-commit nudge, seeded orchestrator CLI, role gating, learnings), `start_broker_with` (repository-identity probe) and SIGHUP / orphan / tty-gone exit into `src/commands/broker_host.rs` as hidden `git paw __broker`; it takes the session name and per-session log path on argv (no receipt lookup for them, so no `git-paw.broker.log` fallback on a fresh launch) and seeds watch targets and the spec mapping from a saved `Session` of that name only when one exists; `SIGINT` ignored; no TUI; no `$TMUX` gate; bind/probe failure exits non-zero; the host spawns no approver and sends no keystrokes (none exists since v0.17.0 `classifier-retirement`)
+- [ ] 2.2 Tests: serves `/status` with `repo_root`; fresh-launch host writes `<session>.broker.log`, not the fallback; SIGHUP → port free + final flush; no escape sequences on a pty; bind failure exits; runs outside tmux; panic isolation in the host
+- [ ] 2.3 `src/cli.rs`: hidden `Broker` command beside the existing hidden `__dashboard`, `__prompt-profile` (and `selftest`); `cli.rs::root_help_hides_internal_subcommands` gains `__broker` (the `cli-parsing` scenarios)
+
+## 3. Service surface + lifecycle flows
+
+- [ ] 3.1 `TerminalBackend::{spawn_service, stop_service, service_alive}`; tmux = detached named window (`new-window -d -n broker`); fake records; tests for window presence, window-0 indices unchanged, SIGHUP on stop (the `code-architecture` scenarios)
+- [ ] 3.2 `cmd_start`, `launch_spec_session`, `cmd_supervisor`: set env → spawn `broker` service with the session name + per-session log path on argv → wait ≤10 s for `/status` (`git_paw` marker, `repo_root`) → dashboard pane 0 → agent panes → `POST /watch` per agent (agent id, worktree, CLI, spec id) → save the receipt (unchanged position: after the panes, `start.rs:377/:790`, `supervisor.rs:848`) → readiness → boot prompts; failure names the port and preserves session state; tests: the "A fresh launch registers its agents with the host" and "A launch that fails after the host starts saves no receipt" scenarios
+- [ ] 3.3 `recover_session`: recreate the `broker` service (session name + re-stamped log path on argv; the host seeds from the receipt `recover.rs:164` already saved) before the dashboard pane
+- [ ] 3.4 `cmd_pause`: stop the `broker` service, leave the dashboard; fall back to killing `dashboard_pane` when no `broker` surface exists; `restart_from_pause`: recreate the service (session name + re-stamped log path on argv), wait for `/status`, recreate the dashboard pane only if absent
+- [ ] 3.5 `cmd_stop`: unchanged kill-session (no prompt, no `--force`, per `stop-without-confirmation`); test the flush now comes from the host window
+- [ ] 3.6 `src/commands/status.rs`: broker line "running" only when `probe_broker_for_repo` answers AND `service_alive` reports the `broker` surface (pre-split sessions: the terminal session's liveness); an answering probe with no live host is reported as a leftover broker; tests for the *Status shows broker information* scenarios, including "Status after stop does not report the broker running" (PP-27)
+- [ ] 3.7 E2E: `pause_e2e.rs` (port free, dashboard pane remains, degraded indicator, pre-split fallback), `e2e_supervisor_stop.rs` (flush via window SIGHUP), `recover_integration.rs` (window recreated), `e2e_supervisor_launch.rs` (`/status` answered before the first agent injection)
+
+## 4. DS-3 remainder: agent → spec mapping in the host
+
+- [ ] 4.1 `WorktreeEntry.spec_id` is v0.17.0's (`supervisor-boot-wiring`); move its aggregator seeding (`seed_from_session`) from `cmd_dashboard` into `__broker` (applied when a saved receipt exists), with its test `main.rs::dashboard_aggregator_is_seeded_from_the_session_receipt` moving into `commands/broker_host.rs`; no new session field
+- [ ] 4.2 `POST /watch` accepts an optional spec id; the fresh-launch registrations (3.2) and `add --from-spec` send it; a body without it behaves as before
+- [ ] 4.3 `__broker` calls `LearningsAggregator::set_spec_id` on a `/watch` registration that carries a spec id; tests: intra-spec and cross-spec classification from real launch data; production caller exists (the `supervisor-learnings` scenarios and the `/watch` spec-id scenario)
+
+## 5. Docs + gates
+
+- [ ] 5.1 `docs/src/architecture.md` (Broker Architecture, Start Flow, the `broker` window), `user-guide/dashboard.md` (thin client, degraded state, lifecycle), `user-guide/pause.md`, `user-guide/session-lifecycle.md`, `user-guide/learnings.md` (intra-spec classification now live), `cli-reference.md` hidden-commands note and the `status` broker line (running only with a live host); `mdbook build docs/` succeeds
+- [ ] 5.2 After archive, backfill the `broker-runtime` and `broker-dashboard` `## Purpose` paragraphs (they name `__dashboard` as the host)
+- [ ] 5.3 Every scenario maps to a named test; `just check` + `just deny` green; full suite green vs merge-base; Gate-5 note on the relocated SIGHUP handler and on the host sending no keystrokes
