@@ -27,6 +27,7 @@ Spec system
   ⚠ spec system             no spec system configured — spec-driven launch is unavailable
       ↳ add a [specs] section to .git-paw/config.toml (type = "openspec" | …) or pass --specs-format
   ✓ spec-worker CLI         no default_spec_cli configured — spec workers fall back to default_cli or the interactive picker
+  ✓ spec workflow           no spec system configured — the boot task prompt names no workflow command
 
 Bundled scripts
   ✓ _paw_common.sh          installed, executable, matches this binary
@@ -47,7 +48,7 @@ Hygiene
   ✓ session state           no stale session receipt
   ✓ worktree registrations  every registered worktree exists on disk
 
-17 ✓ · 1 ⚠ · 1 ✗
+18 ✓ · 1 ⚠ · 1 ✗
 ```
 
 ## Diagnose, don't repair
@@ -86,7 +87,7 @@ git paw doctor || echo "fix the ✗ findings before launching"
 | **Environment** | `git` and `tmux` on `PATH` and at or above their minimum versions (git 2.5 for `git worktree`, tmux 1.8); the working directory is inside a git repository. Missing or too old is ✗. Also whether this OS's FS-scoped sandbox backend (`sandbox-exec` on macOS, `bwrap` on Linux/WSL) is on `PATH` — absent is ⚠ with a pointer to the [sandbox guide](sandbox.md), never ✗, because the sandbox is optional. |
 | **CLIs** | The AI CLIs that resolve on `PATH` — the known roster plus your `[clis.*]` entries. None resolving is ⚠, surfacing the `No AI CLIs found` launch failure before you hit it. Plus two read-only reports about [per-CLI setup](cli-setup.md): **setup state** and **broad grants** (below). |
 | **Config** | `.git-paw/config.toml` exists and parses (unparseable is ✗, absent is ⚠); the resolved `worktree_placement`; any key this version does not recognise (⚠, naming the key). |
-| **Spec system** | The explicitly configured spec format and how many specs it discovered. Unconfigured is ⚠ with the "add `[specs]` or pass `--specs-format`" guidance — there is no filesystem auto-detection. Also reports the effective spec-worker CLI: the CLI each discovered spec would actually launch with (its own `paw_cli` when set, else `default_spec_cli`). Warns (⚠) when a configured `default_spec_cli` is never actually reachable by any discovered spec — every one of them pins its own `paw_cli` instead — surfacing a silent mis-resolution (such as a spec-driven `--supervisor` launch quietly using an unexpected, unsandboxed CLI) rather than passing green. Informational (✓) when no specs or no `default_spec_cli` are configured — there's nothing to verify against yet. |
+| **Spec system** | The explicitly configured spec format and how many specs it discovered. Unconfigured is ⚠ with the "add `[specs]` or pass `--specs-format`" guidance — there is no filesystem auto-detection. Also reports the effective spec-worker CLI: the CLI each discovered spec would actually launch with (its own `paw_cli` when set, else `default_spec_cli`). Warns (⚠) when a configured `default_spec_cli` is never actually reachable by any discovered spec — every one of them pins its own `paw_cli` instead — surfacing a silent mis-resolution (such as a spec-driven `--supervisor` launch quietly using an unexpected, unsandboxed CLI) rather than passing green. Informational (✓) when no specs or no `default_spec_cli` are configured — there's nothing to verify against yet. Finally, whether the workflow command the boot task prompt instructs spec-driven agents to run is **reachable** from your worktrees (below). |
 | **Bundled scripts** | `sweep.sh`, `broker.sh`, `docs-fetch.sh`, and the shared `_paw_common.sh` preamble they source exist under `.git-paw/scripts/`, are executable, and match this binary's embedded copies. Missing or non-executable is ✗; content drift is ⚠ ("stale"). Also checks for a Python 3 interpreter, which every bundled script needs — absent is ⚠, not ✗, because core `start`/`add`/`remove` needs no Python. |
 | **Broker** | When `[broker] enabled = true`, that the configured `bind`/`port` is free or already serving a git-paw broker **for this repository**. A git-paw broker serving another repository is ⚠ with the `[broker] port` remedy — it is the clash that would refuse your next `git paw start`. A non-git-paw service on the port is a separate ⚠ with its own remedy. When disabled, an informational ✓ noting the pure-manual baseline. |
 | **Supervisor** | When `[supervisor] enabled = true`, that each configured gate command's binary resolves on `PATH` (✗ per missing binary) and that `sweep.sh` is installed. When disabled, an informational ✓. |
@@ -131,6 +132,59 @@ git-paw's own planned entries are never listed, whoever added them.
 This advisory is a report over stored rules, not a decision about any prompt.
 git-paw does not edit these entries and never acts on them — reviewing and
 removing the ones you did not intend is yours to do.
+
+### The spec-workflow reachability check
+
+A [spec-driven launch](spec-driven-launch.md) ends its boot task prompt by
+telling the agent to run your spec tool's workflow command — `/opsx:apply` for
+OpenSpec. That command's definitions are installed by the spec tool into an
+agent-CLI directory at the repository root (for `claude`:
+`.claude/commands/opsx/apply.md` and
+`.claude/skills/openspec-apply-change/SKILL.md`), and that directory is
+frequently gitignored. `git worktree add` populates a new worktree from a
+**commit**, so a sibling worktree never sees an uncommitted definition and the
+agent quietly replaces the spec workflow with an ad-hoc one. The **spec
+workflow** check surfaces that before you launch.
+
+Each spec-driven worker CLI the discovered specs resolve to is judged on its
+own:
+
+- ✓ when a definition is **committed** at the main checkout's `HEAD` — every
+  new worktree checks it out, whatever the placement. Staging it is not
+  enough: an index entry does not travel into a new worktree;
+- ✓ when [`worktree_placement`](worktree-placement.md) is `child` and a
+  definition exists at the repository root — the worktree sits under the root,
+  so the CLI's ancestor search still finds it;
+- ⚠ when the CLI's locations are known and no definition reaches the
+  worktrees — either placement is `sibling` and every definition found at the
+  root is uncommitted, or none is found at all. The finding names the command,
+  the unreachable CLIs (and only those — a reachable CLI alongside them passes
+  silently), and the locations checked.
+
+Under `sibling` placement the remedy offers both fixes: **commit the command
+definitions** so every new worktree checks them out, or set
+`worktree_placement = "child"` so the worktrees sit under the repository root.
+Under `child` placement the only cause left is that no definition exists at
+all, so the remedy points at installing it with your spec tool and committing
+it.
+
+Definitions are looked for in the **main checkout**, so running doctor from
+inside an agent's worktree — which never carries them itself — reports the same
+verdict as running it at the repository root.
+
+Two states are reported rather than warned about:
+
+- ✓ **not applicable** when the resolved spec format's task prompt names no
+  workflow command (Markdown, Spec Kit, Superpowers, or no spec system), or
+  when no spec-driven worker CLI resolves — there is nothing to reach;
+- ✓ **could not be verified** for a CLI whose definition locations git-paw does
+  not know. Where a CLI keeps its command definitions is per-CLI knowledge;
+  git-paw lists only the locations verified against a real install (today,
+  `claude`) rather than guessing a path and warning about a definition that
+  never lived there.
+
+Like the setup checks, this one is read-only and **never ✗** — an unreachable
+workflow degrades a launch, it does not block one.
 
 ### The supervisor check is project-agnostic
 

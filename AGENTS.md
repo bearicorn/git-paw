@@ -292,6 +292,8 @@ mid-flight discovery costs a blocked round-trip). Two enums carry this hazard:
   - `src/main.rs` — `build_task_prompt`.
   - `src/mcp/query/specs.rs` — `backend_str`, `derive_title`, `get_spec`.
   - `src/mcp/tools/project.rs` — `get_skill`'s backend-to-doctrine match.
+  - `src/doctor.rs` — `instructed_workflow_command` (which workflow command
+    the format's boot task prompt names; mirrors `build_task_prompt`).
 - Plus the dispatch (`backend_for_type`, `SpecBackendKind::parse`, and
   `SpecBackendKind::type_str` in `src/specs/mod.rs`) and the `SpecsFormat`
   CLI enum in `src/cli.rs`.
