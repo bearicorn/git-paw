@@ -248,6 +248,49 @@ pub struct SpecCliProbe {
     pub resolved_clis: Vec<String>,
 }
 
+/// One candidate location of a workflow command's definition, as found at the
+/// repository root.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkflowDefinitionProbe {
+    /// Repo-relative path of the candidate, e.g. `.claude/commands/opsx/apply.md`.
+    pub path: String,
+    /// Whether the file exists at the repository root.
+    pub present: bool,
+    /// Whether it is committed at the main checkout's `HEAD`, and therefore
+    /// checked out into every worktree created from it. A merely staged file
+    /// is *not* committed: `git worktree add` populates from a commit, so a
+    /// new worktree would not carry it.
+    pub committed: bool,
+}
+
+/// One spec-driven worker CLI's view of the instructed workflow command.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkflowCliProbe {
+    /// The CLI the discovered specs resolve to.
+    pub cli: String,
+    /// Every location where this CLI's definition of the command can live.
+    /// **Empty means git-paw does not know this CLI's layout** — reachability
+    /// cannot be verified for it, which is reported, never warned about.
+    pub locations: Vec<WorkflowDefinitionProbe>,
+}
+
+/// Reachability facts for the workflow command the boot task prompt instructs
+/// spec-driven agents to run (GP-30).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpecWorkflowProbe {
+    /// The resolved spec format, or `None` when no spec system is configured.
+    pub resolved_format: Option<String>,
+    /// The workflow command that format's task prompt names, or `None` when it
+    /// names none (see [`instructed_workflow_command`]).
+    pub command: Option<String>,
+    /// The configured worktree placement — a worktree under the repository root
+    /// reaches the root's untracked definitions by ancestor search.
+    pub placement: WorktreePlacement,
+    /// One entry per effective spec-driven worker CLI
+    /// ([`SpecCliProbe::resolved_clis`]). Empty when no specs are discovered.
+    pub clis: Vec<WorkflowCliProbe>,
+}
+
 /// State of one bundled helper script on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptProbe {
@@ -366,6 +409,8 @@ pub struct Probes {
     pub spec_system: SpecSystemProbe,
     /// Spec-driven CLI-resolution facts.
     pub spec_cli: SpecCliProbe,
+    /// Reachability facts for the instructed spec-workflow command.
+    pub spec_workflow: SpecWorkflowProbe,
     /// Bundled-script facts.
     pub bundled_scripts: BundledScriptsProbe,
     /// Broker facts.
@@ -722,6 +767,172 @@ pub fn check_spec_cli(probe: &SpecCliProbe) -> CheckResult {
     }
 }
 
+/// The workflow command the boot task prompt for `backend` instructs a
+/// spec-driven agent to run, or `None` when that prompt names no command.
+///
+/// Mirrors `build_task_prompt`'s per-backend dispatch: only the `OpenSpec`
+/// template ends `run /opsx:apply <id>`; the Markdown, Spec Kit and
+/// Superpowers templates point at the sidecar instead. Kept as one small
+/// function so `launch-prompt-entry-point` can swap it for its entry-point
+/// selector without touching [`check_spec_workflow`].
+#[must_use]
+fn instructed_workflow_command(backend: crate::specs::SpecBackendKind) -> Option<&'static str> {
+    use crate::specs::SpecBackendKind;
+    match backend {
+        SpecBackendKind::OpenSpec => Some("/opsx:apply"),
+        SpecBackendKind::Markdown | SpecBackendKind::SpecKit | SpecBackendKind::Superpowers => None,
+    }
+}
+
+/// Where an agent CLI keeps its definitions of `command`, as repo-relative
+/// paths; empty when git-paw does not know that CLI's layout (design D2).
+///
+/// A row is added only after the locations are verified against a real install
+/// of the spec tool for that CLI — guessing a path would produce a false
+/// warning about a definition that never lived there. Unknown CLIs are
+/// reported as unverified instead.
+fn workflow_definition_locations(cli: &str, command: &str) -> &'static [&'static str] {
+    match (cli, command) {
+        // Verified against this repository's OpenSpec install for Claude Code.
+        ("claude", "/opsx:apply") => &[
+            ".claude/commands/opsx/apply.md",
+            ".claude/skills/openspec-apply-change/SKILL.md",
+        ],
+        _ => &[],
+    }
+}
+
+/// Per-CLI verdict of the spec-workflow reachability rule (design D1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowReach {
+    /// A definition is committed, or placement is `child` and one exists at
+    /// the repository root.
+    Reachable,
+    /// Locations are known but no definition reaches the worktrees.
+    Unreachable,
+    /// git-paw does not know where this CLI keeps the definition.
+    Unverified,
+}
+
+/// Applies the reachability rule to one CLI's probed locations.
+fn workflow_reach(cli: &WorkflowCliProbe, placement: WorktreePlacement) -> WorkflowReach {
+    if cli.locations.is_empty() {
+        return WorkflowReach::Unverified;
+    }
+    let committed = cli.locations.iter().any(|l| l.committed);
+    let at_root = cli.locations.iter().any(|l| l.present);
+    if committed || (placement == WorktreePlacement::Child && at_root) {
+        WorkflowReach::Reachable
+    } else {
+        WorkflowReach::Unreachable
+    }
+}
+
+/// Renders `cli` as `name (checked a, b)` for the report's detail line.
+fn workflow_cli_summary(cli: &WorkflowCliProbe) -> String {
+    let paths: Vec<&str> = cli.locations.iter().map(|l| l.path.as_str()).collect();
+    format!("{} (checked {})", cli.cli, paths.join(", "))
+}
+
+/// Spec-workflow reachability check (GP-30): whether the workflow command the
+/// boot task prompt instructs spec-driven agents to run can be found from where
+/// worktrees are placed.
+///
+/// A worktree is populated from a commit, so an uncommitted command definition
+/// at the repository root is invisible to a sibling worktree — the agent then
+/// silently replaces the spec workflow with an ad-hoc one. Child placement puts
+/// the worktree under the root, where the CLI's ancestor search still finds it.
+///
+/// Never ✗: an unreachable workflow degrades a launch, it does not block one.
+#[must_use]
+pub fn check_spec_workflow(probe: &SpecWorkflowProbe) -> CheckResult {
+    const NAME: &str = "spec workflow";
+
+    let Some(command) = probe.command.as_deref() else {
+        let detail = match probe.resolved_format.as_deref() {
+            Some(format) => format!("{format} — the boot task prompt names no workflow command"),
+            None => "no spec system configured — the boot task prompt names no workflow command"
+                .to_string(),
+        };
+        return CheckResult::ok(GROUP_SPEC_SYSTEM, NAME, detail);
+    };
+
+    if probe.clis.is_empty() {
+        return CheckResult::ok(
+            GROUP_SPEC_SYSTEM,
+            NAME,
+            format!("{command} is instructed, but no spec-driven worker CLI resolves to check"),
+        );
+    }
+
+    let mut reachable = Vec::new();
+    let mut unreachable = Vec::new();
+    let mut unverified = Vec::new();
+    for cli in &probe.clis {
+        match workflow_reach(cli, probe.placement) {
+            WorkflowReach::Reachable => reachable.push(cli.cli.clone()),
+            WorkflowReach::Unreachable => unreachable.push(workflow_cli_summary(cli)),
+            WorkflowReach::Unverified => unverified.push(cli.cli.clone()),
+        }
+    }
+
+    if !unreachable.is_empty() {
+        return CheckResult::warn(
+            GROUP_SPEC_SYSTEM,
+            NAME,
+            format!(
+                "{command} is instructed by the boot task prompt but is unreachable from \
+                 {} worktrees for {}",
+                placement_word(probe.placement),
+                unreachable.join("; ")
+            ),
+            match probe.placement {
+                // Under sibling placement the definitions exist but do not
+                // travel; under child placement they are simply not there, so
+                // pointing at `child` again would contradict the detail.
+                WorktreePlacement::Sibling => format!(
+                    "commit the {command} definitions so every new worktree checks them out, \
+                     or set worktree_placement = \"child\" in .git-paw/config.toml so worktrees \
+                     sit under the repository root"
+                ),
+                WorktreePlacement::Child => format!(
+                    "install the {command} definitions at the repository root with your spec \
+                     tool, and commit them so every new worktree checks them out"
+                ),
+            },
+        );
+    }
+
+    // Name the CLIs the verdict actually covers: "reachable from every
+    // worktree" alongside "could not be verified for X" would read as a
+    // claim about X too.
+    let mut detail = if reachable.is_empty() {
+        format!("{command} is instructed by the boot task prompt")
+    } else {
+        format!(
+            "{command} is reachable from every worktree for {}",
+            reachable.join(", ")
+        )
+    };
+    if !unverified.is_empty() {
+        let _ = write!(
+            detail,
+            "; reachability could not be verified for {} (git-paw does not know where that CLI \
+             keeps command definitions)",
+            unverified.join(", ")
+        );
+    }
+    CheckResult::ok(GROUP_SPEC_SYSTEM, NAME, detail)
+}
+
+/// The adjective for a placement, for the warning's prose.
+fn placement_word(placement: WorktreePlacement) -> &'static str {
+    match placement {
+        WorktreePlacement::Sibling => "sibling",
+        WorktreePlacement::Child => "child",
+    }
+}
+
 /// Bundled-script checks: each helper present, executable, and matching the
 /// running binary's embedded copy, plus the Python 3 interpreter they need.
 #[must_use]
@@ -1021,6 +1232,7 @@ pub fn run_checks(probes: &Probes) -> Vec<CheckResult> {
     checks.extend(check_config(&probes.config));
     checks.extend(check_spec_system(&probes.spec_system));
     checks.push(check_spec_cli(&probes.spec_cli));
+    checks.push(check_spec_workflow(&probes.spec_workflow));
     checks.extend(check_bundled_scripts(&probes.bundled_scripts));
     checks.extend(check_broker(&probes.broker));
     checks.extend(check_supervisor(&probes.supervisor));
@@ -1240,6 +1452,9 @@ fn collect_probes(repo_root: &Path, environment: EnvironmentProbe) -> Probes {
             .unwrap_or_default(),
     };
 
+    let spec_cli = probe_spec_cli(&config, repo_root);
+    let spec_workflow = probe_spec_workflow(&config, repo_root, config_probe.placement, &spec_cli);
+
     Probes {
         environment,
         clis: probe_clis(&config),
@@ -1247,7 +1462,8 @@ fn collect_probes(repo_root: &Path, environment: EnvironmentProbe) -> Probes {
         broad_grants: probe_broad_grants(repo_root),
         config: config_probe,
         spec_system: probe_spec_system(&config, repo_root),
-        spec_cli: probe_spec_cli(&config, repo_root),
+        spec_cli,
+        spec_workflow,
         bundled_scripts: probe_bundled_scripts(repo_root),
         broker: probe_broker(&config, repo_root),
         supervisor: probe_supervisor(&config, repo_root),
@@ -1357,6 +1573,85 @@ fn probe_spec_cli(config: &PawConfig, repo_root: &Path) -> SpecCliProbe {
         resolved_clis,
         ..default
     }
+}
+
+/// Resolves the instructed workflow command and, for each effective
+/// spec-driven worker CLI, whether that command's definition exists at the
+/// repository root and whether it is committed there.
+///
+/// Read-only: the only processes it runs are the `git rev-parse` calls that
+/// locate the main checkout and a `git cat-file -e` per candidate, with
+/// discrete arguments through
+/// [`CommandRunner`](crate::command_runner::CommandRunner).
+fn probe_spec_workflow(
+    config: &PawConfig,
+    repo_root: &Path,
+    placement: WorktreePlacement,
+    spec_cli: &SpecCliProbe,
+) -> SpecWorkflowProbe {
+    let resolved_format = crate::specs::resolved_spec_type(config, repo_root);
+    let command = resolved_format
+        .as_deref()
+        .and_then(crate::specs::SpecBackendKind::parse)
+        .and_then(instructed_workflow_command);
+    let Some(command) = command else {
+        return SpecWorkflowProbe {
+            resolved_format,
+            command: None,
+            placement,
+            clis: Vec::new(),
+        };
+    };
+
+    let runner = crate::command_runner::RealCommandRunner;
+    // Definitions live in the main checkout. Doctor is routinely run from
+    // inside an agent's worktree, whose own root never carries them — reading
+    // presence there would report every child worktree as unreachable, the
+    // very arrangement that makes the command reachable.
+    let definition_root = crate::cli_setup::shell::resolve_layout(&runner, repo_root)
+        .map_or_else(|_| repo_root.to_path_buf(), |layout| layout.main_checkout);
+    let root = definition_root.display().to_string();
+    let clis = spec_cli
+        .resolved_clis
+        .iter()
+        .map(|cli| WorkflowCliProbe {
+            cli: cli.clone(),
+            locations: workflow_definition_locations(cli, command)
+                .iter()
+                .map(|path| WorkflowDefinitionProbe {
+                    path: (*path).to_string(),
+                    present: definition_root.join(path).exists(),
+                    committed: is_committed(&runner, &root, path),
+                })
+                .collect(),
+        })
+        .collect();
+
+    SpecWorkflowProbe {
+        resolved_format,
+        command: Some(command.to_string()),
+        placement,
+        clis,
+    }
+}
+
+/// Asks git whether `path` (repo-relative) exists in `root`'s `HEAD` commit.
+///
+/// Reachability is about what a *new* worktree checks out, and
+/// `git worktree add` populates from a commit — so an ignored, untracked, or
+/// merely staged path does not travel, and only a committed one does. An
+/// unborn `HEAD` (a repository with no commits yet) reports nothing committed.
+fn is_committed(
+    runner: &impl crate::command_runner::CommandRunner,
+    root: &str,
+    path: &str,
+) -> bool {
+    runner
+        .run(
+            "git",
+            &["-C", root, "cat-file", "-e", &format!("HEAD:{path}")],
+        )
+        .is_ok_and(|out| out.success)
 }
 
 /// Reads the setup record, the files it names and the helper scripts a

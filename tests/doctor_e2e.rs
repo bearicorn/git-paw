@@ -398,6 +398,238 @@ fn json_mode_suppresses_the_human_report_and_matches_its_exit_code() {
 }
 
 // ---------------------------------------------------------------------------
+// Spec-workflow reachability (GP-30)
+// ---------------------------------------------------------------------------
+
+/// The repo-relative path of the `/opsx:apply` definition doctor looks for.
+const OPSX_APPLY_DEFINITION: &str = ".claude/commands/opsx/apply.md";
+
+impl Sandbox {
+    /// Provisions an `OpenSpec` repository whose single discovered change
+    /// resolves to the `claude` worker CLI, under the given placement, with
+    /// the `/opsx:apply` definition present at the root and either committed
+    /// or left ignored.
+    fn with_openspec_workflow(&self, placement: &str, committed: bool) {
+        std::fs::write(
+            self.repo.join(".git-paw/config.toml"),
+            format!(
+                "default_spec_cli = \"claude\"\n\
+                 worktree_placement = \"{placement}\"\n\
+                 \n\
+                 [specs]\n\
+                 type = \"openspec\"\n\
+                 dir = \"openspec/changes\"\n"
+            ),
+        )
+        .expect("write config");
+
+        let change = self.repo.join("openspec/changes/demo-change");
+        std::fs::create_dir_all(&change).expect("create change dir");
+        std::fs::write(change.join("tasks.md"), "## 1. Work\n\n- [ ] 1.1 do it\n")
+            .expect("write tasks.md");
+
+        let definition = self.repo.join(OPSX_APPLY_DEFINITION);
+        std::fs::create_dir_all(definition.parent().expect("has a parent"))
+            .expect("create definition dir");
+        std::fs::write(&definition, "# /opsx:apply\n").expect("write definition");
+
+        if committed {
+            self.git(&["add", "--", OPSX_APPLY_DEFINITION]);
+            self.git(&["commit", "-m", "add the workflow definition"]);
+        } else {
+            // The real GP-30 condition: the spec tool's directory is ignored,
+            // so the definition can never travel into a worktree.
+            std::fs::write(self.repo.join(".gitignore"), ".claude/\n").expect("write .gitignore");
+        }
+    }
+
+    /// Commits everything git will take, so a linked worktree checks it out.
+    fn commit_all(&self) {
+        self.git(&["add", "-A"]);
+        self.git(&["commit", "-m", "provision"]);
+    }
+
+    /// Runs `git` in the repository, asserting it succeeded.
+    fn git(&self, args: &[&str]) {
+        let out = Command::new("git")
+            .current_dir(&self.repo)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Runs `doctor --json` from `dir` instead of the repository root.
+    fn doctor_json_in(&self, dir: &Path) -> serde_json::Value {
+        let mut cmd = self.paw(&["doctor", "--json"]);
+        cmd.current_dir(dir);
+        let out = cmd.output().expect("run doctor");
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        serde_json::from_str(&stdout).unwrap_or_else(|e| {
+            panic!("--json stdout should be one JSON document ({e}):\n{stdout}")
+        })
+    }
+}
+
+/// Returns the spec-workflow check from a parsed `--json` document.
+fn spec_workflow_check(document: &serde_json::Value) -> &serde_json::Value {
+    checks(document)
+        .iter()
+        .find(|c| c["name"] == "spec workflow")
+        .unwrap_or_else(|| panic!("the report should carry the spec-workflow check: {document}"))
+}
+
+#[test]
+fn an_uncommitted_workflow_definition_warns_under_sibling_placement() {
+    // GP-30: a worktree is populated from a commit, so the instructed
+    // `/opsx:apply` does not exist where a sibling agent runs.
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    sandbox.with_openspec_workflow("sibling", false);
+
+    let (_, document) = sandbox.doctor_json();
+    let check = spec_workflow_check(&document);
+
+    assert_eq!(check["status"], "warn", "check: {check}");
+    let detail = check["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("/opsx:apply"), "detail: {detail}");
+    assert!(detail.contains(OPSX_APPLY_DEFINITION), "detail: {detail}");
+    let remedy = check["remedy"].as_str().unwrap_or_default();
+    assert!(
+        remedy.contains("worktree_placement = \"child\""),
+        "remedy: {remedy}"
+    );
+}
+
+#[test]
+fn the_same_uncommitted_definition_passes_under_child_placement() {
+    // A child worktree sits under the root, so the CLI's ancestor search
+    // still finds the uncommitted definition.
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    sandbox.with_openspec_workflow("child", false);
+
+    let (_, document) = sandbox.doctor_json();
+    let check = spec_workflow_check(&document);
+    assert_eq!(check["status"], "ok", "check: {check}");
+    assert!(
+        check["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("is reachable from every worktree"),
+        "the pass must come from reachability, not from an unresolved CLI: {check}"
+    );
+}
+
+#[test]
+fn a_committed_workflow_definition_passes_under_sibling_placement() {
+    // Committed means git checks it out into every new worktree, wherever it
+    // sits.
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    sandbox.with_openspec_workflow("sibling", true);
+
+    let (_, document) = sandbox.doctor_json();
+    let check = spec_workflow_check(&document);
+    assert_eq!(check["status"], "ok", "check: {check}");
+    assert!(
+        check["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("is reachable from every worktree"),
+        "the pass must come from reachability, not from an unresolved CLI: {check}"
+    );
+}
+
+#[test]
+fn a_missing_definition_warns_under_sibling_placement() {
+    // Nothing at the root and nothing committed — the strongest form of
+    // unreachable, and still a ⚠ naming every location checked.
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    sandbox.with_openspec_workflow("sibling", false);
+    std::fs::remove_file(sandbox.repo.join(OPSX_APPLY_DEFINITION)).expect("remove the definition");
+
+    let (_, document) = sandbox.doctor_json();
+    let check = spec_workflow_check(&document);
+
+    assert_eq!(check["status"], "warn", "check: {check}");
+    let detail = check["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains(OPSX_APPLY_DEFINITION), "detail: {detail}");
+    assert!(
+        detail.contains(".claude/skills/openspec-apply-change/SKILL.md"),
+        "detail: {detail}"
+    );
+}
+
+#[test]
+fn a_staged_but_uncommitted_definition_warns_under_sibling_placement() {
+    // `git worktree add` populates from a commit, so an index entry alone
+    // does not make the command reachable.
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    sandbox.with_openspec_workflow("sibling", false);
+    sandbox.git(&["add", "-f", "--", OPSX_APPLY_DEFINITION]);
+
+    let (_, document) = sandbox.doctor_json();
+    assert_eq!(
+        spec_workflow_check(&document)["status"],
+        "warn",
+        "document: {document}"
+    );
+}
+
+#[test]
+fn child_placement_still_passes_when_doctor_runs_inside_the_worktree() {
+    // Agents run their gates from inside their own worktree, whose root never
+    // carries the ignored definition. Reading presence there instead of at the
+    // main checkout would warn about exactly the arrangement that makes the
+    // command reachable.
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    sandbox.with_openspec_workflow("child", false);
+    sandbox.commit_all();
+
+    let worktree = sandbox.repo.join(".git-paw/worktrees/agent");
+    sandbox.git(&["worktree", "add", "-b", "agent", ".git-paw/worktrees/agent"]);
+
+    let check = spec_workflow_check(&sandbox.doctor_json_in(&worktree)).clone();
+    assert_eq!(check["status"], "ok", "check: {check}");
+    assert!(
+        check["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("is reachable from every worktree"),
+        "check: {check}"
+    );
+}
+
+#[test]
+fn a_repository_without_a_spec_system_reports_no_workflow_command() {
+    // No spec system configured → the boot task prompt names no workflow
+    // command, so there is nothing to reach. The check is still reported.
+    let sandbox = Sandbox::new();
+    sandbox.init();
+
+    let (_, document) = sandbox.doctor_json();
+    let check = spec_workflow_check(&document);
+
+    assert_eq!(check["status"], "ok", "check: {check}");
+    assert_eq!(check["group"], "Spec system", "check: {check}");
+    assert!(
+        check["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no workflow command"),
+        "check: {check}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Read-only
 // ---------------------------------------------------------------------------
 

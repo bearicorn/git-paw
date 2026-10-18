@@ -46,6 +46,22 @@ the config manually, add that entry yourself. Git itself handles the nested
 `.git` correctly — a linked worktree carries its own `.git` file pointing
 back at the main repository.
 
+## Placement decides what an agent CLI can find
+
+The same containment affects what an agent's CLI can *read*, not just what a
+grant can cover. A worktree is populated from a commit, so anything the
+repository gitignores — an agent CLI's command and skill definitions at the
+repository root, `.claude/` among them — is simply absent from it. A **sibling**
+worktree lives outside the repository, so those uncommitted definitions are
+invisible: an agent told to run a workflow command finds nothing and quietly
+improvises one instead. A **child** worktree sits under the repository root, so
+the CLI's upward search through ancestor directories still reaches them.
+
+Committing the definitions fixes it under either layout. `git paw doctor`
+reports which applies: its [spec-workflow check](doctor.md#the-spec-workflow-reachability-check)
+warns when the command a [spec-driven launch](spec-driven-launch.md) instructs
+cannot be reached from where your worktrees are placed.
+
 ## Existing sessions are never moved
 
 Placement only governs **new** worktree creation. git-paw records the

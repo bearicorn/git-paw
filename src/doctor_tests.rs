@@ -64,6 +64,19 @@ fn every_non_ok_check_carries_a_remedy() {
             discovered_spec_count: 1,
             resolved_clis: vec!["claude".into()],
         },
+        spec_workflow: SpecWorkflowProbe {
+            resolved_format: Some("openspec".into()),
+            command: Some("/opsx:apply".into()),
+            placement: WorktreePlacement::Sibling,
+            clis: vec![WorkflowCliProbe {
+                cli: "claude".into(),
+                locations: vec![WorkflowDefinitionProbe {
+                    path: ".claude/commands/opsx/apply.md".into(),
+                    present: true,
+                    committed: false,
+                }],
+            }],
+        },
         bundled_scripts: BundledScriptsProbe {
             scripts: vec![ScriptProbe {
                 name: "sweep.sh",
@@ -458,6 +471,340 @@ fn spec_cli_check_warns_when_default_spec_cli_is_never_reached() {
     assert!(!remedy.trim().is_empty());
     assert!(check.detail.contains("claude-oss"));
     assert!(check.detail.contains("claude"));
+}
+
+// -- Spec-workflow reachability (GP-30) -----------------------------------
+
+/// The locations git-paw knows for `claude`'s `/opsx:apply` definitions, in the
+/// `(present, committed)` state a test wants.
+fn claude_opsx_locations(present: bool, committed: bool) -> Vec<WorkflowDefinitionProbe> {
+    [
+        ".claude/commands/opsx/apply.md",
+        ".claude/skills/openspec-apply-change/SKILL.md",
+    ]
+    .iter()
+    .map(|path| WorkflowDefinitionProbe {
+        path: (*path).to_string(),
+        present,
+        committed,
+    })
+    .collect()
+}
+
+/// An `OpenSpec` probe whose only worker CLI is `claude` with the given
+/// definition state.
+fn openspec_workflow_probe(
+    placement: WorktreePlacement,
+    locations: Vec<WorkflowDefinitionProbe>,
+) -> SpecWorkflowProbe {
+    SpecWorkflowProbe {
+        resolved_format: Some("openspec".into()),
+        command: Some("/opsx:apply".into()),
+        placement,
+        clis: vec![WorkflowCliProbe {
+            cli: "claude".into(),
+            locations,
+        }],
+    }
+}
+
+#[test]
+fn spec_workflow_check_warns_on_sibling_placement_with_an_uncommitted_definition() {
+    // The GP-30 shape: the definitions exist at the root but are gitignored,
+    // so a sibling worktree — populated from a commit — never carries them
+    // and the agent silently invents its own workflow.
+    let check = check_spec_workflow(&openspec_workflow_probe(
+        WorktreePlacement::Sibling,
+        claude_opsx_locations(true, false),
+    ));
+
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(check.detail.contains("/opsx:apply"), "{}", check.detail);
+    assert!(
+        check.detail.contains(".claude/commands/opsx/apply.md"),
+        "the detail should name the locations checked: {}",
+        check.detail
+    );
+    let remedy = check.remedy.as_deref().unwrap_or_default();
+    assert!(remedy.contains("commit"), "{remedy}");
+    assert!(
+        remedy.contains("worktree_placement = \"child\""),
+        "{remedy}"
+    );
+}
+
+#[test]
+fn spec_workflow_check_warns_on_sibling_placement_with_no_definition_at_all() {
+    // Nothing at the root and nothing committed: the sibling worktree has no
+    // way to reach the command, and both remedies still apply.
+    let check = check_spec_workflow(&openspec_workflow_probe(
+        WorktreePlacement::Sibling,
+        claude_opsx_locations(false, false),
+    ));
+
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(
+        check.detail.contains(".claude/commands/opsx/apply.md"),
+        "the detail should name the locations checked: {}",
+        check.detail
+    );
+    let remedy = check.remedy.as_deref().unwrap_or_default();
+    assert!(
+        remedy.contains("commit") && remedy.contains("worktree_placement = \"child\""),
+        "{remedy}"
+    );
+}
+
+#[test]
+fn a_staged_but_uncommitted_definition_does_not_reach_a_sibling_worktree() {
+    // `git worktree add` populates from a commit, so a definition that is
+    // only staged (present, not committed) does not travel — the same
+    // verdict as an ignored one.
+    let check = check_spec_workflow(&openspec_workflow_probe(
+        WorktreePlacement::Sibling,
+        claude_opsx_locations(true, false),
+    ));
+
+    assert_eq!(check.status, CheckStatus::Warn);
+}
+
+#[test]
+fn spec_workflow_check_passes_on_child_placement_with_a_root_definition() {
+    // A child worktree sits under the repository root, so the CLI's ancestor
+    // search still finds an uncommitted definition there.
+    let check = check_spec_workflow(&openspec_workflow_probe(
+        WorktreePlacement::Child,
+        claude_opsx_locations(true, false),
+    ));
+
+    assert_eq!(check.status, CheckStatus::Ok);
+    assert!(check.remedy.is_none());
+}
+
+#[test]
+fn spec_workflow_check_passes_when_the_definition_is_committed() {
+    // Committed means every new worktree checks it out, whatever the
+    // placement.
+    let check = check_spec_workflow(&openspec_workflow_probe(
+        WorktreePlacement::Sibling,
+        claude_opsx_locations(true, true),
+    ));
+
+    assert_eq!(check.status, CheckStatus::Ok);
+    assert!(check.remedy.is_none());
+    assert!(
+        check
+            .detail
+            .contains("is reachable from every worktree for claude"),
+        "{}",
+        check.detail
+    );
+}
+
+#[test]
+fn spec_workflow_check_warns_when_no_definition_exists_anywhere() {
+    let check = check_spec_workflow(&openspec_workflow_probe(
+        WorktreePlacement::Child,
+        claude_opsx_locations(false, false),
+    ));
+
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(
+        check
+            .detail
+            .contains(".claude/skills/openspec-apply-change/SKILL.md"),
+        "the detail should name the locations checked: {}",
+        check.detail
+    );
+    let remedy = check.remedy.as_deref().unwrap_or_default();
+    assert!(
+        !remedy.contains("worktree_placement = \"child\""),
+        "placement is already child — the remedy must not tell the user to set it: {remedy}"
+    );
+    assert!(
+        remedy.contains("install") && remedy.contains("commit"),
+        "{remedy}"
+    );
+}
+
+#[test]
+fn spec_workflow_check_is_not_applicable_for_a_format_without_a_workflow_command() {
+    // Markdown, Spec Kit and Superpowers embed the assignment in the sidecar
+    // instead of naming a command, so there is nothing to reach.
+    for format in ["markdown", "speckit", "superpowers"] {
+        let check = check_spec_workflow(&SpecWorkflowProbe {
+            resolved_format: Some(format.into()),
+            command: None,
+            placement: WorktreePlacement::Sibling,
+            clis: Vec::new(),
+        });
+        assert_eq!(check.status, CheckStatus::Ok, "{format}");
+        assert!(
+            check.detail.contains("no workflow command"),
+            "{}",
+            check.detail
+        );
+    }
+}
+
+#[test]
+fn spec_workflow_check_is_not_applicable_without_a_resolved_worker_cli() {
+    // No specs discovered → no CLI resolves → nothing to check.
+    let check = check_spec_workflow(&SpecWorkflowProbe {
+        resolved_format: Some("openspec".into()),
+        command: Some("/opsx:apply".into()),
+        placement: WorktreePlacement::Sibling,
+        clis: Vec::new(),
+    });
+
+    assert_eq!(check.status, CheckStatus::Ok);
+    assert!(
+        check.detail.contains("no spec-driven worker CLI"),
+        "{}",
+        check.detail
+    );
+}
+
+#[test]
+fn spec_workflow_check_warns_naming_only_the_unreachable_cli() {
+    // A mixed repository: one spec pins a second CLI whose definition is not
+    // committed. Only that CLI is named; the reachable one passes silently.
+    let check = check_spec_workflow(&SpecWorkflowProbe {
+        resolved_format: Some("openspec".into()),
+        command: Some("/opsx:apply".into()),
+        placement: WorktreePlacement::Sibling,
+        clis: vec![
+            WorkflowCliProbe {
+                cli: "claude".into(),
+                locations: claude_opsx_locations(true, true),
+            },
+            WorkflowCliProbe {
+                cli: "other-cli".into(),
+                locations: vec![WorkflowDefinitionProbe {
+                    path: ".other/commands/opsx/apply.md".into(),
+                    present: true,
+                    committed: false,
+                }],
+            },
+        ],
+    });
+
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(check.detail.contains("other-cli"), "{}", check.detail);
+    assert!(
+        check.detail.contains(".other/commands/opsx/apply.md"),
+        "{}",
+        check.detail
+    );
+    assert!(
+        !check.detail.contains("claude"),
+        "a reachable CLI must not be named as unreachable: {}",
+        check.detail
+    );
+}
+
+#[test]
+fn spec_workflow_check_reports_an_unknown_cli_without_warning() {
+    // git-paw does not know where this CLI keeps command definitions, so it
+    // says so rather than inventing a path and warning about it.
+    let check = check_spec_workflow(&SpecWorkflowProbe {
+        resolved_format: Some("openspec".into()),
+        command: Some("/opsx:apply".into()),
+        placement: WorktreePlacement::Sibling,
+        clis: vec![WorkflowCliProbe {
+            cli: "mystery-cli".into(),
+            locations: Vec::new(),
+        }],
+    });
+
+    assert_eq!(check.status, CheckStatus::Ok);
+    assert!(check.remedy.is_none());
+    assert!(
+        check.detail.contains("could not be verified") && check.detail.contains("mystery-cli"),
+        "{}",
+        check.detail
+    );
+}
+
+#[test]
+fn a_reachable_and_an_unknown_cli_each_scope_the_detail_to_themselves() {
+    // "reachable from every worktree" next to "could not be verified" reads
+    // as a contradiction unless the first clause names who it covers.
+    let check = check_spec_workflow(&SpecWorkflowProbe {
+        resolved_format: Some("openspec".into()),
+        command: Some("/opsx:apply".into()),
+        placement: WorktreePlacement::Sibling,
+        clis: vec![
+            WorkflowCliProbe {
+                cli: "claude".into(),
+                locations: claude_opsx_locations(true, true),
+            },
+            WorkflowCliProbe {
+                cli: "mystery-cli".into(),
+                locations: Vec::new(),
+            },
+        ],
+    });
+
+    assert_eq!(check.status, CheckStatus::Ok);
+    assert!(
+        check
+            .detail
+            .contains("is reachable from every worktree for claude"),
+        "the reachability claim must name the CLI it covers: {}",
+        check.detail
+    );
+    assert!(
+        check
+            .detail
+            .contains("could not be verified for mystery-cli"),
+        "{}",
+        check.detail
+    );
+}
+
+#[test]
+fn spec_workflow_check_is_never_a_failure() {
+    for probe in [
+        openspec_workflow_probe(
+            WorktreePlacement::Sibling,
+            claude_opsx_locations(false, false),
+        ),
+        openspec_workflow_probe(
+            WorktreePlacement::Sibling,
+            claude_opsx_locations(true, false),
+        ),
+        SpecWorkflowProbe::default(),
+    ] {
+        assert_ne!(
+            check_spec_workflow(&probe).status,
+            CheckStatus::Fail,
+            "an unreachable workflow degrades a launch, it never blocks one"
+        );
+    }
+}
+
+#[test]
+fn only_the_openspec_format_instructs_a_workflow_command() {
+    // The per-format match is the seam `launch-prompt-entry-point` later
+    // swaps; pin it against the boot task prompts it mirrors.
+    use crate::specs::SpecBackendKind;
+    let openspec_prompt = include_str!("../assets/boot-task-prompts/openspec.md");
+    assert!(
+        openspec_prompt.contains("/opsx:apply"),
+        "the OpenSpec boot task prompt should still instruct the command the check names"
+    );
+    assert_eq!(
+        instructed_workflow_command(SpecBackendKind::OpenSpec),
+        Some("/opsx:apply")
+    );
+    for kind in [
+        SpecBackendKind::Markdown,
+        SpecBackendKind::SpecKit,
+        SpecBackendKind::Superpowers,
+    ] {
+        assert_eq!(instructed_workflow_command(kind), None, "{kind:?}");
+    }
 }
 
 // -- Bundled scripts ------------------------------------------------------
