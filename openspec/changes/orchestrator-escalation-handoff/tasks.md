@@ -1,0 +1,26 @@
+## 1. Config + resolution
+
+- [ ] 1.1 `EscalationConfig { enabled: bool = true, timeout_seconds: u64 = 1800 }` under `[supervisor.escalation]` (`serde(default)`); reject `timeout_seconds = 0`; round-trip + defaults tests
+- [ ] 1.2 `CustomCli.headless_args: Option<String>`; `resolve_headless_args(cli, clis)` (override → built-in `claude` `-p`, `codex` `exec` → none); reject an empty override; verify the rows upstream; unit tests
+- [ ] 1.3 Bind `resolve_approval_flags([supervisor].cli, approval | agent_approval)` to the invocation; full-auto + unmapped CLI warns and proceeds flagless; tests
+
+## 2. Escalation module
+
+- [ ] 2.1 Extend the `CommandRunner` seam (`src/command_runner.rs`, today only blocking argv-only `run` / `run_inheriting_stdio` at `:75-97`) with a non-blocking spawn taking a spec {program, args, cwd, stdin bytes, env additions, own process group, stdout/stderr append file, timeout} and returning a handle polled as running / exited(code) / timed-out, with a group kill; `RealCommandRunner` on `std::process::Command` (`process_group(0)` on Unix), no new dependency; the recording fake stores the full spec; real-adapter tests (cwd, stdin delivered and closed, env visible, a child of the child killed with the group on timeout); existing `run` / `run_inheriting_stdio` callers unchanged
+- [ ] 2.2 `src/supervisor/escalation.rs`: `render_context(kind, …)` from the retained renderers + `include_str!("../../assets/escalation-framing.md")` (names `SKILL.md`, the sidecar, the broker URL, the helper/MCP instruction, and the instruction never to run `sweep.sh approve` or answer a permission prompt; overrides the renderers' "escalate to the human" wording — for a one-shot, escalating means publishing why on the broker and exiting; for a merge decision, the PP-25 rule: merge fast-forward only once every gate is verified, escalate only on conflict, correction-cycle exhaustion or regression); tests for each handed-off kind (question, merge decision, correction-exhausted)
+- [ ] 2.3 Resolution at loop start (CLI + headless form, or the reason); launch-time notice; `--dry-run` line
+- [ ] 2.4 Spawn through the extended `CommandRunner` seam (2.1): cwd = repo root, argv = cli + approval flags + headless args, stdin = context, env `GIT_PAW_BROKER_URL`, no tty, stdout/stderr → `.git-paw/logs/<session>/orchestrator-escalations.log`, own process group; assert no credential in argv/env
+- [ ] 2.5 Queue: one in flight, FIFO, keyed by `(kind, agent_id, question text | artifact status | none)`; an escalation whose key is already queued or in flight is dropped (sources are already once-only: messages by the log cursor, correction-exhausted by `CorrectionState`; `DedupWindow` is not used); timeout kills the group and records `timeout`; wind-down stops dequeuing; fake-runner tests for serialization, dedup (a re-published `committed` artifact while pending → not queued; the same after completion → queued), timeout
+
+## 3. Decision + shell wiring
+
+- [ ] 3.1 `decide_message`'s question and merge-decision judgment calls (after `NoteJudgmentCall`) and `decide_nudge`'s correction-exhausted branch (after its broker-escalation effect) return `InvokeOrchestrator` (when resolvable and enabled); `decide_prompt` never returns it (its v0.17.0 `RecordManualDecision` → `PublishEscalation` → `RecordLearning` effects are unchanged) and neither does the early correction heads-up; decision table tests, including "a live permission prompt yields no `InvokeOrchestrator`" and "the early heads-up yields no `InvokeOrchestrator`"
+- [ ] 3.2 Shell: apply `InvokeOrchestrator` via the queue; outcome publish (`agent.status` from `supervisor`, `detail {escalation_key, exit_code|"timeout", duration_seconds}`)
+- [ ] 3.3 Exit summary: invocation counts per outcome, still-queued count, escalation log path, or the unavailable reason; tests for the three "Exit summary reports headless invocation outcomes" scenarios
+- [ ] 3.4 E2E (`tests/unattended_drive_e2e.rs`): stub CLI on PATH with `[clis.stub].headless_args`; an ambiguous `agent.question` spawns it once with the context on stdin; a live permission prompt on another worker spawns nothing and still reaches the broker and the manual-decision log; the sweep continues; the outcome appears on `/status`
+
+## 4. Docs + gates
+
+- [ ] 4.1 `docs/src/user-guide/supervisor.md` (headless hand-off; permission prompts are never handed off and stay with the human; `[supervisor].approval` binding: under `auto` with `git paw setup-cli` grants a one-shot can answer questions but cannot publish a verdict or merge, a merge-decision hand-off needs `full-auto` (recommended in the sandbox) or user-written allow rules; when to set `enabled = false`), configuration reference (`[supervisor.escalation]`, `headless_args`), `supported-clis.md` (headless forms), README bullet, `security-posture.md` (`full-auto` one-shot = unattended root-level write access for up to `timeout_seconds`; it bypasses the `ask` rule on `sweep.sh approve`, so the framing is the guard)
+- [ ] 4.2 `tests/lang_agnostic_skill_audit.rs` covers rendered contexts for every kind; `mdbook build docs/` succeeds
+- [ ] 4.3 Every scenario maps to a named test; `just check` + `just deny` green; full suite vs merge-base green
