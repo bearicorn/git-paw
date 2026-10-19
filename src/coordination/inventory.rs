@@ -23,6 +23,8 @@ use serde::Deserialize;
 
 use crate::config::claude_prompt_profile;
 use crate::error::PawError;
+use crate::session::SessionMode;
+use crate::surface::{SUPERVISOR_AGENT_ID, SessionLayout};
 
 /// Best-effort detected interaction mode of an agent's CLI pane.
 ///
@@ -103,7 +105,7 @@ impl AgentInventory {
         let mut ids: Vec<String> = self
             .entries
             .iter()
-            .filter(|e| e.branch_id != "supervisor")
+            .filter(|e| e.branch_id != SUPERVISOR_AGENT_ID)
             .map(|e| e.branch_id.clone())
             .collect();
         ids.sort();
@@ -179,14 +181,21 @@ pub fn parse_pane_paths(output: &str) -> Vec<(usize, String)> {
 /// mapping, per the v0.5.0 doctrine (match on the worktree path, never on
 /// index ordering).
 ///
-/// The supervisor occupies pane 0 by construction; every other agent's
-/// worktree basename ends in `-<agent_id>` (e.g. `myproj-feat-auth` for
-/// `feat-auth`). The `-` prefix on the suffix prevents `feat-a` from matching
-/// `…-feat-api`.
+/// The supervisor row has no worktree of its own, so its index comes from
+/// `layout` — `None` in a layout that reserves no supervisor surface. Every
+/// other agent's worktree basename ends in `-<agent_id>` (e.g.
+/// `myproj-feat-auth` for `feat-auth`). The `-` prefix on the suffix prevents
+/// `feat-a` from matching `…-feat-api`.
 #[must_use]
-pub fn match_pane(agent_id: &str, pane_paths: &[(usize, String)]) -> Option<usize> {
-    if agent_id == "supervisor" {
-        return Some(0);
+pub fn match_pane(
+    agent_id: &str,
+    pane_paths: &[(usize, String)],
+    layout: &SessionLayout,
+) -> Option<usize> {
+    // Wire identity: this is the broker roster row named `supervisor`, not a
+    // surface whose role is being decided. The INDEX is the layout's.
+    if agent_id == SUPERVISOR_AGENT_ID {
+        return layout.supervisor_index();
     }
     let suffix = format!("-{agent_id}");
     pane_paths.iter().find_map(|(idx, path)| {
@@ -203,17 +212,19 @@ pub fn match_pane(agent_id: &str, pane_paths: &[(usize, String)]) -> Option<usiz
 /// modes into inventory entries.
 ///
 /// `modes` maps a pane index to its detected [`Mode`]; an agent whose pane is
-/// absent from the map (or unmatched) reports [`Mode::Unknown`].
+/// absent from the map (or unmatched) reports [`Mode::Unknown`]. `layout`
+/// answers the reserved indices no worktree path can resolve.
 #[must_use]
 pub fn join_inventory<S: std::hash::BuildHasher>(
     agents: Vec<StatusAgent>,
     pane_paths: &[(usize, String)],
     modes: &HashMap<usize, Mode, S>,
+    layout: &SessionLayout,
 ) -> Vec<AgentEntry> {
     agents
         .into_iter()
         .map(|a| {
-            let pane_index = match_pane(&a.agent_id, pane_paths);
+            let pane_index = match_pane(&a.agent_id, pane_paths, layout);
             let mode = pane_index
                 .and_then(|idx| modes.get(&idx).copied())
                 .unwrap_or(Mode::Unknown);
@@ -427,7 +438,10 @@ pub fn build_inventory(broker_url: &str, tmux_session: &str) -> Result<AgentInve
     for (idx, _) in &pane_paths {
         modes.insert(*idx, detect_pane_mode(tmux_session, *idx));
     }
-    let entries = join_inventory(agents, &pane_paths, &modes);
+    // The coordination commands drive a supervisor-mode session, whose layout
+    // reserves the supervisor surface the roster's `supervisor` row names.
+    let layout = SessionLayout::planned(SessionMode::Supervisor, true);
+    let entries = join_inventory(agents, &pane_paths, &modes, &layout);
     Ok(AgentInventory {
         entries,
         refreshed_at: Instant::now(),
@@ -542,6 +556,12 @@ mod tests {
         ]
     }"#;
 
+    /// The layout the coordination commands drive: supervisor at pane 0,
+    /// dashboard at 1, coding agents from 2.
+    fn supervised() -> SessionLayout {
+        SessionLayout::planned(SessionMode::Supervisor, true)
+    }
+
     fn fixture_inventory() -> AgentInventory {
         let agents = parse_status_agents(STATUS_JSON).unwrap();
         // Non-sequential pane mapping: feat-api on a lower index than feat-auth.
@@ -550,7 +570,7 @@ mod tests {
         );
         let mut modes = HashMap::new();
         modes.insert(2usize, Mode::AcceptEdits);
-        let entries = join_inventory(agents, &panes, &modes);
+        let entries = join_inventory(agents, &panes, &modes, &supervised());
         AgentInventory {
             entries,
             refreshed_at: Instant::now(),
@@ -590,8 +610,8 @@ mod tests {
     fn match_pane_does_not_partial_match_prefix() {
         let panes = parse_pane_paths("1 /home/user/proj-feat-api\n");
         // `feat-a` must NOT match `…-feat-api`.
-        assert_eq!(match_pane("feat-a", &panes), None);
-        assert_eq!(match_pane("feat-api", &panes), Some(1));
+        assert_eq!(match_pane("feat-a", &panes, &supervised()), None);
+        assert_eq!(match_pane("feat-api", &panes, &supervised()), Some(1));
     }
 
     #[test]
@@ -599,6 +619,27 @@ mod tests {
         let inv = fixture_inventory();
         let sup = inv.find("supervisor").unwrap();
         assert_eq!(sup.pane_index, Some(0));
+    }
+
+    #[test]
+    fn supervisor_row_resolves_to_the_layouts_supervisor_index() {
+        // The supervisor row owns no worktree, so its index is the layout's —
+        // and a layout that reserves no supervisor surface yields none.
+        let panes = parse_pane_paths("0 /home/user/myproj\n1 /home/user/myproj-feat-a\n");
+        assert_eq!(
+            match_pane(SUPERVISOR_AGENT_ID, &panes, &supervised()),
+            Some(0)
+        );
+        for bare in [
+            SessionLayout::planned(SessionMode::Bare, true),
+            SessionLayout::planned(SessionMode::Bare, false),
+        ] {
+            assert_eq!(
+                match_pane(SUPERVISOR_AGENT_ID, &panes, &bare),
+                None,
+                "a bare layout reserves no supervisor surface"
+            );
+        }
     }
 
     #[test]
@@ -617,7 +658,7 @@ mod tests {
         // lingers until the next sweep but no pane matches → pane_index None.
         let agents = parse_status_agents(STATUS_JSON).unwrap();
         let panes = parse_pane_paths("0 /home/user/myproj\n2 /home/user/myproj-feat-auth\n");
-        let entries = join_inventory(agents, &panes, &HashMap::new());
+        let entries = join_inventory(agents, &panes, &HashMap::new(), &supervised());
         let inv = AgentInventory {
             entries,
             refreshed_at: Instant::now(),

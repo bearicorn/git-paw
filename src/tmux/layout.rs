@@ -13,7 +13,7 @@ use crate::error::PawError;
 /// Agents are spliced into a row by successive `split-window -h`, and each
 /// `-h` split halves the *current* pane — so a raw 3-agent row renders
 /// 50/25/25, not equal thirds (the v0.8.0 G3 failure). For each agent row
-/// (up to [`crate::supervisor::layout::SUPERVISOR_AGENTS_PER_ROW`] panes) this
+/// (up to [`crate::surface::SUPERVISOR_AGENTS_PER_ROW`] panes) this
 /// resizes every pane but the last to `(window_width - separators) /
 /// panes_in_row` columns — an equal share after accounting for the
 /// one-column pane separators — and lets the last pane absorb the rounding
@@ -25,7 +25,7 @@ use crate::error::PawError;
 /// is [`rebalance_agent_rows`].
 #[must_use]
 pub fn agent_row_widths(window_width: usize, agent_count: usize) -> Vec<(usize, usize)> {
-    use crate::supervisor::layout::{SUPERVISOR_AGENTS_PER_ROW, SUPERVISOR_PANE_OFFSET};
+    use crate::surface::{SUPERVISOR_AGENTS_PER_ROW, SUPERVISOR_PANE_OFFSET};
 
     let mut targets = Vec::new();
     if window_width == 0 {
@@ -80,7 +80,7 @@ fn query_window_width(
 ///
 /// Must run AFTER the splits (start/add) or the kill + height re-tile (remove)
 /// settle so pane indices are contiguous (panes 2..N+1). No agent row exceeds
-/// [`crate::supervisor::layout::SUPERVISOR_AGENTS_PER_ROW`] (5) by
+/// [`crate::surface::SUPERVISOR_AGENTS_PER_ROW`] (5) by
 /// construction, bounding the smallest equal-width target to ~20% per pane
 /// (design D5). Best-effort per resize; one pane's tmux failure does not abort
 /// the rest.

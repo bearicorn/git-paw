@@ -63,6 +63,7 @@ use crate::config::{
 use crate::error::PawError;
 use crate::session::{self, SessionStatus};
 use crate::static_regex::static_regex;
+use crate::surface::{SessionLayout, SurfaceRole};
 
 use super::approval_gate::{approval_dedup_key, live_prompt_in_tail};
 use super::claim::PaneClaim;
@@ -91,15 +92,7 @@ pub const DEDUP_WINDOW: Duration = Duration::from_mins(5);
 /// orchestrator is not prompt-stormed by a per-tick nudge.
 pub const ORCHESTRATION_NUDGE_INTERVAL: Duration = Duration::from_mins(5);
 
-/// The `agent_id` under which the supervisor's own pane (pane 0) is tracked.
-pub const SUPERVISOR_AGENT_ID: &str = "supervisor";
-
-/// Pane index of the supervisor's own pane in the supervisor layout.
-const SUPERVISOR_PANE_INDEX: usize = 0;
-
-/// Pane index of the dashboard TUI in the supervisor layout. Never swept for
-/// approval — it is a `git-paw __dashboard` process, not an agent CLI.
-const DASHBOARD_PANE_INDEX: usize = 1;
+pub use crate::surface::SUPERVISOR_AGENT_ID;
 
 /// Learning category recorded when the loop absorbs friction it could not
 /// auto-approve (per `learnings-supervisor-observation-channel`).
@@ -123,63 +116,30 @@ pub struct AgentPane {
     pub branch: String,
 }
 
-/// The role a swept pane resolves to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PaneRole {
-    /// Pane 0 — the supervisor's own pane.
-    Supervisor,
-    /// Pane 1 — the dashboard TUI; never swept for approval.
-    Dashboard,
-    /// A coding-agent pane, resolved by `pane_current_path`. Carries the
-    /// resolved agent id.
-    Coding(String),
-    /// The pane's path matched no known agent and it is not pane 0/1.
-    Unknown,
+/// Borrows `agents` as the `(agent_id, worktree root)` owner pairs
+/// [`SessionLayout::resolve`] matches a surface's owning directory against.
+fn surface_owners(agents: &[AgentPane]) -> impl Iterator<Item = (&str, &Path)> {
+    agents
+        .iter()
+        .map(|a| (a.agent_id.as_str(), a.worktree_path.as_path()))
 }
 
-impl PaneRole {
-    /// The `agent_id` used for broker alerts and the summary, or `None` for the
-    /// dashboard pane (which is never acted on).
-    #[must_use]
-    pub fn agent_id(&self) -> Option<&str> {
-        match self {
-            PaneRole::Supervisor => Some(SUPERVISOR_AGENT_ID),
-            PaneRole::Coding(id) => Some(id.as_str()),
-            PaneRole::Unknown => Some("unknown"),
-            PaneRole::Dashboard => None,
-        }
-    }
-}
-
-/// Resolves a pane to its agent role.
+/// Resolves a pane to its [`SurfaceRole`] under `layout`.
 ///
-/// Coding agents resolve by matching `pane_current_path` against a known
-/// `worktree_path` (canonicalised where possible) — NEVER by pane index or
-/// CLI-argument order, because pane indices are neither alphabetical nor
-/// argument-ordered and drift on layout changes (D2). Pane 0 resolves to the
-/// supervisor and pane 1 to the dashboard; both run at the repo root, so the
-/// index disambiguates the two only for panes that did not match a coding
-/// agent's distinct worktree path.
+/// A thin delegate to the single resolver in [`crate::surface`], kept here as
+/// the drive loop's name for the operation. Coding agents resolve by matching
+/// `pane_current_path` against a known `worktree_path` (canonicalised where
+/// possible) — NEVER by pane index or CLI-argument order, because pane indices
+/// are neither alphabetical nor argument-ordered and drift on layout changes
+/// (D2). Only then does the layout's reserved-index table decide.
 #[must_use]
 pub fn resolve_pane_agent(
+    layout: SessionLayout,
     pane_index: usize,
     pane_current_path: &str,
     agents: &[AgentPane],
-) -> PaneRole {
-    // Coding agents first, by working directory — index-independent so a
-    // renumbered layout still attributes the pane correctly.
-    let candidate = canonical_or_owned(Path::new(pane_current_path));
-    for agent in agents {
-        if paths_match(&candidate, &agent.worktree_path) {
-            return PaneRole::Coding(agent.agent_id.clone());
-        }
-    }
-    // Not a coding worktree: pane 0 is the supervisor, pane 1 the dashboard.
-    match pane_index {
-        SUPERVISOR_PANE_INDEX => PaneRole::Supervisor,
-        DASHBOARD_PANE_INDEX => PaneRole::Dashboard,
-        _ => PaneRole::Unknown,
-    }
+) -> SurfaceRole {
+    layout.resolve(pane_index, pane_current_path, surface_owners(agents))
 }
 
 /// Returns the pane index of the orchestrator (supervisor CLI) pane, or `None`
@@ -187,14 +147,18 @@ pub fn resolve_pane_agent(
 ///
 /// Resolution reuses [`resolve_pane_agent`], so the orchestrator is identified
 /// the same structural way every other pane is. There is deliberately no
-/// LLM-liveness probe and no broker heartbeat: the session layout already fixes
-/// pane 0 as the supervisor, so pane **presence** is the signal.
+/// LLM-liveness probe and no broker heartbeat: the layout already reserves an
+/// index for the supervisor surface, so pane **presence** is the signal.
 #[must_use]
-pub fn orchestrator_pane_index(panes: &[PaneInfo], agents: &[AgentPane]) -> Option<usize> {
+pub fn orchestrator_pane_index(
+    layout: SessionLayout,
+    panes: &[PaneInfo],
+    agents: &[AgentPane],
+) -> Option<usize> {
     panes
         .iter()
         .find(|p| {
-            resolve_pane_agent(p.pane_index, &p.pane_current_path, agents) == PaneRole::Supervisor
+            resolve_pane_agent(layout, p.pane_index, &p.pane_current_path, agents).is_supervisor()
         })
         .map(|p| p.pane_index)
 }
@@ -206,23 +170,12 @@ pub fn orchestrator_pane_index(panes: &[PaneInfo], agents: &[AgentPane]) -> Opti
 /// loop's escalation behaviour is then identical to the pre-orchestrator
 /// version: a uniform broker review item and no pane injection at all.
 #[must_use]
-pub fn orchestrator_present(panes: &[PaneInfo], agents: &[AgentPane]) -> bool {
-    orchestrator_pane_index(panes, agents).is_some()
-}
-
-/// Canonicalises `p`, falling back to the path as-given when it cannot be
-/// resolved (e.g. it does not exist in a unit test).
-fn canonical_or_owned(p: &Path) -> PathBuf {
-    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
-}
-
-/// Compares a (possibly canonicalised) pane path against a worktree root,
-/// tolerating symlink differences by canonicalising the root too.
-fn paths_match(pane_path: &Path, worktree_root: &Path) -> bool {
-    if pane_path == worktree_root {
-        return true;
-    }
-    canonical_or_owned(worktree_root) == *pane_path
+pub fn orchestrator_present(
+    layout: SessionLayout,
+    panes: &[PaneInfo],
+    agents: &[AgentPane],
+) -> bool {
+    orchestrator_pane_index(layout, panes, agents).is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,6 +1131,9 @@ pub struct DriveConfig {
     /// [`crate::git::default_branch`] — used only to label the ref-derived
     /// merged/unmerged text in the exit summary (`drive-loop-exit-summary-truth`).
     pub default_branch: String,
+    /// The session's reserved-index record. Every role the loop resolves comes
+    /// from it, so no decision compares a pane index to a literal.
+    pub layout: SessionLayout,
 }
 
 impl Default for DriveConfig {
@@ -1195,6 +1151,9 @@ impl Default for DriveConfig {
             clis: HashMap::new(),
             supervisor_cli: String::new(),
             default_branch: String::new(),
+            // The loop runs only under `cmd_supervisor`, so the supervised
+            // layout (supervisor 0, dashboard 1, agents 2+) is the default.
+            layout: SessionLayout::planned(crate::session::SessionMode::Supervisor, true),
         }
     }
 }
@@ -1238,6 +1197,7 @@ pub fn drive_loop(
     config: &DriveConfig,
     instance: &dyn SessionInstanceGuard,
 ) -> DriveSummary {
+    let layout = config.layout;
     let coding_ids: Vec<String> = agents.iter().map(|a| a.agent_id.clone()).collect();
     let mut dedup = DedupWindow::new(config.dedup_window);
     let mut escalations: Vec<Escalation> = Vec::new();
@@ -1288,15 +1248,15 @@ pub fn drive_loop(
         let ctx = SweepContext {
             session,
             repo_root,
-            orchestrator: orchestrator_pane_index(&panes, agents),
+            orchestrator: orchestrator_pane_index(layout, &panes, agents),
             orchestrator_settle_delay,
         };
         orchestrator_monitored |= ctx.orchestrator.is_some();
         let mut pane_by_agent: HashMap<String, usize> = HashMap::new();
         for pane in panes {
-            let role = resolve_pane_agent(pane.pane_index, &pane.pane_current_path, agents);
+            let role = resolve_pane_agent(layout, pane.pane_index, &pane.pane_current_path, agents);
             let Some(agent_id) = role.agent_id() else {
-                continue; // dashboard pane — never acted on
+                continue; // dashboard surface — never acted on
             };
             let agent_id = agent_id.to_string();
             pane_by_agent.insert(agent_id.clone(), pane.pane_index);
@@ -1304,7 +1264,7 @@ pub fn drive_loop(
             match sweep_pane(
                 ctx,
                 &pane,
-                &agent_id,
+                &role,
                 deps,
                 config,
                 &mut dedup,
@@ -1842,12 +1802,17 @@ enum PaneSweepOutcome {
 fn sweep_pane(
     ctx: SweepContext<'_>,
     pane: &PaneInfo,
-    agent_id: &str,
+    role: &SurfaceRole,
     deps: &mut DriveDeps<'_>,
     config: &DriveConfig,
     dedup: &mut DedupWindow,
     status: &[AgentStatusRow],
 ) -> PaneSweepOutcome {
+    let Some(agent_id) = role.agent_id() else {
+        // The dashboard surface is never acted on. The caller already skips
+        // it; this keeps the role the single gate rather than a second rule.
+        return PaneSweepOutcome::None;
+    };
     let session = ctx.session;
     let capture = deps.capturer.capture(session, pane.pane_index);
 
@@ -1862,7 +1827,7 @@ fn sweep_pane(
 
     let markers = &resolve_prompt_profile(cli, &config.clis).cli_unavailable_markers;
     if let Some(m) = cli_unavailable_line(&capture, markers) {
-        if agent_id == SUPERVISOR_AGENT_ID {
+        if role.is_supervisor() {
             return PaneSweepOutcome::OrchestratorCliUnavailable(m.line);
         }
         // Coding pane: non-blocking escalation, deduped on (agent_id, matched
@@ -3019,9 +2984,13 @@ pub struct DriveRunOptions {
     /// path (`drive-loop-actuator-robustness`, GP-15) — the same resolver the
     /// boot-prompt injection path uses.
     pub clis: HashMap<String, CustomCli>,
-    /// CLI running in the orchestrator's pane (pane 0), for its nudge settle
-    /// delay. Empty when unknown.
+    /// CLI running in the orchestrator's surface, for its nudge settle delay.
+    /// Empty when unknown.
     pub supervisor_cli: String,
+    /// The session's reserved-index record — the single answer to which
+    /// surface plays which role, so the loop never compares an index to a
+    /// literal.
+    pub layout: SessionLayout,
 }
 
 /// Runs the unattended drive loop with production dependencies, prints the exit
@@ -3057,6 +3026,7 @@ pub fn run_drive_loop(
         session_created_at,
         clis,
         supervisor_cli,
+        layout,
     } = options;
 
     let instance = FileSessionInstanceGuard {
@@ -3114,6 +3084,7 @@ pub fn run_drive_loop(
         clis,
         supervisor_cli,
         default_branch,
+        layout,
         ..DriveConfig::default()
     };
 
@@ -3227,6 +3198,13 @@ struct StatusResponse {
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+
+    /// The layout the loop runs under in production: `cmd_supervisor` is its
+    /// only caller, so the supervisor surface sits at 0, the dashboard at 1
+    /// and coding agents from 2.
+    fn supervised_layout() -> SessionLayout {
+        SessionLayout::planned(crate::session::SessionMode::Supervisor, true)
+    }
 
     /// `core-project-conventions`' "Every static pattern compiles under test":
     /// forces every static regex in this module to compile.
@@ -3746,12 +3724,12 @@ mod tests {
         ];
         // Pane index 4 holds feat/b's worktree; index 2 holds feat/a's.
         assert_eq!(
-            resolve_pane_agent(4, "/repo-feat-b", &agents),
-            PaneRole::Coding("feat-b".to_string())
+            resolve_pane_agent(supervised_layout(), 4, "/repo-feat-b", &agents),
+            SurfaceRole::Coding("feat-b".to_string())
         );
         assert_eq!(
-            resolve_pane_agent(2, "/repo-feat-a", &agents),
-            PaneRole::Coding("feat-a".to_string())
+            resolve_pane_agent(supervised_layout(), 2, "/repo-feat-a", &agents),
+            SurfaceRole::Coding("feat-a".to_string())
         );
     }
 
@@ -3763,10 +3741,13 @@ mod tests {
             branch: "feat/a".to_string(),
         }];
         assert_eq!(
-            resolve_pane_agent(0, "/repo", &agents),
-            PaneRole::Supervisor
+            resolve_pane_agent(supervised_layout(), 0, "/repo", &agents),
+            SurfaceRole::Supervisor
         );
-        assert_eq!(resolve_pane_agent(1, "/repo", &agents), PaneRole::Dashboard);
+        assert_eq!(
+            resolve_pane_agent(supervised_layout(), 1, "/repo", &agents),
+            SurfaceRole::Dashboard
+        );
     }
 
     // --- every live prompt is escalated, none is approved -------------------
@@ -3789,6 +3770,17 @@ mod tests {
                 self.escalations
             );
             &self.escalations[0]
+        }
+    }
+
+    /// The surface role a probe's `agent_id` stands for: the supervisor's wire
+    /// id names the supervisor surface, any other id a coding surface — the
+    /// same pairing [`SessionLayout::resolve`] produces for those surfaces.
+    fn probe_role(agent_id: &str) -> SurfaceRole {
+        if agent_id == SUPERVISOR_AGENT_ID {
+            SurfaceRole::Supervisor
+        } else {
+            SurfaceRole::Coding(agent_id.to_string())
         }
     }
 
@@ -3837,7 +3829,15 @@ mod tests {
                 pane_index,
                 pane_current_path: "/repo-feat-a".to_string(),
             };
-            sweep_pane(ctx, &pane, agent_id, &mut deps, &config, &mut dedup, &[])
+            sweep_pane(
+                ctx,
+                &pane,
+                &probe_role(agent_id),
+                &mut deps,
+                &config,
+                &mut dedup,
+                &[],
+            )
         };
         SweepProbe {
             outcome,
@@ -4052,7 +4052,15 @@ mod tests {
                     pane_index,
                     pane_current_path: "/repo-feat-a".to_string(),
                 };
-                sweep_pane(ctx, &pane, agent_id, &mut deps, &config, &mut dedup, &[]);
+                sweep_pane(
+                    ctx,
+                    &pane,
+                    &probe_role(agent_id),
+                    &mut deps,
+                    &config,
+                    &mut dedup,
+                    &[],
+                );
             }
         }
         alerts.escalations
@@ -7567,17 +7575,334 @@ mod tests {
         let agents = two_agents();
         let with_supervisor = vec![pane(0, "/repo"), pane(2, "/repo-feat-a")];
         assert_eq!(
-            orchestrator_pane_index(&with_supervisor, &agents),
+            orchestrator_pane_index(supervised_layout(), &with_supervisor, &agents),
             Some(0),
             "pane 0 at the repo root is the orchestrator"
         );
-        assert!(orchestrator_present(&with_supervisor, &agents));
+        assert!(orchestrator_present(
+            supervised_layout(),
+            &with_supervisor,
+            &agents
+        ));
 
         let workers_only = vec![pane(2, "/repo-feat-a"), pane(3, "/repo-feat-b")];
-        assert_eq!(orchestrator_pane_index(&workers_only, &agents), None);
+        assert_eq!(
+            orchestrator_pane_index(supervised_layout(), &workers_only, &agents),
+            None
+        );
         assert!(
-            !orchestrator_present(&workers_only, &agents),
+            !orchestrator_present(supervised_layout(), &workers_only, &agents),
             "a pure --unattended run with no supervisor pane has no orchestrator"
+        );
+    }
+
+    // --- Spec scenario "Behavior is unchanged": drive-loop parity ----------
+
+    /// Everything one parity run of the loop did, keyed by surface.
+    struct LoopTrace {
+        /// Pane indices the loop captured (i.e. swept), in index order.
+        swept: Vec<usize>,
+        /// `(agent_id, verdict)` per escalation, in order.
+        escalated: Vec<(String, String)>,
+        /// Pane indices the loop sent keystrokes to, deduped in index order.
+        keyed: Vec<usize>,
+        /// The terminal outcome.
+        outcome: DriveOutcome,
+    }
+
+    /// A capturer that records which pane indices were captured, so a parity
+    /// test can assert the SET of surfaces the loop swept.
+    struct TracingCapturer {
+        by_pane: HashMap<usize, String>,
+        seen: RefCell<Vec<usize>>,
+    }
+    impl PaneCapture for TracingCapturer {
+        fn capture(&self, _session: &str, pane_index: usize) -> String {
+            self.seen.borrow_mut().push(pane_index);
+            self.by_pane.get(&pane_index).cloned().unwrap_or_default()
+        }
+    }
+
+    /// Drives one sweep of the loop under `layout` and reports what it touched.
+    ///
+    /// The heartbeat is one poll interval, so the loop exits after a single
+    /// sweep and the trace is that sweep's decisions with nothing accumulated
+    /// on top.
+    fn trace_one_sweep(
+        layout: SessionLayout,
+        agents: &[AgentPane],
+        panes: Vec<PaneInfo>,
+        pane_text: &[(usize, &str)],
+    ) -> LoopTrace {
+        let enumerator = FakeEnumerator { panes };
+        let capturer = TracingCapturer {
+            by_pane: pane_text
+                .iter()
+                .map(|(i, t)| (*i, (*t).to_string()))
+                .collect(),
+            seen: RefCell::new(Vec::new()),
+        };
+        let mut dispatcher = RecordingDispatcher::default();
+        let status = ScriptedStatus::new(vec![Vec::new()]);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
+        let mut refresher = RecordingRefresher::default();
+        let messages = ScriptedMessages::none();
+        let config = DriveConfig {
+            poll_interval: Duration::from_secs(1),
+            heartbeat: Duration::from_secs(1),
+            layout,
+            ..DriveConfig::default()
+        };
+        let summary = {
+            let mut deps = DriveDeps {
+                enumerator: &enumerator,
+                capturer: &capturer,
+                dispatcher: &mut dispatcher,
+                status: &status,
+                messages: &messages,
+                clock: &clock,
+                merge_check: &FakeMergeCheck::default(),
+                alerts: &mut alerts,
+                learnings: &mut learnings,
+                manual_decisions: &mut manual_decisions,
+                refresher: &mut refresher,
+                wedged: Vec::new(),
+            };
+            drive_loop_in_tmp("paw-test", agents, &mut deps, &config)
+        };
+
+        let mut swept = capturer.seen.borrow().clone();
+        swept.sort_unstable();
+        swept.dedup();
+        let mut keyed: Vec<usize> = dispatcher.events.iter().map(|(p, _)| *p).collect();
+        keyed.sort_unstable();
+        keyed.dedup();
+        LoopTrace {
+            swept,
+            escalated: alerts
+                .escalations
+                .iter()
+                .map(|e| (e.agent_id.clone(), e.verdict.clone()))
+                .collect(),
+            keyed,
+            outcome: summary.outcome,
+        }
+    }
+
+    /// Spec scenario "Behavior is unchanged", supervised half: every surface
+    /// the loop sweeps, the agent id it escalates each one under, the surface
+    /// it types into and the outcome it exits on are exactly what the
+    /// pre-refactor loop produced for the supervised layout — pane 1 (the
+    /// dashboard) is never touched, the coding panes escalate under their own
+    /// ids, and the hand-off types into the supervisor surface and nowhere
+    /// else.
+    #[test]
+    fn supervised_layout_sweeps_escalates_and_types_exactly_as_before() {
+        let agents = two_agents();
+        let trace = trace_one_sweep(
+            supervised_layout(),
+            &agents,
+            vec![
+                pane(0, "/repo"),
+                pane(1, "/repo"),
+                pane(2, "/repo-feat-a"),
+                pane(3, "/repo-feat-b"),
+            ],
+            &[
+                (0, IDLE_PANE),
+                (1, &live_safe_capture("should never be swept")),
+                (2, &live_safe_capture("frobnicate --all")),
+                (3, &live_safe_capture("cargo build")),
+            ],
+        );
+
+        assert_eq!(
+            trace.swept,
+            vec![0, 2, 3],
+            "the dashboard surface is never swept"
+        );
+        assert_eq!(
+            trace.escalated,
+            vec![
+                ("feat-a".to_string(), PERMISSION_PROMPT_VERDICT.to_string()),
+                ("feat-b".to_string(), PERMISSION_PROMPT_VERDICT.to_string()),
+            ],
+            "only the prompting coding surfaces escalate, under their own ids"
+        );
+        assert_eq!(
+            trace.keyed,
+            vec![0],
+            "the orchestrator hand-off types into the supervisor surface and nowhere else"
+        );
+        assert_eq!(trace.outcome, DriveOutcome::Heartbeat);
+    }
+
+    /// Spec scenario "Behavior is unchanged", escalation-identity half: a live
+    /// prompt on the supervisor's own surface escalates under the supervisor
+    /// wire identity, exactly as the pre-refactor
+    /// `PaneRole::Supervisor.agent_id()` produced.
+    #[test]
+    fn a_prompt_on_the_supervisor_surface_escalates_under_the_wire_identity() {
+        let agents = two_agents();
+        let trace = trace_one_sweep(
+            supervised_layout(),
+            &agents,
+            vec![pane(0, "/repo"), pane(1, "/repo")],
+            &[
+                (0, &live_safe_capture("git status")),
+                (1, &live_safe_capture("should never be swept")),
+            ],
+        );
+
+        assert_eq!(
+            trace.swept,
+            vec![0],
+            "the dashboard surface stays untouched"
+        );
+        assert_eq!(
+            trace.escalated,
+            vec![(
+                SUPERVISOR_AGENT_ID.to_string(),
+                PERMISSION_PROMPT_VERDICT.to_string()
+            )]
+        );
+    }
+
+    /// Spec scenario "Behavior is unchanged", bare half: with no supervisor
+    /// surface in the layout, index 0 is the dashboard — never swept, never
+    /// escalated — the coding surfaces escalate under their own ids, and with
+    /// no orchestrator present nothing is typed anywhere (design D3: the bare
+    /// layout is unreachable from `cmd_supervisor` today, so the record's
+    /// answer, not pane 0's old implicit `Supervisor` role, is the contract).
+    #[test]
+    fn bare_layout_sweeps_only_coding_surfaces_and_types_nowhere() {
+        let agents = two_agents();
+        let trace = trace_one_sweep(
+            SessionLayout::planned(crate::session::SessionMode::Bare, true),
+            &agents,
+            vec![
+                pane(0, "/repo"),
+                pane(1, "/repo-feat-a"),
+                pane(2, "/repo-feat-b"),
+            ],
+            &[
+                (0, &live_safe_capture("should never be swept")),
+                (1, &live_safe_capture("frobnicate --all")),
+                (2, &live_safe_capture("cargo build")),
+            ],
+        );
+
+        assert_eq!(
+            trace.swept,
+            vec![1, 2],
+            "index 0 is the bare layout's dashboard surface"
+        );
+        assert_eq!(
+            trace.escalated,
+            vec![
+                ("feat-a".to_string(), PERMISSION_PROMPT_VERDICT.to_string()),
+                ("feat-b".to_string(), PERMISSION_PROMPT_VERDICT.to_string()),
+            ],
+            "no surface escalates under the supervisor wire identity"
+        );
+        assert!(
+            trace.keyed.is_empty(),
+            "no orchestrator surface, so nothing is typed into: {:?}",
+            trace.keyed
+        );
+        assert_eq!(trace.outcome, DriveOutcome::Heartbeat);
+    }
+
+    /// Spec scenario "Behavior is unchanged", named carve-out (design D6): a
+    /// CODING branch whose slug collides with the supervisor wire identity.
+    ///
+    /// The pre-refactor loop flattened its role to the string `"supervisor"`
+    /// and then re-detected it with `agent_id == SUPERVISOR_AGENT_ID`, so a
+    /// CLI-unavailability banner on that worker's pane ended the whole wave
+    /// as `OrchestratorCliUnavailable`. Deciding by role instead, the worker
+    /// is what it is — a coding surface — and its banner becomes an ordinary
+    /// non-blocking escalation while the wave keeps driving. The new
+    /// behaviour is the intended one and is kept.
+    #[test]
+    fn a_coding_branch_slugged_supervisor_no_longer_ends_the_wave() {
+        let agents = vec![AgentPane {
+            agent_id: SUPERVISOR_AGENT_ID.to_string(),
+            worktree_path: PathBuf::from("/repo-supervisor"),
+            branch: "feat/supervisor".to_string(),
+        }];
+        let trace = trace_one_sweep(
+            supervised_layout(),
+            &agents,
+            vec![pane(0, "/repo"), pane(2, "/repo-supervisor")],
+            &[
+                (0, IDLE_PANE),
+                (2, "working…\nYou've hit your session limit"),
+            ],
+        );
+
+        assert_eq!(
+            trace.outcome,
+            DriveOutcome::Heartbeat,
+            "a worker's banner must not end the wave as orchestrator-CLI-unavailable"
+        );
+        assert_eq!(
+            trace.escalated,
+            vec![(
+                SUPERVISOR_AGENT_ID.to_string(),
+                "cli-unavailable".to_string()
+            )],
+            "it is escalated as a coding pane, under its own (colliding) id"
+        );
+        assert_eq!(
+            trace.swept,
+            vec![0, 2],
+            "the real supervisor surface is still swept alongside it"
+        );
+    }
+
+    /// The other side of the carve-out: a banner on the surface the layout
+    /// actually reserves for the supervisor still ends the wave at once.
+    #[test]
+    fn a_banner_on_the_supervisor_surface_still_ends_the_wave() {
+        let agents = vec![AgentPane {
+            agent_id: SUPERVISOR_AGENT_ID.to_string(),
+            worktree_path: PathBuf::from("/repo-supervisor"),
+            branch: "feat/supervisor".to_string(),
+        }];
+        let trace = trace_one_sweep(
+            supervised_layout(),
+            &agents,
+            vec![pane(0, "/repo"), pane(2, "/repo-supervisor")],
+            &[
+                (0, "working…\nYou've hit your session limit"),
+                (2, IDLE_PANE),
+            ],
+        );
+
+        assert_eq!(trace.outcome, DriveOutcome::CliUnavailable);
+    }
+
+    /// Spec scenario "Coding agents resolve by owner, not index", loop half: a
+    /// coding worktree whose surface sits at an index the layout reserves is
+    /// still swept and escalated as that agent, never as the supervisor.
+    #[test]
+    fn a_coding_surface_at_a_reserved_index_escalates_under_its_own_id() {
+        let agents = two_agents();
+        let trace = trace_one_sweep(
+            supervised_layout(),
+            &agents,
+            vec![pane(0, "/repo-feat-a")],
+            &[(0, &live_safe_capture("frobnicate --all"))],
+        );
+
+        assert_eq!(trace.swept, vec![0]);
+        assert_eq!(
+            trace.escalated,
+            vec![("feat-a".to_string(), PERMISSION_PROMPT_VERDICT.to_string())],
+            "the owning worktree wins over the reserved index"
         );
     }
 

@@ -19,6 +19,9 @@ It describes the code as it is today. For the structure the code is moving towar
 │  detect.rs    git.rs       session.rs   logging.rs   agents.rs        │
 │  (PATH scan)  (worktrees)  (JSON state) (pane logs)  (AGENTS.md)      │
 │                                                                       │
+│  surface.rs                                                           │
+│  (SessionLayout + SurfaceRole: the reserved-index record)             │
+│                                                                       │
 │  skills.rs    init.rs      replay.rs    selftest.rs  doctor.rs        │
 │  (skill       (project     (log         (smoke       (preflight       │
 │   templates)   bootstrap)   playback)    check)       diagnostics)    │
@@ -70,6 +73,7 @@ It describes the code as it is today. For the structure the code is moving towar
 | **Git** | `src/git.rs` | Validates git repos, lists branches (local + remote, deduplicated), creates/removes worktrees, derives safe directory names. |
 | **Tmux** | `src/tmux/` | Tmux orchestration. `command.rs` holds the `TmuxSessionBuilder` plus the supervisor-session, add-agent, and remove-retile command builders (pure argv assembly, pane titles, the supervisor-as-pane layout); `layout.rs` the equal-width agent-row rebalance; `readiness.rs` the launch-readiness gate; `session.rs` runtime operations on live sessions (liveness probes, session-name resolution, attach/detach, pane and session teardown, pane-to-worktree reconciliation). |
 | **Session** | `src/session.rs` | Persists session state to JSON files under `~/.local/share/git-paw/sessions/`. Atomic writes, crash recovery. Also writes the per-repo discovery file (see below). |
+| **Surface** | `src/surface.rs` | The session's pane-layout record and the role each surface plays. `SessionLayout` — derived from a saved session or from a launch plan, never persisted — owns every reserved-index fact: which index holds the supervisor, which the dashboard, where coding agents start, and what each launch records. `SurfaceRole` (`Supervisor` / `Dashboard` / `Coding(agent id)` / `Unknown`) is produced by the single resolver `SessionLayout::resolve`, which matches a surface's owning worktree path before consulting any reserved index. Decision code matches on the role instead of comparing a pane index to a literal or an agent id to `"supervisor"`; the supervisor's broker wire identity is defined here once. The supervisor-window grid geometry (`SupervisorLayout`, `supervisor_layout`, `layout_for`, `SUPERVISOR_PANE_OFFSET`) lives here too so `src/tmux/` depends on core rather than on `src/supervisor/`. |
 | **Config** | `src/config/` | Parses TOML from global (`~/.config/git-paw/config.toml`) and per-repo (`.git-paw/config.toml`). Merges with repo-wins semantics. `mod.rs` holds `PawConfig` and loading; one file per section: `broker.rs`, `cli.rs` (custom CLIs and presets), `dashboard.rs`, `layout.rs`, `prompt_profile.rs` (per-CLI prompt-shape profiles), `specs.rs`, `supervisor.rs`. |
 | **Interactive** | `src/interactive/` | Terminal prompts, split by altitude behind the `Prompter` trait seam: `resolver.rs` (terminal-free selection logic, `PickerState`, spec grouping), `prompter.rs` (the dialoguer `TerminalPrompter`), `picker.rs` (the ratatui/crossterm fuzzy multi-select and its terminal lifecycle). The branch and spec multi-selects are fuzzy-filter pickers (type to filter, space to toggle); the mode and CLI single-selects use dialoguer. Skips prompts when flags are provided. |
 | **Error** | `src/error.rs` | `PawError` enum with thiserror. Actionable error messages and distinct exit codes. |
@@ -139,7 +143,7 @@ format_agent_rows, …}` resolving from the parent module.
 | `src/supervisor/claim.rs` | Exclusive per-pane keystroke claim. Every sender — the drive loop's nudge and buffered-input recovery, and the bundled `sweep.sh approve` in its own process — atomically creates `<repo>/.git-paw/tmp/approve-pane-<N>.claim` before sending a keystroke, so two can never both type into one pane. Non-blocking (a held pane is skipped, not waited on), released by RAII, and stealable once untouched past a 10s TTL so a hard-killed sender cannot wedge a pane. |
 | `src/supervisor/drive.rs` | The `--unattended` drive loop, run in-process by `cmd_supervisor`: ~15 s sweeps of every pane, non-blocking escalation of every live permission prompt, hand-offs to the supervisor pane, buffered-input recovery, the optional correction loop and branch refresh, completion detection, and the exit summary. It sends no approval keystroke. |
 | `src/supervisor/keys.rs` | The `KeyDispatcher` seam and its `tmux send-keys` implementation, used by the drive loop's nudge and input-recovery paths. |
-| `src/supervisor/layout.rs` | Supervisor-as-pane tmux layout: pane 0 supervisor, pane 1 dashboard, agent panes 2 onwards in the bottom-row grid (row-height proportions documented below). |
+| `src/supervisor/layout.rs` | Transitional re-export of the supervisor-as-pane grid geometry, which now lives in `src/surface.rs` (pane 0 supervisor, pane 1 dashboard, agent panes 2 onwards in the bottom-row grid — row-height proportions documented below). |
 | `src/supervisor/manual_approvals.rs` | Records each prompt the drive loop escalates for a human decision to `.git-paw/sessions/<session>.manual-approvals.jsonl`, aggregates the log, and suggests which of the agent CLI's own allowlists could absorb the pattern for `git paw approvals`. |
 | `src/supervisor/permission_prompt.rs` | All permission-prompt detection: `tmux capture-pane`, the approval-marker scan, the live-prompt gate and its anchoring windows, input-box and rule-line parsing, and extraction of the prompted command slice or file-operation target path. Reports what is on screen; decides nothing about the command. |
 
@@ -449,8 +453,9 @@ on every path that changes the grid — `git paw start`, `git paw add`, and
 the same agent count. It never touches the top row's supervisor/dashboard
 50/50 split nor the per-row vertical heights. No agent row exceeds five panes
 (`SUPERVISOR_AGENTS_PER_ROW`), bounding the smallest equal-width target to
-~20% of the window. `src/supervisor/layout.rs` and the rebalance in
-`src/tmux/layout.rs` are the source of truth.
+~20% of the window. `src/surface.rs` (re-exported for one release from
+`src/supervisor/layout.rs`) and the rebalance in `src/tmux/layout.rs` are the
+source of truth.
 
 ### Launch-readiness gate
 

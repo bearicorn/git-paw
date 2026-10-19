@@ -240,3 +240,62 @@ decisions are unchanged.
 - **WHEN** the unattended-drive e2e suite and the drive-loop unit tests run
 - **THEN** the loop's nudge, escalation, merge, and correction decisions SHALL be identical to the pre-refactor behavior
 
+### Requirement: Session surface roles are an explicit enum resolved once from the recorded layout
+
+The system SHALL represent the role of each surface in a session's window as a closed enum (`SurfaceRole`) produced by a single resolver over a core layout record (`SessionLayout`) that is derived from the recorded session — its mode, whether a dashboard exists, and the dashboard's index — together with the surface's owning working directory. Coding-agent roles SHALL be resolved by matching the owning directory against the session's worktree paths before any reserved index is consulted. Every reserved-index fact (the first coding-agent index, the dashboard index, any role-reserved index, and every reserved index a launch records in session or discovery state) SHALL be answered by the layout record; decision code SHALL match on the resolved role and SHALL NOT compare a pane index to a literal, nor re-derive a role by comparing an agent-id string such as `"supervisor"`. A comparison against the broker wire identity `"supervisor"` that identifies a message sender, a roster row or a pane label — not the role of a surface — is not a role decision and is outside this rule. The broker wire identity for a role SHALL be produced in one place, and the terminal adapter modules SHALL NOT depend on supervisor modules for layout geometry. For every layout the system can launch, the resolved roles and every sweep, escalate, keystroke-target, skip, exit and pane-offset decision SHALL be identical to the behavior before this requirement, with one carve-out: because a role decision no longer reads an agent-id string, a coding agent whose branch slug collides with the wire identity `"supervisor"` SHALL be treated as the coding surface it is rather than as the supervisor surface.
+
+#### Scenario: Roles resolve from the layout record
+
+- **GIVEN** a supervised session layout with a supervisor surface at index 0, the dashboard at index 1 and coding agents from index 2, and a bare broker-enabled layout with the dashboard at index 0 and coding agents from index 1
+- **WHEN** each surface of each layout is resolved
+- **THEN** the supervised layout SHALL yield `Supervisor`, `Dashboard`, then `Coding` roles in index order
+- **AND** the bare layout's index 0 SHALL yield `Dashboard`
+- **AND** a surface at a non-reserved index whose owner matches no worktree SHALL yield `Unknown`
+
+Test: `surface::tests::roles_resolve_from_the_layout_record, surface::tests::supervised_layout_yields_supervisor_dashboard_then_coding_in_index_order, surface::tests::reserved_indices_per_layout, surface::tests::a_broker_less_supervised_layout_still_resolves_its_dashboard_surface, supervisor::drive::tests::bare_layout_sweeps_only_coding_surfaces_and_types_nowhere`
+
+#### Scenario: Coding agents resolve by owner, not index
+
+- **GIVEN** a coding agent whose surface sits at an index the layout reserves, running in that agent's worktree
+- **WHEN** the surface is resolved
+- **THEN** it SHALL resolve to that agent's `Coding` role
+
+Test: `surface::tests::coding_agents_resolve_by_owner_not_index, supervisor::drive::tests::a_coding_surface_at_a_reserved_index_escalates_under_its_own_id, supervisor::drive::tests::resolves_coding_agent_by_path_not_index`
+
+#### Scenario: No pane-index literal or role-string comparison in decision code
+
+- **WHEN** a source audit scans the supervisor, coordination, session and command modules
+- **THEN** it SHALL find no comparison of a pane index against a numeric literal and no comparison of an agent id against `"supervisor"` used to decide a role, outside the layout module
+- **AND** comparisons that identify a broker message sender, a roster row or a pane label as `"supervisor"` SHALL be allowed by name
+- **AND** the terminal adapter modules SHALL NOT import a supervisor module for layout geometry
+
+Test: `tests/surface_role_audit.rs::no_agent_id_string_decides_a_surface_role, tests/surface_role_audit.rs::no_pane_index_is_compared_against_a_numeric_literal, tests/surface_role_audit.rs::no_reserved_pane_index_is_written_as_a_literal, tests/surface_role_audit.rs::the_tmux_adapter_imports_no_layout_geometry_from_the_supervisor_module, tests/surface_role_audit.rs::the_supervisor_wire_identity_has_exactly_one_definition, tests/surface_role_audit.rs::stripping_test_modules_keeps_the_production_code_the_rules_govern, tests/surface_role_audit.rs::every_wire_identity_spelling_is_caught`
+
+#### Scenario: Recorded indices come from the layout record
+
+- **GIVEN** a bare broker-enabled launch and a supervised launch
+- **WHEN** each saves its session and per-repo discovery file
+- **THEN** the recorded `dashboard_pane`, every agent's `pane_index` and any orchestrator `pane_index` SHALL equal the values the layout record answers for that layout
+- **AND** they SHALL equal the values the same launch recorded before this requirement
+
+Test: `surface::tests::a_launch_records_the_same_dashboard_pane_it_recorded_before, surface::tests::reserved_indices_per_layout, surface::tests::recorded_dashboard_pane_drives_the_dashboard_index_and_its_fallback, surface::tests::of_a_saved_session_reads_its_mode_broker_and_recorded_dashboard, tests/discovery_file_pane_indices.rs`
+
+#### Scenario: Behavior is unchanged
+
+- **GIVEN** the typed-role refactor
+- **WHEN** the unattended-drive, sweep-helper approve, add/remove and coordination-inventory suites run with their assertions unmodified
+- **THEN** they SHALL pass
+- **AND** the drive loop SHALL sweep, escalate for, send nudge or submit keystrokes to, and exit on exactly the surfaces it did before the refactor, except for the carve-out below
+
+Test: `supervisor::drive::tests::supervised_layout_sweeps_escalates_and_types_exactly_as_before, supervisor::drive::tests::a_prompt_on_the_supervisor_surface_escalates_under_the_wire_identity, tests/unattended_drive_e2e.rs, tests/add_remove_e2e.rs, tests/sweep_sh_approve.rs, tests/coordination_inventory_integration.rs`
+
+#### Scenario: A coding branch slugged `supervisor` is a coding surface
+
+- **GIVEN** a coding agent whose branch slug collides with the broker wire identity `supervisor`, whose surface shows a CLI-unavailability banner
+- **WHEN** the drive loop sweeps it
+- **THEN** it SHALL be escalated as a coding surface and the wave SHALL continue
+- **AND** the loop SHALL NOT exit as orchestrator-CLI-unavailable, which is what the pre-refactor `agent_id == "supervisor"` re-detection did
+- **AND** a banner on the surface the layout reserves for the supervisor SHALL still exit the loop at once
+
+Test: `supervisor::drive::tests::a_coding_branch_slugged_supervisor_no_longer_ends_the_wave, supervisor::drive::tests::a_banner_on_the_supervisor_surface_still_ends_the_wave`
+

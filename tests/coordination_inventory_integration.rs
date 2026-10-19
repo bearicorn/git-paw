@@ -15,6 +15,8 @@ use git_paw::coordination::inventory::{
     self, AgentInventory, InventoryCache, Mode, ValidationError,
 };
 use git_paw::coordination::tell::{self, DeliveryDecision};
+use git_paw::session::SessionMode;
+use git_paw::surface::SessionLayout;
 
 /// Builds a two-agent inventory (`feat-a`, `feat-b`) the way an external
 /// consumer would, from broker `/status` JSON + a tmux pane mapping.
@@ -30,7 +32,8 @@ fn external_inventory() -> AgentInventory {
     let panes = inventory::parse_pane_paths("1 /w/proj-feat-b\n2 /w/proj-feat-a\n");
     let mut modes = HashMap::new();
     modes.insert(2usize, Mode::AcceptEdits); // feat-a
-    let entries = inventory::join_inventory(agents, &panes, &modes);
+    let layout = SessionLayout::planned(SessionMode::Supervisor, true);
+    let entries = inventory::join_inventory(agents, &panes, &modes, &layout);
     AgentInventory {
         entries,
         refreshed_at: Instant::now(),

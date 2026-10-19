@@ -24,7 +24,9 @@ pub(crate) fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Resu
     let repo_root = git::validate_repo(&cwd)?;
 
     // 5.2 Refuse `git paw remove supervisor` with a pointer to `git paw stop`.
-    if branch == "supervisor" {
+    // Wire identity: this names the CLI argument the user typed, not the role
+    // of a session surface.
+    if branch == git_paw::surface::SUPERVISOR_AGENT_ID {
         return Err(PawError::SessionError(
             "refusing to remove the supervisor. To end the whole session, run `git paw stop` \
              (or `git paw purge` to also remove worktrees)."
@@ -114,7 +116,7 @@ pub(crate) fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Resu
     // 5.6 Recompute layout_for(N-1) and re-apply so the grid re-flows.
     let remaining = existing.worktrees.len() - 1;
     if session_alive && remaining > 0 {
-        let layout = git_paw::supervisor::layout::layout_for(remaining)?;
+        let layout = git_paw::surface::layout_for(remaining)?;
         tmux::build_remove_retile_commands(&existing.session_name, remaining, layout).execute()?;
         // Rebalance the re-flowed agent rows to equal width on the live window
         // (design D4, G3): tmux renumbered the survivors after the kill, so the

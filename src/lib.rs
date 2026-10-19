@@ -58,5 +58,6 @@ pub mod skills;
 pub mod specs;
 mod static_regex;
 pub mod supervisor;
+pub mod surface;
 pub mod tmux;
 pub mod worktree_provision;

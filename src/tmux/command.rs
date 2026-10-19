@@ -621,7 +621,7 @@ pub fn build_boot_inject_args(session_name: &str, pane_index: usize, text: &str)
 /// - Pane 0: supervisor agent (top-left, 50% of the top row)
 /// - Pane 1: dashboard (top-right, 50% of the top row)
 /// - Panes 2..N+1: coding agents, row-major (left-to-right, top-to-bottom),
-///   up to [`crate::supervisor::layout::SUPERVISOR_AGENTS_PER_ROW`] columns
+///   up to [`crate::surface::SUPERVISOR_AGENTS_PER_ROW`] columns
 ///   per row
 ///
 /// Sequence (see design D2):
@@ -647,12 +647,12 @@ pub fn build_supervisor_session(
     supervisor: &PaneSpec,
     dashboard: &PaneSpec,
     agents: &[PaneSpec],
-    layout: crate::supervisor::layout::SupervisorLayout,
+    layout: crate::surface::SupervisorLayout,
     mouse_mode: bool,
     border_affordances: bool,
     env_vars: &[(String, String)],
 ) -> Result<TmuxSession, PawError> {
-    use crate::supervisor::layout::{SUPERVISOR_AGENTS_PER_ROW, SUPERVISOR_PANE_OFFSET};
+    use crate::surface::{SUPERVISOR_AGENTS_PER_ROW, SUPERVISOR_PANE_OFFSET};
 
     let session_name = session_name_override
         .unwrap_or_else(|| crate::domain::SessionName::from_project(project_name).into_string());
@@ -999,10 +999,10 @@ pub fn build_add_agent_commands(
     session_name: &str,
     new_agent: &PaneSpec,
     prev_agent_count: usize,
-    layout: crate::supervisor::layout::SupervisorLayout,
+    layout: crate::surface::SupervisorLayout,
     border_affordances: bool,
 ) -> TmuxSession {
-    use crate::supervisor::layout::{SUPERVISOR_AGENTS_PER_ROW, SUPERVISOR_PANE_OFFSET};
+    use crate::surface::{SUPERVISOR_AGENTS_PER_ROW, SUPERVISOR_PANE_OFFSET};
 
     let mut commands: Vec<TmuxCommand> = Vec::new();
     let i = prev_agent_count; // 0-based agent index of the new agent
@@ -1075,7 +1075,7 @@ pub fn build_add_agent_commands(
 pub fn build_remove_retile_commands(
     session_name: &str,
     remaining_agent_count: usize,
-    layout: crate::supervisor::layout::SupervisorLayout,
+    layout: crate::surface::SupervisorLayout,
 ) -> TmuxSession {
     let mut commands: Vec<TmuxCommand> = Vec::new();
     if remaining_agent_count > 0 {
@@ -1099,10 +1099,10 @@ pub fn build_remove_retile_commands(
 fn push_supervisor_resize_pass(
     commands: &mut Vec<TmuxCommand>,
     session_name: &str,
-    layout: crate::supervisor::layout::SupervisorLayout,
+    layout: crate::surface::SupervisorLayout,
     agent_count: usize,
 ) {
-    use crate::supervisor::layout::{SUPERVISOR_AGENTS_PER_ROW, SUPERVISOR_PANE_OFFSET};
+    use crate::surface::{SUPERVISOR_AGENTS_PER_ROW, SUPERVISOR_PANE_OFFSET};
 
     let top_target = format!("{session_name}:0.0");
     let top_pct_str = format!("{}%", layout.top_row_pct);
