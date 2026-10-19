@@ -85,7 +85,7 @@ git paw doctor || echo "fix the ✗ findings before launching"
 | Group | Checks |
 |---|---|
 | **Environment** | `git` and `tmux` on `PATH` and at or above their minimum versions (git 2.5 for `git worktree`, tmux 1.8); the working directory is inside a git repository. Missing or too old is ✗. Also whether this OS's FS-scoped sandbox backend (`sandbox-exec` on macOS, `bwrap` on Linux/WSL) is on `PATH` — absent is ⚠ with a pointer to the [sandbox guide](sandbox.md), never ✗, because the sandbox is optional. |
-| **CLIs** | The AI CLIs that resolve on `PATH` — the known roster plus your `[clis.*]` entries. None resolving is ⚠, surfacing the `No AI CLIs found` launch failure before you hit it. Plus two read-only reports about [per-CLI setup](cli-setup.md): **setup state** and **broad grants** (below). |
+| **CLIs** | The AI CLIs that resolve on `PATH` — the known roster plus your `[clis.*]` entries. None resolving is ⚠, surfacing the `No AI CLIs found` launch failure before you hit it. Plus three read-only reports about [per-CLI setup](cli-setup.md): **setup state**, **broad grants** and **grant residue** (below). |
 | **Config** | `.git-paw/config.toml` exists and parses (unparseable is ✗, absent is ⚠); the resolved `worktree_placement`; any key this version does not recognise (⚠, naming the key). |
 | **Spec system** | The explicitly configured spec format and how many specs it discovered. Unconfigured is ⚠ with the "add `[specs]` or pass `--specs-format`" guidance — there is no filesystem auto-detection. Also reports the effective spec-worker CLI: the CLI each discovered spec would actually launch with (its own `paw_cli` when set, else `default_spec_cli`). Warns (⚠) when a configured `default_spec_cli` is never actually reachable by any discovered spec — every one of them pins its own `paw_cli` instead — surfacing a silent mis-resolution (such as a spec-driven `--supervisor` launch quietly using an unexpected, unsandboxed CLI) rather than passing green. Informational (✓) when no specs or no `default_spec_cli` are configured — there's nothing to verify against yet. Finally, whether the workflow command the boot task prompt instructs spec-driven agents to run is **reachable** from your worktrees (below). |
 | **Bundled scripts** | `sweep.sh`, `broker.sh`, `docs-fetch.sh`, and the shared `_paw_common.sh` preamble they source exist under `.git-paw/scripts/`, are executable, and match this binary's embedded copies. Missing or non-executable is ✗; content drift is ⚠ ("stale"). Also checks for a Python 3 interpreter, which every bundled script needs — absent is ⚠, not ✗, because core `start`/`add`/`remove` needs no Python. |
@@ -95,16 +95,16 @@ git paw doctor || echo "fix the ✗ findings before launching"
 
 ### The per-CLI setup checks
 
-Two checks report on [`git paw setup-cli`](cli-setup.md). Both are strictly
-read-only — they create, modify and delete nothing — and **neither can ever be
+Three checks report on [`git paw setup-cli`](cli-setup.md). All are strictly
+read-only — they create, modify and delete nothing — and **none can ever be
 the reason doctor fails**: they never report ✗.
 
 **Setup state**, one per CLI identity that has setup facts or record entries:
 
 - ✓ when nothing is applied, listing the available items and whether each is
   verified or plan-only;
-- ✓ when every recorded entry is present, unchanged, and matches what this
-  binary would plan;
+- ✓ when every recorded entry is present and unchanged, and the target
+  settings file holds every entry this binary would plan;
 - ⚠ when a recorded entry is missing or has been edited, with a remedy naming
   `--undo`;
 - ⚠ when the applied entries are out of date against this version, with a
@@ -116,6 +116,19 @@ the reason doctor fails**: they never report ✗.
   worktree, because a granted path is relative and resolves against whichever
   directory the session runs in.
 
+What counts as **applied** is judged against the CLI's target settings file,
+not against git-paw's record: a planned entry is applied when that file holds
+it at its key path, whoever wrote it. That includes an entry you already had
+before you ran `git paw setup-cli`. Setup skips such an entry — there is
+nothing to write — and deliberately never records it, because the record
+lists only what git-paw itself wrote, so `--undo` can take back exactly that
+and nothing else.
+
+The check reads the comparison in both directions. It also warns when the
+record holds a permission rule **this version of git-paw no longer plans** — a
+grant a previous release wrote and this one has withdrawn. The remedy is the
+same either way: `git paw setup-cli <CLI> --undo`, then re-apply the item.
+
 **Broad grants**, an advisory over the allowlist item's target file when it
 exists. It lists every `permissions.allow` entry whose shape grants more than
 one specific command — a bare tool rule, a single-word prefix grant, a shell
@@ -125,13 +138,67 @@ file-tool rule anchored at the filesystem root or your home directory, or a
 helper grant broader than git-paw's own entry for that helper.
 
 Entries are abbreviated to the tool name and the first two words of the
-specifier, so a credential embedded later in a rule is never echoed. An
-unparseable file is reported as "not inspected", without its content.
+specifier, each capped in length. That bounds the common way a secret ends up
+in a rule — a long URL carrying a token — but it is a mitigation, not a
+guarantee: a short rule that is itself a secret cannot be told apart from a
+short rule that is not, so treat doctor output as you would the settings file
+it reads. An unparseable file is reported as "not inspected", without its
+content.
 git-paw's own planned entries are never listed, whoever added them.
 
 This advisory is a report over stored rules, not a decision about any prompt.
 git-paw does not edit these entries and never acts on them — reviewing and
 removing the ones you did not intend is yours to do.
+
+**Grant residue** (`project CLI grant residue`) sits beside the advisory and
+answers a narrower question: not "is this rule broad?" but "is this a
+known-dangerous leftover?". It reads the **main checkout's**
+`.claude/settings.json` and `.claude/settings.local.json`, and reports ⚠ when
+either holds one of exactly three things:
+
+| Residue | Example | Why it matters |
+|---|---|---|
+| A `permissions.allow` entry granting `curl` with any arguments | `Bash(curl *)`, `Bash(curl:*)`, `Bash(curl*)` | an unrestricted network client |
+| A `permissions.allow` entry naming a helper script with a keystroke or verdict subcommand | `Bash(.git-paw/scripts/sweep.sh approve *)`, `Bash(.git-paw/scripts/sweep.sh verified *)`, `Bash(.git-paw/scripts/sweep.sh *)` | it lets an agent session approve its own permission prompts, or publish a supervisor verdict, without a prompt |
+| A `permissions.allow` entry naming the pass-through fetch subcommand | `Bash(.git-paw/scripts/docs-fetch.sh get *)` | it passes an arbitrary URL through, so a session can read any file it names or send repository content to any host |
+| A `permissions.allow` entry naming any other subcommand the grant table withholds | `Bash(.git-paw/scripts/sweep.sh classify *)` | a helper subcommand the grant table deliberately withholds from the allowlist item |
+| A top-level `allowed_bash_prefixes` key | — | the inert seed git-paw wrote before v0.16.0; it grants nothing in the current CLI and is pure leftover |
+
+Each entry is reported with the reason true of the subcommand it actually
+reaches, and a rule reaching several — a whole-script wildcard reaches all of
+them — is reported by the gravest.
+
+The helper rules are matched by the helper's name wherever it appears in the
+specifier, so a relative, absolute or interpreter-prefixed path is caught
+alike. A wildcard is matched in or across the subcommand position: both
+`Bash(.git-paw/scripts/sweep.sh *)` and `Bash(.git-paw/scripts/sweep.sh ap*)`
+reach `approve`. Two things are deliberately **not** residue: a specific loopback rule
+such as `Bash(curl -s http://127.0.0.1:9119/status)`, which names one
+endpoint rather than granting the client; and `Bash(.git-paw/scripts/broker.sh *)`,
+because the grant table grants that helper whole — it is one of git-paw's own
+entries.
+
+Only `Bash` rules can be residue — a `Read` or `Edit` rule naming a helper
+grants reading or writing that file, not running it.
+
+The remedy is **by hand**. git-paw never rewrites a grant it did not write, so
+it names each file and each matching entry and leaves the removal to you. The
+check is ✓ when neither file holds a match, and ⚠ stating the file was not
+inspected when one of them exists but is not valid JSON. When neither file
+exists there is nothing to report and the check is not shown at all.
+
+Entries are abbreviated as in the advisory above, with the same caveat — it
+bounds what is printed rather than guaranteeing a secret never appears. A
+helper grant gets one extra protection: it is rendered from the word naming
+the helper, so an environment assignment in front of it, which is exactly
+where a token would sit, is replaced by `…` instead of printed.
+
+Like the other two, it is read-only, never reports ✗, and never influences
+how a prompt is handled.
+
+A rule can appear in both reports — `Bash(curl *)` is both broad and residue.
+That is intended: one is advice about breadth, the other names a specific
+danger.
 
 ### The spec-workflow reachability check
 

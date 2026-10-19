@@ -51,6 +51,12 @@ fn every_non_ok_check_carries_a_remedy() {
         clis: Vec::new(),
         cli_setup: crate::cli_setup::doctor::SetupProbe::default(),
         broad_grants: crate::cli_setup::doctor::BroadGrantProbe::default(),
+        grant_residue: crate::cli_setup::doctor::ResidueProbe {
+            files: vec![(
+                ".claude/settings.local.json".into(),
+                r#"{"permissions":{"allow":["Bash(curl *)"]}}"#.into(),
+            )],
+        },
         config: ConfigProbe {
             path: ".git-paw/config.toml".into(),
             present: true,

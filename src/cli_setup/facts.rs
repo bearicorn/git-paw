@@ -216,6 +216,12 @@ pub struct CliSetupFacts {
     /// The allowlist item's target file, relative to the root of the
     /// repository's **main checkout**.
     pub allowlist_target: &'static str,
+    /// The CLI's project-shared settings file, relative to the same root.
+    ///
+    /// git-paw never writes it — it is recorded so the grant-residue report
+    /// can read the other place a durable project grant can live, including
+    /// the inert seed versions before v0.16 wrote there.
+    pub shared_settings: &'static str,
     /// Key path of the allow list inside the target file.
     pub allow_key_path: &'static [&'static str],
     /// Key path of the ask list inside the target file.
@@ -266,6 +272,7 @@ pub const CLAUDE: CliSetupFacts = CliSetupFacts {
     identity: "claude",
     items: &[SetupItem::Allowlist],
     allowlist_target: ".claude/settings.local.json",
+    shared_settings: ".claude/settings.json",
     allow_key_path: &["permissions", "allow"],
     ask_key_path: &["permissions", "ask"],
     deny_key_path: &["permissions", "deny"],

@@ -140,6 +140,25 @@ it created.
 A file git-paw created is deleted only when nothing but its own skeleton is
 left; if you added a key of your own, the file stays.
 
+### Upgrading from 0.17.0 or earlier
+
+If you applied the allowlist on an earlier release and `git paw doctor` told
+you the applied allowlist was out of date — straight after applying it, with
+an `--undo` and re-apply remedy that never cleared the warning — that is
+fixed. Setup skips a planned entry your settings file already holds and
+records only what it wrote, and doctor used to compare its plan against the
+record alone, so any entry you already had read as permanently missing. Doctor
+now judges the plan against the settings file, so an entry you already had
+counts as applied and the undo/re-apply round trip converges. Nothing about
+what setup writes, what it records, or what undo removes has changed.
+
+Doctor also reports **grant residue** now: durable rules left in the
+project's CLI settings by earlier versions or by earlier "don't ask again"
+answers — a blanket `curl` grant, a `sweep.sh` rule covering a subcommand the
+table above withholds, or the inert `allowed_bash_prefixes` seed written
+before v0.16.0. git-paw does not rewrite a grant it did not write, so those
+must be removed by hand. See [Doctor](doctor.md).
+
 ## Verified and plan-only
 
 Each item carries a verification status: whether its facts — the target file,

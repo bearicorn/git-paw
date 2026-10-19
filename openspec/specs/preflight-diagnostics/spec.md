@@ -348,12 +348,12 @@ failing the command.
 
 ### Requirement: Doctor reports CLI setup state
 
-`git paw doctor` SHALL report, in the CLIs group, one setup check for each CLI identity that has a row in the setup fact table or entries in the setup record. The check SHALL be read-only: it reads the setup record, the files the record names, the helper scripts in the main checkout and in the current session's worktrees, and SHALL NOT create, modify or delete any of them. It SHALL report:
+`git paw doctor` SHALL report, in the CLIs group, one setup check for each CLI identity that has a row in the setup fact table or entries in the setup record. The check SHALL be read-only: it reads the setup record, the files the record names, the item's target settings file, the helper scripts in the main checkout and in the current session's worktrees, and SHALL NOT create, modify or delete any of them. An entry the running binary would plan SHALL count as applied when the item's target settings file holds that value at the entry's key path, whether git-paw wrote it or it was there before the item was applied. The comparison against the running binary's plan SHALL be made whenever the item is applied — that is, whenever the record holds any entry for it — and SHALL NOT depend on the record holding a permission entry, because an item applied to a file that already held every planned entry records none. It SHALL report:
 
 - ✓ when no item is applied, with a detail listing the available items and whether each is verified or plan-only;
-- ✓ when every applied item's recorded entries are present and unchanged and match the entries the running binary would plan;
+- ✓ when every applied item's recorded entries are present and unchanged and every entry the running binary would plan is present in the target file;
 - ⚠ when a recorded entry is missing or changed, with a remedy naming `git paw setup-cli <CLI> --undo` or re-applying the item;
-- ⚠ when the applied entries differ from the entries the running binary would plan, with a remedy naming `git paw setup-cli <CLI> --undo` followed by re-applying the item;
+- ⚠ when the applied entries differ from the entries the running binary would plan — an entry it would plan is absent from the target file, or the record holds an entry it no longer plans — with a remedy naming `git paw setup-cli <CLI> --undo` followed by re-applying the item;
 - ⚠ when an allowlist item is applied and a helper script in the main checkout or in a worktree of the current session differs from the copy the binary bundles, naming that helper's path, because the CLI would run the modified helper without a prompt, with a remedy to restore the helper (`git paw init` for the main checkout, restarting the session for a worktree) or undo the item.
 
 The check SHALL NOT report ✗.
@@ -377,10 +377,46 @@ Test: `cli_setup::doctor::tests::a_recorded_entry_removed_by_hand_warns_naming_u
 #### Scenario: Applied entries are out of date
 
 - **GIVEN** a setup record whose recorded allowlist entries lack one entry the running binary would plan
+- **AND** the target settings file does not hold that entry
 - **WHEN** `git paw doctor` runs
 - **THEN** the setup check SHALL be ⚠ with a remedy naming `git paw setup-cli claude --undo` and re-applying `--allowlist`
 
 Test: `cli_setup::doctor::tests::applied_entries_out_of_date_warn_naming_undo_and_reapplying`
+
+#### Scenario: An entry the user already had counts as applied
+
+- **GIVEN** a `.claude/settings.local.json` that already held `Bash(.git-paw/scripts/broker.sh *)` before `git paw setup-cli claude --allowlist --yes` was run
+- **AND** the setup record therefore does not list that entry
+- **WHEN** `git paw doctor` runs
+- **THEN** the setup check SHALL be ✓
+
+Test: `cli_setup::doctor::tests::an_entry_the_user_already_had_counts_as_applied`
+
+#### Scenario: Undo and re-apply converge when entries pre-existed
+
+- **GIVEN** the repository from "An entry the user already had counts as applied"
+- **WHEN** `git paw setup-cli claude --undo --yes` and then `git paw setup-cli claude --allowlist --yes` are run
+- **THEN** `Bash(.git-paw/scripts/broker.sh *)` SHALL still be present in `permissions.allow`
+- **AND** `git paw doctor` SHALL report the setup check ✓
+
+Test: `tests/doctor_e2e.rs::undo_and_reapply_converge_when_entries_pre_existed`
+
+#### Scenario: A recorded entry the binary no longer plans is reported
+
+- **GIVEN** a setup record listing an allowlist entry, present in the target file, that the running binary would not plan
+- **WHEN** `git paw doctor` runs
+- **THEN** the setup check SHALL be ⚠ with a remedy naming `git paw setup-cli claude --undo` and re-applying `--allowlist`
+
+Test: `cli_setup::doctor::tests::a_recorded_entry_the_binary_no_longer_plans_is_reported`
+
+#### Scenario: A hand deletion is caught when every planned entry pre-existed
+
+- **GIVEN** a target settings file that already held every entry the running binary plans before the item was applied
+- **AND** a setup record that therefore lists no permission entry for the item
+- **WHEN** one of those entries is removed by hand and `git paw doctor` runs
+- **THEN** the setup check SHALL be ⚠
+
+Test: `cli_setup::doctor::tests::a_hand_deletion_is_caught_when_every_planned_entry_pre_existed`
 
 #### Scenario: A granted helper was modified
 
@@ -583,4 +619,101 @@ Test: `doctor::tests::spec_workflow_check_reports_an_unknown_cli_without_warning
 - **THEN** the output SHALL contain the spec-workflow check with its status and detail
 
 Test: `tests/doctor_e2e.rs::an_uncommitted_workflow_definition_warns_under_sibling_placement, tests/doctor_e2e.rs::json_document_carries_the_required_fields_on_every_check`
+
+### Requirement: Doctor warns about dangerous grant residue in the project's CLI settings
+
+`git paw doctor` SHALL report in the CLIs group one grant-residue check over the project-shared and project-local settings files, in the main checkout, of every CLI identity whose fact row declares an allowlist item and records them (for `claude`: `.claude/settings.json` and `.claude/settings.local.json`). The check SHALL be reported when at least one of those files exists, and SHALL NOT be reported at all when none does. The check SHALL be ⚠ when a file holds any of:
+
+1. a `permissions.allow` entry that grants `curl` with any arguments — a `Bash` rule whose specifier is `curl` followed only by a wildcard (for example `Bash(curl *)`, `Bash(curl:*)`, `Bash(curl*)`);
+2. a `permissions.allow` `Bash` rule that names a git-paw helper script **for which the grant table lists at least one never-granted subcommand**, followed by one of those subcommands, by a wildcard standing in the subcommand position, or by a word that a wildcard completes into one of them — whatever path form names the script (relative, absolute or interpreter-prefixed), for example `Bash(.git-paw/scripts/sweep.sh approve *)`, `Bash(.git-paw/scripts/sweep.sh verified *)`, `Bash(.git-paw/scripts/sweep.sh ap*)` or `Bash(.git-paw/scripts/sweep.sh *)`. A rule naming a helper the grant table grants whole, such as `Bash(.git-paw/scripts/broker.sh *)`, withholds nothing and SHALL NOT be reported;
+3. a top-level `allowed_bash_prefixes` key, the inert seed earlier git-paw versions wrote.
+
+The ⚠ detail SHALL name each file and each matching entry, and SHALL say, for each matching entry, why that entry is dangerous: for a network-client grant, an unrestricted network client; for a helper grant, what the subcommands it reaches actually hand over — a subcommand that presses an approval keystroke or publishes a supervisor verdict SHALL be reported as letting an agent session approve its own prompts or publish a verdict without a prompt, a subcommand that passes an arbitrary URL through SHALL be reported as a read-anywhere primitive, and any other withheld subcommand SHALL be reported as one the grant table deliberately withholds; for the inert key, that it grants nothing in the current CLI but is left over from an earlier version. A rule reaching several withheld subcommands SHALL be reported by the gravest of their reasons.
+
+Each named entry SHALL be abbreviated so that a credential embedded in the rule is not echoed: a network-client or inert-key entry as the broad-grant advisory abbreviates entries, and a helper grant rendered from the word that names the helper, so that anything preceding it — an environment assignment, which is where a secret appears in such a rule — is replaced by an elision rather than printed.
+
+The remedy SHALL state that git-paw never rewrites grants it did not write and that the user should remove these entries by hand. The check SHALL be ✓ when no file holds a match, and ⚠ stating the file was not inspected when an existing file is not valid JSON. The check SHALL be read-only, SHALL NOT report ✗, SHALL NOT print any other content of the files, and SHALL NOT influence how any permission prompt is handled.
+
+#### Scenario: A durable self-approval grant is flagged
+
+- **GIVEN** a main-checkout `.claude/settings.local.json` whose `permissions.allow` holds `Bash(.git-paw/scripts/sweep.sh approve *)`
+- **WHEN** `git paw doctor` runs
+- **THEN** the grant-residue check SHALL be ⚠ naming that file and that entry
+- **AND** its remedy SHALL say to remove the entry by hand and that git-paw does not rewrite it
+
+Test: `cli_setup::doctor::tests::a_durable_self_approval_grant_is_flagged, tests/doctor_e2e.rs::doctor_warns_about_grant_residue_in_both_settings_files_and_edits_neither`
+
+#### Scenario: A blanket curl grant is flagged
+
+- **GIVEN** a main-checkout `.claude/settings.local.json` whose `permissions.allow` holds `Bash(curl *)`
+- **WHEN** `git paw doctor` runs
+- **THEN** the grant-residue check SHALL be ⚠ naming `Bash(curl *)`
+
+Test: `cli_setup::doctor::tests::a_blanket_curl_grant_is_flagged`
+
+#### Scenario: A wildcard that completes a withheld subcommand is flagged
+
+- **GIVEN** `permissions.allow` holds `Bash(.git-paw/scripts/sweep.sh ap*)`, which covers `approve` without naming it
+- **WHEN** `git paw doctor` runs
+- **THEN** the grant-residue check SHALL report that entry
+
+Test: `cli_setup::doctor::tests::every_never_granted_helper_shape_is_flagged, cli_setup::doctor::tests::a_partial_wildcard_that_completes_only_granted_subcommands_is_not_residue`
+
+#### Scenario: A matched entry is named without echoing a preceding secret
+
+- **GIVEN** `permissions.allow` holds `Bash(GH_TOKEN=<secret> .git-paw/scripts/sweep.sh approve *)`
+- **WHEN** `git paw doctor` runs
+- **THEN** the grant-residue check SHALL name the entry from the helper word onward
+- **AND** the detail and the remedy SHALL NOT contain the assignment or its value
+
+Test: `cli_setup::doctor::tests::a_residue_entry_carrying_a_credential_is_rendered_from_the_helper`
+
+#### Scenario: The reason names what the matched subcommand hands over
+
+- **GIVEN** `permissions.allow` holds `Bash(.git-paw/scripts/docs-fetch.sh get *)`
+- **WHEN** `git paw doctor` runs
+- **THEN** the grant-residue check SHALL report it as a read-anywhere primitive, not as a self-approval grant
+
+Test: `cli_setup::doctor::tests::the_reason_names_what_the_matched_subcommand_hands_over`
+
+#### Scenario: The inert seed in the shared settings file is flagged
+
+- **GIVEN** a main-checkout `.claude/settings.json` holding a top-level `allowed_bash_prefixes` array and no `.claude/settings.local.json`
+- **WHEN** `git paw doctor` runs
+- **THEN** the grant-residue check SHALL be ⚠ naming `.claude/settings.json` and `allowed_bash_prefixes`
+
+Test: `cli_setup::doctor::tests::the_inert_seed_in_the_shared_settings_file_is_flagged`
+
+#### Scenario: git-paw's own entries are not residue
+
+- **GIVEN** the allowlist item applied and no other entry in either settings file
+- **WHEN** `git paw doctor` runs
+- **THEN** the grant-residue check SHALL be ✓
+
+Test: `cli_setup::doctor::tests::git_paws_own_entries_are_not_residue, cli_setup::doctor::tests::a_granted_helper_invocation_is_not_residue, tests/doctor_e2e.rs::undo_and_reapply_converge_when_entries_pre_existed`
+
+#### Scenario: A loopback-scoped curl grant is not residue
+
+- **GIVEN** `permissions.allow` holds `Bash(curl -s http://127.0.0.1:9119/status)`
+- **WHEN** `git paw doctor` runs
+- **THEN** the grant-residue check SHALL NOT list that entry
+
+Test: `cli_setup::doctor::tests::a_loopback_scoped_curl_grant_is_not_residue`
+
+#### Scenario: Only a command rule can be residue
+
+- **GIVEN** `permissions.allow` holds `Read(.git-paw/scripts/sweep.sh *)`, which grants reading the helper rather than running it
+- **WHEN** `git paw doctor` runs
+- **THEN** the grant-residue check SHALL NOT list that entry
+
+Test: `cli_setup::doctor::tests::only_a_command_rule_can_be_residue`
+
+#### Scenario: The residue check never edits the files
+
+- **GIVEN** both settings files holding residue
+- **WHEN** `git paw doctor` runs
+- **THEN** both files SHALL be byte-identical afterwards
+- **AND** no check SHALL be reported ✗ because of them
+
+Test: `cli_setup::doctor::tests::the_residue_check_never_reports_fail, tests/doctor_e2e.rs::doctor_warns_about_grant_residue_in_both_settings_files_and_edits_neither`
 
