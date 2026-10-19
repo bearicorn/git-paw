@@ -304,20 +304,18 @@ impl Session {
 
     /// Index of the first coding-agent pane in this session's tmux window.
     ///
-    /// Supervisor mode reserves pane 0 (supervisor) and pane 1 (dashboard),
-    /// so agents start at
-    /// [`SUPERVISOR_PANE_OFFSET`](crate::supervisor::layout::SUPERVISOR_PANE_OFFSET).
-    /// Bare mode places the dashboard at pane 0 when the broker is enabled
-    /// (agents at pane 1), or has no dashboard pane at all (agents at
-    /// pane 0). Used by the GP-03c agent-pane liveness probe
-    /// ([`crate::tmux::session_liveness_for`]) to know which panes are
-    /// coding-agent panes rather than supervisor/dashboard panes.
+    /// The answer comes from this session's
+    /// [`SessionLayout`](crate::surface::SessionLayout), which owns every
+    /// reserved-index fact: supervisor mode reserves pane 0 (supervisor) and
+    /// pane 1 (dashboard) so agents start at pane 2, while bare mode places
+    /// the dashboard at pane 0 when the broker is enabled (agents at pane 1)
+    /// or has no dashboard pane at all (agents at pane 0). Used by the GP-03c
+    /// agent-pane liveness probe ([`crate::tmux::session_liveness_for`]) to
+    /// know which panes are coding-agent panes rather than
+    /// supervisor/dashboard panes.
     #[must_use]
     pub fn agent_pane_offset(&self) -> usize {
-        match self.mode {
-            SessionMode::Supervisor => crate::supervisor::layout::SUPERVISOR_PANE_OFFSET,
-            SessionMode::Bare => usize::from(self.broker_port.is_some()),
-        }
+        crate::surface::SessionLayout::of(self).first_agent_index()
     }
 }
 
@@ -1707,7 +1705,7 @@ mod tests {
         session.mode = SessionMode::Supervisor;
         assert_eq!(
             session.agent_pane_offset(),
-            crate::supervisor::layout::SUPERVISOR_PANE_OFFSET
+            crate::surface::SUPERVISOR_PANE_OFFSET
         );
     }
 

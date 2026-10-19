@@ -4,6 +4,7 @@
 use git_paw::error::PawError;
 use git_paw::git;
 use git_paw::session::{self, SessionStatus};
+use git_paw::surface::SessionLayout;
 use git_paw::tmux;
 
 /// Pauses the session: detaches the user's tmux client, stops the broker
@@ -51,7 +52,7 @@ pub(crate) fn cmd_pause() -> Result<(), PawError> {
     // applies when broker was enabled — without a broker there's no
     // dashboard pane to kill.
     if existing.broker_port.is_some() {
-        let pane_idx = existing.dashboard_pane.unwrap_or(0);
+        let pane_idx = SessionLayout::of(&existing).dashboard_index_or_default();
         tmux::kill_pane(&existing.session_name, pane_idx)?;
     }
 

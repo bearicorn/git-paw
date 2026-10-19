@@ -141,7 +141,7 @@ pub(crate) fn cmd_add(
     // 4.4 Enforce the 25-agent cap BEFORE mutating. layout_for(N+1) errors with
     // the same "split into multiple sessions" message `start` uses.
     let prev_agent_count = existing.worktrees.len();
-    let layout = git_paw::supervisor::layout::layout_for(prev_agent_count + 1)?;
+    let layout = git_paw::surface::layout_for(prev_agent_count + 1)?;
 
     // 4.5 Take the advisory lock for the rest of the critical section.
     let _lock = git_paw::lock::SessionLock::acquire(&repo_root)?;

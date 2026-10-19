@@ -610,7 +610,7 @@ fn hard_command_failure_aborts() {
 /// id, and the supervisor builder also emits all five affordances.
 #[test]
 fn supervisor_session_titles_are_roles_and_emits_affordances() {
-    let layout = crate::supervisor::layout::supervisor_layout(2).expect("layout");
+    let layout = crate::surface::supervisor_layout(2).expect("layout");
     let supervisor = make_pane("supervisor", "/repo", "claude");
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let agent = make_pane("feat/foo", "/tmp/wt", "claude");
@@ -658,7 +658,7 @@ fn supervisor_session_titles_are_roles_and_emits_affordances() {
 /// CLI-launch keystroke) and clears the input line before each launch.
 #[test]
 fn supervisor_build_suppresses_startup_prompts_and_clears_input() {
-    let layout = crate::supervisor::layout::supervisor_layout(1).expect("layout");
+    let layout = crate::surface::supervisor_layout(1).expect("layout");
     let supervisor = make_pane("supervisor", "/repo", "claude");
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let agent = make_pane("feat/foo", "/tmp/wt", "claude");
@@ -713,7 +713,7 @@ fn supervisor_build_suppresses_startup_prompts_and_clears_input() {
 /// split takes the first agent's worktree.
 #[test]
 fn supervisor_build_compensates_first_agent_cwd_for_swap() {
-    let layout = crate::supervisor::layout::supervisor_layout(2).expect("layout");
+    let layout = crate::surface::supervisor_layout(2).expect("layout");
     let supervisor = make_pane("supervisor", "/repo", "claude");
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let a0 = make_pane("feat/foo", "/tmp/wt-foo", "claude");
@@ -762,7 +762,7 @@ fn supervisor_build_compensates_first_agent_cwd_for_swap() {
 /// affordances" (`supervisor-launch` / *`border_affordances` config field*).
 #[test]
 fn supervisor_session_opt_out_omits_affordances() {
-    let layout = crate::supervisor::layout::supervisor_layout(1).expect("layout");
+    let layout = crate::surface::supervisor_layout(1).expect("layout");
     let supervisor = make_pane("supervisor", "/repo", "claude");
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let agent = make_pane("feat/foo", "/tmp/wt", "claude");
@@ -1471,8 +1471,7 @@ fn make_layout_panes(n: usize) -> (PaneSpec, PaneSpec, Vec<PaneSpec>) {
 }
 
 fn build_for(agent_count: usize) -> TmuxSession {
-    let layout =
-        crate::supervisor::layout::supervisor_layout(agent_count).expect("layout computes");
+    let layout = crate::surface::supervisor_layout(agent_count).expect("layout computes");
     let (supervisor, dashboard, agents) = make_layout_panes(agent_count);
     build_supervisor_session(
         "proj",
@@ -1618,7 +1617,7 @@ fn supervisor_layout_25_agents_five_rows() {
 fn supervisor_layout_26_agents_rejected_by_layout_helper() {
     // The layout helper is the single gate for the hard cap; the tmux
     // builder is unreachable when supervisor_layout errors.
-    let err = crate::supervisor::layout::supervisor_layout(26).expect_err("26 agents rejected");
+    let err = crate::surface::supervisor_layout(26).expect_err("26 agents rejected");
     let msg = err.to_string();
     assert!(msg.contains("26 agents requested"));
     assert!(msg.contains("maximum is 25"));
@@ -1882,7 +1881,7 @@ fn every_new_session_command() -> Vec<(&'static str, String)> {
     // Builder 2: supervisor-mode layout. Build a small variant so the
     // sample is fast; the new-session shape doesn't depend on agent
     // count.
-    let layout = crate::supervisor::layout::supervisor_layout(2).expect("layout");
+    let layout = crate::surface::supervisor_layout(2).expect("layout");
     let (supervisor, dashboard, agents) = make_layout_panes(2);
     let supervisor_session = build_supervisor_session(
         "conv-supervisor",
@@ -1944,7 +1943,7 @@ fn every_new_session_passes_c() {
 /// SHALL NOT use the `cd <worktree> && <cli>` race chain.
 #[test]
 fn supervisor_layout_agent_splits_carry_worktree_no_cd_chain() {
-    let layout = crate::supervisor::layout::supervisor_layout(2).expect("layout");
+    let layout = crate::surface::supervisor_layout(2).expect("layout");
     let supervisor = make_pane("supervisor", "/repo", "claude");
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let agent_a = make_pane("feat/a", "/tmp/wt-a", "claude");
@@ -1996,7 +1995,7 @@ fn add_agent_same_row_splits_horizontally_from_previous_pane() {
     // 4 agents already present (single row, indices 2..=5); adding a 5th
     // (agent index 4) stays in the same row -> horizontal split from the
     // immediately-preceding pane (index 5), new pane at index 6.
-    let layout = crate::supervisor::layout::layout_for(5).expect("layout");
+    let layout = crate::surface::layout_for(5).expect("layout");
     let new_agent = make_pane("feat/fifth", "/tmp/wt5", "claude");
     let session = build_add_agent_commands("paw-x", &new_agent, 4, layout, true);
     let cmds = session.command_strings();
@@ -2021,7 +2020,7 @@ fn add_agent_new_row_splits_vertically_from_previous_row_first_pane() {
     // 5 agents present (one full row, indices 2..=6); adding a 6th (agent
     // index 5) starts a new row -> vertical split from the previous row's
     // first pane (index 2).
-    let layout = crate::supervisor::layout::layout_for(6).expect("layout");
+    let layout = crate::surface::layout_for(6).expect("layout");
     let new_agent = make_pane("feat/sixth", "/tmp/wt6", "claude");
     let session = build_add_agent_commands("paw-x", &new_agent, 5, layout, false);
     let cmds = session.command_strings();
@@ -2039,7 +2038,7 @@ fn add_agent_new_row_splits_vertically_from_previous_row_first_pane() {
 fn add_agent_reapplies_row_height_resize_pass() {
     // The re-tile must end with the same per-row resize pass start uses:
     // one resize for the top row (:0.0) at top_row_pct, one per agent row.
-    let layout = crate::supervisor::layout::layout_for(5).expect("layout");
+    let layout = crate::surface::layout_for(5).expect("layout");
     let new_agent = make_pane("feat/fifth", "/tmp/wt5", "claude");
     let session = build_add_agent_commands("paw-x", &new_agent, 4, layout, false);
     let cmds = session.command_strings();
@@ -2056,7 +2055,7 @@ fn add_agent_reapplies_row_height_resize_pass() {
 fn remove_retile_emits_resize_pass_for_remaining_count() {
     // After removing one of 5 agents, the grid re-tiles to the 4-agent
     // layout: a top-row resize plus one agent-row resize (single row).
-    let layout = crate::supervisor::layout::layout_for(4).expect("layout");
+    let layout = crate::surface::layout_for(4).expect("layout");
     let session = build_remove_retile_commands("paw-x", 4, layout);
     let cmds = session.command_strings();
 
@@ -2076,7 +2075,7 @@ fn remove_retile_emits_resize_pass_for_remaining_count() {
 
 #[test]
 fn remove_retile_with_zero_remaining_is_empty() {
-    let layout = crate::supervisor::layout::layout_for(1).expect("layout");
+    let layout = crate::surface::layout_for(1).expect("layout");
     let session = build_remove_retile_commands("paw-x", 0, layout);
     assert!(
         session.command_strings().is_empty(),
@@ -2129,7 +2128,7 @@ fn agent_row_widths_skips_single_pane_rows() {
 /// supervisor/dashboard 50/50 split is untouched (spec 4.3 / D4).
 #[test]
 fn agent_row_widths_never_touch_top_row() {
-    for n in 1..=crate::supervisor::layout::SUPERVISOR_MAX_AGENTS {
+    for n in 1..=crate::surface::SUPERVISOR_MAX_AGENTS {
         for (idx, _) in agent_row_widths(480, n) {
             assert!(idx >= 2, "rebalance must skip panes 0 and 1 for n={n}");
         }
@@ -2143,7 +2142,7 @@ fn agent_row_widths_never_touch_top_row() {
 fn agent_row_widths_minimum_is_one_fifth() {
     let window = 480usize;
     let floor = window / 5; // 96 cols = 20%
-    for n in 1..=crate::supervisor::layout::SUPERVISOR_MAX_AGENTS {
+    for n in 1..=crate::surface::SUPERVISOR_MAX_AGENTS {
         for (idx, cols) in agent_row_widths(window, n) {
             assert!(
                 cols + 1 >= floor,
@@ -2736,7 +2735,7 @@ fn has_live_agent_pane_true_for_a_renumbered_agent_pane_after_pause() {
 /// asserted on here.
 #[test]
 fn affordances_off_panes_are_still_labelled_so_pause_renumbering_is_safe() {
-    let layout = crate::supervisor::layout::supervisor_layout(1).expect("layout");
+    let layout = crate::surface::supervisor_layout(1).expect("layout");
     let supervisor = make_pane("supervisor", "/repo", "claude");
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let agent = make_pane("feat/foo", "/tmp/wt", "claude");
@@ -2768,7 +2767,7 @@ fn affordances_off_panes_are_still_labelled_so_pause_renumbering_is_safe() {
     assert!(has_live_agent_pane_with(
         &runner,
         "sup-off",
-        crate::supervisor::layout::SUPERVISOR_PANE_OFFSET
+        crate::surface::SUPERVISOR_PANE_OFFSET
     ));
 }
 

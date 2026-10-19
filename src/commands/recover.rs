@@ -13,6 +13,7 @@ use git_paw::broker;
 use git_paw::config::{self, ApprovalLevel, CustomCli, PawConfig, SupervisorConfig};
 use git_paw::error::PawError;
 use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry};
+use git_paw::surface::SessionLayout;
 use git_paw::tmux;
 
 use super::helpers::{dashboard_command, warn_if_broker_is_exposed};
@@ -237,8 +238,8 @@ fn recover_bare_session<S: std::hash::BuildHasher>(
 
     // The dashboard occupies pane 0 when the broker is enabled, so coding
     // agents start at pane 1; without it they start at pane 0.
-    let pane_offset = usize::from(broker_url.is_some());
-    Ok((builder.build()?, pane_offset, None))
+    let layout = SessionLayout::planned(SessionMode::Bare, broker_url.is_some());
+    Ok((builder.build()?, layout.first_agent_index(), None))
 }
 
 /// Rebuild a supervisor-mode session with the v0.5 layout: supervisor at pane
@@ -295,7 +296,7 @@ fn recover_supervisor_session(
         format!("{supervisor_launch} {supervisor_flags}")
     };
 
-    let layout = git_paw::supervisor::layout::supervisor_layout(existing.worktrees.len())?;
+    let layout = git_paw::surface::supervisor_layout(existing.worktrees.len())?;
 
     let repo_str = repo_root.to_string_lossy().to_string();
     let supervisor_pane = tmux::PaneSpec {
@@ -338,13 +339,16 @@ fn recover_supervisor_session(
         &env_vars,
     )?;
 
+    let session_layout = SessionLayout::planned(SessionMode::Supervisor, broker_url.is_some());
     Ok((
         session,
-        git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET,
-        Some(session::RepoOrchestratorEntry {
-            cli: supervisor_cli,
-            pane_index: 0,
-        }),
+        session_layout.first_agent_index(),
+        session_layout
+            .orchestrator_index()
+            .map(|pane_index| session::RepoOrchestratorEntry {
+                cli: supervisor_cli,
+                pane_index,
+            }),
     ))
 }
 

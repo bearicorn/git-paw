@@ -147,7 +147,7 @@ This split applies only where a format is a contract, not to every struct in the
 | Dashboard | Already Model-View-Update — a functional core for a terminal UI |
 | Process execution (`CommandRunner`) | Already a port with a test fake; not yet used everywhere |
 | MCP server | Already layered one way (`query` → `tools` → `server`) and talks to the broker over HTTP |
-| Terminal | tmux calls are spread across several modules, and pane numbers appear in decision code and session state; the terminal port is the main open item |
+| Terminal | tmux calls are spread across several modules; the terminal port is the main open item. Reserved pane indices no longer appear in decision code: they live in `surface::SessionLayout`, and each surface's role is the closed `surface::SurfaceRole` enum a single resolver produces. Pane numbers still appear in session state and at the adapter edge |
 | Broker | Runs inside the dashboard process; moving it into its own process so the dashboard becomes a thin client is planned |
 | Drive loop | Its side effects are already behind traits; its decisions are not yet separated from them |
 | Commands (`start`, `stop`, `purge`, …) | Not yet callable as a library: they read the current directory and print directly |

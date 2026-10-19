@@ -24,6 +24,7 @@ use git_paw::error::PawError;
 use git_paw::git;
 use git_paw::interactive;
 use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry};
+use git_paw::surface::SessionLayout;
 use git_paw::tmux;
 
 use super::helpers::{
@@ -633,7 +634,7 @@ pub(crate) fn cmd_supervisor(
 
     // Hard cap (D4): 25 agents per session for v0.5.0. Configurable layout
     // arrives in v1.0.0 (issue #17).
-    let layout = git_paw::supervisor::layout::supervisor_layout(branches.len())?;
+    let layout = git_paw::surface::supervisor_layout(branches.len())?;
 
     // Real launch.
     git::prune_worktrees(repo_root)?;
@@ -804,16 +805,23 @@ pub(crate) fn cmd_supervisor(
         &env_vars,
     )?;
 
+    // Every reserved-index fact for this launch — the logging offset, the
+    // recorded `dashboard_pane`, the discovery-file offset and orchestrator
+    // entry, and the gate/submit targets below — comes from this one layout
+    // record. (`layout` above is the grid GEOMETRY for `agent_count` panes;
+    // this is the index record for the window those panes land in.)
+    let session_layout = SessionLayout::planned(SessionMode::Supervisor, broker_config.enabled);
+
     // Attach session logging (no-op unless `[logging] enabled`). Supervisor
     // mode reserves pane 0 (supervisor) and pane 1 (dashboard), so coding
     // agents — in `branches` order, matching `agent_panes` and the boot loop
-    // below — start at SUPERVISOR_PANE_OFFSET.
+    // below — start at the layout's first agent index.
     attach_session_logging(
         &mut tmux_session,
         config,
         repo_root,
         &branch_refs,
-        git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET,
+        session_layout.first_agent_index(),
     )?;
 
     tmux_session.execute()?;
@@ -837,32 +845,36 @@ pub(crate) fn cmd_supervisor(
         broker_bind: None,
         broker_log_path: None,
         mode: SessionMode::Supervisor,
-        dashboard_pane: None,
+        // A broker-less supervisor launch still builds the dashboard pane but
+        // records no index for it; the layout already answers `None` there, so
+        // this needs no broker guard of its own.
+        dashboard_pane: session_layout.recorded_dashboard_pane(),
     };
     if broker_config.enabled {
         state.broker_port = Some(broker_config.port);
         state.broker_bind = Some(broker_config.bind.clone());
         state.broker_log_path = Some(session::broker_log_path(&state.session_name)?);
-        state.dashboard_pane = Some(1);
     }
     session::save_session(&state)?;
 
     // Write the per-repo discovery file sweep.sh reads. Coding agents start
-    // at SUPERVISOR_PANE_OFFSET (supervisor pane 0, dashboard pane 1).
+    // at the layout's first agent index (supervisor pane 0, dashboard pane 1).
     write_repo_discovery_file(
         repo_root,
         &tmux_session.name,
         &state.worktrees,
-        git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET,
-        Some(session::RepoOrchestratorEntry {
-            cli: supervisor_cli.clone(),
-            pane_index: 0,
-        }),
+        session_layout.first_agent_index(),
+        session_layout
+            .orchestrator_index()
+            .map(|pane_index| session::RepoOrchestratorEntry {
+                cli: supervisor_cli.clone(),
+                pane_index,
+            }),
     );
 
-    // Inject the initial prompt into the supervisor pane (index 0) and each
-    // coding agent pane (indices 2..N+1). The dashboard pane (index 1) is a
-    // TUI process and does NOT receive a send-keys prompt.
+    // Inject the initial prompt into the supervisor surface and each coding
+    // agent pane (indices 2..N+1). The dashboard pane (index 1) is a TUI
+    // process and does NOT receive a send-keys prompt.
     //
     // Instead of a blind fixed sleep, each pane's boot block is gated on
     // observed CLI readiness (design D1, G1): `gate_pane_for_injection` polls
@@ -885,21 +897,29 @@ pub(crate) fn cmd_supervisor(
     let supervisor_framing = build_supervisor_framing();
     let supervisor_prompt = format!("{supervisor_boot_block}\n\n{supervisor_framing}");
     let supervisor_delay = resolve_submit_delay_ms(&supervisor_cli, &config.clis);
+    // This launch is BUILDING the supervisor surface, so the layout answers
+    // its index totally rather than as an `Option` to be unwrapped here.
+    let supervisor_idx = session_layout.supervisor_launch_index();
     gate_pane_or_fail_on_dialog(
         &tmux_session.name,
-        0,
+        supervisor_idx,
         &supervisor_cli,
         &supervisor_pane.cli_command,
         &config.clis,
     )?;
-    submit_prompt_to_pane(&tmux_session.name, 0, &supervisor_prompt, supervisor_delay);
+    submit_prompt_to_pane(
+        &tmux_session.name,
+        supervisor_idx,
+        &supervisor_prompt,
+        supervisor_delay,
+    );
 
     for (idx, prompt) in agent_prompts.iter().enumerate() {
         // Per-branch delay: a spec-driven session can resolve a distinct CLI
         // per branch (GP-10), and each CLI's configured settle delay differs.
         let agent_cli = effective_agent_cli(&branches[idx]);
         let agent_delay = resolve_submit_delay_ms(&agent_cli, &config.clis);
-        let pane_idx = git_paw::supervisor::layout::SUPERVISOR_PANE_OFFSET + idx;
+        let pane_idx = session_layout.agent_index(idx);
         gate_pane_or_fail_on_dialog(
             &tmux_session.name,
             pane_idx,
@@ -1043,6 +1063,7 @@ fn drive_unattended_loop(
             .clone()
             .or_else(|| loaded_config.default_cli.clone())
             .unwrap_or_default(),
+        layout: git_paw::surface::SessionLayout::of(state),
     };
 
     drive::run_drive_loop(session_name, repo_root, &agents, options)?;

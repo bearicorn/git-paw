@@ -21,6 +21,7 @@ use git_paw::error::PawError;
 use git_paw::git;
 use git_paw::interactive;
 use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry};
+use git_paw::surface::SessionLayout;
 use git_paw::tmux;
 
 use super::helpers::{
@@ -331,6 +332,11 @@ pub(crate) fn cmd_start(
 
     let mut tmux_session = builder.build()?;
 
+    // Every reserved-index fact for this launch — the logging offset below,
+    // the recorded `dashboard_pane`, the discovery-file offset and the
+    // boot-block pane targets — comes from this one layout record.
+    let layout = SessionLayout::planned(SessionMode::Bare, broker_config.enabled);
+
     // Attach session logging (no-op unless `[logging] enabled`). Pane offset
     // matches the boot-block/discovery offset below: dashboard occupies pane 0
     // when the broker is enabled, so coding agents start at pane 1.
@@ -340,7 +346,7 @@ pub(crate) fn cmd_start(
         &config,
         &repo_root,
         &logging_branches,
-        usize::from(broker_config.enabled),
+        layout.first_agent_index(),
     )?;
 
     // Execute tmux session
@@ -364,14 +370,15 @@ pub(crate) fn cmd_start(
         broker_bind: None,
         broker_log_path: None,
         mode: SessionMode::Bare,
-        dashboard_pane: None,
+        // The layout already answers `None` for a broker-less launch, so this
+        // needs no broker guard of its own.
+        dashboard_pane: layout.recorded_dashboard_pane(),
     };
 
     if broker_config.enabled {
         state.broker_port = Some(broker_config.port);
         state.broker_bind = Some(broker_config.bind.clone());
         state.broker_log_path = Some(session::broker_log_path(&state.session_name)?);
-        state.dashboard_pane = Some(0);
     }
 
     session::save_session(&state)?;
@@ -379,13 +386,12 @@ pub(crate) fn cmd_start(
     // Write the per-repo discovery file sweep.sh reads. In the bare layout
     // the dashboard occupies pane 0 when the broker is enabled, so coding
     // agents start at pane 1; without the broker they start at pane 0.
-    let pane_offset = usize::from(broker_config.enabled);
     write_repo_discovery_file(
         &state.repo_path,
         &tmux_session.name,
         &state.worktrees,
-        pane_offset,
-        None, // bare-mode session: no orchestrator pane
+        layout.first_agent_index(),
+        None, // bare-mode session: the layout reserves no supervisor surface
     );
 
     // Inject boot blocks for manual broker mode (without supervisor).
@@ -399,7 +405,7 @@ pub(crate) fn cmd_start(
     // boot block on top of it, so the launch fails loudly instead.
     if broker_config.enabled {
         for (idx, (branch, cli)) in selection.mappings.iter().enumerate() {
-            let pane_idx = if broker_config.enabled { idx + 1 } else { idx };
+            let pane_idx = layout.agent_index(idx);
             let agent_flags = config::resolve_approval_flags(cli, approval, &config.clis);
             let cli_command =
                 apply_approval_flags(&config::launch_command(cli, &config.clis), &agent_flags);
@@ -743,6 +749,11 @@ fn launch_spec_session(
 
     let mut tmux_session = builder.build()?;
 
+    // Every reserved-index fact for this launch — the logging offset, the
+    // recorded `dashboard_pane`, the discovery-file offset and the per-agent
+    // prompt targets — comes from this one layout record.
+    let layout = SessionLayout::planned(SessionMode::Bare, broker_config.enabled);
+
     // Attach session logging (no-op unless `[logging] enabled`). Pane indices
     // shift by 1 when the broker's dashboard occupies pane 0.
     let logging_branches: Vec<&str> = mappings.iter().map(|(b, _)| b.as_str()).collect();
@@ -751,13 +762,11 @@ fn launch_spec_session(
         config,
         repo_root,
         &logging_branches,
-        usize::from(broker_config.enabled),
+        layout.first_agent_index(),
     )?;
 
     // Execute tmux session
     tmux_session.execute()?;
-
-    let pane_offset = usize::from(broker_config.enabled);
 
     // Save session state and write the per-repo discovery file BEFORE
     // gating/injecting — matching the supervisor path's order (save, then
@@ -777,14 +786,15 @@ fn launch_spec_session(
         broker_bind: None,
         broker_log_path: None,
         mode: SessionMode::Bare,
-        dashboard_pane: None,
+        // The layout already answers `None` for a broker-less launch, so this
+        // needs no broker guard of its own.
+        dashboard_pane: layout.recorded_dashboard_pane(),
     };
 
     if broker_config.enabled {
         state.broker_port = Some(broker_config.port);
         state.broker_bind = Some(broker_config.bind.clone());
         state.broker_log_path = Some(session::broker_log_path(&state.session_name)?);
-        state.dashboard_pane = Some(0);
     }
 
     session::save_session(&state)?;
@@ -797,8 +807,8 @@ fn launch_spec_session(
         &state.repo_path,
         &tmux_session.name,
         &state.worktrees,
-        pane_offset,
-        None, // bare-mode session: no orchestrator pane
+        layout.first_agent_index(),
+        None, // bare-mode session: the layout reserves no supervisor surface
     );
 
     // Inject and submit each agent's prompt: the broker boot block (when
@@ -816,7 +826,7 @@ fn launch_spec_session(
     // pre-fill above), so a blind submit into a pane still showing an
     // unanswered first-run trust/bypass dialog could accidentally accept it.
     for (idx, (branch, cli)) in mappings.iter().enumerate() {
-        let pane_idx = idx + pane_offset;
+        let pane_idx = layout.agent_index(idx);
         let agent_flags = config::resolve_approval_flags(cli, approval, &config.clis);
         let cli_command =
             apply_approval_flags(&config::launch_command(cli, &config.clis), &agent_flags);
@@ -853,7 +863,7 @@ fn launch_spec_session(
 pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result<(), PawError> {
     tmux::ensure_tmux_installed()?;
 
-    let dashboard_index = existing.dashboard_pane.unwrap_or(0);
+    let dashboard_index = SessionLayout::of(existing).dashboard_index_or_default();
 
     let mut updated = existing.clone();
     // Re-stamp the broker log path, so a session paused under a git-paw that

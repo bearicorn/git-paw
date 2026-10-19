@@ -8,6 +8,7 @@ use git_paw::detect;
 use git_paw::error::PawError;
 use git_paw::interactive;
 use git_paw::session::Session;
+use git_paw::surface::SessionLayout;
 
 /// Convert the config's `[clis.*]` table into the detector's custom-CLI
 /// definitions so a configured CLI is resolvable on `PATH` at launch time.
@@ -40,13 +41,12 @@ pub(crate) fn agent_pane_offset(session: &Session) -> usize {
 /// Derives the per-repo discovery file's orchestrator entry from a session's
 /// MODE, rather than reading it back from a file that may not exist.
 ///
-/// A supervisor-mode session has an orchestrator pane at index 0 (the
-/// supervisor layout puts the supervisor first, the dashboard second, coding
-/// agents after); a bare session has none. The CLI is resolved the way every
-/// supervisor launch path resolves it — `[supervisor].cli`, else
-/// `default_cli`. Returns `None` for a bare session, and also for a
-/// supervisor session whose CLI cannot be resolved: the discovery file is a
-/// best-effort surface and must never fail a resume.
+/// The pane index — and whether there is an orchestrator surface at all —
+/// come from the mode's [`SessionLayout`]; a bare layout reserves none. The
+/// CLI is resolved the way every supervisor launch path resolves it —
+/// `[supervisor].cli`, else `default_cli`. Returns `None` for a bare session,
+/// and also for a supervisor session whose CLI cannot be resolved: the
+/// discovery file is a best-effort surface and must never fail a resume.
 ///
 /// `recover_session` derives the same entry from the CLI it has already had
 /// to resolve in order to REBUILD the pane, so it keeps its own construction
@@ -55,15 +55,14 @@ pub(crate) fn orchestrator_entry_for_mode(
     mode: git_paw::session::SessionMode,
     config: &PawConfig,
 ) -> Option<git_paw::session::RepoOrchestratorEntry> {
-    if mode != git_paw::session::SessionMode::Supervisor {
-        return None;
-    }
+    let layout = SessionLayout::planned(mode, config.broker.enabled);
+    let pane_index = layout.orchestrator_index()?;
     let cli = config
         .supervisor
         .as_ref()
         .and_then(|s| s.cli.clone())
         .or_else(|| config.default_cli.clone())?;
-    Some(git_paw::session::RepoOrchestratorEntry { cli, pane_index: 0 })
+    Some(git_paw::session::RepoOrchestratorEntry { cli, pane_index })
 }
 
 /// Attaches `tmux pipe-pane` to each coding-agent pane so the session-logging

@@ -25,10 +25,13 @@ use super::broker_log::{self, BrokerLog};
 /// than a blank cell that looks like a rendering bug (W15-15).
 const UNKNOWN_CLI: &str = "?";
 
-/// The `agent_id` of the supervisor's pinned row. The supervisor is the only
-/// publisher whose `phase` introspection field is surfaced unconditionally in
-/// the agent table (see [`format_agent_rows`]).
-const SUPERVISOR_AGENT_ID: &str = "supervisor";
+// The `agent_id` of the supervisor's pinned row, imported from
+// `crate::surface`, which owns the single definition of the supervisor's
+// broker wire identity. The supervisor is the only publisher whose `phase`
+// introspection field is surfaced unconditionally in the agent table (see
+// `format_agent_rows`). Comparisons against it here identify a *roster row*,
+// not the role of a session surface.
+use crate::surface::SUPERVISOR_AGENT_ID;
 
 /// The one `phase` value the dashboard honours on a *non-supervisor* row.
 ///
@@ -163,7 +166,7 @@ pub fn arrange_with_supervisor_pinned(rows: Vec<AgentRow>) -> Vec<AgentTableRow>
     let mut supervisor: Option<AgentRow> = None;
     let mut coding: Vec<AgentRow> = Vec::with_capacity(rows.len());
     for row in rows {
-        if row.agent_id == "supervisor" {
+        if row.agent_id == SUPERVISOR_AGENT_ID {
             supervisor = Some(row);
         } else {
             coding.push(row);

@@ -32,7 +32,11 @@ use crate::static_regex::static_regex;
 /// The agent id that owns verification and archival. Any other id committing
 /// archive activity is a role-gating violation. Established by the v0.5.0
 /// supervisor-as-pane work.
-pub const SUPERVISOR_AGENT_ID: &str = "supervisor";
+///
+/// Re-exported from [`crate::surface`], which owns the single definition of
+/// the supervisor's broker wire identity. This comparison identifies a
+/// *committing agent id*, not the role of a session surface.
+pub use crate::surface::SUPERVISOR_AGENT_ID;
 
 /// The `from` / sender label stamped on guard-published messages so the user
 /// (and the offending agent's LLM) can see the warning came from the guard.
