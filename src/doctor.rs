@@ -425,6 +425,8 @@ pub struct Probes {
     pub cli_setup: crate::cli_setup::doctor::SetupProbe,
     /// Durable allow rules already in the project's CLI settings.
     pub broad_grants: crate::cli_setup::doctor::BroadGrantProbe,
+    /// The project's CLI settings files, for the grant-residue report.
+    pub grant_residue: crate::cli_setup::doctor::ResidueProbe,
 }
 
 // ---------------------------------------------------------------------------
@@ -1229,6 +1231,9 @@ pub fn run_checks(probes: &Probes) -> Vec<CheckResult> {
     checks.extend(crate::cli_setup::doctor::check_broad_grants(
         &probes.broad_grants,
     ));
+    checks.extend(crate::cli_setup::doctor::check_grant_residue(
+        &probes.grant_residue,
+    ));
     checks.extend(check_config(&probes.config));
     checks.extend(check_spec_system(&probes.spec_system));
     checks.push(check_spec_cli(&probes.spec_cli));
@@ -1460,6 +1465,7 @@ fn collect_probes(repo_root: &Path, environment: EnvironmentProbe) -> Probes {
         clis: probe_clis(&config),
         cli_setup: probe_cli_setup(repo_root),
         broad_grants: probe_broad_grants(repo_root),
+        grant_residue: probe_grant_residue(repo_root),
         config: config_probe,
         spec_system: probe_spec_system(&config, repo_root),
         spec_cli,
@@ -1678,6 +1684,21 @@ fn probe_cli_setup(repo_root: &Path) -> crate::cli_setup::doctor::SetupProbe {
             .or_insert_with(|| std::fs::read_to_string(&entry.file).ok());
     }
 
+    // The item's own target file, whether or not the record names it: an entry
+    // the user already held is not recorded, so judging the plan against the
+    // record alone reports it missing forever.
+    let mut targets = std::collections::BTreeMap::new();
+    for row in crate::cli_setup::facts::FACT_TABLE {
+        if !row.declares(crate::cli_setup::facts::SetupItem::Allowlist) {
+            continue;
+        }
+        let path = layout.main_checkout.join(row.allowlist_target);
+        files
+            .entry(path.clone())
+            .or_insert_with(|| std::fs::read_to_string(&path).ok());
+        targets.insert(row.identity.to_string(), path);
+    }
+
     // The main checkout plus every worktree of the current session: a granted
     // relative path resolves against whichever of them a session runs in.
     let mut roots = vec![repo_root.to_path_buf()];
@@ -1690,6 +1711,7 @@ fn probe_cli_setup(repo_root: &Path) -> crate::cli_setup::doctor::SetupProbe {
     setup_doctor::SetupProbe {
         entries,
         files,
+        targets,
         helpers,
     }
 }
@@ -1735,6 +1757,33 @@ fn probe_broad_grants(repo_root: &Path) -> crate::cli_setup::doctor::BroadGrantP
         }
     }
     setup_doctor::BroadGrantProbe::default()
+}
+
+/// Reads the main checkout's project-shared and project-local CLI settings
+/// files for the grant-residue report.
+///
+/// Strictly read-only, and only the files a fact row names — never a
+/// user-level settings file, and never a worktree's own copy.
+fn probe_grant_residue(repo_root: &Path) -> crate::cli_setup::doctor::ResidueProbe {
+    use crate::cli_setup::{doctor as setup_doctor, facts, shell};
+
+    let runner = crate::command_runner::RealCommandRunner;
+    let root = shell::resolve_layout(&runner, repo_root)
+        .map_or_else(|_| repo_root.to_path_buf(), |layout| layout.main_checkout);
+
+    let mut files = Vec::new();
+    for row in facts::FACT_TABLE {
+        if !row.declares(facts::SetupItem::Allowlist) {
+            continue;
+        }
+        for relative in [row.shared_settings, row.allowlist_target] {
+            let path = root.join(relative);
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                files.push((path, content));
+            }
+        }
+    }
+    setup_doctor::ResidueProbe { files }
 }
 
 /// Inspects `.git-paw/scripts/` against the binary's embedded helper scripts.

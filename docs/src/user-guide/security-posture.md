@@ -140,6 +140,34 @@ additionally lists the broad allow rules already in that file, so you can see
 what earlier "don't ask again" answers left behind — it reports them and never
 edits them.
 
+### Self-approval residue
+
+One shape of leftover grant deserves naming on its own, because it undoes the
+single most important distinction the grant table draws.
+
+The allowlist item grants `sweep.sh` **per subcommand**, and withholds
+`approve`, `verified`, `feedback-gate` and `conflict-ack` precisely because
+the target settings file reaches every session in the repository — a worker's
+as much as the orchestrator's. A durable allow rule naming one of those
+subcommands, or a whole-script `Bash(.git-paw/scripts/sweep.sh *)` wildcard
+that covers them all, hands every agent session exactly what was withheld: it
+can press the approval keystroke in another pane, or publish a supervisor
+verdict, **without a prompt**. An agent can then approve its own permission
+prompts and sign off its own work.
+
+Such a rule is not something git-paw writes. It arrives from a "don't ask
+again" answer — including ones the retired classifier accepted on your behalf
+up to v0.16.0 — or from a broad rule added by hand. `git paw doctor` now
+reports it, in the `project CLI grant residue` check, alongside a blanket
+`curl` grant and the inert `allowed_bash_prefixes` seed earlier versions
+wrote. See [Doctor](doctor.md).
+
+Removing it is **manual by design**. git-paw never rewrites or deletes a grant
+it did not write: it cannot prove the rule is not one you meant to add, and a
+tool that edits your permission rules on its own is the thing this whole
+section exists to rule out. Doctor names the file and the entry; the deletion
+is yours.
+
 ## Browser exposure — the broker's Host and Origin guard
 
 The coordination broker is an HTTP server on your loopback interface
@@ -240,7 +268,9 @@ loopback `Host`.
   protect.
 - If you ran v0.16.0 or earlier, audit your agent CLI's settings file for
   durable "don't ask again" grants the retired classifier accepted on your
-  behalf.
+  behalf. `git paw doctor` names the known-dangerous ones — above all a
+  `sweep.sh` rule that lets an agent approve its own prompts — but removing
+  them is yours to do.
 - Run untrusted or aggressive automation on hardware, accounts, and repositories
   whose compromise you could tolerate.
 

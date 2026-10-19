@@ -864,3 +864,134 @@ fn doctor_lists_a_broad_grant_the_user_already_had() {
     assert!(detail.contains("Bash(git push:*)"), "{detail}");
     assert!(!detail.contains("npm run test"), "{detail}");
 }
+
+#[test]
+#[serial]
+fn doctor_warns_about_grant_residue_in_both_settings_files_and_edits_neither() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let claude = sandbox.repo.join(".claude");
+    std::fs::create_dir_all(&claude).expect("mkdir");
+
+    // The shared file carries the inert seed earlier versions wrote; the local
+    // one carries two durable grants from before the per-subcommand table.
+    std::fs::write(
+        claude.join("settings.json"),
+        r#"{"allowed_bash_prefixes":["git "]}"#,
+    )
+    .expect("write shared settings");
+    std::fs::write(
+        claude.join("settings.local.json"),
+        r#"{"permissions":{"allow":["Bash(curl *)","Bash(.git-paw/scripts/sweep.sh approve *)","Bash(.git-paw/scripts/broker.sh *)"]}}"#,
+    )
+    .expect("write local settings");
+
+    let before = byte_snapshot(&sandbox.repo);
+    let (code, document) = sandbox.doctor_json();
+    let after = byte_snapshot(&sandbox.repo);
+
+    let residue = checks(&document)
+        .iter()
+        .find(|c| c["name"] == "project CLI grant residue")
+        .expect("the residue check");
+    assert_eq!(residue["status"], "warn");
+    let detail = residue["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains(".claude/settings.json"), "{detail}");
+    assert!(detail.contains(".claude/settings.local.json"), "{detail}");
+    assert!(detail.contains("allowed_bash_prefixes"), "{detail}");
+    assert!(detail.contains("Bash(curl *)"), "{detail}");
+    assert!(detail.contains("sweep.sh approve"), "{detail}");
+    assert!(
+        !detail.contains("broker.sh"),
+        "a helper the grant table grants whole is not residue: {detail}"
+    );
+    let remedy = residue["remedy"].as_str().unwrap_or_default();
+    assert!(remedy.contains("by hand"), "{remedy}");
+
+    assert_eq!(
+        before, after,
+        "the residue check must not create, modify or delete anything"
+    );
+    assert_ne!(residue["status"], "fail");
+    assert!(
+        code == 0 || code == 1,
+        "doctor's own exit code is unaffected: {code}"
+    );
+}
+
+/// The status of the `claude setup` check in a fresh `doctor` run.
+fn setup_status(sandbox: &Sandbox) -> (String, String) {
+    let (_code, document) = sandbox.doctor_json();
+    let check = checks(&document)
+        .iter()
+        .find(|c| c["name"] == "claude setup")
+        .expect("a setup check for claude")
+        .clone();
+    (
+        check["status"].as_str().unwrap_or_default().to_string(),
+        check["detail"].as_str().unwrap_or_default().to_string(),
+    )
+}
+
+#[test]
+#[serial]
+fn undo_and_reapply_converge_when_entries_pre_existed() {
+    const PRE_EXISTING: &str = "Bash(.git-paw/scripts/broker.sh *)";
+
+    let sandbox = Sandbox::new();
+    sandbox.init();
+
+    // The user already granted one of the entries the item plans, so apply
+    // skips it and the record never names it.
+    let settings = sandbox.repo.join(".claude/settings.local.json");
+    std::fs::create_dir_all(settings.parent().expect("parent")).expect("mkdir");
+    std::fs::write(
+        &settings,
+        format!(r#"{{"permissions":{{"allow":["{PRE_EXISTING}"]}}}}"#),
+    )
+    .expect("write settings");
+
+    sandbox
+        .paw(&["setup-cli", "claude", "--allowlist", "--yes"])
+        .assert()
+        .success();
+
+    let (status, detail) = setup_status(&sandbox);
+    assert_eq!(
+        status, "ok",
+        "a freshly applied allowlist is current: {detail}"
+    );
+
+    // Everything the item just wrote — including the `sweep.sh approve` rule
+    // it pins to `permissions.ask` — is git-paw's own, so none of it is
+    // residue.
+    let (_code, document) = sandbox.doctor_json();
+    let residue = checks(&document)
+        .iter()
+        .find(|c| c["name"] == "project CLI grant residue")
+        .expect("the residue check");
+    assert_eq!(
+        residue["status"], "ok",
+        "git-paw's own applied entries are not residue: {}",
+        residue["detail"]
+    );
+
+    // The upgrade path other changes prescribe has to converge: undo leaves
+    // the user's own entry alone, and the re-apply skips it again.
+    sandbox
+        .paw(&["setup-cli", "claude", "--undo", "--yes"])
+        .assert()
+        .success();
+    sandbox
+        .paw(&["setup-cli", "claude", "--allowlist", "--yes"])
+        .assert()
+        .success();
+
+    let on_disk = std::fs::read_to_string(&settings).expect("read settings");
+    assert!(
+        on_disk.contains(PRE_EXISTING),
+        "undo must never remove an entry git-paw did not write: {on_disk}"
+    );
+    let (status, detail) = setup_status(&sandbox);
+    assert_eq!(status, "ok", "undo + re-apply converges: {detail}");
+}
