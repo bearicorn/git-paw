@@ -71,6 +71,95 @@ fn modified_files_of(msg: &BrokerMessage) -> Option<&Vec<String>> {
     }
 }
 
+/// Phase-label prefix covering the bundled stuck-detection helper's
+/// prompt and stream-timeout alerts (`stuck-on-prompt`,
+/// `stuck-stream-timeout`).
+const STALL_ALERT_PHASE_PREFIX: &str = "stuck";
+
+/// The helper's remaining synthetic alert phases, which do not share the
+/// `stuck` prefix but are the same kind of message: a report *about* a
+/// wave that is not moving.
+const STALL_ALERT_PHASES: &[&str] = &["context-bloat", "no-progress", "blocked-on-supervisor"];
+
+/// Whether `phase` is one of the stuck-detection helper's synthetic alerts
+/// rather than an agent's own lifecycle phase.
+///
+/// Every phase the helper publishes is an observation about the wave being
+/// stuck — not the wave moving. `no-progress` is the plainest case: it says
+/// in its own name that nothing is progressing, and counting its arrival as
+/// progress would reset the very clock it is reporting on.
+fn is_stall_alert_phase(phase: Option<&str>) -> bool {
+    phase
+        .is_some_and(|p| p.starts_with(STALL_ALERT_PHASE_PREFIX) || STALL_ALERT_PHASES.contains(&p))
+}
+
+/// Whether accepting `msg` means the *wave* progressed.
+///
+/// Progress is a wave phase advancing or a branch tip moving — the branch tip
+/// is the watcher's business (`watcher::watch_worktree`), so this function
+/// decides only the message half. A wave phase advances on an `agent.status`
+/// whose status or phase differs from the sender's recorded values, and on an
+/// `agent.artifact`, `agent.verified`, `agent.feedback` or
+/// `agent.advanced-main`.
+///
+/// Nothing else counts, and the exclusions are the point of the signal:
+///
+/// - A **repeated status** keeps `last_seen` fresh by design — that is exactly
+///   how a 13-day stall hid behind a roster of `working` agents. Its
+///   `modified_files` are ignored too, so uncommitted churn in a worktree the
+///   watcher is polling never reads as progress.
+/// - An **`agent.question`** is the drive loop escalating a live permission
+///   prompt, and it re-escalates the same prompt after each dedup window; an
+///   **`agent.learning`** is the record it writes for that escalation. Both
+///   keep arriving while the wave sits on the unanswered prompt this signal
+///   exists to reveal.
+/// - `agent.blocked`, `agent.intent`, `agent.answer` and the broker's own
+///   `supervisor.verify-now` nudge move no phase and no branch tip.
+///
+/// Call it **before** [`update_agent_record`] overwrites the record, under the
+/// same write lock, so "differs from the recorded values" compares against the
+/// state the broker held when the message arrived.
+///
+/// This is the semantic-handling site a new [`BrokerMessage`] variant must be
+/// classified at (AGENTS.md's enum-variant ripple list): the match is
+/// exhaustive, so the compiler names it.
+#[must_use]
+pub fn message_is_progress(inner: &BrokerStateInner, msg: &BrokerMessage) -> bool {
+    match msg {
+        BrokerMessage::Status { agent_id, payload } => {
+            // A stall-alert phase is the stuck-detection helper reporting,
+            // ABOUT an agent, that the wave is not moving. Counting its
+            // arrival as a phase advance would let the detection of a stall
+            // reset the stall clock — the signal would switch itself off
+            // precisely when it starts firing. Moving *out* of such a phase
+            // is an ordinary advance and still counts, because the
+            // comparison below only sees the incoming phase.
+            if is_stall_alert_phase(payload.phase.as_deref()) {
+                return false;
+            }
+            match inner
+                .agents
+                .get(agent_id)
+                .and_then(|r| r.last_status_and_phase.as_ref())
+            {
+                // The agent's first status is news by definition.
+                None => true,
+                Some((status, phase)) => payload.status != *status || payload.phase != *phase,
+            }
+        }
+        BrokerMessage::Artifact { .. }
+        | BrokerMessage::Verified { .. }
+        | BrokerMessage::Feedback { .. }
+        | BrokerMessage::AdvancedMain { .. } => true,
+        BrokerMessage::Blocked { .. }
+        | BrokerMessage::Question { .. }
+        | BrokerMessage::Intent { .. }
+        | BrokerMessage::Answer { .. }
+        | BrokerMessage::Learning { .. }
+        | BrokerMessage::VerifyNow { .. } => false,
+    }
+}
+
 /// Updates (or creates) the agent record and inbox for the message sender.
 fn update_agent_record(inner: &mut BrokerStateInner, msg: &BrokerMessage) {
     // Roster is populated only from status-publishing senders (W15-16). The
@@ -101,6 +190,7 @@ fn update_agent_record(inner: &mut BrokerStateInner, msg: &BrokerMessage) {
             last_message: None,
             last_committed_at: None,
             modified_files: Vec::new(),
+            last_status_and_phase: None,
         });
 
     // Make terminal states sticky: only update status if the new status is also terminal
@@ -125,6 +215,14 @@ fn update_agent_record(inner: &mut BrokerStateInner, msg: &BrokerMessage) {
 
     record.last_seen = now;
     record.last_message = Some(msg.clone());
+
+    // Wave-progress classification compares an incoming `agent.status`
+    // against the agent's last *status* — not against `record.status`, which
+    // sticks at a terminal label, nor against `last_message`, which any
+    // roster-upserting variant overwrites. See `last_status_and_phase`.
+    if let BrokerMessage::Status { payload, .. } = msg {
+        record.last_status_and_phase = Some((payload.status.clone(), payload.phase.clone()));
+    }
 
     // `supervisor-branch-refresh` gate 1 (design D1): track the latest
     // modified-file set on its own field, separate from `last_message`,
@@ -166,8 +264,12 @@ fn update_agent_record(inner: &mut BrokerStateInner, msg: &BrokerMessage) {
 /// - Appends the message to the in-memory log
 pub fn publish_message(state: &Arc<BrokerState>, msg: &BrokerMessage) {
     let seq = state.next_seq();
-    {
+    let progressed = {
         let mut inner = state.write();
+
+        // Classify before the record is overwritten: "differs from the
+        // recorded values" is only answerable against the pre-update state.
+        let progressed = message_is_progress(&inner, msg);
 
         update_agent_record(&mut inner, msg);
 
@@ -178,7 +280,17 @@ pub fn publish_message(state: &Arc<BrokerState>, msg: &BrokerMessage) {
 
         // Route based on message type
         route_message(&mut inner, msg, seq);
+
+        progressed
+    };
+
+    if progressed {
+        state.mark_progress();
     }
+    // Wake every `GET /log` long-poll waiter now the log has grown. Done
+    // outside the write lock so a waiter that re-checks immediately is not
+    // blocked by the publisher it was waiting for.
+    state.notify_published();
 
     // Forward to the learnings aggregator after delivery completes. The
     // aggregator only writes to a markdown file — it does NOT publish back
@@ -655,6 +767,346 @@ mod tests {
 
     fn fresh_state() -> Arc<BrokerState> {
         Arc::new(BrokerState::new(None))
+    }
+
+    // === Wave-progress classification (`message_is_progress`) ===
+
+    fn make_status_with_phase(agent_id: &str, status: &str, phase: Option<&str>) -> BrokerMessage {
+        BrokerMessage::Status {
+            agent_id: agent_id.to_string(),
+            payload: StatusPayload {
+                status: status.to_string(),
+                phase: phase.map(str::to_string),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn make_advanced_main(from: &str, merged_branch: &str) -> BrokerMessage {
+        BrokerMessage::AdvancedMain {
+            payload: crate::broker::messages::AdvancedMainPayload {
+                from: from.to_string(),
+                merged_branch: merged_branch.to_string(),
+                new_main_sha: "abc1234".to_string(),
+                base: "main".to_string(),
+                merged_at: chrono::Utc::now(),
+                summary: None,
+            },
+        }
+    }
+
+    fn make_learning(agent_id: &str) -> BrokerMessage {
+        BrokerMessage::Learning {
+            payload: crate::broker::messages::LearningPayload {
+                id: "0123456789abcdef".to_string(),
+                agent_id: agent_id.to_string(),
+                branch_id: None,
+                category: "permission_pattern".to_string(),
+                title: "escalated a permission prompt".to_string(),
+                body: serde_json::json!({}),
+                timestamp: "2026-10-26T00:00:00Z".to_string(),
+            },
+        }
+    }
+
+    /// Every [`BrokerMessage`] variant, classified against a broker that
+    /// already has `feat-a` on record as `working` with no phase.
+    ///
+    /// The table is the guard AGENTS.md's enum-variant ripple list points at:
+    /// a new variant lands here, classified, rather than silently defaulting
+    /// to "not progress" (or worse, to "progress" and masking a stall).
+    #[test]
+    fn every_message_variant_is_classified_for_wave_progress() {
+        let state = fresh_state();
+        publish_message(&state, &make_status("feat-a", "working"));
+
+        let cases: &[(&str, BrokerMessage, bool)] = &[
+            (
+                "a status repeating the recorded label",
+                make_status("feat-a", "working"),
+                false,
+            ),
+            (
+                "a status whose label changed",
+                make_status("feat-a", "done"),
+                true,
+            ),
+            (
+                "a status whose phase appeared",
+                make_status_with_phase("feat-a", "working", Some("merging")),
+                true,
+            ),
+            (
+                "a status from an agent with no record yet",
+                make_status("feat-new", "working"),
+                true,
+            ),
+            (
+                "an artifact",
+                make_artifact("feat-a", "committed", &[]),
+                true,
+            ),
+            (
+                "a verdict",
+                make_verified("feat-a", "supervisor", None),
+                true,
+            ),
+            (
+                "feedback",
+                make_feedback("feat-a", "supervisor", &["fix the parser"]),
+                true,
+            ),
+            (
+                "an advanced main",
+                make_advanced_main("supervisor", "feat-b"),
+                true,
+            ),
+            (
+                "a question (the drive loop's escalation)",
+                make_question("feat-a", "allow `cargo test`?"),
+                false,
+            ),
+            ("a learning", make_learning("supervisor"), false),
+            (
+                "a blocked report",
+                make_blocked("feat-a", "peer review", "feat-b"),
+                false,
+            ),
+            (
+                "an intent",
+                make_intent("feat-a", &["src/lib.rs"], "wire it up", 900),
+                false,
+            ),
+            (
+                "an answer",
+                make_answer("feat-a", "supervisor", "ship it"),
+                false,
+            ),
+            (
+                "the broker's own verify-now nudge",
+                BrokerMessage::VerifyNow {
+                    branch_id: "feat-a".to_string(),
+                },
+                false,
+            ),
+        ];
+
+        let inner = state.read();
+        for (label, msg, expected) in cases {
+            assert_eq!(
+                message_is_progress(&inner, msg),
+                *expected,
+                "{label} must {} count as wave progress",
+                if *expected { "" } else { "not" }
+            );
+        }
+    }
+
+    /// A status that repeats the recorded label but reports a different
+    /// modified-file set is still not progress: uncommitted churn moves no
+    /// phase and no branch tip.
+    #[test]
+    fn a_repeated_status_with_new_modified_files_is_not_progress() {
+        let state = fresh_state();
+        publish_message(&state, &make_status("feat-a", "working"));
+
+        let churn = BrokerMessage::Status {
+            agent_id: "feat-a".to_string(),
+            payload: StatusPayload {
+                status: "working".to_string(),
+                modified_files: vec!["src/lib.rs".to_string()],
+                ..Default::default()
+            },
+        };
+        assert!(!message_is_progress(&state.read(), &churn));
+    }
+
+    /// A status that only drops a previously reported phase is a phase
+    /// change, so it is progress.
+    #[test]
+    fn a_status_that_clears_its_phase_is_progress() {
+        let state = fresh_state();
+        publish_message(
+            &state,
+            &make_status_with_phase("supervisor", "working", Some("audit")),
+        );
+
+        assert!(message_is_progress(
+            &state.read(),
+            &make_status("supervisor", "working")
+        ));
+    }
+
+    /// A repeated heartbeat from an agent whose RECORDED status is stuck at
+    /// a terminal label is still a repeat, and still not progress.
+    ///
+    /// `update_agent_record` keeps `record.status` sticky at `committed` once
+    /// the post-commit TTL lapses, so an agent that committed and then keeps
+    /// heartbeating `working` never changes the recorded label. Comparing an
+    /// incoming status against that field would make every one of those
+    /// heartbeats read as a change — perpetual progress for an agent that is
+    /// doing nothing but repeating itself, which is the precise shape of the
+    /// stall this signal exists to reveal.
+    #[test]
+    fn a_repeated_heartbeat_under_a_sticky_terminal_status_is_not_progress() {
+        let state = fresh_state();
+        // TTL 0 keeps `committed` terminal, so the record never re-enters
+        // `working` however many heartbeats arrive.
+        state.set_republish_working_ttl(std::time::Duration::ZERO);
+        publish_message(&state, &make_artifact("feat-a", "committed", &[]));
+        publish_message(&state, &make_status("feat-a", "working"));
+
+        assert_eq!(
+            state.read().agents["feat-a"].status,
+            "committed",
+            "precondition: the recorded status is sticky at the terminal label"
+        );
+        assert!(
+            !message_is_progress(&state.read(), &make_status("feat-a", "working")),
+            "a heartbeat repeating the agent's own last status is not progress, \
+             whatever the sticky record says"
+        );
+
+        // And it does not move the wave clock, over a run of them.
+        state.set_last_progress_unix_secs(1_000);
+        for _ in 0..12 {
+            publish_message(&state, &make_status("feat-a", "working"));
+        }
+        assert_eq!(state.wave_status().last_progress_unix_secs, 1_000);
+    }
+
+    /// An unrelated roster-upserting message between two identical
+    /// heartbeats does not make the second one look new.
+    ///
+    /// `last_message` is overwritten by `Intent` (and `Blocked`, and
+    /// `Artifact`), so reading the prior phase from it would compare a
+    /// heartbeat against whatever happened to arrive in between.
+    #[test]
+    fn an_intent_between_two_identical_heartbeats_does_not_fake_progress() {
+        let state = fresh_state();
+        publish_message(
+            &state,
+            &make_status_with_phase("supervisor", "working", Some("sweep")),
+        );
+        publish_message(
+            &state,
+            &make_intent("supervisor", &["src/lib.rs"], "look at it", 900),
+        );
+
+        assert!(
+            !message_is_progress(
+                &state.read(),
+                &make_status_with_phase("supervisor", "working", Some("sweep"))
+            ),
+            "the heartbeat repeats the agent's last status and phase"
+        );
+    }
+
+    /// Every synthetic phase the bundled stuck-detection helper publishes.
+    ///
+    /// Kept beside the classifier's own list so a new alert phase added to
+    /// `sweep.sh` without a matching exclusion shows up as a failure here
+    /// rather than as a wave clock that quietly never stalls.
+    const HELPER_ALERT_PHASES: &[&str] = &[
+        "stuck-on-prompt",
+        "stuck-stream-timeout",
+        "context-bloat",
+        "no-progress",
+        "blocked-on-supervisor",
+    ];
+
+    /// `broker-runtime` scenario "A stuck-detection alert is not progress":
+    /// every phase the helper publishes is a report that the wave is NOT
+    /// moving. Treating any of them as a phase advance would let the
+    /// detection of a stall reset the stall clock — the signal switching
+    /// itself off exactly when it starts firing. `no-progress` is the
+    /// plainest case: it says so in its own name.
+    #[test]
+    fn a_stuck_detection_alert_is_not_progress() {
+        let state = fresh_state();
+        publish_message(&state, &make_status("feat-a", "working"));
+        state.set_last_progress_unix_secs(1_000);
+
+        for phase in HELPER_ALERT_PHASES {
+            let alert = make_status_with_phase("feat-a", "working", Some(phase));
+            assert!(
+                !message_is_progress(&state.read(), &alert),
+                "`{phase}` is a stall report, not a phase advance"
+            );
+            publish_message(&state, &alert);
+        }
+
+        assert_eq!(
+            state.wave_status().last_progress_unix_secs,
+            1_000,
+            "detecting the stall must not reset the stall clock"
+        );
+    }
+
+    /// The exclusion set is exactly the helper's alert phases, and
+    /// `broker-runtime` scenario "An ordinary phase is still progress": a
+    /// real lifecycle phase remains a phase advance.
+    #[test]
+    fn only_the_helpers_alert_phases_are_excluded() {
+        for phase in HELPER_ALERT_PHASES {
+            assert!(is_stall_alert_phase(Some(phase)), "{phase}");
+        }
+        assert!(!is_stall_alert_phase(None));
+
+        let state = fresh_state();
+        publish_message(&state, &make_status("supervisor", "working"));
+        for phase in ["sweep", "audit", "merge", "feedback", "idle", "checkpoint"] {
+            assert!(
+                !is_stall_alert_phase(Some(phase)),
+                "`{phase}` is the supervisor's own lifecycle phase"
+            );
+            assert!(
+                message_is_progress(
+                    &state.read(),
+                    &make_status_with_phase("supervisor", "working", Some(phase))
+                ),
+                "`{phase}` is a real phase advance and must count as progress"
+            );
+        }
+    }
+
+    /// `broker-runtime` scenario "Recovering from an alert phase is
+    /// progress": the exclusion is on the INCOMING phase, so leaving a
+    /// stall-alert phase still counts.
+    #[test]
+    fn recovering_from_a_stuck_phase_is_progress() {
+        let state = fresh_state();
+        publish_message(
+            &state,
+            &make_status_with_phase("feat-a", "working", Some("stuck-on-prompt")),
+        );
+
+        assert!(
+            message_is_progress(&state.read(), &make_status("feat-a", "working")),
+            "an agent coming back to life is real progress"
+        );
+    }
+
+    /// Publishing a progress message stamps the wave clock; publishing a
+    /// non-progress message leaves it where it was.
+    #[test]
+    fn publishing_stamps_the_wave_clock_only_for_progress() {
+        let state = fresh_state();
+        publish_message(&state, &make_status("feat-a", "working"));
+
+        state.set_last_progress_unix_secs(1_000);
+        publish_message(&state, &make_status("feat-a", "working"));
+        assert_eq!(
+            state.wave_status().last_progress_unix_secs,
+            1_000,
+            "a repeated heartbeat must not advance the wave clock"
+        );
+
+        publish_message(&state, &make_artifact("feat-a", "committed", &[]));
+        assert!(
+            state.wave_status().last_progress_unix_secs > 1_000,
+            "an artifact must advance the wave clock"
+        );
     }
 
     // === Task 3: Message log accumulation ===

@@ -57,6 +57,29 @@ The `/status` agent roster — and therefore the dashboard table — is built **
 
 The supervisor row appears **after** the supervisor pane's CLI has booted and published its first self-registration `agent.status` — typically within 3-5 seconds of `git paw start --supervisor` returning. There is no phantom supervisor row at launch time; if the supervisor pane fails to start, the row simply never appears. Aborted launches (non-TTY skip, missing CLI on PATH, system-level pane spawn failure) leave the agent table free of a misleading supervisor entry.
 
+### Stalled-wave indicator
+
+Agent rows answer "is this agent alive?" The status line at the bottom of the
+dashboard answers the question they cannot: "is the wave getting anywhere?"
+Whenever the broker reports the wave as stalled, the status line carries an
+indicator naming how long it has been idle:
+
+```
+wave stalled 1h
+```
+
+The reading comes straight from the broker's
+[wave staleness](coordination.md#wave-staleness) state, so the same two things
+clear it that count as progress anywhere else — a wave phase advancing or a
+branch tip moving. The indicator disappears on the first refresh that reports
+`stalled = false`; nothing is shown while the wave is progressing. Tune (or
+disable) the threshold with `[broker] wave_stall_minutes` — see the
+[configuration reference](../configuration/README.md#broker).
+
+This is the dashboard's view of a session that looks healthy row by row and is
+not moving: every pane alive, every agent `working`, and nothing having
+actually advanced since the unanswered prompt.
+
 ## Controls
 
 | Key | Action |

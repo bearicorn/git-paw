@@ -245,9 +245,11 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 
-use git_paw::broker::AgentStatusEntry;
+use git_paw::broker::{AgentStatusEntry, WaveStatus};
 use git_paw::dashboard::broker_log::BrokerLog;
-use git_paw::dashboard::{format_agent_rows, format_status_line, render_dashboard};
+use git_paw::dashboard::{
+    format_agent_rows, format_status_line, format_status_line_with_wave, render_dashboard,
+};
 
 /// Flattens a `Buffer` into a single `String` so substring assertions work
 /// across cell boundaries (ratatui stores one grapheme per cell).
@@ -341,5 +343,101 @@ fn test_dashboard_renders_observation_sections() {
     assert!(
         !rendered.contains("Reply to"),
         "dashboard MUST NOT render a Reply-to input prompt; got:\n{rendered}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// broker-dashboard: the dashboard shows a stalled-wave indicator
+// ---------------------------------------------------------------------------
+
+/// One `working` agent, the roster a stalled wave hides behind.
+fn one_working_agent(now: Instant) -> Vec<AgentStatusEntry> {
+    vec![AgentStatusEntry {
+        agent_id: "feat-auth".to_string(),
+        cli: "claude".to_string(),
+        status: "working".to_string(),
+        last_seen_seconds: 0,
+        last_seen: now,
+        phase: None,
+        modified_files: Vec::new(),
+    }]
+}
+
+/// Scenario "Stalled wave is shown": a broker reporting `stalled = true` with
+/// an hour of idleness puts a stalled indicator naming 1h in the status line
+/// — even though the only agent is cheerfully `working`.
+#[test]
+fn a_stalled_wave_is_shown_in_the_status_line() {
+    let now = Instant::now();
+    let agents = one_working_agent(now);
+    let rows = format_agent_rows(&agents, now);
+    let status_line = format_status_line_with_wave(
+        1,
+        1,
+        0,
+        0,
+        0,
+        Some(WaveStatus {
+            last_progress_unix_secs: 1_000,
+            idle_seconds: 3_600,
+            stall_threshold_seconds: 1_800,
+            stalled: true,
+        }),
+    );
+
+    let rendered = render_to_string(&rows, &status_line, false);
+
+    assert!(
+        rendered.contains("wave stalled") && rendered.contains("1h"),
+        "the status line must name the stall and its 1h of idleness; got:\n{rendered}"
+    );
+}
+
+/// Scenario "Indicator clears on progress": the next refresh reports
+/// `stalled = false` and the indicator is gone — the agent rows and counts
+/// are untouched.
+#[test]
+fn the_stalled_indicator_clears_on_the_next_progressing_refresh() {
+    let now = Instant::now();
+    let agents = one_working_agent(now);
+    let rows = format_agent_rows(&agents, now);
+
+    let stalled = format_status_line_with_wave(
+        1,
+        1,
+        0,
+        0,
+        0,
+        Some(WaveStatus {
+            last_progress_unix_secs: 1_000,
+            idle_seconds: 3_600,
+            stall_threshold_seconds: 1_800,
+            stalled: true,
+        }),
+    );
+    assert!(render_to_string(&rows, &stalled, false).contains("wave stalled"));
+
+    let progressing = format_status_line_with_wave(
+        1,
+        1,
+        0,
+        0,
+        0,
+        Some(WaveStatus {
+            last_progress_unix_secs: 2_000,
+            idle_seconds: 3,
+            stall_threshold_seconds: 1_800,
+            stalled: false,
+        }),
+    );
+    let rendered = render_to_string(&rows, &progressing, false);
+
+    assert!(
+        !rendered.contains("wave stalled"),
+        "the indicator must clear on the first refresh reporting progress; got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("1 agents:"),
+        "clearing the indicator must leave the summary intact; got:\n{rendered}"
     );
 }

@@ -69,6 +69,14 @@ pub struct BrokerConfig {
     /// Filesystem watcher tuning.
     #[serde(default)]
     pub watcher: WatcherConfig,
+    /// Minutes of wave inactivity after which `GET /status` reports the wave
+    /// as stalled.
+    ///
+    /// `None` resolves to [`Self::DEFAULT_WAVE_STALL_MINUTES`] (30) via
+    /// [`Self::wave_stall_seconds`]. A value of `0` disables the `stalled`
+    /// flag while `idle_seconds` is still reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wave_stall_minutes: Option<u64>,
 }
 
 impl Default for BrokerConfig {
@@ -78,14 +86,35 @@ impl Default for BrokerConfig {
             port: 9119,
             bind: "127.0.0.1".to_string(),
             watcher: WatcherConfig::default(),
+            wave_stall_minutes: None,
         }
     }
 }
 
 impl BrokerConfig {
+    /// Default wave-stall threshold in minutes.
+    ///
+    /// Sits just above the unattended drive loop's 25-minute heartbeat, so an
+    /// unattended run exits on its heartbeat before an attended reader sees
+    /// `stalled` for the same quiet period.
+    pub const DEFAULT_WAVE_STALL_MINUTES: u64 = 30;
+
     /// Returns the full URL for the broker endpoint.
     pub fn url(&self) -> String {
         format!("http://{}:{}", self.bind, self.port)
+    }
+
+    /// Returns the effective wave-stall threshold in seconds.
+    ///
+    /// - `None` → [`Self::DEFAULT_WAVE_STALL_MINUTES`] converted to seconds.
+    /// - `Some(0)` → `0`, which disables the `stalled` flag (the broker still
+    ///   reports `idle_seconds`).
+    /// - `Some(n)` → `n * 60`.
+    #[must_use]
+    pub fn wave_stall_seconds(&self) -> u64 {
+        self.wave_stall_minutes
+            .unwrap_or(Self::DEFAULT_WAVE_STALL_MINUTES)
+            .saturating_mul(60)
     }
 
     fn default_port() -> u16 {

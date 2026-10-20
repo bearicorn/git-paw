@@ -294,6 +294,7 @@ mod tests {
         "get_intents",
         "get_intent",
         "get_conflicts",
+        "wait_for_events",
         // governance (read-only)
         "get_dod",
         "get_constitution",

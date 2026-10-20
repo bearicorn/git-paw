@@ -2721,9 +2721,9 @@ impl StatusFetcher for HttpStatusFetcher {
 /// stream, advancing a per-call cursor so each message is observed once.
 struct HttpLogObserver {
     broker_url: Option<String>,
-    /// Highest sequence number already observed. `Cell` because the trait takes
-    /// `&self` (the loop is single-threaded).
-    cursor: std::cell::Cell<u64>,
+    /// Cursor plus the epoch it belongs to. `RefCell` because the trait
+    /// takes `&self` (the loop is single-threaded).
+    reader: std::cell::RefCell<crate::broker::publish::CursorReader>,
 }
 
 impl MessageObserver for HttpLogObserver {
@@ -2731,14 +2731,30 @@ impl MessageObserver for HttpLogObserver {
         let Some(url) = &self.broker_url else {
             return Vec::new();
         };
-        let Ok(entries) = crate::broker::publish::fetch_log_entries_over_http(url) else {
+        let since = self.reader.borrow().cursor();
+        // Ask the broker for only what this observer has not seen. The
+        // client-side `seq > since` filter below stays as a guard, so a
+        // broker that ignores the cursor still yields each message once.
+        let Ok(page) = crate::broker::publish::fetch_log_page_over_http(url, since, None) else {
             return Vec::new();
         };
-        let since = self.cursor.get();
+
+        // A pause/start cycle — or any broker restart — begins sequence
+        // numbers again at zero. Without this the cursor would sit above
+        // everything the new broker ever appends and the loop would go
+        // permanently deaf. On a reset, re-read from the beginning: the
+        // entries are the new broker's, so none of them has been seen.
+        let mut reader = self.reader.borrow_mut();
+        let since = if reader.observe_epoch(page.epoch) {
+            0
+        } else {
+            since
+        };
+
         let mut out = Vec::new();
-        for entry in entries {
+        for entry in page.entries {
             if entry.seq > since {
-                self.cursor.set(self.cursor.get().max(entry.seq));
+                reader.advance_to(entry.seq);
                 out.push(entry.message);
             }
         }
@@ -3048,7 +3064,7 @@ pub fn run_drive_loop(
     };
     let messages = HttpLogObserver {
         broker_url: broker_url.clone(),
-        cursor: std::cell::Cell::new(0),
+        reader: std::cell::RefCell::new(crate::broker::publish::CursorReader::new()),
     };
     let clock = SystemClock;
     let mut alerts = BrokerAlertSink {
@@ -3211,6 +3227,117 @@ mod tests {
     #[test]
     fn static_regexes_compile() {
         assert!(paste_buffer_regex().is_match("Pasted text #1"));
+    }
+
+    /// Serves `bodies` in order, one per connection, recording each request
+    /// line. Returns the bound address and the join handle.
+    fn stub_log_broker(bodies: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub broker");
+        let addr = listener.local_addr().expect("stub broker address");
+        let handle = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for body in bodies {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 2048];
+                let read = stream.read(&mut buf).unwrap_or(0);
+                requests.push(String::from_utf8_lossy(&buf[..read]).to_string());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+            requests
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn request_line(request: &str) -> &str {
+        request.lines().next().unwrap_or_default()
+    }
+
+    /// `broker-runtime` scenario "The drive loop reads only new entries": an
+    /// observer that has consumed up to sequence 12 asks the broker for
+    /// `since=12` instead of re-fetching the whole log and filtering it.
+    ///
+    /// Also `broker-runtime` scenario "An unchanged epoch leaves the cursor
+    /// alone": the second poll against the same broker still carries 12.
+    #[test]
+    fn the_drive_loop_observer_requests_only_entries_after_its_cursor() {
+        let (url, server) = stub_log_broker(vec![
+            r#"{"entries":[{"seq":12,"timestamp_unix_secs":0,"message":{"type":"agent.status","agent_id":"feat-a","payload":{"status":"working","modified_files":[]}}}],"last_seq":12,"epoch":1000}"#.to_string(),
+            r#"{"entries":[],"last_seq":12,"epoch":1000}"#.to_string(),
+        ]);
+
+        let observer = HttpLogObserver {
+            broker_url: Some(url),
+            reader: std::cell::RefCell::new(crate::broker::publish::CursorReader::new()),
+        };
+        assert_eq!(observer.poll_new().len(), 1, "the entry at seq 12");
+        assert!(observer.poll_new().is_empty(), "nothing newer than 12");
+
+        let requests = server.join().expect("stub broker thread");
+        assert!(
+            request_line(&requests[1]).contains("since=12"),
+            "the observer must carry its cursor on the wire; got {:?}",
+            request_line(&requests[1])
+        );
+    }
+
+    /// `broker-runtime` scenario "A reader resets its cursor when the epoch
+    /// changes": a pause/start cycle restarts sequence numbers at zero, so
+    /// an observer that kept its old cursor would sit above everything the
+    /// new broker appends and go permanently deaf.
+    #[test]
+    fn the_drive_loop_observer_resets_its_cursor_when_the_broker_epoch_changes() {
+        let entry = |seq: u64, agent: &str| {
+            format!(
+                r#"{{"seq":{seq},"timestamp_unix_secs":0,"message":{{"type":"agent.status","agent_id":"{agent}","payload":{{"status":"working","modified_files":[]}}}}}}"#
+            )
+        };
+        let (url, server) = stub_log_broker(vec![
+            // First broker: the observer consumes up to 12.
+            format!(
+                r#"{{"entries":[{}],"last_seq":12,"epoch":1000}}"#,
+                entry(12, "feat-a")
+            ),
+            // A NEW broker on the same port, numbering from 1 again.
+            format!(
+                r#"{{"entries":[{},{},{}],"last_seq":3,"epoch":2000}}"#,
+                entry(1, "feat-b"),
+                entry(2, "feat-c"),
+                entry(3, "feat-d")
+            ),
+            // And the poll after that holds the new cursor.
+            r#"{"entries":[],"last_seq":3,"epoch":2000}"#.to_string(),
+        ]);
+
+        let observer = HttpLogObserver {
+            broker_url: Some(url),
+            reader: std::cell::RefCell::new(crate::broker::publish::CursorReader::new()),
+        };
+        assert_eq!(observer.poll_new().len(), 1);
+
+        let after_restart = observer.poll_new();
+        assert_eq!(
+            after_restart.len(),
+            3,
+            "every entry of the restarted broker must be observed, not skipped \
+             as older than the stale cursor"
+        );
+        assert!(observer.poll_new().is_empty());
+
+        let requests = server.join().expect("stub broker thread");
+        assert!(
+            request_line(&requests[2]).contains("since=3"),
+            "after the reset the cursor must track the NEW broker; got {:?}",
+            request_line(&requests[2])
+        );
     }
 
     /// Runs the loop against a throwaway repository root.

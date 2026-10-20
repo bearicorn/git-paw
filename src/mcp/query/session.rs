@@ -44,6 +44,13 @@ pub struct SessionSnapshot {
     pub broker_url: Option<String>,
     /// Per-agent rows.
     pub agents: Vec<AgentRow>,
+    /// The broker's wave-progress object, when a broker is reachable.
+    ///
+    /// The per-agent rows answer "is anyone alive"; this answers "has
+    /// anything moved" — the question a roster of repeated `working`
+    /// heartbeats cannot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wave: Option<crate::mcp::query::events::WaveSnapshot>,
 }
 
 fn status_label(status: &SessionStatus) -> &'static str {
@@ -58,11 +65,25 @@ fn status_label(status: &SessionStatus) -> &'static str {
 /// exists.
 #[must_use]
 pub fn session_status(ctx: &RepoContext) -> Option<SessionSnapshot> {
+    let dir = session::sessions_dir().ok()?;
+    session_status_in(ctx, &dir)
+}
+
+/// [`session_status`] reading session receipts from `sessions_dir`.
+///
+/// Mirrors `session::find_session_for_repo_in`: a test can seed a receipt in
+/// a temporary directory and read it back without mutating `HOME` out from
+/// under every other test sharing the process.
+#[must_use]
+pub fn session_status_in(
+    ctx: &RepoContext,
+    sessions_dir: &std::path::Path,
+) -> Option<SessionSnapshot> {
     // Owner-resolving lookup: `git paw mcp` is routinely started inside an
     // agent worktree with no `--repo`, and a worktree root never equals the
     // repository root. Read-only, so widening the match is safe here — see
     // `session::find_session_for_repo` for why mutating commands must not.
-    let session = session::find_session_for_repo_or_owner(&ctx.root)
+    let session = session::find_session_for_repo_or_owner_in(&ctx.root, sessions_dir)
         .ok()
         .flatten()?;
 
@@ -101,12 +122,53 @@ pub fn session_status(ctx: &RepoContext) -> Option<SessionSnapshot> {
         agent_count: session.worktrees.len(),
         broker_url: ctx.broker_url.clone(),
         agents,
+        wave: ctx
+            .broker_url
+            .as_deref()
+            .and_then(|url| crate::broker::publish::fetch_wave_over_http(url).ok())
+            .flatten()
+            .map(Into::into),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `mcp-server`'s "and SHALL omit it otherwise": a session with no
+    /// reachable broker reports no `wave` at all, rather than a zeroed
+    /// object a client could mistake for "idle since the epoch".
+    #[test]
+    fn the_wave_is_omitted_when_no_broker_is_reachable() {
+        let repo = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let canonical = repo.path().canonicalize().unwrap();
+        std::fs::write(
+            sessions.path().join("paw-nobroker.json"),
+            serde_json::json!({
+                "session_name": "paw-nobroker",
+                "repo_path": canonical.to_string_lossy(),
+                "project_name": "nobroker",
+                "created_at": "2026-05-01T00:00:00Z",
+                "status": "active",
+                "worktrees": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let ctx = RepoContext {
+            root: canonical,
+            git_paw_dir: None,
+            broker_url: None,
+            server_name: "git-paw".to_string(),
+        };
+        let snapshot = session_status_in(&ctx, sessions.path()).expect("the session resolves");
+
+        assert!(snapshot.wave.is_none());
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(!json.contains("wave"), "got {json}");
+    }
 
     #[test]
     fn no_session_yields_none() {

@@ -607,8 +607,8 @@ mod tests {
         );
         assert_eq!(
             planned_under(&p, "permissions.allow").len(),
-            11,
-            "the eleven grant-table entries"
+            12,
+            "the twelve grant-table entries"
         );
     }
 
@@ -671,7 +671,7 @@ mod tests {
             !allow.contains(&"Bash(.git-paw/scripts/broker.sh *)".to_string()),
             "the user's own entry is not re-planned, so undo can never claim it"
         );
-        assert_eq!(allow.len(), 10, "the other ten are still planned");
+        assert_eq!(allow.len(), 11, "the other eleven are still planned");
     }
 
     #[test]
@@ -886,7 +886,7 @@ mod tests {
     #[test]
     fn an_empty_target_file_is_treated_as_an_empty_object() {
         let p = plan_ok(&CLAUDE, &with_target("   \n"));
-        assert_eq!(planned_under(&p, "permissions.allow").len(), 11);
+        assert_eq!(planned_under(&p, "permissions.allow").len(), 12);
     }
 
     #[test]

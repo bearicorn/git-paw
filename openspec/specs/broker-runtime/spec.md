@@ -6,13 +6,15 @@ The broker runtime is git-paw's in-process coordination server. This capability 
 ## Requirements
 ### Requirement: Broker configuration schema
 
-The system SHALL extend `.git-paw/config.toml` with a new optional `[broker]` section containing exactly three fields:
+The system SHALL extend `.git-paw/config.toml` with a new optional `[broker]` section containing these fields:
 
 - `enabled: bool` — defaults to `false` when the field or the entire section is absent
 - `port: u16` — defaults to `9119` when absent
 - `bind: String` — defaults to `"127.0.0.1"` when absent
+- `wave_stall_minutes: Option<u64>` — defaults to `30` when absent; `0` disables the `stalled` flag while `idle_seconds` is still reported
+- `watcher: WatcherConfig` — the filesystem-watcher sub-table (`[broker.watcher]`), itself all-optional
 
-Loading a `.git-paw/config.toml` that omits the `[broker]` section SHALL succeed and produce a `BrokerConfig` with the documented defaults. The system MUST NOT change behavior of existing v0.2.0 sessions when this field is absent.
+Loading a `.git-paw/config.toml` that omits the `[broker]` section SHALL succeed and produce a `BrokerConfig` with the documented defaults. Loading one that omits any individual field SHALL succeed and default that field. The system MUST NOT change behavior of existing v0.2.0 sessions when this field is absent.
 
 #### Scenario: Config file with no broker section loads successfully
 
@@ -33,6 +35,11 @@ Loading a `.git-paw/config.toml` that omits the `[broker]` section SHALL succeed
 
 - **WHEN** `BrokerConfig { enabled: true, port: 9200, bind: "127.0.0.1" }` calls `url()`
 - **THEN** the result is `"http://127.0.0.1:9200"`
+
+#### Scenario: Every documented field round-trips
+
+- **WHEN** a `.git-paw/config.toml` naming every `[broker]` field, including `wave_stall_minutes` and a `[broker.watcher]` sub-table, is parsed
+- **THEN** each field SHALL carry the configured value, and no field SHALL be rejected as unknown
 
 ### Requirement: Broker entry point and handle
 
@@ -1059,4 +1066,168 @@ Every in-tree broker client SHALL remain accepted by both checks on the default 
 - **WHEN** `publish_to_broker_http`, `register_watch_target_http`, `fetch_log_entries_over_http`, `fetch_log_over_http`, `fetch_status_agents_over_http`, `fetch_status_over_http` and the stale-broker probe each talk to it
 - **THEN** each SHALL succeed as it does without the guard
 - **AND** the probe SHALL still recognise the listener as a live git-paw broker
+
+### Requirement: GET /log long-polls on the since cursor
+
+The `GET /log` endpoint SHALL accept an optional `wait` query parameter (whole seconds). When `wait` is present and no log entry with a sequence number greater than `since` exists, the broker SHALL hold the request until such an entry is appended or `wait` seconds elapse, whichever comes first, and SHALL then respond with the same `{"entries": [...], "last_seq": N}` shape as an immediate request — `entries` empty when the wait elapsed with nothing new. The broker SHALL cap the wait at 60 seconds, SHALL reject a non-numeric `wait` with 400, and SHALL NOT hold any broker state lock while waiting. Whenever a `GET /log` response carries no entries — with or without `wait` — its `last_seq` SHALL equal the request's `since` (`0` when `since` is absent), so a reader's cursor never rewinds; a response with entries SHALL report the highest returned sequence number, as before. In every other respect a request without `wait` SHALL behave exactly as before. The drive loop's broker-message observer SHALL request only entries after the last sequence number it has already seen.
+
+#### Scenario: A waiting request returns as soon as an entry is published
+
+- **GIVEN** a broker whose last sequence number is 7
+- **WHEN** a client sends `GET /log?since=7&wait=30` and another client publishes a message 2 seconds later
+- **THEN** the first request SHALL complete within about 2 seconds with exactly the new entry and `last_seq = 8`
+
+#### Scenario: A waiting request times out empty
+
+- **GIVEN** a broker whose last sequence number is 7 and no publisher
+- **WHEN** a client sends `GET /log?since=7&wait=2`
+- **THEN** the response SHALL arrive after about 2 seconds with `entries` empty and `last_seq = 7`
+
+#### Scenario: The wait is capped
+
+- **WHEN** a client sends `GET /log?since=0&wait=600` against a broker with no entries after 0
+- **THEN** the response SHALL arrive within about 60 seconds
+
+#### Scenario: A non-numeric wait is rejected
+
+- **WHEN** a client sends `GET /log?wait=soon`
+- **THEN** the response status SHALL be 400
+
+#### Scenario: A request without wait returns at once
+
+- **GIVEN** a broker with three published messages
+- **WHEN** a client sends `GET /log?since=2`
+- **THEN** the response SHALL return immediately with the entry at sequence 3 and `last_seq = 3`
+
+#### Scenario: An empty response without wait holds the cursor
+
+- **GIVEN** a broker whose last sequence number is 7
+- **WHEN** a client sends `GET /log?since=7` with no `wait`
+- **THEN** the response SHALL return immediately with `entries` empty and `last_seq = 7`
+
+### Requirement: The log response identifies the broker instance
+
+Sequence numbers restart at zero every time a broker starts, so a cursor from a previous broker is meaningless against the current one — and because a cursor never rewinds, a reader holding a stale high cursor would silently skip every entry the new broker has appended and wait out every long poll. To make that detectable, every `GET /log` response SHALL carry an `epoch` field identifying the running broker instance (its start time in Unix milliseconds), and `wait_for_events` and `sweep.sh events` SHALL pass it through to their callers.
+
+A cursor reader SHALL remember the epoch it last saw and, whenever the epoch it receives differs from that one, SHALL reset its cursor to `0` before its next request, so it re-reads the new broker's log from the beginning exactly once. The first epoch a reader sees SHALL be recorded without resetting, since there is no earlier cursor to invalidate.
+
+#### Scenario: A restarted broker reports a new epoch
+
+- **GIVEN** a reader that has consumed up to sequence 12 from a broker
+- **WHEN** that broker is stopped, a new broker starts for the same session, and the reader polls again
+- **THEN** the response's `epoch` SHALL differ from the one the reader recorded
+
+#### Scenario: A reader resets its cursor when the epoch changes
+
+- **GIVEN** a drive-loop observer holding cursor 12 and the previous broker's epoch
+- **WHEN** it polls a broker reporting a different epoch and three entries at sequences 1 to 3
+- **THEN** it SHALL observe all three entries rather than skipping them as older than its cursor
+
+#### Scenario: An unchanged epoch leaves the cursor alone
+
+- **GIVEN** a reader holding cursor 12 and the current broker's epoch
+- **WHEN** it polls the same broker again
+- **THEN** its request SHALL still carry `since=12` and it SHALL NOT re-read the log from the beginning
+
+#### Scenario: The drive loop reads only new entries
+
+- **GIVEN** a running drive loop whose observer has already consumed entries up to sequence 12
+- **WHEN** it polls the broker for new messages
+- **THEN** its request SHALL carry `since=12`
+
+### Requirement: GET /status reports wave staleness
+
+The broker SHALL record the time the wave last made progress and SHALL include in every `GET /status` response a `wave` object with `last_progress_unix_secs`, `idle_seconds`, `stall_threshold_seconds`, and `stalled` (true when the threshold is non-zero and `idle_seconds` exceeds it). Progress SHALL be a wave phase advancing or a branch tip moving, and nothing else. A wave phase advances when the broker accepts an `agent.status` whose status or phase differs from that agent's previously recorded values, an `agent.artifact`, an `agent.verified`, an `agent.feedback`, or an `agent.advanced-main`. The bundled stuck-detection helper's synthetic phases are the exception: a status whose `phase` begins `stuck` (`stuck-on-prompt`, `stuck-stream-timeout`) or is `context-bloat`, `no-progress` or `blocked-on-supervisor` is a report *about* a wave that is not moving, not a wave that is. Treating any of them as a phase advance would let the very detection of a stall reset the stall clock — plainest for `no-progress`, which says in its own name that nothing is progressing. A status that moves an agent *out* of one of those phases is an ordinary phase advance and does count. A branch tip moves when the watcher observes that an agent's worktree `HEAD` commit differs from the one it last observed. Every other accepted message or observation SHALL NOT be progress — in particular an `agent.status` that repeats the agent's recorded status and phase (whatever its modified-file set), an `agent.question` (including the drive loop's escalation of a live permission prompt and its re-escalation of a prompt it already escalated), an `agent.learning` (including the learnings the drive loop records for its own escalations), and a change to an agent's uncommitted modified-file set. A broker that has accepted no message SHALL report its start time as the last progress. Every other field of the `/status` response SHALL be unchanged.
+
+#### Scenario: Repeated identical heartbeats are not progress
+
+- **GIVEN** an agent whose last recorded status is `working` with no modified files, and a stall threshold of 60 seconds
+- **WHEN** the agent re-publishes the identical `working` status every 10 seconds for 2 minutes and nothing else happens
+- **THEN** `/status` SHALL report `stalled = true` and `idle_seconds` of at least 120
+
+#### Scenario: A real event resets staleness
+
+- **GIVEN** a wave reported `stalled = true`
+- **WHEN** an agent publishes an `agent.artifact`
+- **THEN** the next `/status` SHALL report `stalled = false` and an `idle_seconds` near 0
+
+#### Scenario: A moved branch tip is progress
+
+- **GIVEN** an agent whose worktree `HEAD` the watcher last observed at commit `A`
+- **WHEN** the agent commits and the watcher observes `HEAD` at commit `B`
+- **THEN** `last_progress_unix_secs` SHALL advance
+
+#### Scenario: Uncommitted file churn is not progress
+
+- **GIVEN** an agent whose recorded status is `working` and a stall threshold of 60 seconds
+- **WHEN** the watcher observes the agent's modified-file set change several times over 2 minutes, with no commit and no status or phase change
+- **THEN** `/status` SHALL report `stalled = true`
+
+#### Scenario: The drive loop's own escalations and learnings are not progress
+
+- **GIVEN** an `--unattended` session whose only agent sits on an unanswered live permission prompt, and a stall threshold of 60 seconds
+- **WHEN** over 2 minutes the drive loop publishes the prompt's escalation as an `agent.question`, re-escalates it after its dedup window, and records `agent.learning` entries for it, while no agent's phase advances and no branch tip moves
+- **THEN** `/status` SHALL report `stalled = true` and an `idle_seconds` of at least 120
+
+#### Scenario: A stuck-detection alert is not progress
+
+- **GIVEN** an agent recorded as `working` with no phase, and a stall threshold of 60 seconds
+- **WHEN** over 2 minutes the stuck-detection helper publishes synthetic `agent.status` messages for it carrying each of its alert phases — `stuck-on-prompt`, `stuck-stream-timeout`, `context-bloat`, `no-progress` and `blocked-on-supervisor` — and nothing else happens
+- **THEN** `/status` SHALL report `stalled = true` and an `idle_seconds` of at least 120
+
+#### Scenario: An ordinary phase is still progress
+
+- **GIVEN** an agent recorded as `working` with no phase
+- **WHEN** it publishes an `agent.status` with a lifecycle phase such as `sweep` or `merge`
+- **THEN** that SHALL count as a wave phase advancing
+
+#### Scenario: Recovering from an alert phase is progress
+
+- **GIVEN** an agent whose recorded phase is `stuck-on-prompt`
+- **WHEN** it publishes an `agent.status` with no phase
+- **THEN** that SHALL count as a wave phase advancing
+
+#### Scenario: A zero threshold disables the flag
+
+- **GIVEN** `[broker] wave_stall_minutes = 0`
+- **WHEN** the wave has been idle for an hour
+- **THEN** `/status` SHALL report `stalled = false` and SHALL still report `idle_seconds`
+
+### Requirement: Wave stall threshold is configurable
+
+The `[broker]` table SHALL accept an optional `wave_stall_minutes` integer, defaulting to `30` when absent; `0` SHALL disable the `stalled` flag while keeping `idle_seconds`. A config without the key SHALL load unchanged.
+
+#### Scenario: Absent key uses the default
+
+- **GIVEN** a config with `[broker] enabled = true` and no `wave_stall_minutes`
+- **WHEN** the broker starts
+- **THEN** `/status` SHALL report `stall_threshold_seconds = 1800`
+
+#### Scenario: Configured threshold is honoured
+
+- **GIVEN** `[broker] wave_stall_minutes = 5`
+- **WHEN** the broker starts
+- **THEN** `/status` SHALL report `stall_threshold_seconds = 300`
+
+### Requirement: Status surfaces a stalled wave
+
+When the session's broker reports `stalled = true`, `git paw status` SHALL print a line stating that the wave has made no progress and for how long, and `git paw status --json` SHALL include the broker's `wave` object. When the wave is not stalled, the human output SHALL be unchanged.
+
+#### Scenario: A stalled wave is visible in status
+
+- **GIVEN** an active session whose broker reports `stalled = true` with `idle_seconds = 11520`
+- **WHEN** `git paw status` is executed
+- **THEN** the output SHALL contain a line stating the wave has made no progress for 3h12m
+
+#### Scenario: JSON status carries the wave object
+
+- **GIVEN** an active session with a live broker
+- **WHEN** `git paw status --json` is executed
+- **THEN** the output SHALL contain a `wave` object with `stalled` and `idle_seconds`
+
+#### Scenario: A progressing wave adds no line
+
+- **GIVEN** an active session whose broker reports `stalled = false`
+- **WHEN** `git paw status` is executed
+- **THEN** the output SHALL NOT contain a stalled-wave line
 

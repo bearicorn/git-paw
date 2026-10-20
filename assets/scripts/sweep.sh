@@ -417,6 +417,13 @@ usage: $0 <subcommand> [args]
   stuck-eval <agent> <last_seen> [checkbox_count] [commit_count] [blocked_age]
                                       (stdin: capture) run the stuck decision for one agent
   status [--all]                      broker /status, one line per agent (phantoms filtered)
+  events <since> [wait]               long-poll broker /log from the <since> cursor (default
+                                      wait 30s) and print one JSON object
+                                      {entries, last_seq, epoch, wave}; read-only — sends no
+                                      keystroke and publishes nothing. Pass since=0 again
+                                      whenever `epoch` changes (the broker restarted and its
+                                      sequence numbers began again). With no broker it
+                                      prints {"no_session": true} and exits 0
   worktrees-status                    uncommitted-file count per agent worktree
   inbox                               supervisor inbox payloads (question/feedback/blocked)
   feedback-gate <agent> <gate> <msg…> publish agent.feedback with bracketed gate prefix
@@ -672,6 +679,73 @@ for a in data.get("agents", []):
     ))
 if phantoms and not show_all:
     print("phantoms (use --all to show):", ", ".join(phantoms))
+PY
+)"
+}
+
+# Long-poll the broker's message log and print one JSON object
+# {entries, last_seq, wave} on stdout.
+#
+# This is the read surface for an orchestrator that works a turn at a time:
+# sampling pane state misses anything that happens and un-happens between two
+# samples, while an ordered log read by cursor cannot. When the wait elapses
+# with nothing new, the wave object still says whether the quiet is healthy
+# or a stall.
+#
+# Read-only by construction: it GETs /log and /status, sends no keystroke and
+# publishes nothing. With no reachable broker it prints an empty object with
+# no_session true and exits 0, so a caller polling a repository with no live
+# session gets an answer rather than an error.
+cmd_events() {
+  local since=${1:-0}
+  local wait=${2:-30}
+  if ! [[ "${since}" =~ ^[0-9]+$ ]] || ! [[ "${wait}" =~ ^[0-9]+$ ]]; then
+    echo "usage: $0 events <since> [wait-seconds]" >&2
+    exit 2
+  fi
+
+  local log status
+  # --max-time must outlast the broker's own wait, or curl would abandon a
+  # request the broker is legitimately still holding.
+  log=$(curl -s --max-time "$((wait + 10))" "${BROKER}/log?since=${since}&wait=${wait}" || true)
+  status=$(curl -s --max-time 5 "${BROKER}/status" || true)
+
+  SINCE="${since}" LOG_JSON="${log}" STATUS_JSON="${status}" "${PY}" -c "$(cat <<'PY'
+import json, os, sys
+since = int(os.environ.get("SINCE", "0"))
+def load(raw):
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return None
+log = load(os.environ.get("LOG_JSON", ""))
+status = load(os.environ.get("STATUS_JSON", ""))
+# No body at all (connection refused), an unparseable body, or a broker
+# error object: in every case there are no entries to report and the
+# caller must not read the empty result as "nothing happened".
+if not isinstance(log, dict) or "entries" not in log:
+    out = {"entries": [], "last_seq": since, "no_session": True}
+    if isinstance(log, dict) and log.get("error"):
+        out["error"] = str(log["error"])
+    json.dump(out, sys.stdout)
+    print()
+    sys.exit(0)
+out = {
+    "entries": log.get("entries", []),
+    "last_seq": log.get("last_seq", since),
+}
+# Identifies the broker instance. Sequence numbers restart at zero on
+# every broker start, so a caller whose recorded epoch changes must pass
+# since=0 next time or it will sit above everything the new broker
+# appends and time out forever.
+if "epoch" in log:
+    out["epoch"] = log["epoch"]
+if isinstance(status, dict) and isinstance(status.get("wave"), dict):
+    out["wave"] = status["wave"]
+json.dump(out, sys.stdout)
+print()
 PY
 )"
 }
@@ -1683,6 +1757,7 @@ main() {
     capture) cmd_capture "$@" ;;
     approve) cmd_approve "$@" ;;
     status) cmd_status "$@" ;;
+    events) cmd_events "$@" ;;
     detect-stuck) cmd_detect_stuck "$@" ;;
     stuck-eval) cmd_stuck_eval "$@" ;;
     worktrees-status) cmd_worktrees_status "$@" ;;

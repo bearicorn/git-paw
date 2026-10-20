@@ -51,7 +51,9 @@ pub fn conflicts(ctx: &RepoContext) -> Vec<Conflict> {
     let Some(url) = ctx.broker_url.as_deref() else {
         return Vec::new();
     };
-    let Ok(entries) = fetch_log_entries_over_http(url) else {
+    // The conflict reconstruction needs the whole history by definition, so
+    // it reads from the start of the log and never waits.
+    let Ok(entries) = fetch_log_entries_over_http(url, 0, None) else {
         return Vec::new();
     };
 

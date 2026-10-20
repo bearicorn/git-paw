@@ -85,13 +85,23 @@ repository's shared `info/exclude` when the target is not already ignored.
 Never a file inside a worktree, never a user-level file, never the configured
 `[clis.<name>].settings_path`.
 
-**The grant.** Eleven allow entries naming git-paw's own helper scripts by
+**The grant.** Twelve allow entries naming git-paw's own helper scripts by
 relative path and fixed subcommand, from a compiled table. Nothing is derived
 from a command argument, your configuration or your repository content. No
 entry names `curl`, an interpreter, an absolute path or a directory wildcard.
 The keystroke-sending and verdict-publishing subcommands are deliberately
 excluded, and `sweep.sh approve` is pinned to an **ask** rule so it always
-reaches a human. See the full table in [Per-CLI Setup](cli-setup.md).
+reaches a human. The twelfth entry, `sweep.sh events`, is a pure read of the
+broker's log and status — no keystroke, no verdict. See the full table in
+[Per-CLI Setup](cli-setup.md).
+
+**An applied grant is never rewritten for you.** When a release adds an entry
+to the table, a file applied under an earlier version keeps the entries that
+version wrote; git-paw changes nothing behind your back. `git paw doctor`
+reports the applied setup as out of date, and the remedy is explicit and
+yours: `git paw setup-cli claude --undo`, then
+`git paw setup-cli claude --allowlist`. Until then the new subcommand prompts
+like any ungranted command.
 
 **The tamper threat, and the mitigation.** A granted helper runs without a
 prompt, and it lives inside the agent's own worktree. In an edit-accepting

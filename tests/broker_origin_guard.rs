@@ -630,7 +630,7 @@ fn in_tree_rust_clients_are_unaffected() {
     )
     .expect("register_watch_target_http must pass the guard");
 
-    let entries = git_paw::broker::publish::fetch_log_entries_over_http(&url)
+    let entries = git_paw::broker::publish::fetch_log_entries_over_http(&url, 0, None)
         .expect("fetch_log_entries_over_http must pass the guard");
     assert!(
         !entries.is_empty(),

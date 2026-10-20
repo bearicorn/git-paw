@@ -1052,7 +1052,7 @@ mod tests {
         let allow = written["permissions"]["allow"]
             .as_array()
             .expect("allow list");
-        assert_eq!(allow.len(), 11);
+        assert_eq!(allow.len(), 12);
 
         let rec = load_record(&p.record_path).expect("record");
         assert_eq!(rec.entries.len(), p.entry_count());

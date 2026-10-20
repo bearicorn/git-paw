@@ -51,7 +51,9 @@ pub fn active_intents(ctx: &RepoContext) -> Vec<Intent> {
     let Some(url) = ctx.broker_url.as_deref() else {
         return Vec::new();
     };
-    let Ok(entries) = fetch_log_entries_over_http(url) else {
+    // Reconstructing the latest intent per agent needs the whole history, so
+    // this reader starts from the beginning of the log and never waits.
+    let Ok(entries) = fetch_log_entries_over_http(url, 0, None) else {
         return Vec::new();
     };
 

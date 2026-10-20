@@ -247,6 +247,29 @@ cannot be read.
 | `get_intents` | — | `{ intents: [{ branch_id, files, regions, summary, published_at, valid_for_seconds }] }` |
 | `get_intent` | `{ branch_id }` | `{ intent: <intent> \| null }` |
 | `get_conflicts` | — | `{ conflicts: [{ shape, branches, files, detected_at }] }` |
+| `wait_for_events` | `{ since?, timeout_seconds? }` | `{ entries: [<broker message>], last_seq, epoch, wave }` |
+
+`wait_for_events` is the MCP form of the broker's
+[long-pollable event log](coordination.md#waiting-for-events). `since` is a
+broker log sequence number (default `0`) and `timeout_seconds` defaults to
+`30`, capped at `60`. The tool long-polls `GET /log`, so it returns as soon as
+an entry newer than `since` is appended, or when the timeout elapses —
+whichever comes first. The `wave` object reports
+[wave staleness](coordination.md#wave-staleness), so a call that times out
+with no entries still tells the caller whether the wave has stalled.
+
+`epoch` identifies the broker instance that answered. Sequence numbers
+restart at zero whenever a broker does — a `pause` + `start` cycle, for
+instance — so a cursor is only meaningful against the epoch it came from.
+**Record the epoch with your cursor and pass `since: 0` on the next call
+whenever it changes**, or you will hold a cursor above everything the new
+broker appends and time out on every call. See
+[The broker epoch](coordination.md#the-broker-epoch--reset-your-cursor-when-it-changes).
+
+With no reachable session broker it returns at once with empty `entries`,
+`last_seq` equal to the `since` it was given, and `no_session: true`. It
+mutates nothing: like every tool outside [Publish tools](#publish-tools), it
+only reads broker state.
 
 ### Governance
 
@@ -279,9 +302,15 @@ error.
 
 | Tool | Input | Result |
 |------|-------|--------|
-| `get_session_status` | — | `{ session: { name, mode, status, paused, agent_count, broker_url, agents:[…] } \| null }` |
+| `get_session_status` | — | `{ session: { name, mode, status, paused, agent_count, broker_url, agents:[…], wave? } \| null }` |
 | `get_session_summary` | — | `{ summary: { name, status, agent_count, agents_by_status } \| null }` |
 | `get_learnings` | — | `{ sections: [{ category, entries:[…] }] }` |
+
+`get_session_status` includes the broker's `wave` object — the session's
+[wave-staleness](coordination.md#wave-staleness) reading
+(`last_progress_unix_secs`, `idle_seconds`, `stall_threshold_seconds`,
+`stalled`) — whenever a broker is reachable, and omits the field entirely
+otherwise.
 
 ### Git context
 
