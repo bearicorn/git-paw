@@ -241,10 +241,11 @@ them: `Updated` only when content changed, and the closing line counts every cre
 - [Two files to read] → the sidecar is short and points at `SKILL.md`; `start` prints both paths.
 - [Typed delivery prompts the operator] → typed delivery (typing an answer into the asking agent's
   pane, paste-buffer recovery, `/tell` in send-keys mode) keeps v0.17's raw `tmux send-keys` in v0.18.
-  Under `agent-hook-and-tmux-guards`' ask rule on `Bash(tmux send-keys *)`, which the orchestrator's
-  root session reads too, each such keystroke now prompts the operator — accepted interim friction in
-  an attended session until v0.19 `verified-agent-send` adds `sweep.sh tell`. The skill prefers broker
-  delivery (`sweep.sh answer`, `/tell` feedback mode) so typed keystrokes are rare.
+  git-paw writes no CLI rule for `tmux send-keys` (permission decisions about commands other than
+  git-paw's own helpers belong to the CLI and the user — the v0.17 classifier-retirement rule, which also
+  re-scoped `agent-hook-and-tmux-guards` to skill text), so whether such a keystroke prompts depends on
+  the user's own CLI rules. Accepted until v0.19 `verified-agent-send` adds `sweep.sh tell`. The skill
+  prefers broker delivery (`sweep.sh answer`, `/tell` feedback mode) so typed keystrokes are rare.
 - [Rendered `SKILL.md` goes stale] → `start` re-renders; `doctor` may later check parity (not this
   change).
 - [Export-agnosticism regression in frontmatter prose] → audited.

@@ -293,11 +293,12 @@ table keyed by the names of the helper scripts the binary bundles:
 
 The item SHALL add `Bash(.git-paw/scripts/sweep.sh approve *)` to `permissions.ask`, so the
 keystroke-sending `approve` subcommand always prompts even when another rule would allow it. The item
-SHALL NOT add an allow entry for `sweep.sh approve`, `sweep.sh verified` or `sweep.sh feedback-gate`,
-for `docs-fetch.sh get`, an interpreter-prefixed form, an absolute-path form, a wildcard over a
-directory, or any entry naming a command other than a git-paw helper script. Every bundled helper
-script SHALL appear in the grant table, either with its granted subcommands or as granted nothing, and
-every `sweep.sh` subcommand SHALL be either granted or listed as never granted.
+SHALL NOT add an allow entry for `sweep.sh approve`, `sweep.sh verified`, `sweep.sh feedback-gate`,
+`sweep.sh conflict-ack`, `sweep.sh answer` or `sweep.sh advanced-main`, for `docs-fetch.sh get`, an
+interpreter-prefixed form, an absolute-path form, a wildcard over a directory, or any entry naming a
+command other than a git-paw helper script. Every bundled helper script SHALL appear in the grant
+table, either with its granted subcommands or as granted nothing, and every `sweep.sh` subcommand
+SHALL be either granted or listed as never granted.
 
 #### Scenario: The allow entries are exactly the grant table
 

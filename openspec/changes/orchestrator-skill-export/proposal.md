@@ -140,9 +140,7 @@ Archive position 18. Export-agnosticism applies in full — new export surfaces 
 - **Predecessors (implementation order):** archive position 18, after `orchestrator-read-surface` (3:
   `wait_for_events`, `sweep.sh events`, wave staleness), `supervisor-pane-removal` (6, which modified
   *Supervisor AGENTS.md from supervisor skill template* and *Quick Start Supervisor chapter is internally
-  consistent* first — this change modifies both again), `agent-hook-and-tmux-guards` (8: `tmux
-  send-keys` on `ask` in the shared `setup-cli` target file, so the skill's typed delivery prompts the
-  operator until v0.19 `verified-agent-send` adds `sweep.sh tell`; see design, Risks), `drive-loop-reattach` (10:
+  consistent* first — this change modifies both again), `drive-loop-reattach` (10:
   `start --unattended` re-attaches a drive loop to a live session, which the skill teaches),
   `cmd-library-surface` (15: the `Output` sink the
   start announcement goes through), `broker-verdict-authority` (16: verdict helpers; it MODIFIES the two
@@ -230,4 +228,4 @@ v0.17.0 `classifier-retirement` REMOVES *Supervisor skill — tiered permission 
   heartbeat exit to re-attach a drive loop (`drive-loop-reattach`, 10).
 - Typed delivery via `sweep.sh tell` is deferred to v0.19 `verified-agent-send`: answer typing,
   paste-buffer recovery and `/tell` in send-keys mode keep v0.17's raw `tmux send-keys` here, which
-  `agent-hook-and-tmux-guards` (8)'s ask rule now makes prompt the operator (design, Risks).
+  prompts the operator only where the user's own CLI rules make it (design, Risks).

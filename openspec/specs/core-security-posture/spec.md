@@ -135,3 +135,20 @@ The security-posture chapter SHALL state four things about the broker:
 - **WHEN** `docs/src/user-guide/security-posture.md` is read
 - **THEN** it SHALL describe the Host and Origin checks, the DNS-rebinding threat they address, the non-loopback-bind exception, and the statement that local processes are not authenticated by this guard
 
+### Requirement: Security posture documents hook bypass and tmux driving
+
+The security-posture chapter SHALL describe two ways an agent session can step around git-paw's own safeguards with ordinary commands, and what git-paw does and does not do about them:
+
+- bypassing git-paw's git hooks with a per-invocation hook override (`git -c core.hooksPath=…`) or `--no-verify`, which silently drops the branch guard and the commit report;
+- driving the session's tmux panes (`tmux send-keys`, `tmux run-shell`, `tmux pipe-pane`), which can answer a permission prompt from outside the agent's CLI and so bypass the human and the orchestrator.
+
+The chapter SHALL state that the bundled coordination skill forbids both; that git-paw writes no permission rule for these commands, because it pre-approves only its own helper workflow and leaves every other permission decision to the agent CLI and the human; and that a user who wants these forms to prompt or be refused can add their own ask or deny rules to the agent CLI's settings, which git-paw never writes, edits or removes.
+
+#### Scenario: Posture chapter names both risks and the user's own remedy
+
+- **WHEN** `docs/src/user-guide/security-posture.md` is read
+- **THEN** it SHALL name `core.hooksPath`, `--no-verify`, `tmux send-keys` and `tmux run-shell`
+- **AND** it SHALL state that git-paw writes no rule for them and that the user may add their own ask or deny rules
+
+Test: `tests/security_posture_docs.rs::posture_chapter_documents_hook_bypass_and_tmux_driving`
+
