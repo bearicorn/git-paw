@@ -265,6 +265,7 @@ create  /repo/.claude/settings.local.json
     permissions.allow += Bash(.git-paw/scripts/sweep.sh stuck-eval *)
     permissions.allow += Bash(.git-paw/scripts/sweep.sh status-publish *)
     permissions.allow += Bash(.git-paw/scripts/sweep.sh learn *)
+    permissions.allow += Bash(.git-paw/scripts/sweep.sh events *)
     permissions.ask += Bash(.git-paw/scripts/sweep.sh approve *)
     permissions.ask += Edit(**/.git-paw/config.toml)
     permissions.deny += Edit(**/.git-paw/scripts/**)

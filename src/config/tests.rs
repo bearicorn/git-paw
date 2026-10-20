@@ -2428,6 +2428,64 @@ fn watcher_ttl_parses_from_broker_table() {
     assert_eq!(config.broker.watcher.republish_working_ttl_seconds(), 0);
 }
 
+// --- [broker] wave_stall_minutes ---
+
+/// A `[broker]` table without the key loads unchanged and resolves to the
+/// 30-minute default.
+#[test]
+fn broker_config_without_wave_stall_minutes_loads_and_defaults_to_thirty() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(&path, "[broker]\nenabled = true\nport = 9119\n");
+    let config = load_config_file(&path).unwrap().unwrap();
+    assert_eq!(config.broker.wave_stall_minutes, None);
+    assert_eq!(config.broker.wave_stall_seconds(), 1800);
+}
+
+#[test]
+fn broker_config_wave_stall_minutes_parses_to_seconds() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(&path, "[broker]\nenabled = true\nwave_stall_minutes = 5\n");
+    let config = load_config_file(&path).unwrap().unwrap();
+    assert_eq!(config.broker.wave_stall_minutes, Some(5));
+    assert_eq!(config.broker.wave_stall_seconds(), 300);
+}
+
+/// `0` disables the `stalled` flag; the broker still reports idleness.
+#[test]
+fn broker_config_wave_stall_minutes_zero_resolves_to_zero_seconds() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(&path, "[broker]\nenabled = true\nwave_stall_minutes = 0\n");
+    let config = load_config_file(&path).unwrap().unwrap();
+    assert_eq!(config.broker.wave_stall_seconds(), 0);
+}
+
+/// `broker-runtime` scenario "Every documented field round-trips": the
+/// released requirement said the `[broker]` section had exactly three
+/// fields, which the watcher sub-table already broke and
+/// `wave_stall_minutes` breaks again. Pin the real set so the spec and the
+/// struct cannot drift apart again unnoticed.
+#[test]
+fn every_documented_broker_field_round_trips() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(
+        &path,
+        "[broker]\nenabled = true\nport = 9200\nbind = \"127.0.0.1\"\n\
+         wave_stall_minutes = 45\n[broker.watcher]\nrepublish_working_ttl_seconds = 90\n",
+    );
+    let broker = load_config_file(&path).unwrap().unwrap().broker;
+
+    assert!(broker.enabled);
+    assert_eq!(broker.port, 9200);
+    assert_eq!(broker.bind, "127.0.0.1");
+    assert_eq!(broker.wave_stall_minutes, Some(45));
+    assert_eq!(broker.wave_stall_seconds(), 2700);
+    assert_eq!(broker.watcher.republish_working_ttl_seconds(), 90);
+}
+
 // --- ConflictConfig (supervisor.conflict sub-table) ---
 
 #[test]

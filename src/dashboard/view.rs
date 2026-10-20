@@ -14,7 +14,7 @@ use ratatui::layout::{Alignment, Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Paragraph, Row, Table};
 
-use crate::broker::AgentStatusEntry;
+use crate::broker::{AgentStatusEntry, WaveStatus};
 
 use super::Model;
 use super::broker_log::{self, BrokerLog};
@@ -195,6 +195,36 @@ pub fn format_status_line(
     format!(
         "{total} agents: {working} working, {done} done, {blocked} blocked, {committed} committed"
     )
+}
+
+/// [`format_status_line`] with the broker's stalled-wave indicator appended
+/// when the wave has stalled.
+///
+/// The per-agent counts answer "is anyone alive"; a roster of `working`
+/// agents can sit for days without the wave moving, so a stalled wave is
+/// named outright — with how long it has been idle — rather than left for
+/// the reader to infer. A wave that is not stalled (or absent) renders the
+/// summary exactly as before, which is what clears the indicator on the
+/// first refresh reporting progress.
+#[must_use]
+pub fn format_status_line_with_wave(
+    total: usize,
+    working: usize,
+    done: usize,
+    blocked: usize,
+    committed: usize,
+    wave: Option<WaveStatus>,
+) -> String {
+    let summary = format_status_line(total, working, done, blocked, committed);
+    match wave {
+        Some(w) if w.stalled => {
+            format!(
+                "{summary}  \u{b7}  \u{26a0} wave stalled {}",
+                w.idle_human()
+            )
+        }
+        _ => summary,
+    }
 }
 
 // ---------------------------------------------------------------------------

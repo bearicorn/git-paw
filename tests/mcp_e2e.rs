@@ -652,3 +652,189 @@ fn active_broker_populates_intents_and_conflicts() {
             .any(|f| f.contains("src/shared.rs"))
     );
 }
+
+// --- mcp-server: event wait tool + session wave ---------------------------
+
+/// Builds a broker and a `RepoContext` pointing at it. Returns `None` when
+/// the port is busy, which makes the caller inconclusive rather than failing.
+fn broker_and_ctx(stall_minutes: u64) -> Option<(git_paw::broker::BrokerHandle, RepoContext)> {
+    let tmp = tempfile::tempdir().ok()?;
+    let config = BrokerConfig {
+        enabled: true,
+        port: pick_broker_port(),
+        bind: "127.0.0.1".to_string(),
+        wave_stall_minutes: Some(stall_minutes),
+        ..Default::default()
+    };
+    let handle = start_broker_with(&config, BrokerState::new(None), Vec::new(), None, 3600).ok()?;
+    let ctx = RepoContext {
+        root: tmp.path().to_path_buf(),
+        git_paw_dir: None,
+        broker_url: Some(handle.url.clone()),
+        server_name: "git-paw".to_string(),
+    };
+    // The temp dir only has to outlive the context's root path, which nothing
+    // in these tests reads from disk.
+    std::mem::forget(tmp);
+    Some((handle, ctx))
+}
+
+fn status_msg(agent: &str, status: &str) -> BrokerMessage {
+    BrokerMessage::Status {
+        agent_id: agent.to_string(),
+        payload: git_paw::broker::messages::StatusPayload {
+            status: status.to_string(),
+            ..Default::default()
+        },
+    }
+}
+
+/// `mcp-server` scenario "Waiting returns new entries": a publish during the
+/// wait reaches the caller before the timeout, with the cursor advanced.
+#[test]
+fn wait_for_events_returns_an_entry_published_during_the_wait() {
+    let Some((handle, ctx)) = broker_and_ctx(30) else {
+        return;
+    };
+    // Seed the log to sequence 4.
+    for n in 0..4 {
+        publish_message(
+            &handle.state,
+            &status_msg(&format!("feat-seed{n}"), "working"),
+        );
+    }
+
+    let publisher = std::sync::Arc::clone(&handle.state);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        publish_message(&publisher, &status_msg("feat-late", "working"));
+    });
+
+    let started = std::time::Instant::now();
+    let snapshot = query::events::wait_for_events(&ctx, 4, 30);
+
+    assert!(!snapshot.no_session);
+    assert_eq!(snapshot.entries.len(), 1, "exactly the new entry");
+    assert_eq!(snapshot.last_seq, 5);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "the wait must end on the publish, not run to the 30s timeout"
+    );
+}
+
+/// `mcp-server` scenario "A timed-out wait still reports the wave": the whole
+/// point of carrying the wave — a waiter that learned nothing new still
+/// learns the wave has stalled.
+#[test]
+fn a_timed_out_wait_still_reports_a_stalled_wave() {
+    let Some((handle, ctx)) = broker_and_ctx(1) else {
+        return;
+    };
+    for n in 0..9 {
+        publish_message(
+            &handle.state,
+            &status_msg(&format!("feat-seed{n}"), "working"),
+        );
+    }
+    let aged = handle.state.wave_status().last_progress_unix_secs - 600;
+    handle.state.set_last_progress_unix_secs(aged);
+
+    let snapshot = query::events::wait_for_events(&ctx, 9, 2);
+
+    assert!(snapshot.entries.is_empty(), "nothing was published");
+    assert_eq!(snapshot.last_seq, 9, "the cursor must not rewind");
+    let wave = snapshot
+        .wave
+        .expect("a reachable broker must report its wave");
+    assert!(
+        wave.stalled,
+        "the wave is ten minutes idle under a 1m threshold"
+    );
+}
+
+/// `mcp-server` scenario "A restarted broker is visible to the caller":
+/// `wait_for_events` passes the serving broker's epoch through, and a
+/// replacement broker reports a different one — the client's signal that
+/// its cursor is stale and must go back to 0.
+#[test]
+fn wait_for_events_reports_an_epoch_that_changes_with_the_broker() {
+    let Some((first, first_ctx)) = broker_and_ctx(30) else {
+        return;
+    };
+    publish_message(&first.state, &status_msg("feat-a", "working"));
+
+    let snapshot = query::events::wait_for_events(&first_ctx, 0, 1);
+    let epoch = snapshot.epoch.expect("a reachable broker names itself");
+    assert_eq!(epoch, first.state.epoch());
+
+    let Some((second, second_ctx)) = broker_and_ctx(30) else {
+        return;
+    };
+    let after = query::events::wait_for_events(&second_ctx, 0, 1);
+
+    assert_ne!(
+        after.epoch.expect("epoch"),
+        epoch,
+        "a different broker must be distinguishable, or a client keeps a \
+         cursor that silently skips everything the new broker appends"
+    );
+    drop(second);
+}
+
+/// `mcp-server` scenario "Stalled wave reaches the orchestrator":
+/// `get_session_status` carries the same wave object.
+#[test]
+fn get_session_status_reports_a_stalled_wave() {
+    let repo = tempfile::tempdir().unwrap();
+    git_init_with_commit(repo.path());
+
+    let config = BrokerConfig {
+        enabled: true,
+        port: pick_broker_port(),
+        bind: "127.0.0.1".to_string(),
+        wave_stall_minutes: Some(1),
+        ..Default::default()
+    };
+    let Ok(handle) = start_broker_with(&config, BrokerState::new(None), Vec::new(), None, 3600)
+    else {
+        return;
+    };
+    let aged = handle.state.wave_status().last_progress_unix_secs - 600;
+    handle.state.set_last_progress_unix_secs(aged);
+
+    // A session receipt the MCP session read can resolve, in a sessions
+    // directory of this test's own — no `HOME` mutation, which would reach
+    // every other test sharing this process.
+    let sessions = tempfile::tempdir().unwrap();
+    let sessions_dir = sessions.path();
+    let canonical = repo.path().canonicalize().unwrap();
+    std::fs::write(
+        sessions_dir.join("paw-wave.json"),
+        serde_json::json!({
+            "session_name": "paw-wave",
+            "repo_path": canonical.to_string_lossy(),
+            "project_name": "wave",
+            "created_at": "2026-05-01T00:00:00Z",
+            "status": "active",
+            "worktrees": [],
+            "broker_port": config.port,
+            "broker_bind": "127.0.0.1",
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let ctx = RepoContext {
+        root: canonical,
+        git_paw_dir: None,
+        broker_url: Some(handle.url.clone()),
+        server_name: "git-paw".to_string(),
+    };
+
+    let snapshot = query::session::session_status_in(&ctx, sessions_dir)
+        .expect("the seeded session must resolve");
+    let wave = snapshot
+        .wave
+        .expect("a reachable broker must report its wave");
+    assert!(wave.stalled, "got {wave:?}");
+}

@@ -424,8 +424,17 @@ pub enum Command {
                       active but the tmux session no longer exists — a crash or \
                       release-boundary carry-over). Run `git paw start` to self-heal a stale \
                       receipt, or `git paw purge --stale` to clear it.\n\n\
+                      When this session's own broker reports the wave stalled — nothing has \
+                      progressed for longer than `[broker] wave_stall_minutes` (default 30) \
+                      — an extra line under `Broker:` names how long: \
+                      `wave stalled — no progress for 3h12m`. Progress is a wave phase \
+                      advancing or a branch tip moving, and nothing else, so a roster of \
+                      agents all reporting `working` can still be stalled. Nothing extra is \
+                      printed when the wave is progressing.\n\n\
                       Pass --json for machine-readable output (the `status` field is one of \
-                      active/paused/stopped/stale).\n\n\
+                      active/paused/stopped/stale; a `wave` object carrying \
+                      last_progress_unix_secs, idle_seconds, stall_threshold_seconds and \
+                      stalled is included whenever this session's broker is reachable).\n\n\
                       Examples:\n  git paw status\n  git paw status --json"
     )]
     Status {

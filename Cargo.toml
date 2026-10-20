@@ -41,6 +41,10 @@ name = "git-paw"
 path = "src/main.rs"
 
 [dev-dependencies]
+# Same tokio as the runtime dependency, with `test-util` so broker long-poll
+# tests can run on a paused clock: a 60-second cap is asserted in virtual
+# time instead of costing 60 real seconds.
+tokio = { version = "1", features = ["test-util"] }
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"

@@ -1013,6 +1013,60 @@ mod tests {
         assert!(remedy.contains("--allowlist"), "{remedy}");
     }
 
+    /// `orchestrator-read-surface`'s documented upgrade path: a user who
+    /// applied the allowlist under v0.17 has no `sweep.sh events` entry, so
+    /// doctor reports the applied setup out of date and names the `--undo`
+    /// then `--allowlist` re-run that fixes it. Re-applying (the full
+    /// current plan, as `applied_probe` builds it) clears the warning.
+    #[test]
+    fn a_v017_record_without_the_events_grant_is_out_of_date_until_reapplied() {
+        const EVENTS: &str = "Bash(.git-paw/scripts/sweep.sh events *)";
+
+        // A v0.17 setup: the record lists the eleven pre-`events` entries and
+        // the settings file holds exactly those same eleven. Both halves
+        // matter — the check judges applied state against the FILE, so a
+        // fixture that dropped the entry only from the record would still
+        // read as fully applied.
+        let mut probe = applied_probe();
+        probe.entries.retain(|e| e.value != EVENTS);
+        drop_from_file(&mut probe, EVENTS);
+
+        let allow_in_file = |p: &SetupProbe| -> Vec<String> {
+            let content = p.files.get(&target()).cloned().flatten().unwrap();
+            let root: serde_json::Value = serde_json::from_str(&content).unwrap();
+            root["permissions"]["allow"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+        let before = allow_in_file(&probe);
+        assert_eq!(before.len(), 11, "the v0.17 grant table");
+        assert!(!before.iter().any(|v| v == EVENTS));
+
+        let c = only(&check_cli_setup(&probe), "claude setup");
+        assert_eq!(c.status, CheckStatus::Warn, "{}", c.detail);
+        assert!(c.detail.contains("out of date"), "{}", c.detail);
+        assert!(
+            c.detail.contains("write 1 entry"),
+            "the warning must name the single missing entry; got {}",
+            c.detail
+        );
+        let remedy = c.remedy.clone().unwrap_or_default();
+        assert!(remedy.contains("--undo"), "{remedy}");
+        assert!(remedy.contains("--allowlist"), "{remedy}");
+
+        // After `--undo` + `--allowlist` the file carries the twelfth entry
+        // and the check is quiet.
+        let reapplied = applied_probe();
+        assert!(allow_in_file(&reapplied).iter().any(|v| v == EVENTS));
+        assert_eq!(
+            only(&check_cli_setup(&reapplied), "claude setup").status,
+            CheckStatus::Ok
+        );
+    }
+
     #[test]
     fn an_entry_the_user_already_had_counts_as_applied() {
         let mut probe = applied_probe();

@@ -14,6 +14,7 @@
 
 pub mod conflicts;
 pub mod docs;
+pub mod events;
 pub mod git;
 pub mod governance;
 pub mod intents;

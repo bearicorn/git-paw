@@ -92,6 +92,35 @@ async fn run_git_status(worktree: &Path) -> Option<Vec<String>> {
     Some(parse_porcelain(&stdout))
 }
 
+/// Reads the worktree's current `HEAD` commit.
+///
+/// Returns `None` when git is unavailable, the command fails, or the branch
+/// has no commit yet — callers treat that as "no observation this tick".
+async fn run_git_head(worktree: &Path) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .arg("rev-parse")
+        .arg("HEAD")
+        .current_dir(worktree)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if head.is_empty() { None } else { Some(head) }
+}
+
+/// Whether an observed `HEAD` commit means this agent's branch tip moved.
+///
+/// The first observation is the baseline — a watcher starting up has not
+/// witnessed a commit, it has merely learned where the branch already was —
+/// so progress is only a *change* from a previously observed commit.
+#[must_use]
+pub fn head_moved(previous: Option<&str>, current: &str) -> bool {
+    previous.is_some_and(|prev| prev != current)
+}
+
 /// Watches a single worktree, publishing `agent.status` when git-status output changes.
 ///
 /// The task runs until the broker's shutdown signal fires. Each iteration waits
@@ -103,6 +132,7 @@ pub async fn watch_worktree(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut previous: Option<Vec<String>> = None;
+    let mut previous_head: Option<String> = None;
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     // Skip the immediate first tick so we wait one interval before the first poll.
     ticker.tick().await;
@@ -114,6 +144,23 @@ pub async fn watch_worktree(
                     break;
                 }
             }
+        }
+
+        // Branch-tip observation, beside `git status` on the same tick: a
+        // moved `HEAD` is wave progress even when nothing else happens
+        // (`broker-runtime`'s "A moved branch tip is progress").
+        //
+        // Taken FIRST, before any of the `git status` early exits. The most
+        // likely reason `git status` fails transiently is `index.lock`
+        // contention — which is to say, while the agent is committing, which
+        // is exactly the tick whose HEAD change matters. A failed
+        // `rev-parse` leaves `previous_head` untouched, so it can never
+        // manufacture a move.
+        if let Some(head) = run_git_head(&target.worktree_path).await {
+            if head_moved(previous_head.as_deref(), &head) {
+                state.mark_progress();
+            }
+            previous_head = Some(head);
         }
 
         let Some(current) = run_git_status(&target.worktree_path).await else {
@@ -343,6 +390,86 @@ mod tests {
         assert_eq!(
             working_count, 1,
             "a burst of writes within one poll interval must republish working exactly once"
+        );
+
+        let _ = tx.send(true);
+        let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+    }
+
+    // === Branch-tip observation (wave progress) ===
+
+    /// The first `HEAD` the watcher sees is a baseline, not a commit it
+    /// witnessed — only a *change* from a previously observed commit is
+    /// progress.
+    #[test]
+    fn the_first_head_observation_is_a_baseline_not_progress() {
+        assert!(!head_moved(None, "aaaa111"));
+        assert!(!head_moved(Some("aaaa111"), "aaaa111"));
+        assert!(head_moved(Some("aaaa111"), "bbbb222"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn run_git_head_reads_the_current_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_test_repo(tmp.path());
+        let head = run_git_head(tmp.path()).await.expect("HEAD must resolve");
+        assert_eq!(head.len(), 40, "a full object id, got {head:?}");
+    }
+
+    /// `broker-runtime` scenario "A moved branch tip is progress": the
+    /// watcher observes `HEAD` at commit A, the agent commits, and the next
+    /// tick's observation of commit B advances the wave clock — with no
+    /// message published at all.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn a_moved_branch_tip_advances_the_wave_clock() {
+        use crate::broker::BrokerState;
+        use std::process::Command;
+
+        let tmp = tempfile::tempdir().unwrap();
+        init_test_repo(tmp.path());
+
+        let state = Arc::new(BrokerState::new(None));
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let target = WatchTarget {
+            agent_id: "feat-tip".to_string(),
+            cli: "claude".to_string(),
+            worktree_path: tmp.path().to_path_buf(),
+        };
+        let handle = tokio::spawn(watch_worktree(Arc::clone(&state), target, rx));
+
+        // Let the watcher take its baseline observation of commit A.
+        tokio::time::sleep(POLL_INTERVAL + Duration::from_millis(500)).await;
+        // Age the wave so a later advance is unmistakable.
+        let aged = state.wave_status().last_progress_unix_secs - 100;
+        state.set_last_progress_unix_secs(aged);
+
+        // The agent commits: HEAD moves from A to B.
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(tmp.path())
+                .output()
+                .expect("git command failed");
+        };
+        // An EMPTY commit: `git status` is clean before and after, so the
+        // watcher publishes no `agent.status` and the only thing that can
+        // move the wave clock is the HEAD observation itself. A commit that
+        // dirtied the worktree would let a status publish pass this test
+        // even if the HEAD check were deleted.
+        run(&["commit", "--allow-empty", "-m", "ship it", "-q"]);
+
+        tokio::time::sleep(POLL_INTERVAL + Duration::from_millis(800)).await;
+
+        assert!(
+            state.read().message_log.is_empty(),
+            "precondition: a clean worktree must publish nothing, so only the \
+             HEAD observation can have moved the wave clock"
+        );
+        assert!(
+            state.wave_status().last_progress_unix_secs > aged,
+            "observing a moved HEAD must advance last_progress_unix_secs"
         );
 
         let _ = tx.send(true);

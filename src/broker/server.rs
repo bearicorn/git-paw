@@ -5,6 +5,7 @@
 //! [`super`] — no `RwLock` guard is held across an `.await` boundary.
 
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{Path, Query, State};
@@ -157,14 +158,35 @@ struct PollResponse {
     last_seq: u64,
 }
 
+/// Query parameters for the `GET /log` endpoint.
+#[derive(Deserialize)]
+struct LogQuery {
+    /// Return only entries with sequence number > `since`. Defaults to 0.
+    since: Option<String>,
+    /// Hold the request for up to this many whole seconds when no entry is
+    /// newer than `since`. Absent means "answer immediately".
+    wait: Option<String>,
+}
+
+/// Upper bound on a `GET /log` long-poll, in seconds. A client asking for
+/// longer is served at the cap rather than refused, so no caller can pin a
+/// handler task indefinitely.
+const MAX_LOG_WAIT_SECONDS: u64 = 60;
+
 /// Response body for the `GET /log` endpoint.
 #[derive(Serialize)]
 struct LogResponse {
     /// All messages with `seq > since`, in chronological order.
     /// Each entry is `[seq, timestamp_unix_secs, message]`.
     entries: Vec<LogEntry>,
-    /// Highest sequence number in the result (0 if empty).
+    /// Highest sequence number in the result, or the request's `since` when
+    /// the result is empty — a reader's cursor must never rewind.
     last_seq: u64,
+    /// The running broker instance's epoch (its start time, Unix seconds).
+    /// Sequence numbers restart at zero on every broker start, so a reader
+    /// whose recorded epoch differs from this one must reset its cursor to
+    /// `0` or it will silently skip the new broker's entries.
+    epoch: u64,
 }
 
 /// One entry in `GET /log`.
@@ -459,13 +481,52 @@ async fn messages(
         .into_response()
 }
 
-/// `GET /log?since=N` — returns the broker's full message log filtered to
-/// `seq > since`.
+/// Collects log entries newer than `since`, holding the request for up to
+/// `wait` when there are none.
+///
+/// Registers interest in the publish notification *before* each re-check, so
+/// an entry appended between the check and the await still wakes the waiter.
+/// [`delivery::full_log`] takes and releases the state read lock inside a
+/// single statement, so no guard is ever live across the `.await`
+/// (`clippy::await_holding_lock`).
+async fn await_log_entries(
+    state: &Arc<BrokerState>,
+    since: u64,
+    wait: Duration,
+) -> Vec<(u64, std::time::SystemTime, BrokerMessage)> {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let notified = state.publish_notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        let raw = delivery::full_log(state, since);
+        if !raw.is_empty() {
+            return raw;
+        }
+        if tokio::time::timeout_at(deadline, notified).await.is_err() {
+            // The wait elapsed. One last read so an entry published in the
+            // same instant as the timeout is still returned.
+            return delivery::full_log(state, since);
+        }
+    }
+}
+
+/// `GET /log?since=N&wait=S` — returns the broker's message log filtered to
+/// `seq > since`, optionally long-polling for up to `wait` seconds.
 ///
 /// Used by `cmd_supervisor` to reconstruct broker state from outside the
 /// dashboard process so it can build the dependency graph for merge ordering
-/// and write a real session summary instead of an empty one.
-async fn log(State(state): State<Arc<BrokerState>>, Query(params): Query<PollQuery>) -> Response {
+/// and write a real session summary instead of an empty one, and by the
+/// orchestrator read surface (`wait_for_events`, `sweep.sh events`, the drive
+/// loop's message observer) to advance a cursor event-by-event.
+///
+/// With `wait` present and nothing newer than `since`, the request is held
+/// until an entry is appended or the wait elapses, capped at
+/// [`MAX_LOG_WAIT_SECONDS`]. Without `wait` the handler answers immediately,
+/// exactly as before. In both cases an empty answer reports
+/// `last_seq = since`, so a reader's cursor never rewinds.
+async fn log(State(state): State<Arc<BrokerState>>, Query(params): Query<LogQuery>) -> Response {
     let since = match params.since {
         Some(s) => match s.parse::<u64>() {
             Ok(n) => n,
@@ -479,9 +540,27 @@ async fn log(State(state): State<Arc<BrokerState>>, Query(params): Query<PollQue
         },
         None => 0,
     };
+    let wait = match params.wait {
+        Some(w) => match w.parse::<u64>() {
+            Ok(n) => Some(Duration::from_secs(n.min(MAX_LOG_WAIT_SECONDS))),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({"error": "wait must be a valid u64"})),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
 
-    let raw = delivery::full_log(&state, since);
-    let last_seq = raw.iter().map(|(s, _, _)| *s).max().unwrap_or(0);
+    let raw = match wait {
+        Some(w) => await_log_entries(&state, since, w).await,
+        None => delivery::full_log(&state, since),
+    };
+    // An empty answer holds the caller's cursor at `since` rather than
+    // rewinding it to 0.
+    let last_seq = raw.iter().map(|(s, _, _)| *s).max().unwrap_or(since);
     let entries: Vec<LogEntry> = raw
         .into_iter()
         .map(|(seq, ts, message)| LogEntry {
@@ -495,7 +574,11 @@ async fn log(State(state): State<Arc<BrokerState>>, Query(params): Query<PollQue
 
     (
         StatusCode::OK,
-        axum::Json(LogResponse { entries, last_seq }),
+        axum::Json(LogResponse {
+            entries,
+            last_seq,
+            epoch: state.epoch(),
+        }),
     )
         .into_response()
 }
@@ -522,6 +605,11 @@ async fn status(State(state): State<Arc<BrokerState>>) -> Response {
             "uptime_seconds": uptime,
             "agents": agents,
             "repo_root": repo_root,
+            // Wave-level progress, alongside the per-agent rows: `agents[]`
+            // answers "is anyone alive", `wave` answers "has anything
+            // moved" — the question a roster of repeated `working`
+            // heartbeats cannot.
+            "wave": state.wave_status(),
         })),
     )
         .into_response()
@@ -1470,6 +1558,9 @@ mod tests {
         assert_eq!(parsed["last_seq"], 3);
     }
 
+    /// Also `broker-runtime` scenario "A request without wait returns at
+    /// once": three messages, `since=2`, the entry at sequence 3 and
+    /// `last_seq = 3`, with no waiting.
     #[tokio::test]
     async fn log_with_since_filters_older_entries() {
         let state = Arc::new(BrokerState::new(None));
@@ -1508,6 +1599,7 @@ mod tests {
             "since=2 must yield only the message at seq=3"
         );
         assert_eq!(entries[0]["seq"], 3);
+        assert_eq!(parsed["last_seq"], 3);
     }
 
     #[tokio::test]
@@ -1524,6 +1616,392 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // --- `GET /log` long-polls on the since cursor ----------------------
+
+    /// Publishes `count` distinct `agent.status` messages so the log has a
+    /// known last sequence number.
+    fn seed_log(state: &Arc<BrokerState>, count: u64) {
+        for n in 1..=count {
+            let msg = BrokerMessage::Status {
+                agent_id: format!("feat-seed{n}"),
+                payload: super::super::messages::StatusPayload {
+                    status: "working".to_string(),
+                    ..Default::default()
+                },
+            };
+            delivery::publish_message(state, &msg);
+        }
+    }
+
+    /// GETs `uri` against a router over `state` and returns the parsed body.
+    async fn get_log(state: Arc<BrokerState>, uri: &str) -> serde_json::Value {
+        let resp = router(state, true)
+            .oneshot(
+                loopback_request()
+                    .method("GET")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// `broker-runtime` scenario "A waiting request returns as soon as an
+    /// entry is published". Virtual time (`start_paused`) keeps the test
+    /// instant while still proving the handler returned on the *publish*, at
+    /// the 2-second mark, rather than sitting out its 30-second wait.
+    #[tokio::test(start_paused = true)]
+    async fn log_wait_returns_as_soon_as_an_entry_is_published() {
+        let state = Arc::new(BrokerState::new(None));
+        seed_log(&state, 7);
+
+        let publisher = Arc::clone(&state);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let msg = BrokerMessage::Status {
+                agent_id: "feat-late".to_string(),
+                payload: super::super::messages::StatusPayload {
+                    status: "working".to_string(),
+                    ..Default::default()
+                },
+            };
+            delivery::publish_message(&publisher, &msg);
+        });
+
+        let started = tokio::time::Instant::now();
+        let parsed = get_log(state, "/log?since=7&wait=30").await;
+        let waited = started.elapsed();
+
+        let entries = parsed["entries"].as_array().expect("entries array");
+        assert_eq!(entries.len(), 1, "exactly the newly published entry");
+        assert_eq!(entries[0]["message"]["agent_id"], "feat-late");
+        assert_eq!(parsed["last_seq"], 8);
+        assert!(
+            waited < Duration::from_secs(10),
+            "the wait must end on the publish (~2s), not run to 30s; waited {waited:?}"
+        );
+    }
+
+    /// `broker-runtime` scenario "A waiting request times out empty" — and
+    /// the cursor-holding clause: an empty answer reports `last_seq = since`,
+    /// never `0`.
+    #[tokio::test(start_paused = true)]
+    async fn log_wait_times_out_empty_and_holds_the_cursor() {
+        let state = Arc::new(BrokerState::new(None));
+        seed_log(&state, 7);
+
+        let started = tokio::time::Instant::now();
+        let parsed = get_log(state, "/log?since=7&wait=2").await;
+        let waited = started.elapsed();
+
+        assert!(
+            parsed["entries"].as_array().unwrap().is_empty(),
+            "nothing was published, so the answer must be empty"
+        );
+        assert_eq!(parsed["last_seq"], 7, "an empty answer holds the cursor");
+        assert!(
+            waited >= Duration::from_secs(2),
+            "the handler must hold the request for the full wait; waited {waited:?}"
+        );
+    }
+
+    /// `broker-runtime` scenario "The wait is capped": a client asking for
+    /// 600 seconds is served at the 60-second cap, so no caller can pin a
+    /// handler task indefinitely.
+    #[tokio::test(start_paused = true)]
+    async fn log_wait_is_capped_at_sixty_seconds() {
+        let state = Arc::new(BrokerState::new(None));
+
+        let started = tokio::time::Instant::now();
+        let parsed = get_log(state, "/log?since=0&wait=600").await;
+        let waited = started.elapsed();
+
+        assert!(parsed["entries"].as_array().unwrap().is_empty());
+        assert!(
+            waited >= Duration::from_secs(60) && waited < Duration::from_secs(120),
+            "wait=600 must be served at the 60s cap; waited {waited:?}"
+        );
+    }
+
+    /// `broker-runtime` scenario "A non-numeric wait is rejected".
+    #[tokio::test]
+    async fn log_non_numeric_wait_returns_400() {
+        let resp = test_router()
+            .oneshot(
+                loopback_request()
+                    .method("GET")
+                    .uri("/log?wait=soon")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// `broker-runtime` scenario "An empty response without wait holds the
+    /// cursor": the v0.17 behaviour reported `last_seq = 0` here, rewinding
+    /// every reader that asked for nothing new.
+    #[tokio::test]
+    async fn log_empty_response_without_wait_holds_the_cursor() {
+        let state = Arc::new(BrokerState::new(None));
+        seed_log(&state, 7);
+
+        let parsed = get_log(state, "/log?since=7").await;
+
+        assert!(parsed["entries"].as_array().unwrap().is_empty());
+        assert_eq!(parsed["last_seq"], 7);
+    }
+
+    /// `broker-runtime` scenario "A restarted broker reports a new epoch":
+    /// every `/log` answer names the serving broker instance, it is stable
+    /// across that broker's answers, and a replacement broker reports a
+    /// different one — which is the only way a reader can learn its cursor
+    /// has become meaningless.
+    #[tokio::test]
+    async fn log_reports_a_stable_epoch_that_changes_when_the_broker_does() {
+        let first = Arc::new(BrokerState::new(None));
+        seed_log(&first, 3);
+
+        let epoch = get_log(Arc::clone(&first), "/log?since=0").await["epoch"]
+            .as_u64()
+            .expect("every /log answer names its broker");
+        assert!(epoch > 0);
+        assert_eq!(
+            get_log(first, "/log?since=3").await["epoch"],
+            epoch,
+            "one broker's epoch must not drift between answers, or a reader \
+             would reset its cursor on every poll"
+        );
+
+        // The replacement a pause/start cycle creates. Its sequence numbers
+        // begin again at 1, so its epoch has to differ.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let replacement = Arc::new(BrokerState::new(None));
+        let new_epoch = get_log(replacement, "/log?since=0").await["epoch"]
+            .as_u64()
+            .expect("epoch");
+
+        assert_ne!(
+            new_epoch, epoch,
+            "a replacement broker must be distinguishable from the one whose \
+             cursor the reader still holds"
+        );
+    }
+
+    // --- `GET /status` reports wave staleness ---------------------------
+
+    /// Publishes `agent.status` for `agent` with the given label and phase.
+    fn publish_status(state: &Arc<BrokerState>, agent: &str, status: &str, phase: Option<&str>) {
+        let msg = BrokerMessage::Status {
+            agent_id: agent.to_string(),
+            payload: super::super::messages::StatusPayload {
+                status: status.to_string(),
+                phase: phase.map(str::to_string),
+                ..Default::default()
+            },
+        };
+        delivery::publish_message(state, &msg);
+    }
+
+    /// Returns the current Unix second, for ageing a broker's last-progress
+    /// stamp without sleeping.
+    fn now_unix() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// Builds a broker whose agent `feat-a` is on record as `working` and
+    /// whose wave last progressed `idle` seconds ago, under a `threshold`
+    /// second stall threshold.
+    fn aged_broker(threshold: u64, idle: u64) -> Arc<BrokerState> {
+        let state = Arc::new(BrokerState::new(None));
+        state.set_wave_stall_seconds(threshold);
+        // The agent's first status is genuinely new, so it is progress; age
+        // the wave afterwards to set up the "and then nothing moved" case.
+        publish_status(&state, "feat-a", "working", None);
+        state.set_last_progress_unix_secs(now_unix() - idle);
+        state
+    }
+
+    /// Reads the `wave` object from `/status`.
+    async fn get_wave(state: &Arc<BrokerState>) -> serde_json::Value {
+        get_status(state).await["wave"].clone()
+    }
+
+    /// `broker-runtime` scenario "Repeated identical heartbeats are not
+    /// progress": the stall that hid behind a roster of live `working` rows.
+    #[tokio::test]
+    async fn status_repeated_identical_heartbeats_are_not_progress() {
+        let state = aged_broker(60, 120);
+        // Two minutes of 10-second heartbeats, all identical.
+        for _ in 0..12 {
+            publish_status(&state, "feat-a", "working", None);
+        }
+
+        let wave = get_wave(&state).await;
+        assert_eq!(wave["stalled"], true);
+        assert!(
+            wave["idle_seconds"].as_u64().unwrap() >= 120,
+            "repeated heartbeats must not reset the wave clock; got {wave}"
+        );
+    }
+
+    /// `broker-runtime` scenario "A real event resets staleness".
+    #[tokio::test]
+    async fn status_an_artifact_resets_staleness() {
+        let state = aged_broker(60, 120);
+        assert_eq!(get_wave(&state).await["stalled"], true);
+
+        delivery::publish_message(
+            &state,
+            &BrokerMessage::Artifact {
+                agent_id: "feat-a".to_string(),
+                payload: super::super::messages::ArtifactPayload {
+                    status: "committed".to_string(),
+                    exports: vec![],
+                    modified_files: vec!["src/lib.rs".to_string()],
+                },
+            },
+        );
+
+        let wave = get_wave(&state).await;
+        assert_eq!(wave["stalled"], false);
+        assert!(
+            wave["idle_seconds"].as_u64().unwrap() <= 2,
+            "an artifact is progress, so the wave clock restarts; got {wave}"
+        );
+    }
+
+    /// `broker-runtime` scenario "Uncommitted file churn is not progress": an
+    /// agent editing for two minutes without committing moves no phase.
+    #[tokio::test]
+    async fn status_uncommitted_file_churn_is_not_progress() {
+        let state = aged_broker(60, 120);
+        for files in [
+            vec!["a.rs"],
+            vec!["a.rs", "b.rs"],
+            vec!["a.rs", "b.rs", "c.rs"],
+            vec!["b.rs"],
+        ] {
+            delivery::publish_message(
+                &state,
+                &BrokerMessage::Status {
+                    agent_id: "feat-a".to_string(),
+                    payload: super::super::messages::StatusPayload {
+                        status: "working".to_string(),
+                        modified_files: files.iter().map(ToString::to_string).collect(),
+                        ..Default::default()
+                    },
+                },
+            );
+        }
+
+        let wave = get_wave(&state).await;
+        assert_eq!(
+            wave["stalled"], true,
+            "a changing modified-file set is not a phase advance; got {wave}"
+        );
+    }
+
+    /// `broker-runtime` scenario "The drive loop's own escalations and
+    /// learnings are not progress": under `--unattended` the drive loop
+    /// escalates a live permission prompt, re-escalates it after its dedup
+    /// window, and records learnings — all while the wave sits on the
+    /// unanswered prompt.
+    #[tokio::test]
+    async fn status_drive_loop_escalations_and_learnings_are_not_progress() {
+        let state = aged_broker(60, 120);
+        for _ in 0..2 {
+            delivery::publish_message(
+                &state,
+                &BrokerMessage::Question {
+                    agent_id: "feat-a".to_string(),
+                    payload: super::super::messages::QuestionPayload {
+                        question: "permission prompt: allow `cargo test`?".to_string(),
+                    },
+                },
+            );
+            delivery::publish_message(
+                &state,
+                &BrokerMessage::Learning {
+                    payload: super::super::messages::LearningPayload {
+                        id: "0123456789abcdef".to_string(),
+                        agent_id: "supervisor".to_string(),
+                        branch_id: Some("feat-a".to_string()),
+                        category: "permission_pattern".to_string(),
+                        title: "escalated a permission prompt".to_string(),
+                        body: serde_json::json!({}),
+                        timestamp: "2026-10-26T00:00:00Z".to_string(),
+                    },
+                },
+            );
+        }
+
+        let wave = get_wave(&state).await;
+        assert_eq!(wave["stalled"], true);
+        assert!(
+            wave["idle_seconds"].as_u64().unwrap() >= 120,
+            "escalations and learnings must not mask the stall; got {wave}"
+        );
+    }
+
+    /// `broker-runtime` scenario "A stuck-detection alert is not progress",
+    /// end to end through `/status`: two minutes of the helper's alerts
+    /// about a stalled agent leave the wave reported as stalled.
+    #[tokio::test]
+    async fn status_stuck_detection_alerts_are_not_progress() {
+        let state = aged_broker(60, 120);
+        for phase in [
+            "stuck-on-prompt",
+            "stuck-stream-timeout",
+            "context-bloat",
+            "no-progress",
+            "blocked-on-supervisor",
+        ] {
+            publish_status(&state, "feat-a", "working", Some(phase));
+        }
+
+        let wave = get_wave(&state).await;
+        assert_eq!(wave["stalled"], true, "got {wave}");
+        assert!(
+            wave["idle_seconds"].as_u64().unwrap() >= 120,
+            "detecting the stall must not reset the clock; got {wave}"
+        );
+    }
+
+    /// `broker-runtime` scenario "A zero threshold disables the flag".
+    #[tokio::test]
+    async fn status_zero_threshold_disables_the_flag_but_still_reports_idleness() {
+        let state = aged_broker(0, 3600);
+
+        let wave = get_wave(&state).await;
+        assert_eq!(wave["stalled"], false);
+        assert_eq!(wave["stall_threshold_seconds"], 0);
+        assert!(wave["idle_seconds"].as_u64().unwrap() >= 3600);
+    }
+
+    /// The `wave` object carries every documented field, and a broker that
+    /// has accepted no message reports its start time as the last progress.
+    #[tokio::test]
+    async fn status_wave_reports_start_time_before_any_message() {
+        let state = Arc::new(BrokerState::new(None));
+        let wave = get_wave(&state).await;
+
+        assert!(wave["last_progress_unix_secs"].as_u64().unwrap() > 0);
+        assert!(wave["idle_seconds"].as_u64().unwrap() <= 2);
+        assert_eq!(wave["stall_threshold_seconds"], 1800);
+        assert_eq!(wave["stalled"], false);
     }
 
     // --- Browser-exposure guard (Host / Origin) -------------------------

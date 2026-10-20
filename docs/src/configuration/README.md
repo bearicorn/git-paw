@@ -95,6 +95,7 @@ cli = "codex"
 # enabled = false
 # port = 9119
 # bind = "127.0.0.1"
+# wave_stall_minutes = 30
 
 # Pointers to user-maintained governance docs (all optional)
 # [governance]
@@ -718,6 +719,7 @@ Configure the HTTP broker for agent coordination. When enabled, git-paw starts a
 enabled = true
 port = 9119
 bind = "127.0.0.1"
+wave_stall_minutes = 30
 ```
 
 | Field | Default | Description |
@@ -725,6 +727,9 @@ bind = "127.0.0.1"
 | `enabled` | `false` | Whether to start the coordination broker |
 | `port` | `9119` | HTTP port for the broker server |
 | `bind` | `"127.0.0.1"` | Bind address -- never bind to `0.0.0.0` on shared machines |
+| `wave_stall_minutes` | `30` | Minutes without wave progress after which the broker reports the wave as stalled on `GET /status`, in `git paw status`, and on the dashboard status line. "Progress" is a wave phase advancing or a branch tip moving, and nothing else — see [Wave staleness](../user-guide/coordination.md#wave-staleness). `0` disables the `stalled` flag while still reporting `idle_seconds`. Omitted → the documented default |
+
+The default of 30 minutes sits just above the unattended drive loop's 25-minute heartbeat, so a wave that is merely between heartbeats is not reported as stalled. A config written before the key existed loads unchanged and gets the default.
 
 When the broker is enabled, git-paw injects the `GIT_PAW_BROKER_URL` environment variable into each agent pane, pointing to `http://<bind>:<port>`. Agents use this URL to communicate with the broker.
 

@@ -9,6 +9,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
+use crate::broker::WaveStatus;
 use crate::broker::messages::{
     ArtifactPayload, BlockedPayload, BrokerMessage, QuestionPayload, StatusPayload,
 };
@@ -204,6 +205,73 @@ pub fn register_watch_target_http(
     Ok(())
 }
 
+/// A `GET /log` answer: the entries, and the epoch of the broker that
+/// served them.
+///
+/// The epoch is what makes a cursor safe across a broker restart. Sequence
+/// numbers restart at zero on every start, and a cursor never rewinds, so a
+/// reader that kept its old cursor would skip the new broker's entries
+/// forever. See [`CursorReader`].
+#[derive(Debug, Clone)]
+pub struct BrokerLogPage {
+    /// Entries newer than the requested cursor, oldest first.
+    pub entries: Vec<BrokerLogEntry>,
+    /// The serving broker instance's epoch (start time, Unix seconds).
+    pub epoch: u64,
+}
+
+/// Tracks a broker log cursor across broker restarts.
+///
+/// Holds the last sequence seen and the epoch it was seen under. When the
+/// epoch changes, the cursor is meaningless — [`Self::observe_epoch`] resets
+/// it to `0` so the next read starts from the new broker's first entry. The
+/// first epoch observed is recorded without a reset, because there is no
+/// earlier cursor to invalidate.
+#[derive(Debug, Default)]
+pub struct CursorReader {
+    cursor: u64,
+    epoch: Option<u64>,
+}
+
+impl CursorReader {
+    /// A reader starting from the beginning of whatever broker it first
+    /// reaches.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The sequence number to request entries after.
+    #[must_use]
+    pub fn cursor(&self) -> u64 {
+        self.cursor
+    }
+
+    /// Records the epoch just observed, resetting the cursor to `0` when it
+    /// differs from the previously recorded one. Returns `true` when a reset
+    /// happened.
+    pub fn observe_epoch(&mut self, epoch: u64) -> bool {
+        match self.epoch {
+            Some(previous) if previous == epoch => false,
+            Some(_) => {
+                self.cursor = 0;
+                self.epoch = Some(epoch);
+                true
+            }
+            // First sight of any broker: nothing to invalidate.
+            None => {
+                self.epoch = Some(epoch);
+                false
+            }
+        }
+    }
+
+    /// Advances the cursor to `seq` when it is newer than the current one.
+    pub fn advance_to(&mut self, seq: u64) {
+        self.cursor = self.cursor.max(seq);
+    }
+}
+
 /// One entry from the broker's `GET /log` response, preserving the
 /// publish-time wall-clock timestamp alongside the message.
 ///
@@ -220,12 +288,37 @@ pub struct BrokerLogEntry {
     pub message: BrokerMessage,
 }
 
-/// Fetches the broker's full message log over HTTP via `GET /log`,
-/// preserving each entry's sequence number and publish timestamp.
+/// Fetches the broker's message log over HTTP via `GET /log`, preserving
+/// each entry's sequence number and publish timestamp.
+///
+/// `since` is the caller's cursor: only entries with a greater sequence
+/// number are returned, and `0` asks for the whole log. A reader that
+/// consumes the log incrementally passes the highest sequence it has already
+/// seen, so each poll costs the new entries rather than the full history.
+///
+/// `wait` long-polls: when it is `Some` and nothing is newer than `since`,
+/// the broker holds the request until an entry is appended or the wait
+/// elapses (it caps the wait at 60 seconds). The socket read timeout is
+/// extended past the requested wait so the client does not give up on a
+/// request the broker is legitimately still holding.
 ///
 /// Returns entries in chronological order (oldest first). Errors are
 /// returned; the caller decides whether to fail or fall back to empty.
-pub fn fetch_log_entries_over_http(broker_url: &str) -> Result<Vec<BrokerLogEntry>, PawError> {
+pub fn fetch_log_entries_over_http(
+    broker_url: &str,
+    since: u64,
+    wait: Option<Duration>,
+) -> Result<Vec<BrokerLogEntry>, PawError> {
+    Ok(fetch_log_page_over_http(broker_url, since, wait)?.entries)
+}
+
+/// [`fetch_log_entries_over_http`] that also reports the serving broker's
+/// epoch, for a reader advancing a cursor across restarts.
+pub fn fetch_log_page_over_http(
+    broker_url: &str,
+    since: u64,
+    wait: Option<Duration>,
+) -> Result<BrokerLogPage, PawError> {
     let addr = broker_url.strip_prefix("http://").unwrap_or(broker_url);
     let socket_addr = if let Ok(a) = addr.parse() {
         a
@@ -241,11 +334,18 @@ pub fn fetch_log_entries_over_http(broker_url: &str) -> Result<Vec<BrokerLogEntr
 
     let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(500))
         .map_err(|e| PawError::SessionError(format!("failed to connect to broker: {e}")))?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    // Leave the broker room to hold a long-poll for its full wait before the
+    // client calls the read dead.
+    let read_timeout = Duration::from_secs(2) + wait.unwrap_or(Duration::ZERO);
+    stream.set_read_timeout(Some(read_timeout)).ok();
     stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
 
+    let query = match wait {
+        Some(w) => format!("?since={since}&wait={}", w.as_secs()),
+        None => format!("?since={since}"),
+    };
     let request = format!(
-        "GET /log HTTP/1.1\r\nHost: {addr}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+        "GET /log{query} HTTP/1.1\r\nHost: {addr}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
     );
     stream
         .write_all(request.as_bytes())
@@ -299,7 +399,75 @@ pub fn fetch_log_entries_over_http(broker_url: &str) -> Result<Vec<BrokerLogEntr
             });
         }
     }
-    Ok(out)
+    Ok(BrokerLogPage {
+        entries: out,
+        // A broker predating the field reports no epoch. `0` is then
+        // constant across its responses, so a reader simply never sees a
+        // change and keeps its cursor — the pre-epoch behaviour.
+        epoch: parsed
+            .get("epoch")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+    })
+}
+
+/// Fetches the broker's wave-progress object over HTTP via `GET /status`.
+///
+/// Returns `Ok(None)` when the broker answers without a `wave` object (a
+/// broker predating this field), and `Err` when it cannot be reached or
+/// answers with something unparseable. Callers treat both as "no wave to
+/// report" and print nothing extra.
+pub fn fetch_wave_over_http(broker_url: &str) -> Result<Option<WaveStatus>, PawError> {
+    let addr = broker_url.strip_prefix("http://").unwrap_or(broker_url);
+    let socket_addr = if let Ok(a) = addr.parse() {
+        a
+    } else {
+        use std::net::ToSocketAddrs;
+        addr.to_socket_addrs()
+            .map_err(|e| PawError::SessionError(format!("invalid broker address {addr}: {e}")))?
+            .next()
+            .ok_or_else(|| {
+                PawError::SessionError(format!("broker address {addr} resolved to no addrs"))
+            })?
+    };
+
+    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(500))
+        .map_err(|e| PawError::SessionError(format!("failed to connect to broker: {e}")))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+
+    let request = format!(
+        "GET /status HTTP/1.1\r\nHost: {addr}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| PawError::SessionError(format!("failed to write broker request: {e}")))?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|e| PawError::SessionError(format!("failed to read broker response: {e}")))?;
+
+    if !(response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200")) {
+        return Err(PawError::SessionError(format!(
+            "broker /status returned non-200: {}",
+            response.lines().next().unwrap_or("<empty>")
+        )));
+    }
+
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b)
+        .ok_or_else(|| {
+            PawError::SessionError("broker /status response missing body separator".to_string())
+        })?;
+    let parsed: serde_json::Value = serde_json::from_str(body).map_err(|e| {
+        PawError::SessionError(format!("broker /status returned invalid JSON: {e}"))
+    })?;
+
+    Ok(parsed
+        .get("wave")
+        .and_then(|w| serde_json::from_value::<WaveStatus>(w.clone()).ok()))
 }
 
 /// Fetches the broker's full message log over HTTP via `GET /log`.
@@ -311,7 +479,7 @@ pub fn fetch_log_entries_over_http(broker_url: &str) -> Result<Vec<BrokerLogEntr
 /// Errors are returned; the caller decides whether to fail or fall back
 /// to an empty log.
 pub fn fetch_log_over_http(broker_url: &str) -> Result<Vec<BrokerMessage>, PawError> {
-    Ok(fetch_log_entries_over_http(broker_url)?
+    Ok(fetch_log_entries_over_http(broker_url, 0, None)?
         .into_iter()
         .map(|e| e.message)
         .collect())
@@ -351,6 +519,77 @@ mod tests {
             "a rejected (non-202) response must surface as an error, not panic"
         );
         server.join().unwrap();
+    }
+
+    /// The cursor and the wait reach the broker on the wire, in the shape
+    /// `GET /log?since=<n>&wait=<secs>` — the request `wait_for_events`,
+    /// `sweep.sh events` and the drive-loop observer all depend on.
+    #[test]
+    fn fetch_log_entries_sends_the_cursor_and_the_wait() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let read = stream.read(&mut buf).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..read]).to_string();
+            let body = r#"{"entries":[],"last_seq":4}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            request
+        });
+
+        let entries = fetch_log_entries_over_http(
+            &format!("http://{addr}"),
+            4,
+            Some(Duration::from_secs(30)),
+        )
+        .expect("the reader must parse the broker's answer");
+        assert!(entries.is_empty());
+
+        let request = server.join().unwrap();
+        let request_line = request.lines().next().unwrap_or_default();
+        assert!(
+            request_line.contains("since=4") && request_line.contains("wait=30"),
+            "cursor and wait must both reach the broker; got {request_line:?}"
+        );
+    }
+
+    /// Without a wait the reader asks for an immediate answer — no `wait`
+    /// parameter at all, so a pre-long-poll broker behaves exactly as before.
+    #[test]
+    fn fetch_log_entries_without_a_wait_sends_no_wait_parameter() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let read = stream.read(&mut buf).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..read]).to_string();
+            let body = r#"{"entries":[],"last_seq":0}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            request
+        });
+
+        let _ = fetch_log_over_http(&format!("http://{addr}"));
+
+        let request = server.join().unwrap();
+        let request_line = request.lines().next().unwrap_or_default();
+        assert!(
+            request_line.contains("since=0") && !request_line.contains("wait="),
+            "a whole-log read must not long-poll; got {request_line:?}"
+        );
     }
 
     #[test]

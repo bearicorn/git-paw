@@ -451,12 +451,16 @@ fn yes_applies_the_plan_records_it_and_leaves_git_status_clean() {
     let written: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(sandbox.settings()).expect("settings"))
             .expect("valid json");
-    assert_eq!(
-        written["permissions"]["allow"]
-            .as_array()
-            .expect("allow")
-            .len(),
-        11
+    let allow = written["permissions"]["allow"]
+        .as_array()
+        .expect("allow")
+        .clone();
+    assert_eq!(allow.len(), 12, "the twelve grant-table entries");
+    assert!(
+        allow
+            .iter()
+            .any(|v| v == "Bash(.git-paw/scripts/sweep.sh events *)"),
+        "the read-only events grant must be written; got {allow:?}"
     );
     assert!(
         written["permissions"]["deny"]

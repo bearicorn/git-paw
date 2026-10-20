@@ -57,12 +57,20 @@ differently configured repositories plan byte-identical entries.
 |---|---|---|
 | `broker.sh` | every subcommand | — |
 | `docs-fetch.sh` | `find` only | `get` |
-| `sweep.sh` | `snapshot`, `capture`, `status`, `worktrees-status`, `inbox`, `detect-stuck`, `stuck-eval`, `status-publish`, `learn` | `approve`, `verified`, `feedback-gate`, `conflict-ack`, `classify` |
+| `sweep.sh` | `snapshot`, `capture`, `status`, `worktrees-status`, `inbox`, `detect-stuck`, `stuck-eval`, `status-publish`, `learn`, `events` | `approve`, `verified`, `feedback-gate`, `conflict-ack`, `classify` |
 | `_paw_common.sh` | — (it is sourced, never invoked) | — |
+
+That is **twelve** allow entries in total.
 
 Each entry names the helper by its relative invocation path, like
 `Bash(.git-paw/scripts/broker.sh *)`. No entry names an interpreter, an
 absolute path, a directory wildcard or `curl`.
+
+`sweep.sh events` is granted — as
+`Bash(.git-paw/scripts/sweep.sh events *)` — because it only reads the
+broker's log and status to serve the
+[event long poll](coordination.md#the-bundled-helper-verb). It sends no
+keystroke and publishes no verdict.
 
 What is withheld, and why:
 
@@ -122,6 +130,28 @@ Run it from the repository's **main checkout**. At least one of
 `--trust` and `--hooks` exist so the flag surface will not change when later
 releases add those facts. Today no CLI declares them, so they report "not
 supported" and write nothing.
+
+### Re-running after an upgrade
+
+**git-paw never rewrites recorded grants itself.** When a release adds an
+entry to the grant table — `sweep.sh events` is the v0.18 example — a file you
+applied under an earlier version keeps exactly the entries that version wrote.
+Nothing updates it in the background.
+
+`git paw doctor` notices and reports the applied setup as **out of date**,
+naming how many entries this version would also write. It judges that against
+your CLI's settings file rather than against git-paw's record, so an entry you
+already held yourself counts as applied — see
+[the per-CLI setup checks](doctor.md#the-per-cli-setup-checks). The remedy is to take back what
+git-paw wrote and apply the current table:
+
+```bash
+git paw setup-cli claude --undo
+git paw setup-cli claude --allowlist
+```
+
+Until you do, the new subcommand simply prompts the way any ungranted command
+does — nothing breaks, you just answer a prompt.
 
 ### Undo
 

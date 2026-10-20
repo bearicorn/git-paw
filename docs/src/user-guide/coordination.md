@@ -504,6 +504,96 @@ This cursor-based approach is lossless -- no messages are missed between polls, 
 
 Agents can use the bundled helper instead of a raw `curl` for the same read — `.git-paw/scripts/broker.sh poll [since]` issues `GET /messages/<agent-id>?since=<n>` and prints the returned messages (see [Broker helper](#broker-helper)).
 
+## Waiting for Events
+
+`/messages/<agent_id>` is one agent's inbox. `GET /log` is the whole session's
+message log, and it is the read surface for anything that watches the session
+as a whole — a supervisor, an external orchestrator, a monitoring script.
+
+```bash
+curl -s "$GIT_PAW_BROKER_URL/log?since=0"
+```
+
+The response is `{"entries": [...], "last_seq": N}`. `since` is the same
+cursor the inbox poll uses: the broker returns only entries whose sequence is
+greater than the value you pass, and `last_seq` is the cursor to send next.
+**An empty response reports `last_seq` equal to the `since` you sent**, so a
+reader's cursor never rewinds and never has to re-read the log from the start.
+(Before v0.18 an empty response reported `0`, which rewound every reader that
+trusted it — this is the one behaviour change in the response.)
+
+### The broker epoch — reset your cursor when it changes
+
+Sequence numbers are per-broker and restart at zero every time a broker
+starts, which a `git paw pause` + `git paw start` cycle does. Because a
+cursor never rewinds, a reader that kept its old cursor across a restart
+would sit above everything the new broker appends: it would see nothing,
+forever, and time out every long poll while the session worked normally
+around it.
+
+Every `GET /log` response therefore carries an `epoch` identifying the
+running broker instance (its start time in Unix milliseconds), and so do
+`sweep.sh events` and `wait_for_events`:
+
+```json
+{ "entries": [ ... ], "last_seq": 57, "epoch": 1761500000123, "wave": { ... } }
+```
+
+**Record the epoch alongside your cursor, and whenever it differs from the
+one you recorded, send `since=0` on your next request** — the entries you
+have already seen belong to a broker that no longer exists, so re-reading
+from the start is correct and happens exactly once per restart. The first
+epoch you see needs no reset; there is no earlier cursor to invalidate.
+git-paw's own in-tree readers (the drive loop's observer, the MCP tool)
+already do this.
+
+### The long poll
+
+Add `wait=<seconds>` and the broker holds the request open until there is
+something to return:
+
+```bash
+# Block for up to 30s, or return the moment an entry newer than 42 is appended
+curl -s "$GIT_PAW_BROKER_URL/log?since=42&wait=30"
+```
+
+- `wait` is whole seconds and is **capped at 60**. A larger value is clamped;
+  a non-numeric value is rejected with HTTP `400`.
+- With `wait` and nothing newer than `since`, the request is held until an
+  entry is appended or the wait elapses — whichever comes first. A wait that
+  elapses with nothing new returns `{"entries": [], "last_seq": <since>}`.
+- Without `wait`, the request returns immediately, exactly as before.
+
+This is what makes an external reader **event-driven** rather than
+capture-diff polling. A reader that samples pane output on a timer silently
+misses anything that starts and finishes between two samples; a reader that
+blocks on the cursor sees every appended entry exactly once, whatever the
+timing.
+
+### The bundled helper verb
+
+The supervisor-side helper wraps both reads in one call:
+
+```bash
+.git-paw/scripts/sweep.sh events <since> [wait]
+```
+
+`wait` defaults to **30** seconds. The verb calls `GET /log?since=&wait=` and
+`GET /status`, and prints **one** JSON object to stdout:
+
+```json
+{ "entries": [ ... ], "last_seq": 57, "epoch": 1761500000123, "wave": { ... } }
+```
+
+It is strictly a read: it sends no keystroke and publishes nothing. With no
+reachable broker it prints an object carrying `"no_session": true` and exits
+`0`, so a caller never has to distinguish a crash from a session that is not
+running. It is granted read-only by
+[`git paw setup-cli <CLI> --allowlist`](cli-setup.md#the-grant-table).
+
+An MCP-speaking client reaches the same surface through the
+[`wait_for_events` tool](mcp.md#coordination).
+
 ## Checking Overall Status
 
 The `/status` endpoint returns a summary of all agents and their latest state:
@@ -511,6 +601,68 @@ The `/status` endpoint returns a summary of all agents and their latest state:
 ```bash
 curl -s "$GIT_PAW_BROKER_URL/status"
 ```
+
+### Wave staleness
+
+Per-agent heartbeats answer "is this agent alive?" They do not answer "is this
+wave getting anywhere?" A session can sit on an unanswered permission prompt
+for days with every pane alive and every agent reporting `working`. So
+`/status` also carries a `wave` object describing the session as a whole:
+
+```json
+"wave": {
+  "last_progress_unix_secs": 1761500000,
+  "idle_seconds": 11520,
+  "stall_threshold_seconds": 1800,
+  "stalled": true
+}
+```
+
+**What counts as progress** is deliberately narrow — exactly two things:
+
+- **A wave phase advances.** An `agent.status` whose `status` or `phase`
+  differs from that agent's previously recorded values, or any
+  `agent.artifact`, `agent.verified`, `agent.feedback`, or
+  `agent.advanced-main`.
+- **A branch tip moves.** The broker's filesystem watcher sees an agent
+  worktree's `HEAD` commit change.
+
+**What does not count**, however much of it arrives:
+
+- a repeated identical `agent.status` — whatever its `modified_files` set;
+- uncommitted file churn;
+- `agent.question`, including the unattended drive loop's escalation of a live
+  permission prompt and its re-escalation of the same prompt;
+- `agent.learning`, `agent.blocked`, `agent.intent`, `agent.answer`, and the
+  broker's own `supervisor.verify-now` nudge;
+- an `agent.status` carrying one of the stuck-detection helper's synthetic
+  alert phases — `stuck-on-prompt`, `stuck-stream-timeout`,
+  `context-bloat`, `no-progress` or `blocked-on-supervisor`. Each is a
+  report *about* a wave that is not moving, so counting it would let the
+  detection of a stall reset the stall clock; `no-progress` says as much in
+  its own name. A status moving an agent back *out* of one of those phases
+  is an ordinary phase advance and does count.
+
+That exclusion list is the point: those are precisely the messages that keep
+arriving while a wave sits on an unanswered prompt, so counting them would
+make the signal report healthy exactly when it matters most.
+
+A broker that has accepted no message at all reports its own start time as the
+last progress. `stalled` is `true` when the threshold is non-zero and
+`idle_seconds` exceeds it.
+
+The threshold is the `[broker] wave_stall_minutes` key — default **30**
+minutes, `0` to disable the flag while still reporting `idle_seconds`. See the
+[configuration reference](../configuration/README.md#broker). Thirty minutes
+sits just above the unattended drive loop's 25-minute heartbeat, so a wave
+that is merely between heartbeats is not reported as stalled.
+
+The same object is surfaced by
+[`git paw status`](../cli-reference.md#git-paw-status) (human and `--json`),
+the [dashboard status line](dashboard.md#stalled-wave-indicator), the MCP
+tools [`get_session_status` and `wait_for_events`](mcp.md#session-state), and
+`sweep.sh events` — so a waiter whose long poll times out with no entries
+still learns that the wave has stalled.
 
 ## Multi-Repo Considerations
 
@@ -562,7 +714,7 @@ routing, and the configuration knobs.
 
 ## Audit Trail
 
-The broker appends every message to a `<session_name>.broker.log` file in git-paw's session-state directory (`~/Library/Application Support/git-paw/sessions/` on macOS, `$XDG_DATA_HOME/git-paw/sessions/` — default `~/.local/share/git-paw/sessions/` — on Linux), outside the repository. Each line is plain text — `[<seq>] <unix-seconds> [<agent_id>] <message summary>` — and the file is flushed every 5 seconds, giving an audit trail of agent communication. For the full JSON of every message, query the broker's `GET /log` endpoint.
+The broker appends every message to a `<session_name>.broker.log` file in git-paw's session-state directory (`~/Library/Application Support/git-paw/sessions/` on macOS, `$XDG_DATA_HOME/git-paw/sessions/` — default `~/.local/share/git-paw/sessions/` — on Linux), outside the repository. Each line is plain text — `[<seq>] <unix-seconds> [<agent_id>] <message summary>` — and the file is flushed every 5 seconds, giving an audit trail of agent communication. For the full JSON of every message, query the broker's `GET /log` endpoint (see [Waiting for Events](#waiting-for-events)).
 
 The log file is automatically cleaned up by `git paw purge`.
 

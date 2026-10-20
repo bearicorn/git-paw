@@ -285,8 +285,10 @@ table keyed by the names of the helper scripts the binary bundles:
 - `broker.sh`: every subcommand, as `Bash(.git-paw/scripts/broker.sh *)`;
 - `docs-fetch.sh`: only `find`, as `Bash(.git-paw/scripts/docs-fetch.sh find *)`;
 - `sweep.sh`: only the subcommands that send no keystrokes and publish no verdict — `snapshot`,
-  `capture`, `status`, `worktrees-status`, `inbox`, `detect-stuck`, `stuck-eval`, `status-publish` and
-  `learn` — each as `Bash(.git-paw/scripts/sweep.sh <subcommand> *)`;
+  `capture`, `status`, `worktrees-status`, `inbox`, `detect-stuck`, `stuck-eval`, `status-publish`,
+  `learn` and `events` — each as `Bash(.git-paw/scripts/sweep.sh <subcommand> *)`; `events` is
+  granted read-only, because it only reads the broker's log and status and sends no keystroke and
+  publishes nothing;
 - `_paw_common.sh`: no entry (it is sourced, never invoked).
 
 The item SHALL add `Bash(.git-paw/scripts/sweep.sh approve *)` to `permissions.ask`, so the
@@ -300,10 +302,15 @@ every `sweep.sh` subcommand SHALL be either granted or listed as never granted.
 #### Scenario: The allow entries are exactly the grant table
 
 - **WHEN** the allowlist item is planned for `claude`
-- **THEN** its `permissions.allow` entries SHALL be exactly the eleven grant-table entries
+- **THEN** its `permissions.allow` entries SHALL be exactly the twelve grant-table entries
 - **AND** its `permissions.ask` entries SHALL include `Bash(.git-paw/scripts/sweep.sh approve *)`
 
 Test: `cli_setup::facts::tests::allow_entries_are_exactly_the_grant_table, cli_setup::plan::tests::allow_entries_are_exactly_the_grant_table`
+
+#### Scenario: The read-only events subcommand is granted
+
+- **WHEN** the allowlist item is planned for `claude`
+- **THEN** its `permissions.allow` entries SHALL include `Bash(.git-paw/scripts/sweep.sh events *)`
 
 #### Scenario: Keystroke and verdict subcommands are never allowed
 

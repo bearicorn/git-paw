@@ -786,7 +786,7 @@ pub fn resolve_broker_log_path(session: Option<&Session>) -> Result<PathBuf, Paw
 }
 
 /// Returns the sessions directory (`~/.local/share/git-paw/sessions/`).
-fn sessions_dir() -> Result<PathBuf, PawError> {
+pub fn sessions_dir() -> Result<PathBuf, PawError> {
     let base = crate::dirs::data_dir().ok_or_else(|| {
         PawError::SessionError("could not determine XDG data directory".to_string())
     })?;

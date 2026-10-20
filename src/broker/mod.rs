@@ -76,6 +76,21 @@ pub struct AgentRecord {
     /// `git status` probe, so the supervisor and the watcher can never
     /// disagree about whether a worktree is clean.
     pub modified_files: Vec<String>,
+    /// The `status` and `phase` of this agent's most recent `agent.status`,
+    /// or `None` before it has published one.
+    ///
+    /// Wave-progress classification needs "what did this agent last say",
+    /// and neither existing field answers that:
+    /// - [`Self::status`] is deliberately **sticky** at a terminal label, so
+    ///   an agent that committed and then heartbeats `working` forever would
+    ///   compare unequal on every single heartbeat and read as perpetual
+    ///   progress — masking exactly the stall the wave signal exists to show.
+    /// - [`Self::last_message`] is overwritten by any roster-upserting
+    ///   variant, so an `agent.intent` between two identical heartbeats would
+    ///   make the second look like a change.
+    ///
+    /// Transient, like the rest of the record — not serialized.
+    pub last_status_and_phase: Option<(String, Option<String>)>,
 }
 
 /// JSON-serializable snapshot of an agent's status for the `/status` endpoint
@@ -105,6 +120,48 @@ pub struct AgentStatusEntry {
     /// working-tree probe.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modified_files: Vec<String>,
+}
+
+/// Wave-level progress snapshot reported by `GET /status` and rendered by
+/// every orchestrator-facing surface.
+///
+/// "The wave" is the session as a whole, not one agent: `idle_seconds`
+/// measures how long it has been since *anything* progressed — a wave phase
+/// advancing or a branch tip moving (see
+/// [`delivery::message_is_progress`]). Per-agent `last_seen` cannot answer
+/// that question, because a repeated `working` heartbeat keeps it fresh while
+/// the wave sits on an unanswered prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct WaveStatus {
+    /// Wall-clock seconds since the Unix epoch at the last observed progress.
+    /// The broker's start time until the first progress is observed.
+    pub last_progress_unix_secs: u64,
+    /// Seconds elapsed since [`Self::last_progress_unix_secs`].
+    pub idle_seconds: u64,
+    /// Configured stall threshold in seconds; `0` disables [`Self::stalled`].
+    pub stall_threshold_seconds: u64,
+    /// `true` when the threshold is non-zero and `idle_seconds` exceeds it.
+    pub stalled: bool,
+}
+
+impl WaveStatus {
+    /// Renders [`Self::idle_seconds`] for a human: `3h12m`, `1h`, `45m`,
+    /// `20s`.
+    ///
+    /// One rendering shared by `git paw status` and the dashboard badge, so
+    /// the same idleness never reads two different ways depending on where
+    /// the operator looked.
+    #[must_use]
+    pub fn idle_human(&self) -> String {
+        let hours = self.idle_seconds / 3600;
+        let minutes = (self.idle_seconds % 3600) / 60;
+        match (hours, minutes) {
+            (0, 0) => format!("{}s", self.idle_seconds),
+            (0, m) => format!("{m}m"),
+            (h, 0) => format!("{h}h"),
+            (h, m) => format!("{h}h{m}m"),
+        }
+    }
 }
 
 /// Mutable broker state protected by an `RwLock`.
@@ -181,6 +238,50 @@ pub struct BrokerState {
     /// (e.g. in router-only unit tests), in which case live registration still
     /// records the target but spawns no watcher.
     watcher_shutdown_rx: OnceLock<tokio::sync::watch::Receiver<bool>>,
+    /// Signalled after every append to `message_log`, so a `GET /log` waiter
+    /// wakes the moment a newer entry exists instead of polling. Lives outside
+    /// the `RwLock` so the long-poll handler can await it without holding any
+    /// guard (`clippy::await_holding_lock`).
+    publish_notify: tokio::sync::Notify,
+    /// Unix seconds at the last observed wave progress, seeded with the
+    /// broker's start time. An atomic rather than a `RwLock` field so the
+    /// publish path and the watcher can stamp it without taking the state
+    /// lock.
+    last_progress_unix: AtomicU64,
+    /// Wave-stall threshold in seconds, resolved from
+    /// `[broker] wave_stall_minutes` at broker start; `0` disables the
+    /// `stalled` flag.
+    wave_stall_seconds: AtomicU64,
+    /// Identifies this broker instance: its start time in Unix
+    /// milliseconds.
+    ///
+    /// Milliseconds, not seconds, because the value's whole job is to
+    /// differ between a broker and its replacement — and a pause/start
+    /// cycle can land inside the same second.
+    ///
+    /// Sequence numbers restart at zero on every broker start, so a cursor
+    /// from a previous broker means nothing to this one — and since a cursor
+    /// never rewinds, a reader holding a stale high cursor would silently
+    /// skip everything this broker has appended and wait out every long
+    /// poll. Reporting the epoch on every `/log` response lets a reader
+    /// notice the change and reset its cursor.
+    epoch: u64,
+}
+
+/// Returns the current wall-clock time in seconds since the Unix epoch, or
+/// `0` if the system clock predates the epoch.
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Current wall-clock time in milliseconds since the Unix epoch, saturated
+/// into a `u64`.
+fn now_unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 impl BrokerState {
@@ -208,6 +309,12 @@ impl BrokerState {
             verify_on_commit_nudge: false,
             role_gating: None,
             watcher_shutdown_rx: OnceLock::new(),
+            publish_notify: tokio::sync::Notify::new(),
+            last_progress_unix: AtomicU64::new(now_unix_secs()),
+            wave_stall_seconds: AtomicU64::new(
+                crate::config::BrokerConfig::DEFAULT_WAVE_STALL_MINUTES * 60,
+            ),
+            epoch: now_unix_millis(),
         }
     }
 
@@ -326,6 +433,70 @@ impl BrokerState {
     /// path for `git paw remove`).
     pub fn forget_watch_target(&self, worktree_path: &std::path::Path) {
         self.write().watched_paths.remove(worktree_path);
+    }
+
+    /// Sets the wave-stall threshold in seconds (`0` disables the `stalled`
+    /// flag). Called from [`start_broker_with`] with the value resolved from
+    /// `[broker] wave_stall_minutes`.
+    pub fn set_wave_stall_seconds(&self, seconds: u64) {
+        self.wave_stall_seconds.store(seconds, Ordering::Relaxed);
+    }
+
+    /// Records that the wave progressed just now.
+    ///
+    /// Called by the publish path for a message
+    /// [`delivery::message_is_progress`] classifies as progress, and by the
+    /// filesystem watcher when an agent's worktree `HEAD` commit changes.
+    pub fn mark_progress(&self) {
+        self.last_progress_unix
+            .store(now_unix_secs(), Ordering::Relaxed);
+    }
+
+    /// Overrides the last-progress timestamp (Unix seconds).
+    ///
+    /// Exists so tests can age the wave without sleeping; production code
+    /// marks progress through [`BrokerState::mark_progress`].
+    pub fn set_last_progress_unix_secs(&self, unix_secs: u64) {
+        self.last_progress_unix.store(unix_secs, Ordering::Relaxed);
+    }
+
+    /// Returns the current wave-progress snapshot.
+    ///
+    /// `stalled` is true only when the configured threshold is non-zero and
+    /// `idle_seconds` exceeds it, so `wave_stall_minutes = 0` keeps reporting
+    /// idleness without ever raising the flag.
+    #[must_use]
+    pub fn wave_status(&self) -> WaveStatus {
+        let last_progress_unix_secs = self.last_progress_unix.load(Ordering::Relaxed);
+        let stall_threshold_seconds = self.wave_stall_seconds.load(Ordering::Relaxed);
+        let idle_seconds = now_unix_secs().saturating_sub(last_progress_unix_secs);
+        WaveStatus {
+            last_progress_unix_secs,
+            idle_seconds,
+            stall_threshold_seconds,
+            stalled: stall_threshold_seconds != 0 && idle_seconds > stall_threshold_seconds,
+        }
+    }
+
+    /// Returns this broker instance's epoch — its start time in Unix
+    /// milliseconds. See [`BrokerState::epoch`] for why a cursor reader
+    /// needs it.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Wakes every `GET /log` waiter, signalling that the message log grew.
+    pub fn notify_published(&self) {
+        self.publish_notify.notify_waiters();
+    }
+
+    /// Returns a future that resolves on the next [`BrokerState::notify_published`].
+    ///
+    /// The caller registers interest *before* re-checking the log, so an
+    /// entry appended between the check and the await is never missed.
+    pub fn publish_notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.publish_notify.notified()
     }
 
     /// Acquires a read lock on the inner state.
@@ -750,6 +921,9 @@ pub fn start_broker_with(
     state.set_republish_working_ttl(std::time::Duration::from_secs(
         config.watcher.republish_working_ttl_seconds(),
     ));
+    // Apply the configured wave-stall threshold before the first `/status`
+    // can be served.
+    state.set_wave_stall_seconds(config.wave_stall_seconds());
     let stop_flag = Arc::new(AtomicBool::new(false));
 
     match probe_existing_broker(&url, state.repo_root.as_deref()) {
@@ -1082,6 +1256,58 @@ mod tests {
         )
         .expect("start broker for repository");
         (handle, config)
+    }
+
+    /// One idleness rendering shared by `git paw status` and the dashboard
+    /// badge, so the same wave never reads two different ways.
+    #[test]
+    fn idle_human_renders_hours_minutes_and_seconds() {
+        let wave = |idle_seconds| WaveStatus {
+            last_progress_unix_secs: 0,
+            idle_seconds,
+            stall_threshold_seconds: 60,
+            stalled: true,
+        };
+        assert_eq!(wave(11_520).idle_human(), "3h12m");
+        assert_eq!(wave(3_600).idle_human(), "1h");
+        assert_eq!(wave(2_700).idle_human(), "45m");
+        assert_eq!(wave(20).idle_human(), "20s");
+    }
+
+    /// `broker-runtime` scenario "Absent key uses the default": a config with
+    /// the broker enabled and no `wave_stall_minutes` starts a broker whose
+    /// reported threshold is 30 minutes.
+    #[test]
+    fn broker_start_without_the_key_uses_the_default_wave_threshold() {
+        let config = config_on(free_port());
+        assert_eq!(config.wave_stall_minutes, None);
+
+        // Start from a threshold that is NOT the default, so the assertion
+        // distinguishes "the config default was applied" from "the state's
+        // own seed was never overwritten". Without this the test passes even
+        // when `start_broker_with` never reads the config at all.
+        let state = BrokerState::new(None);
+        state.set_wave_stall_seconds(1);
+
+        let Ok(handle) = start_broker(&config, state, Vec::new()) else {
+            // A busy port makes the test inconclusive, not failing.
+            return;
+        };
+        assert_eq!(handle.state.wave_status().stall_threshold_seconds, 1800);
+    }
+
+    /// `broker-runtime` scenario "Configured threshold is honoured".
+    #[test]
+    fn broker_start_honours_a_configured_wave_threshold() {
+        let config = BrokerConfig {
+            wave_stall_minutes: Some(5),
+            ..config_on(free_port())
+        };
+
+        let Ok(handle) = start_broker(&config, BrokerState::new(None), Vec::new()) else {
+            return;
+        };
+        assert_eq!(handle.state.wave_status().stall_threshold_seconds, 300);
     }
 
     #[test]

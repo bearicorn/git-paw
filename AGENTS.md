@@ -281,6 +281,10 @@ mid-flight discovery costs a blocked round-trip). Two enums carry this hazard:
   - `src/dashboard/broker_log.rs` — `message_bit()`, `type_short()`,
     `derive_summary()`.
   - `src/broker/learnings.rs` — `observe()`.
+  - `src/broker/delivery.rs` — `message_is_progress()`, the wave-progress
+    classifier. A new variant must be placed on one side or the other:
+    counting it as progress masks a stall, and the wave signal exists to
+    expose stalls.
 - Semantic handling the compiler will NOT catch (a new variant is inert without
   it): `src/broker/delivery.rs` routing (enqueue/broadcast), plus any reaction
   in `src/broker/conflict.rs`, `src/broker/server.rs`, `src/broker/watcher.rs`,

@@ -1048,6 +1048,12 @@ worktree_placement = "child"
 # port = 9119
 # bind = "127.0.0.1"
 #
+# Minutes without wave progress — a branch tip moving or a wave phase
+# advancing — after which `/status`, `git paw status` and the dashboard
+# report the wave as stalled. 0 disables the flag and still reports the
+# idle time (default: 30).
+# wave_stall_minutes = 30
+#
 # Filesystem watcher. After a `committed` event, a file write within this
 # TTL re-publishes `working` so the dashboard reflects continued activity.
 # 0 disables; non-zero values below 5 clamp to 5 (default: 60).

@@ -417,9 +417,26 @@ recovers such a session; `git paw purge --stale` deliberately leaves it alone.
 gone. When the status is `🔴 stale`, run `git paw start` to self-heal (the stale
 receipt is invalidated automatically before launching) or `git paw purge --stale`
 to clear it. The `--json` output is an object with `session`, `status`,
-`tmux_running`, and `worktrees` fields (just `{ "session": null }` when the
-repository has no session); its `status` field carries the matching lowercase
-value (`active`, `paused`, `stopped`, or `stale`).
+`tmux_running`, and `worktrees` fields, plus `wave` when the session's own
+broker is reachable (just `{ "session": null }` when the repository has no
+session); its `status` field carries the matching lowercase value (`active`,
+`paused`, `stopped`, or `stale`).
+
+When the session's broker reports the wave as **stalled**, status prints one
+extra line under the `Broker:` line naming how long nothing has progressed:
+
+```
+  ↳ wave stalled — no progress for 3h12m
+```
+
+Nothing extra is printed when the wave is not stalled. "Progress" is a wave
+phase advancing or a branch tip moving, and nothing else — see
+[Wave staleness](user-guide/coordination.md#wave-staleness) for the full rule
+and `[broker] wave_stall_minutes` for the threshold.
+
+`--json` is not conditional: whenever a broker is reachable, its `wave` object
+(`last_progress_unix_secs`, `idle_seconds`, `stall_threshold_seconds`,
+`stalled`) is always included, stalled or not.
 
 Each entry in `--json`'s `worktrees` array carries:
 

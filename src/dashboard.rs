@@ -31,13 +31,13 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use crate::broker::delivery;
-use crate::broker::{AgentStatusEntry, BrokerHandle, BrokerState};
+use crate::broker::{AgentStatusEntry, BrokerHandle, BrokerState, WaveStatus};
 use crate::dashboard::broker_log::{BrokerLog, LogEntry, LogKeyAction};
 use crate::error::PawError;
 
 pub use view::{
     AgentRow, AgentTableRow, arrange_with_supervisor_pinned, format_age, format_agent_rows,
-    format_status_line, render_dashboard, status_symbol,
+    format_status_line, format_status_line_with_wave, render_dashboard, status_symbol,
 };
 
 /// Idle refresh interval for the dashboard draw loop.
@@ -250,6 +250,15 @@ pub enum Msg {
         agents: Vec<AgentStatusEntry>,
         /// The instant the snapshot was taken, used to age each row.
         now: Instant,
+        /// The broker's wave-progress object at the same instant, from which
+        /// the footer's stalled-wave indicator is derived. `None` leaves the
+        /// footer unchanged — the per-agent summary alone, as before.
+        ///
+        /// Read from the in-process [`BrokerState`] the dashboard already
+        /// renders; it is the same object `GET /status` reports, so the
+        /// dashboard and an external reader can never disagree about whether
+        /// the wave is stalled.
+        wave: Option<WaveStatus>,
     },
     /// Broker-log entries newer than the log's cursor, to append to the panel.
     BrokerIngest(Vec<LogEntry>),
@@ -272,7 +281,7 @@ pub fn update(model: &mut Model, msg: Msg) {
                 model.quit = true;
             }
         }
-        Msg::Snapshot { agents, now } => {
+        Msg::Snapshot { agents, now, wave } => {
             model.rows = format_agent_rows(&agents, now);
             let working = agents.iter().filter(|a| a.status == "working").count();
             let done = agents
@@ -281,7 +290,10 @@ pub fn update(model: &mut Model, msg: Msg) {
                 .count();
             let blocked = agents.iter().filter(|a| a.status == "blocked").count();
             let committed = agents.iter().filter(|a| a.status == "committed").count();
-            model.status_line = format_status_line(agents.len(), working, done, blocked, committed);
+            // Recomputed on every snapshot, so the indicator clears itself on
+            // the first refresh that reports the wave progressing again.
+            model.status_line =
+                format_status_line_with_wave(agents.len(), working, done, blocked, committed, wave);
         }
         // Pull only messages newer than the cursor and push them onto the ring
         // buffer (newest ends up at the top). This is the same in-process state
@@ -483,7 +495,11 @@ pub fn run_dashboard_with_panes<S: std::hash::BuildHasher>(
         // line from them.
         let agents = delivery::agent_status_snapshot(state);
         let now = Instant::now();
-        update(&mut model, Msg::Snapshot { agents, now });
+        // The wave comes from the same in-process state as the roster — the
+        // very object `GET /status` serialises — so the badge and an external
+        // reader never disagree.
+        let wave = Some(state.wave_status());
+        update(&mut model, Msg::Snapshot { agents, now, wave });
 
         // Feed the Broker log with the messages newer than its cursor.
         let new_entries = delivery::full_log(state, model.broker_log.last_seq());
@@ -718,7 +734,14 @@ mod tests {
         let expected_status_line = format_status_line(5, 1, 2, 1, 1);
 
         let mut model = Model::new(500, false, default_panel_height());
-        update(&mut model, Msg::Snapshot { agents, now });
+        update(
+            &mut model,
+            Msg::Snapshot {
+                agents,
+                now,
+                wave: None,
+            },
+        );
 
         assert_eq!(
             model.rows, expected_rows,
@@ -740,6 +763,7 @@ mod tests {
             Msg::Snapshot {
                 agents: vec![entry("feat-a", "working"), entry("feat-b", "working")],
                 now: Instant::now(),
+                wave: None,
             },
         );
         assert_eq!(model.rows.len(), 2);
@@ -749,6 +773,7 @@ mod tests {
             Msg::Snapshot {
                 agents: vec![entry("feat-a", "done")],
                 now: Instant::now(),
+                wave: None,
             },
         );
         assert_eq!(
@@ -757,6 +782,55 @@ mod tests {
             "a snapshot replaces the derived rows, it does not accumulate"
         );
         assert_eq!(model.status_line, format_status_line(1, 0, 1, 0, 0));
+    }
+
+    /// `broker-dashboard`'s two scenarios at the REFRESH level, not the
+    /// formatter level: a snapshot carrying a stalled wave puts the
+    /// indicator in the model's status line, and the next snapshot
+    /// reporting progress takes it away.
+    ///
+    /// The render tests build the status line by hand, so they cannot catch
+    /// the draw loop passing `wave: None` — exactly the regression that
+    /// would silently un-ship this feature.
+    #[test]
+    fn a_snapshot_carrying_a_stalled_wave_puts_the_indicator_in_the_status_line() {
+        let wave = |idle_seconds, stalled| {
+            Some(WaveStatus {
+                last_progress_unix_secs: 1_000,
+                idle_seconds,
+                stall_threshold_seconds: 1_800,
+                stalled,
+            })
+        };
+        let mut model = Model::new(500, false, default_panel_height());
+
+        update(
+            &mut model,
+            Msg::Snapshot {
+                agents: vec![entry("feat-a", "working")],
+                now: Instant::now(),
+                wave: wave(3_600, true),
+            },
+        );
+        assert!(
+            model.status_line.contains("wave stalled") && model.status_line.contains("1h"),
+            "got {:?}",
+            model.status_line
+        );
+
+        update(
+            &mut model,
+            Msg::Snapshot {
+                agents: vec![entry("feat-a", "working")],
+                now: Instant::now(),
+                wave: wave(3, false),
+            },
+        );
+        assert!(
+            !model.status_line.contains("wave stalled"),
+            "the next progressing refresh must clear it; got {:?}",
+            model.status_line
+        );
     }
 
     #[test]
@@ -802,6 +876,7 @@ mod tests {
                 Msg::Snapshot {
                     agents: agents.clone(),
                     now,
+                    wave: None,
                 },
             );
             update(model, Msg::BrokerIngest(entries.clone()));

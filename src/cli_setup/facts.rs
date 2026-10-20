@@ -133,6 +133,11 @@ pub const SWEEP_GRANTED: &[&str] = &[
     "stuck-eval",
     "status-publish",
     "learn",
+    // `events` only reads the broker's log and status: no keystroke, no
+    // publish of any kind. It is the orchestrator's event surface, so an
+    // ungranted `events` would prompt on every turn of a loop whose whole
+    // purpose is to wait unattended.
+    "events",
 ];
 
 /// `sweep.sh` subcommands that are deliberately never granted.
@@ -471,8 +476,9 @@ mod tests {
 
     #[test]
     fn allow_entries_are_exactly_the_grant_table() {
+        let planned = planned_allow_entries();
         assert_eq!(
-            planned_allow_entries(),
+            planned,
             vec![
                 "Bash(.git-paw/scripts/broker.sh *)",
                 "Bash(.git-paw/scripts/docs-fetch.sh find *)",
@@ -485,7 +491,27 @@ mod tests {
                 "Bash(.git-paw/scripts/sweep.sh stuck-eval *)",
                 "Bash(.git-paw/scripts/sweep.sh status-publish *)",
                 "Bash(.git-paw/scripts/sweep.sh learn *)",
+                "Bash(.git-paw/scripts/sweep.sh events *)",
             ]
+        );
+        assert_eq!(planned.len(), 12, "the grant table is twelve allow entries");
+    }
+
+    /// `cli-setup` scenario "The read-only events subcommand is granted":
+    /// `events` only reads the broker's log and status, so it joins the
+    /// granted read-only subcommands rather than prompting on every turn of
+    /// an unattended orchestrator loop.
+    #[test]
+    fn the_read_only_events_subcommand_is_granted() {
+        assert!(
+            planned_allow_entries()
+                .contains(&"Bash(.git-paw/scripts/sweep.sh events *)".to_string()),
+            "events must be granted read-only"
+        );
+        assert!(
+            !planned_ask_entries()
+                .contains(&"Bash(.git-paw/scripts/sweep.sh events *)".to_string()),
+            "events sends no keystroke, so it must not be pinned to ask"
         );
     }
 

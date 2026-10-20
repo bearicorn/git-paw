@@ -107,9 +107,9 @@ It describes the code as it is today. For the structure the code is moving towar
 | `src/broker/mod.rs` | Public surface (start/stop entry points, shared state types). |
 | `src/broker/server.rs` | `axum` HTTP server: `/publish`, `/watch`, `/messages/:agent_id`, `/status`, `/log`. Validates each incoming `/publish` body (message schema, `agent_id` pattern, unfilled-placeholder rejection) before handing it to delivery. |
 | `src/broker/messages.rs` | `BrokerMessage` enum + payload types + slug validation. Source of truth for the wire format used in user-facing examples. |
-| `src/broker/publish.rs` | Client-side helpers for callers outside the broker process: build `BrokerMessage` values and publish them over HTTP, register a live `/watch` target, and fetch `/log`. Shared by `cmd_supervisor` and the MCP publish tools. |
+| `src/broker/publish.rs` | Client-side helpers for callers outside the broker process: build `BrokerMessage` values and publish them over HTTP, register a live `/watch` target, fetch `/log` (by cursor, optionally long-polling), and fetch the wave-progress object from `/status`. Shared by `cmd_supervisor`, `git paw status`, and the MCP query and publish tools. |
 | `src/broker/delivery.rs` | Delivery layer: assigns each message its sequence number, updates the sender's record, appends it to the message log, and routes it into inboxes (broadcast, supervisor inbox, targeted delivery). Also cursor-based polling, the dashboard snapshot, and the broker-log flush loop. |
-| `src/broker/watcher.rs` | Git-status polling watcher: one task per worktree runs `git status --porcelain` every 2 s and publishes `agent.status` (with `modified_files`) when the reported path set changes; prunes a worktree that has vanished. |
+| `src/broker/watcher.rs` | Git-status polling watcher: one task per worktree runs `git status --porcelain` every 2 s and publishes `agent.status` (with `modified_files`) when the reported path set changes; reads `git rev-parse HEAD` on the same tick and marks wave progress when the branch tip moves (the first observation is a baseline); prunes a worktree that has vanished. |
 | `src/broker/conflict.rs` | Forward / in-flight / ownership conflict detection. Auto-emits `[conflict-detector]`-tagged `agent.feedback` and escalates via `agent.question`. |
 | `src/broker/learnings.rs` | Opt-in learnings subsystem. Aggregates the deterministic signals (stuck durations, recovery cycles, conflict events, permission patterns) plus published qualitative `agent.learning` records, and flushes them to `.git-paw/session-learnings.md`. |
 
@@ -169,7 +169,7 @@ nothing about MCP, `tools` knows about MCP and `query`, and `server` only wires
 | `src/mcp/mod.rs` | Entry point: `cmd_mcp()`, `RepoContext`, and repository resolution (`--repo` wins, else nearest `.git` ancestor). |
 | `src/mcp/server.rs` | stdio transport setup, tool-registry wiring, and process lifecycle (exits when stdin closes). |
 | `src/mcp/logging.rs` | Minimal in-tree logger (no tracing dependency) — diagnostics to stderr at a `RUST_LOG`-controlled level (default `warn`) and, with `--log-file`, tee'd to a file; stdout stays reserved for the JSON-RPC stream. |
-| `src/mcp/query/*` | Data-layer reads (no MCP types): `conflicts.rs`, `docs.rs`, `git.rs`, `governance.rs`, `intents.rs`, `learnings.rs`, `session.rs`, `source.rs`, `specs.rs`, plus `mod.rs`. Built from broker HTTP state, files on disk, and git output. |
+| `src/mcp/query/*` | Data-layer reads (no MCP types): `conflicts.rs`, `docs.rs`, `events.rs`, `git.rs`, `governance.rs`, `intents.rs`, `learnings.rs`, `session.rs`, `source.rs`, `specs.rs`, plus `mod.rs`. Built from broker HTTP state, files on disk, and git output. `events.rs` is the cursor read behind `wait_for_events`: it long-polls `/log` and returns the new entries, the new cursor, the broker epoch, and the wave. |
 | `src/mcp/tools/*` | MCP tool surfaces (one file per category): `coordination.rs`, `docs.rs`, `git.rs`, `governance.rs`, `project.rs`, `publish.rs`, `session.rs`, `source.rs`, plus `mod.rs`. Each read tool maps a `query` reader onto an MCP tool definition. `publish.rs` is the only write surface: `publish_status`, `publish_artifact`, `publish_blocked`, and `publish_question`, built with the `src/broker/publish.rs` helpers, with the `agent_id` derived from the session's worktree branch (no tool accepts one) and no `agent.verified` / `agent.feedback` verbs. |
 
 ### `src/coordination/` modules
@@ -356,9 +356,11 @@ Dashboard pane process (git paw __dashboard):
 │   │   ├── POST /watch   (register a hot-added worktree as a live watch target)
 │   │   ├── GET /messages/:agent_id?since=N
 │   │   ├── GET /status
-│   │   └── GET /log?since=N   (full message log, read by cmd_supervisor and the MCP server)
+│   │   └── GET /log?since=N[&wait=S]   (full message log, cursor-paged and
+│   │       long-pollable; read by cmd_supervisor and the MCP server)
 │   ├── Worktree watchers (src/broker/watcher.rs), one task per worktree
-│   │   └── `git status --porcelain` every 2s; publishes agent.status on change;
+│   │   └── `git status --porcelain` + `git rev-parse HEAD` every 2s; publishes
+│   │       agent.status on change; marks wave progress on a moved branch tip;
 │   │       prunes a vanished worktree
 │   └── Conflict detector (src/broker/conflict.rs), supervisor mode only
 │       └── Forward / in-flight / ownership shapes
