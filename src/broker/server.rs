@@ -41,6 +41,19 @@ fn agent_id_regex() -> &'static Regex {
     RE.get_or_init(|| static_regex(r"^(supervisor|[a-z0-9][a-z0-9-]*[/-][a-z0-9][a-z0-9-]*)$"))
 }
 
+/// Returns whether `value` is an `agent_id` the `/publish` handler accepts.
+///
+/// The handler's own predicate, exposed so that callers deriving an id —
+/// notably [`crate::broker::messages::slugify_branch`] and its tests — are
+/// checked against the very regex that would reject them on the wire, rather
+/// than against a second copy of the pattern that can drift from it. That
+/// drift is exactly what let an `_` in a branch name become an id every
+/// publish answered with HTTP 400 (PP-26).
+#[must_use]
+pub fn is_valid_agent_id(value: &str) -> bool {
+    agent_id_regex().is_match(value)
+}
+
 /// Compiled-once regex matching unfilled placeholder strings — exact match
 /// `<anything>` from start to end.
 fn placeholder_regex() -> &'static Regex {
@@ -318,7 +331,7 @@ async fn publish(
             // Phantom debris (`"a"`, `"<agent-id>"`, empty strings) is
             // rejected at the API boundary so it cannot leak into
             // `/status`.
-            if !agent_id_regex().is_match(msg.agent_id()) {
+            if !is_valid_agent_id(msg.agent_id()) {
                 return agent_id_rejection(msg.agent_id());
             }
             // Reject obviously-unfilled placeholder strings in the few

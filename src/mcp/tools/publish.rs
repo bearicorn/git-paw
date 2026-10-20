@@ -38,7 +38,31 @@ fn to_err(e: PawError) -> ErrorData {
 
 /// Resolves the publishing `agent_id` from the session's worktree branch
 /// (design D3) — the caller never supplies one.
+///
+/// Refuses in the repository's main working tree. A publish tool acts as the
+/// calling agent, and agents run in linked worktrees; the main working tree is
+/// the orchestrator's, where deriving from the branch would name an agent
+/// after the default branch (`main` → `agent-main`) and publish as a phantom
+/// the broker accepts. The caller turns this into an MCP-level error, so the
+/// server keeps running and nothing is published.
+///
+/// Root detection is git's own answer, through the same
+/// [`RepoLayout::is_linked_worktree`] check `git paw setup-cli` makes: this
+/// checkout's git directory versus the common one, which stays correct under
+/// `--separate-git-dir`.
+///
+/// [`RepoLayout::is_linked_worktree`]: crate::cli_setup::shell::RepoLayout::is_linked_worktree
 fn resolve_agent_id(ctx: &RepoContext) -> Result<String, PawError> {
+    let runner = crate::command_runner::RealCommandRunner;
+    let layout = crate::cli_setup::shell::resolve_layout(&runner, &ctx.root)?;
+    if !layout.is_linked_worktree() {
+        return Err(PawError::McpError(format!(
+            "publishing acts as the calling agent, and this server is resolved to the \
+             repository's main working tree ({}) rather than an agent's worktree — start a \
+             git-paw session and publish from the agent's own worktree",
+            layout.main_checkout.display()
+        )));
+    }
     let branch = crate::git::current_branch(&ctx.root)?;
     Ok(slugify_branch(&branch))
 }
@@ -201,7 +225,57 @@ mod tests {
 
     /// A throwaway git repo checked out on `branch`, for resolving the
     /// publishing `agent_id`.
-    fn repo_on_branch(branch: &str) -> tempfile::TempDir {
+    /// A repository and a LINKED WORKTREE checked out on `branch` — the shape
+    /// an agent actually runs in, and the only one from which a publish tool
+    /// derives an id (it refuses in the main working tree).
+    ///
+    /// [`Self::path`] is the worktree, not the repository, because that is
+    /// what an agent's MCP server resolves to.
+    struct AgentWorktree {
+        _sandbox: tempfile::TempDir,
+        worktree: std::path::PathBuf,
+    }
+
+    impl AgentWorktree {
+        fn path(&self) -> &std::path::Path {
+            &self.worktree
+        }
+    }
+
+    fn repo_on_branch(branch: &str) -> AgentWorktree {
+        let sandbox = tempfile::tempdir().unwrap();
+        let repo = sandbox.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            git_run(&repo, &args);
+        }
+        git_run(&repo, &["commit", "--allow-empty", "-q", "-m", "root"]);
+
+        let worktree = sandbox.path().join("worktree");
+        git_run(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                worktree.to_str().unwrap(),
+            ],
+        );
+        AgentWorktree {
+            _sandbox: sandbox,
+            worktree,
+        }
+    }
+
+    /// Just the repository's main working tree, on `main` — where a publish
+    /// tool has no agent to be.
+    fn main_working_tree() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         for args in [
@@ -212,9 +286,6 @@ mod tests {
             git_run(dir, &args);
         }
         git_run(dir, &["commit", "--allow-empty", "-q", "-m", "root"]);
-        if branch != "main" {
-            git_run(dir, &["checkout", "-q", "-b", branch]);
-        }
         tmp
     }
 
@@ -540,6 +611,36 @@ mod tests {
             .err()
             .expect("an unreachable broker must error, not panic");
         assert!(!err.message.is_empty());
+    }
+
+    /// `mcp-agent-publish`, "A publish from the main working tree is
+    /// refused": a server resolved to the main working tree has no agent to
+    /// be, so it errors and publishes nothing rather than deriving
+    /// `agent-main` from the default branch.
+    #[test]
+    fn publish_from_the_main_working_tree_is_refused_and_publishes_nothing() {
+        let (handle, url) = spawn_test_broker();
+        let repo = main_working_tree();
+        let server = server_for(repo.path().canonicalize().unwrap(), Some(url.clone()));
+
+        let err = server
+            .publish_status(Parameters(PublishStatusParams {
+                message: "booting".to_string(),
+            }))
+            .err()
+            .expect("the main working tree must be refused, not published from");
+        assert!(
+            err.message.contains("main working tree"),
+            "the error should name the main working tree; got: {err:?}"
+        );
+
+        let log = fetch_log_over_http(&url).expect("fetch broker log");
+        assert!(
+            !log.iter().any(|m| m.agent_id() == "agent-main"),
+            "a refused derivation must publish nothing; log: {log:?}"
+        );
+
+        drop(handle);
     }
 
     #[test]

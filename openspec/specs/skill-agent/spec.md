@@ -27,7 +27,7 @@ The embedded `coordination.md` skill content SHALL reflect the v0.5 state in whi
     - Identify the **branch-name** form (e.g. `feat/no-supervisor-flag`) as the original git ref used in `git checkout`, `git worktree`, and other git-side operations.
     - Identify the **`agent_id`** form (e.g. `feat-no-supervisor-flag`) as the dashed slug used in every `/publish` payload, every `/messages/<id>` URL, and the `target` field of `agent.feedback` / `agent.question` payloads.
     - State explicitly that `agent_id` is the **slugified** form of the branch name, and name the conversion function as `slugify_branch`.
-    - Describe the slugify rule's effect (lowercase, non-`[a-z0-9_]` chars become `-`, consecutive `-` collapse to one, empty fallback to `agent`) so a reader can predict the conversion without reading the source.
+    - Describe the slugify rule's effect (lowercase, every character outside `[a-z0-9]` — `_` included — becomes `-`, consecutive `-` collapse to one, leading and trailing `-` are trimmed, a single-word result gets an `agent-` prefix and an empty one becomes `agent-unnamed`) so a reader can predict the conversion without reading the source, and state that the branch name itself may keep `_` while its `agent_id` never does.
     - State which form to use in which context: the `agent_id` form in every broker payload `target` field; the branch-name form in git operations.
 12. Include a `### Stash hygiene` section (or equivalent heading) that instructs the agent how to safely handle stashes in a multi-worktree environment. The section SHALL contain three rules in order:
     - **List before pop** — always run `git stash list` first.
@@ -122,7 +122,8 @@ The embedded `coordination.md` skill content SHALL reflect the v0.5 state in whi
 - **AND** it contains the substring `agent_id`
 - **AND** it contains the substring `slugify_branch`
 - **AND** it instructs the agent to use the `agent_id` (dashed) form in broker `target` fields and the branch-name (slashed) form in git operations
-- **AND** it describes the slugify rule sufficiently for a reader to predict the conversion (lowercase, non-`[a-z0-9_]` chars to `-`, collapse, fallback to `agent` on empty)
+- **AND** it describes the slugify rule sufficiently for a reader to predict the conversion (lowercase, non-`[a-z0-9]` chars including `_` to `-`, collapse, trim, `agent-` prefix for a single word, `agent-unnamed` on empty)
+- **AND** it does NOT state that underscores are preserved in the `agent_id`
 
 #### Scenario: Coordination skill documents stash hygiene rules
 

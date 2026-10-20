@@ -895,30 +895,47 @@ impl fmt::Display for BrokerMessage {
 
 /// Converts a git branch name into a stable broker `agent_id` slug.
 ///
-/// Applies a 5-step normalization algorithm:
+/// Total and infallible. Applies a 6-step normalization algorithm:
 ///
-/// 1. Convert to ASCII lowercase
-/// 2. Replace any character not in `[a-z0-9_]` with `-`
+/// 1. Convert ASCII uppercase letters to lowercase
+/// 2. Replace any character not in `[a-z0-9]` with `-` (this includes `_`)
 /// 3. Collapse consecutive `-` into a single `-`
 /// 4. Trim leading and trailing `-`
-/// 5. If the result is empty, return `"agent"`
+/// 5. If the result is empty, return `"agent-unnamed"`
+/// 6. If the result contains no `-` (a single word), prefix it with `"agent-"`
+///
+/// Every output therefore matches the `agent_id` pattern the broker's
+/// `/publish` handler enforces ([`crate::broker::server::is_valid_agent_id`]),
+/// contains only `[a-z0-9-]`, and can never equal the reserved id
+/// `supervisor` — steps 2 and 6 are what close the two gaps PP-26 surfaced: an
+/// `_` in the branch used to produce an id `/publish` answered with HTTP 400,
+/// and a single-word branch used to produce a bare word the same validator
+/// refuses.
+///
+/// Branch names git-paw itself builds are *not* slugified this way — the spec
+/// providers keep `_` via [`crate::specs::branch_segment_slug`], because a
+/// branch is durable git state and `_` is legal in a ref. Only the id grammar
+/// forbids it, so the mapping happens here, at the id boundary.
 ///
 /// # Examples
 ///
 /// - `"feat/http-broker"` → `"feat-http-broker"`
 /// - `"a/b/c"` → `"a-b-c"`
 /// - `"FEAT/X"` → `"feat-x"`
-/// - `""` → `"agent"`
-/// - `"---"` → `"agent"`
+/// - `"feat/my_feature"` → `"feat-my-feature"`
+/// - `"hotfix"` → `"agent-hotfix"`
+/// - `"supervisor"` → `"agent-supervisor"`
+/// - `""` → `"agent-unnamed"`
+/// - `"---"` → `"agent-unnamed"`
 pub fn slugify_branch(name: &str) -> String {
     // Step 1: to ASCII lowercase
     let lowered = name.to_ascii_lowercase();
 
-    // Step 2: replace non-[a-z0-9_] with -
+    // Step 2: replace non-[a-z0-9] with - (underscores included)
     let replaced: String = lowered
         .chars()
         .map(|c| {
-            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() {
                 c
             } else {
                 '-'
@@ -944,12 +961,78 @@ pub fn slugify_branch(name: &str) -> String {
     // Step 4: trim leading/trailing -
     let trimmed = collapsed.trim_matches('-');
 
-    // Step 5: if empty, return "agent"
+    // Step 5: nothing survived — the documented fallback id.
     if trimmed.is_empty() {
-        "agent".to_string()
-    } else {
-        trimmed.to_string()
+        return "agent-unnamed".to_string();
     }
+
+    // Step 6: a single word is not a two-segment id, so the validator refuses
+    // it; the `agent-` prefix makes it one (and makes `supervisor`
+    // underivable).
+    if trimmed.contains('-') {
+        trimmed.to_string()
+    } else {
+        format!("agent-{trimmed}")
+    }
+}
+
+/// Two branches of one session whose names derive the same broker `agent_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentIdClash {
+    /// The branch already accounted for when the clash was found.
+    pub first_branch: String,
+    /// The branch that collided with it.
+    pub second_branch: String,
+    /// The `agent_id` both derive.
+    pub agent_id: String,
+}
+
+impl fmt::Display for AgentIdClash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "branches '{}' and '{}' both derive the broker agent id '{}' — \
+             two agents in one session cannot share an id (they would share an \
+             inbox, so feedback and verdicts meant for one would reach the \
+             other); rename one branch so the ids differ",
+            self.first_branch, self.second_branch, self.agent_id
+        )
+    }
+}
+
+/// Returns the first pair of branches that derive the same `agent_id`, or
+/// `None` when every id is distinct.
+///
+/// `new` are the branches a launch is about to create agents for; `existing`
+/// are branches already carrying an agent (for `git paw add`, the live
+/// session's recorded branches). Each new branch is checked against the
+/// existing ones and against the new branches before it, so a clash within one
+/// launch is caught as readily as a clash with a live agent.
+///
+/// Pure: it derives ids and compares them, and is called before any worktree,
+/// pane or session record exists, so a refusal leaves nothing behind to clean
+/// up. [`slugify_branch`] mapping `_` to `-` is what makes this necessary —
+/// `feat/a_b` and `feat/a-b` are distinct refs that now derive one id, the way
+/// `feat/x` and `feat-x` always have.
+#[must_use]
+pub fn ensure_distinct_agent_ids(new: &[&str], existing: &[&str]) -> Option<AgentIdClash> {
+    let mut seen: Vec<(String, &str)> = existing
+        .iter()
+        .map(|branch| (slugify_branch(branch), *branch))
+        .collect();
+
+    for branch in new {
+        let id = slugify_branch(branch);
+        if let Some((_, first)) = seen.iter().find(|(seen_id, _)| *seen_id == id) {
+            return Some(AgentIdClash {
+                first_branch: (*first).to_string(),
+                second_branch: (*branch).to_string(),
+                agent_id: id,
+            });
+        }
+        seen.push((id, branch));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -991,23 +1074,82 @@ mod tests {
 
     #[test]
     fn slugify_branch_normalises_each_case() {
-        // One row per behavioural case: slugify lowercases, maps every run of
-        // non-alphanumeric/underscore chars to a single dash, trims leading and
-        // trailing dashes, and falls back to `agent` when nothing survives.
+        // One row per spec scenario: slugify lowercases, maps every run of
+        // non-alphanumeric chars (underscores included) to a single dash,
+        // trims leading and trailing dashes, prefixes a single word with
+        // `agent-`, and falls back to `agent-unnamed` when nothing survives.
         for (input, expected) in [
-            ("feat/errors", "feat-errors"),         // slash -> dash
-            ("main", "main"),                       // already clean, unchanged
-            ("a/b/c", "a-b-c"),                     // multiple slashes
-            ("FEAT/X", "feat-x"),                   // lowercased
-            ("", "agent"),                          // empty -> fallback
-            ("---", "agent"),                       // only dashes -> fallback
-            ("feat//x", "feat-x"),                  // consecutive dashes collapse
-            ("/feat/x/", "feat-x"),                 // leading/trailing dashes trimmed
-            ("feat/my_feature", "feat-my_feature"), // underscores preserved
-            ("feat/日本語", "feat"),                // non-ascii dropped
+            ("feat/http-broker", "feat-http-broker"),   // slash -> dash
+            ("Feat/HTTP_Broker", "feat-http-broker"),   // lowercased, `_` -> `-`
+            ("users/jane/feat/x", "users-jane-feat-x"), // nested path
+            ("feat/my_feature", "feat-my-feature"),     // underscore -> dash
+            // PP-26: a task branch naming an underscored file.
+            (
+                "task/t001-create-room_setup-md",
+                "task-t001-create-room-setup-md",
+            ),
+            ("feat//x", "feat-x"),              // consecutive dashes collapse
+            ("/feat/x/", "feat-x"),             // leading/trailing dashes trimmed
+            ("feat/日本語", "agent-feat"),      // non-ascii replaced, then prefixed
+            ("hotfix", "agent-hotfix"),         // single word gets the prefix
+            ("supervisor", "agent-supervisor"), // the reserved id is underivable
+            ("", "agent-unnamed"),              // empty -> fallback
+            ("///", "agent-unnamed"),           // all separators -> fallback
         ] {
             assert_eq!(slugify_branch(input), expected, "slugify_branch({input:?})");
         }
+    }
+
+    /// The function is deterministic — the same input always slugifies to the
+    /// same id, so an agent's inbox URL does not move under it.
+    #[test]
+    fn slugify_branch_is_deterministic() {
+        assert_eq!(
+            slugify_branch("feat/http-broker"),
+            slugify_branch("feat/http-broker")
+        );
+    }
+
+    #[test]
+    fn distinct_branches_report_no_clash() {
+        assert_eq!(
+            ensure_distinct_agent_ids(&["feat/a", "feat/b"], &[]),
+            None,
+            "branches with different ids launch as before"
+        );
+    }
+
+    /// `_` and `-` now derive one id, so two such branches in one session are
+    /// a clash the launch has to refuse.
+    #[test]
+    fn two_new_branches_differing_only_by_underscore_clash() {
+        let clash = ensure_distinct_agent_ids(&["feat/a_b", "feat/a-b"], &[])
+            .expect("underscore and dash derive the same id");
+        assert_eq!(clash.first_branch, "feat/a_b");
+        assert_eq!(clash.second_branch, "feat/a-b");
+        assert_eq!(clash.agent_id, "feat-a-b");
+    }
+
+    /// `git paw add`'s shape: a new branch against the live session's agents.
+    #[test]
+    fn new_branch_clashing_with_an_existing_agent_is_reported() {
+        let clash = ensure_distinct_agent_ids(&["feat-x"], &["feat/x"])
+            .expect("feat-x and feat/x derive the same id");
+        assert_eq!(clash.first_branch, "feat/x");
+        assert_eq!(clash.second_branch, "feat-x");
+        assert_eq!(clash.agent_id, "feat-x");
+    }
+
+    /// The refusal has to name both branches and the shared id, because that
+    /// is the whole content of the remedy (rename one of them).
+    #[test]
+    fn clash_message_names_both_branches_and_the_shared_id() {
+        let message = ensure_distinct_agent_ids(&["feat/a_b", "feat/a-b"], &[])
+            .expect("clash")
+            .to_string();
+        assert!(message.contains("feat/a_b"), "message: {message}");
+        assert!(message.contains("feat/a-b"), "message: {message}");
+        assert!(message.contains("feat-a-b"), "message: {message}");
     }
 
     /// Every `BrokerMessage` variant paired with its expected `agent_id()` and

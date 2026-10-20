@@ -721,14 +721,28 @@ confuse them when composing payloads. Match the form to the context:
 can predict the conversion without reading the source:
 
 1. Lowercase the branch name to ASCII.
-2. Replace every character that is not in `[a-z0-9_]` with `-` (slashes, dots,
-   spaces, and any other punctuation all become `-`).
+2. Replace every character that is not in `[a-z0-9]` with `-` — slashes, dots,
+   spaces, any other punctuation, and **underscores** all become `-`.
 3. Collapse consecutive `-` runs to a single `-`, then trim leading and trailing `-`.
-4. If the result is empty after the above, fall back to the literal string `agent`.
+4. If the result is empty after the above, fall back to the literal string
+   `agent-unnamed`.
+5. If the result is a single word with no `-` left in it, prefix it with `agent-`.
 
 So `feat/no-supervisor-flag` → `feat-no-supervisor-flag`, `fix/CVE-2025_1234` →
-`fix-cve-2025_1234`, and a hypothetical pathological branch with no allowed chars
-falls back to `agent`.
+`fix-cve-2025-1234`, `hotfix` → `agent-hotfix`, and a hypothetical pathological
+branch with no allowed chars falls back to `agent-unnamed`.
+
+**The branch name may keep `_`; its `agent_id` never does.** git-paw builds some
+branch names from spec text — a Spec Kit task naming `ROOM_SETUP.md` yields the
+branch `task/t001-create-room_setup-md` — and an underscore is perfectly legal in
+a git ref, so the branch keeps it. Only the broker's `agent_id` grammar forbids
+`_`, so step 2 maps it to `-` at the id boundary: that branch publishes as
+`task-t001-create-room-setup-md`. Never hand-copy a branch name into an
+`agent_id` field — convert it.
+
+Steps 4 and 5 exist because the broker rejects a bare single word as an
+`agent_id`. They also mean no branch can ever derive the reserved id
+`supervisor` (a branch named `supervisor` becomes `agent-supervisor`).
 
 **Rule of thumb:** if the symbol appears in JSON going to or coming from the broker,
 use the `agent_id` (dashed) form. If it appears in a shell command involving git,

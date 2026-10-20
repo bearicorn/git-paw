@@ -13,8 +13,8 @@ use std::sync::OnceLock;
 use regex::Regex;
 
 use super::{SpecBackend, SpecBackendKind, SpecEntry};
-use crate::broker::messages::slugify_branch;
 use crate::error::PawError;
+use crate::specs::branch_segment_slug;
 use crate::static_regex::static_regex;
 
 /// Default directory holding superpowers plan files.
@@ -111,7 +111,7 @@ impl Plan {
     }
 
     fn into_entry(self) -> SpecEntry {
-        let branch = format!("plan/{}", slugify_branch(&self.stem));
+        let branch = format!("plan/{}", branch_segment_slug(&self.stem));
         let prompt = self.build_prompt();
         SpecEntry {
             id: self.stem,
@@ -298,6 +298,20 @@ Run: `cargo test auth`\n\n\
             "branch has only safe slug chars: {}",
             entries[0].branch
         );
+    }
+
+    /// An underscored plan stem keeps the `_` in its branch; the broker id
+    /// derived from that branch maps it to `-`, so publishing still works.
+    #[test]
+    fn underscored_plan_stem_keeps_underscore_in_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plan(tmp.path(), "add_auth.md", "### Task 1: X\n- [ ] do it\n");
+        let entries = SuperpowersBackend.scan(tmp.path()).unwrap();
+        assert_eq!(entries[0].branch, "plan/add_auth");
+
+        let agent_id = crate::broker::messages::slugify_branch(&entries[0].branch);
+        assert_eq!(agent_id, "plan-add-auth");
+        assert!(crate::broker::server::is_valid_agent_id(&agent_id));
     }
 
     #[test]

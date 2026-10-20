@@ -472,15 +472,43 @@ pub fn cli_speaks_mcp<S: BuildHasher>(cli: &str, clis: &HashMap<String, CustomCl
 /// `{{BRANCH_ID}}` placeholder pre-expanded so each invocation carries the
 /// agent's literal id.
 pub fn build_boot_block(branch_id: &str, broker_url: &str, mcp_capable: bool) -> String {
+    boot_block_for_id(&slugify_branch(branch_id), broker_url, mcp_capable)
+}
+
+/// Builds the boot block for the SUPERVISOR pane, whose identity is the
+/// reserved id `supervisor` rather than a branch.
+///
+/// Separate from [`build_boot_block`] on purpose. The supervisor is the only
+/// caller entitled to the literal `supervisor`, so the passthrough lives here
+/// instead of in a shared helper that every coding-agent path also calls —
+/// there, a coding agent on a branch literally named `supervisor` would be
+/// handed the orchestrator's identity, told to publish `--agent supervisor`,
+/// and so be able to issue the verdicts that authorise merges, while its own
+/// discovery entry said `agent-supervisor` and nothing routed back to it.
+///
+/// Always renders the `broker.sh` helper form, never the MCP form: the
+/// supervisor pane runs in the repository's main working tree, where the MCP
+/// worker publish tools refuse to act (`mcp-agent-publish`, "A publish from
+/// the main working tree is refused"), so an MCP-form boot block would fail on
+/// its very first `publish_status`. `mcp-orchestrator-write-tools` is what
+/// later gives a root session its own publishing identity; until it lands the
+/// supervisor publishes through the helper, which takes `--agent supervisor`
+/// explicitly and is unaffected by that refusal.
+#[must_use]
+pub fn build_supervisor_boot_block(broker_url: &str) -> String {
+    boot_block_for_id(crate::surface::SUPERVISOR_AGENT_ID, broker_url, false)
+}
+
+/// Shared boot-block renderer taking an already-resolved `agent_id`.
+fn boot_block_for_id(agent_id: &str, broker_url: &str, mcp_capable: bool) -> String {
     let template = if mcp_capable {
         include_str!("../assets/boot-block-mcp-template.md")
     } else {
         include_str!("../assets/boot-block-template.md")
     };
-    let slugified_branch = slugify_branch(branch_id);
 
     template
-        .replace("{{BRANCH_ID}}", &slugified_branch)
+        .replace("{{BRANCH_ID}}", agent_id)
         .replace("{{GIT_PAW_BROKER_URL}}", broker_url)
 }
 
@@ -625,8 +653,53 @@ pub fn render(
     gates: &GateCommands<'_>,
     backends: &[crate::specs::SpecBackendKind],
 ) -> String {
+    render_for_agent_id(
+        template,
+        &slugify_branch(branch),
+        broker_url,
+        project,
+        gates,
+        backends,
+    )
+}
+
+/// Renders a skill for the SUPERVISOR, whose identity is the reserved id
+/// `supervisor` rather than a branch.
+///
+/// Separate from [`render`] for the same reason
+/// [`build_supervisor_boot_block`] is separate from [`build_boot_block`]: the
+/// passthrough must not be reachable from a coding-agent path, where a branch
+/// literally named `supervisor` would otherwise render a skill telling that
+/// agent it *is* the supervisor.
+#[must_use]
+pub fn render_for_supervisor(
+    template: &SkillTemplate,
+    broker_url: &str,
+    project: &str,
+    gates: &GateCommands<'_>,
+    backends: &[crate::specs::SpecBackendKind],
+) -> String {
+    render_for_agent_id(
+        template,
+        crate::surface::SUPERVISOR_AGENT_ID,
+        broker_url,
+        project,
+        gates,
+        backends,
+    )
+}
+
+/// Shared skill renderer taking an already-resolved `agent_id`.
+fn render_for_agent_id(
+    template: &SkillTemplate,
+    branch_id: &str,
+    broker_url: &str,
+    project: &str,
+    gates: &GateCommands<'_>,
+    backends: &[crate::specs::SpecBackendKind],
+) -> String {
     const NOT_CONFIGURED: &str = "(not configured)";
-    let branch_id = slugify_branch(branch);
+    let branch_id = branch_id.to_string();
 
     // Start with basic substitutions. Gate-command placeholders use the
     // literal `(not configured)` when the source value is `None` so the
@@ -4806,6 +4879,98 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         );
     }
 
+    /// `broker-protocol`, "No branch derives the reserved supervisor id": a
+    /// CODING agent on a branch literally named `supervisor` must be given
+    /// `agent-supervisor`, never the orchestrator's identity.
+    ///
+    /// The supervisor passthrough is reachable only through the supervisor's
+    /// own entry points. If it ever moved back into a helper shared with the
+    /// coding-agent paths, this agent would be told to publish
+    /// `--agent supervisor` — letting it issue the verdicts that authorise
+    /// merges — while its discovery entry said `agent-supervisor`, so nothing
+    /// routed back to it.
+    #[test]
+    fn a_coding_branch_named_supervisor_does_not_get_the_reserved_id() {
+        for mcp_capable in [false, true] {
+            let block = build_boot_block("supervisor", "http://127.0.0.1:9119", mcp_capable);
+            assert!(
+                block.contains("agent-supervisor"),
+                "a branch named supervisor must derive agent-supervisor (mcp={mcp_capable}); \
+                 got:\n{block}"
+            );
+            assert!(
+                !block.contains("--agent supervisor ")
+                    && !block.contains("\"supervisor\"")
+                    && !block.contains("/messages/supervisor"),
+                "a coding agent must never be handed the reserved supervisor id \
+                 (mcp={mcp_capable}); got:\n{block}"
+            );
+        }
+
+        let tmpl = SkillTemplate {
+            name: "coordination".into(),
+            content: "id={{BRANCH_ID}}".into(),
+            source: Source::Embedded,
+            format: SkillFormat::Standardized,
+            metadata: None,
+            resource_paths: None,
+        };
+        let rendered = render(
+            &tmpl,
+            "supervisor",
+            "http://127.0.0.1:9119",
+            "proj",
+            &GateCommands::default(),
+            &[],
+        );
+        assert_eq!(rendered, "id=agent-supervisor");
+    }
+
+    /// The supervisor's OWN entry points keep the reserved literal, so its
+    /// boot block and skill still say `supervisor`.
+    #[test]
+    fn the_supervisors_own_entry_points_keep_the_reserved_id() {
+        let block = build_supervisor_boot_block("http://127.0.0.1:9119");
+        assert!(
+            block.contains(".git-paw/scripts/broker.sh --agent supervisor status booting"),
+            "the supervisor's boot block must publish as supervisor; got:\n{block}"
+        );
+
+        let tmpl = SkillTemplate {
+            name: "supervisor".into(),
+            content: "id={{BRANCH_ID}}".into(),
+            source: Source::Embedded,
+            format: SkillFormat::Standardized,
+            metadata: None,
+            resource_paths: None,
+        };
+        let rendered = render_for_supervisor(
+            &tmpl,
+            "http://127.0.0.1:9119",
+            "proj",
+            &GateCommands::default(),
+            &[],
+        );
+        assert_eq!(rendered, "id=supervisor");
+    }
+
+    /// The supervisor runs in the main working tree, where the MCP publish
+    /// tools refuse to derive an identity — so its boot block is always the
+    /// helper form, whatever its CLI's MCP capability says.
+    #[test]
+    fn the_supervisor_boot_block_is_always_the_helper_form() {
+        let block = build_supervisor_boot_block("http://127.0.0.1:9119");
+        assert!(
+            block.contains(".git-paw/scripts/broker.sh --agent supervisor"),
+            "supervisor boot block must use the helper form; got:\n{block}"
+        );
+        assert!(
+            !block.contains("publish_status"),
+            "supervisor boot block must not use the MCP form, whose first \
+             publish_status would be refused in the main working tree; got:\n{block}"
+        );
+    }
+
     /// `boot-block` scenario "Both forms carry the same four events": the
     /// MCP form and the helper form cover exactly register/done/blocked/
     /// question — neither adds nor omits an event relative to the other.
@@ -4832,7 +4997,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     fn boot_block_substitutes_branch_id_placeholder() {
         let block = build_boot_block("Feature/HTTP_Broker", "http://localhost:9119", false);
         assert!(
-            block.contains("feature-http_broker"),
+            block.contains("feature-http-broker"),
             "Branch ID not properly slugified"
         );
         assert!(
@@ -5487,7 +5652,8 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     }
 
     /// drift 54 (optional 3.5) — coordination skill describes the slugify rule's
-    /// effect: lowercase, non-allowed-char replacement, and `agent` fallback.
+    /// effect: lowercase, non-allowed-char replacement (underscores included),
+    /// the `agent-unnamed` empty fallback and the single-word `agent-` prefix.
     #[test]
     fn coordination_skill_describes_slugify_rule() {
         let tmpl = resolve("coordination").unwrap();
@@ -5498,19 +5664,32 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         let next_heading = tmpl.content[start + 1..]
             .find("\n### ")
             .map_or(tmpl.content.len(), |off| start + 1 + off);
-        let section_lower = tmpl.content[start..next_heading].to_lowercase();
+        let section = &tmpl.content[start..next_heading];
+        let section_lower = section.to_lowercase();
         assert!(
             section_lower.contains("lowercase"),
             "slugify rule should mention lowercase step"
         );
         assert!(
-            tmpl.content[start..next_heading].contains("[a-z0-9_]"),
+            section.contains("[a-z0-9]"),
             "slugify rule should describe the allowed char class"
         );
         assert!(
+            section_lower.contains("underscore"),
+            "slugify rule should say underscores become `-` in the agent_id"
+        );
+        assert!(
+            !section.contains("[a-z0-9_]"),
+            "slugify rule must not state the superseded underscore-preserving char class"
+        );
+        assert!(
             (section_lower.contains("fallback") || section_lower.contains("fall back"))
-                && section_lower.contains("agent"),
-            "slugify rule should describe the empty-fallback to `agent`"
+                && section.contains("agent-unnamed"),
+            "slugify rule should describe the empty-fallback to `agent-unnamed`"
+        );
+        assert!(
+            section.contains("agent-hotfix"),
+            "slugify rule should show the single-word `agent-` prefix"
         );
     }
 

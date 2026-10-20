@@ -155,6 +155,25 @@ pub(crate) fn cmd_start(
         config.default_cli.as_deref(),
     )?;
 
+    // Refuse before anything is created when two of the session's branches
+    // derive the same broker agent id — they would share one inbox. Ahead of
+    // the dry run too, so a previewed plan is one that could actually launch.
+    //
+    // Only when the broker is enabled: an agent id exists to address an agent
+    // ON the broker, so with it off nothing derives, publishes or routes by
+    // one and a shared id has no observable effect. Refusing anyway would
+    // reject launches a broker-less session has always accepted.
+    if config.broker.enabled {
+        let session_branches: Vec<&str> = selection
+            .mappings
+            .iter()
+            .map(|(branch, _)| branch.as_str())
+            .collect();
+        if let Some(clash) = broker::messages::ensure_distinct_agent_ids(&session_branches, &[]) {
+            return Err(PawError::ConfigError(clash.to_string()));
+        }
+    }
+
     // Dry run — print plan and exit without creating worktrees
     let project = git::project_name(&repo_root);
     let mouse = config.mouse.unwrap_or(true);
@@ -577,6 +596,17 @@ fn launch_spec_session(
     no_rebase: bool,
 ) -> Result<(), PawError> {
     let session_name = tmux::resolve_session_name(project)?;
+
+    // Refuse before anything is created when two of the session's branches
+    // derive the same broker agent id — they would share one inbox. Gated on
+    // the broker being enabled for the reason given in `cmd_start`.
+    if config.broker.enabled {
+        let session_branches: Vec<&str> =
+            mappings.iter().map(|(branch, _)| branch.as_str()).collect();
+        if let Some(clash) = broker::messages::ensure_distinct_agent_ids(&session_branches, &[]) {
+            return Err(PawError::ConfigError(clash.to_string()));
+        }
+    }
 
     // Prune stale worktree registrations from previous sessions
     git::prune_worktrees(repo_root)?;

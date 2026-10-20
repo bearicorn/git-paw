@@ -198,15 +198,22 @@ What it does:
    `git paw start --specs NAME`). An unknown spec name errors with the
    discovered candidate list; an unknown `--cli` errors with the detected
    CLI ids — and in both cases nothing is created.
-2. Enforces the 25-agent cap **before** touching anything. Adding the 26th
+2. Refuses — **before** touching anything — a branch whose broker `agent_id`
+   is already taken by an agent in the session. The id is the slugified
+   branch name, so two different branches can map to one id: adding `feat-x`
+   to a session already running `feat/x` fails naming both branches and the
+   shared id `feat-x`, because the two agents would share one inbox. Rename
+   the branch so the ids differ. (Only when the broker is enabled; with it
+   off, nothing addresses agents by id.)
+3. Enforces the 25-agent cap **before** touching anything. Adding the 26th
    agent fails with the same "split into multiple sessions" message
    `start` uses.
-3. Creates the worktree (same naming and idempotent-create behaviour as
+4. Creates the worktree (same naming and idempotent-create behaviour as
    `start`; re-adding an existing worktree reuses it) and attaches the
    agent through the **same** boot pipeline a start-time agent uses — the
    broker boot block, the sidecar spec body (`.git-paw/AGENTS.local.md`), and
    the initial prompt are byte-identical.
-4. Re-tiles the agent grid to the layout a `start` of that many agents
+5. Re-tiles the agent grid to the layout a `start` of that many agents
    would have produced. Existing panes keep their indices, so any
    in-flight `send-keys` targeting (supervisor sweeps) still lands on the
    right pane; the new pane gets the next index. The re-tile preserves
@@ -216,7 +223,7 @@ What it does:
    After the re-tile, git-paw reconciles the session JSON against the live
    panes and warns if any agent has no live pane (a JSON↔tmux desync), so it
    is visible and recoverable rather than silent.
-5. Registers the branch in the session so subsequent `status`, `stop`,
+6. Registers the branch in the session so subsequent `status`, `stop`,
    `purge`, and `pause` include it.
 
 The new agent's boot block is injected only once its CLI reaches an

@@ -393,7 +393,13 @@ Three properties are structural, not incidental:
   Each derives the publishing agent id from the calling session's own
   resolved worktree branch (the same conversion the `broker.sh poll`/`status`
   path uses), so a session can only ever publish as itself — it cannot
-  attribute a message to a different agent.
+  attribute a message to a different agent. A server resolved to the
+  repository's **main working tree** rather than a linked worktree has no
+  agent to be: publishing there would mint a phantom agent named after the
+  default branch, so each publish tool returns an MCP-level error saying the
+  operation needs an agent's worktree session, publishes nothing, and the
+  server keeps running. This mirrors the bundled `broker.sh` helper, which
+  likewise refuses to derive an id in the main working tree.
 - **The supervisor authority verbs are absent, deliberately.**
   `agent.verified` is what authorises a branch to be merged; `agent.feedback`
   is the supervisor's corrective channel. Neither is exposed here, and neither

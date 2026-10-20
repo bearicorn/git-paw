@@ -203,9 +203,13 @@ fn add_attaches_pane_and_registers_agent() {
     );
     assert_eq!(panes, 5, "add should splice one pane (4 -> 5)");
     assert_eq!(agent_count, 3, "discovery file should list 3 agents");
+    // `agent-c`, not a bare `c`: a single-word branch's id takes the `agent-`
+    // prefix, because the broker's `/publish` validator refuses a bare word
+    // (`agent-id-slug-safety`). Before that prefix this registered as `c`, an
+    // id every publish from the agent would have been answered 400 for.
     assert!(
-        raw.contains("\"branch_id\": \"c\""),
-        "discovery file should register the added branch 'c'; raw:\n{raw}"
+        raw.contains("\"branch_id\": \"agent-c\""),
+        "discovery file should register the added branch 'c' as agent-c; raw:\n{raw}"
     );
 }
 

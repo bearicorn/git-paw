@@ -137,6 +137,13 @@ const ALLOWED_WIRE_IDENTITY_SITES: &[(&str, &str)] = &[
     // `match_pane` keys the supervisor's roster row; the INDEX it answers
     // comes from the layout record, which is what the rule is about.
     ("src/coordination/inventory.rs", "match_pane"),
+    // `normalize_id` excludes the reserved wire identity from branch
+    // slugification when comparing a `/tell` target against a roster row.
+    // `supervisor` is an id, not a branch: slugifying it would yield
+    // `agent-supervisor` and make the supervisor unaddressable by name. No
+    // surface role is decided here — `match_pane` above still answers the
+    // supervisor's index from the layout record.
+    ("src/coordination/inventory.rs", "normalize_id"),
     // `git paw remove supervisor` is refused by name — a CLI argument, not a
     // surface role.
     ("src/commands/remove.rs", "cmd_remove"),

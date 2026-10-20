@@ -138,6 +138,25 @@ pub(crate) fn cmd_add(
         )));
     }
 
+    // Refuse before mutating when the new branch derives the same broker agent
+    // id as an agent already in the session — the two would share one inbox.
+    //
+    // Only when the broker is enabled: an agent id exists to address an agent
+    // ON the broker, so with it off nothing derives, publishes or routes by
+    // one and a shared id has no observable effect.
+    if broker_config.enabled {
+        let live_branches: Vec<&str> = existing
+            .worktrees
+            .iter()
+            .map(|w| w.branch.as_str())
+            .collect();
+        if let Some(clash) =
+            broker::messages::ensure_distinct_agent_ids(&[branch.as_str()], &live_branches)
+        {
+            return Err(PawError::ConfigError(clash.to_string()));
+        }
+    }
+
     // 4.4 Enforce the 25-agent cap BEFORE mutating. layout_for(N+1) errors with
     // the same "split into multiple sessions" message `start` uses.
     let prev_agent_count = existing.worktrees.len();

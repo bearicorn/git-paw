@@ -243,6 +243,21 @@ Branch names depend on the format:
 - **Spec Kit:** branch prefix is `task/` or `phase/` depending on the entry kind; `branch_prefix` is **not** applied. Example: `.specify/specs/003-user-list/tasks.md` with task `- [ ] T009 [P] Add login form` produces branch `task/t009-add-login-form`.
 - **Superpowers:** `plan/<slugified plan-file stem>`; `branch_prefix` is **not** applied. Example: `docs/superpowers/plans/2026-07-20-add-auth.md` produces branch `plan/2026-07-20-add-auth`.
 
+Spec Kit and Superpowers derive their branch name from spec text — a task
+description, a plan-file stem — by lowercasing it and replacing every character
+outside `[a-z0-9_]` with `-`. **Underscores survive into the branch name.** A
+task reading `- [ ] T001 [P] Create ROOM_SETUP.md` produces branch
+`task/t001-create-room_setup-md`, and a plan file `add_auth.md` produces branch
+`plan/add_auth`: `_` is legal in a git ref, and the branch is durable state that
+worktree recovery and `--resume` use to look up work, so it is left intact.
+
+The agent's broker `agent_id` is a *separate* derivation from that branch name,
+and it does **not** keep `_` — the broker's id grammar forbids it, so the
+underscore maps to `-` there. The branch `task/t001-create-room_setup-md`
+publishes as agent `task-t001-create-room-setup-md`. See
+[Identifier Forms](coordination.md#identifier-forms--branch-vs-agent_id) for the
+full conversion.
+
 ## CLI Resolution
 
 When a spec-mode launch runs, CLIs are resolved in priority order:

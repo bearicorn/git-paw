@@ -2364,7 +2364,12 @@ mod tests {
     #[test]
     fn supervisor_pane_prompt_starts_with_boot_block() {
         let broker_url = "http://127.0.0.1:9119";
-        let boot_block = git_paw::skills::build_boot_block("supervisor", broker_url, false);
+        // The supervisor's OWN entry point, which is what `cmd_supervisor`
+        // calls. `build_boot_block` is the coding-agent one and slugifies its
+        // argument, so passing "supervisor" there would (correctly) yield
+        // `agent-supervisor` — a coding agent must never be handed the
+        // reserved id.
+        let boot_block = git_paw::skills::build_supervisor_boot_block(broker_url);
         let supervisor_framing = "Begin observing the spec implementation session. Your skill (.git-paw/AGENTS.local.md) describes \
              your role — read it, then start the autonomous loop. The user can type questions or \
              directives directly into your pane; handle them per the 'When the user types in your \
