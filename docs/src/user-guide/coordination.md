@@ -68,6 +68,16 @@ simple arguments. The agent id comes from `--agent <id>` (the boot block
 passes the pre-expanded branch id) or, absent one, from slugifying the current
 worktree branch. Run `.git-paw/scripts/broker.sh --help` for the full surface.
 
+**In the repository's main working tree the helper needs an explicit
+`--agent <id>`.** Agents publish from linked worktrees; the main working tree is
+the orchestrator's, and deriving an id from its branch would mint a phantom
+agent named after the default branch (`main` → `agent-main`) rather than
+identifying anybody. Run there without `--agent`, the helper exits non-zero with
+a diagnostic naming the remedy and publishes nothing. Pass the identity you mean
+— `broker.sh --agent supervisor question "which order?"` — and it publishes as
+before. Nothing changes for an agent in its own worktree, where derivation works
+exactly as it always has.
+
 | Subcommand | Publishes / reads |
 |------------|-------------------|
 | `status <message>` | `agent.status` (`status:"working"`, the message, `modified_files:[]`) |
@@ -302,9 +312,10 @@ Most broker messages use the same JSON envelope:
 }
 ```
 
-`<slug>` is the agent's slugified branch name (lowercase alphanumeric + `-` /
-`_`; slashes from a branch name like `feat/auth` become hyphens —
-`feat-auth`). Eight variants use this envelope: `agent.status`,
+`<slug>` is the agent's slugified branch name (lowercase alphanumeric + `-`
+only; slashes and underscores from a branch name like `feat/auth` or
+`feat/my_auth` become hyphens — `feat-auth`, `feat-my-auth`). Eight variants
+use this envelope: `agent.status`,
 `agent.artifact`, `agent.blocked`, `agent.intent`, `agent.question`,
 `agent.feedback`, `agent.answer`, and `agent.verified`. Three more do not:
 `agent.advanced-main` carries its fields flat alongside `type` (see
@@ -873,8 +884,19 @@ Two related forms of an agent identifier appear throughout the broker protocol:
 
 `agent_id` is the slugified form of the branch name. The conversion (named
 `slugify_branch` in the source) lowercases the input, replaces every character
-outside `[a-z0-9_]` with `-`, collapses runs of `-`, trims leading and trailing
-`-`, and falls back to the literal `agent` if the result is empty.
+outside `[a-z0-9]` with `-` — underscores included — collapses runs of `-`,
+trims leading and trailing `-`, falls back to the literal `agent-unnamed` if the
+result is empty, and prefixes a single-word result with `agent-`
+(`hotfix` → `agent-hotfix`). Every output therefore matches the `agent_id`
+pattern `/publish` enforces, and no branch can derive the reserved id
+`supervisor`.
+
+**A branch name may keep `_`; its `agent_id` never does.** Branch names git-paw
+derives from spec text keep underscores — a Spec Kit task naming `ROOM_SETUP.md`
+produces the branch `task/t001-create-room_setup-md` — because `_` is legal in a
+git ref and the branch is durable state that recovery and `--resume` use to look
+up work. Only the broker's id grammar forbids `_`, so the mapping happens at the id
+boundary: that branch publishes as `task-t001-create-room-setup-md`.
 
 Match the form to the context: dashed `agent_id` in any JSON going to or coming
 from the broker; slashed branch name in any shell command involving git.

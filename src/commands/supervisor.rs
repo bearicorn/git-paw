@@ -557,6 +557,23 @@ pub(crate) fn cmd_supervisor(
         out
     };
 
+    // Refuse before anything is touched when two of the session's branches
+    // derive the same broker agent id — they would share one inbox, so a
+    // verdict or feedback meant for one would reach the other. As early as
+    // `branches` is known: later steps prune worktrees and write the main
+    // checkout's supervisor assignment block, and a refused launch should
+    // leave none of that behind.
+    //
+    // Only when the broker is enabled: an agent id exists to address an agent
+    // ON the broker, so with it off nothing derives, publishes or routes by
+    // one and a shared id has no observable effect.
+    if config.broker.enabled {
+        let refs: Vec<&str> = branches.iter().map(String::as_str).collect();
+        if let Some(clash) = broker::messages::ensure_distinct_agent_ids(&refs, &[]) {
+            return Err(PawError::ConfigError(clash.to_string()));
+        }
+    }
+
     let project = git::project_name(repo_root);
     let session_name = tmux::resolve_session_name(&project)?;
     let mouse = config.mouse.unwrap_or(true);
@@ -657,9 +674,8 @@ pub(crate) fn cmd_supervisor(
     // AGENTS.md BEFORE pane 0 starts the supervisor CLI. The supervisor pane
     // launches from `repo_root` so Claude reads this file as its skill.
     let supervisor_skill_template = git_paw::skills::resolve("supervisor")?;
-    let supervisor_md = git_paw::skills::render(
+    let supervisor_md = git_paw::skills::render_for_supervisor(
         &supervisor_skill_template,
-        "supervisor",
         &broker_config.url(),
         &project,
         &supervisor_cfg.gate_commands(),
@@ -889,11 +905,11 @@ pub(crate) fn cmd_supervisor(
     // (see assets/agent-skills/supervisor.md). Sending more than one Enter
     // at launch risks accidentally accepting a follow-on permission prompt
     // on fast CLIs and is intentionally avoided.
-    let supervisor_boot_block = git_paw::skills::build_boot_block(
-        "supervisor",
-        &broker_config.url(),
-        git_paw::skills::cli_speaks_mcp(&supervisor_cli, &config.clis),
-    );
+    // Always the helper form, never the MCP form — the supervisor pane runs in
+    // the main working tree, where the MCP publish tools refuse to derive an
+    // identity, so an MCP-form block would fail on its first publish. See
+    // `build_supervisor_boot_block`.
+    let supervisor_boot_block = git_paw::skills::build_supervisor_boot_block(&broker_config.url());
     let supervisor_framing = build_supervisor_framing();
     let supervisor_prompt = format!("{supervisor_boot_block}\n\n{supervisor_framing}");
     let supervisor_delay = resolve_submit_delay_ms(&supervisor_cli, &config.clis);

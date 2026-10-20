@@ -324,6 +324,52 @@ fn full_lifecycle_initialize_list_call_shutdown() {
     client.shutdown_and_assert_clean_exit(Duration::from_secs(2));
 }
 
+/// `mcp-agent-publish`, "A publish from the main working tree is refused":
+/// a server resolved to the main working tree has no agent to be. Previously
+/// its `main` branch derived nothing the broker would take; with the
+/// `agent-` prefix it would derive the phantom `agent-main`, so the tool
+/// refuses instead — and, like every other degradation here, the refusal is
+/// an MCP-level error that leaves the server serving.
+///
+/// This half of the scenario is the "server keeps running" half, which needs
+/// the real spawned binary. No broker runs here, so "publishes nothing" is
+/// asserted by the sibling unit test
+/// `mcp::tools::publish::tests::publish_from_the_main_working_tree_is_refused_and_publishes_nothing`,
+/// which checks a live broker's log. The message assertion below is what keeps
+/// this test honest: without it, an unconfigured broker would error anyway.
+#[test]
+fn publish_from_the_main_working_tree_errors_and_the_server_keeps_running() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("proj");
+    std::fs::create_dir(&repo).unwrap();
+    git_init_with_commit(&repo);
+
+    let mut client = McpClient::spawn(&repo);
+    client.initialize();
+
+    let resp = client.request(
+        "tools/call",
+        json!({ "name": "publish_status", "arguments": { "message": "booting" } }),
+    );
+    let error = resp
+        .get("error")
+        .unwrap_or_else(|| panic!("publishing from the main working tree must error: {resp}"));
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        message.contains("main working tree"),
+        "the error should name the main working tree: {resp}"
+    );
+
+    // Server still alive: a follow-up request succeeds.
+    let after = client.call_tool("get_branches", json!({}));
+    assert!(after.pointer("/structuredContent/branches").is_some());
+
+    client.shutdown_and_assert_clean_exit(Duration::from_secs(2));
+}
+
 #[test]
 fn cold_repo_specs_and_learnings_are_empty() {
     let tmp = tempfile::tempdir().unwrap();

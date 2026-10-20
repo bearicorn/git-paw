@@ -259,7 +259,7 @@ The output is the pane's working directory — for a coding-agent pane, that
 agent's worktree path. Resolve it to an agent by matching it against the
 `worktree_path` entries of the `agents` roster in the per-repo session file
 `.git-paw/sessions/<session>.json`; the matching entry's `branch_id` is the
-authoritative `agent_id` (the branch name with `/` slugified to `-`). That
+authoritative `agent_id` (the slugified branch name). That
 roster also records a `pane_index`, but it describes the layout as of the last
 time the file was written and is NOT the routing source — the live
 `pane_current_path` match is.

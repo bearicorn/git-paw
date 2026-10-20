@@ -189,6 +189,8 @@ git paw start --unattended --from-all-specs
 git paw start --unattended --branches feat/auth,feat/api
 ```
 
+Every launch path refuses, before creating any worktree or pane, a session whose branches do not all derive distinct broker `agent_id`s. The id is the slugified branch name, so two different branches can map to one: `git paw start --branches feat/x,feat-x` fails naming both branches and the shared id `feat-x`, because the two agents would otherwise share an inbox and receive each other's feedback and verdicts. Rename one branch so the ids differ. (Only when the broker is enabled; with it off, nothing addresses agents by id and the launch proceeds as before.)
+
 ### Supervisor mode resolution chain
 
 git-paw decides whether to enter supervisor mode using this order (first match wins):
@@ -231,6 +233,8 @@ git paw add --from-spec add-export
 ```
 
 Validation happens before any side effect: an unknown `--cli` errors with the detected CLI ids, and an unknown `--from-spec` errors with the discovered spec candidates — no worktree or pane is created in either case.
+
+A branch whose broker `agent_id` is already taken by an agent in the session is refused the same way: the id is the slugified branch name, so `git paw add feat-x` against a session already running `feat/x` fails naming both branches and the shared id `feat-x` rather than attaching a second agent to one inbox. (Only when the broker is enabled; with it off nothing addresses agents by id.)
 
 ## `git paw remove`
 

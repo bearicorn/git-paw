@@ -113,11 +113,29 @@ impl AgentInventory {
     }
 }
 
-/// Normalises an agent identifier for comparison: trims surrounding
-/// whitespace and treats the slash form (`feat/auth`) and slug form
-/// (`feat-auth`) as equivalent.
+/// Normalises an agent identifier for comparison, so a target named by its
+/// branch (`feat/my_auth`) resolves to the agent whose id is the slug of that
+/// branch (`feat-my-auth`).
+///
+/// Routed through [`slugify_branch`](crate::broker::messages::slugify_branch)
+/// rather than a local `replace('/', "-")`, which handled slashes but not the
+/// underscores, case or `agent-` prefixing the real derivation applies — so
+/// `feat/my_auth` normalised to `feat-my_auth` and matched nothing. Sharing
+/// the one derivation is the point of this change; a second, weaker copy here
+/// is the same drift in miniature.
+///
+/// The broker wire identity `supervisor` is passed through. This names a
+/// ROSTER ROW, not a surface whose role is being decided — the supervisor's
+/// own index still comes from the layout record (see [`match_pane`]). It has
+/// to be excluded from slugification because it is a reserved id, not a
+/// branch: slugifying it would yield `agent-supervisor` and stop the
+/// supervisor from being addressable by name.
 fn normalize_id(id: &str) -> String {
-    id.trim().replace('/', "-")
+    let trimmed = id.trim();
+    if trimmed == SUPERVISOR_AGENT_ID {
+        return trimmed.to_string();
+    }
+    crate::broker::messages::slugify_branch(trimmed)
 }
 
 /// One agent row parsed from the broker `/status` JSON.
@@ -186,6 +204,12 @@ pub fn parse_pane_paths(output: &str) -> Vec<(usize, String)> {
 /// other agent's worktree basename ends in `-<agent_id>` (e.g.
 /// `myproj-feat-auth` for `feat-auth`). The `-` prefix on the suffix prevents
 /// `feat-a` from matching `…-feat-api`.
+///
+/// A single-word branch is matched by its unprefixed form too. The worktree
+/// directory is named from the branch (`hotfix`), while the branch's
+/// `agent_id` carries the `agent-` prefix the broker's two-segment grammar
+/// requires (`agent-hotfix`), so the two no longer agree on their own —
+/// without this, every single-word branch's pane went unmatched.
 #[must_use]
 pub fn match_pane(
     agent_id: &str,
@@ -197,14 +221,23 @@ pub fn match_pane(
     if agent_id == SUPERVISOR_AGENT_ID {
         return layout.supervisor_index();
     }
-    let suffix = format!("-{agent_id}");
+    let candidates = [
+        Some(agent_id),
+        agent_id
+            .strip_prefix("agent-")
+            .filter(|rest| !rest.is_empty() && !rest.contains('-')),
+    ];
     pane_paths.iter().find_map(|(idx, path)| {
         let base = path
             .trim_end_matches('/')
             .rsplit('/')
             .next()
             .unwrap_or(path);
-        (base == agent_id || base.ends_with(&suffix)).then_some(*idx)
+        candidates
+            .iter()
+            .flatten()
+            .any(|candidate| base == *candidate || base.ends_with(&format!("-{candidate}")))
+            .then_some(*idx)
     })
 }
 
@@ -614,11 +647,83 @@ mod tests {
         assert_eq!(match_pane("feat-api", &panes, &supervised()), Some(1));
     }
 
+    /// A single-word branch's worktree is named `hotfix`, but its `agent_id`
+    /// is `agent-hotfix` (the broker needs two segments). Both the child and
+    /// sibling worktree layouts must still resolve to the pane.
+    #[test]
+    fn match_pane_resolves_a_single_word_branchs_agent_prefixed_id() {
+        let panes = parse_pane_paths("1 /home/user/proj/.git-paw/worktrees/hotfix\n");
+        assert_eq!(match_pane("agent-hotfix", &panes, &supervised()), Some(1));
+
+        let sibling = parse_pane_paths("2 /home/user/proj-hotfix\n");
+        assert_eq!(match_pane("agent-hotfix", &sibling, &supervised()), Some(2));
+    }
+
+    /// Stripping the prefix must not let a real two-segment id match some
+    /// unrelated pane: only a single-word remainder is a legitimate branch
+    /// directory, so `agent-feat-x` keeps matching `feat-x` worktrees only
+    /// through its full id.
+    #[test]
+    fn match_pane_does_not_strip_the_prefix_off_a_two_segment_id() {
+        let panes = parse_pane_paths("1 /home/user/proj-feat-x\n");
+        assert_eq!(match_pane("agent-feat-x", &panes, &supervised()), None);
+    }
+
     #[test]
     fn supervisor_resolves_to_pane_zero() {
         let inv = fixture_inventory();
         let sup = inv.find("supervisor").unwrap();
         assert_eq!(sup.pane_index, Some(0));
+    }
+
+    /// Naming a target by its BRANCH resolves to the agent whose id is that
+    /// branch's slug, for every shape the real derivation handles — not just
+    /// slashes. An underscored branch is the case a local
+    /// `replace('/', "-")` got wrong.
+    #[test]
+    fn find_normalises_a_branch_name_the_way_the_id_was_derived() {
+        let status = r#"{
+            "git_paw": true,
+            "version": "0.6.0",
+            "uptime_seconds": 42,
+            "agents": [
+                {"agent_id": "feat-my-auth", "cli": "claude", "status": "working", "last_seen_seconds": 3, "summary": ""},
+                {"agent_id": "agent-hotfix", "cli": "claude", "status": "working", "last_seen_seconds": 3, "summary": ""}
+            ]
+        }"#;
+        let inv = AgentInventory {
+            entries: join_inventory(
+                parse_status_agents(status).unwrap(),
+                &[],
+                &HashMap::new(),
+                &supervised(),
+            ),
+            refreshed_at: Instant::now(),
+        };
+
+        for target in ["feat/my_auth", "feat-my-auth", "Feat/My_Auth"] {
+            assert_eq!(
+                inv.find(target).map(|e| e.branch_id.as_str()),
+                Some("feat-my-auth"),
+                "target {target:?} should resolve to feat-my-auth"
+            );
+        }
+        // A single-word branch resolves to its `agent-` prefixed id.
+        assert_eq!(
+            inv.find("hotfix").map(|e| e.branch_id.as_str()),
+            Some("agent-hotfix")
+        );
+    }
+
+    /// `supervisor` is a reserved id, not a branch: slugifying it would make
+    /// it `agent-supervisor` and the supervisor unaddressable by name.
+    #[test]
+    fn find_does_not_slugify_the_reserved_supervisor_id() {
+        let inv = fixture_inventory();
+        assert_eq!(
+            inv.find("supervisor").map(|e| e.branch_id.as_str()),
+            Some("supervisor")
+        );
     }
 
     #[test]

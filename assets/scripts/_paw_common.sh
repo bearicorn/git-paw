@@ -215,16 +215,31 @@ paw_publish() {
   rm -f "${body}"
 }
 
-# Slugify a branch name the same way the broker does (lowercase, non
-# [a-z0-9_] -> '-', collapse runs, strip ends, default 'agent').
+# Slugify a branch name into the broker agent_id the Rust side derives
+# (lowercase, non [a-z0-9] -> '-' with underscores included, collapse runs,
+# strip ends; empty -> 'agent-unnamed'; a single word gets an 'agent-' prefix
+# so the two-segment id the broker's /publish validator requires is always
+# produced). Byte-for-byte identical to slugify_branch in
+# src/broker/messages.rs -- tests/slugify_parity.rs pins the two together.
+#
+# The substitution runs before lowercasing and matches ASCII [A-Za-z0-9] only,
+# so a non-ASCII branch cannot take Python's Unicode-aware str.lower() path and
+# diverge from Rust's to_ascii_lowercase.
+#
+# The branch reaches Python through the environment, never argv, so a branch
+# name can never be read as an interpreter option.
 slugify() {
   AGENT_BRANCH="$1" "${PY}" -c "$(cat <<'PY'
 import os, re
 b = os.environ.get("AGENT_BRANCH", "")
-s = b.lower()
-s = re.sub(r"[^a-z0-9_]", "-", s)
+s = re.sub(r"[^A-Za-z0-9]", "-", b).lower()
 s = re.sub(r"-+", "-", s).strip("-")
-print(s or "agent")
+if not s:
+    print("agent-unnamed")
+elif "-" in s:
+    print(s)
+else:
+    print("agent-" + s)
 PY
 )"
 }

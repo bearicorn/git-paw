@@ -191,6 +191,66 @@ fn backend_for_type(spec_type: &str) -> Result<Box<dyn SpecBackend>, PawError> {
     }
 }
 
+/// Slugifies one segment of a branch name the spec providers build from spec
+/// text (a task id plus its description, a feature dir plus a phase name, a
+/// plan file stem).
+///
+/// Steps, in order:
+///
+/// 1. Convert ASCII uppercase letters to lowercase
+/// 2. Replace every character not in `[a-z0-9_]` with `-`
+/// 3. Collapse runs of `-` into a single `-`
+/// 4. Trim leading and trailing `-`
+/// 5. If the result is empty, return `"agent"`
+///
+/// This deliberately keeps `_`: a branch is durable git state (existing
+/// worktrees, recovery and `--resume` find work by branch name) and `_` is
+/// legal in a ref, so the providers do not borrow the broker's stricter
+/// [`crate::broker::messages::slugify_branch`]. That function maps `_` to `-`
+/// when the same branch is turned into an `agent_id`, so a branch keeping `_`
+/// never yields an id the broker rejects.
+///
+/// # Examples
+///
+/// - `"T009-Add login form"` → `"t009-add-login-form"`
+/// - `"T001-Create ROOM_SETUP.md"` → `"t001-create-room_setup-md"`
+/// - `""` → `"agent"`
+#[must_use]
+pub fn branch_segment_slug(input: &str) -> String {
+    let replaced: String = input
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    let mut collapsed = String::with_capacity(replaced.len());
+    let mut prev_dash = false;
+    for c in replaced.chars() {
+        if c == '-' {
+            if !prev_dash {
+                collapsed.push('-');
+            }
+            prev_dash = true;
+        } else {
+            collapsed.push(c);
+            prev_dash = false;
+        }
+    }
+
+    let trimmed = collapsed.trim_matches('-');
+    if trimmed.is_empty() {
+        "agent".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Derives a branch name by concatenating `prefix` and `id`.
 ///
 /// Inserts a `/` separator if `prefix` does not already end with one.

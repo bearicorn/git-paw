@@ -19,8 +19,8 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use crate::broker::messages::slugify_branch;
 use crate::error::PawError;
+use crate::specs::branch_segment_slug;
 use crate::specs::{SpecBackend, SpecBackendKind, SpecEntry};
 use crate::static_regex::static_regex;
 
@@ -323,7 +323,7 @@ pub(crate) fn decompose_feature(feature: &Feature) -> Vec<SpecEntry> {
     for task in phase.tasks.iter().filter(|t| !t.complete && t.p_marker) {
         let id = format!("{feature_dir}-{}", task.id);
         let branch_input = format!("{}-{}", task.id, task.description);
-        let branch = format!("task/{}", slugify_branch(&branch_input));
+        let branch = format!("task/{}", branch_segment_slug(&branch_input));
         let prompt = build_prompt(feature, &EntryKind::Single { task });
         entries.push(SpecEntry {
             id,
@@ -344,7 +344,7 @@ pub(crate) fn decompose_feature(feature: &Feature) -> Vec<SpecEntry> {
     if !non_p.is_empty() {
         let id = format!("{feature_dir}-phase-{}", phase.number);
         let branch_input = format!("{feature_dir}-{}", phase.name);
-        let branch = format!("phase/{}", slugify_branch(&branch_input));
+        let branch = format!("phase/{}", branch_segment_slug(&branch_input));
         let kind = EntryKind::Consolidated {
             tasks: non_p,
             phase_number: phase.number,
@@ -818,6 +818,24 @@ mod tests {
             .find(|e| e.id == "003-user-list-phase-2")
             .unwrap();
         assert_eq!(phase_entry.branch, "phase/003-user-list-foundational");
+    }
+
+    /// A task naming an underscored file keeps the `_` in its branch, while
+    /// the broker id derived from that branch maps it to `-`, so the id the
+    /// agent publishes under is one `/publish` accepts (PP-26).
+    #[test]
+    fn decompose_task_naming_underscored_file_keeps_underscore_in_branch() {
+        let feat = feature_fixture(
+            "004-rooms",
+            "## Phase 1: Setup\n- [ ] T001 [P] Create ROOM_SETUP.md\n",
+        );
+        let entries = decompose_feature(&feat);
+        let task_entry = entries.iter().find(|e| e.id == "004-rooms-T001").unwrap();
+        assert_eq!(task_entry.branch, "task/t001-create-room_setup-md");
+
+        let agent_id = crate::broker::messages::slugify_branch(&task_entry.branch);
+        assert_eq!(agent_id, "task-t001-create-room-setup-md");
+        assert!(crate::broker::server::is_valid_agent_id(&agent_id));
     }
 
     #[test]

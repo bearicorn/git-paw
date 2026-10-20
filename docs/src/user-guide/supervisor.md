@@ -1152,6 +1152,17 @@ reflected correctly after the next sweep. The `mode` column is best-effort
 (`accept-edits`, `interactive`, or `unknown`); `unknown` is treated as the
 safe case by `/tell`.
 
+**Known limitation — underscored branches show no `pane_index`.** The join
+matches an agent's `agent_id` against its worktree directory name. A branch
+containing `_` (or a `.`, or upper case) keeps those characters in its
+directory while its `agent_id` maps them to `-`, so the two no longer agree
+and the pane goes unmatched: the agent still appears in the inventory with its
+status and `last_seen`, but `pane_index` is empty and `mode` reads `unknown`.
+`/tell` still reaches it — delivery falls back to the broker `agent.feedback`
+path, which is the safe route it uses for `unknown` mode anyway. Only the
+`send-keys` fast path and the pane-mode column are affected. Avoid `_` in
+branch names if you want the pane columns populated.
+
 The supervisor refreshes the inventory at its sweep cadence and caches it in
 memory. `/agents` and `/tell` reuse the cached snapshot while it is younger
 than `[supervisor.tell] inventory_max_age_seconds` (default 60), re-polling

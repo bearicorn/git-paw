@@ -13,7 +13,9 @@
 #     9119) and bind (default 127.0.0.1),
 #   - the agent's own id from `--agent <id>` (the pre-expanded branch id
 #     the boot block passes) or, absent one, from slugifying the current
-#     worktree branch (mirrors sweep.sh's resolve_agent_for_path slug rules).
+#     worktree branch (mirrors sweep.sh's resolve_agent_for_path slug rules);
+#     in the repository's main working tree no id is derived at all, because
+#     an agent is always in a linked worktree -- pass `--agent <id>` there.
 #
 # Wrapping every agent->broker curl behind one stable script path means a
 # permission rule scoped to that exact path (`.git-paw/scripts/broker.sh`)
@@ -54,12 +56,55 @@ if [[ ! -r "${_PAW_COMMON}" ]] || ! . "${_PAW_COMMON}"; then
   exit 3
 fi
 
+# Absolutise a directory path git reported, resolving symlinks so two answers
+# for the same directory always compare equal. `rev-parse` may answer
+# relatively (plain `.git`), and relative answers are relative to the -C
+# directory, so they resolve against PROJECT_ROOT. Prints nothing when the
+# input is empty or does not name a reachable directory.
+abs_dir() {
+  local p=${1:-}
+  if [[ -z "${p}" ]]; then
+    return 1
+  fi
+  if [[ "${p}" != /* ]]; then
+    p="${PROJECT_ROOT}/${p}"
+  fi
+  (cd "${p}" 2>/dev/null && pwd -P)
+}
+
 # Resolve the agent id: explicit --agent override wins; otherwise slugify the
 # current worktree branch.
+#
+# An id is never DERIVED in the repository's main working tree. Agents publish
+# from linked worktrees; the main working tree is the orchestrator's, and it
+# always passes an explicit --agent. Deriving there would name an agent after
+# the default branch ("main" -> "agent-main") and mint a phantom the broker
+# happily accepts, so the derivation is refused instead. An explicit --agent
+# skips the check entirely and publishes as before.
 resolve_agent() {
   if [[ -n "${AGENT_OVERRIDE}" ]]; then
     printf '%s\n' "${AGENT_OVERRIDE}"
     return
+  fi
+  # git's own answer to "is this a linked worktree": a linked worktree's git
+  # dir differs from the common one. Holds under --separate-git-dir too, and
+  # is the same comparison `git paw setup-cli` makes (RepoLayout).
+  #
+  # Both flags are resolved the same way, through `abs_dir`, rather than with
+  # `--absolute-git-dir` / `--path-format=absolute`: `git rev-parse` ECHOES an
+  # unrecognised flag as an output line and still exits 0, so on a git too old
+  # for `--path-format` the answer is a two-line string that is neither empty
+  # nor a path. A guard written to fall back on an empty answer would never
+  # fire, and would compare two strings that can never be equal — silently
+  # letting every derivation through. One code path, supported everywhere,
+  # cannot rot that way.
+  local git_dir common_dir
+  git_dir=$(abs_dir "$(git -C "${PROJECT_ROOT}" rev-parse --git-dir 2>/dev/null)")
+  common_dir=$(abs_dir "$(git -C "${PROJECT_ROOT}" rev-parse --git-common-dir 2>/dev/null)")
+  if [[ -n "${git_dir}" && "${git_dir}" == "${common_dir}" ]]; then
+    echo "broker.sh: refusing to derive an agent id in the repository's main working tree (${PROJECT_ROOT})" >&2
+    echo "broker.sh: agents publish from their own linked worktree; from here, pass the identity you mean with --agent <id>" >&2
+    exit 2
   fi
   local branch
   branch=$(git -C "${PROJECT_ROOT}" symbolic-ref --short HEAD 2>/dev/null)
@@ -111,7 +156,8 @@ usage: $0 [--agent <id>] <subcommand> [args]
   poll [since]                           GET <broker>/messages/<agent-id>?since=<n> and print the inbox
 
 The agent id comes from --agent <id> (the boot block passes the pre-expanded
-branch id) or, absent one, from slugifying the current worktree branch.
+branch id) or, absent one, from slugifying the current worktree branch. In the
+repository's main working tree no id is derived: pass --agent <id> there.
 
 Discovered configuration:
   broker:         ${BROKER}
@@ -135,7 +181,7 @@ cmd_status() {
     exit 2
   fi
   local agent payload
-  agent=$(resolve_agent)
+  agent=$(resolve_agent) || exit $?
   payload=$("${PY}" -c "$(cat <<'PY'
 import json, sys
 agent, msg = sys.argv[1], sys.argv[2]
@@ -161,7 +207,7 @@ cmd_artifact() {
     esac
   done
   local agent payload
-  agent=$(resolve_agent)
+  agent=$(resolve_agent) || exit $?
   payload=$(EXPORTS="${exports}" FILES="${files}" "${PY}" -c "$(cat <<'PY'
 import json, os, sys
 agent = sys.argv[1]
@@ -189,7 +235,7 @@ cmd_blocked() {
     exit 2
   fi
   local agent payload
-  agent=$(resolve_agent)
+  agent=$(resolve_agent) || exit $?
   payload=$("${PY}" -c "$(cat <<'PY'
 import json, sys
 agent, needs, frm = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -210,7 +256,7 @@ cmd_question() {
     exit 2
   fi
   local agent payload
-  agent=$(resolve_agent)
+  agent=$(resolve_agent) || exit $?
   payload=$("${PY}" -c "$(cat <<'PY'
 import json, sys
 agent, text = sys.argv[1], sys.argv[2]
@@ -233,7 +279,7 @@ cmd_intent() {
     exit 2
   fi
   local agent payload
-  agent=$(resolve_agent)
+  agent=$(resolve_agent) || exit $?
   payload=$(TTL="${ttl}" DEFAULT_TTL="${DEFAULT_INTENT_TTL_SECONDS}" "${PY}" -c "$(cat <<'PY'
 import json, os, sys
 agent, summary, files = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -255,7 +301,7 @@ PY
 cmd_poll() {
   local since=${1:-0}
   local agent
-  agent=$(resolve_agent)
+  agent=$(resolve_agent) || exit $?
   # Pipe curl into python via `-c` so the script body does not compete with
   # the curl body for stdin (a heredoc on stdin would swallow the pipe).
   curl -s "${BROKER}/messages/${agent}?since=${since}" | "${PY}" -c "$(cat <<'PY'
