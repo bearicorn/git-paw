@@ -178,6 +178,34 @@ tool that edits your permission rules on its own is the thing this whole
 section exists to rule out. Doctor names the file and the entry; the deletion
 is yours.
 
+### Hook bypass and tmux driving
+
+Two things an agent session can do with ordinary commands step around
+git-paw's own safeguards, and both have been seen in practice:
+
+- **Bypassing git-paw's git hooks.** git-paw's hooks guard each agent's branch
+  and report its commits. A per-invocation override such as
+  `git -c core.hooksPath=…`, or `git commit --no-verify` (`-n`), silently
+  skips them — the branch guard and the commit report go with it.
+- **Driving tmux.** `tmux send-keys`, `tmux run-shell` and `tmux pipe-pane`
+  reach into the session's panes from outside the agent's CLI. Keystrokes sent
+  that way can answer a permission prompt — the agent's own included — and so
+  bypass the human and the orchestrator entirely.
+
+The bundled coordination skill tells every agent plainly not to do either. An
+instruction is not a control, though, and git-paw adds no permission rule for
+these commands: it pre-approves only its own helper workflow (`setup-cli`
+writes rules naming git-paw's helper scripts and nothing else), and every other
+permission decision belongs to your agent CLI and to you. That is the same
+line the v0.17.0 classifier retirement drew.
+
+If you want these forms to prompt — or to be refused outright — add your own
+ask or deny rules to your agent CLI's settings, for example ask rules for
+`git -c …`, `… --no-verify` and the tmux verbs above. git-paw never writes
+them, never edits them, and never removes them. Like any rule matched on a
+command's text, they are a speed bump against the natural forms rather than a
+boundary; the [sandbox](./sandbox.md) is the boundary.
+
 ## Browser exposure — the broker's Host and Origin guard
 
 The coordination broker is an HTTP server on your loopback interface

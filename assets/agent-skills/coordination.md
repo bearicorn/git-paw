@@ -574,6 +574,26 @@ is additionally asked to revert your archive commit. Commit your work, let the
 post-commit hook publish, and wait for the supervisor to verify and archive.
 
 <!-- opsx-role-gating:end -->
+### Never bypass git hooks or drive tmux
+
+These rules hold whatever your permission mode would let you run:
+
+1. **Never redirect or bypass the git hooks git-paw installs.** No
+   per-invocation hook override (`git -c core.hooksPath=…`), no `--no-verify`
+   (or its short form `git commit -n`), and no change to the repository's hook
+   configuration. Commit with a plain `git commit` from your worktree root;
+   when a hook rejects a commit, fix what it reports instead of skipping it.
+   The hooks are how git-paw guards your branch and reports your commits, so a
+   bypassed hook silently drops the branch guard and the commit report.
+2. **Never drive tmux.** No `tmux send-keys`, `tmux run-shell`,
+   `tmux pipe-pane` or any other tmux command aimed at the session's panes —
+   your own included. Keystrokes sent into a pane from outside its CLI bypass
+   the human and orchestrator gate entirely.
+3. **Never answer your own permission prompts**, and never arrange for
+   anything else to answer them. A prompt is answered by the human or the
+   orchestrator. If you are blocked on one, wait — or publish a question if you
+   need a decision.
+
 ### When you depend on a peer's work
 
 When a peer publishes an `agent.artifact` message that lists files or work you depend

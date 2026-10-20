@@ -264,6 +264,31 @@ fn posture_chapter_covers_the_guard_and_its_limits() {
     );
 }
 
+// core-security-posture scenario "Posture chapter names both risks and the
+// user's own remedy": hook bypass and tmux driving are named, git-paw writes no
+// rule for them, and the user may add their own ask or deny rules.
+#[test]
+fn posture_chapter_documents_hook_bypass_and_tmux_driving() {
+    let posture = read("docs/src/user-guide/security-posture.md");
+    let missing = contains_all(
+        &posture,
+        &[
+            "core.hooksPath",
+            "--no-verify",
+            "tmux send-keys",
+            "tmux run-shell",
+            "adds no permission rule for",
+            "add your own",
+            "ask or deny rules",
+            "git-paw never writes",
+        ],
+    );
+    assert!(
+        missing.is_empty(),
+        "security-posture.md must cover hook bypass and tmux driving; missing: {missing:?}"
+    );
+}
+
 // The chapters must be wired into the mdBook table of contents, or mdbook build
 // silently omits them.
 #[test]

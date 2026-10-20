@@ -1448,6 +1448,39 @@ mod tests {
         );
     }
 
+    /// `skill-agent` scenario "Coordination skill forbids hook bypass".
+    #[test]
+    fn coordination_skill_forbids_hook_bypass() {
+        let tmpl = resolve("coordination").unwrap();
+        assert!(
+            tmpl.content.contains("core.hooksPath"),
+            "names the hook override"
+        );
+        assert!(tmpl.content.contains("--no-verify"), "names --no-verify");
+        assert!(
+            tmpl.content
+                .contains("Never redirect or bypass the git hooks git-paw installs"),
+            "states the agent must not redirect or bypass git hooks"
+        );
+    }
+
+    /// `skill-agent` scenario "Coordination skill forbids driving tmux".
+    #[test]
+    fn coordination_skill_forbids_driving_tmux_and_self_approval() {
+        let tmpl = resolve("coordination").unwrap();
+        assert!(tmpl.content.contains("tmux send-keys"), "names send-keys");
+        assert!(tmpl.content.contains("tmux run-shell"), "names run-shell");
+        assert!(
+            tmpl.content.contains("Never drive tmux"),
+            "states the agent must never drive tmux"
+        );
+        assert!(
+            tmpl.content
+                .contains("Never answer your own permission prompts"),
+            "states the agent must never answer its own permission prompts"
+        );
+    }
+
     #[test]
     fn coordination_skill_does_not_contain_cherry_pick_instructions() {
         let tmpl = resolve("coordination").unwrap();
