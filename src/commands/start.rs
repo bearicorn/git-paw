@@ -26,7 +26,7 @@ use git_paw::tmux;
 
 use super::helpers::{
     agent_pane_offset, attach_session_logging, config_to_custom_defs, dashboard_command,
-    orchestrator_entry_for_mode, to_interactive_cli, warn_if_broker_is_exposed,
+    to_interactive_cli, warn_if_broker_is_exposed,
 };
 use super::recover::recover_session;
 use super::supervisor::cmd_supervisor;
@@ -410,7 +410,6 @@ pub(crate) fn cmd_start(
         &tmux_session.name,
         &state.worktrees,
         layout.first_agent_index(),
-        None, // bare-mode session: the layout reserves no supervisor surface
     );
 
     // Inject boot blocks for manual broker mode (without supervisor).
@@ -838,7 +837,6 @@ fn launch_spec_session(
         &tmux_session.name,
         &state.worktrees,
         layout.first_agent_index(),
-        None, // bare-mode session: the layout reserves no supervisor surface
     );
 
     // Inject and submit each agent's prompt: the broker boot block (when
@@ -1041,17 +1039,7 @@ pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result
             .unwrap_or(offset + idx),
         })
         .collect();
-    // The orchestrator entry is DERIVED from the resumed session's mode, as
-    // recovery derives it — reading it back from the existing discovery file
-    // would lose it exactly when the file is missing, which is the case this
-    // rewrite exists for.
-    let orchestrator = orchestrator_entry_for_mode(updated.mode, &config);
-    crate::write_repo_discovery_file_with_agents(
-        repo_root,
-        &updated.session_name,
-        agents,
-        orchestrator,
-    );
+    crate::write_repo_discovery_file_with_agents(repo_root, &updated.session_name, agents);
 
     attach_or_print_hint(&existing.session_name)
 }

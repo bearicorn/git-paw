@@ -425,14 +425,16 @@ fn worker_overrides_resolve_by_key_and_launch_command() {
 }
 
 // ---------------------------------------------------------------------------
-// Supervisor pane
+// No orchestrator pane
 // ---------------------------------------------------------------------------
 
-/// `[supervisor] cli = "claude-oss"` with `[clis.claude-oss] command = <stub>`:
-/// pane 0 launches the command followed by the supervisor's approval flag.
+/// `[supervisor] cli = "claude-oss"` with `[clis.claude-oss] command = <stub>`
+/// and `approval = "full-auto"`: no pane runs an orchestrator, so the
+/// configured command is never spawned — pane 0 is the dashboard and the
+/// agent runs `--cli`.
 #[test]
 #[serial]
-fn supervisor_pane_launches_configured_command() {
+fn supervisor_cli_is_never_launched_in_a_pane() {
     if skip_if_no_tmux() {
         return;
     }
@@ -477,29 +479,31 @@ fn supervisor_pane_launches_configured_command() {
     );
 
     let session_name = format!("paw-{project}");
-    // Pane 0 = supervisor. The agent uses `echo`, so only the supervisor can
-    // have produced the stub's log.
+    // Pane 1 is the agent, running `echo`: once its output renders, every
+    // pane has been launched. Only an orchestrator pane could have spawned
+    // the stub.
+    let pane1 = wait_for_pane_content(&tmux_env, &session_name, 1, "echo", Duration::from_secs(15));
     let pane0 = wait_for_pane_content(
         &tmux_env,
         &session_name,
         0,
         SUP_SENTINEL,
-        Duration::from_secs(15),
+        Duration::from_secs(3),
     );
-    let log = wait_for_log(&st.log, ARGV_MARKER, Duration::from_secs(5));
+    let log = wait_for_log(&st.log, ARGV_MARKER, Duration::from_secs(3));
     kill_session(&tmux_env, &session_name);
 
     assert!(
-        pane0.contains(STUB_BIN) && pane0.contains(SUP_SENTINEL),
-        "supervisor pane 0 must launch the configured command plus its flag; capture:\n{pane0}"
+        pane1.contains("echo"),
+        "the agent launched; capture:\n{pane1}"
     );
     assert!(
-        !pane0.contains("claude-oss"),
-        "the supervisor [clis] key must not be launched; capture:\n{pane0}"
+        !pane0.contains(STUB_BIN) && !pane0.contains(SUP_SENTINEL),
+        "pane 0 is the dashboard, not the orchestrator CLI; capture:\n{pane0}"
     );
     assert!(
-        log.contains(&format!("{ARGV_MARKER}{SUP_SENTINEL}")),
-        "the supervisor's configured command must have actually been spawned; log:\n{log}"
+        !log.contains(ARGV_MARKER),
+        "the [supervisor].cli command must never be spawned; log:\n{log}"
     );
 }
 

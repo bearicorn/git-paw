@@ -136,31 +136,6 @@ A permission-prompt marker matched only in scrollback above the Live-prompt gate
 - **THEN** the gate SHALL treat the prompt as cleared
 - **AND** SHALL dispatch NO keystrokes — preventing an approval digit from landing as a phantom chat message
 
-### Requirement: Blind send-keys excludes the supervisor pane 0
-
-The approval-send gate SHALL refuse to dispatch approval keystrokes to pane index 0 (the supervisor's own pane). When the resolved target pane index is 0, the gate SHALL send no keystrokes and SHALL report that pane 0 is excluded from blind send-keys.
-
-No git-paw component SHALL send approval keystrokes to pane 0 by any other path. A permission prompt on the supervisor's own pane is answered by the human at that pane; the drive loop only escalates it (see `supervisor-unattended-operation`, *The drive loop covers the supervisor's own pane 0*).
-
-#### Scenario: Pane 0 is never sent blind keystrokes
-
-- **GIVEN** an approval target whose resolved pane index is 0
-- **WHEN** the approval-send gate runs, even with a live prompt re-confirmed in pane 0
-- **THEN** the gate SHALL dispatch NO keystrokes to pane 0
-- **AND** SHALL report that pane 0 is excluded from blind send-keys
-
-#### Scenario: Coding agent panes are still approvable
-
-- **GIVEN** an approval target whose resolved pane index is 2 (a coding-agent pane) with a live prompt re-confirmed
-- **WHEN** the approval-send gate runs
-- **THEN** the gate SHALL dispatch the approval keystrokes to pane 2
-
-#### Scenario: The drive loop sends no approval keystrokes to pane 0
-
-- **GIVEN** an `--unattended` session whose supervisor pane (pane 0) shows a live permission prompt
-- **WHEN** the drive loop sweeps pane 0
-- **THEN** no keystroke answering the prompt SHALL be sent to pane 0
-
 ### Requirement: Approval gate reuses existing broker variants
 
 Escalating a live permission prompt, and the signals around it, SHALL reuse the existing `BrokerMessage` variants defined in `broker-messages`. The trigger that a pane is waiting on a prompt SHALL be the synthetic `agent.status` with `phase: "stuck-on-prompt"` (per `stuck-prompt-detection`). The escalation of a live permission prompt SHALL reuse `agent.question`, and its question text SHALL name the originating agent and the prompted command. Supervisor→agent replies SHALL reuse `agent.feedback` or the supervisor `/tell` path. The system SHALL NOT define a `BrokerMessage` variant or a per-CLI permission hook dedicated to permission prompts.
@@ -200,4 +175,39 @@ Approval keystrokes SHALL reach an agent pane only through the bundled `sweep.sh
 - **WHEN** a human runs `sweep.sh approve <pane>` for it
 - **THEN** the helper SHALL send `1` followed by `Enter`
 - **AND** SHALL NOT select any durable "don't ask again" option
+
+### Requirement: Keystrokes reach only coding-agent surfaces
+
+Every git-paw keystroke sender SHALL send keystrokes only to a surface whose resolved role is a coding agent, in every session mode. This covers the explicit `sweep.sh approve <pane>` action and the drive loop's nudge, stale-input recovery and buffered-input submit. The drive loop SHALL resolve the role from the session's recorded layout and the surface's owning worktree; `sweep.sh approve` SHALL resolve it from the session's discovery roster (see `broker-agent-helper`, *sweep.sh approve refuses pane 0*). The dashboard surface, a surface whose owner matches no agent worktree, and any other non-coding surface SHALL be refused: the sender SHALL send no keystrokes and SHALL report that the surface is excluded because it is not a coding agent. No sender SHALL hold an exception that lets it type into a non-coding surface, and the pane index alone SHALL NOT decide eligibility.
+
+#### Scenario: Dashboard surface is refused in a bare session
+
+- **GIVEN** a bare broker-enabled session whose dashboard is at pane 0, and whose discovery roster lists coding agents from pane 1
+- **WHEN** `sweep.sh approve 0` runs, even if the dashboard's capture resembles a live prompt
+- **THEN** it SHALL send NO keystrokes
+- **AND** SHALL report that the surface is excluded because it is not a coding agent
+
+#### Scenario: Dashboard surface is never nudged in a supervised session
+
+- **GIVEN** a supervised `--unattended` session whose dashboard is at pane 0 and whose dashboard capture shows text resembling buffered input on an idle input box
+- **WHEN** the drive loop sweeps the session
+- **THEN** it SHALL send NO keystrokes to pane 0
+
+#### Scenario: Unresolved surface is refused
+
+- **GIVEN** a surface whose owner matches no agent worktree and whose capture shows buffered input on an idle input box
+- **WHEN** the drive loop sweeps the session
+- **THEN** it SHALL send NO keystrokes to that surface
+
+#### Scenario: The first agent of a broker-less session is approvable
+
+- **GIVEN** a session with the broker disabled, whose discovery roster lists its first coding agent at pane 0, showing a live permission prompt
+- **WHEN** a human runs `sweep.sh approve 0`
+- **THEN** the helper SHALL send `1` followed by `Enter` to that surface
+
+#### Scenario: Coding agent surfaces are reached
+
+- **GIVEN** a coding agent's surface whose idle input box holds buffered text
+- **WHEN** the drive loop sweeps it
+- **THEN** it SHALL submit the buffered text to that surface
 

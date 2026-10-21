@@ -288,11 +288,12 @@ git paw start --specs add-auth --dry-run
 `--from-all-specs --supervisor` (or `--from-all-specs` with `[supervisor] enabled = true`
 in your config) engages the supervisor flow against the discovered specs.
 git-paw scans the configured specs directory, creates one worktree per spec,
-and builds one tmux session with the supervisor pane (pane 0), the dashboard
-pane, and the per-spec agent panes, then returns with an attach hint (or, with
-`--unattended`, runs the in-process drive loop instead) — same
-supervisor architecture as `--branches`-driven sessions, just with branches
-discovered from specs.
+and builds one tmux session with the dashboard pane (pane 0) and the per-spec
+agent panes from pane 1 — the orchestrator runs outside the session, reading
+the context rendered into `.git-paw/AGENTS.local.md` — then returns with an
+attach hint (or, with `--unattended`, runs the in-process drive loop instead)
+— same supervisor architecture as `--branches`-driven sessions, just with
+branches discovered from specs.
 
 The [CLI Resolution](#cli-resolution) chain above applies identically here —
 `--supervisor` never bypasses or alters it. In particular, `default_spec_cli`
@@ -370,9 +371,10 @@ Attach with:  tmux attach -t paw-myproject
 ```
 
 Supervisor mode never auto-attaches, interactive terminal or not: the
-supervisor CLI runs inside the session's pane 0, and (without `--unattended`)
-the launch prints `Supervisor session '<name>' launched with <N> coding
-agent(s).` followed by the same `Attach with:` hint. Attach later from a real
+orchestrator is your own agent session outside tmux, and (without
+`--unattended`) the launch prints `Supervisor session '<name>' launched with
+<N> coding agent(s).`, the orchestrator-context path
+(`.git-paw/AGENTS.local.md`), and the same `Attach with:` hint. Attach later from a real
 terminal:
 
 ```bash

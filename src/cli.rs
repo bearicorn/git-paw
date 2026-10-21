@@ -97,7 +97,7 @@ pub enum Command {
                       git paw start --specs   # opens spec picker (TTY required)\n  \
                       git paw start --dry-run\n  \
                       git paw start --preset backend\n  \
-                      git paw start --supervisor   # launch with an orchestrator pane\n  \
+                      git paw start --supervisor   # dashboard + agents; your own session orchestrates\n  \
                       git paw start --no-supervisor  # disable supervisor for this session (overrides config)\n  \
                       git paw start --no-rebase   # skip rebasing agent branches onto the default branch"
     )]
@@ -162,10 +162,17 @@ pub enum Command {
         preset: Option<String>,
 
         /// Enable supervisor mode for this session.
+        ///
+        /// Builds the dashboard at pane 0 (a full-width top row) and one
+        /// coding agent per pane from pane 1. No pane runs an orchestrator:
+        /// the orchestrator is your own agent session outside tmux, pointed
+        /// at the context the launch writes to `.git-paw/AGENTS.local.md`
+        /// and prints with the attach hint. The agents' CLI resolves from
+        /// `--cli`, then `default_cli`, then `[supervisor].cli`.
         #[arg(
             long,
             default_value_t = false,
-            help = "Enable supervisor mode for this session"
+            help = "Enable supervisor mode: dashboard at pane 0, agents from pane 1; orchestrate from your own session via .git-paw/AGENTS.local.md"
         )]
         supervisor: bool,
 
@@ -202,11 +209,11 @@ pub enum Command {
         /// Run the supervisor wave to completion with no human babysitting.
         ///
         /// Engages supervisor mode (equivalent to `--supervisor`) and then
-        /// drives an in-process loop that sweeps the supervisor pane and every
-        /// coding-agent pane on a ~15s cadence: it escalates EVERY live
-        /// permission prompt for a human decision WITHOUT blocking the rest of
-        /// the wave, recovers buffered input, detects completion and CLI
-        /// unavailability, and exits with a summary. Designed for detached
+        /// drives an in-process loop that sweeps every coding-agent pane on a
+        /// ~15s cadence: it escalates EVERY live permission prompt for a human
+        /// decision WITHOUT blocking the rest of the wave, recovers buffered
+        /// input, detects completion and agent CLI unavailability, and exits
+        /// with a summary. Designed for detached
         /// operation — it does not require an attached interactive terminal.
         ///
         /// It approves nothing. git-paw makes no safety decision about an
@@ -216,18 +223,15 @@ pub enum Command {
         /// in `full-auto` inside the documented sandbox — see the security
         /// posture chapter.
         ///
-        /// The loop is the pump and the supervisor pane is the brain. When a
-        /// supervisor (orchestrator) pane is present, each judgment call — a
-        /// permission prompt, a worker's question, a merge decision — is also
-        /// injected into that pane so the smart model is actively triggered
-        /// instead of relied on to poll an inbox, and a longer-cadence nudge asks
-        /// it to re-run its orchestration sweep. The loop never waits on it, so
-        /// the wave keeps moving. Nudges directed at a *worker* are skipped once
-        /// that worker has finished (broker status `done` or `verified`) — but
-        /// NOT while it is merely quiet at `blocked`/`committed`, which is when
-        /// the correction loop must still reach it. With no supervisor pane
-        /// nothing is injected anywhere and escalations stay broker-only review
-        /// items for the human, exactly as before.
+        /// The loop is the pump; the orchestrator — your own agent session
+        /// outside tmux — is the brain. Every judgment call (a permission
+        /// prompt, a worker's question, a merge decision) is a broker review
+        /// item the orchestrator reads; nothing is typed into any pane for it,
+        /// and the loop never waits on a reply. Nudges directed at a *worker*
+        /// are skipped once that worker has finished (broker status `done` or
+        /// `verified`) — but NOT while it is merely quiet at
+        /// `blocked`/`committed`, which is when the correction loop must still
+        /// reach it.
         ///
         /// Set `[supervisor.correction] auto_loopback = true` to also close the
         /// verify↔fix cycle without a human hop: a failed supervisor gate

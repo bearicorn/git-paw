@@ -137,20 +137,17 @@ terminal. It is mutually exclusive with `--no-supervisor`.
 initiative; whether a command runs without a prompt is decided by the agent
 CLI's own permission system. For a run that truly does not stop, pre-approve
 the commands in that CLI's own allow rules, or use
-`[supervisor] approval = "full-auto"` inside the documented sandbox. See
+`[supervisor] agent_approval = "full-auto"` inside the documented sandbox. See
 [Supervisor → Unattended mode](user-guide/supervisor.md).
 
-When a supervisor (orchestrator) pane is present, the loop additionally **hands
-each judgment call to that pane** — a risky/unknown prompt, a worker's question,
-a merge decision, a non-converging branch — by injecting it as a task prompt, and
-nudges the pane to re-run its orchestration sweep on a longer (~5-minute)
-cadence. The escalation is still recorded on the broker either way, and the loop
-never waits on the supervisor's reply. Nudges aimed at a *worker* pane stop once
-that worker has finished (`done`/`verified`) — but not while it is merely quiet
-at `blocked`/`committed`, where the correction loop must still reach it. With no
-supervisor pane, nothing is
-injected anywhere and escalations stay broker-only review items — identical to
-the previous behaviour. See
+No orchestrator runs inside the session — it drives from your own agent
+session, pointed at `.git-paw/AGENTS.local.md` — so the loop sweeps and types
+into **coding-agent panes only** and records every judgment call (a live
+prompt, a worker's question, a merge decision, a non-converging branch) as a
+broker review item, injecting nothing into any pane. The loop never waits on a
+reply. Nudges aimed at a *worker* pane stop once that worker has finished
+(`done`/`verified`) — but not while it is merely quiet at
+`blocked`/`committed`, where the correction loop must still reach it. See
 [the loop is a pump, the supervisor is the brain](user-guide/supervisor.md#the-loop-is-a-pump-the-supervisor-is-the-brain).
 
 The selection flags compose with `--supervisor`: `git paw start --supervisor

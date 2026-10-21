@@ -356,11 +356,6 @@ fn no_reserved_pane_index_is_written_as_a_literal() {
     let mut violations: Vec<String> = Vec::new();
 
     for (path, src) in scanned_files() {
-        // The transitional re-export shim names every moved geometry symbol
-        // and decides nothing. `supervisor-pane-removal` deletes it.
-        if path == "src/supervisor/layout.rs" {
-            continue;
-        }
         for (i, line) in src.lines().enumerate() {
             let trimmed = line.trim();
             // An import names the symbol without deciding anything with it.

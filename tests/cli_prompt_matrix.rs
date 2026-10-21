@@ -225,7 +225,7 @@ fn start_supervisor_flag_enters_supervisor_mode() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("Supervisor:"),
+        stdout.contains("supervisor session plan"),
         "--supervisor must enter supervisor mode (flag short-circuits the confirm); got:\n{stdout}"
     );
 }

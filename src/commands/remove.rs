@@ -117,11 +117,12 @@ pub(crate) fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Resu
     let remaining = existing.worktrees.len() - 1;
     if session_alive && remaining > 0 {
         let layout = git_paw::surface::layout_for(remaining)?;
-        tmux::build_remove_retile_commands(&existing.session_name, remaining, layout).execute()?;
+        tmux::build_remove_retile_commands(&existing.session_name, offset, remaining, layout)
+            .execute()?;
         // Rebalance the re-flowed agent rows to equal width on the live window
         // (design D4, G3): tmux renumbered the survivors after the kill, so the
         // contiguous rows are resized to even columns for the new count.
-        if let Err(e) = tmux::rebalance_agent_rows(&existing.session_name, remaining) {
+        if let Err(e) = tmux::rebalance_agent_rows(&existing.session_name, offset, remaining) {
             eprintln!("warning: could not rebalance agent-row widths: {e}");
         }
     }
@@ -156,18 +157,11 @@ pub(crate) fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Resu
     let mut updated = existing.clone();
     updated.worktrees.remove(pos);
     session::save_session(&updated)?;
-    // The orchestrator pane does not change when a coding agent is detached —
-    // carry the existing entry (if any) forward unchanged.
-    let orchestrator = session::read_repo_session_file(&repo_root, &updated.session_name)
-        .ok()
-        .flatten()
-        .and_then(|f| f.orchestrator);
     write_repo_discovery_file(
         &repo_root,
         &updated.session_name,
         &updated.worktrees,
         offset,
-        orchestrator,
     );
 
     println!(

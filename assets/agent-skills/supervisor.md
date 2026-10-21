@@ -328,13 +328,13 @@ prompt**).
 <!-- drive-loop-directive:begin -->
 ## Unattended: a drive loop is running
 
-An in-process drive loop is sweeping every pane this session. It approves nothing: every live permission prompt it finds is escalated into THIS pane and recorded on the broker, and the rest of the wave keeps moving. No git-paw component approves permission prompts.
+An in-process drive loop is sweeping every coding-agent surface this session. It approves nothing and types nothing for you: it records each live permission prompt, judgment call and merge decision on the broker, where you read them, and the rest of the wave keeps moving. No git-paw component approves permission prompts.
 
-The loop is the pump; you are the brain. It does not merely park what it cannot decide — it types each judgment call straight into THIS pane and moves on without waiting for you, and it nudges you to run an orchestration sweep on a longer cadence. A task prompt arriving here with no human behind it is the loop handing you work; see **Judgment calls handed to you** for the four kinds and how to decide each.
+The loop is the pump; you are the brain. You drive the session from outside it, so the broker is where the loop's work reaches you: its review items (questions it publishes as `supervisor`), each worker's own questions, and each `committed`/`done` artifact whose merge decision is now live.
 
 Your role this session is escalation-driven, in this order each cycle:
 
-1. **Drain the loop's escalations first.** Each escalated permission prompt is injected here AND recorded as a review item in your broker inbox — the inbox is the backstop for anything that arrived while this pane was busy. Relay each one to the human, naming the agent and the pending command, and run `.git-paw/scripts/sweep.sh approve <pane>` only when the human explicitly tells you to. For any other escalation, reason about it and publish feedback or an answer — before anything else, so blocked agents unblock fastest.
+1. **Drain the loop's escalations first.** Read each escalated permission prompt from the broker. Relay each one to the human, naming the agent and the pending command, and run `.git-paw/scripts/sweep.sh approve <pane>` only when the human explicitly tells you to. For any other escalation, reason about it and publish feedback or an answer — before anything else, so blocked agents unblock fastest.
 2. **Then run your normal sweep** — verification, merge, conflict handling, detect-stuck, and status — as usual. Do not wait for prompts to clear on their own; nothing will clear them but the human's decision.
 <!-- drive-loop-directive:end -->
 
@@ -493,11 +493,11 @@ curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
 ### Judgment calls handed to you
 
 In an unattended session the drive loop is a **pump, not a brain**: it sweeps
-panes, escalates every permission prompt it finds, and whenever it meets
-something that needs judgment it types that judgment call straight into your
-pane and moves on. It does not wait for you. So a task prompt can appear in
-your pane with no human behind it — that is the loop handing you work, and
-deciding it is your job, not the human's. The one exception is a permission
+the coding-agent panes, escalates every permission prompt it finds, and
+whenever it meets something that needs judgment it records it on the broker
+and moves on. It does not wait for you, and it types nothing for you — you
+drive the session from outside it, so the broker is where that work waits.
+Deciding it is your job, not the human's. The one exception is a permission
 prompt: those are the human's to decide, and your job is to relay them.
 
 Four kinds of judgment call reach you this way. For each, decide from the
@@ -535,11 +535,9 @@ ambiguity you can resolve from the specs is not a human's problem.
 
 **Non-blocking in both directions.** The loop never waits on your answer, so a
 call you deliberate over cannot freeze the wave; equally, do not sit on one.
-Every hand-off is also recorded on the broker as a review item, so nothing is
-lost when your pane happened to be busy at the moment the loop tried to hand it
-over. The loop will also nudge you to run an orchestration sweep on a longer
-cadence — that nudge is your cue to re-read the broker state and pick up
-whatever is still open, including anything a busy pane missed.
+Every judgment call stays on the broker until it is answered, so nothing is
+lost while you are busy — re-read the broker state each cycle and pick up
+whatever is still open.
 
 ### Who decides a permission prompt
 
@@ -550,9 +548,9 @@ You do not. Three parties decide, in this order:
    commands before anything reaches you. git-paw adds no rules of its own and
    judges no command — it has no allowlist and no command classifier.
 2. **Any prompt the CLI still raises is relayed to the human.** Under
-   `--unattended` the drive loop escalates it into this pane and records it on
-   the broker; otherwise your own sweep finds it. Relay it in your own pane,
-   naming the agent and the pending command.
+   `--unattended` the drive loop records it on the broker; otherwise your own
+   sweep finds it. Relay it to the human, naming the agent and the pending
+   command.
 3. **The human decides.** Only when the human explicitly tells you to approve
    do you run:
 

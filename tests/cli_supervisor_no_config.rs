@@ -101,8 +101,8 @@ fn supervisor_without_section_or_default_cli_still_errors() {
     let _proc_env = tmux_env.apply_to_process();
     let home = TempDir::new().expect("home tempdir");
 
-    // Neither `default_cli` nor `[supervisor]` — the existing CLI-resolution
-    // error path SHALL still fire.
+    // Neither `default_cli` nor `[supervisor]` nor `--cli` — no coding-agent CLI
+    // resolves, so the launch errors naming `--cli` and `default_cli`.
     write_config(tr.path(), "# no default_cli, no supervisor section\n");
 
     let mut command = cmd();
@@ -123,7 +123,7 @@ fn supervisor_without_section_or_default_cli_still_errors() {
         "supervisor launch without CLI resolution should fail"
     );
     assert!(
-        stderr.contains("requires either [supervisor].cli or default_cli"),
+        stderr.contains("--cli") && stderr.contains("default_cli"),
         "stderr should explain the missing-CLI condition; got:\n{stderr}"
     );
 }

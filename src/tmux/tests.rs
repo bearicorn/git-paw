@@ -606,26 +606,17 @@ fn hard_command_failure_aborts() {
     assert!(result.is_err(), "a hard command failure must propagate");
 }
 
-/// Scenario: Supervisor/dashboard/agent pane titles are their role/branch
-/// id, and the supervisor builder also emits all five affordances.
+/// Scenarios "Dashboard pane title is dashboard" and "Agent pane title is
+/// the branch id": pane 0 is titled `dashboard`, each agent its branch, and
+/// the supervised builder also emits all five affordances.
 #[test]
 fn supervisor_session_titles_are_roles_and_emits_affordances() {
     let layout = crate::surface::supervisor_layout(2).expect("layout");
-    let supervisor = make_pane("supervisor", "/repo", "claude");
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let agent = make_pane("feat/foo", "/tmp/wt", "claude");
-    let session = build_supervisor_session(
-        "sup",
-        None,
-        &supervisor,
-        &dashboard,
-        &[agent],
-        layout,
-        true,
-        true,
-        &[],
-    )
-    .expect("session builds");
+    let session =
+        build_supervisor_session("sup", None, &dashboard, &[agent], layout, true, true, &[])
+            .expect("session builds");
     let cmds = session.command_strings();
 
     // All five affordances present and scoped.
@@ -645,35 +636,24 @@ fn supervisor_session_titles_are_roles_and_emits_affordances() {
             .unwrap_or_else(|| panic!("no title set for {target}; cmds:\n{cmds:#?}"))
             .clone()
     };
-    assert!(title_for(":0.0").ends_with("-T supervisor"), "pane 0 title");
-    assert!(title_for(":0.1").ends_with("-T dashboard"), "pane 1 title");
+    assert!(title_for(":0.0").ends_with("-T dashboard"), "pane 0 title");
     assert!(
-        title_for(":0.2").ends_with("-T feat/foo"),
+        title_for(":0.1").ends_with("-T feat/foo"),
         "agent pane title"
     );
 }
 
 /// W2-2 (supervisor-cli-launch-robustness): the supervisor build suppresses
 /// shell startup prompts (so an oh-my-zsh-style update prompt can't eat the
-/// CLI-launch keystroke) and clears the input line before each launch.
+/// launch keystroke) and clears the input line before each launch.
 #[test]
 fn supervisor_build_suppresses_startup_prompts_and_clears_input() {
     let layout = crate::surface::supervisor_layout(1).expect("layout");
-    let supervisor = make_pane("supervisor", "/repo", "claude");
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let agent = make_pane("feat/foo", "/tmp/wt", "claude");
-    let session = build_supervisor_session(
-        "sup",
-        None,
-        &supervisor,
-        &dashboard,
-        &[agent],
-        layout,
-        true,
-        true,
-        &[],
-    )
-    .expect("session builds");
+    let session =
+        build_supervisor_session("sup", None, &dashboard, &[agent], layout, true, true, &[])
+            .expect("session builds");
     let cmds = session.command_strings();
 
     // Pane 0's shell gets the suppression env via `new-session -e`.
@@ -689,68 +669,89 @@ fn supervisor_build_suppresses_startup_prompts_and_clears_input() {
             && c.contains("true")),
         "session env must carry DISABLE_AUTO_UPDATE for split panes"
     );
-    // A `C-u` clear precedes the supervisor pane's CLI-launch command.
-    let clear_idx = cmds.iter().position(|c| {
-        c.contains("send-keys") && c.contains(":0.0") && c.trim_end().ends_with("C-u")
-    });
-    let launch_idx = cmds.iter().position(|c| {
-        c.contains("send-keys") && c.contains(":0.0") && c.contains("claude") && c.contains("Enter")
-    });
-    let (clear_idx, launch_idx) = (
-        clear_idx.expect("a C-u clear is sent to pane 0"),
-        launch_idx.expect("the CLI-launch command is sent to pane 0"),
-    );
-    assert!(
-        clear_idx < launch_idx,
-        "the C-u clear must precede the CLI-launch command on pane 0"
-    );
+    // A `C-u` clear precedes each pane's launch command.
+    for (target, command) in [(":0.0", "git-paw __dashboard"), (":0.1", "claude")] {
+        let clear_idx = cmds.iter().position(|c| {
+            c.contains("send-keys") && c.contains(target) && c.trim_end().ends_with("C-u")
+        });
+        let launch_idx = cmds.iter().position(|c| {
+            c.contains("send-keys")
+                && c.contains(target)
+                && c.contains(command)
+                && c.contains("Enter")
+        });
+        let (clear_idx, launch_idx) = (
+            clear_idx.unwrap_or_else(|| panic!("a C-u clear is sent to {target}")),
+            launch_idx.unwrap_or_else(|| panic!("the launch command is sent to {target}")),
+        );
+        assert!(
+            clear_idx < launch_idx,
+            "the C-u clear must precede the launch command on {target}"
+        );
+    }
 }
 
-/// W3-1 (supervisor-first-agent-cwd): the split `-c` cwds are assigned to
-/// compensate for the pane-1/2 swap, so the first agent's CLI (sent to
-/// index 2 after the swap) runs in its worktree, not the repo root. The
-/// agent-area `-v` split takes the dashboard's cwd; the dashboard `-h`
-/// split takes the first agent's worktree.
+/// Scenarios "Every agent split names its own worktree" and "First agent's
+/// CLI runs in its worktree": the dashboard is pane 0 via `new-session -c
+/// <repo root>`, every agent — the first included — is born by a split that
+/// carries its own worktree, each CLI goes to the index its split produced,
+/// and no `swap-pane` is emitted.
 #[test]
-fn supervisor_build_compensates_first_agent_cwd_for_swap() {
+fn supervisor_build_spawns_every_agent_in_its_own_worktree_without_a_swap() {
     let layout = crate::surface::supervisor_layout(2).expect("layout");
-    let supervisor = make_pane("supervisor", "/repo", "claude");
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let a0 = make_pane("feat/foo", "/tmp/wt-foo", "claude");
     let a1 = make_pane("feat/bar", "/tmp/wt-bar", "claude");
-    let session = build_supervisor_session(
-        "sup",
-        None,
-        &supervisor,
-        &dashboard,
-        &[a0, a1],
-        layout,
-        true,
-        true,
-        &[],
-    )
-    .expect("session builds");
+    let session =
+        build_supervisor_session("sup", None, &dashboard, &[a0, a1], layout, true, true, &[])
+            .expect("session builds");
     let cmds = session.command_strings();
 
-    let vsplit = cmds
+    let new_session = cmds
         .iter()
-        .find(|c| c.contains("split-window") && c.contains("-v") && c.contains("-c"))
-        .expect("agent-area -v split with -c");
-    let hsplit = cmds
-        .iter()
-        .find(|c| c.contains("split-window") && c.contains("-h") && c.contains("-c"))
-        .expect("dashboard -h split with -c");
-
-    // Agent-area split is born in the dashboard's cwd (it lands at the
-    // dashboard's post-swap index); dashboard split is born in the first
-    // agent's worktree (it lands at the agent's post-swap index).
+        .find(|c| c.contains("new-session"))
+        .expect("new-session");
     assert!(
-        vsplit.contains("-c /repo"),
-        "agent-area -v split must use the dashboard cwd (swap compensation); got: {vsplit}"
+        new_session.ends_with("-c /repo"),
+        "the dashboard pane is born at the repo root; got: {new_session}"
     );
     assert!(
-        hsplit.contains("-c /tmp/wt-foo"),
-        "dashboard -h split must use the first agent's worktree (swap compensation); got: {hsplit}"
+        !cmds.iter().any(|c| c.contains("swap-pane")),
+        "no swap-pane may be emitted; cmds:\n{cmds:#?}"
+    );
+
+    let splits: Vec<&String> = cmds.iter().filter(|c| c.contains("split-window")).collect();
+    assert_eq!(splits.len(), 2, "one split per agent; got {splits:#?}");
+    assert!(
+        splits[0].contains("-v")
+            && splits[0].contains("-t paw-sup:0.0")
+            && splits[0].ends_with("-c /tmp/wt-foo"),
+        "the first agent splits off the dashboard in its own worktree; got: {}",
+        splits[0]
+    );
+    assert!(
+        splits[1].contains("-h")
+            && splits[1].contains("-t paw-sup:0.1")
+            && splits[1].ends_with("-c /tmp/wt-bar"),
+        "the second agent splits off the first in its own worktree; got: {}",
+        splits[1]
+    );
+    assert!(
+        !cmds.iter().any(|c| c.contains("cd /tmp/wt")),
+        "no `cd <worktree> &&` launch chain"
+    );
+    for (target, title) in [(":0.1", "feat/foo"), (":0.2", "feat/bar")] {
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains("send-keys") && c.contains(target) && c.contains("claude")),
+            "{title}'s CLI goes to {target}; cmds:\n{cmds:#?}"
+        );
+    }
+    assert!(
+        !cmds
+            .iter()
+            .any(|c| c.contains("send-keys") && c.contains(":0.0") && c.contains("claude")),
+        "no agent CLI is launched in the repo-root dashboard pane"
     );
 }
 
@@ -763,13 +764,11 @@ fn supervisor_build_compensates_first_agent_cwd_for_swap() {
 #[test]
 fn supervisor_session_opt_out_omits_affordances() {
     let layout = crate::surface::supervisor_layout(1).expect("layout");
-    let supervisor = make_pane("supervisor", "/repo", "claude");
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let agent = make_pane("feat/foo", "/tmp/wt", "claude");
     let session = build_supervisor_session(
         "sup-off",
         None,
-        &supervisor,
         &dashboard,
         &[agent],
         layout,
@@ -794,7 +793,7 @@ fn supervisor_session_opt_out_omits_affordances() {
         "opt-out supervisor session must not set pane titles"
     );
     // The roles the liveness probe reads survive the opt-out.
-    for role in ["supervisor", "dashboard", "feat/foo"] {
+    for role in ["dashboard", "feat/foo"] {
         assert!(
             cmds.iter()
                 .any(|c| c.contains("@paw_role") && c.ends_with(role)),
@@ -1457,26 +1456,24 @@ fn cmd_supervisor_inject_argv_has_single_enter_per_pane() {
 //
 // Behavioral: we inspect the emitted command strings to verify the layout
 // shape. The exact tmux side effects are integration-tested elsewhere;
-// here we lock in the deterministic command sequence the supervisor-mode
-// pane assumptions depend on (supervisor=0, dashboard=1, agents=2+).
+// here we lock in the deterministic command sequence the supervised pane
+// assumptions depend on (dashboard=0, agents=1+).
 // -----------------------------------------------------------------------
 
-fn make_layout_panes(n: usize) -> (PaneSpec, PaneSpec, Vec<PaneSpec>) {
-    let supervisor = make_pane("supervisor", "/repo", "claude");
+fn make_layout_panes(n: usize) -> (PaneSpec, Vec<PaneSpec>) {
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let agents = (0..n)
         .map(|i| make_pane(&format!("feat/b{i}"), &format!("/tmp/wt{i}"), "claude"))
         .collect();
-    (supervisor, dashboard, agents)
+    (dashboard, agents)
 }
 
 fn build_for(agent_count: usize) -> TmuxSession {
     let layout = crate::surface::supervisor_layout(agent_count).expect("layout computes");
-    let (supervisor, dashboard, agents) = make_layout_panes(agent_count);
+    let (dashboard, agents) = make_layout_panes(agent_count);
     build_supervisor_session(
         "proj",
         None,
-        &supervisor,
         &dashboard,
         &agents,
         layout,
@@ -1487,7 +1484,8 @@ fn build_for(agent_count: usize) -> TmuxSession {
     .expect("session builds")
 }
 
-/// 9.1 — 5-agent layout: 1 agent row, top 50% / agent row 50%.
+/// 9.1 — 5-agent layout: 1 agent row, top 50% / agent row 50%. Pane 0 is
+/// the dashboard; panes 1-5 are the agents, in one row below it.
 #[test]
 fn supervisor_layout_5_agents_single_row() {
     let session = build_for(5);
@@ -1498,19 +1496,24 @@ fn supervisor_layout_5_agents_single_row() {
         .collect();
     assert_eq!(
         send_keys.len(),
-        7,
-        "5 agents → 1 supervisor + 1 dashboard + 5 agents = 7 send-keys, got {send_keys:#?}"
+        6,
+        "5 agents → 1 dashboard + 5 agents = 6 send-keys, got {send_keys:#?}"
     );
-    let supervisor_pane = send_keys
-        .iter()
-        .find(|c| c.contains("0.0 "))
-        .unwrap_or(&send_keys[0]);
-    assert!(supervisor_pane.contains("claude"));
-    let dashboard_pane = send_keys
-        .iter()
-        .find(|c| c.contains(":0.1 ") && c.contains("__dashboard"))
-        .expect("dashboard send-keys at pane :0.1");
-    let _ = dashboard_pane;
+    assert!(
+        send_keys
+            .iter()
+            .any(|c| c.contains(":0.0 ") && c.contains("__dashboard")),
+        "dashboard send-keys at pane :0.0; got {send_keys:#?}"
+    );
+    for pane in 1..=5 {
+        let target = format!(":0.{pane} ");
+        assert!(
+            send_keys
+                .iter()
+                .any(|c| c.contains(&target) && c.contains("claude")),
+            "agent at pane {pane}; got {send_keys:#?}"
+        );
+    }
     // Top row resize-pane uses 50%.
     let resizes = commands_containing(&cmds, "resize-pane");
     assert!(
@@ -1519,16 +1522,17 @@ fn supervisor_layout_5_agents_single_row() {
             .any(|c| c.contains(":0.0") && c.contains("-y 50%")),
         "top row resize to 50%, got resizes {resizes:#?}"
     );
-    // Single agent row resize at pane :0.2 with the other 50%.
+    // Single agent row resize at pane :0.1 with the other 50%.
     assert!(
         resizes
             .iter()
-            .any(|c| c.contains(":0.2") && c.contains("-y 50%")),
-        "agent-row resize to 50% at :0.2, got resizes {resizes:#?}"
+            .any(|c| c.contains(":0.1") && c.contains("-y 50%")),
+        "agent-row resize to 50% at :0.1, got resizes {resizes:#?}"
     );
 }
 
-/// 9.2 — 10-agent layout: 2 rows of 5, top 50% / each agent row 25%.
+/// 9.2 — 10-agent layout: 2 rows of 5, top 50% / each agent row 25%; the
+/// first agent row holds panes 1-5, the second panes 6-10.
 #[test]
 fn supervisor_layout_10_agents_two_rows() {
     let session = build_for(10);
@@ -1539,8 +1543,8 @@ fn supervisor_layout_10_agents_two_rows() {
         .collect();
     assert_eq!(
         send_keys.len(),
-        12,
-        "10 agents → 1 supervisor + 1 dashboard + 10 agents = 12 send-keys"
+        11,
+        "10 agents → 1 dashboard + 10 agents = 11 send-keys"
     );
     let resizes = commands_containing(&cmds, "resize-pane");
     assert!(
@@ -1548,9 +1552,20 @@ fn supervisor_layout_10_agents_two_rows() {
             .iter()
             .any(|c| c.contains(":0.0") && c.contains("-y 50%"))
     );
+    for row_first in [":0.1 ", ":0.6 "] {
+        assert!(
+            resizes
+                .iter()
+                .any(|c| c.contains(row_first.trim_end()) && c.contains("-y 25%")),
+            "agent row starting at {row_first} sized 25%; got {resizes:#?}"
+        );
+    }
+    let splits = commands_containing(&cmds, "split-window");
     assert!(
-        resizes.iter().filter(|c| c.contains("-y 25%")).count() >= 2,
-        "two agent rows at 25% each, got {resizes:#?}"
+        splits
+            .iter()
+            .any(|c| c.contains("-v") && c.contains(":0.1") && c.ends_with("-c /tmp/wt5")),
+        "the sixth agent starts a new row below the first agent row; got {splits:#?}"
     );
 }
 
@@ -1569,16 +1584,18 @@ fn supervisor_layout_11_agents_three_rows() {
         resizes.iter().filter(|c| c.contains("-y 16.7%")).count() >= 3,
         "three agent rows at 16.7% each, got {resizes:#?}"
     );
-    // 11 agents start at pane 2 and run through pane 12.
+    // 11 agents start at pane 1 and run through pane 11.
     let send_keys: Vec<String> = commands_containing(&cmds, "send-keys")
         .into_iter()
         .filter(|c| !c.trim_end().ends_with("C-u"))
         .collect();
-    assert_eq!(send_keys.len(), 13);
-    assert!(send_keys.iter().any(|c| c.contains(":0.12 ")));
+    assert_eq!(send_keys.len(), 12);
+    assert!(send_keys.iter().any(|c| c.contains(":0.11 ")));
+    assert!(!send_keys.iter().any(|c| c.contains(":0.12 ")));
 }
 
-/// 9.4 — 20-agent layout: 4 rows of 5, top 50% / each agent row 12.5%.
+/// 9.4 — 20-agent layout: 4 rows of 5, top 50% / each agent row 12.5%,
+/// agents at panes 1-20 (5 dashboard-plus-agent rows in total).
 #[test]
 fn supervisor_layout_20_agents_four_rows() {
     let session = build_for(20);
@@ -1589,10 +1606,21 @@ fn supervisor_layout_20_agents_four_rows() {
             .iter()
             .any(|c| c.contains(":0.0") && c.contains("-y 50%"))
     );
-    assert!(
-        resizes.iter().filter(|c| c.contains("-y 12.5%")).count() >= 4,
-        "four agent rows at 12.5% each, got {resizes:#?}"
-    );
+    for row_first in [1, 6, 11, 16] {
+        let target = format!(":0.{row_first} ");
+        assert!(
+            resizes
+                .iter()
+                .any(|c| c.contains(target.trim_end()) && c.contains("-y 12.5%")),
+            "agent row starting at pane {row_first} sized 12.5%; got {resizes:#?}"
+        );
+    }
+    let send_keys: Vec<String> = commands_containing(&cmds, "send-keys")
+        .into_iter()
+        .filter(|c| !c.trim_end().ends_with("C-u"))
+        .collect();
+    assert_eq!(send_keys.len(), 21, "1 dashboard + 20 agents");
+    assert!(send_keys.iter().any(|c| c.contains(":0.20 ")));
 }
 
 /// 9.5 — 25-agent layout: 5 rows of 5, top 50% / each agent row 10%.
@@ -1623,9 +1651,9 @@ fn supervisor_layout_26_agents_rejected_by_layout_helper() {
     assert!(msg.contains("maximum is 25"));
 }
 
-/// 9.7 — pane indices follow row-major order. With 7 agents, pane 2 is
-/// the first agent (top-left), pane 6 is the fifth (top-right of row 1),
-/// pane 7 is the sixth (start of row 2).
+/// 9.7 — pane indices follow row-major order. With 7 agents, pane 1 is
+/// the first agent (top-left), pane 5 is the fifth (top-right of row 1),
+/// pane 6 is the sixth (start of row 2).
 #[test]
 fn supervisor_layout_7_agents_row_major_indices() {
     let session = build_for(7);
@@ -1634,41 +1662,54 @@ fn supervisor_layout_7_agents_row_major_indices() {
         .into_iter()
         .filter(|c| !c.trim_end().ends_with("C-u"))
         .collect();
-    // pane :0.2 is the first agent — its send-keys must contain its CLI
-    // command. Likewise :0.6 (fifth agent) and :0.7 (sixth agent).
+    // Each agent's CLI goes to its row-major pane: agent i (0-based) at
+    // pane i + 1.
+    for (agent, pane) in [(0, 1), (4, 5), (5, 6), (6, 7)] {
+        let target = format!(":0.{pane} ");
+        assert!(
+            send_keys
+                .iter()
+                .any(|c| c.contains(&target) && c.contains("claude")),
+            "pane {pane} runs agent {agent}; send-keys {send_keys:#?}"
+        );
+    }
+    // The sixth agent opens row 2 with a vertical split below row 1's
+    // first pane; the fifth closes row 1 with a horizontal split.
+    let splits = commands_containing(&cmds, "split-window");
     assert!(
-        send_keys
+        splits
             .iter()
-            .any(|c| c.contains(":0.2 ") && c.contains("claude")),
-        "pane :0.2 is the first agent (top-left); send-keys {send_keys:#?}"
+            .any(|c| c.contains("-h") && c.contains(":0.4") && c.ends_with("-c /tmp/wt4")),
+        "the fifth agent splits off the fourth; got {splits:#?}"
     );
     assert!(
-        send_keys
+        splits
             .iter()
-            .any(|c| c.contains(":0.6 ") && c.contains("claude")),
-        "pane :0.6 is the fifth agent (top-right of row 1)"
-    );
-    assert!(
-        send_keys
-            .iter()
-            .any(|c| c.contains(":0.7 ") && c.contains("claude")),
-        "pane :0.7 is the sixth agent (start of row 2)"
+            .any(|c| c.contains("-v") && c.contains(":0.1") && c.ends_with("-c /tmp/wt5")),
+        "the sixth agent starts row 2; got {splits:#?}"
     );
 }
 
-// Maps to scenario `Top row is split 50/50 between supervisor and
-// dashboard` from supervisor-as-pane. (test-coverage-v0-5-0 task 12.7)
+// Scenario `Dashboard row spans the full width` (supervisor-launch): no
+// horizontal split shares the top row — the only split off pane 0 is the
+// vertical one that opens the agent grid.
 #[test]
-fn supervisor_top_row_split_50_50() {
+fn supervisor_top_row_is_the_dashboard_alone() {
     let session = build_for(3);
     let cmds = session.command_strings();
-    let h_split = cmds
+    let off_pane_zero: Vec<&String> = cmds
         .iter()
-        .find(|c| c.contains("split-window") && c.contains("-h") && c.contains("-l 50%"))
-        .unwrap_or_else(|| panic!("expected horizontal 50% split; got cmds: {cmds:#?}"));
+        .filter(|c| c.contains("split-window") && c.contains(":0.0"))
+        .collect();
+    assert_eq!(
+        off_pane_zero.len(),
+        1,
+        "exactly one split off the dashboard; got {off_pane_zero:#?}"
+    );
     assert!(
-        h_split.contains(":0.0") || h_split.contains("split-window -h -t paw-proj"),
-        "horizontal split should target the supervisor pane; got: {h_split}"
+        off_pane_zero[0].contains("-v") && off_pane_zero[0].contains("-l 50%"),
+        "the dashboard is split only vertically, at 50%; got: {}",
+        off_pane_zero[0]
     );
 }
 
@@ -1807,7 +1848,7 @@ fn broker_disabled_produces_no_dashboard_pane() {
     );
 }
 
-// Maps to scenario `Dashboard pane title` from supervisor-as-pane.
+// Maps to scenario `Dashboard pane title is dashboard` (supervisor-launch).
 // (test-coverage-v0-5-0 task 12.3)
 #[test]
 fn dashboard_pane_has_title_dashboard() {
@@ -1818,11 +1859,11 @@ fn dashboard_pane_has_title_dashboard() {
         .iter()
         .find(|c| {
             c.contains("select-pane")
-                && c.contains(":0.1")
+                && c.contains(":0.0")
                 && c.contains("-T")
                 && c.contains("dashboard")
         })
-        .unwrap_or_else(|| panic!("expected select-pane -T dashboard at :0.1; cmds:\n{cmds:#?}"));
+        .unwrap_or_else(|| panic!("expected select-pane -T dashboard at :0.0; cmds:\n{cmds:#?}"));
     // The shipped title shape is `<branch> → <cli_command>` with branch =
     // "dashboard". Confirm the title argument contains the bare word.
     assert!(
@@ -1843,8 +1884,8 @@ fn supervisor_layout_emits_env_before_agent_send_keys() {
         .expect("set-environment GIT_PAW_BROKER_URL present");
     let first_agent_send = cmds
         .iter()
-        .position(|c| c.contains("send-keys") && c.contains(":0.2 "))
-        .expect("first agent send-keys at :0.2");
+        .position(|c| c.contains("send-keys") && c.contains(":0.1 ") && c.contains("claude"))
+        .expect("first agent send-keys at :0.1");
     assert!(
         first_env < first_agent_send,
         "set-environment must come before agent-pane send-keys"
@@ -1882,11 +1923,10 @@ fn every_new_session_command() -> Vec<(&'static str, String)> {
     // sample is fast; the new-session shape doesn't depend on agent
     // count.
     let layout = crate::surface::supervisor_layout(2).expect("layout");
-    let (supervisor, dashboard, agents) = make_layout_panes(2);
+    let (dashboard, agents) = make_layout_panes(2);
     let supervisor_session = build_supervisor_session(
         "conv-supervisor",
         None,
-        &supervisor,
         &dashboard,
         &agents,
         layout,
@@ -1944,14 +1984,12 @@ fn every_new_session_passes_c() {
 #[test]
 fn supervisor_layout_agent_splits_carry_worktree_no_cd_chain() {
     let layout = crate::surface::supervisor_layout(2).expect("layout");
-    let supervisor = make_pane("supervisor", "/repo", "claude");
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let agent_a = make_pane("feat/a", "/tmp/wt-a", "claude");
     let agent_b = make_pane("feat/b", "/tmp/wt-b", "claude");
     let session = build_supervisor_session(
         "proj",
         None,
-        &supervisor,
         &dashboard,
         &[agent_a, agent_b],
         layout,
@@ -1992,45 +2030,67 @@ fn supervisor_layout_agent_splits_carry_worktree_no_cd_chain() {
 
 #[test]
 fn add_agent_same_row_splits_horizontally_from_previous_pane() {
-    // 4 agents already present (single row, indices 2..=5); adding a 5th
+    // 4 agents already present (single row, indices 1..=4); adding a 5th
     // (agent index 4) stays in the same row -> horizontal split from the
-    // immediately-preceding pane (index 5), new pane at index 6.
+    // immediately-preceding pane (index 4), new pane at index 5.
     let layout = crate::surface::layout_for(5).expect("layout");
     let new_agent = make_pane("feat/fifth", "/tmp/wt5", "claude");
-    let session = build_add_agent_commands("paw-x", &new_agent, 4, layout, true);
+    let session = build_add_agent_commands("paw-x", &new_agent, 1, 4, layout, true);
     let cmds = session.command_strings();
 
     assert!(
         cmds.iter().any(|c| c.contains("split-window")
             && c.contains("-h")
-            && c.contains(":0.5")
+            && c.contains(":0.4")
             && c.contains("-c /tmp/wt5")),
-        "5th agent should -h split from pane 5 with -c worktree; cmds:\n{cmds:#?}"
+        "5th agent should -h split from pane 4 with -c worktree; cmds:\n{cmds:#?}"
     );
-    // New pane is targeted at index 6 for title + launch.
+    // New pane is targeted at index 5 for title + launch.
     assert!(
         cmds.iter()
-            .any(|c| c.contains("send-keys") && c.contains(":0.6") && c.contains("claude")),
-        "new agent CLI should launch in pane 6; cmds:\n{cmds:#?}"
+            .any(|c| c.contains("send-keys") && c.contains(":0.5") && c.contains("claude")),
+        "new agent CLI should launch in pane 5; cmds:\n{cmds:#?}"
     );
 }
 
 #[test]
 fn add_agent_new_row_splits_vertically_from_previous_row_first_pane() {
-    // 5 agents present (one full row, indices 2..=6); adding a 6th (agent
+    // 5 agents present (one full row, indices 1..=5); adding a 6th (agent
     // index 5) starts a new row -> vertical split from the previous row's
-    // first pane (index 2).
+    // first pane (index 1).
     let layout = crate::surface::layout_for(6).expect("layout");
     let new_agent = make_pane("feat/sixth", "/tmp/wt6", "claude");
-    let session = build_add_agent_commands("paw-x", &new_agent, 5, layout, false);
+    let session = build_add_agent_commands("paw-x", &new_agent, 1, 5, layout, false);
     let cmds = session.command_strings();
 
     assert!(
         cmds.iter().any(|c| c.contains("split-window")
             && c.contains("-v")
-            && c.contains(":0.2")
+            && c.contains(":0.1")
             && c.contains("-c /tmp/wt6")),
-        "6th agent should -v split from pane 2 (prev row first); cmds:\n{cmds:#?}"
+        "6th agent should -v split from pane 1 (prev row first); cmds:\n{cmds:#?}"
+    );
+}
+
+/// Design D6: a live session an earlier binary built (agents from pane 2)
+/// keeps its own offset — the add path splits and launches relative to the
+/// first agent the session's layout record answers, not this binary's.
+#[test]
+fn add_agent_to_a_pre_relocation_session_uses_its_recorded_offset() {
+    let layout = crate::surface::layout_for(3).expect("layout");
+    let new_agent = make_pane("feat/third", "/tmp/wt3", "claude");
+    let session = build_add_agent_commands("paw-x", &new_agent, 2, 2, layout, false);
+    let cmds = session.command_strings();
+
+    assert!(
+        cmds.iter()
+            .any(|c| c.contains("split-window") && c.contains("-h") && c.contains(":0.3")),
+        "the third agent splits off pane 3 (the second agent); cmds:\n{cmds:#?}"
+    );
+    assert!(
+        cmds.iter()
+            .any(|c| c.contains("send-keys") && c.contains(":0.4") && c.contains("claude")),
+        "the new agent launches in pane 4; cmds:\n{cmds:#?}"
     );
 }
 
@@ -2040,7 +2100,7 @@ fn add_agent_reapplies_row_height_resize_pass() {
     // one resize for the top row (:0.0) at top_row_pct, one per agent row.
     let layout = crate::surface::layout_for(5).expect("layout");
     let new_agent = make_pane("feat/fifth", "/tmp/wt5", "claude");
-    let session = build_add_agent_commands("paw-x", &new_agent, 4, layout, false);
+    let session = build_add_agent_commands("paw-x", &new_agent, 1, 4, layout, false);
     let cmds = session.command_strings();
 
     let top_pct = format!("{}%", layout.top_row_pct);
@@ -2056,7 +2116,7 @@ fn remove_retile_emits_resize_pass_for_remaining_count() {
     // After removing one of 5 agents, the grid re-tiles to the 4-agent
     // layout: a top-row resize plus one agent-row resize (single row).
     let layout = crate::surface::layout_for(4).expect("layout");
-    let session = build_remove_retile_commands("paw-x", 4, layout);
+    let session = build_remove_retile_commands("paw-x", 1, 4, layout);
     let cmds = session.command_strings();
 
     let top_pct = format!("{}%", layout.top_row_pct);
@@ -2065,18 +2125,36 @@ fn remove_retile_emits_resize_pass_for_remaining_count() {
             .any(|c| c.contains("resize-pane") && c.contains(":0.0") && c.contains(&top_pct)),
         "remove re-tile should resize the top row; cmds:\n{cmds:#?}"
     );
-    // 4 agents -> 1 agent row -> exactly one agent-row resize (pane :0.2).
+    // 4 agents -> 1 agent row -> exactly one agent-row resize (pane :0.1).
     assert!(
         cmds.iter()
-            .any(|c| c.contains("resize-pane") && c.contains(":0.2")),
-        "remove re-tile should resize the first agent row (pane 2); cmds:\n{cmds:#?}"
+            .any(|c| c.contains("resize-pane") && c.contains(":0.1")),
+        "remove re-tile should resize the first agent row (pane 1); cmds:\n{cmds:#?}"
+    );
+}
+
+/// Design D6: `remove` on a live pre-relocation session (agents from pane
+/// 2) re-tiles that session's own agent rows, never its pane 1 dashboard.
+#[test]
+fn remove_retile_on_a_pre_relocation_session_uses_its_recorded_offset() {
+    let layout = crate::surface::layout_for(2).expect("layout");
+    let session = build_remove_retile_commands("paw-x", 2, 2, layout);
+    let cmds = session.command_strings();
+    let resizes = commands_containing(&cmds, "resize-pane");
+    assert!(
+        resizes.iter().any(|c| c.contains(":0.2")),
+        "the first agent row is pane 2; got {resizes:#?}"
+    );
+    assert!(
+        !resizes.iter().any(|c| c.contains(":0.1")),
+        "the legacy dashboard (pane 1) is never re-tiled; got {resizes:#?}"
     );
 }
 
 #[test]
 fn remove_retile_with_zero_remaining_is_empty() {
     let layout = crate::surface::layout_for(1).expect("layout");
-    let session = build_remove_retile_commands("paw-x", 0, layout);
+    let session = build_remove_retile_commands("paw-x", 1, 0, layout);
     assert!(
         session.command_strings().is_empty(),
         "removing the last agent leaves the top row untouched (no re-tile)"
@@ -2094,43 +2172,51 @@ fn remove_retile_with_zero_remaining_is_empty() {
 /// within a one-column-per-pane tolerance of the 160 ideal.
 #[test]
 fn agent_row_widths_three_agents_equal_thirds() {
-    let targets = agent_row_widths(480, 3);
-    // Panes :0.2 and :0.3 resized; :0.4 omitted (absorbs remainder).
-    assert_eq!(targets, vec![(2, 159), (3, 159)]);
+    let targets = agent_row_widths(480, 1, 3);
+    // Panes :0.1 and :0.2 resized; :0.3 omitted (absorbs remainder).
+    assert_eq!(targets, vec![(1, 159), (2, 159)]);
 }
 
 /// A full 5-agent row targets an equal fifth per pane (resizing the first
 /// four). At 480 cols: (480-4)/5 = 95 each.
 #[test]
 fn agent_row_widths_five_agents_equal_fifths() {
-    let targets = agent_row_widths(480, 5);
-    assert_eq!(targets, vec![(2, 95), (3, 95), (4, 95), (5, 95)]);
+    let targets = agent_row_widths(480, 1, 5);
+    assert_eq!(targets, vec![(1, 95), (2, 95), (3, 95), (4, 95)]);
+}
+
+/// The targets are counted from the session's first agent pane, so a live
+/// pre-relocation session (agents from pane 2) rebalances its own rows.
+#[test]
+fn agent_row_widths_count_from_the_given_first_agent() {
+    assert_eq!(agent_row_widths(480, 2, 3), vec![(2, 159), (3, 159)]);
 }
 
 /// A single agent needs no rebalance; two rows (6 agents = 5 + 1) rebalance
-/// only the full first row — the lone second-row pane (:0.7) is omitted.
+/// only the full first row — the lone second-row pane (:0.6) is omitted.
 #[test]
 fn agent_row_widths_skips_single_pane_rows() {
     assert!(
-        agent_row_widths(480, 1).is_empty(),
+        agent_row_widths(480, 1, 1).is_empty(),
         "a lone agent needs no width rebalance"
     );
-    let targets = agent_row_widths(480, 6);
-    // Row 1 panes :0.2..:0.5 resized (4); row 2's lone pane :0.7 omitted.
+    let targets = agent_row_widths(480, 1, 6);
+    // Row 1 panes :0.1..:0.4 resized (4); row 2's lone pane :0.6 omitted.
     assert_eq!(targets.len(), 4, "only the full first row rebalances");
     assert!(
-        targets.iter().all(|(idx, _)| *idx >= 2 && *idx <= 5),
+        targets.iter().all(|(idx, _)| *idx >= 1 && *idx <= 4),
         "no second-row pane resized; got {targets:?}"
     );
 }
 
-/// The rebalance never targets the top row (panes 0/1), so the
-/// supervisor/dashboard 50/50 split is untouched (spec 4.3 / D4).
+/// Scenario "Row rebalance leaves the dashboard row full width": the
+/// rebalance never targets the top row (pane 0), so the full-width
+/// dashboard is untouched (spec 4.3 / D4).
 #[test]
 fn agent_row_widths_never_touch_top_row() {
     for n in 1..=crate::surface::SUPERVISOR_MAX_AGENTS {
-        for (idx, _) in agent_row_widths(480, n) {
-            assert!(idx >= 2, "rebalance must skip panes 0 and 1 for n={n}");
+        for (idx, _) in agent_row_widths(480, 1, n) {
+            assert!(idx >= 1, "rebalance must skip pane 0 for n={n}");
         }
     }
 }
@@ -2143,7 +2229,7 @@ fn agent_row_widths_minimum_is_one_fifth() {
     let window = 480usize;
     let floor = window / 5; // 96 cols = 20%
     for n in 1..=crate::surface::SUPERVISOR_MAX_AGENTS {
-        for (idx, cols) in agent_row_widths(window, n) {
+        for (idx, cols) in agent_row_widths(window, 1, n) {
             assert!(
                 cols + 1 >= floor,
                 "pane {idx} width {cols} below the ~20% floor ({floor}) for n={n}"
@@ -2155,7 +2241,7 @@ fn agent_row_widths_minimum_is_one_fifth() {
 /// A zero-width window (no live geometry) yields no resize targets.
 #[test]
 fn agent_row_widths_zero_window_is_empty() {
-    assert!(agent_row_widths(0, 5).is_empty());
+    assert!(agent_row_widths(0, 1, 5).is_empty());
 }
 
 // -----------------------------------------------------------------------
@@ -2736,13 +2822,11 @@ fn has_live_agent_pane_true_for_a_renumbered_agent_pane_after_pause() {
 #[test]
 fn affordances_off_panes_are_still_labelled_so_pause_renumbering_is_safe() {
     let layout = crate::surface::supervisor_layout(1).expect("layout");
-    let supervisor = make_pane("supervisor", "/repo", "claude");
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let agent = make_pane("feat/foo", "/tmp/wt", "claude");
     let session = build_supervisor_session(
         "sup-off",
         None,
-        &supervisor,
         &dashboard,
         &[agent],
         layout,
@@ -2752,7 +2836,7 @@ fn affordances_off_panes_are_still_labelled_so_pause_renumbering_is_safe() {
     )
     .expect("session builds");
     let cmds = session.command_strings();
-    for role in ["supervisor", "dashboard", "feat/foo"] {
+    for role in ["dashboard", "feat/foo"] {
         assert!(
             cmds.iter()
                 .any(|c| c.contains("@paw_role") && c.ends_with(role)),
@@ -2763,7 +2847,7 @@ fn affordances_off_panes_are_still_labelled_so_pause_renumbering_is_safe() {
     // Post-pause: the dashboard pane is gone and the agent pane (which the
     // builder labelled above) has been renumbered down to index 0, below the
     // supervisor-mode agent offset.
-    let runner = runner_with_panes("0|claude|supervisor\n1|claude|feat/foo\n");
+    let runner = runner_with_panes("0|claude|feat/foo\n");
     assert!(has_live_agent_pane_with(
         &runner,
         "sup-off",
@@ -3267,7 +3351,7 @@ fn rebalance_queries_the_window_width_then_resizes_all_but_the_last_pane_in_a_ro
             Ok(ok_out(""))
         }
     });
-    rebalance_agent_rows_with(&fake, "paw-proj", 2).unwrap();
+    rebalance_agent_rows_with(&fake, "paw-proj", 1, 2).unwrap();
 
     let calls = fake.calls();
     assert_eq!(
@@ -3289,7 +3373,7 @@ fn rebalance_queries_the_window_width_then_resizes_all_but_the_last_pane_in_a_ro
         vec![vec![
             "resize-pane".to_string(),
             "-t".to_string(),
-            "paw-proj:0.2".to_string(),
+            "paw-proj:0.1".to_string(),
             "-x".to_string(),
             "39".to_string(),
         ]],
@@ -3300,7 +3384,7 @@ fn rebalance_queries_the_window_width_then_resizes_all_but_the_last_pane_in_a_ro
 #[test]
 fn rebalance_is_a_no_op_when_the_window_is_gone() {
     let gone = FakeCommandRunner::failing("can't find window");
-    rebalance_agent_rows_with(&gone, "paw-proj", 3).unwrap();
+    rebalance_agent_rows_with(&gone, "paw-proj", 1, 3).unwrap();
     assert_eq!(
         gone.calls().len(),
         1,
@@ -3317,7 +3401,7 @@ fn rebalance_is_a_no_op_for_a_single_agent() {
             Ok(ok_out(""))
         }
     });
-    rebalance_agent_rows_with(&fake, "paw-proj", 1).unwrap();
+    rebalance_agent_rows_with(&fake, "paw-proj", 1, 1).unwrap();
     assert_eq!(
         fake.calls().len(),
         1,

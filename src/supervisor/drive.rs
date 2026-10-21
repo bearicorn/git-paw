@@ -2,15 +2,16 @@
 //!
 //! `cmd_supervisor` runs this loop in-process (in the foreground
 //! `git paw start --unattended` process) after the tmux session is built. The
-//! loop keeps a multi-agent supervisor wave moving with no human in the seat:
-//! it polls on a ~15-second cadence, sweeps the supervisor pane (pane 0) and
-//! every coding-agent pane, auto-approves classifier-safe permission prompts,
-//! escalates risky/unknown prompts for later human review WITHOUT blocking the
-//! rest of the wave, detects completion, and exits with a summary.
+//! loop keeps a multi-agent supervised wave moving with no human in the seat:
+//! it polls on a ~15-second cadence, sweeps every coding-agent surface,
+//! escalates each live permission prompt for a human decision WITHOUT blocking
+//! the rest of the wave, detects completion, and exits with a summary.
 //!
-//! The loop is the *sole* auto-approver for an unattended session — the
-//! dashboard's auto-approve thread is disabled (see `main.rs`) so two approvers
-//! never race on the same pane.
+//! No orchestrator runs inside the session — it drives from outside tmux — so
+//! the loop sweeps, nudges and submits on coding-agent surfaces only, never on
+//! the dashboard or an unattributed surface, and it types no escalation into
+//! any surface: the broker record, the exit summary and the manual-decision
+//! log are the whole escalation. It approves no prompt.
 //!
 //! # Battle-tested heuristics encoded here
 //!
@@ -26,10 +27,10 @@
 //!   `for p in …` shell loop (D3).
 //! - **Pane→agent resolution via `pane_current_path`** — never pane index or
 //!   CLI-argument order ([`resolve_pane_agent`], D2).
-//! - **Cover pane 0 but never pollute it** — the supervisor's own pane is swept
-//!   and its safe prompts approved with the minimal option-digit + `Enter`
-//!   keystrokes only; nothing is typed when pane 0 shows no live prompt
-//!   (W15-3 / W15-13, D5).
+//! - **Coding surfaces only** — every keystroke the loop sends (a nudge, a
+//!   stale-input recovery, a buffered-input submit) reaches a surface the
+//!   layout resolves as a coding agent; the dashboard and unattributed
+//!   surfaces are never swept for a decision (`approval-auto`, GP-46).
 //! - **Identity-keyed dedup** — repeated alerts collapse on
 //!   `(agent_id, command-shape)` within a 5-minute window, never on the
 //!   prompt's boilerplate text ([`DedupWindow`], W15-19, D7).
@@ -86,12 +87,6 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_mins(25);
 /// single alert within this window (W15-19).
 pub const DEDUP_WINDOW: Duration = Duration::from_mins(5);
 
-/// Orchestration-sweep cadence: the loop nudges the orchestrator pane to run an
-/// orchestration sweep on approximately this interval — deliberately a multiple
-/// of [`POLL_INTERVAL`] (20×), so the fast approval sweep is unchanged and the
-/// orchestrator is not prompt-stormed by a per-tick nudge.
-pub const ORCHESTRATION_NUDGE_INTERVAL: Duration = Duration::from_mins(5);
-
 pub use crate::surface::SUPERVISOR_AGENT_ID;
 
 /// Learning category recorded when the loop absorbs friction it could not
@@ -103,8 +98,8 @@ const LEARNING_CATEGORY: &str = "tooling_friction";
 // ---------------------------------------------------------------------------
 
 /// A coding agent in the session, used to resolve a pane to its agent by
-/// working directory. The supervisor (pane 0) and dashboard (pane 1) are not
-/// listed here — they resolve to the repo root by pane index.
+/// working directory. The dashboard is not listed here — it resolves by the
+/// index the session's layout reserves for it.
 #[derive(Debug, Clone)]
 pub struct AgentPane {
     /// Broker agent id (slugified branch name).
@@ -140,42 +135,6 @@ pub fn resolve_pane_agent(
     agents: &[AgentPane],
 ) -> SurfaceRole {
     layout.resolve(pane_index, pane_current_path, surface_owners(agents))
-}
-
-/// Returns the pane index of the orchestrator (supervisor CLI) pane, or `None`
-/// when the session has no supervisor pane.
-///
-/// Resolution reuses [`resolve_pane_agent`], so the orchestrator is identified
-/// the same structural way every other pane is. There is deliberately no
-/// LLM-liveness probe and no broker heartbeat: the layout already reserves an
-/// index for the supervisor surface, so pane **presence** is the signal.
-#[must_use]
-pub fn orchestrator_pane_index(
-    layout: SessionLayout,
-    panes: &[PaneInfo],
-    agents: &[AgentPane],
-) -> Option<usize> {
-    panes
-        .iter()
-        .find(|p| {
-            resolve_pane_agent(layout, p.pane_index, &p.pane_current_path, agents).is_supervisor()
-        })
-        .map(|p| p.pane_index)
-}
-
-/// Whether an orchestrator (supervisor CLI) pane is present — the predicate that
-/// selects between the hand-to-orchestrator path and the broker-only fallback.
-///
-/// A pure `--unattended` run with no supervisor pane returns `false`, and the
-/// loop's escalation behaviour is then identical to the pre-orchestrator
-/// version: a uniform broker review item and no pane injection at all.
-#[must_use]
-pub fn orchestrator_present(
-    layout: SessionLayout,
-    panes: &[PaneInfo],
-    agents: &[AgentPane],
-) -> bool {
-    orchestrator_pane_index(layout, panes, agents).is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +279,12 @@ impl WorkerPhase {
     /// [`MERGE_CANDIDATE_STATUSES`] phases, i.e. [`WorkerPhase::Committed`] /
     /// [`WorkerPhase::Done`]. Delegates to the array for the same reason
     /// [`WorkerPhase::is_completed`] does.
+    ///
+    /// No production caller while no orchestrator runs inside the session: the
+    /// headless hand-off (`orchestrator-escalation-handoff`) is what keys a
+    /// merge decision off it. Kept because `code-architecture` requires the
+    /// predicate on the enum.
+    #[cfg_attr(not(test), expect(dead_code))]
     fn is_merge_candidate(self) -> bool {
         MERGE_CANDIDATE_STATUSES.contains(&self.as_status())
     }
@@ -584,25 +549,10 @@ pub fn reengagement_text(gate: &str, feedback: &str) -> String {
     ))
 }
 
-/// Renders the orchestration-sweep nudge injected into the orchestrator's pane
-/// on the [`ORCHESTRATION_NUDGE_INTERVAL`] cadence.
-///
-/// The nudge carries no per-agent detail on purpose: it asks the orchestrator to
-/// re-derive the whole picture from the broker (spawn order, merge sequencing,
-/// blocked workers) rather than pushing the loop's mechanical view of it, which
-/// is what keeps judgment in the smart model and mere triggering in the loop.
-#[must_use]
-pub fn orchestration_nudge_text() -> String {
-    one_line_capped(
-        "Run an orchestration sweep now: re-read the broker state and reconsider \
-         dependency-aware spawn order, merge sequencing, and any blocked or \
-         non-converging worker. Act on what you find; escalate to the human only \
-         what you genuinely cannot decide.",
-    )
-}
-
-/// Renders the task text injected into the orchestrator's pane when a worker
-/// asks an ambiguous question.
+/// Renders the escalation context for a worker's ambiguous question — the text
+/// a headless orchestrator invocation reads (`orchestrator-escalation-handoff`).
+/// A pure renderer: no orchestrator runs inside the session, so nothing here is
+/// typed into a surface.
 ///
 /// The worker published `agent.question` precisely because it could not decide,
 /// so the question itself is the ambiguity signal — the loop adds no classifier
@@ -619,13 +569,13 @@ pub fn question_handoff_text(agent_id: &str, question: &str) -> String {
     ))
 }
 
-/// Renders the task text injected into the orchestrator's pane when a worker
-/// publishes an artifact at a [`MERGE_CANDIDATE_STATUSES`] status — the point at
-/// which a **merge decision** becomes live.
+/// Renders the escalation context for a worker artifact at a
+/// `committed`/`done` status — the point at which a **merge decision**
+/// becomes live. A pure renderer, kept for the headless
+/// orchestrator invocation (`orchestrator-escalation-handoff`); nothing here is
+/// typed into a surface.
 ///
-/// A committed or done branch is what the supervisor's verify-then-merge
-/// sequencing keys off, so this is the loop triggering that decision rather than
-/// waiting for the orchestrator to notice the artifact on its own.
+/// A committed or done branch is what verify-then-merge sequencing keys off.
 #[must_use]
 pub fn merge_handoff_text(agent_id: &str, status: &str) -> String {
     one_line_capped(&format!(
@@ -693,8 +643,10 @@ impl Escalation {
         }
     }
 
-    /// Renders the task text injected into the orchestrator's pane for this
-    /// escalation.
+    /// Renders the task text a headless orchestrator invocation reads for this
+    /// escalation (`orchestrator-escalation-handoff`). A pure renderer: no
+    /// orchestrator runs inside the session, so the drive loop types this into
+    /// no surface.
     ///
     /// Most verdicts ask the *orchestrator* to decide and act — it can publish
     /// an answer or declare a branch unrecoverable itself. The human framing is
@@ -710,15 +662,10 @@ impl Escalation {
     /// run `sweep.sh approve` only when the human says so.
     ///
     /// A `"cli-unavailable"` verdict paraphrases its `command` instead of
-    /// quoting it, since this text is typed into the orchestrator's own
-    /// pane, which the next sweep re-scans:
-    /// the `cli-unavailable` verdict's `command` is the matched banner LINE
-    /// VERBATIM (`sweep_pane`), and quoting it here would plant a copy of the
-    /// marker in a scanned pane — the next sweep would then see its own
-    /// echoed hand-off, misread it as a fresh orchestrator-pane banner, and
-    /// exit the run `cli-unavailable` for the wrong reason
-    /// (`cli-unavailable-detection-gaps`). The broker-facing [`Self::question`]
-    /// is unaffected: it is never typed into a pane the loop scans.
+    /// quoting it: the `cli-unavailable` verdict's `command` is the matched
+    /// banner LINE VERBATIM (`sweep_pane`), and a reader that echoes this text
+    /// into a terminal git-paw scans must not plant a copy of the marker there
+    /// (`cli-unavailable-detection-gaps`).
     #[must_use]
     pub fn handoff_text(&self) -> String {
         if self.verdict == "cli-unavailable" {
@@ -764,12 +711,6 @@ pub enum DriveOutcome {
     /// new same-named session (GP-06) — it exits without acting on the new
     /// session's panes.
     SessionTornDown,
-    /// The orchestrator pane's CLI has stopped serving — a usage/session
-    /// limit or an expired/missing login — detected via the resolved
-    /// profile's `cli_unavailable_markers` (`drive-loop-exit-summary-truth`,
-    /// D4). An explicit, loud, non-success exit: with the brain gone,
-    /// continuing to approve worker prompts is not progress.
-    CliUnavailable,
 }
 
 impl DriveOutcome {
@@ -782,7 +723,6 @@ impl DriveOutcome {
             DriveOutcome::Stuck => "stuck",
             DriveOutcome::Heartbeat => "heartbeat",
             DriveOutcome::SessionTornDown => "session-torn-down",
-            DriveOutcome::CliUnavailable => "cli-unavailable",
         }
     }
 }
@@ -806,14 +746,12 @@ pub struct DriveSummary {
     /// wave (GP-05) — the fallback the per-agent list has when its own
     /// resolution is sparse or unavailable, and a useful roll-up otherwise.
     pub merged_summary: Option<String>,
-    /// Whether an orchestrator (supervisor CLI) pane was present for at least
-    /// one sweep this run. `false` for a pure `--unattended` roster with no
-    /// supervisor pane — the summary then says so rather than implying an
-    /// orchestrator was watched for CLI unavailability when none ran
-    /// (`cli-unavailable-detection-gaps`; the pane-0 / supervisor-role
-    /// resolution itself is unchanged).
-    pub orchestrator_monitored: bool,
 }
+
+/// The summary line stating the loop's CLI-unavailability coverage: the
+/// orchestrator runs outside the session, so the loop never watches its CLI.
+pub const ORCHESTRATOR_NOT_MONITORED_LINE: &str =
+    "The orchestrator runs outside the session; its CLI is not monitored by the loop.";
 
 impl DriveSummary {
     /// Renders the summary as human-readable text for the terminal.
@@ -832,9 +770,7 @@ impl DriveSummary {
         if let Some(merged) = &self.merged_summary {
             let _ = writeln!(out, "{merged}");
         }
-        if !self.orchestrator_monitored {
-            out.push_str("No orchestrator pane was monitored for CLI unavailability this run.\n");
-        }
+        let _ = writeln!(out, "{ORCHESTRATOR_NOT_MONITORED_LINE}");
 
         out.push_str("\nPer-agent final state:\n");
         if self.agent_states.is_empty() {
@@ -1102,9 +1038,6 @@ pub struct DriveConfig {
     pub heartbeat: Duration,
     /// Dedup window.
     pub dedup_window: Duration,
-    /// Cadence of the orchestration-sweep nudge injected into the orchestrator
-    /// pane — deliberately longer than `poll_interval`.
-    pub orchestration_nudge_interval: Duration,
     /// Correction-loop policy (`[supervisor.correction]`). The default leaves
     /// `auto_loopback` off, so the loop sends no re-engagement keystrokes.
     pub correction: CorrectionConfig,
@@ -1123,10 +1056,6 @@ pub struct DriveConfig {
     /// resolve the per-CLI nudge settle delay (`drive-loop-actuator-robustness`,
     /// GP-15) — the same resolver the boot-prompt injection path uses.
     pub clis: HashMap<String, CustomCli>,
-    /// CLI running in the orchestrator's pane (pane 0), used to resolve its
-    /// nudge settle delay. Empty when unknown, which resolves to
-    /// [`crate::DEFAULT_SUBMIT_DELAY_MS`] via [`resolve_submit_delay_ms`].
-    pub supervisor_cli: String,
     /// The repository's default branch name, resolved once via
     /// [`crate::git::default_branch`] — used only to label the ref-derived
     /// merged/unmerged text in the exit summary (`drive-loop-exit-summary-truth`).
@@ -1142,17 +1071,15 @@ impl Default for DriveConfig {
             poll_interval: POLL_INTERVAL,
             heartbeat: HEARTBEAT_INTERVAL,
             dedup_window: DEDUP_WINDOW,
-            orchestration_nudge_interval: ORCHESTRATION_NUDGE_INTERVAL,
             correction: CorrectionConfig::default(),
             learnings_enabled: false,
             broker_log_hint: None,
             learnings_hint: None,
             branch_refresh_enabled: false,
             clis: HashMap::new(),
-            supervisor_cli: String::new(),
             default_branch: String::new(),
             // The loop runs only under `cmd_supervisor`, so the supervised
-            // layout (supervisor 0, dashboard 1, agents 2+) is the default.
+            // layout (dashboard 0, agents 1+) is the default.
             layout: SessionLayout::planned(crate::session::SessionMode::Supervisor, true),
         }
     }
@@ -1209,15 +1136,6 @@ pub fn drive_loop(
     let mut resolved_phase: HashMap<String, WorkerPhase> = HashMap::new();
 
     let start = deps.clock.now();
-    // Nudge timer starts at the loop's start, so the first orchestration nudge
-    // lands one full cadence in rather than on the opening tick.
-    let mut last_orchestration_nudge = start;
-    // The orchestrator's nudge settle delay never changes mid-run, so it is
-    // resolved once here rather than on every tick.
-    let orchestrator_settle_delay = Duration::from_millis(resolve_submit_delay_ms(
-        &config.supervisor_cli,
-        &config.clis,
-    ));
     // The most recent `/status` snapshot, used to resolve a coding pane's
     // nudge settle delay during the sweep — which runs BEFORE this tick's own
     // fetch below (GP-16's sweep/fetch ordering stays as-is). Empty on the
@@ -1225,72 +1143,46 @@ pub fn drive_loop(
     // default via `resolve_submit_delay_ms`'s empty-CLI fallback, same as the
     // correction pass's pre-first-status handling.
     let mut status_for_sweep: Vec<AgentStatusRow> = Vec::new();
-    // Whether an orchestrator pane was present for at least one sweep, so the
-    // exit summary can say honestly whether CLI unavailability was ever
-    // monitored for it (`cli-unavailable-detection-gaps`).
-    let mut orchestrator_monitored = false;
+    let ctx = SweepContext { session, repo_root };
 
     // The loop is an expression that breaks with the terminal `(outcome,
     // latest_status)`: every exit path assigns both, so there are no
     // pre-initialised placeholders to leave dead.
-    let (outcome, latest_status) = 'drive: loop {
+    let (outcome, latest_status) = loop {
         // --- Session-instance check (GP-06), before any action this tick -----
         if !instance.is_current() {
             break (DriveOutcome::SessionTornDown, Vec::new());
         }
 
-        // --- Sweep every pane (pane-keyed, explicit per-pane capture) --------
-        // The pane list is bound before the sweep because the orchestrator's
-        // presence is read from it: pane presence IS the orchestrator signal,
-        // and it is re-resolved every sweep so a supervisor pane that dies
-        // mid-wave falls back to broker-only escalation from then on.
-        let panes = deps.enumerator.list_panes(session);
-        let ctx = SweepContext {
-            session,
-            repo_root,
-            orchestrator: orchestrator_pane_index(layout, &panes, agents),
-            orchestrator_settle_delay,
-        };
-        orchestrator_monitored |= ctx.orchestrator.is_some();
+        // --- Sweep every coding surface (explicit per-pane capture) ----------
+        // Only a surface the layout resolves to a coding agent is captured or
+        // typed into (GP-46): the dashboard and an unowned surface are skipped
+        // before any capture, so nothing drawn there can drive a decision.
         let mut pane_by_agent: HashMap<String, usize> = HashMap::new();
-        for pane in panes {
+        for pane in deps.enumerator.list_panes(session) {
             let role = resolve_pane_agent(layout, pane.pane_index, &pane.pane_current_path, agents);
-            let Some(agent_id) = role.agent_id() else {
-                continue; // dashboard surface — never acted on
+            let Some(agent_id) = role.coding_agent() else {
+                continue; // not a coding surface — never acted on
             };
-            let agent_id = agent_id.to_string();
-            pane_by_agent.insert(agent_id.clone(), pane.pane_index);
+            pane_by_agent.insert(agent_id.to_string(), pane.pane_index);
 
-            match sweep_pane(
+            if let Some(escalation) = sweep_pane(
                 ctx,
                 &pane,
-                &role,
+                agent_id,
                 deps,
                 config,
                 &mut dedup,
                 &status_for_sweep,
             ) {
-                PaneSweepOutcome::None => {}
-                PaneSweepOutcome::Escalated(escalation) => escalations.push(escalation),
-                PaneSweepOutcome::OrchestratorCliUnavailable(line) => {
-                    // The brain is gone: exit at once rather than continue
-                    // blindly sweeping worker panes (D4). The quoted line
-                    // reaches the summary through the escalation list, the
-                    // same as every other detail the summary renders.
-                    escalations.push(Escalation {
-                        agent_id: agent_id.clone(),
-                        verdict: "cli-unavailable".to_string(),
-                        command: line,
-                    });
-                    break 'drive (DriveOutcome::CliUnavailable, Vec::new());
-                }
+                escalations.push(escalation);
             }
         }
 
         // --- Fetch status once this tick, BEFORE dispatching any nudge -------
         // (GP-16): the freshest possible completion signal gates every nudge
-        // dispatched below, including `observe_worker_messages`' hand-offs,
-        // which used to run on a stale (pre-fetch) view.
+        // dispatched below; the stale (pre-fetch) view it replaced let a
+        // finished wave be nudged on its way out.
         let latest_status = deps.status.fetch();
         status_for_sweep.clone_from(&latest_status);
         // A branch that reached a terminal PASS leaves the correction cycle,
@@ -1320,12 +1212,10 @@ pub fn drive_loop(
 
         // --- Observe newly published worker messages -------------------------
         let merged_bases = observe_worker_messages(
-            ctx,
             &coding_ids,
             deps,
             &mut correction,
             &config.correction.gate_tags,
-            winding_down,
         );
 
         // --- Branch refresh (post-merge, opt-in) ------------------------------
@@ -1346,20 +1236,6 @@ pub fn drive_loop(
                 DriveOutcome::EscalatedForReview
             };
             break (outcome, latest_status);
-        }
-
-        // --- Orchestration-sweep nudge (longer cadence) ----------------------
-        // Placed after the completion check so a finished wave is never nudged.
-        if let Some(pane_index) = ctx.orchestrator
-            && deps.clock.now().duration_since(last_orchestration_nudge)
-                >= config.orchestration_nudge_interval
-            // Suppressed while the orchestrator is mid-response: the timer is
-            // advanced only on a dispatched nudge, so a busy orchestrator has
-            // its nudge deferred to the next tick rather than skipped for a
-            // whole cadence.
-            && hand_to_orchestrator(deps, ctx, pane_index, &orchestration_nudge_text())
-        {
-            last_orchestration_nudge = deps.clock.now();
         }
 
         // --- Correction pass (auto-loopback) ---------------------------------
@@ -1475,7 +1351,6 @@ pub fn drive_loop(
         broker_log_hint: config.broker_log_hint.clone(),
         learnings_hint: config.learnings_hint.clone(),
         merged_summary,
-        orchestrator_monitored,
     }
 }
 
@@ -1493,34 +1368,18 @@ const MERGE_CANDIDATE_STATUSES: &[&str] = &["committed", "done"];
 
 /// Reacts to the broker messages published since the previous sweep.
 ///
-/// Three worker signals matter here, and each is a different kind of live
-/// judgment call:
-/// - **`agent.feedback`** carrying a `[<gate>]` tag is a FAILING gate verdict; it
-///   marks the branch for the correction pass. (A passing gate publishes
-///   `agent.verified`, which the `/status` sweep handles instead.)
-/// - **`agent.question`** is an ambiguous question. The worker published it
-///   precisely *because* it could not decide, so the message itself is the
-///   ambiguity signal — the loop adds no classifier of its own — and it is handed
-///   to the orchestrator to answer.
-/// - **`agent.artifact`** at a [`MERGE_CANDIDATE_STATUSES`] status is the point a
-///   **merge decision** becomes live, so it is handed over for verification and
-///   merge sequencing.
+/// Only **`agent.feedback`** carrying a `[<gate>]` tag acts here: it is a
+/// FAILING gate verdict and marks the branch for the correction pass. (A
+/// passing gate publishes `agent.verified`, which the `/status` sweep handles
+/// instead.) The feedback arm filters on `coding_ids` FIRST, so the loop's own
+/// `supervisor` traffic never feeds back into itself.
 ///
-/// Every arm filters on `coding_ids` FIRST. The loop's own escalations go out as
-/// `agent.question` from the supervisor, so an unfiltered question arm would feed
-/// the loop its own tail — injecting each escalation twice and, worse, once per
-/// message it generated. Handing off is fire-and-forget throughout: no arm blocks
-/// the wave on the orchestrator's response.
-///
-/// `winding_down` (GP-16) suppresses only the hand-off keystrokes (the
-/// `Question`/`Artifact` arms) once this tick's own status fetch has already
-/// shown the wave complete — the loop is about to exit and typing a fresh
-/// task prompt into the orchestrator's pane on the way out would just leave
-/// unsubmitted text behind. The `Feedback` bookkeeping and the
-/// `AdvancedMain` merge-base collection below are unaffected: neither sends a
-/// keystroke, and both stay useful even on the final tick (a correction
-/// record left pending is harmless once the wave is done, and a merge base
-/// observed on the final tick is still a real merge that happened).
+/// A worker's **`agent.question`** and its **`agent.artifact`** at a
+/// `committed`/`done` status are judgment calls too, but no
+/// orchestrator runs inside the session: the worker's own broker message is
+/// the review item, and the loop neither copies it nor types it into any
+/// surface. A headless orchestrator invocation reads them from the broker
+/// (`orchestrator-escalation-handoff`).
 ///
 /// Returns the default-branch name (`payload.base`) of every
 /// `agent.advanced-main` event observed this sweep, in publish order.
@@ -1534,12 +1393,10 @@ const MERGE_CANDIDATE_STATUSES: &[&str] = &["committed", "done"];
 /// `supervisor-branch-refresh` (design D4): refresh is evaluated only in
 /// reaction to an observed merge, never on a timer.
 fn observe_worker_messages(
-    ctx: SweepContext<'_>,
     coding_ids: &[String],
     deps: &mut DriveDeps<'_>,
     correction: &mut CorrectionState,
     gate_tags: &[String],
-    winding_down: bool,
 ) -> Vec<String> {
     let mut merged_bases = Vec::new();
     for msg in deps.messages.poll_new() {
@@ -1550,31 +1407,13 @@ fn observe_worker_messages(
         let Some(agent_id) = coding_ids.iter().find(|id| *id == msg.agent_id()) else {
             continue;
         };
-        match &msg {
-            BrokerMessage::Feedback { payload, .. } => {
-                if let Some(gate) = gate_failure(payload, gate_tags) {
-                    correction.mark_gate_failure(
-                        agent_id,
-                        reengagement_text(&gate, &payload.errors.join("; ")),
-                    );
-                }
-            }
-            BrokerMessage::Question { payload, .. } => {
-                if !winding_down && let Some(pane_index) = ctx.orchestrator {
-                    let text = question_handoff_text(agent_id, &payload.question);
-                    hand_to_orchestrator(deps, ctx, pane_index, &text);
-                }
-            }
-            BrokerMessage::Artifact { payload, .. } => {
-                if !winding_down
-                    && let Some(pane_index) = ctx.orchestrator
-                    && WorkerPhase::from_status(&payload.status).is_merge_candidate()
-                {
-                    let text = merge_handoff_text(agent_id, &payload.status);
-                    hand_to_orchestrator(deps, ctx, pane_index, &text);
-                }
-            }
-            _ => {}
+        if let BrokerMessage::Feedback { payload, .. } = &msg
+            && let Some(gate) = gate_failure(payload, gate_tags)
+        {
+            correction.mark_gate_failure(
+                agent_id,
+                reengagement_text(&gate, &payload.errors.join("; ")),
+            );
         }
     }
     merged_bases
@@ -1666,8 +1505,7 @@ fn refresh_branches_after_merge(
     }
 }
 
-/// The tmux session, the repository root, and the orchestrator pane resolved
-/// for the current sweep.
+/// The tmux session and the repository root for the current sweep.
 ///
 /// Bundled rather than passed as separate parameters because every acting path
 /// needs them, and threading them separately pushes the sweep helpers past the
@@ -1678,29 +1516,14 @@ struct SweepContext<'a> {
     session: &'a str,
     /// Repository root, from which the per-pane approval claim path is built.
     repo_root: &'a Path,
-    /// Orchestrator (supervisor CLI) pane index, or `None` when the session has
-    /// no supervisor pane — the broker-only fallback.
-    orchestrator: Option<usize>,
-    /// The orchestrator pane's resolved per-CLI nudge settle delay
-    /// ([`resolve_submit_delay_ms`]), bundled here so every
-    /// [`hand_to_orchestrator`] call site resolves it from one place.
-    orchestrator_settle_delay: Duration,
 }
 
-/// Records `escalation` on the broker — **uniformly**, whether or not an
-/// orchestrator is running — and, when an orchestrator pane is present, ALSO
-/// hands it to that pane as a task prompt.
-///
-/// The split matters: the broker record is the durable, drainable review item a
-/// human reads in a no-supervisor run, while the injection actively *triggers* a
-/// present orchestrator instead of relying on it to poll an inbox it never
-/// reads. With no orchestrator pane the second step does not happen at all, so
-/// the escalation path is identical to the pre-orchestrator version.
-fn record_escalation(deps: &mut DriveDeps<'_>, ctx: SweepContext<'_>, escalation: &Escalation) {
+/// Records `escalation` on the broker as a drainable review item — and only
+/// there. No orchestrator runs inside the session, so nothing is typed into
+/// any surface: an orchestrator outside the session reads the item from the
+/// broker.
+fn record_escalation(deps: &mut DriveDeps<'_>, escalation: &Escalation) {
     deps.alerts.escalate(escalation);
-    if let Some(pane_index) = ctx.orchestrator {
-        hand_to_orchestrator(deps, ctx, pane_index, &escalation.handoff_text());
-    }
 }
 
 /// A CLI-unavailability marker found in a pane's capture.
@@ -1763,56 +1586,39 @@ fn cli_unavailable_dedup_key(agent_id: &str, marker: &str) -> String {
     format!("cli-unavailable|{agent_id}|{marker}")
 }
 
-/// What sweeping one pane found.
-#[derive(Debug)]
-enum PaneSweepOutcome {
-    /// Nothing actionable — no live prompt, no CLI-unavailability marker.
-    None,
-    /// A risky/unknown prompt (or a CLI-unavailability marker on a coding
-    /// pane) was escalated this sweep.
-    Escalated(Escalation),
-    /// The orchestrator pane itself shows a CLI-unavailability marker: the
-    /// caller must exit the loop at once (D4).
-    OrchestratorCliUnavailable(String),
-}
-
-/// Sweeps one pane: captures it, and when a LIVE prompt is in the tail
-/// records a deduped escalation for a human decision without blocking the
-/// rest of the wave.
+/// Sweeps one coding-agent pane: captures it, and when a LIVE prompt is in the
+/// tail records a deduped escalation for a human decision without blocking
+/// the rest of the wave. Returns the escalation emitted this sweep, if any.
+///
+/// The caller passes only a surface the layout resolved as
+/// [`SurfaceRole::Coding`] — `agent_id` is that surface's owner — so the
+/// dashboard and an unowned surface are never captured here.
 ///
 /// It answers NO prompt, whatever the command text says. Whether the prompted
 /// command may run is decided by the agent CLI's own permission system or by
 /// the human — a decision git-paw cannot make reliably from pane text, and no
 /// longer tries to.
 ///
-/// Before the live-prompt check, every pane's tail is also scanned for a
-/// CLI-unavailability marker (D4): the orchestrator pane signals an immediate
-/// exit to the caller, while a coding pane's match becomes a deduped
-/// `cli-unavailable` escalation and the sweep continues driving the rest of
-/// the wave.
+/// Before the live-prompt check, the pane's tail is also scanned for a
+/// CLI-unavailability marker (D4): a match becomes a deduped `cli-unavailable`
+/// escalation and the sweep continues driving the rest of the wave.
 ///
 /// A pane with no live prompt and no CLI-unavailability marker — mere
-/// narration, or a resolved prompt scrolled into history — is left untouched;
-/// that is also what keeps pane 0 quiet. The one exception is an IDLE pane whose
-/// input box still holds an unsubmitted directive: that gets a follow-up `Enter`
-/// and, if the text survives, the same clear+re-type+`Enter` recovery the nudge
-/// path uses, via [`submit_buffered_input`] — because no other part of the loop
-/// can see a stall that never became a prompt.
-#[allow(clippy::too_many_arguments)]
+/// narration, or a resolved prompt scrolled into history — is left untouched.
+/// The one exception is an IDLE pane whose input box still holds an
+/// unsubmitted directive: that gets a follow-up `Enter` and, if the text
+/// survives, the same clear+re-type+`Enter` recovery the nudge path uses, via
+/// [`submit_buffered_input`] — because no other part of the loop can see a
+/// stall that never became a prompt.
 fn sweep_pane(
     ctx: SweepContext<'_>,
     pane: &PaneInfo,
-    role: &SurfaceRole,
+    agent_id: &str,
     deps: &mut DriveDeps<'_>,
     config: &DriveConfig,
     dedup: &mut DedupWindow,
     status: &[AgentStatusRow],
-) -> PaneSweepOutcome {
-    let Some(agent_id) = role.agent_id() else {
-        // The dashboard surface is never acted on. The caller already skips
-        // it; this keeps the role the single gate rather than a second rule.
-        return PaneSweepOutcome::None;
-    };
+) -> Option<Escalation> {
     let session = ctx.session;
     let capture = deps.capturer.capture(session, pane.pane_index);
 
@@ -1827,24 +1633,21 @@ fn sweep_pane(
 
     let markers = &resolve_prompt_profile(cli, &config.clis).cli_unavailable_markers;
     if let Some(m) = cli_unavailable_line(&capture, markers) {
-        if role.is_supervisor() {
-            return PaneSweepOutcome::OrchestratorCliUnavailable(m.line);
-        }
-        // Coding pane: non-blocking escalation, deduped on (agent_id, matched
-        // marker) — never on incidental transcript content, so a persistent
-        // marker does not re-fire every sweep and two distinct banners stay
-        // distinct (`cli-unavailable-detection-gaps`).
+        // Non-blocking escalation, deduped on (agent_id, matched marker) —
+        // never on incidental transcript content, so a persistent marker does
+        // not re-fire every sweep and two distinct banners stay distinct
+        // (`cli-unavailable-detection-gaps`).
         let key = cli_unavailable_dedup_key(agent_id, &m.marker);
         if !dedup.should_emit(&key, deps.clock.now()) {
-            return PaneSweepOutcome::None;
+            return None;
         }
         let escalation = Escalation {
             agent_id: agent_id.to_string(),
             verdict: "cli-unavailable".to_string(),
             command: m.line,
         };
-        record_escalation(deps, ctx, &escalation);
-        return PaneSweepOutcome::Escalated(escalation);
+        record_escalation(deps, &escalation);
+        return Some(escalation);
     }
 
     if !is_live_prompt(&capture) {
@@ -1858,7 +1661,7 @@ fn sweep_pane(
             &capture,
             settle_delay,
         );
-        return PaneSweepOutcome::None;
+        return None;
     }
 
     // A live prompt. git-paw answers NONE of them: whether the prompted
@@ -1870,7 +1673,7 @@ fn sweep_pane(
     // unanswered after the window is escalated again as a reminder.
     let key = approval_dedup_key(agent_id, &capture);
     if !dedup.should_emit(&key, deps.clock.now()) {
-        return PaneSweepOutcome::None;
+        return None;
     }
     let escalation = Escalation {
         agent_id: agent_id.to_string(),
@@ -1885,7 +1688,7 @@ fn sweep_pane(
     // nudges and correction-loop signals out of a log that `git paw
     // approvals` reads as "commands that needed a human".
     deps.manual_decisions.record_forwarded(agent_id, &capture);
-    record_escalation(deps, ctx, &escalation);
+    record_escalation(deps, &escalation);
     // Opportunistic learning: a prompt the CLI's own permission rules did not
     // cover cost the wave a human round-trip.
     deps.learnings.record(
@@ -1893,13 +1696,13 @@ fn sweep_pane(
         "unattended loop escalated a prompt",
         &friction_learning_body(&escalation),
     );
-    PaneSweepOutcome::Escalated(escalation)
+    Some(escalation)
 }
 
 /// The mutable slice of one sweep the correction pass operates on, bundled so
 /// [`run_correction_pass`] keeps a small signature.
 struct CorrectionPass<'a> {
-    /// tmux session + orchestrator pane for this sweep.
+    /// tmux session + repository root for this sweep.
     ctx: SweepContext<'a>,
     /// Pane index per agent id, resolved during this sweep.
     panes: &'a HashMap<String, usize>,
@@ -2002,7 +1805,7 @@ fn run_correction_pass(
                     policy.max_cycles
                 ),
             };
-            record_escalation(deps, pass.ctx, &escalation);
+            record_escalation(deps, &escalation);
             pass.escalations.push(escalation);
         }
     }
@@ -2048,7 +1851,7 @@ fn apply_exhaustion(
                 "branch is unrecoverable after {cycles} correction cycle(s); needs a human"
             ),
         };
-        record_escalation(deps, pass.ctx, &escalation);
+        record_escalation(deps, &escalation);
         pass.escalations.push(escalation);
     }
     pass.exhausted.push(ExhaustedBranch {
@@ -2145,10 +1948,8 @@ fn send_reengagement(
 ///
 /// Gated on a fresh capture taken immediately before the send satisfying
 /// `ready` — the TOCTOU guard every free-text path shares, so no caller can
-/// skip it. Callers differ only in how strict `ready` is: the worker
-/// re-engagement needs the pane merely to be free of a live permission
-/// prompt, while an orchestrator hand-off additionally requires it not to be
-/// mid-response ([`orchestrator_ready`]).
+/// skip it. The worker re-engagement needs the pane merely to be free of a
+/// live permission prompt. Every caller targets a coding-agent surface.
 ///
 /// The whole operation — initial send through every recovery attempt — runs
 /// under `pane_index`'s exclusive [`PaneClaim`], so a `C-u` this function (or
@@ -2390,8 +2191,8 @@ fn pane_has_buffered_input(capture: &str) -> bool {
 /// [`send_approval`] applies, so a pane that started responding or raised a
 /// prompt in between receives no stray keystroke. The `Enter`-first step
 /// types no free text, so it runs without the pane's claim, preserving
-/// today's behaviour for the case it alone fixes (the pane-0 no-pollution
-/// rule holds, since nothing is typed); recovery, which DOES type free text,
+/// today's behaviour for the case it alone fixes (no free text is
+/// typed); recovery, which DOES type free text,
 /// runs only under the pane's exclusive [`PaneClaim`] — a concurrent approver
 /// holding it defers recovery to the next sweep, with the `Enter` above still
 /// having gone out. A paste-buffer placeholder is never cleared: the loop
@@ -2455,49 +2256,6 @@ fn pane_is_mid_response(capture: &str) -> bool {
         .mid_response_markers
         .iter()
         .any(|marker| lowered.contains(marker.as_str()))
-}
-
-/// Whether the orchestrator's pane is ready to receive an injected task.
-///
-/// Two conditions, each guarding a distinct hazard:
-/// - **No live permission prompt.** The approval path owns that pane state on
-///   this or a prior tick, and free text typed at a prompt lands *in* the prompt.
-///   This is what keeps the hand-off from colliding with the pane-0 approval
-///   no-pollution rule, which stays unmodified.
-/// - **Not mid-response.** A task injected into the middle of the orchestrator's
-///   own turn pollutes its context instead of queueing a job.
-fn orchestrator_ready(capture: &str) -> bool {
-    !live_prompt_in_tail(capture) && !pane_is_mid_response(capture)
-}
-
-/// Injects `text` into the orchestrator's pane as a task prompt, returning
-/// whether any keystroke was actually dispatched.
-///
-/// Fire-and-forget by design: a refusal (the pane was busy), a dispatch
-/// failure, or a wedged pane (escalated by [`send_nudge`] itself) is
-/// swallowed here, because the broker record is the durable channel and the
-/// injection is only the trigger. Nothing here blocks the wave — the loop
-/// moves straight on, and the next orchestration nudge re-triggers the
-/// orchestrator anyway. The returned flag lets a *cadenced* caller
-/// distinguish "dispatched" from "suppressed" so it can retry rather than
-/// swallow the whole interval.
-fn hand_to_orchestrator(
-    deps: &mut DriveDeps<'_>,
-    ctx: SweepContext<'_>,
-    pane_index: usize,
-    text: &str,
-) -> bool {
-    send_nudge(
-        deps,
-        ctx.repo_root,
-        ctx.session,
-        pane_index,
-        SUPERVISOR_AGENT_ID,
-        text,
-        ctx.orchestrator_settle_delay,
-        orchestrator_ready,
-    )
-    .is_ok_and(NudgeOutcome::was_sent)
 }
 
 /// Builds the keystroke sequence for a *nudge* — free text the loop wants a
@@ -3000,9 +2758,6 @@ pub struct DriveRunOptions {
     /// path (`drive-loop-actuator-robustness`, GP-15) — the same resolver the
     /// boot-prompt injection path uses.
     pub clis: HashMap<String, CustomCli>,
-    /// CLI running in the orchestrator's surface, for its nudge settle delay.
-    /// Empty when unknown.
-    pub supervisor_cli: String,
     /// The session's reserved-index record — the single answer to which
     /// surface plays which role, so the loop never compares an index to a
     /// literal.
@@ -3018,13 +2773,9 @@ pub struct DriveRunOptions {
 ///
 /// # Errors
 ///
-/// Returns an error for an unrecoverable setup failure, or — AFTER printing
-/// the exit summary — when the outcome is [`DriveOutcome::CliUnavailable`]
-/// (`drive-loop-exit-summary-truth`, D4): the one outcome whose exit status
-/// changes, so an unattended `--unattended` process exits non-zero rather
-/// than reporting success with the orchestrator gone. The loop itself
-/// swallows transient tmux/broker errors and keeps polling; every other
-/// outcome keeps returning `Ok`.
+/// Returns an error only for an unrecoverable setup failure (the default
+/// branch cannot be resolved). The loop itself swallows transient
+/// tmux/broker errors and keeps polling; every outcome returns `Ok`.
 pub fn run_drive_loop(
     session: &str,
     repo_root: &Path,
@@ -3041,7 +2792,6 @@ pub fn run_drive_loop(
         branch_refresh_enabled,
         session_created_at,
         clis,
-        supervisor_cli,
         layout,
     } = options;
 
@@ -3088,17 +2838,12 @@ pub fn run_drive_loop(
         // design's open questions).
         poll_interval: duration_from_env_ms("GIT_PAW_DRIVE_POLL_MS", POLL_INTERVAL),
         heartbeat: duration_from_env_ms("GIT_PAW_DRIVE_HEARTBEAT_MS", HEARTBEAT_INTERVAL),
-        orchestration_nudge_interval: duration_from_env_ms(
-            "GIT_PAW_DRIVE_ORCHESTRATION_NUDGE_MS",
-            ORCHESTRATION_NUDGE_INTERVAL,
-        ),
         correction,
         learnings_enabled,
         broker_log_hint,
         learnings_hint,
         branch_refresh_enabled,
         clis,
-        supervisor_cli,
         default_branch,
         layout,
         ..DriveConfig::default()
@@ -3122,13 +2867,6 @@ pub fn run_drive_loop(
 
     let summary = drive_loop(session, repo_root, agents, &mut deps, &config, &instance);
     println!("{}", summary.render());
-    if summary.outcome == DriveOutcome::CliUnavailable {
-        // The one exit-status change in this release (D4): every other
-        // outcome keeps returning `Ok`, printed exactly as before.
-        return Err(PawError::SessionError(
-            "unattended drive loop exited: cli-unavailable".to_string(),
-        ));
-    }
     Ok(summary)
 }
 
@@ -3216,8 +2954,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
 
     /// The layout the loop runs under in production: `cmd_supervisor` is its
-    /// only caller, so the supervisor surface sits at 0, the dashboard at 1
-    /// and coding agents from 2.
+    /// only caller, so the dashboard sits at 0 and coding agents from 1.
     fn supervised_layout() -> SessionLayout {
         SessionLayout::planned(crate::session::SessionMode::Supervisor, true)
     }
@@ -3458,47 +3195,6 @@ mod tests {
             self.captures
                 .get(i)
                 .or_else(|| self.captures.last())
-                .cloned()
-                .unwrap_or_default()
-        }
-    }
-
-    /// Like [`SequencedCapturer`] but keyed PER PANE: each pane index advances
-    /// its own position independently. A single pane can be captured more
-    /// than once within one sweep (the orchestrator pane's ready-check and
-    /// post-send verify inside `send_nudge`, in addition to the sweep's own
-    /// capture), and those extra calls must never consume another pane's
-    /// scripted sequence.
-    struct PerPaneSequencedCapturer {
-        by_pane: HashMap<usize, (Vec<String>, Cell<usize>)>,
-    }
-    impl PerPaneSequencedCapturer {
-        fn new(entries: &[(usize, &[&str])]) -> Self {
-            let by_pane = entries
-                .iter()
-                .map(|(idx, captures)| {
-                    (
-                        *idx,
-                        (
-                            captures.iter().map(|c| (*c).to_string()).collect(),
-                            Cell::new(0),
-                        ),
-                    )
-                })
-                .collect();
-            Self { by_pane }
-        }
-    }
-    impl PaneCapture for PerPaneSequencedCapturer {
-        fn capture(&self, _session: &str, pane_index: usize) -> String {
-            let Some((captures, idx)) = self.by_pane.get(&pane_index) else {
-                return String::new();
-            };
-            let i = idx.get();
-            idx.set(i + 1);
-            captures
-                .get(i)
-                .or_else(|| captures.last())
                 .cloned()
                 .unwrap_or_default()
         }
@@ -3781,7 +3477,7 @@ mod tests {
     /// dispatch (GP-15), and [`FakeClock::sleep`] advances the loop's own
     /// notion of elapsed time. A cadence- or cycle-count-sensitive test that
     /// does not care about settle-delay timing wires this in so a
-    /// re-engagement or orchestrator hand-off costs no simulated time,
+    /// re-engagement costs no simulated time,
     /// preserving the tick/round arithmetic it was written against.
     fn zero_settle_delay_clis() -> HashMap<String, CustomCli> {
         ["", "claude"]
@@ -3860,28 +3556,28 @@ mod tests {
         );
     }
 
+    /// Pane 0 is the dashboard; any other repo-root surface owns no worktree
+    /// and is `Unknown` — neither is a coding surface the loop acts on.
     #[test]
-    fn resolves_pane_zero_and_one_to_supervisor_and_dashboard() {
+    fn resolves_pane_zero_to_the_dashboard_and_a_stray_root_surface_to_unknown() {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
         }];
-        assert_eq!(
-            resolve_pane_agent(supervised_layout(), 0, "/repo", &agents),
-            SurfaceRole::Supervisor
-        );
-        assert_eq!(
-            resolve_pane_agent(supervised_layout(), 1, "/repo", &agents),
-            SurfaceRole::Dashboard
-        );
+        let dashboard = resolve_pane_agent(supervised_layout(), 0, "/repo", &agents);
+        assert_eq!(dashboard, SurfaceRole::Dashboard);
+        assert_eq!(dashboard.coding_agent(), None);
+        let stray = resolve_pane_agent(supervised_layout(), 1, "/repo", &agents);
+        assert_eq!(stray, SurfaceRole::Unknown);
+        assert_eq!(stray.coding_agent(), None);
     }
 
     // --- every live prompt is escalated, none is approved -------------------
 
     /// Everything one direct [`sweep_pane`] call did.
     struct SweepProbe {
-        outcome: PaneSweepOutcome,
+        outcome: Option<Escalation>,
         keys: Vec<(usize, String)>,
         escalations: Vec<Escalation>,
         learnings: Vec<(String, String, String)>,
@@ -3900,23 +3596,11 @@ mod tests {
         }
     }
 
-    /// The surface role a probe's `agent_id` stands for: the supervisor's wire
-    /// id names the supervisor surface, any other id a coding surface — the
-    /// same pairing [`SessionLayout::resolve`] produces for those surfaces.
-    fn probe_role(agent_id: &str) -> SurfaceRole {
-        if agent_id == SUPERVISOR_AGENT_ID {
-            SurfaceRole::Supervisor
-        } else {
-            SurfaceRole::Coding(agent_id.to_string())
-        }
-    }
-
-    /// Sweeps one pane showing `capture` and reports what happened.
+    /// Sweeps one coding pane showing `capture` and reports what happened.
     ///
     /// Calls [`sweep_pane`] directly rather than driving the whole loop, so a
     /// test asserts the sweep's own decision without a status script or a
-    /// completion condition in the way. No orchestrator pane, so nothing is
-    /// typed anywhere even on the hand-off path.
+    /// completion condition in the way.
     fn sweep_probe(capture: &str, agent_id: &str, pane_index: usize) -> SweepProbe {
         let enumerator = FakeEnumerator { panes: Vec::new() };
         let capturer = FakeCapturer::new(&[(pane_index, capture)]);
@@ -3949,22 +3633,12 @@ mod tests {
             let ctx = SweepContext {
                 session: "paw-test",
                 repo_root: tmp.path(),
-                orchestrator: None,
-                orchestrator_settle_delay: Duration::from_millis(0),
             };
             let pane = PaneInfo {
                 pane_index,
                 pane_current_path: "/repo-feat-a".to_string(),
             };
-            sweep_pane(
-                ctx,
-                &pane,
-                &probe_role(agent_id),
-                &mut deps,
-                &config,
-                &mut dedup,
-                &[],
-            )
+            sweep_pane(ctx, &pane, agent_id, &mut deps, &config, &mut dedup, &[])
         };
         SweepProbe {
             outcome,
@@ -3982,7 +3656,7 @@ mod tests {
     fn formerly_safe_command_is_escalated_not_approved() {
         let probe = sweep_probe(&live_safe_capture("ls -la"), "feat-a", 2);
         assert!(
-            matches!(probe.outcome, PaneSweepOutcome::Escalated(_)),
+            probe.outcome.is_some(),
             "expected an escalation, got {:?}",
             probe.outcome
         );
@@ -4002,28 +3676,6 @@ mod tests {
         );
     }
 
-    /// Spec scenario "A live prompt on the supervisor pane is escalated, not
-    /// answered" (`supervisor-unattended-operation`): pane 0 used to be the
-    /// one pane the loop was explicitly permitted to clear. It is now
-    /// escalate-only, under the agent id `supervisor`.
-    #[test]
-    fn supervisor_pane_prompt_is_escalated_not_answered() {
-        let probe = sweep_probe(&live_safe_capture("git status"), SUPERVISOR_AGENT_ID, 0);
-        assert!(
-            matches!(probe.outcome, PaneSweepOutcome::Escalated(_)),
-            "expected an escalation, got {:?}",
-            probe.outcome
-        );
-        let e = probe.escalation();
-        assert_eq!(e.agent_id, SUPERVISOR_AGENT_ID);
-        assert_eq!(e.verdict, PERMISSION_PROMPT_VERDICT);
-        assert!(
-            probe.keys.is_empty(),
-            "pane 0 must receive no keystroke, got {:?}",
-            probe.keys
-        );
-    }
-
     /// Spec scenario "A file-edit prompt is escalated by its target path"
     /// (`supervisor-unattended-operation`): a write/edit prompt carries no
     /// `Bash command` header, so the escalation names the target path — the
@@ -4034,7 +3686,7 @@ mod tests {
                        ❯ 1. Yes\n  2. No\n(esc to cancel)";
         let probe = sweep_probe(capture, "feat-a", 2);
         assert!(
-            matches!(probe.outcome, PaneSweepOutcome::Escalated(_)),
+            probe.outcome.is_some(),
             "expected an escalation, got {:?}",
             probe.outcome
         );
@@ -4072,7 +3724,7 @@ mod tests {
         for capture in cases {
             let probe = sweep_probe(capture, "feat-a", 2);
             assert!(
-                matches!(probe.outcome, PaneSweepOutcome::Escalated(_)),
+                probe.outcome.is_some(),
                 "capture must escalate: {capture:?} (got {:?})",
                 probe.outcome
             );
@@ -4089,32 +3741,16 @@ mod tests {
         }
     }
 
-    /// Spec scenario "The permission-prompt hand-off asks for a relay, not a
-    /// decision" (`supervisor-autonomous-orchestrator`, design D2): an
-    /// orchestrator that approves on its own reading of the command is just
-    /// another classifier, reading untrusted pane text. The hand-off must name
-    /// the agent and the command, ask for a relay, and withhold approval until
-    /// the human says so.
+    /// The broker review item for a permission prompt names the agent and the
+    /// command and says plainly that git-paw approves none — it is the whole
+    /// escalation an orchestrator outside the session reads.
     #[test]
-    fn permission_prompt_handoff_asks_for_a_relay() {
+    fn permission_prompt_review_item_names_the_prompt_and_approves_nothing() {
         let e = Escalation {
             agent_id: "feat-a".to_string(),
             verdict: PERMISSION_PROMPT_VERDICT.to_string(),
             command: "ls -la".to_string(),
         };
-        let text = e.handoff_text();
-        assert!(text.contains("feat-a"), "must name the agent: {text}");
-        assert!(text.contains("ls -la"), "must name the command: {text}");
-        assert!(
-            text.to_ascii_lowercase().contains("relay"),
-            "must ask for a relay: {text}"
-        );
-        assert!(
-            !text.contains("Decide it now"),
-            "must NOT ask the orchestrator to decide it: {text}"
-        );
-
-        // The broker-facing question says plainly that git-paw approves none.
         let q = e.question();
         assert!(q.contains("feat-a") && q.contains("ls -la"), "{q}");
         assert!(
@@ -4172,22 +3808,12 @@ mod tests {
                 let ctx = SweepContext {
                     session: "paw-test",
                     repo_root: tmp.path(),
-                    orchestrator: None,
-                    orchestrator_settle_delay: Duration::from_millis(0),
                 };
                 let pane = PaneInfo {
                     pane_index,
                     pane_current_path: "/repo-feat-a".to_string(),
                 };
-                sweep_pane(
-                    ctx,
-                    &pane,
-                    &probe_role(agent_id),
-                    &mut deps,
-                    &config,
-                    &mut dedup,
-                    &[],
-                );
+                sweep_pane(ctx, &pane, agent_id, &mut deps, &config, &mut dedup, &[]);
             }
         }
         alerts.escalations
@@ -4646,7 +4272,7 @@ mod tests {
 
     /// Spec scenario "A buffered directive on an idle pane is submitted": the
     /// follow-up `Enter` alone clears the box, so no recovery keystrokes
-    /// follow and no free text is ever typed (pane 0's no-pollution rule).
+    /// follow and no free text is ever typed.
     #[test]
     fn loop_submits_a_stranded_directive_on_an_idle_pane() {
         let stuck = idle_input_box("/opsx:apply my-change");
@@ -4817,7 +4443,6 @@ mod tests {
             broker_log_hint: Some("/tmp/broker.log".to_string()),
             learnings_hint: Some(".git-paw/session-learnings.md".to_string()),
             merged_summary: None,
-            orchestrator_monitored: true,
         };
         let text = summary.render();
         assert!(text.contains("escalated-for-review"), "states outcome");
@@ -4830,37 +4455,60 @@ mod tests {
         );
     }
 
+    /// Scenario "The summary does not claim orchestrator coverage"
+    /// (`supervisor-unattended-operation`): the orchestrator runs outside the
+    /// session, so every summary says its CLI is not monitored by the loop —
+    /// whatever the outcome.
+    #[test]
+    fn summary_states_the_orchestrator_cli_is_not_monitored() {
+        for outcome in [
+            DriveOutcome::Completed,
+            DriveOutcome::EscalatedForReview,
+            DriveOutcome::Heartbeat,
+        ] {
+            let summary = DriveSummary {
+                outcome,
+                agent_states: vec![("feat-a".to_string(), "verified".to_string())],
+                escalations: Vec::new(),
+                exhausted: Vec::new(),
+                broker_log_hint: None,
+                learnings_hint: None,
+                merged_summary: None,
+            };
+            let text = summary.render();
+            assert!(
+                text.contains("its CLI is not monitored by the loop"),
+                "{outcome:?}: the summary must disclaim orchestrator coverage; got:\n{text}"
+            );
+        }
+    }
+
     // --- wedged nudges reach the summary, once (task 4) ---------------------
 
-    /// Spec scenario "A wedged nudge appears in the exit summary", exercised
-    /// through the orchestration-nudge path (`hand_to_orchestrator`): a nudge
-    /// still wedged after every recovery attempt is folded into
-    /// `DriveSummary.escalations` — which upgrades an otherwise-`Completed`
-    /// wave to `escalated-for-review`, fixing the 0.16.0 field bug where a
-    /// wedged nudge (broker-only) left the printed summary reading
-    /// `0 escalations`.
+    /// Spec scenario "A wedged nudge appears in the exit summary": a coding
+    /// pane whose buffered input is still wedged after every recovery attempt
+    /// is folded into `DriveSummary.escalations` — once, however many sweeps
+    /// see it — which upgrades an otherwise-`Completed` wave to
+    /// `escalated-for-review`, fixing the 0.16.0 field bug where a wedged
+    /// nudge (broker-only) left the printed summary reading `0 escalations`.
     #[test]
-    fn a_wedged_orchestrator_hand_off_reaches_the_summary() {
-        let panes = vec![PaneInfo {
-            pane_index: 0,
-            pane_current_path: "/repo".to_string(),
+    fn a_wedged_buffered_input_reaches_the_summary_once() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
         }];
-        let enumerator = FakeEnumerator { panes };
-        // Tick 1: the sweep sees a clean idle pane (nothing buffered, so
-        // `submit_buffered_input` does nothing), then the orchestration nudge
-        // fires and finds a paste-buffer placeholder on every verify —
-        // unreadable, so recovery runs to exhaustion and wedges. Tick 2: a
-        // clean idle pane again, and the wave completes before another nudge
-        // is due.
+        let enumerator = FakeEnumerator {
+            panes: vec![PaneInfo {
+                pane_index: 1,
+                pane_current_path: "/repo-feat-a".to_string(),
+            }],
+        };
+        // An unreadable paste placeholder on every capture: the follow-up
+        // `Enter` and every recovery attempt leave it in place, so the pane
+        // wedges on both sweeps.
         let placeholder = idle_input_box("[Pasted text #1 +5 lines]");
-        let capturer = SequencedCapturer::new(&[
-            IDLE_PANE,    // tick 1 sweep: nothing buffered
-            IDLE_PANE,    // tick 1 nudge ready-check
-            &placeholder, // tick 1 nudge initial verify: still present
-            &placeholder, // tick 1 recovery attempt 1 verify: still present
-            &placeholder, // tick 1 recovery attempt 2 verify: still present (wedged)
-            IDLE_PANE,    // tick 2 sweep: nothing buffered
-        ]);
+        let capturer = FakeCapturer::new(&[(1, &placeholder)]);
         let mut dispatcher = RecordingDispatcher::default();
         let status = ScriptedStatus::new(vec![vec![], vec![row("supervisor", "done")]]);
         let clock = FakeClock::new();
@@ -4885,14 +4533,14 @@ mod tests {
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
-            orchestration_nudge_interval: Duration::ZERO,
             heartbeat: Duration::from_hours(1),
             ..DriveConfig::default()
         };
-        let summary = drive_loop_in_tmp("paw-test", &[], &mut deps, &config);
+        let summary = drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
         assert_eq!(summary.outcome, DriveOutcome::EscalatedForReview);
         assert_eq!(summary.escalations.len(), 1, "wedge reported exactly once");
         assert_eq!(summary.escalations[0].verdict, NUDGE_WEDGED_VERDICT);
+        assert_eq!(summary.escalations[0].agent_id, "feat-a");
     }
 
     // --- GP-05: exit summary resolves terminal state (unattended-wave-lifecycle) --
@@ -5143,16 +4791,24 @@ mod tests {
     // --- explicit per-pane capture (task 3.4 / D3) --------------------------
 
     /// The loop captures each swept pane with its OWN `capture-pane` call — one
-    /// per pane, never a single shell `for` loop — and skips the dashboard pane
-    /// entirely (it is never captured). With no live prompt there is no
-    /// approval re-capture, so the call count equals the number of acted panes.
+    /// per pane, never a single shell `for` loop — and skips every surface
+    /// that is not a coding agent (the dashboard, a stray repo-root surface)
+    /// entirely. With no live prompt there is no approval re-capture, so the
+    /// call count equals the number of coding panes.
     #[test]
     fn sweep_captures_each_pane_exactly_once() {
-        let agents = vec![AgentPane {
-            agent_id: "feat-a".to_string(),
-            worktree_path: PathBuf::from("/repo-feat-a"),
-            branch: "feat/a".to_string(),
-        }];
+        let agents = vec![
+            AgentPane {
+                agent_id: "feat-a".to_string(),
+                worktree_path: PathBuf::from("/repo-feat-a"),
+                branch: "feat/a".to_string(),
+            },
+            AgentPane {
+                agent_id: "feat-b".to_string(),
+                worktree_path: PathBuf::from("/repo-feat-b"),
+                branch: "feat/b".to_string(),
+            },
+        ];
         let enumerator = FakeEnumerator {
             panes: vec![
                 PaneInfo {
@@ -5161,15 +4817,24 @@ mod tests {
                 },
                 PaneInfo {
                     pane_index: 1,
-                    pane_current_path: "/repo".to_string(),
+                    pane_current_path: "/repo-feat-a".to_string(),
                 },
                 PaneInfo {
                     pane_index: 2,
-                    pane_current_path: "/repo-feat-a".to_string(),
+                    pane_current_path: "/repo-feat-b".to_string(),
+                },
+                PaneInfo {
+                    pane_index: 3,
+                    pane_current_path: "/repo".to_string(),
                 },
             ],
         };
-        let capturer = FakeCapturer::new(&[(0, "supervisor thinking\n$ "), (2, "working...\n$ ")]);
+        let capturer = FakeCapturer::new(&[
+            (0, "dashboard\n$ "),
+            (1, "working...\n$ "),
+            (2, "working...\n$ "),
+            (3, "stray shell\n$ "),
+        ]);
         let mut dispatcher = RecordingDispatcher::default();
         // Complete on the first poll so exactly one sweep runs.
         let status = ScriptedStatus::new(vec![vec![row("supervisor", "done")]]);
@@ -5199,11 +4864,11 @@ mod tests {
             ..DriveConfig::default()
         };
         drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
-        // Panes 0 and 2 captured once each; pane 1 (dashboard) never captured.
+        // Panes 1 and 2 captured once each; panes 0 and 3 never captured.
         assert_eq!(
             capturer.calls.get(),
             2,
-            "one explicit capture per acted pane, dashboard pane skipped"
+            "one explicit capture per coding pane, non-coding surfaces skipped"
         );
     }
 
@@ -5232,7 +4897,7 @@ mod tests {
             ],
         };
         let capturer = FakeCapturer::new(&[
-            (0, ""), // supervisor pane: no live prompt
+            (0, ""), // dashboard: never captured
             (2, &live_safe_capture("cargo test")),
         ]);
         let mut dispatcher = RecordingDispatcher::default();
@@ -5271,8 +4936,8 @@ mod tests {
         // The wave still finished — the escalation did not block it — but an
         // unanswered prompt means the run ends for review, not clean.
         assert_eq!(summary.outcome, DriveOutcome::EscalatedForReview);
-        // Pane 2 is the prompting pane: it receives nothing. (Pane 0 does get
-        // the orchestrator hand-off, which is free text, not an answer.)
+        // Pane 2 is the prompting pane: it receives nothing, and nothing is
+        // typed anywhere else for the escalation either.
         assert!(
             !dispatcher.events.iter().any(|(p, _)| *p == 2),
             "the prompting pane must receive no keystroke; dispatched: {:?}",
@@ -5484,114 +5149,6 @@ mod tests {
         assert!(!learnings.records.is_empty(), "friction learning recorded");
     }
 
-    // --- pane 0 coverage (task 4.3 / W15-3 / W15-13) -----------------------
-
-    /// Spec scenario "The drive loop sends no approval keystrokes to pane 0"
-    /// (`approval-auto`): pane 0 is swept — its prompt reaches the broker and
-    /// the summary — but the loop types nothing into the supervisor's own
-    /// pane, so its context is never polluted by a stray digit.
-    #[test]
-    fn loop_escalates_supervisor_pane_prompt_without_typing() {
-        let agents: Vec<AgentPane> = Vec::new();
-        let enumerator = FakeEnumerator {
-            panes: vec![PaneInfo {
-                pane_index: 0,
-                pane_current_path: "/repo".to_string(),
-            }],
-        };
-        let capturer = FakeCapturer::new(&[(0, &live_safe_capture("cargo test"))]);
-        let mut dispatcher = RecordingDispatcher::default();
-        let status = ScriptedStatus::new(vec![vec![row("supervisor", "done")]]);
-        let clock = FakeClock::new();
-        let mut alerts = RecordingAlerts::default();
-        let mut learnings = RecordingLearnings::default();
-        let mut manual_decisions = NoopManualDecisions;
-        let mut refresher = RecordingRefresher::default();
-        let messages = ScriptedMessages::none();
-        let mut deps = DriveDeps {
-            enumerator: &enumerator,
-            capturer: &capturer,
-            dispatcher: &mut dispatcher,
-            status: &status,
-            messages: &messages,
-            clock: &clock,
-            merge_check: &FakeMergeCheck::default(),
-            alerts: &mut alerts,
-            learnings: &mut learnings,
-            manual_decisions: &mut manual_decisions,
-            refresher: &mut refresher,
-            wedged: Vec::new(),
-        };
-        let config = DriveConfig {
-            poll_interval: Duration::from_secs(1),
-            heartbeat: Duration::from_hours(1),
-            ..DriveConfig::default()
-        };
-        drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
-        assert!(
-            dispatcher.events.is_empty(),
-            "pane 0 must receive no keystroke at all, got {:?}",
-            dispatcher.events
-        );
-        assert_eq!(
-            alerts
-                .escalations
-                .iter()
-                .filter(
-                    |e| e.agent_id == SUPERVISOR_AGENT_ID && e.verdict == PERMISSION_PROMPT_VERDICT
-                )
-                .count(),
-            1,
-            "the pane-0 prompt is carried by the broker instead: {:?}",
-            alerts.escalations
-        );
-    }
-
-    #[test]
-    fn loop_leaves_supervisor_pane_untouched_without_prompt() {
-        let agents: Vec<AgentPane> = Vec::new();
-        let enumerator = FakeEnumerator {
-            panes: vec![PaneInfo {
-                pane_index: 0,
-                pane_current_path: "/repo".to_string(),
-            }],
-        };
-        // Supervisor pane is mid-conversation, no live prompt footer.
-        let capturer = FakeCapturer::new(&[(0, "supervisor is thinking about the plan\n$ ")]);
-        let mut dispatcher = RecordingDispatcher::default();
-        let status = ScriptedStatus::new(vec![vec![row("supervisor", "done")]]);
-        let clock = FakeClock::new();
-        let mut alerts = RecordingAlerts::default();
-        let mut learnings = RecordingLearnings::default();
-        let mut manual_decisions = NoopManualDecisions;
-        let mut refresher = RecordingRefresher::default();
-        let messages = ScriptedMessages::none();
-        let mut deps = DriveDeps {
-            enumerator: &enumerator,
-            capturer: &capturer,
-            dispatcher: &mut dispatcher,
-            status: &status,
-            messages: &messages,
-            clock: &clock,
-            merge_check: &FakeMergeCheck::default(),
-            alerts: &mut alerts,
-            learnings: &mut learnings,
-            manual_decisions: &mut manual_decisions,
-            refresher: &mut refresher,
-            wedged: Vec::new(),
-        };
-        let config = DriveConfig {
-            poll_interval: Duration::from_secs(1),
-            heartbeat: Duration::from_hours(1),
-            ..DriveConfig::default()
-        };
-        drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
-        assert!(
-            dispatcher.events.is_empty(),
-            "no keystrokes to pane 0 without a live prompt"
-        );
-    }
-
     // --- heartbeat exit (task 6.2) -----------------------------------------
 
     #[test]
@@ -5728,7 +5285,7 @@ mod tests {
         let capture = live_safe_capture(".git-paw/scripts/broker.sh --agent feat-a status booting");
         let probe = sweep_probe(&capture, "feat-a", 2);
         assert!(
-            matches!(probe.outcome, PaneSweepOutcome::Escalated(_)),
+            probe.outcome.is_some(),
             "a prompted boot publish must escalate, got {:?}",
             probe.outcome
         );
@@ -6821,11 +6378,11 @@ mod tests {
 
     // --- autonomous orchestrator (supervisor-autonomous-orchestrator) --------
 
-    /// An orchestrator pane sitting at its input box: no live permission prompt,
-    /// not mid-turn — the state a hand-off may be injected into.
+    /// A pane sitting at its input box: no live permission prompt,
+    /// not mid-turn.
     const IDLE_PANE: &str = "? for shortcuts";
 
-    /// An orchestrator pane actively producing a response. Injecting here would
+    /// A pane actively producing a response. Injecting here would
     /// land a task in the middle of the model's own turn.
     const MID_RESPONSE_PANE: &str = "Boondoggling… (esc to interrupt)";
 
@@ -6933,7 +6490,7 @@ mod tests {
     /// Spec scenario: two `done` workers, neither branch actually merged — the
     /// exact 0.16.0 dogfood shape (`drive-loop-exit-summary-truth`). The
     /// summary must read `escalated-for-review` / `0/2 branches merged` with
-    /// one `[unmerged]` entry per branch, and an orchestrator pane present
+    /// one `[unmerged]` entry per branch, and no surface
     /// must receive no keystrokes for those entries (they are pushed directly
     /// onto `escalations`, never through `record_escalation`).
     #[test]
@@ -6986,7 +6543,7 @@ mod tests {
         );
         assert!(
             dispatcher.events.is_empty(),
-            "the orchestrator pane must receive no keystrokes for unmerged entries: {:?}",
+            "no surface may receive keystrokes for unmerged entries: {:?}",
             dispatcher.events
         );
     }
@@ -7092,49 +6649,6 @@ mod tests {
 
     // --- CLI-unavailability detection (drive-loop-exit-summary-truth, D4) ---
 
-    /// The orchestrator pane's tail showing a CLI-unavailability marker exits
-    /// the loop at once with `cli-unavailable`, quoting the matching line.
-    #[test]
-    fn orchestrator_marker_exits_with_cli_unavailable() {
-        let agents = vec![AgentPane {
-            agent_id: "feat-a".to_string(),
-            worktree_path: PathBuf::from("/repo-feat-a"),
-            branch: "feat/a".to_string(),
-        }];
-        let merge_check = FakeMergeCheck::default();
-        let (summary, _dispatcher) = run_loop_with_merge_check(
-            &agents,
-            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
-            &[
-                (0, "working…\nYou've hit your session limit"),
-                (2, IDLE_PANE),
-            ],
-            vec![vec![row("feat-a", "working")]],
-            &merge_check,
-            &DriveConfig {
-                poll_interval: Duration::from_secs(1),
-                heartbeat: Duration::from_hours(1),
-                default_branch: "main".to_string(),
-                ..DriveConfig::default()
-            },
-        );
-        assert_eq!(summary.outcome, DriveOutcome::CliUnavailable);
-        assert!(
-            summary
-                .escalations
-                .iter()
-                .any(|e| e.verdict == "cli-unavailable"
-                    && e.command.contains("You've hit your session limit")),
-            "{:?}",
-            summary.escalations
-        );
-        let text = summary.render();
-        assert!(
-            text.contains("You've hit your session limit"),
-            "summary must quote the matching line: {text}"
-        );
-    }
-
     /// A CLI-unavailability marker on a CODING pane is a deduped escalation —
     /// the loop keeps driving the rest of the wave, and the final outcome is
     /// never `completed` while it stands.
@@ -7186,11 +6700,11 @@ mod tests {
             "feat-b's prompt must still be escalated: {:?}",
             summary.escalations
         );
-        // Only the orchestrator pane (0) is typed into, and only with the
-        // relay hand-off — neither worker pane receives a keystroke.
+        // The escalations are broker records only — no surface receives a
+        // keystroke.
         assert!(
-            dispatcher.events.iter().all(|(p, _)| *p == 0),
-            "no worker pane may be typed into: {:?}",
+            dispatcher.events.is_empty(),
+            "no surface may be typed into: {:?}",
             dispatcher.events
         );
     }
@@ -7461,22 +6975,25 @@ mod tests {
         );
     }
 
-    /// Spec scenario "No orchestrator pane is reported honestly": a pure
-    /// `--unattended` roster with no supervisor pane still escalates a coding
-    /// pane's CLI-unavailability marker, and the rendered summary states that
-    /// no orchestrator pane was monitored rather than implying full coverage.
+    /// Spec scenario "A banner quoted by the dashboard does not trigger": the
+    /// dashboard's broker-log panel can display a worker's session-limit line
+    /// at the tail of its capture. The dashboard is not a coding surface, so
+    /// it is never scanned — no escalation, and the wave completes.
     #[test]
-    fn no_orchestrator_pane_is_reported_honestly() {
+    fn a_banner_quoted_by_the_dashboard_does_not_trigger() {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
             worktree_path: PathBuf::from("/repo-feat-a"),
             branch: "feat/a".to_string(),
         }];
         let merge_check = FakeMergeCheck::default();
-        let (summary, _dispatcher) = run_loop_with_merge_check(
+        let (summary, dispatcher) = run_loop_with_merge_check(
             &agents,
-            vec![pane(2, "/repo-feat-a")], // no pane 0 — no orchestrator in the roster
-            &[(2, "You've hit your session limit")],
+            vec![pane(0, "/repo"), pane(1, "/repo-feat-a")],
+            &[
+                (0, "broker log\nfeat-a: You've hit your session limit"),
+                (1, IDLE_PANE),
+            ],
             vec![vec![row("feat-a", "done")]],
             &merge_check,
             &DriveConfig {
@@ -7487,19 +7004,12 @@ mod tests {
             },
         );
         assert!(
-            summary
-                .escalations
-                .iter()
-                .any(|e| e.agent_id == "feat-a" && e.verdict == "cli-unavailable"),
-            "coding-pane detection must work unchanged with no orchestrator: {:?}",
+            summary.escalations.is_empty(),
+            "nothing may be attributed to the dashboard: {:?}",
             summary.escalations
         );
-        assert!(!summary.orchestrator_monitored);
-        let text = summary.render();
-        assert!(
-            text.contains("No orchestrator pane was monitored for CLI unavailability"),
-            "summary must state the monitoring gap honestly: {text}"
-        );
+        assert_eq!(summary.outcome, DriveOutcome::Completed);
+        assert!(dispatcher.events.is_empty(), "{:?}", dispatcher.events);
     }
 
     /// Spec scenario (GP-50) "The embedded profile recognises an organisation
@@ -7559,107 +7069,6 @@ mod tests {
         );
     }
 
-    /// Safety finding (gate review): a worker's `cli-unavailable` escalation
-    /// is handed off to the orchestrator pane via `record_escalation` →
-    /// `hand_to_orchestrator`. The bounded-trailing-region scan
-    /// (`cli-unavailable-detection-gaps`) is wide enough that if the
-    /// orchestrator's pane shows that hand-off text on the NEXT sweep (the
-    /// CLI echoing what it was asked, as terminal CLIs commonly do), a
-    /// verbatim-quoted banner would self-trigger `OrchestratorCliUnavailable`
-    /// and end the run non-zero, naming the wrong pane. `handoff_text`'s
-    /// paraphrase (tested directly above) is what prevents this; this test
-    /// proves the FULL LOOP does not exit `CliUnavailable` even when the
-    /// orchestrator pane's capture is exactly the echoed hand-off text.
-    #[test]
-    fn echoed_handoff_on_orchestrator_pane_does_not_self_trigger_cli_unavailable() {
-        let agents = vec![AgentPane {
-            agent_id: "feat-a".to_string(),
-            worktree_path: PathBuf::from("/repo-feat-a"),
-            branch: "feat/a".to_string(),
-        }];
-        let echoed_handoff = Escalation {
-            agent_id: "feat-a".to_string(),
-            verdict: "cli-unavailable".to_string(),
-            command: "You've hit your session limit".to_string(),
-        }
-        .handoff_text();
-        // Tick 1: pane 0 idle (its ready-check and post-send verify inside
-        // `send_nudge` re-capture it, so it is scripted 3 wide for that one
-        // tick), feat-a's pane shows the banner — this produces the hand-off
-        // typed into pane 0. Tick 2: pane 0 now shows exactly that echoed
-        // text, feat-a has gone quiet and finished.
-        let capturer = PerPaneSequencedCapturer::new(&[
-            (
-                0,
-                [IDLE_PANE, IDLE_PANE, IDLE_PANE, echoed_handoff.as_str()].as_slice(),
-            ),
-            (2, ["You've hit your session limit", IDLE_PANE].as_slice()),
-        ]);
-        let status = ScriptedStatus::new(vec![
-            vec![row("feat-a", "working")],
-            vec![row("feat-a", "done")],
-        ]);
-        let enumerator = FakeEnumerator {
-            panes: vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
-        };
-        let mut dispatcher = RecordingDispatcher::default();
-        let clock = FakeClock::new();
-        let mut alerts = RecordingAlerts::default();
-        let mut learnings = RecordingLearnings::default();
-        let mut manual_decisions = NoopManualDecisions;
-        let mut refresher = RecordingRefresher::default();
-        let merge_check = FakeMergeCheck::default();
-        let mut deps = DriveDeps {
-            enumerator: &enumerator,
-            capturer: &capturer,
-            dispatcher: &mut dispatcher,
-            status: &status,
-            messages: &ScriptedMessages::default(),
-            clock: &clock,
-            merge_check: &merge_check,
-            alerts: &mut alerts,
-            learnings: &mut learnings,
-            manual_decisions: &mut manual_decisions,
-            refresher: &mut refresher,
-            wedged: Vec::new(),
-        };
-        let summary = drive_loop_in_tmp(
-            "paw-test",
-            &agents,
-            &mut deps,
-            &DriveConfig {
-                poll_interval: Duration::from_secs(1),
-                heartbeat: Duration::from_hours(1),
-                default_branch: "main".to_string(),
-                ..DriveConfig::default()
-            },
-        );
-        assert_ne!(
-            summary.outcome,
-            DriveOutcome::CliUnavailable,
-            "the orchestrator's own echoed hand-off must never self-trigger \
-             cli-unavailable: {summary:?}"
-        );
-        assert_eq!(
-            summary
-                .escalations
-                .iter()
-                .filter(|e| e.verdict == "cli-unavailable")
-                .count(),
-            1,
-            "exactly feat-a's original escalation, nothing from pane 0's echo: {:?}",
-            summary.escalations
-        );
-        assert!(
-            summary
-                .escalations
-                .iter()
-                .all(|e| e.agent_id != SUPERVISOR_AGENT_ID),
-            "the orchestrator itself must never be escalated from its own echo: {:?}",
-            summary.escalations
-        );
-    }
-
     /// Asserts a payload containing `needle` was typed into `pane_index`
     /// LITERALLY (`send-keys -l`) and submitted by a SEPARATE `Enter` keystroke
     /// immediately after — the D6 nudge discipline.
@@ -7693,34 +7102,6 @@ mod tests {
         d.literal_sends
             .iter()
             .any(|(p, t)| *p == pane_index && t.contains(needle))
-    }
-
-    /// Presence is structural — a pane resolving to the supervisor IS the
-    /// orchestrator, and a session with no such pane has none.
-    #[test]
-    fn orchestrator_presence_is_read_from_the_pane_layout() {
-        let agents = two_agents();
-        let with_supervisor = vec![pane(0, "/repo"), pane(2, "/repo-feat-a")];
-        assert_eq!(
-            orchestrator_pane_index(supervised_layout(), &with_supervisor, &agents),
-            Some(0),
-            "pane 0 at the repo root is the orchestrator"
-        );
-        assert!(orchestrator_present(
-            supervised_layout(),
-            &with_supervisor,
-            &agents
-        ));
-
-        let workers_only = vec![pane(2, "/repo-feat-a"), pane(3, "/repo-feat-b")];
-        assert_eq!(
-            orchestrator_pane_index(supervised_layout(), &workers_only, &agents),
-            None
-        );
-        assert!(
-            !orchestrator_present(supervised_layout(), &workers_only, &agents),
-            "a pure --unattended run with no supervisor pane has no orchestrator"
-        );
     }
 
     // --- Spec scenario "Behavior is unchanged": drive-loop parity ----------
@@ -7819,36 +7200,32 @@ mod tests {
         }
     }
 
-    /// Spec scenario "Behavior is unchanged", supervised half: every surface
-    /// the loop sweeps, the agent id it escalates each one under, the surface
-    /// it types into and the outcome it exits on are exactly what the
-    /// pre-refactor loop produced for the supervised layout — pane 1 (the
-    /// dashboard) is never touched, the coding panes escalate under their own
-    /// ids, and the hand-off types into the supervisor surface and nowhere
-    /// else.
+    /// `approval-auto` scenario "Keystrokes reach only coding-agent
+    /// surfaces", supervised half (GP-46): pane 0 is the dashboard — never
+    /// captured, never escalated, never typed into, even with a prompt drawn
+    /// on it — the coding surfaces escalate under their own ids, and the
+    /// escalations are broker records only.
     #[test]
-    fn supervised_layout_sweeps_escalates_and_types_exactly_as_before() {
+    fn supervised_layout_sweeps_only_coding_surfaces_and_types_nowhere() {
         let agents = two_agents();
         let trace = trace_one_sweep(
             supervised_layout(),
             &agents,
             vec![
                 pane(0, "/repo"),
-                pane(1, "/repo"),
-                pane(2, "/repo-feat-a"),
-                pane(3, "/repo-feat-b"),
+                pane(1, "/repo-feat-a"),
+                pane(2, "/repo-feat-b"),
             ],
             &[
-                (0, IDLE_PANE),
-                (1, &live_safe_capture("should never be swept")),
-                (2, &live_safe_capture("frobnicate --all")),
-                (3, &live_safe_capture("cargo build")),
+                (0, &live_safe_capture("should never be swept")),
+                (1, &live_safe_capture("frobnicate --all")),
+                (2, &live_safe_capture("cargo build")),
             ],
         );
 
         assert_eq!(
             trace.swept,
-            vec![0, 2, 3],
+            vec![1, 2],
             "the dashboard surface is never swept"
         );
         assert_eq!(
@@ -7859,51 +7236,116 @@ mod tests {
             ],
             "only the prompting coding surfaces escalate, under their own ids"
         );
-        assert_eq!(
-            trace.keyed,
-            vec![0],
-            "the orchestrator hand-off types into the supervisor surface and nowhere else"
+        assert!(
+            trace.keyed.is_empty(),
+            "no surface is typed into: {:?}",
+            trace.keyed
         );
         assert_eq!(trace.outcome, DriveOutcome::Heartbeat);
     }
 
-    /// Spec scenario "Behavior is unchanged", escalation-identity half: a live
-    /// prompt on the supervisor's own surface escalates under the supervisor
-    /// wire identity, exactly as the pre-refactor
-    /// `PaneRole::Supervisor.agent_id()` produced.
+    /// `approval-auto` scenarios "Dashboard surface is never nudged in a
+    /// supervised session", "Unresolved surface is refused" and "Coding agent
+    /// surfaces are reached": buffered text on an idle input box is submitted
+    /// on the coding surface only — the dashboard and a surface no worktree
+    /// owns receive nothing.
     #[test]
-    fn a_prompt_on_the_supervisor_surface_escalates_under_the_wire_identity() {
+    fn buffered_input_is_submitted_on_coding_surfaces_only() {
+        let agents = two_agents();
+        let buffered = idle_input_box("/opsx:apply my-change");
+        let trace = trace_one_sweep(
+            supervised_layout(),
+            &agents,
+            vec![
+                pane(0, "/repo"),
+                pane(1, "/repo-feat-a"),
+                pane(3, "/elsewhere"),
+            ],
+            &[(0, &buffered), (1, &buffered), (3, &buffered)],
+        );
+
+        assert_eq!(trace.swept, vec![1], "only the coding surface is captured");
+        assert_eq!(
+            trace.keyed,
+            vec![1],
+            "the buffered submit reaches the coding surface and nothing else"
+        );
+    }
+
+    /// Scenario "A prompt drawn on the dashboard is not escalated"
+    /// (`supervisor-unattended-operation`): text on the dashboard — which can
+    /// quote a worker's prompt — is not a coding surface, so the loop never
+    /// captures it, escalates it, or types into it.
+    #[test]
+    fn a_prompt_drawn_on_the_dashboard_is_not_escalated() {
         let agents = two_agents();
         let trace = trace_one_sweep(
             supervised_layout(),
             &agents,
-            vec![pane(0, "/repo"), pane(1, "/repo")],
+            vec![pane(0, "/repo")],
+            &[(0, &live_safe_capture("git status"))],
+        );
+
+        assert!(trace.swept.is_empty(), "swept {:?}", trace.swept);
+        assert!(
+            trace.escalated.is_empty(),
+            "escalated {:?}",
+            trace.escalated
+        );
+        assert!(trace.keyed.is_empty(), "keyed {:?}", trace.keyed);
+    }
+
+    /// Scenario "A pre-relocation live session keeps its agent offset"
+    /// (`session-state`): a session an earlier binary saved with
+    /// `dashboard_pane = Some(1)` still runs its old orchestrator CLI at pane
+    /// 0 and its dashboard at pane 1. Neither is a coding surface, so the
+    /// loop acts on panes 2.. only — even when both reserved panes show a
+    /// live prompt.
+    #[test]
+    fn a_pre_relocation_session_acts_on_neither_reserved_pane() {
+        let agents = two_agents();
+        let legacy = crate::session::Session {
+            session_name: "paw-test".to_string(),
+            repo_path: PathBuf::from("/repo"),
+            project_name: "test".to_string(),
+            created_at: SystemTime::UNIX_EPOCH,
+            status: crate::session::SessionStatus::Active,
+            worktrees: Vec::new(),
+            broker_port: Some(9119),
+            broker_bind: Some("127.0.0.1".to_string()),
+            broker_log_path: None,
+            mode: crate::session::SessionMode::Supervisor,
+            dashboard_pane: Some(1),
+        };
+        let trace = trace_one_sweep(
+            SessionLayout::of(&legacy),
+            &agents,
+            vec![
+                pane(0, "/repo"),
+                pane(1, "/repo"),
+                pane(2, "/repo-feat-a"),
+                pane(3, "/repo-feat-b"),
+            ],
             &[
-                (0, &live_safe_capture("git status")),
-                (1, &live_safe_capture("should never be swept")),
+                (0, &live_safe_capture("old orchestrator prompt")),
+                (1, &live_safe_capture("dashboard text")),
+                (2, &live_safe_capture("frobnicate --all")),
+                (3, IDLE_PANE),
             ],
         );
 
-        assert_eq!(
-            trace.swept,
-            vec![0],
-            "the dashboard surface stays untouched"
-        );
+        assert_eq!(trace.swept, vec![2, 3], "panes 0 and 1 are never swept");
         assert_eq!(
             trace.escalated,
-            vec![(
-                SUPERVISOR_AGENT_ID.to_string(),
-                PERMISSION_PROMPT_VERDICT.to_string()
-            )]
+            vec![("feat-a".to_string(), PERMISSION_PROMPT_VERDICT.to_string())]
         );
+        assert!(trace.keyed.is_empty(), "keyed {:?}", trace.keyed);
     }
 
-    /// Spec scenario "Behavior is unchanged", bare half: with no supervisor
-    /// surface in the layout, index 0 is the dashboard — never swept, never
-    /// escalated — the coding surfaces escalate under their own ids, and with
-    /// no orchestrator present nothing is typed anywhere (design D3: the bare
-    /// layout is unreachable from `cmd_supervisor` today, so the record's
-    /// answer, not pane 0's old implicit `Supervisor` role, is the contract).
+    /// `approval-auto` scenario "Keystrokes reach only coding-agent
+    /// surfaces", bare half: index 0 is the bare layout's dashboard — never
+    /// swept, never escalated — the coding surfaces escalate under their own
+    /// ids, and nothing is typed anywhere.
     #[test]
     fn bare_layout_sweeps_only_coding_surfaces_and_types_nowhere() {
         let agents = two_agents();
@@ -7937,24 +7379,18 @@ mod tests {
         );
         assert!(
             trace.keyed.is_empty(),
-            "no orchestrator surface, so nothing is typed into: {:?}",
+            "nothing is typed into: {:?}",
             trace.keyed
         );
         assert_eq!(trace.outcome, DriveOutcome::Heartbeat);
     }
 
-    /// Spec scenario "Behavior is unchanged", named carve-out (design D6): a
-    /// CODING branch whose slug collides with the supervisor wire identity.
-    ///
-    /// The pre-refactor loop flattened its role to the string `"supervisor"`
-    /// and then re-detected it with `agent_id == SUPERVISOR_AGENT_ID`, so a
-    /// CLI-unavailability banner on that worker's pane ended the whole wave
-    /// as `OrchestratorCliUnavailable`. Deciding by role instead, the worker
-    /// is what it is — a coding surface — and its banner becomes an ordinary
-    /// non-blocking escalation while the wave keeps driving. The new
-    /// behaviour is the intended one and is kept.
+    /// A CODING branch whose slug collides with the supervisor wire identity
+    /// is what it is — a coding surface — so its CLI-unavailability banner is
+    /// an ordinary non-blocking escalation under its own (colliding) id and
+    /// the wave keeps driving.
     #[test]
-    fn a_coding_branch_slugged_supervisor_no_longer_ends_the_wave() {
+    fn a_coding_branch_slugged_supervisor_is_an_ordinary_coding_surface() {
         let agents = vec![AgentPane {
             agent_id: SUPERVISOR_AGENT_ID.to_string(),
             worktree_path: PathBuf::from("/repo-supervisor"),
@@ -7963,17 +7399,17 @@ mod tests {
         let trace = trace_one_sweep(
             supervised_layout(),
             &agents,
-            vec![pane(0, "/repo"), pane(2, "/repo-supervisor")],
+            vec![pane(0, "/repo"), pane(1, "/repo-supervisor")],
             &[
                 (0, IDLE_PANE),
-                (2, "working…\nYou've hit your session limit"),
+                (1, "working…\nYou've hit your session limit"),
             ],
         );
 
         assert_eq!(
             trace.outcome,
             DriveOutcome::Heartbeat,
-            "a worker's banner must not end the wave as orchestrator-CLI-unavailable"
+            "a worker's banner must not end the wave"
         );
         assert_eq!(
             trace.escalated,
@@ -7983,38 +7419,12 @@ mod tests {
             )],
             "it is escalated as a coding pane, under its own (colliding) id"
         );
-        assert_eq!(
-            trace.swept,
-            vec![0, 2],
-            "the real supervisor surface is still swept alongside it"
-        );
-    }
-
-    /// The other side of the carve-out: a banner on the surface the layout
-    /// actually reserves for the supervisor still ends the wave at once.
-    #[test]
-    fn a_banner_on_the_supervisor_surface_still_ends_the_wave() {
-        let agents = vec![AgentPane {
-            agent_id: SUPERVISOR_AGENT_ID.to_string(),
-            worktree_path: PathBuf::from("/repo-supervisor"),
-            branch: "feat/supervisor".to_string(),
-        }];
-        let trace = trace_one_sweep(
-            supervised_layout(),
-            &agents,
-            vec![pane(0, "/repo"), pane(2, "/repo-supervisor")],
-            &[
-                (0, "working…\nYou've hit your session limit"),
-                (2, IDLE_PANE),
-            ],
-        );
-
-        assert_eq!(trace.outcome, DriveOutcome::CliUnavailable);
+        assert_eq!(trace.swept, vec![1], "the dashboard is not swept");
     }
 
     /// Spec scenario "Coding agents resolve by owner, not index", loop half: a
     /// coding worktree whose surface sits at an index the layout reserves is
-    /// still swept and escalated as that agent, never as the supervisor.
+    /// still swept and escalated as that agent, never as the dashboard.
     #[test]
     fn a_coding_surface_at_a_reserved_index_escalates_under_its_own_id() {
         let agents = two_agents();
@@ -8033,24 +7443,27 @@ mod tests {
         );
     }
 
-    /// Spec scenario "A live permission prompt is injected into the
-    /// orchestrator pane" — the escalation is recorded on the broker AND
-    /// handed to the orchestrator, while the wave never blocks on the
-    /// hand-off. Both workers are prompting, so both escalate.
+    /// Scenarios "Escalation is recorded as a broker review item only"
+    /// (`supervisor-autonomous-orchestrator`) and "A permission-prompt
+    /// escalation is never typed into a surface"
+    /// (`supervisor-unattended-operation`): both prompting workers escalate,
+    /// each escalation is a broker review item, and no surface — the
+    /// dashboard included — receives a keystroke, while the wave keeps
+    /// moving to completion.
     #[test]
-    fn live_prompt_is_handed_to_the_orchestrator_and_recorded_on_the_broker() {
+    fn escalation_is_recorded_as_a_broker_review_item_only() {
         let agents = two_agents();
         let (dispatcher, alerts) = run_loop(
             &agents,
             vec![
                 pane(0, "/repo"),
-                pane(2, "/repo-feat-a"),
-                pane(3, "/repo-feat-b"),
+                pane(1, "/repo-feat-a"),
+                pane(2, "/repo-feat-b"),
             ],
             &[
                 (0, IDLE_PANE),
-                (2, &live_safe_capture("frobnicate --all")),
-                (3, &live_safe_capture("cargo build")),
+                (1, &live_safe_capture("frobnicate --all")),
+                (2, &live_safe_capture("cargo build")),
             ],
             vec![
                 vec![row("feat-a", "working"), row("feat-b", "working")],
@@ -8064,8 +7477,7 @@ mod tests {
             },
         );
 
-        // Recorded uniformly on the broker …
-        assert_eq!(alerts.escalations.len(), 2, "{:?}", alerts.escalations);
+        assert_eq!(alerts.escalations.len(), 2, "recorded on the broker");
         assert!(
             alerts
                 .escalations
@@ -8074,72 +7486,18 @@ mod tests {
             "{:?}",
             alerts.escalations
         );
-        // … AND handed to the orchestrator's pane as a relay request.
-        assert_text_then_separate_enter(&dispatcher, 0, "Relay to the human");
-        assert!(
-            injected(&dispatcher, 0, "feat-a"),
-            "the hand-off names the agent whose prompt it is"
-        );
-        // Neither prompting pane was typed into — only pane 0 saw the relay.
-        assert!(
-            dispatcher.events.iter().all(|(p, _)| *p == 0),
-            "only the orchestrator pane is typed into; events were {:?}",
-            dispatcher.events
-        );
-    }
-
-    /// Spec: "No orchestrator present falls back to broker-only escalation" —
-    /// the same input records the escalations and injects into NO pane. This
-    /// is also the back-compat guarantee for a pure `--unattended` run.
-    #[test]
-    fn live_prompt_without_an_orchestrator_records_only_the_broker_escalation() {
-        let agents = two_agents();
-        let (dispatcher, alerts) = run_loop(
-            &agents,
-            vec![pane(2, "/repo-feat-a"), pane(3, "/repo-feat-b")],
-            &[
-                (2, &live_safe_capture("frobnicate --all")),
-                (3, &live_safe_capture("cargo build")),
-            ],
-            vec![
-                vec![row("feat-a", "working"), row("feat-b", "working")],
-                vec![row("supervisor", "done")],
-            ],
-            &ScriptedMessages::none(),
-            &DriveConfig {
-                poll_interval: Duration::from_secs(1),
-                heartbeat: Duration::from_hours(1),
-                ..DriveConfig::default()
-            },
-        );
-
-        assert_eq!(alerts.escalations.len(), 2, "still recorded on the broker");
-        assert!(
-            alerts
-                .escalations
-                .iter()
-                .all(|e| e.verdict == PERMISSION_PROMPT_VERDICT),
-            "{:?}",
-            alerts.escalations
-        );
-        assert!(
-            dispatcher.literal_sends.is_empty(),
-            "no pane injection at all without an orchestrator; literal sends were {:?}",
-            dispatcher.literal_sends
-        );
-        // With no orchestrator to relay to, nothing is typed anywhere at all.
         assert!(
             dispatcher.events.is_empty(),
-            "no keystroke is expected; events were {:?}",
+            "no surface receives a keystroke; events were {:?}",
             dispatcher.events
         );
     }
 
-    /// Spec: "An ambiguous question is injected into the orchestrator pane" — a
-    /// worker's `agent.question` IS the ambiguity signal, so it goes straight to
-    /// the orchestrator for the smart model to answer.
+    /// A worker's ambiguous `agent.question` is a judgment call, but its own
+    /// broker message is the review item: the loop publishes no copy of it and
+    /// types it into no surface.
     #[test]
-    fn worker_question_is_handed_to_the_orchestrator_pane() {
+    fn a_worker_question_stays_on_the_broker_and_is_typed_nowhere() {
         let agents = two_agents();
         let question = BrokerMessage::Question {
             agent_id: "feat-a".to_string(),
@@ -8147,10 +7505,10 @@ mod tests {
                 question: "spec says both A and B own this file — which wins?".to_string(),
             },
         };
-        let (dispatcher, _) = run_loop(
+        let (dispatcher, alerts) = run_loop(
             &agents,
-            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
-            &[(0, IDLE_PANE), (2, IDLE_PANE)],
+            vec![pane(0, "/repo"), pane(1, "/repo-feat-a")],
+            &[(0, IDLE_PANE), (1, IDLE_PANE)],
             vec![
                 vec![row("feat-a", "working"), row("feat-b", "working")],
                 vec![row("supervisor", "done")],
@@ -8163,55 +7521,11 @@ mod tests {
             },
         );
 
-        assert_text_then_separate_enter(&dispatcher, 0, "which wins?");
-        assert!(
-            injected(&dispatcher, 0, "Judgment call handed to you: feat-a"),
-            "the hand-off names the waiting worker; literal sends were {:?}",
-            dispatcher.literal_sends
-        );
+        assert!(dispatcher.events.is_empty(), "{:?}", dispatcher.events);
+        assert!(alerts.escalations.is_empty(), "{:?}", alerts.escalations);
     }
 
     // --- wind-down suppresses nudge dispatch (GP-16) ------------------------
-
-    /// Spec scenario "No nudge is sent after wind-down begins": a `Question`
-    /// message that arrives on the SAME tick the wave's own status fetch
-    /// already shows it complete is never handed to the orchestrator — the
-    /// loop's wind-down state is checked before dispatching a hand-off, not
-    /// just before the cadenced orchestration nudge.
-    #[test]
-    fn no_hand_off_is_dispatched_on_the_tick_the_wave_completes() {
-        let agents = vec![AgentPane {
-            agent_id: "feat-a".to_string(),
-            worktree_path: PathBuf::from("/repo-feat-a"),
-            branch: "feat/a".to_string(),
-        }];
-        let question = BrokerMessage::Question {
-            agent_id: "feat-a".to_string(),
-            payload: crate::broker::messages::QuestionPayload {
-                question: "which wins?".to_string(),
-            },
-        };
-        let (dispatcher, _) = run_loop(
-            &agents,
-            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
-            &[(0, IDLE_PANE), (2, IDLE_PANE)],
-            // A single tick: the status fetch already shows the wave
-            // complete (a supervisor verdict) at the same moment the
-            // Question message is observed.
-            vec![vec![row("supervisor", "done")]],
-            &ScriptedMessages::new(vec![vec![question]]),
-            &DriveConfig {
-                poll_interval: Duration::from_secs(1),
-                heartbeat: Duration::from_hours(1),
-                ..DriveConfig::default()
-            },
-        );
-        assert!(
-            dispatcher.events.is_empty(),
-            "no nudge keystrokes on the tick the wave completes; events were {:?}",
-            dispatcher.events
-        );
-    }
 
     /// Spec scenario "Wind-down does not re-accumulate unsubmitted text": a
     /// gate failure observed on the same tick the wave completes leaves a
@@ -8265,61 +7579,55 @@ mod tests {
         }
     }
 
-    /// Drives one wave whose only message is a `feat-a` artifact at `status`, and
-    /// reports what reached the orchestrator pane.
-    fn run_artifact_wave(status: &str) -> RecordingDispatcher {
-        let agents = two_agents();
-        let (dispatcher, _) = run_loop(
-            &agents,
-            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
-            &[(0, IDLE_PANE), (2, IDLE_PANE)],
-            vec![
-                vec![row("feat-a", status), row("feat-b", "working")],
-                vec![row("supervisor", "done")],
-            ],
-            &ScriptedMessages::new(vec![vec![artifact(status)]]),
-            &DriveConfig {
-                poll_interval: Duration::from_secs(1),
-                heartbeat: Duration::from_hours(1),
-                ..DriveConfig::default()
-            },
+    /// Scenario "Merge decision is recorded, not injected"
+    /// (`supervisor-autonomous-orchestrator`): a worker's `committed` (or
+    /// `done`) artifact is the point a merge decision becomes live. The
+    /// worker's own artifact message is the broker record of it; the loop
+    /// publishes no copy and types into no surface.
+    #[test]
+    fn merge_decision_is_recorded_not_injected() {
+        for status in ["committed", "done"] {
+            let agents = two_agents();
+            let (dispatcher, alerts) = run_loop(
+                &agents,
+                vec![pane(0, "/repo"), pane(1, "/repo-feat-a")],
+                &[(0, IDLE_PANE), (1, IDLE_PANE)],
+                vec![
+                    vec![row("feat-a", status), row("feat-b", "working")],
+                    vec![row("supervisor", "done")],
+                ],
+                &ScriptedMessages::new(vec![vec![artifact(status)]]),
+                &DriveConfig {
+                    poll_interval: Duration::from_secs(1),
+                    heartbeat: Duration::from_hours(1),
+                    ..DriveConfig::default()
+                },
+            );
+            assert!(
+                dispatcher.events.is_empty(),
+                "{status}: no surface may be typed into; events were {:?}",
+                dispatcher.events
+            );
+            assert!(
+                alerts.escalations.is_empty(),
+                "{status}: the artifact itself is the record; got {:?}",
+                alerts.escalations
+            );
+        }
+    }
+
+    /// The escalation context a headless orchestrator invocation reads for a
+    /// merge decision names the agent, the status that made it live, and the
+    /// sequencing ask — a pure renderer, kept for that hand-off.
+    #[test]
+    fn merge_handoff_text_names_the_agent_status_and_sequencing() {
+        let text = merge_handoff_text("feat-a", "committed");
+        assert!(
+            text.contains("Merge decision handed to you: feat-a"),
+            "{text}"
         );
-        dispatcher
-    }
-
-    /// Spec: "A merge decision is injected into the orchestrator pane" — a
-    /// `committed` or `done` artifact is the point a merge decision becomes live,
-    /// so the loop triggers the orchestrator rather than waiting to be noticed.
-    #[test]
-    fn merge_candidate_artifact_hands_the_merge_decision_to_the_orchestrator() {
-        for status in MERGE_CANDIDATE_STATUSES {
-            let dispatcher = run_artifact_wave(status);
-            assert_text_then_separate_enter(&dispatcher, 0, "Merge decision handed to you: feat-a");
-            assert!(
-                injected(&dispatcher, 0, "merge sequence"),
-                "the {status} hand-off asks for merge sequencing"
-            );
-            assert!(
-                injected(&dispatcher, 0, status),
-                "the hand-off names the status that made the decision live"
-            );
-        }
-    }
-
-    /// …and no other artifact status does. `blocked` and `verified` never arrive
-    /// as an artifact status (they are `agent.blocked` / `agent.verified`), and a
-    /// merge-sequencing prompt for a branch in either state would be misleading —
-    /// there is no merge to sequence.
-    #[test]
-    fn non_merge_candidate_artifact_hands_over_nothing() {
-        for status in ["blocked", "verified", "working"] {
-            let dispatcher = run_artifact_wave(status);
-            assert!(
-                !injected(&dispatcher, 0, "Merge decision handed to you"),
-                "a {status} artifact is not a merge candidate; sends were {:?}",
-                dispatcher.literal_sends
-            );
-        }
+        assert!(text.contains("committed"), "{text}");
+        assert!(text.contains("merge sequence"), "{text}");
     }
 
     // === `supervisor-branch-refresh`: post-merge trigger + gates (group 5/6) ===
@@ -8663,8 +7971,6 @@ mod tests {
         let ctx = SweepContext {
             session: "paw-test",
             repo_root: &repo_root,
-            orchestrator: None,
-            orchestrator_settle_delay: Duration::ZERO,
         };
 
         let enumerator = FakeEnumerator { panes: vec![] };
@@ -8746,8 +8052,6 @@ mod tests {
         let ctx = SweepContext {
             session: "paw-test",
             repo_root: &repo_root,
-            orchestrator: None,
-            orchestrator_settle_delay: Duration::ZERO,
         };
 
         let enumerator = FakeEnumerator { panes: vec![] };
@@ -8836,124 +8140,6 @@ mod tests {
         assert!(
             dispatcher.literal_sends.is_empty(),
             "a supervisor-authored question is not a worker judgment call; sends were {:?}",
-            dispatcher.literal_sends
-        );
-    }
-
-    /// A task injected mid-turn pollutes the orchestrator's context, so the
-    /// hand-off is suppressed while its pane is producing output — the broker
-    /// record still stands.
-    #[test]
-    fn handoff_is_suppressed_while_the_orchestrator_is_mid_response() {
-        let agents = two_agents();
-        let (dispatcher, alerts) = run_loop(
-            &agents,
-            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
-            &[
-                (0, MID_RESPONSE_PANE),
-                (2, &live_safe_capture("frobnicate --all")),
-            ],
-            vec![
-                vec![row("feat-a", "working"), row("feat-b", "working")],
-                vec![row("supervisor", "done")],
-            ],
-            &ScriptedMessages::none(),
-            &DriveConfig {
-                poll_interval: Duration::from_secs(1),
-                heartbeat: Duration::from_hours(1),
-                ..DriveConfig::default()
-            },
-        );
-
-        assert_eq!(
-            alerts.escalations.len(),
-            1,
-            "the broker record still stands"
-        );
-        assert!(
-            dispatcher.literal_sends.is_empty(),
-            "nothing is typed into a mid-response orchestrator; sends were {:?}",
-            dispatcher.literal_sends
-        );
-    }
-
-    /// Spec: "Orchestration nudge fires on the longer cadence" — once the
-    /// orchestration interval elapses with no completion, the nudge goes out as
-    /// text plus a separate `Enter`.
-    #[test]
-    fn orchestration_nudge_fires_on_the_longer_cadence() {
-        let agents = two_agents();
-        let (dispatcher, _) = run_loop(
-            &agents,
-            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
-            &[(0, IDLE_PANE), (2, IDLE_PANE)],
-            vec![vec![row("feat-a", "working"), row("feat-b", "working")]],
-            &ScriptedMessages::none(),
-            &DriveConfig {
-                poll_interval: Duration::from_secs(15),
-                orchestration_nudge_interval: Duration::from_secs(10),
-                heartbeat: Duration::from_secs(20),
-                ..DriveConfig::default()
-            },
-        );
-
-        assert_text_then_separate_enter(&dispatcher, 0, "Run an orchestration sweep now");
-        assert!(
-            injected(&dispatcher, 0, "merge sequencing"),
-            "the nudge asks for spawn order, merge sequencing, and blocked workers"
-        );
-    }
-
-    /// …and within a single approval tick nothing is nudged: the orchestration
-    /// cadence is a multiple of the poll interval, so the fast sweep does not
-    /// prompt-storm the orchestrator.
-    #[test]
-    fn no_orchestration_nudge_within_a_single_approval_tick() {
-        let agents = two_agents();
-        let (dispatcher, _) = run_loop(
-            &agents,
-            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
-            &[(0, IDLE_PANE), (2, IDLE_PANE)],
-            vec![vec![row("feat-a", "working"), row("feat-b", "working")]],
-            &ScriptedMessages::none(),
-            &DriveConfig {
-                poll_interval: POLL_INTERVAL,
-                orchestration_nudge_interval: ORCHESTRATION_NUDGE_INTERVAL,
-                heartbeat: POLL_INTERVAL + Duration::from_secs(1),
-                ..DriveConfig::default()
-            },
-        );
-
-        assert!(
-            dispatcher.literal_sends.is_empty(),
-            "no orchestration nudge inside one approval tick; sends were {:?}",
-            dispatcher.literal_sends
-        );
-    }
-
-    /// The orchestration nudge is suppressed while the orchestrator is
-    /// mid-response, and — because the cadence timer only advances on a
-    /// delivered nudge — it is deferred rather than swallowed.
-    #[test]
-    fn orchestration_nudge_is_suppressed_while_the_orchestrator_is_mid_response() {
-        let agents = two_agents();
-        let (dispatcher, _) = run_loop(
-            &agents,
-            vec![pane(0, "/repo"), pane(2, "/repo-feat-a")],
-            &[(0, MID_RESPONSE_PANE), (2, IDLE_PANE)],
-            vec![vec![row("feat-a", "working"), row("feat-b", "working")]],
-            &ScriptedMessages::none(),
-            &DriveConfig {
-                poll_interval: Duration::from_secs(15),
-                orchestration_nudge_interval: Duration::from_secs(10),
-                heartbeat: Duration::from_secs(20),
-                ..DriveConfig::default()
-            },
-        );
-
-        assert!(
-            dispatcher.literal_sends.is_empty(),
-            "a busy orchestrator is not nudged; sends were {:?}",
             dispatcher.literal_sends
         );
     }

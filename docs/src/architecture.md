@@ -115,9 +115,9 @@ It describes the code as it is today. For the structure the code is moving towar
 
 `src/dashboard.rs` (top-level, not inside `src/broker/`) renders the dashboard
 pane — the live status table and the optional message-log panel — by reading
-the shared broker state. The dashboard pane sits at pane index 1 in supervisor
-mode (see the layout diagram below) and at pane 0 in non-supervisor broker
-mode.
+the shared broker state. The dashboard pane sits at pane index 0 whenever the
+session has one — in supervisor mode (see the layout diagram below) and in
+non-supervisor broker mode alike.
 
 The dashboard is structured as **Model-View-Update**:
 
@@ -141,9 +141,8 @@ format_agent_rows, …}` resolving from the parent module.
 | `src/supervisor/approval_gate.rs` | The shared live-prompt gate (`live_prompt_in_tail`) and the escalation dedup key. |
 | `src/supervisor/branch_refresh.rs` | Pure precondition check for the opt-in post-merge branch refresh (`[supervisor] branch_refresh`): a branch is rebased only when every gate passes. The drive loop resolves the inputs. |
 | `src/supervisor/claim.rs` | Exclusive per-pane keystroke claim. Every sender — the drive loop's nudge and buffered-input recovery, and the bundled `sweep.sh approve` in its own process — atomically creates `<repo>/.git-paw/tmp/approve-pane-<N>.claim` before sending a keystroke, so two can never both type into one pane. Non-blocking (a held pane is skipped, not waited on), released by RAII, and stealable once untouched past a 10s TTL so a hard-killed sender cannot wedge a pane. |
-| `src/supervisor/drive.rs` | The `--unattended` drive loop, run in-process by `cmd_supervisor`: ~15 s sweeps of every pane, non-blocking escalation of every live permission prompt, hand-offs to the supervisor pane, buffered-input recovery, the optional correction loop and branch refresh, completion detection, and the exit summary. It sends no approval keystroke. |
+| `src/supervisor/drive.rs` | The `--unattended` drive loop, run in-process by `cmd_supervisor`: ~15 s sweeps of every coding-agent pane, non-blocking escalation of every live permission prompt as a broker review item (nothing is typed for it), buffered-input recovery, the optional correction loop and branch refresh, completion detection, and the exit summary. It sends no approval keystroke. |
 | `src/supervisor/keys.rs` | The `KeyDispatcher` seam and its `tmux send-keys` implementation, used by the drive loop's nudge and input-recovery paths. |
-| `src/supervisor/layout.rs` | Transitional re-export of the supervisor-as-pane grid geometry, which now lives in `src/surface.rs` (pane 0 supervisor, pane 1 dashboard, agent panes 2 onwards in the bottom-row grid — row-height proportions documented below). |
 | `src/supervisor/manual_approvals.rs` | Records each prompt the drive loop escalates for a human decision to `.git-paw/sessions/<session>.manual-approvals.jsonl`, aggregates the log, and suggests which of the agent CLI's own allowlists could absorb the pattern for `git paw approvals`. |
 | `src/supervisor/permission_prompt.rs` | All permission-prompt detection: `tmux capture-pane`, the approval-marker scan, the live-prompt gate and its anchoring windows, input-box and rule-line parsing, and extraction of the prompted command slice or file-operation target path. Reports what is on screen; decides nothing about the command. |
 
@@ -255,11 +254,11 @@ git paw start
      │
      ▼
 ┌─ Pane layout by mode ────────────────────────────────────┐
-│  supervisor   → Pane 0 = supervisor CLI                  │
-│                 Pane 1 = `git paw __dashboard`           │
-│                 Pane 2..N = per-agent CLIs               │
+│  supervisor   → Pane 0 = `git paw __dashboard`           │
+│                 Pane 1..N = per-agent CLIs               │
 │                 (cmd_supervisor builds it with           │
-│                  tmux::build_supervisor_session)         │
+│                  tmux::build_supervisor_session; the     │
+│                  orchestrator runs outside the session)  │
 │  broker-only  → Pane 0 = `git paw __dashboard`           │
 │                 Pane 1..N = per-branch agent CLIs        │
 │  no broker    → Pane 0..N = per-branch agent CLIs        │
@@ -304,9 +303,7 @@ index tmux assigns. A file left by the original launch would then record pane
 indices that no longer describe the session. Recovery rewrites it from the
 offsets of the layout it just rebuilt; the resume path reads each agent's pane
 index back from the running session (`list-panes` matched on
-`pane_current_path`) rather than assuming the launch-time offsets, and derives
-the `orchestrator` entry from the resumed session's mode so it survives a
-missing file.
+`pane_current_path`) rather than assuming the launch-time offsets.
 
 Its shape — stable for sweep.sh and forward-compatible (consumers ignore
 unknown keys):
@@ -319,13 +316,9 @@ unknown keys):
       "branch_id": "feat-add-auth",
       "worktree_path": "/abs/path/to/myproject/.git-paw/worktrees/feat-add-auth",
       "cli": "claude",
-      "pane_index": 2
+      "pane_index": 1
     }
-  ],
-  "orchestrator": {
-    "cli": "fable",
-    "pane_index": 0
-  }
+  ]
 }
 ```
 
@@ -335,18 +328,15 @@ supervisor attached to a pre-existing `paw-*` session), `sweep.sh` falls back to
 resolving the session name from `$TMUX` / `tmux display-message -p '#S'`, so the
 file never needs to be hand-authored.
 
-`orchestrator` records the supervisor pane's own entry — distinct from the
-coding-agent roster in `agents`, so tooling can see the full tiered-model
-split (e.g. a `fable`-tier orchestrator driving `sonnet` workers). It is
-present only for a supervisor-mode session; a bare-mode session (no
-orchestrator pane) and a file written before this field existed both omit it.
-The field is additive and back-compatible: it deserializes with
-`#[serde(default)]`, so an older file loads unchanged, and `sweep.sh` — which
+The `agents` roster lists coding agents only. No `orchestrator` entry is
+written: the orchestrator runs outside the session, so no pane is its own. A
+file written by an earlier release may still carry one; it deserializes with
+`#[serde(default)]`, so such a file loads unchanged, and `sweep.sh` — which
 reads `agents` and `session_name` by name — ignores it.
 
 ## Broker Architecture
 
-When `[broker] enabled = true`, the dashboard pane runs `git paw __dashboard`. This single process hosts both the HTTP broker and the dashboard TUI. The dashboard pane sits at pane 1 in supervisor mode and at pane 0 in non-supervisor broker mode.
+When `[broker] enabled = true`, the dashboard pane runs `git paw __dashboard`. This single process hosts both the HTTP broker and the dashboard TUI. The dashboard pane sits at pane 0 in supervisor mode and in non-supervisor broker mode alike.
 
 ```
 Dashboard pane process (git paw __dashboard):
@@ -403,30 +393,38 @@ When the broker is enabled, git-paw sets `GIT_PAW_BROKER_URL=http://<bind>:<port
 ## Supervisor Mode Layout
 
 When `--supervisor` is active (or `[supervisor] enabled = true`), the tmux
-session is laid out as a 50/50 top row plus a row-major agent grid below.
-This is the canonical v0.5.0 supervisor-as-pane layout established by the
-`supervisor-as-pane` archive.
+session is laid out as the dashboard in a full-width top row plus a row-major
+agent grid below. No pane runs an orchestrator CLI.
 
 ```
-┌──────────────────────────┬──────────────────────────┐
-│  pane 0: supervisor      │  pane 1: dashboard       │
-├──┬──┬──┬──┬──┬───────────┴──────────────────────────┤
-│ 2│ 3│ 4│ 5│ 6│  agent grid (row 1)                  │
+┌─────────────────────────────────────────────────────┐
+│  pane 0: dashboard                                  │
+├──┬──┬──┬──┬──┬──────────────────────────────────────┤
+│ 1│ 2│ 3│ 4│ 5│  agent grid (row 1)                  │
 ├──┴──┴──┴──┴──┤                                      │
-│ 7│..│..│..│ N│  agent grid (row 2..M)               │
+│ 6│..│..│..│ N│  agent grid (row 2..M)               │
 └──┴──┴──┴──┴──┴──────────────────────────────────────┘
 ```
 
-Pane 0 always hosts the supervisor CLI; pane 1 always hosts the dashboard.
-Pane indices 2 onwards host one CLI per agent. The supervisor reads agent
-state via the broker and the dashboard; the dashboard reads the same broker
-state for its status table.
+Pane 0 always hosts the dashboard; pane indices 1 onwards host one CLI per
+agent. The **orchestrator runs outside the tmux session** — the operator's own
+agent session, pointed at the repo-root sidecar `.git-paw/AGENTS.local.md` that
+the launch writes and names. It drives the run through the broker, the bundled
+helpers (`.git-paw/scripts/sweep.sh`, `broker.sh`) or the MCP server; the
+dashboard reads the same broker state for its status table.
+
+A live session saved by an earlier release (orchestrator CLI at pane 0,
+dashboard at pane 1, agents from 2) keeps resolving until it ends: every
+consumer derives the first agent pane from the recorded `dashboard_pane`
+(`n` → agents from `n + 1`), and neither of that session's first two panes is
+ever treated as a coding agent. Recovering such a session rebuilds the layout
+above.
 
 ### Row-height proportions
 
-The top row is always half the session height — the supervisor and dashboard
-panes split its width 50/50 — and the agent rows share the remaining 50%
-evenly, each taking `50 / agent_rows` percent. This is a fixed rule rather
+The top row is always half the session height — the dashboard spans its full
+width — and the agent rows share the remaining 50% evenly, each taking
+`50 / agent_rows` percent. This is a fixed rule rather
 than a per-agent-count table: adding agents shrinks the agent rows, never the
 top row.
 
@@ -452,12 +450,11 @@ row gets an equal column share (the last pane absorbs the rounding remainder),
 leaving the row equal-width within a one-column tolerance. The rebalance runs
 on every path that changes the grid — `git paw start`, `git paw add`, and
 `git paw remove` — so an incrementally-built grid matches a start-time grid of
-the same agent count. It never touches the top row's supervisor/dashboard
-50/50 split nor the per-row vertical heights. No agent row exceeds five panes
+the same agent count. It never touches the full-width dashboard row nor the
+per-row vertical heights. No agent row exceeds five panes
 (`SUPERVISOR_AGENTS_PER_ROW`), bounding the smallest equal-width target to
-~20% of the window. `src/surface.rs` (re-exported for one release from
-`src/supervisor/layout.rs`) and the rebalance in `src/tmux/layout.rs` are the
-source of truth.
+~20% of the window. `src/surface.rs` and the rebalance in `src/tmux/layout.rs`
+are the source of truth.
 
 ### Launch-readiness gate
 

@@ -1,17 +1,19 @@
 # Dashboard
 
 When the broker is enabled, one tmux pane runs the dashboard instead of an
-agent CLI. In **supervisor mode** the dashboard lives at **pane 1** (pane 0
-hosts the supervisor CLI itself); in **broker-only mode** (broker on,
-supervisor off) the dashboard lives at **pane 0**. Either way it renders the
+agent CLI, and it is **pane 0 in every mode**: in **supervisor mode** it is
+the full-width top row above the agent grid (no orchestrator CLI runs inside
+the session), and in **broker-only mode** (broker on, supervisor off) it sits
+ahead of the agent panes. Either way it renders the
 same live status table that refreshes about once a second (and immediately on a key press), giving you an at-a-glance
-view of what each agent is doing.
+view of what each agent is doing. A supervised session builds the dashboard
+pane even with the broker off.
 
-The dashboard is **observation-only** — it never sends actions back to agents. Beyond `q` to quit, its keystrokes drive the [Broker log panel](#broker-log-panel) (toggle, filter, inspect). Human input (questions, directives, replies to `agent.question` events) happens in the supervisor pane itself; the dashboard simply renders broker state.
+The dashboard is **observation-only** — it never sends actions back to agents, and no git-paw keystroke sender ever types into it. Beyond `q` to quit, its keystrokes drive the [Broker log panel](#broker-log-panel) (toggle, filter, inspect). Human input (questions, directives, replies to `agent.question` events) happens in the orchestrator's own agent session, outside tmux; the dashboard simply renders broker state. There is no inbox panel.
 
 ## What the Dashboard Pane Shows
 
-The dashboard renders a table with one row per agent. When a supervisor pane is running, its row is pinned to the top with a horizontal-line divider beneath it; coding-agent rows follow in alphabetical order:
+The dashboard renders a table with one row per agent. Once the orchestrator has published its own `agent.status` (as `supervisor`), its row is pinned to the top with a horizontal-line divider beneath it; coding-agent rows follow in alphabetical order:
 
 ```
 ┌────────────┬────────┬────────────┬─────────────┐
@@ -25,7 +27,7 @@ The dashboard renders a table with one row per agent. When a supervisor pane is 
 └────────────┴────────┴────────────┴─────────────┘
 ```
 
-When no supervisor pane is running (e.g. broker-only mode — broker on, no `--supervisor` — or during the boot window before the supervisor has finished self-registering), the divider is not rendered and coding agents fill rows alphabetically from the top.
+When no orchestrator has published (e.g. broker-only mode — broker on, no `--supervisor` — or a supervised session before your orchestrator session has picked up its context), the divider is not rendered and coding agents fill rows alphabetically from the top.
 
 ### Status Symbols
 
@@ -43,7 +45,7 @@ The **Last Update** column shows elapsed time since the agent's last status upda
 
 The supervisor row's `Status` column does **not** show the wire-message type label that a coding-agent row shows. Instead the supervisor publishes a `phase` field on its `agent.status` messages (e.g. `baseline`, `watching`, `approving`, `answering`, `merging`, `summary`), and the dashboard prefers that label when rendering its row. This avoids the misleading `status=feedback` label the supervisor would otherwise show when it publishes `agent.feedback` to a coding agent.
 
-The supervisor pane is also not a watch target, so the broker cannot infer its `cli` from the watch-target map. To populate the `CLI` column for the supervisor row, the supervisor self-registration `agent.status` includes a `cli` field (e.g. `"cli":"claude"`). The broker upserts that value into its internal CLI map when it receives the message.
+The orchestrator has no pane and no worktree, so it is not a watch target and the broker cannot infer its `cli` from the watch-target map. To populate the `CLI` column for the supervisor row, the supervisor self-registration `agent.status` includes a `cli` field (e.g. `"cli":"claude"`). The broker upserts that value into its internal CLI map when it receives the message.
 
 The `CLI` column is populated for **every** agent row, not just the supervisor. git-paw knows each pane's CLI at launch and pre-fills it authoritatively — coding agents from the watch-target map (the per-repo session JSON), the supervisor from `[supervisor].cli`/`default_cli`. Agents do **not** self-report their CLI (they would only be guessing). A row appears once its pane publishes a status, and its `CLI` column shows the pre-filled value; if a CLI somehow can't be resolved it shows a `?` placeholder rather than a blank cell.
 
@@ -55,7 +57,7 @@ The `/status` agent roster — and therefore the dashboard table — is built **
 
 ### When the supervisor row appears
 
-The supervisor row appears **after** the supervisor pane's CLI has booted and published its first self-registration `agent.status` — typically within 3-5 seconds of `git paw start --supervisor` returning. There is no phantom supervisor row at launch time; if the supervisor pane fails to start, the row simply never appears. Aborted launches (non-TTY skip, missing CLI on PATH, system-level pane spawn failure) leave the agent table free of a misleading supervisor entry.
+The supervisor row appears **after** the orchestrator — your own agent session, outside tmux — publishes its first `agent.status` as `supervisor`, its first action on picking up `.git-paw/AGENTS.local.md`. The launcher never publishes on its behalf, and the drive loop's escalations (published as `agent.question` from `supervisor`) never create the row either, so a session no orchestrator drives shows no phantom supervisor row.
 
 ### Stalled-wave indicator
 
@@ -103,7 +105,7 @@ you can watch the session's wire-level activity at a glance instead of tailing
 The log is **in-memory only** — closing the dashboard drops it — and bounded by
 `[dashboard.broker_log] max_messages` (default 500). Older messages fall off the
 top as new ones arrive. The panel is read-only: replying to a question or
-directing an agent still happens in the supervisor pane.
+directing an agent happens in the orchestrator's own session.
 
 When visible, the panel occupies a fixed **20 rows** by default — materially more
 than its original 12 — so more coordination traffic is visible without constant
@@ -251,8 +253,8 @@ Because the dashboard is cheap to relaunch (`git paw start` re-attaches to the s
 
 ## Replying to agent questions
 
-Earlier dashboard versions included a "Questions" panel and a "Reply to" input field for human-typed answers to `agent.question` events. The panel was removed in v0.5.0 because the supervisor pane is the natural input surface — typed questions and replies go through `tmux send-keys` and the supervisor agent's own curl machinery, not through the dashboard.
+Earlier dashboard versions included a "Questions" panel and a "Reply to" input field for human-typed answers to `agent.question` events. The panel was removed in v0.5.0; the dashboard has no inbox. Questions and replies go through the orchestrator — your own agent session, outside tmux — and its helpers, not through the dashboard.
 
-`agent.question` messages still flow through the broker. The supervisor pane polls the supervisor inbox, reads incoming questions, and replies via `tmux send-keys` to the asking agent's pane (and via `agent.feedback` to the broker for the audit log). See the [Supervisor mode](../quick-start-supervisor.md) chapter and the embedded `supervisor.md` skill for the reply flow.
+`agent.question` messages still flow through the broker. The orchestrator reads incoming questions from the broker (through `sweep.sh`, the broker helper or the MCP server) and replies via `tmux send-keys` to the asking agent's pane (and via `agent.feedback` to the broker for the audit log). See the [Supervisor mode](../quick-start-supervisor.md) chapter and the embedded `supervisor.md` skill for the reply flow.
 
 See the [v0.5.0 changelog](../changelog.md) for the removal note.

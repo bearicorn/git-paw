@@ -173,11 +173,11 @@ fn add_attaches_pane_and_registers_agent() {
     let tmux_env = tmux_test_env();
 
     let session = start_session(tr.path(), home.path(), &tmux_env, "a,b");
-    // 2 agents -> supervisor + dashboard + 2 = 4 panes.
+    // 2 agents -> dashboard + 2 = 3 panes.
     assert_eq!(
         list_pane_count(&tmux_env, &session),
-        4,
-        "expected 4 panes after a 2-agent start"
+        3,
+        "expected 3 panes after a 2-agent start"
     );
 
     let mut add = cmd();
@@ -201,7 +201,7 @@ fn add_attaches_pane_and_registers_agent() {
         out.status.success(),
         "add failed; stdout:\n{add_stdout}\nstderr:\n{add_stderr}"
     );
-    assert_eq!(panes, 5, "add should splice one pane (4 -> 5)");
+    assert_eq!(panes, 4, "add should splice one pane (3 -> 4)");
     assert_eq!(agent_count, 3, "discovery file should list 3 agents");
     // `agent-c`, not a bare `c`: a single-word branch's id takes the `agent-`
     // prefix, because the broker's `/publish` validator refuses a bare word
@@ -228,7 +228,7 @@ fn remove_clean_agent_detaches_and_updates_session() {
     let tmux_env = tmux_test_env();
 
     let session = start_session(tr.path(), home.path(), &tmux_env, "a,b,c");
-    assert_eq!(list_pane_count(&tmux_env, &session), 5);
+    assert_eq!(list_pane_count(&tmux_env, &session), 4);
 
     // Worktree for 'b' lives as a sibling of the repo.
     let wt_b = tr.path().parent().unwrap().join("repo-b");
@@ -255,7 +255,7 @@ fn remove_clean_agent_detaches_and_updates_session() {
         "remove failed; stderr:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(panes, 4, "remove should close one pane (5 -> 4)");
+    assert_eq!(panes, 3, "remove should close one pane (4 -> 3)");
     assert_eq!(agent_count, 2, "discovery file should list 2 agents");
     assert!(
         !raw.contains("\"branch_id\": \"b\""),
@@ -686,8 +686,8 @@ fn add_to_paused_session_holds_prompt_for_resume() {
         stdout.contains("paused"),
         "add to a paused session should report it will start on `git paw start`; stdout:\n{stdout}"
     );
-    // 1 agent -> supervisor + dashboard + a = 3 panes; the held add makes 4.
-    assert_eq!(panes, 4, "paused add still creates the pane (3 -> 4)");
+    // 1 agent -> dashboard + a = 2 panes; the held add makes 3.
+    assert_eq!(panes, 3, "paused add still creates the pane (2 -> 3)");
     assert_eq!(
         agent_count, 2,
         "the held agent is registered in the session"
@@ -815,7 +815,7 @@ fn add_from_spec_resolves_and_attaches() {
     let home = TempDir::new().unwrap();
     let tmux_env = tmux_test_env();
     let session = start_session(tr.path(), home.path(), &tmux_env, "a");
-    assert_eq!(list_pane_count(&tmux_env, &session), 3);
+    assert_eq!(list_pane_count(&tmux_env, &session), 2);
 
     let mut add = cmd();
     tmux_env.apply_assert(&mut add);
@@ -837,7 +837,7 @@ fn add_from_spec_resolves_and_attaches() {
         out.status.success(),
         "add --from-spec should succeed; stdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    assert_eq!(panes, 4, "add --from-spec should splice one pane (3 -> 4)");
+    assert_eq!(panes, 3, "add --from-spec should splice one pane (2 -> 3)");
     assert_eq!(
         agent_count, 2,
         "the spec-derived agent should be registered in the session"

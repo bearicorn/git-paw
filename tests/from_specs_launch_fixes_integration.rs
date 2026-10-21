@@ -123,7 +123,7 @@ fn repo_with_specs_no_supervisor() -> (TestRepo, &'static str) {
 // -----------------------------------------------------------------------
 
 /// `start --from-specs --supervisor --dry-run` SHALL print the supervisor-mode
-/// dry-run header (`Supervisor: ...`, `Agent CLI: ...`), NOT the from-specs
+/// dry-run plan (`Dry run — supervisor session plan:`, `Agent CLI: ...`), NOT the from-specs
 /// dry-run header (`Dry run — session plan (from specs):` with a plain branch
 /// list).
 ///
@@ -161,8 +161,8 @@ fn from_specs_with_supervisor_routes_to_supervisor_dry_run() {
 
     // Supervisor-mode dry-run header markers.
     assert!(
-        stdout.contains("Supervisor:"),
-        "supervisor-mode dry-run should print 'Supervisor:'; got: {stdout}"
+        stdout.contains("supervisor session plan"),
+        "supervisor-mode dry-run should print the supervisor session plan; got: {stdout}"
     );
     assert!(
         stdout.contains("Agent CLI:"),
@@ -213,8 +213,8 @@ fn from_specs_without_supervisor_routes_to_start_from_specs_dry_run() {
 
     // Supervisor-mode markers should NOT appear.
     assert!(
-        !stdout.contains("Supervisor:"),
-        "from-specs-only dry-run should NOT print 'Supervisor:'; got: {stdout}"
+        !stdout.contains("supervisor session plan"),
+        "from-specs-only dry-run should NOT print the supervisor session plan; got: {stdout}"
     );
     assert!(
         !stdout.contains("Approval:"),
@@ -252,7 +252,7 @@ fn from_specs_with_supervisor_config_routes_to_supervisor_dry_run() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Supervisor:"),
+        stdout.contains("supervisor session plan"),
         "config-driven supervisor should produce supervisor dry-run; got: {stdout}"
     );
     assert!(

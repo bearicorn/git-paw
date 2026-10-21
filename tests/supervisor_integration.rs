@@ -302,16 +302,18 @@ fn dry_run_with_config(config_content: &str) -> (String, String) {
     )
 }
 
-/// Split approval levels flag the supervisor command only: `approval` governs
-/// the supervisor pane command, `agent_approval` the agent commands.
+/// The `--dry-run` plan reports the agent approval level only: no pane runs
+/// an orchestrator, so `[supervisor].approval` has no command to shape and
+/// the plan lists no supervisor command.
 ///
-/// Maps to supervisor-config scenario "approval set to full-auto relaxes only
-/// the supervisor pane" and supervisor-launch scenario "Fresh start applies
-/// supervisor flags to pane 0 only" (command composition; the pane-level
-/// observable is covered by `e2e_supervisor_approval_flags`).
+/// Maps to supervisor-launch's REMOVED *Supervisor pane approval flags*
+/// migration ("`--dry-run` reports the agent approval level only") and
+/// supervisor-config scenario "approval does not change any pane command"
+/// (command composition; the pane-level observable is covered by
+/// `e2e_supervisor_approval_flags`).
 #[test]
-fn split_approval_levels_flag_supervisor_command_only() {
-    let (stdout, _stderr) = dry_run_with_config(
+fn dry_run_reports_the_agent_approval_level_only() {
+    let (stdout, stderr) = dry_run_with_config(
         r#"
 [supervisor]
 enabled = true
@@ -322,66 +324,35 @@ agent_approval = "auto"
     );
 
     assert!(
-        stdout.contains("Supervisor: claude --dangerously-skip-permissions"),
-        "supervisor command must carry the full-auto flag, got:\n{stdout}"
+        stdout.contains("Approval:   Auto"),
+        "the plan reports agent_approval, got:\n{stdout}"
     );
-    let agent_line = stdout
-        .lines()
-        .find(|l| l.contains("feat/test"))
-        .expect("agent branch line in plan");
     assert!(
-        !agent_line.contains("--dangerously-skip-permissions"),
-        "agent command must NOT carry the supervisor's flag, got: {agent_line}"
+        !stdout.contains("Supervisor:") && !stdout.contains("Supervisor approval"),
+        "the plan lists no orchestrator command or level, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("--dangerously-skip-permissions"),
+        "no command carries approval's full-auto flag, got:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("warning"),
+        "setting approval produces no warning, got:\n{stderr}"
     );
 }
 
-/// The dry-run plan reports the two approval levels distinctly when they
-/// differ. Maps to supervisor-launch scenario "Dry run reports split
-/// approval levels".
+/// The plan's agent commands carry `agent_approval`'s flags. Maps to
+/// supervisor-config scenario "Coding agents resolve from `agent_approval`".
 #[test]
-fn dry_run_reports_split_approval_levels() {
+fn dry_run_agent_commands_resolve_from_agent_approval() {
     let (stdout, _stderr) = dry_run_with_config(
         r#"
 [supervisor]
 enabled = true
 cli = "claude"
-approval = "full-auto"
-agent_approval = "auto"
-"#,
-    );
-
-    assert!(
-        stdout.contains("Supervisor approval: FullAuto"),
-        "plan must report the supervisor approval level, got:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("Agent approval:      Auto"),
-        "plan must report the agent approval level, got:\n{stdout}"
-    );
-}
-
-/// With no `approval` key the supervisor + agent commands both resolve from
-/// `agent_approval` exactly as the pre-split resolution did.
-///
-/// Maps to supervisor-launch scenario "No approval key produces byte-identical
-/// commands to v0.10.0" and supervisor-config scenario "Absent approval
-/// inherits `agent_approval` for the supervisor pane".
-#[test]
-fn no_approval_key_builds_commands_from_agent_approval_alone() {
-    // agent_approval = "full-auto": both commands carry the claude flag,
-    // exactly what approval_flags("claude", FullAuto) produced for both
-    // panes before the split.
-    let (stdout, _stderr) = dry_run_with_config(
-        r#"
-[supervisor]
-enabled = true
-cli = "claude"
+approval = "manual"
 agent_approval = "full-auto"
 "#,
-    );
-    assert!(
-        stdout.contains("Supervisor: claude --dangerously-skip-permissions"),
-        "supervisor inherits agent_approval when approval is unset, got:\n{stdout}"
     );
     let agent_line = stdout
         .lines()
@@ -389,65 +360,39 @@ agent_approval = "full-auto"
         .expect("agent branch line in plan");
     assert!(
         agent_line.contains("claude --dangerously-skip-permissions"),
-        "agent command keeps agent_approval's flag, got: {agent_line}"
-    );
-    // Equal levels keep the single combined Approval line (pre-split format).
-    assert!(
-        stdout.contains("Approval:   FullAuto"),
-        "equal levels must keep the combined approval line, got:\n{stdout}"
-    );
-
-    // agent_approval = "auto": both commands resolve to the deterministic
-    // acceptEdits permission mode (GP-03a) — not bare, and never the
-    // full-auto skip-permissions flag.
-    let (stdout, _stderr) = dry_run_with_config(
-        r#"
-[supervisor]
-enabled = true
-cli = "claude"
-agent_approval = "auto"
-"#,
-    );
-    assert!(
-        stdout
-            .lines()
-            .any(|l| l.trim() == "Supervisor: claude --permission-mode acceptEdits"),
-        "supervisor command resolves to the deterministic acceptEdits mode at auto, got:\n{stdout}"
-    );
-    assert!(
-        !stdout.contains("--dangerously-skip-permissions"),
-        "no command may carry the full-auto flag at auto, got:\n{stdout}"
+        "agent command carries agent_approval's flag, got: {agent_line}"
     );
 }
 
-/// `approval = "full-auto"` with a CLI that has neither a built-in row nor an
-/// `approval_args` override warns (naming the CLI and the override) and
-/// degrades to a flagless launch instead of failing.
-///
-/// Maps to supervisor-config scenario "Full-auto with an unmapped CLI warns
-/// and degrades" (the real-launch variant lives in
-/// `e2e_supervisor_approval_flags`).
+/// Scenario "approval does not change any pane command": the planned pane
+/// commands are byte-identical with and without `[supervisor].approval`.
 #[test]
-fn full_auto_unmapped_cli_warns_and_degrades() {
-    let (stdout, stderr) = dry_run_with_config(
-        r#"
-[supervisor]
-enabled = true
-cli = "my-agent"
-approval = "full-auto"
-"#,
+fn approval_key_leaves_every_planned_command_byte_identical() {
+    // Compare the whole plan — every command and level it lists — except
+    // what differs per temp repo: the session name and each
+    // `<branch> → <command> (<worktree>)` line's worktree.
+    let commands = |stdout: &str| -> Vec<String> {
+        stdout
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("Session:"))
+            .map(|l| {
+                if l.contains('\u{2192}') {
+                    l.rsplit_once(" (").map_or(l, |(cmd, _)| cmd).to_string()
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect()
+    };
+    let (with_key, _) = dry_run_with_config(
+        "[supervisor]\nenabled = true\ncli = \"claude\"\nagent_approval = \"auto\"\napproval = \"full-auto\"\n",
     );
-
+    let (without_key, _) = dry_run_with_config(
+        "[supervisor]\nenabled = true\ncli = \"claude\"\nagent_approval = \"auto\"\n",
+    );
     assert!(
-        stderr.contains("my-agent"),
-        "warning must name the CLI, got:\n{stderr}"
+        !commands(&with_key).is_empty(),
+        "plan lists commands:\n{with_key}"
     );
-    assert!(
-        stderr.contains("[clis.my-agent]") && stderr.contains("approval_args"),
-        "warning must point at the [clis.<name>] approval_args override, got:\n{stderr}"
-    );
-    assert!(
-        stdout.lines().any(|l| l.trim() == "Supervisor: my-agent"),
-        "supervisor command must degrade to flagless, got:\n{stdout}"
-    );
+    assert_eq!(commands(&with_key), commands(&without_key));
 }

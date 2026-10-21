@@ -771,13 +771,16 @@ fn unattended_escalates_live_prompt_without_blocking_other_agent() {
     assert_eq!(entry["first_seen"], true, "{entry}");
 }
 
-/// Spec scenario "A live prompt on the supervisor pane is escalated, not
-/// answered" (`supervisor-unattended-operation`): the drive loop covers pane
-/// 0, but only to escalate it under the agent id `supervisor`. Nothing is
-/// typed into the supervisor's own pane, so its context is never polluted.
+/// Spec scenarios "A permission-prompt escalation is never typed into a
+/// surface" (`supervisor-unattended-operation`) and "Escalation is recorded
+/// as a broker review item only" (`supervisor-autonomous-orchestrator`): a
+/// coding agent's live prompt reaches the broker as a review item from
+/// `supervisor`, the prompting pane's stdin records no keystroke, and the
+/// configured `[supervisor].cli` never runs in any pane — its own recorder
+/// is never created.
 #[test]
 #[serial]
-fn unattended_escalates_supervisor_pane_zero_prompt_without_typing() {
+fn unattended_records_the_escalation_on_the_broker_and_types_nothing() {
     if !tmux_available() {
         eprintln!("skipping: tmux not available");
         return;
@@ -789,13 +792,31 @@ fn unattended_escalates_supervisor_pane_zero_prompt_without_typing() {
     let port = pick_broker_port();
     let url = format!("http://127.0.0.1:{port}");
 
-    // The SUPERVISOR pane shows a live `ls -la` prompt and records its own
-    // stdin; the coding agent just holds. Pane 0 runs in the repo root, which
-    // is on the default branch, so the recorder fires there.
-    let stdin_marker = out.path().join("pane0-stdin.bin");
-    let sup =
-        write_prompt_recorder_dummy(tr.path(), "dummy_sup.sh", "main", "ls -la", &stdin_marker);
-    write_config(tr.path(), port, &sup.to_string_lossy(), plain_dummy());
+    // The coding agent shows a live `ls -la` prompt and records its stdin.
+    // `[supervisor].cli` is a recorder too: it would create its marker the
+    // moment any pane ran it, on any branch.
+    let agent_stdin = out.path().join("agent-stdin.bin");
+    let agent = write_prompt_recorder_dummy(
+        tr.path(),
+        "dummy_agent.sh",
+        "feat/alpha",
+        "ls -la",
+        &agent_stdin,
+    );
+    let orchestrator_marker = out.path().join("orchestrator-ran.bin");
+    let orchestrator = write_prompt_recorder_dummy(
+        tr.path(),
+        "dummy_orch.sh",
+        "main",
+        "never shown",
+        &orchestrator_marker,
+    );
+    write_config(
+        tr.path(),
+        port,
+        &orchestrator.to_string_lossy(),
+        &agent.to_string_lossy(),
+    );
 
     let (mut child, stdout_path) = spawn_unattended(
         tr.path(),
@@ -811,30 +832,35 @@ fn unattended_escalates_supervisor_pane_zero_prompt_without_typing() {
         wait_for_broker(&url, Duration::from_secs(20)),
         "broker should come up on the ephemeral port"
     );
-    // Pane 0 is covered by the sweep, but only to escalate: the question is
-    // published under the `supervisor` agent id.
     let escalated = wait_for_broker_log(
         home.path(),
-        &["question:", "supervisor is waiting on", "ls -la"],
+        &["question:", "feat-alpha is waiting on", "ls -la"],
         Duration::from_secs(25),
     );
-    // Complete via the coding agent so the run exits.
     publish_terminal(&url, "feat-alpha", "verified");
 
     let status = wait_child(&mut child, Duration::from_secs(30));
     let stdout = read_to_string(&stdout_path);
     let broker_log = read_broker_log(home.path());
-    let pane0_stdin = fs::read(&stdin_marker).unwrap_or_default();
+    let agent_keys = fs::read(&agent_stdin).unwrap_or_default();
     kill_session(tmux_env.socket_dir(), &stdout);
 
     assert!(
         escalated,
-        "the pane-0 prompt should be escalated as `supervisor`; stdout:\n{stdout}\nbroker log:\n{broker_log}"
+        "the prompt should be a broker review item; stdout:\n{stdout}\nbroker log:\n{broker_log}"
     );
     assert!(
-        pane0_stdin.is_empty(),
-        "no keystroke may reach pane 0; its stdin recorded {:?}; stdout:\n{stdout}",
-        String::from_utf8_lossy(&pane0_stdin)
+        agent_keys.is_empty(),
+        "no keystroke may reach the prompting pane; its stdin recorded {:?}; stdout:\n{stdout}",
+        String::from_utf8_lossy(&agent_keys)
+    );
+    assert!(
+        !orchestrator_marker.exists(),
+        "no pane may run the orchestrator CLI; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("its CLI is not monitored by the loop"),
+        "the summary disclaims orchestrator coverage; stdout:\n{stdout}"
     );
     let status = status.unwrap_or_else(|| panic!("child did not exit; stdout:\n{stdout}"));
     assert!(
@@ -980,13 +1006,14 @@ fn unattended_reports_completed_when_branch_is_merged() {
     assert!(stdout.contains("1/1 branches merged"), "stdout:\n{stdout}");
 }
 
-/// The orchestrator pane's CLI has stopped serving anything but a
-/// session-limit status line: the loop must exit at once with
-/// `cli-unavailable` and a non-zero status — the one exit-status change in
-/// this release (D4).
+/// Spec scenario "A rate-limited worker is escalated while the wave keeps
+/// moving": a coding agent whose pane shows a session-limit banner becomes a
+/// `cli-unavailable` escalation quoting the line, the run still reaches its
+/// completion signal, and the wave is reported `escalated-for-review` — not
+/// `completed`, and not a process failure.
 #[test]
 #[serial]
-fn unattended_exits_non_zero_on_orchestrator_cli_unavailable() {
+fn unattended_escalates_a_rate_limited_worker_and_keeps_going() {
     if !tmux_available() {
         eprintln!("skipping: tmux not available");
         return;
@@ -996,9 +1023,10 @@ fn unattended_exits_non_zero_on_orchestrator_cli_unavailable() {
     let home = TempDir::new().expect("home dir");
     let out = TempDir::new().expect("out dir");
     let port = pick_broker_port();
+    let url = format!("http://127.0.0.1:{port}");
 
     let marker = write_marker_dummy(tr.path(), "dummy_limit.sh", "You've hit your session limit");
-    write_config(tr.path(), port, &marker.to_string_lossy(), plain_dummy());
+    write_config(tr.path(), port, plain_dummy(), &marker.to_string_lossy());
 
     let (mut child, stdout_path) = spawn_unattended(
         tr.path(),
@@ -1007,24 +1035,37 @@ fn unattended_exits_non_zero_on_orchestrator_cli_unavailable() {
         out.path(),
         "feat/alpha",
         "400",
-        "120000", // long heartbeat: the marker, not the heartbeat, ends the run
+        "120000", // long heartbeat: the completion signal ends the run
     );
+
+    assert!(
+        wait_for_broker(&url, Duration::from_secs(20)),
+        "broker should come up on the ephemeral port"
+    );
+    let escalated = wait_for_broker_log(
+        home.path(),
+        &["question:", "feat-alpha"],
+        Duration::from_secs(25),
+    );
+    publish_terminal(&url, "feat-alpha", "verified");
 
     let status = wait_child(&mut child, Duration::from_secs(30));
     let stdout = read_to_string(&stdout_path);
     kill_session(tmux_env.socket_dir(), &stdout);
 
+    assert!(escalated, "the banner is escalated; stdout:\n{stdout}");
     let status = status.unwrap_or_else(|| panic!("child did not exit; stdout:\n{stdout}"));
     assert!(
-        !status.success(),
-        "a cli-unavailable exit must be non-zero; stdout:\n{stdout}"
+        status.success(),
+        "a worker's banner is a review item, not a process failure; stdout:\n{stdout}"
     );
     assert!(
-        stdout.contains("Unattended drive loop exited: cli-unavailable"),
+        stdout.contains("Unattended drive loop exited: escalated-for-review"),
         "stdout:\n{stdout}"
     );
     assert!(
-        stdout.contains("You've hit your session limit"),
-        "the summary should quote the matching line; stdout:\n{stdout}"
+        stdout.contains("[cli-unavailable] feat-alpha")
+            && stdout.contains("You've hit your session limit"),
+        "the summary lists the escalation quoting the matching line; stdout:\n{stdout}"
     );
 }

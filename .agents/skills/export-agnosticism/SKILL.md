@@ -32,8 +32,7 @@ export.
 - **Agent-facing prose assets** — instructions, rules, directives, framing text and task-prompt
   scaffolding injected into an agent's sidecar, boot prompt, or skill content, authored in bundled
   assets rather than assembled from compiled string literals: `assets/inter-agent-rules.md`,
-  `assets/governance-section-header.md`, `assets/supervisor-framing.md`,
-  `assets/spec-path-doctrine/*.md`, `assets/boot-task-prompts/*.md`, `assets/task-prompts/**/*.md`.
+  `assets/governance-section-header.md`, `assets/spec-path-doctrine/*.md`, `assets/boot-task-prompts/*.md`, `assets/task-prompts/**/*.md`.
   Compiled code keeps the assembly around them (placeholder substitution, conditional inclusion,
   per-backend selection, dedupe, region gating) — only the sentences live in the asset.
 - **Scripts & mirrored logic (code)** — `assets/scripts/{sweep,broker,docs-fetch}.sh`, including

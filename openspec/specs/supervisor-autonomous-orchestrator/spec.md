@@ -3,55 +3,6 @@
 ## Purpose
 The pump-to-brain layer of unattended operation. When a supervisor (orchestrator) pane is present, the drive loop hands each judgment call it cannot make mechanically — a `danger`/`unknown` prompt, a worker's `agent.question`, a `committed`/`done` artifact's merge decision, and a non-converging (correction-exhausted) branch — to the orchestrator pane by injecting it as a task prompt, in addition to the uniform broker record, so the smart model is actively triggered rather than relied on to poll an inbox nobody reads. A longer-cadence nudge asks the orchestrator to re-run its sweep; worker-directed nudges stop only once a worker has finished (`done`/`verified`), never for the `blocked`/`committed` states the correction loop must still reach; injection is skipped while the pane shows a prompt or is mid-response and never blocks the wave; and with no supervisor pane nothing is injected, so a pure `--unattended` run is byte-for-byte the prior behavior. The orchestrator's judgment-call responsibilities are documented project-agnostically in the bundled supervisor skill.
 ## Requirements
-### Requirement: Judgment calls are handed to the orchestrator pane
-
-The drive loop SHALL hand a live judgment call to the orchestrator by injecting it as a prompt into the orchestrator's pane (in addition to recording it on the broker) whenever an orchestrator (supervisor CLI) pane is present under unattended operation. A judgment call is a live permission prompt on a worker pane, an ambiguous `agent.question`, or a merge decision. The loop SHALL NOT block the wave waiting on the orchestrator's response.
-
-A permission-prompt hand-off SHALL name the agent and the prompted command and SHALL ask the orchestrator to relay the prompt to the human. It SHALL NOT ask the orchestrator to decide or approve the prompt itself.
-
-#### Scenario: A live permission prompt is injected into the orchestrator pane
-
-- **GIVEN** an unattended session with an orchestrator pane present and a worker showing a live permission prompt
-- **WHEN** the drive loop processes the escalation
-- **THEN** the loop SHALL inject the hand-off into the orchestrator's pane
-- **AND** SHALL still record the escalation on the broker
-- **AND** SHALL continue progressing the other workers without blocking
-
-#### Scenario: The permission-prompt hand-off asks for a relay, not a decision
-
-- **GIVEN** a permission-prompt escalation for agent `feat-a` and command `ls -la`
-- **WHEN** its hand-off text is rendered
-- **THEN** the text SHALL name `feat-a` and `ls -la` and ask the orchestrator to relay the prompt to the human
-- **AND** SHALL NOT tell the orchestrator to decide the prompt or approve the pane itself
-
-#### Scenario: An ambiguous question is injected into the orchestrator pane
-
-- **GIVEN** an orchestrator pane is present and a worker publishes an ambiguous `agent.question`
-- **WHEN** the drive loop processes it
-- **THEN** the loop SHALL inject the question into the orchestrator's pane for the smart model to answer
-
-#### Scenario: A merge decision is injected into the orchestrator pane
-
-- **GIVEN** an orchestrator pane is present and a worker publishes an `agent.artifact` whose status is `committed` or `done`
-- **WHEN** the drive loop processes it
-- **THEN** the loop SHALL inject a merge-decision hand-off into the orchestrator's pane so it verifies the branch and sequences its merge
-- **AND** SHALL NOT inject a merge-decision hand-off for any other artifact status
-
-### Requirement: Orchestration-sweep nudge on a longer cadence
-
-The drive loop SHALL nudge the orchestrator pane to run an orchestration sweep on a
-cadence longer than its per-tick pane sweep, so the orchestrator periodically
-reconsiders spawn order, merge sequencing, and blocked workers without a human
-trigger. The nudge SHALL follow the send-keys nudge discipline — the text followed
-by a separate `Enter` keystroke.
-
-#### Scenario: Orchestration nudge fires on the longer cadence
-
-- **GIVEN** an unattended session with an orchestrator pane present
-- **WHEN** the longer orchestration-nudge cadence elapses without a completion condition
-- **THEN** the loop SHALL inject an orchestration-sweep nudge into the orchestrator's pane
-- **AND** SHALL send the nudge text followed by a separate `Enter`
-
 ### Requirement: Worker-directed nudges skip finished workers
 
 Any nudge the drive loop directs at a worker pane SHALL be suppressed when that
@@ -90,26 +41,22 @@ the former ends a worker's eligibility for a nudge.
 
 ### Requirement: No-orchestrator fallback preserves prior behavior
 
-The drive loop SHALL fall back to the uniform broker-review-item escalation and
-SHALL NOT attempt any pane injection when no orchestrator (supervisor CLI) pane is
-present — a pure `--unattended` run with no supervisor — so behavior is identical to
-the previous version. The human remains the exception handler, re-engaged via the
-existing escalation record and heartbeat rather than by the loop second-guessing an
-absent orchestrator.
+Every judgment call the drive loop cannot make mechanically — a live permission prompt, an ambiguous `agent.question`, a `committed`/`done` artifact's merge decision, and a correction-exhausted branch — SHALL be recorded as a broker review item, and the loop SHALL NOT inject anything into any surface. The loop SHALL publish the review item for a live permission prompt and for a correction-exhausted branch; for an ambiguous question and a merge decision the review item SHALL be the worker's own `agent.question` or `agent.artifact` message, which the loop leaves on the broker and SHALL NOT republish. With no orchestrator pane inside the session this is the only escalation path in this release, and it is identical to the pre-relocation behaviour of a pure `--unattended` run with no orchestrator pane: the human remains the exception handler, re-engaged via the existing escalation record and heartbeat.
 
-#### Scenario: No orchestrator present falls back to broker-only escalation
+#### Scenario: Escalation is recorded as a broker review item only
 
-- **GIVEN** a pure `--unattended` run with no supervisor pane
-- **WHEN** the drive loop escalates a `danger`/`unknown` prompt
+- **GIVEN** a `--unattended` run and a worker showing a live permission prompt
+- **WHEN** the drive loop escalates it
 - **THEN** the loop SHALL record the escalation as a broker review item
-- **AND** SHALL NOT inject anything into any pane
-- **AND** the behavior SHALL be identical to the previous version
+- **AND** SHALL NOT inject anything into any surface
+- **AND** SHALL continue progressing the other workers without blocking
 
-#### Scenario: Orchestrator present takes the hand-off path
+#### Scenario: Merge decision is recorded, not injected
 
-- **GIVEN** an unattended run with an orchestrator pane present
-- **WHEN** the drive loop escalates a judgment call
-- **THEN** it SHALL take the hand-to-orchestrator path rather than the broker-only fallback
+- **GIVEN** a `--unattended` run and a worker publishing an `agent.artifact` with status `committed`
+- **WHEN** the drive loop processes it
+- **THEN** the worker's artifact SHALL remain the broker record of the merge decision, with no copy published by the loop
+- **AND** the loop SHALL NOT type into any surface
 
 ### Requirement: Orchestrator judgment-call responsibilities are documented in the skill
 

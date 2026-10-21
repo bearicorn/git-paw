@@ -11,8 +11,9 @@ succeeds. For the mechanics of how the orchestrator drives the wave, see
 
 git-paw already gives you both halves:
 
-- **Orchestrator** — the supervisor pane (`[supervisor].cli` + `--supervisor`). Its
-  job is judgment: spawn order, answering cross-agent questions, sequencing merges,
+- **Orchestrator** — your own agent session outside the tmux session, reading the
+  context a `--supervisor` launch renders into `.git-paw/AGENTS.local.md`
+  (`[supervisor].cli` names its CLI). Its job is judgment: spawn order, answering cross-agent questions, sequencing merges,
   and deciding when a worker is unrecoverable. Give it your most capable model.
 - **Worker** — an ordinary CLI in a worktree (`default_spec_cli` / `--cli`). Its job
   is execution: implement one change against a concrete task list. This is where a
@@ -114,7 +115,7 @@ for exactly what it handles.
 
 You are the **exception handler**, not the operator. A human is re-engaged only for
 what the orchestrator genuinely cannot decide, plus two structural cases: the
-~25-minute heartbeat exit, and a run with **no supervisor pane at all** (a pure
-`--unattended` run with no orchestrator escalates to the broker inbox exactly as it
-did before). Everything the fleet can resolve — safe approvals, cross-agent
+~25-minute heartbeat exit, and a run with **no orchestrator session at all** (a pure
+`--unattended` run nobody orchestrates leaves every judgment call as a broker review
+item for you, exactly as it did before). Everything the fleet can resolve — safe approvals, cross-agent
 questions, verify-fix cycles, merge sequencing — resolves without you.

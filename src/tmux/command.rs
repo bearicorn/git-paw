@@ -613,38 +613,37 @@ pub fn build_boot_inject_args(session_name: &str, pane_index: usize, text: &str)
     ]
 }
 
-/// Build the tmux commands that materialise the supervisor-mode pane layout
-/// described in `openspec/changes/supervisor-as-pane/specs/tmux-orchestration/`.
+/// Build the tmux commands that materialise the supervised pane layout
+/// (`tmux-orchestration`, *Supervisor-mode pane layout*).
 ///
 /// Pane ordering:
 ///
-/// - Pane 0: supervisor agent (top-left, 50% of the top row)
-/// - Pane 1: dashboard (top-right, 50% of the top row)
-/// - Panes 2..N+1: coding agents, row-major (left-to-right, top-to-bottom),
-///   up to [`crate::surface::SUPERVISOR_AGENTS_PER_ROW`] columns
-///   per row
+/// - Pane 0: dashboard, the full-width top row
+/// - Panes 1..N: coding agents, row-major (left-to-right, top-to-bottom),
+///   up to [`crate::surface::SUPERVISOR_AGENTS_PER_ROW`] columns per row
 ///
-/// Sequence (see design D2):
+/// No pane runs an orchestrator CLI: the orchestrator drives from outside the
+/// session.
 ///
-/// 1. `new-session -d` creates pane 0 (supervisor).
-/// 2. `split-window -v -p <bottom_pct>` on pane 0 creates the full-width agent
-///    area as pane 1 (temporary index).
-/// 3. `split-window -h -p 50` on pane 0 creates the top-right pane (pane 2),
-///    the dashboard candidate.
-/// 4. `swap-pane -s :0.1 -t :0.2` reorders the indices so pane 1 = dashboard
-///    and pane 2 = agent area.
-/// 5. For each subsequent agent: `split-window -h` within the current row to
-///    add a sibling, or `split-window -v` to start a new row.
-/// 6. Final pass: `resize-pane -t <pane> -y <pct>%` enforces the height
+/// Sequence:
+///
+/// 1. `new-session -d -c <repo root>` creates pane 0 (dashboard).
+/// 2. `split-window -v -l <bottom_pct> -c <first worktree>` on pane 0 creates
+///    the full-width agent area as pane 1, born in the first agent's
+///    worktree.
+/// 3. For each subsequent agent: `split-window -h` within the current row to
+///    add a sibling, or `split-window -v` to start a new row — every split
+///    carries `-c <that agent's worktree>`.
+/// 4. Final pass: `resize-pane -t <pane> -y <pct>%` enforces the height
 ///    proportions from the layout table.
 ///
-/// `select-layout` is intentionally avoided here — it does not preserve the
-/// predictable pane-index ordering the rest of the system relies on.
+/// `select-layout` and `swap-pane` are intentionally avoided here — neither
+/// preserves the predictable pane-index ordering the rest of the system
+/// relies on.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn build_supervisor_session(
     project_name: &str,
     session_name_override: Option<String>,
-    supervisor: &PaneSpec,
     dashboard: &PaneSpec,
     agents: &[PaneSpec],
     layout: crate::surface::SupervisorLayout,
@@ -662,7 +661,7 @@ pub fn build_supervisor_session(
         cmds.push(TmuxCommand::new(parts));
     };
 
-    // 1. Create the detached session with pane 0 = supervisor.
+    // 1. Create the detached session with pane 0 = dashboard, at the repo root.
     // -x/-y give tmux explicit dimensions so it can start without an attached
     // client (required in non-TTY environments like CI). The real terminal
     // resizes the session on attach.
@@ -688,7 +687,7 @@ pub fn build_supervisor_session(
             "-e",
             "DISABLE_UPDATE_PROMPT=true",
             "-c",
-            &supervisor.worktree,
+            &dashboard.worktree,
         ],
     );
 
@@ -745,116 +744,11 @@ pub fn build_supervisor_session(
         );
     }
 
-    let supervisor_target = format!("{session_name}:0.0");
-    push_pane_title(
-        &mut commands,
-        border_affordances,
-        &supervisor_target,
-        &supervisor.branch,
-    );
-    // Clear the input line before launching (W2-2): a stray shell-startup
-    // prompt or buffered keystroke could otherwise corrupt the leading
-    // character of the CLI command. `C-u` on a clean prompt is a no-op.
-    push(
-        &mut commands,
-        &["send-keys", "-t", &supervisor_target, "C-u"],
-    );
-    push(
-        &mut commands,
-        &[
-            "send-keys",
-            "-t",
-            &supervisor_target,
-            &supervisor.cli_command,
-            "Enter",
-        ],
-    );
-
-    // 4. Split pane 0 vertically -> creates the full-width agent area (now
-    //    index 1, swapped to index 2 below). When there is at least one
-    //    coding agent we pass `-c <first_agent.worktree>` so the agent area
-    //    pane is born in the first agent's worktree directly — this avoids
-    //    the `cd <worktree> && <cli>` send-keys race that previously left
-    //    resumed agent panes anchored in the supervisor's cwd.
-    //
-    // Use `-l <N>%` (the modern tmux 3.1+ form) instead of the deprecated
-    // `-p <N>`. On Linux tmux 3.4 (Ubuntu 24.04 apt-package), `-p`
-    // resolves the percentage against the parent pane's laid-out size,
-    // which is empty on a detached server with no attached client — tmux
-    // bails with `cmd-split-window.c: "size missing"`. `-l <N>%` resolves
-    // against the window's `-y` dimension instead, which is the value we
-    // set on `new-session -x 200 -y 50`, so the split math succeeds in
-    // headless mode. macOS tmux 3.6a tolerates either form.
-    let bottom_pct = format!("{}%", 100u16 - u16::from(layout.top_row_pct));
-    // W3-1: step 6 swaps panes 1 and 2. `swap-pane` carries each pane's cwd
-    // to the OTHER index, but the CLI commands + titles are sent post-swap by
-    // index — so the `-c` cwds must be assigned to COMPENSATE for the swap.
-    // The agent-area split (which lands at the dashboard's index-1 after the
-    // swap) therefore gets the dashboard's cwd, and the dashboard split (which
-    // lands at the agent's index-2) gets the first agent's worktree. Without
-    // this compensation the first agent's pane inherits the supervisor's
-    // repo-root cwd and its commits land on the wrong branch (contamination).
-    if agents.is_empty() {
-        push(
-            &mut commands,
-            &[
-                "split-window",
-                "-v",
-                "-t",
-                &supervisor_target,
-                "-l",
-                &bottom_pct,
-            ],
-        );
-    } else {
-        push(
-            &mut commands,
-            &[
-                "split-window",
-                "-v",
-                "-t",
-                &supervisor_target,
-                "-l",
-                &bottom_pct,
-                "-c",
-                &dashboard.worktree,
-            ],
-        );
-    }
-
-    // 5. Split pane 0 horizontally -> creates the top-right pane (currently
-    //    index 2, swapped to index 1 below) at 50% width.
-    // Same `-l <N>%` reasoning as step 4. Per the W3-1 swap-compensation note
-    // above, this split (which lands at the agent's index-2 after the swap)
-    // is born in the FIRST agent's worktree, so the agent's CLI — sent to
-    // index 2 post-swap — runs in its own worktree, not the repo root.
-    let dashboard_split_cwd = agents
-        .first()
-        .map_or(dashboard.worktree.as_str(), |a| a.worktree.as_str());
-    push(
-        &mut commands,
-        &[
-            "split-window",
-            "-h",
-            "-t",
-            &supervisor_target,
-            "-l",
-            "50%",
-            "-c",
-            dashboard_split_cwd,
-        ],
-    );
-
-    // 6. Swap indices so pane 1 = dashboard, pane 2 = agent area.
-    let pane_one = format!("{session_name}:0.1");
-    let pane_two = format!("{session_name}:0.2");
-    push(
-        &mut commands,
-        &["swap-pane", "-s", &pane_one, "-t", &pane_two],
-    );
-
-    // 7. Set dashboard title + run its command in pane 1 (after swap).
-    let dashboard_target = format!("{session_name}:0.1");
+    // 4. Title the dashboard (pane 0) and run its command. Clear the input
+    // line first (W2-2): a stray shell-startup prompt or buffered keystroke
+    // could otherwise corrupt the leading character of the command. `C-u` on
+    // a clean prompt is a no-op.
+    let dashboard_target = format!("{session_name}:0.0");
     push_pane_title(
         &mut commands,
         border_affordances,
@@ -876,15 +770,36 @@ pub fn build_supervisor_session(
         ],
     );
 
-    // 8. Populate the agent grid.
-    if !agents.is_empty() {
-        // First agent: the agent area is already pane 2 (post-swap) and was
-        // created with `-c <first.worktree>` above, so its shell is already
-        // running in the first agent's worktree. Send only the bare CLI
-        // command — no `cd <worktree> && <cli>` chain, which would race with
-        // shell startup.
+    // 5. Populate the agent grid.
+    if let Some(first) = agents.first() {
+        // Split pane 0 vertically -> the full-width agent area becomes pane 1,
+        // born in the first agent's worktree via `-c` so its CLI runs there
+        // without a `cd <worktree> && <cli>` chain (which races shell
+        // startup).
+        //
+        // Use `-l <N>%` (the modern tmux 3.1+ form) instead of the deprecated
+        // `-p <N>`. On Linux tmux 3.4 (Ubuntu 24.04 apt-package), `-p`
+        // resolves the percentage against the parent pane's laid-out size,
+        // which is empty on a detached server with no attached client — tmux
+        // bails with `cmd-split-window.c: "size missing"`. `-l <N>%` resolves
+        // against the window's `-y` dimension instead, which is the value we
+        // set on `new-session -x 200 -y 50`, so the split math succeeds in
+        // headless mode. macOS tmux 3.6a tolerates either form.
+        let bottom_pct = format!("{}%", 100u16 - u16::from(layout.top_row_pct));
+        push(
+            &mut commands,
+            &[
+                "split-window",
+                "-v",
+                "-t",
+                &dashboard_target,
+                "-l",
+                &bottom_pct,
+                "-c",
+                &first.worktree,
+            ],
+        );
         let first_target = format!("{session_name}:0.{SUPERVISOR_PANE_OFFSET}");
-        let first = &agents[0];
         push_pane_title(
             &mut commands,
             border_affordances,
@@ -959,12 +874,18 @@ pub fn build_supervisor_session(
         }
     }
 
-    // 9. Final pass: resize-pane to enforce the layout-table heights. One
+    // 6. Final pass: resize-pane to enforce the layout-table heights. One
     //    resize-pane per row (top + each agent row). Shared with the add /
     //    remove re-tile path via `push_supervisor_resize_pass` so an
     //    incrementally re-tiled grid matches a start-time grid of the same
     //    agent count. Percentages use `<pct>%` syntax which tmux 3.x accepts.
-    push_supervisor_resize_pass(&mut commands, &session_name, layout, agents.len());
+    push_supervisor_resize_pass(
+        &mut commands,
+        &session_name,
+        layout,
+        SUPERVISOR_PANE_OFFSET,
+        agents.len(),
+    );
 
     Ok(TmuxSession {
         name: session_name,
@@ -978,8 +899,10 @@ pub fn build_supervisor_session(
 ///
 /// `prev_agent_count` is the number of coding agents already in the session
 /// (N); the new agent becomes agent index N (0-based), landing at pane
-/// `SUPERVISOR_PANE_OFFSET + N`. The split mirrors `build_supervisor_session`'s
-/// grid logic:
+/// `first_agent + N`. `first_agent` is the session's first coding-agent pane
+/// as its [`SessionLayout`](crate::surface::SessionLayout) answers it — `1`
+/// for a session this binary built, `2` for a live pre-relocation one. The
+/// split mirrors `build_supervisor_session`'s grid logic:
 ///
 /// - When the new agent starts a fresh row (`N % AGENTS_PER_ROW == 0`, N > 0),
 ///   `split-window -v` from the previous row's first pane.
@@ -998,20 +921,21 @@ pub fn build_supervisor_session(
 pub fn build_add_agent_commands(
     session_name: &str,
     new_agent: &PaneSpec,
+    first_agent: usize,
     prev_agent_count: usize,
     layout: crate::surface::SupervisorLayout,
     border_affordances: bool,
 ) -> TmuxSession {
-    use crate::surface::{SUPERVISOR_AGENTS_PER_ROW, SUPERVISOR_PANE_OFFSET};
+    use crate::surface::SUPERVISOR_AGENTS_PER_ROW;
 
     let mut commands: Vec<TmuxCommand> = Vec::new();
     let i = prev_agent_count; // 0-based agent index of the new agent
-    let pane_idx = SUPERVISOR_PANE_OFFSET + i;
+    let pane_idx = first_agent + i;
     let pane_target = format!("{session_name}:0.{pane_idx}");
 
     if i > 0 && i.is_multiple_of(SUPERVISOR_AGENTS_PER_ROW) {
         // New row: vertical split from the previous row's first pane.
-        let prev_row_first = SUPERVISOR_PANE_OFFSET + (i - SUPERVISOR_AGENTS_PER_ROW);
+        let prev_row_first = first_agent + (i - SUPERVISOR_AGENTS_PER_ROW);
         let src = format!("{session_name}:0.{prev_row_first}");
         commands.push(TmuxCommand::new(&[
             "split-window",
@@ -1049,7 +973,13 @@ pub fn build_add_agent_commands(
         "Enter",
     ]));
 
-    push_supervisor_resize_pass(&mut commands, session_name, layout, prev_agent_count + 1);
+    push_supervisor_resize_pass(
+        &mut commands,
+        session_name,
+        layout,
+        first_agent,
+        prev_agent_count + 1,
+    );
 
     TmuxSession {
         name: session_name.to_string(),
@@ -1062,24 +992,33 @@ pub fn build_add_agent_commands(
 ///
 /// The caller kills the target pane first (via [`kill_pane`]); tmux then
 /// renumbers the remaining panes to be contiguous, so each surviving row's
-/// first pane is still addressable at `SUPERVISOR_PANE_OFFSET + row * AGENTS_PER_ROW`.
+/// first pane is still addressable at `first_agent + row * AGENTS_PER_ROW`,
+/// `first_agent` being the session's first coding-agent pane as its
+/// [`SessionLayout`](crate::surface::SessionLayout) answers it.
 /// This emits the per-row `resize-pane` pass for `layout` (computed for the new,
 /// smaller `remaining_agent_count`) so the grid re-flows to the proportions a
 /// start of that many agents would produce, without leaving a hole.
 ///
-/// Returns an empty command set when no agents remain (the supervisor +
-/// dashboard top row is left as-is). Branch→pane mapping for the survivors is
-/// re-derived by the supervisor via `pane_current_path` each sweep, so the
-/// transient index shift is invisible to targeting.
+/// Returns an empty command set when no agents remain (the dashboard top row
+/// is left as-is). Branch→pane mapping for the survivors is re-derived via
+/// `pane_current_path` each sweep, so the transient index shift is invisible
+/// to targeting.
 #[must_use]
 pub fn build_remove_retile_commands(
     session_name: &str,
+    first_agent: usize,
     remaining_agent_count: usize,
     layout: crate::surface::SupervisorLayout,
 ) -> TmuxSession {
     let mut commands: Vec<TmuxCommand> = Vec::new();
     if remaining_agent_count > 0 {
-        push_supervisor_resize_pass(&mut commands, session_name, layout, remaining_agent_count);
+        push_supervisor_resize_pass(
+            &mut commands,
+            session_name,
+            layout,
+            first_agent,
+            remaining_agent_count,
+        );
     }
     TmuxSession {
         name: session_name.to_string(),
@@ -1088,9 +1027,10 @@ pub fn build_remove_retile_commands(
 }
 
 /// Push the per-row `resize-pane -y <pct>%` pass that enforces a supervisor
-/// layout's height proportions: one resize for the top row (supervisor +
-/// dashboard) and one per agent row (targeting each row's first pane). Shared
-/// by the start-time builder's final pass and the add/remove re-tile builders.
+/// layout's height proportions: one resize for the top row (pane 0) and one
+/// per agent row (targeting each row's first pane, counted from
+/// `first_agent`). Shared by the start-time builder's final pass and the
+/// add/remove re-tile builders.
 ///
 /// The per-row equal-width rebalance is applied separately at runtime by
 /// [`rebalance_agent_rows`] (design D4, G3): it needs the live window width to
@@ -1100,9 +1040,10 @@ fn push_supervisor_resize_pass(
     commands: &mut Vec<TmuxCommand>,
     session_name: &str,
     layout: crate::surface::SupervisorLayout,
+    first_agent: usize,
     agent_count: usize,
 ) {
-    use crate::surface::{SUPERVISOR_AGENTS_PER_ROW, SUPERVISOR_PANE_OFFSET};
+    use crate::surface::SUPERVISOR_AGENTS_PER_ROW;
 
     let top_target = format!("{session_name}:0.0");
     let top_pct_str = format!("{}%", layout.top_row_pct);
@@ -1116,8 +1057,8 @@ fn push_supervisor_resize_pass(
 
     let agent_row_pct_str = format_supervisor_pct(layout.agent_row_pct);
     for row in 0..layout.agent_rows {
-        let pane_idx = SUPERVISOR_PANE_OFFSET + row * SUPERVISOR_AGENTS_PER_ROW;
-        if pane_idx < SUPERVISOR_PANE_OFFSET + agent_count {
+        let pane_idx = first_agent + row * SUPERVISOR_AGENTS_PER_ROW;
+        if pane_idx < first_agent + agent_count {
             let target = format!("{session_name}:0.{pane_idx}");
             commands.push(TmuxCommand::new(&[
                 "resize-pane",

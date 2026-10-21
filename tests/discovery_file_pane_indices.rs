@@ -423,13 +423,15 @@ fn restart_from_pause_rewrites_the_discovery_file_with_live_pane_indices() {
     kill_session(&tmux_env, &session_name);
 }
 
-/// A supervisor-mode resume must still record the orchestrator entry when the
-/// discovery file is MISSING — the case the rewrite exists for. Reading the
-/// entry back from the old file would lose it exactly then, so it is derived
-/// from the resumed session's mode instead.
+/// Scenario "Supervised start records the dashboard at pane 0" plus the
+/// REMOVED *Session file records the orchestrator pane* (`session-state`):
+/// a supervised launch and its resume from pause write a roster whose first
+/// coding agent is pane 1 and NO orchestrator entry — including when the
+/// discovery file was removed before the resume, the case the rewrite
+/// exists for.
 #[test]
 #[serial]
-fn restart_from_pause_derives_the_orchestrator_entry_when_the_file_is_gone() {
+fn supervised_launch_and_resume_write_no_orchestrator_entry() {
     if skip_if_no_tmux() {
         return;
     }
@@ -457,6 +459,21 @@ fn restart_from_pause_derives_the_orchestrator_entry_when_the_file_is_gone() {
         "supervisor launch should succeed; stderr:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let launched = read_discovery(&repo, &session_name);
+    assert!(
+        launched.orchestrator.is_none(),
+        "a supervised launch writes no orchestrator entry; file:\n{launched:?}"
+    );
+    assert_eq!(
+        launched.agents.first().map(|a| a.pane_index),
+        Some(1),
+        "the first coding agent is pane 1; file:\n{launched:?}"
+    );
+    let raw = fs::read_to_string(discovery_path(&repo, &session_name)).expect("discovery file");
+    assert!(
+        !raw.contains("\"orchestrator\""),
+        "the key is never emitted; file:\n{raw}"
+    );
 
     let mut pause = cmd();
     tmux_env.apply_assert(&mut pause);
@@ -474,7 +491,7 @@ fn restart_from_pause_derives_the_orchestrator_entry_when_the_file_is_gone() {
         String::from_utf8_lossy(&pause_out.stderr)
     );
 
-    // The GIVEN: nothing to read the orchestrator entry back from.
+    // The discovery file is gone before the resume rewrites it.
     fs::remove_file(discovery_path(&repo, &session_name)).expect("remove discovery file");
 
     let mut resume = cmd();
@@ -497,14 +514,11 @@ fn restart_from_pause_derives_the_orchestrator_entry_when_the_file_is_gone() {
     let file = read_discovery(&repo, &session_name);
     kill_session(&tmux_env, &session_name);
 
-    let orchestrator = file.orchestrator.clone().unwrap_or_else(|| {
-        panic!("a resumed supervisor session must record its orchestrator entry; file:\n{file:?}")
-    });
-    assert_eq!(orchestrator.pane_index, 0, "the supervisor pane is index 0");
-    assert_eq!(
-        orchestrator.cli, "cat",
-        "it names the configured supervisor CLI"
+    assert!(
+        file.orchestrator.is_none(),
+        "a resumed supervised session writes no orchestrator entry; file:\n{file:?}"
     );
+    assert_eq!(file.agents.len(), 1, "the roster lists the coding agent");
 }
 
 /// A resume recreates the dashboard pane and re-spawns the broker BEFORE the

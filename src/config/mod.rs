@@ -1084,7 +1084,7 @@ worktree_placement = "child"
 # spec_validate_command = "openspec validate {{CHANGE_ID}} --strict"  # OpenSpec only
 # security_audit_command = "cargo audit"                       # or: "npm audit", "bandit -r ."
 # agent_approval = "auto"  # one of: "manual", "auto", "full-auto"
-# approval = "manual"  # supervisor pane's own level: "manual" | "auto" | "full-auto"
+# approval = "manual"  # orchestrator's own level, reserved for git-paw-initiated orchestrator invocations; changes no pane command
 # verify_on_commit_nudge = true  # broker nudges the supervisor to verify each commit promptly (default true)
 #
 # Stuck/bloat detection thresholds, read by .git-paw/scripts/sweep.sh. Each is

@@ -239,6 +239,7 @@ pub(crate) fn cmd_add(
     tmux::build_add_agent_commands(
         &existing.session_name,
         &pane,
+        offset,
         prev_agent_count,
         layout,
         config.border_affordances_enabled(),
@@ -248,7 +249,8 @@ pub(crate) fn cmd_add(
     // Rebalance the (possibly newly-full) agent row to equal width on the live
     // window so the added grid matches a start-time grid width-for-width
     // (design D4, G3).
-    if let Err(e) = tmux::rebalance_agent_rows(&existing.session_name, prev_agent_count + 1) {
+    if let Err(e) = tmux::rebalance_agent_rows(&existing.session_name, offset, prev_agent_count + 1)
+    {
         eprintln!("warning: could not rebalance agent-row widths: {e}");
     }
 
@@ -260,18 +262,11 @@ pub(crate) fn cmd_add(
     let mut updated = existing.clone();
     updated.worktrees.push(entry);
     session::save_session(&updated)?;
-    // The orchestrator pane does not change when a coding agent is
-    // hot-attached — carry the existing entry (if any) forward unchanged.
-    let orchestrator = session::read_repo_session_file(&repo_root, &updated.session_name)
-        .ok()
-        .flatten()
-        .and_then(|f| f.orchestrator);
     write_repo_discovery_file(
         &repo_root,
         &updated.session_name,
         &updated.worktrees,
         offset,
-        orchestrator,
     );
 
     // Register the new worktree as a live broker watch target so the watcher

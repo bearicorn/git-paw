@@ -772,18 +772,16 @@ fn submit_prompt_to_pane(session_name: &str, pane_idx: usize, prompt: &str, dela
 /// Builds the sweep.sh-compatible agent roster from the launched worktrees:
 /// each entry carries the broker agent id (`branch_id`), worktree path, CLI,
 /// and the tmux `pane_index`. `pane_offset` is the index of the first coding
-/// agent pane — `SUPERVISOR_PANE_OFFSET` for the supervisor layout, or
-/// `1`/`0` for the bare layout depending on whether the dashboard pane is
-/// present. `orchestrator` records the supervisor pane's own entry — `None`
-/// for a bare-mode session, which has no orchestrator pane. Best-effort: a
-/// write failure is surfaced as a warning and does not abort the launch,
-/// since the global receipt remains the source of truth.
+/// agent pane, answered by the session's
+/// [`SessionLayout`](git_paw::surface::SessionLayout). No orchestrator entry
+/// is written: the orchestrator runs outside the session, so no pane is its
+/// own. Best-effort: a write failure is surfaced as a warning and does not
+/// abort the launch, since the global receipt remains the source of truth.
 fn write_repo_discovery_file(
     repo_root: &Path,
     session_name: &str,
     worktrees: &[WorktreeEntry],
     pane_offset: usize,
-    orchestrator: Option<session::RepoOrchestratorEntry>,
 ) {
     let agents = worktrees
         .iter()
@@ -795,7 +793,7 @@ fn write_repo_discovery_file(
             pane_index: pane_offset + idx,
         })
         .collect();
-    write_repo_discovery_file_with_agents(repo_root, session_name, agents, orchestrator);
+    write_repo_discovery_file_with_agents(repo_root, session_name, agents);
 }
 
 /// [`write_repo_discovery_file`] for a caller that has already resolved each
@@ -811,12 +809,11 @@ fn write_repo_discovery_file_with_agents(
     repo_root: &Path,
     session_name: &str,
     agents: Vec<session::RepoAgentEntry>,
-    orchestrator: Option<session::RepoOrchestratorEntry>,
 ) {
     let file = session::RepoSessionFile {
         session_name: session_name.to_string(),
         agents,
-        orchestrator,
+        orchestrator: None,
     };
     if let Err(e) = session::write_repo_session_file(repo_root, &file) {
         eprintln!("warning: failed to write per-repo session discovery file: {e}");
@@ -2356,47 +2353,26 @@ mod tests {
         );
     }
 
-    // Maps to scenario `Supervisor pane receives a boot block` from
-    // supervisor-as-pane. The pane-0 prompt is constructed inline in
-    // `cmd_supervisor` (it is not extracted into a helper); we reconstruct
-    // it using the same public helpers production uses and lock in the
-    // resulting prefix + framing. (test-coverage-v0-5-0 task 12.10)
+    // Maps to boot-block scenario `No boot block is built for a supervisor
+    // identity`. The only boot-block entry point a launch has is the
+    // coding-agent one, which slugifies its argument — so even a branch
+    // literally named `supervisor` boots as `agent-supervisor` and is never
+    // handed the orchestrator's reserved id.
     #[test]
-    fn supervisor_pane_prompt_starts_with_boot_block() {
+    fn no_boot_block_is_built_with_the_supervisor_identity() {
         let broker_url = "http://127.0.0.1:9119";
-        // The supervisor's OWN entry point, which is what `cmd_supervisor`
-        // calls. `build_boot_block` is the coding-agent one and slugifies its
-        // argument, so passing "supervisor" there would (correctly) yield
-        // `agent-supervisor` — a coding agent must never be handed the
-        // reserved id.
-        let boot_block = git_paw::skills::build_supervisor_boot_block(broker_url);
-        let supervisor_framing = "Begin observing the spec implementation session. Your skill (.git-paw/AGENTS.local.md) describes \
-             your role — read it, then start the autonomous loop. The user can type questions or \
-             directives directly into your pane; handle them per the 'When the user types in your \
-             pane' section of your skill.";
-        let supervisor_prompt = format!("{boot_block}\n\n{supervisor_framing}");
-
+        for mcp_capable in [false, true] {
+            let block = git_paw::skills::build_boot_block("supervisor", broker_url, mcp_capable);
+            assert!(
+                !block.contains("--agent supervisor "),
+                "no boot block may publish as the reserved id; got:\n{block}"
+            );
+        }
+        let helper_form = git_paw::skills::build_boot_block("supervisor", broker_url, false);
         assert!(
-            supervisor_prompt.starts_with(&boot_block),
-            "supervisor pane prompt should begin with the boot block; got:\n{supervisor_prompt}"
-        );
-        // The boot-block template uses `{{BRANCH_ID}}` as a placeholder that
-        // `build_boot_block` substitutes to the slugified agent id. For the
-        // supervisor pane the substituted value is the literal string
-        // `supervisor`, which appears in every bundled-helper call as
-        // `broker.sh --agent supervisor ...` (the boot block calls the helper,
-        // never a raw broker curl). That is the production shape of
-        // "BRANCH_ID=supervisor" from the spec scenario.
-        assert!(
-            boot_block.contains(".git-paw/scripts/broker.sh --agent supervisor status booting"),
-            "boot block must carry the supervisor agent_id substitution; got:\n{boot_block}"
-        );
-        let framing_idx = supervisor_prompt
-            .find("Begin observing")
-            .expect("`Begin observing` framing must follow the boot block");
-        assert!(
-            framing_idx > boot_block.len(),
-            "framing must follow the boot block, not precede it; framing_idx={framing_idx}"
+            helper_form
+                .contains(".git-paw/scripts/broker.sh --agent agent-supervisor status booting"),
+            "a branch named supervisor boots under its slugified id; got:\n{helper_form}"
         );
     }
 

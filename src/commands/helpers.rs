@@ -8,7 +8,6 @@ use git_paw::detect;
 use git_paw::error::PawError;
 use git_paw::interactive;
 use git_paw::session::Session;
-use git_paw::surface::SessionLayout;
 
 /// Convert the config's `[clis.*]` table into the detector's custom-CLI
 /// definitions so a configured CLI is resolvable on `PATH` at launch time.
@@ -36,33 +35,6 @@ pub(crate) fn to_interactive_cli(cli: &detect::CliInfo) -> interactive::CliInfo 
 /// [`Session::agent_pane_offset`].
 pub(crate) fn agent_pane_offset(session: &Session) -> usize {
     session.agent_pane_offset()
-}
-
-/// Derives the per-repo discovery file's orchestrator entry from a session's
-/// MODE, rather than reading it back from a file that may not exist.
-///
-/// The pane index — and whether there is an orchestrator surface at all —
-/// come from the mode's [`SessionLayout`]; a bare layout reserves none. The
-/// CLI is resolved the way every supervisor launch path resolves it —
-/// `[supervisor].cli`, else `default_cli`. Returns `None` for a bare session,
-/// and also for a supervisor session whose CLI cannot be resolved: the
-/// discovery file is a best-effort surface and must never fail a resume.
-///
-/// `recover_session` derives the same entry from the CLI it has already had
-/// to resolve in order to REBUILD the pane, so it keeps its own construction
-/// (where an unresolvable CLI is a hard error, as it must be).
-pub(crate) fn orchestrator_entry_for_mode(
-    mode: git_paw::session::SessionMode,
-    config: &PawConfig,
-) -> Option<git_paw::session::RepoOrchestratorEntry> {
-    let layout = SessionLayout::planned(mode, config.broker.enabled);
-    let pane_index = layout.orchestrator_index()?;
-    let cli = config
-        .supervisor
-        .as_ref()
-        .and_then(|s| s.cli.clone())
-        .or_else(|| config.default_cli.clone())?;
-    Some(git_paw::session::RepoOrchestratorEntry { cli, pane_index })
 }
 
 /// Attaches `tmux pipe-pane` to each coding-agent pane so the session-logging
@@ -314,65 +286,6 @@ mod tests {
         assert!(
             !msg.contains("v1.0.0"),
             "error must not cite a release version"
-        );
-    }
-
-    /// A bare session has no orchestrator pane.
-    #[test]
-    fn orchestrator_entry_is_none_for_a_bare_session() {
-        let config = PawConfig::default();
-        assert_eq!(
-            orchestrator_entry_for_mode(git_paw::session::SessionMode::Bare, &config),
-            None
-        );
-    }
-
-    /// A supervisor session's entry names the supervisor pane (index 0) and
-    /// the configured supervisor CLI.
-    #[test]
-    fn orchestrator_entry_for_a_supervisor_session_names_pane_zero_and_its_cli() {
-        let supervisor = git_paw::config::SupervisorConfig {
-            cli: Some("fable".to_string()),
-            ..Default::default()
-        };
-        let config = PawConfig {
-            default_cli: Some("claude".to_string()),
-            supervisor: Some(supervisor),
-            ..Default::default()
-        };
-
-        let entry = orchestrator_entry_for_mode(git_paw::session::SessionMode::Supervisor, &config)
-            .expect("a supervisor session has an orchestrator entry");
-        assert_eq!(entry.pane_index, 0);
-        assert_eq!(entry.cli, "fable");
-    }
-
-    /// Without `[supervisor].cli` the entry falls back to `default_cli`, the
-    /// same resolution every supervisor launch path uses.
-    #[test]
-    fn orchestrator_entry_falls_back_to_the_default_cli() {
-        let config = PawConfig {
-            default_cli: Some("claude".to_string()),
-            supervisor: Some(git_paw::config::SupervisorConfig::default()),
-            ..Default::default()
-        };
-
-        let entry = orchestrator_entry_for_mode(git_paw::session::SessionMode::Supervisor, &config)
-            .expect("default_cli resolves the orchestrator CLI");
-        assert_eq!(entry.cli, "claude");
-    }
-
-    /// An unresolvable CLI yields `None` rather than an error: the discovery
-    /// file is best-effort and must never fail a resume.
-    #[test]
-    fn orchestrator_entry_is_none_when_no_cli_can_be_resolved() {
-        let config = PawConfig {
-            supervisor: Some(git_paw::config::SupervisorConfig::default()),
-            ..Default::default()
-        };
-        assert_eq!(
-            orchestrator_entry_for_mode(git_paw::session::SessionMode::Supervisor, &config),
-            None
         );
     }
 

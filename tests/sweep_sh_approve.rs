@@ -126,6 +126,11 @@ fn send_line(session: &str, pane: usize, line: &str) {
 /// it the helper falls back to its built-in marker, which is a different
 /// scenario from the ones here.
 fn run_approve(repo: &Path, sweep: &Path, pane: &str) -> String {
+    run_approve_with_status(repo, sweep, pane).1
+}
+
+/// [`run_approve`], also returning the helper's exit code.
+fn run_approve_with_status(repo: &Path, sweep: &Path, pane: &str) -> (Option<i32>, String) {
     let bin = assert_cmd::cargo::cargo_bin("git-paw");
     let bin_dir = bin.parent().expect("built binary has a parent dir");
     let path = std::env::var("PATH").unwrap_or_default();
@@ -136,10 +141,13 @@ fn run_approve(repo: &Path, sweep: &Path, pane: &str) -> String {
         .env("PATH", format!("{}:{path}", bin_dir.display()))
         .output()
         .expect("run sweep.sh approve");
-    format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+    (
+        out.status.code(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
     )
 }
 
@@ -220,8 +228,8 @@ fn approve_sends_nothing_when_prompt_cleared() {
     kill_session(&session);
 }
 
-/// Scenario "approve 0 is rejected": pane 0 (the supervisor's own pane) is
-/// refused with no keystrokes.
+/// Scenario "Without a roster pane 0 is still refused": with no roster entry
+/// to check against, pane 0 is refused with no keystrokes.
 #[test]
 #[serial]
 fn approve_refuses_pane_zero() {
@@ -250,6 +258,200 @@ fn approve_refuses_pane_zero() {
     assert!(
         !out.contains("approved pane"),
         "approve 0 must not approve, got: {out}"
+    );
+
+    kill_session(&session);
+}
+
+/// Writes a discovery JSON whose roster lists one coding agent per entry of
+/// `panes`, at that `pane_index`.
+fn write_session_json_with_roster(repo: &Path, session_name: &str, panes: &[usize]) {
+    let dir = repo.join(".git-paw/sessions");
+    fs::create_dir_all(&dir).expect("mk sessions dir");
+    let agents: Vec<String> = panes
+        .iter()
+        .map(|p| {
+            format!(
+                "{{\"branch_id\": \"feat-a{p}\", \"worktree_path\": \"/tmp/wt{p}\", \
+                 \"cli\": \"claude\", \"pane_index\": {p}}}"
+            )
+        })
+        .collect();
+    let body = format!(
+        "{{\"session_name\": \"{session_name}\", \"agents\": [{}]}}",
+        agents.join(", ")
+    );
+    fs::write(dir.join(format!("{session_name}.json")), body).expect("write session json");
+}
+
+/// A live one-time-yes permission prompt, as `sh` renders it from `printf`.
+const LIVE_PROMPT_LINE: &str = "printf 'Bash command\\n  cargo test\\nDo you want to proceed?\\n 1. Yes\\n 2. No\\n Esc to cancel '";
+
+/// Scenarios "approve of the dashboard pane is rejected"
+/// (`broker-agent-helper`) and "Dashboard surface is refused in a bare
+/// session" (`approval-auto`): with a roster listing coding agents at panes
+/// 1 and 2, pane 0 is refused by role — even showing a live prompt.
+#[test]
+#[serial]
+fn approve_refuses_the_dashboard_pane_by_roster() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let env = helpers::tmux_test_env();
+    let _proc = env.apply_to_process();
+
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+    let sweep = install_sweep(repo.path());
+    let session = unique_session_name("dash");
+    write_session_json_with_roster(repo.path(), &session, &[1, 2]);
+    create_session_with_panes(&session);
+    send_line(&session, 0, LIVE_PROMPT_LINE);
+
+    let out = run_approve(repo.path(), &sweep, "0");
+    assert!(
+        out.contains("pane 0 excluded from blind send-keys (not a coding agent)"),
+        "the dashboard must be refused as not a coding agent, got: {out}"
+    );
+    assert!(!out.contains("approved pane"), "got: {out}");
+
+    kill_session(&session);
+}
+
+/// Scenario "approve of a pane no roster entry claims is rejected".
+#[test]
+#[serial]
+fn approve_refuses_a_pane_no_roster_entry_claims() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let env = helpers::tmux_test_env();
+    let _proc = env.apply_to_process();
+
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+    let sweep = install_sweep(repo.path());
+    let session = unique_session_name("unclaimed");
+    write_session_json_with_roster(repo.path(), &session, &[1]);
+    create_session_with_panes(&session);
+    send_line(&session, 2, LIVE_PROMPT_LINE);
+
+    let out = run_approve(repo.path(), &sweep, "2");
+    assert!(
+        out.contains("pane 2 excluded from blind send-keys (not a coding agent)"),
+        "a pane no roster entry claims must be refused, got: {out}"
+    );
+    assert!(!out.contains("approved pane"), "got: {out}");
+
+    kill_session(&session);
+}
+
+/// Scenario "a non-numeric pane argument is refused": `.` and `[0-2]` would
+/// match a roster index as a pattern and resolve to the active pane in tmux,
+/// so both are refused with a non-zero exit and every pane — each showing a
+/// live prompt — is left untouched.
+#[test]
+#[serial]
+fn approve_refuses_a_non_numeric_pane() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let env = helpers::tmux_test_env();
+    let _proc = env.apply_to_process();
+
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+    let sweep = install_sweep(repo.path());
+    let session = unique_session_name("nonnum");
+    write_session_json_with_roster(repo.path(), &session, &[1, 2]);
+    create_session_with_panes(&session);
+    for pane in 0..=2 {
+        send_line(&session, pane, LIVE_PROMPT_LINE);
+    }
+    let capture = |pane: usize| {
+        let target = format!("{session}:0.{pane}");
+        String::from_utf8_lossy(&tmux(&["capture-pane", "-p", "-t", &target]).stdout).into_owned()
+    };
+    let before: Vec<String> = (0..=2).map(capture).collect();
+
+    for arg in [".", "[0-2]"] {
+        let (code, out) = run_approve_with_status(repo.path(), &sweep, arg);
+        assert_ne!(
+            code,
+            Some(0),
+            "approve {arg} must exit non-zero, got: {out}"
+        );
+        assert!(
+            out.contains("approve takes a numeric pane index, no keys sent"),
+            "approve {arg} must be refused as non-numeric, got: {out}"
+        );
+        assert!(!out.contains("approved pane"), "got: {out}");
+    }
+
+    std::thread::sleep(Duration::from_millis(200));
+    let after: Vec<String> = (0..=2).map(capture).collect();
+    kill_session(&session);
+    assert_eq!(before, after, "no pane may receive a keystroke");
+}
+
+/// Scenario "approve of a roster agent's pane proceeds": a roster agent at
+/// pane 1 showing a live one-time-yes prompt is answered with option 1.
+#[test]
+#[serial]
+fn approve_of_a_roster_agents_pane_proceeds() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let env = helpers::tmux_test_env();
+    let _proc = env.apply_to_process();
+
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+    let sweep = install_sweep(repo.path());
+    let session = unique_session_name("roster");
+    write_session_json_with_roster(repo.path(), &session, &[1, 2]);
+    create_session_with_panes(&session);
+    send_line(&session, 1, LIVE_PROMPT_LINE);
+
+    let out = run_approve(repo.path(), &sweep, "1");
+    assert!(
+        out.contains("approved pane 1 (option 1)"),
+        "a roster agent's live prompt must be answered, got: {out}"
+    );
+
+    kill_session(&session);
+}
+
+/// Scenario "The first agent of a broker-less session is approvable"
+/// (`approval-auto`): with no dashboard, the roster lists the first coding
+/// agent at pane 0, and a human's `approve 0` reaches it — eligibility is
+/// the role, never the index.
+#[test]
+#[serial]
+fn approve_reaches_the_first_agent_of_a_broker_less_session() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let env = helpers::tmux_test_env();
+    let _proc = env.apply_to_process();
+
+    let repo = TempDir::new().expect("repo");
+    init_git_repo(repo.path());
+    let sweep = install_sweep(repo.path());
+    let session = unique_session_name("nobroker");
+    write_session_json_with_roster(repo.path(), &session, &[0, 1]);
+    create_session_with_panes(&session);
+    send_line(&session, 0, LIVE_PROMPT_LINE);
+
+    let out = run_approve(repo.path(), &sweep, "0");
+    assert!(
+        out.contains("approved pane 0 (option 1)"),
+        "the broker-less first agent at pane 0 must be approvable, got: {out}"
     );
 
     kill_session(&session);

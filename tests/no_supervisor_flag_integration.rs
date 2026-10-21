@@ -41,7 +41,7 @@ display_name = "Echo"
 }
 
 /// `git paw start --no-supervisor --dry-run` SHALL produce the bare-start
-/// dry-run plan (no `Supervisor:` / `Agent CLI:` headers) even when the
+/// dry-run plan (no supervisor session plan / `Agent CLI:` header) even when the
 /// repo's `[supervisor] enabled = true` config would normally route to
 /// supervisor mode.
 #[test]
@@ -82,7 +82,7 @@ fn no_supervisor_overrides_config_enabled_in_dry_run() {
 
     // Supervisor-mode dry-run markers MUST NOT appear.
     assert!(
-        !stdout.contains("Supervisor:"),
+        !stdout.contains("supervisor session plan"),
         "--no-supervisor must skip supervisor mode; got: {stdout}"
     );
     assert!(
@@ -134,7 +134,7 @@ fn supervisor_config_enabled_routes_to_supervisor_dry_run() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Supervisor:"),
+        stdout.contains("supervisor session plan"),
         "config enabled should route to supervisor mode; got: {stdout}"
     );
 }
