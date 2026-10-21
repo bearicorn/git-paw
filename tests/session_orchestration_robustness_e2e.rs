@@ -8,10 +8,10 @@
 //!
 //! Coverage:
 //! - 6.1/6.2 applied-layout widths (live tmux): a 3-agent row renders equal
-//!   thirds (NOT 50/25/25); the top row stays ~50/50; a 5-agent row is ~20%
+//!   thirds (NOT 50/25/25); the top row is the full-width dashboard; a 5-agent row is ~20%
 //!   per pane.
-//! - 6.3 pane-integrity on `add`: pane count == JSON-agent count (+supervisor
-//!   +dashboard) and every agent's worktree→pane `pane_current_path` mapping
+//! - 6.3 pane-integrity on `add`: pane count == JSON-agent count (+dashboard)
+//!   and every agent's worktree→pane `pane_current_path` mapping
 //!   is intact.
 //! - 6.4 pane-integrity on `remove`: removing a middle agent kills only that
 //!   pane (no collateral loss, no orphan); the removed pane is an `echo`
@@ -164,10 +164,10 @@ fn three_agent_row_renders_equal_thirds_not_50_25_25() {
     let widths = pane_widths(&tmux_env, &session);
     kill(&tmux_env, &session);
 
-    // Agent panes are indices 2,3,4 (supervisor=0, dashboard=1).
+    // Agent panes are indices 1,2,3 (dashboard=0).
     let agents: Vec<usize> = widths
         .iter()
-        .filter(|(i, _)| *i >= 2)
+        .filter(|(i, _)| *i >= 1)
         .map(|(_, w)| *w)
         .collect();
     assert_eq!(agents.len(), 3, "expected 3 agent panes; got {widths:?}");
@@ -185,9 +185,12 @@ fn three_agent_row_renders_equal_thirds_not_50_25_25() {
     );
 }
 
+/// Scenarios "Row rebalance leaves the dashboard row full width" and "Full
+/// agent row stays at five equal-width columns": the dashboard spans the
+/// whole window and five agents each take ~20%.
 #[test]
 #[serial]
-fn top_row_stays_fifty_fifty_and_five_agent_row_is_one_fifth_each() {
+fn dashboard_row_spans_full_width_and_five_agent_row_is_one_fifth_each() {
     if !tmux_available() {
         eprintln!("skipping: tmux not available");
         return;
@@ -202,16 +205,11 @@ fn top_row_stays_fifty_fifty_and_five_agent_row_is_one_fifth_each() {
     kill(&tmux_env, &session);
 
     let width_of = |idx: usize| widths.iter().find(|(i, _)| *i == idx).map(|(_, w)| *w);
-    let sup = width_of(0).expect("supervisor pane");
-    let dash = width_of(1).expect("dashboard pane");
-    assert!(
-        sup.abs_diff(dash) <= 2,
-        "top row must stay ~50/50; supervisor={sup} dashboard={dash}"
-    );
+    let dash = width_of(0).expect("dashboard pane");
 
     let agents: Vec<usize> = widths
         .iter()
-        .filter(|(i, _)| *i >= 2)
+        .filter(|(i, _)| *i >= 1)
         .map(|(_, w)| *w)
         .collect();
     assert_eq!(agents.len(), 5, "expected 5 agent panes; got {widths:?}");
@@ -220,6 +218,13 @@ fn top_row_stays_fifty_fifty_and_five_agent_row_is_one_fifth_each() {
     assert!(
         max - min <= 2,
         "the 5 agent panes must each be ~20% (equal within tolerance); got {agents:?}"
+    );
+    // The full-width dashboard spans the agent row: five panes plus their
+    // four one-column separators.
+    let row: usize = agents.iter().sum::<usize>() + agents.len() - 1;
+    assert!(
+        dash.abs_diff(row) <= 1,
+        "the dashboard must span the full window width; dashboard={dash} agent row={row}"
     );
 }
 
@@ -261,11 +266,11 @@ fn add_preserves_every_agent_pane_mapping() {
         "add failed; stderr:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    // supervisor + dashboard + 4 agents = 6 panes.
+    // dashboard + 4 agents = 5 panes.
     assert_eq!(
         widths.len(),
-        6,
-        "expected 6 panes after add; got {widths:?}"
+        5,
+        "expected 5 panes after add; got {widths:?}"
     );
     // Every original AND new agent worktree maps to a live pane (no agent left
     // without a pane — the G2 dropped-pane regression).
@@ -328,11 +333,11 @@ fn remove_middle_agent_kills_only_that_pane() {
         "remove failed; stderr:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    // supervisor + dashboard + 2 surviving agents = 4 panes.
+    // dashboard + 2 surviving agents = 3 panes.
     assert_eq!(
         widths.len(),
-        4,
-        "expected 4 panes after remove; got {widths:?}"
+        3,
+        "expected 3 panes after remove; got {widths:?}"
     );
     // 'a' and 'c' still each have a live pane; 'b' is gone (no orphan).
     let wt_a = canonical(&sandbox.join("repo-a"));

@@ -19,13 +19,19 @@ use crate::error::PawError;
 /// one-column pane separators — and lets the last pane absorb the rounding
 /// remainder, leaving the row equal-width within a one-column tolerance.
 /// Returns `(pane_index, columns)` pairs for the panes to resize (the last
-/// pane of each row is omitted).
+/// pane of each row is omitted). `first_agent` is the pane index of the first
+/// coding agent, as the session's
+/// [`SessionLayout`](crate::surface::SessionLayout) answers it.
 ///
 /// Pure (no IO) so the row arithmetic is unit-testable; the live application
 /// is [`rebalance_agent_rows`].
 #[must_use]
-pub fn agent_row_widths(window_width: usize, agent_count: usize) -> Vec<(usize, usize)> {
-    use crate::surface::{SUPERVISOR_AGENTS_PER_ROW, SUPERVISOR_PANE_OFFSET};
+pub fn agent_row_widths(
+    window_width: usize,
+    first_agent: usize,
+    agent_count: usize,
+) -> Vec<(usize, usize)> {
+    use crate::surface::SUPERVISOR_AGENTS_PER_ROW;
 
     let mut targets = Vec::new();
     if window_width == 0 {
@@ -38,7 +44,7 @@ pub fn agent_row_widths(window_width: usize, agent_count: usize) -> Vec<(usize, 
             let separators = panes_in_row - 1;
             let per = window_width.saturating_sub(separators) / panes_in_row;
             for j in 0..(panes_in_row - 1) {
-                targets.push((SUPERVISOR_PANE_OFFSET + row_first_agent + j, per));
+                targets.push((first_agent + row_first_agent + j, per));
             }
         }
         row_first_agent += panes_in_row;
@@ -75,17 +81,21 @@ fn query_window_width(
 /// a one-column tolerance instead of the 50/25/25 raw `-h` splits produce. A
 /// no-op for 0 or 1 agents, or when the window is gone. Setting a pane's `-x`
 /// width only moves its boundary with the horizontal neighbour in the same
-/// row, so this never disturbs the top-row supervisor/dashboard 50/50 split
-/// nor the per-row vertical heights.
+/// row, so this never disturbs the full-width top row nor the per-row
+/// vertical heights.
 ///
 /// Must run AFTER the splits (start/add) or the kill + height re-tile (remove)
-/// settle so pane indices are contiguous (panes 2..N+1). No agent row exceeds
-/// [`crate::surface::SUPERVISOR_AGENTS_PER_ROW`] (5) by
+/// settle so pane indices are contiguous (panes `first_agent..first_agent+N`).
+/// No agent row exceeds [`crate::surface::SUPERVISOR_AGENTS_PER_ROW`] (5) by
 /// construction, bounding the smallest equal-width target to ~20% per pane
 /// (design D5). Best-effort per resize; one pane's tmux failure does not abort
 /// the rest.
-pub fn rebalance_agent_rows(session_name: &str, agent_count: usize) -> Result<(), PawError> {
-    rebalance_agent_rows_with(&RealCommandRunner, session_name, agent_count)
+pub fn rebalance_agent_rows(
+    session_name: &str,
+    first_agent: usize,
+    agent_count: usize,
+) -> Result<(), PawError> {
+    rebalance_agent_rows_with(&RealCommandRunner, session_name, first_agent, agent_count)
 }
 
 /// [`rebalance_agent_rows`] against an injected runner, so the width query and
@@ -97,12 +107,13 @@ pub fn rebalance_agent_rows(session_name: &str, agent_count: usize) -> Result<()
 pub(crate) fn rebalance_agent_rows_with(
     runner: &dyn CommandRunner,
     session_name: &str,
+    first_agent: usize,
     agent_count: usize,
 ) -> Result<(), PawError> {
     let Some(window_width) = query_window_width(runner, session_name)? else {
         return Ok(());
     };
-    for (pane_idx, cols) in agent_row_widths(window_width, agent_count) {
+    for (pane_idx, cols) in agent_row_widths(window_width, first_agent, agent_count) {
         let target = format!("{session_name}:0.{pane_idx}");
         let cols_str = cols.to_string();
         let _ =

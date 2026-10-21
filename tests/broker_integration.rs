@@ -819,3 +819,46 @@ fn broker_log_flush_on_shutdown() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// supervisor-launch scenario "Drive-loop escalations create no supervisor row"
+// ---------------------------------------------------------------------------
+
+/// The drive loop records each escalation as an `agent.question` from the
+/// `supervisor` wire identity. Only status-kind messages populate the
+/// roster, so with no external orchestrator publishing its own status the
+/// broker's `/status` lists no `supervisor` row — however many escalations
+/// the loop has recorded.
+#[test]
+#[serial]
+fn drive_loop_escalations_create_no_supervisor_row() {
+    use git_paw::broker::messages::{BrokerMessage, QuestionPayload};
+    use git_paw::supervisor::drive::{Escalation, SUPERVISOR_AGENT_ID};
+
+    let (handle, url) = spawn_test_broker_with(|| git_paw::broker::BrokerState::new(None));
+
+    // The exact message the loop's broker sink publishes for an escalation.
+    let escalation = Escalation {
+        agent_id: "feat-a".to_string(),
+        verdict: "permission-prompt".to_string(),
+        command: "cargo build".to_string(),
+    };
+    let msg = BrokerMessage::Question {
+        agent_id: SUPERVISOR_AGENT_ID.to_string(),
+        payload: QuestionPayload {
+            question: escalation.question(),
+        },
+    };
+    git_paw::broker::publish::publish_to_broker_http(&url, &msg).expect("escalation publishes");
+
+    let (status, body) = http_req(&url, "GET", "/status", &[], "");
+    assert_eq!(status, 200);
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("status json");
+    let agents = parsed["agents"].as_array().expect("agents array");
+    assert!(
+        agents.iter().all(|a| a["agent_id"] != SUPERVISOR_AGENT_ID),
+        "an escalation must not create a supervisor roster row: {body}"
+    );
+
+    drop(handle);
+}

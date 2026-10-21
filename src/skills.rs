@@ -475,31 +475,7 @@ pub fn build_boot_block(branch_id: &str, broker_url: &str, mcp_capable: bool) ->
     boot_block_for_id(&slugify_branch(branch_id), broker_url, mcp_capable)
 }
 
-/// Builds the boot block for the SUPERVISOR pane, whose identity is the
-/// reserved id `supervisor` rather than a branch.
-///
-/// Separate from [`build_boot_block`] on purpose. The supervisor is the only
-/// caller entitled to the literal `supervisor`, so the passthrough lives here
-/// instead of in a shared helper that every coding-agent path also calls —
-/// there, a coding agent on a branch literally named `supervisor` would be
-/// handed the orchestrator's identity, told to publish `--agent supervisor`,
-/// and so be able to issue the verdicts that authorise merges, while its own
-/// discovery entry said `agent-supervisor` and nothing routed back to it.
-///
-/// Always renders the `broker.sh` helper form, never the MCP form: the
-/// supervisor pane runs in the repository's main working tree, where the MCP
-/// worker publish tools refuse to act (`mcp-agent-publish`, "A publish from
-/// the main working tree is refused"), so an MCP-form boot block would fail on
-/// its very first `publish_status`. `mcp-orchestrator-write-tools` is what
-/// later gives a root session its own publishing identity; until it lands the
-/// supervisor publishes through the helper, which takes `--agent supervisor`
-/// explicitly and is unaffected by that refusal.
-#[must_use]
-pub fn build_supervisor_boot_block(broker_url: &str) -> String {
-    boot_block_for_id(crate::surface::SUPERVISOR_AGENT_ID, broker_url, false)
-}
-
-/// Shared boot-block renderer taking an already-resolved `agent_id`.
+/// Boot-block renderer taking an already-resolved `agent_id`.
 fn boot_block_for_id(agent_id: &str, broker_url: &str, mcp_capable: bool) -> String {
     let template = if mcp_capable {
         include_str!("../assets/boot-block-mcp-template.md")
@@ -663,14 +639,14 @@ pub fn render(
     )
 }
 
-/// Renders a skill for the SUPERVISOR, whose identity is the reserved id
-/// `supervisor` rather than a branch.
+/// Renders a skill for the orchestrator, whose identity is the reserved id
+/// `supervisor` rather than a branch — the orchestrator context written to
+/// the repo-root sidecar.
 ///
-/// Separate from [`render`] for the same reason
-/// [`build_supervisor_boot_block`] is separate from [`build_boot_block`]: the
-/// passthrough must not be reachable from a coding-agent path, where a branch
-/// literally named `supervisor` would otherwise render a skill telling that
-/// agent it *is* the supervisor.
+/// Separate from [`render`] on purpose: the passthrough must not be reachable
+/// from a coding-agent path, where a branch literally named `supervisor`
+/// would otherwise render a skill telling that agent it *is* the
+/// orchestrator, able to issue the verdicts that authorise merges.
 #[must_use]
 pub fn render_for_supervisor(
     template: &SkillTemplate,
@@ -4517,10 +4493,10 @@ mod tests {
         assert_eq!(tmpl.source, cloned.source);
     }
 
-    // boot-block / Scenario: Unattended supervisor boot context announces the
-    // drive loop — the directive says a loop escalates prompts to this pane,
-    // that no component approves them, and that the supervisor relays each
-    // one to the human.
+    // boot-block / Scenario: Unattended orchestrator context announces the
+    // drive loop — the directive says a loop records escalations on the
+    // broker, that no component approves them, and that the orchestrator
+    // relays each one to the human.
     #[test]
     fn drive_loop_directive_present_when_unattended() {
         let input = format!(
@@ -4556,6 +4532,10 @@ mod tests {
         assert!(
             lower.contains("no git-paw component approves permission prompts"),
             "the directive must state no component approves prompts; got:\n{real}"
+        );
+        assert!(
+            lower.contains("on the broker, where you read them"),
+            "the directive must say the loop records escalations on the broker; got:\n{real}"
         );
         assert!(
             lower.contains("relay each one to the human"),
@@ -4625,13 +4605,13 @@ mod tests {
     fn drive_loop_directive_region_is_byte_identical_to_ground_truth() {
         const EXPECTED: &str = "## Unattended: a drive loop is running\n\
 \n\
-An in-process drive loop is sweeping every pane this session. It approves nothing: every live permission prompt it finds is escalated into THIS pane and recorded on the broker, and the rest of the wave keeps moving. No git-paw component approves permission prompts.\n\
+An in-process drive loop is sweeping every coding-agent surface this session. It approves nothing and types nothing for you: it records each live permission prompt, judgment call and merge decision on the broker, where you read them, and the rest of the wave keeps moving. No git-paw component approves permission prompts.\n\
 \n\
-The loop is the pump; you are the brain. It does not merely park what it cannot decide — it types each judgment call straight into THIS pane and moves on without waiting for you, and it nudges you to run an orchestration sweep on a longer cadence. A task prompt arriving here with no human behind it is the loop handing you work; see **Judgment calls handed to you** for the four kinds and how to decide each.\n\
+The loop is the pump; you are the brain. You drive the session from outside it, so the broker is where the loop's work reaches you: its review items (questions it publishes as `supervisor`), each worker's own questions, and each `committed`/`done` artifact whose merge decision is now live.\n\
 \n\
 Your role this session is escalation-driven, in this order each cycle:\n\
 \n\
-1. **Drain the loop's escalations first.** Each escalated permission prompt is injected here AND recorded as a review item in your broker inbox — the inbox is the backstop for anything that arrived while this pane was busy. Relay each one to the human, naming the agent and the pending command, and run `.git-paw/scripts/sweep.sh approve <pane>` only when the human explicitly tells you to. For any other escalation, reason about it and publish feedback or an answer — before anything else, so blocked agents unblock fastest.\n\
+1. **Drain the loop's escalations first.** Read each escalated permission prompt from the broker. Relay each one to the human, naming the agent and the pending command, and run `.git-paw/scripts/sweep.sh approve <pane>` only when the human explicitly tells you to. For any other escalation, reason about it and publish feedback or an answer — before anything else, so blocked agents unblock fastest.\n\
 2. **Then run your normal sweep** — verification, merge, conflict handling, detect-stuck, and status — as usual. Do not wait for prompts to clear on their own; nothing will clear them but the human's decision.";
 
         let tmpl = resolve("supervisor").unwrap();
@@ -4647,7 +4627,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         assert!(
             out.contains(EXPECTED),
             "drive-loop-directive region must render byte-identical to the \
-             pre-relocation DRIVE_LOOP_DIRECTIVE constant; got:\n{out}"
+             ground truth; got:\n{out}"
         );
     }
 
@@ -4959,16 +4939,10 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         assert_eq!(rendered, "id=agent-supervisor");
     }
 
-    /// The supervisor's OWN entry points keep the reserved literal, so its
-    /// boot block and skill still say `supervisor`.
+    /// The orchestrator's OWN entry point keeps the reserved literal, so its
+    /// skill still says `supervisor`.
     #[test]
     fn the_supervisors_own_entry_points_keep_the_reserved_id() {
-        let block = build_supervisor_boot_block("http://127.0.0.1:9119");
-        assert!(
-            block.contains(".git-paw/scripts/broker.sh --agent supervisor status booting"),
-            "the supervisor's boot block must publish as supervisor; got:\n{block}"
-        );
-
         let tmpl = SkillTemplate {
             name: "supervisor".into(),
             content: "id={{BRANCH_ID}}".into(),
@@ -4985,23 +4959,6 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             &[],
         );
         assert_eq!(rendered, "id=supervisor");
-    }
-
-    /// The supervisor runs in the main working tree, where the MCP publish
-    /// tools refuse to derive an identity — so its boot block is always the
-    /// helper form, whatever its CLI's MCP capability says.
-    #[test]
-    fn the_supervisor_boot_block_is_always_the_helper_form() {
-        let block = build_supervisor_boot_block("http://127.0.0.1:9119");
-        assert!(
-            block.contains(".git-paw/scripts/broker.sh --agent supervisor"),
-            "supervisor boot block must use the helper form; got:\n{block}"
-        );
-        assert!(
-            !block.contains("publish_status"),
-            "supervisor boot block must not use the MCP form, whose first \
-             publish_status would be refused in the main working tree; got:\n{block}"
-        );
     }
 
     /// `boot-block` scenario "Both forms carry the same four events": the

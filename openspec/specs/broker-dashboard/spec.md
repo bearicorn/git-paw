@@ -362,7 +362,7 @@ The dashboard SHALL NOT render a prompt-inbox panel for `agent.question` message
 - An input field for replying to questions
 - A focused-question cursor or any keybindings (Tab, Enter, Backspace, printable characters) for navigating or composing replies in the dashboard
 
-`agent.question` messages SHALL continue to flow through the broker per the `message-delivery` capability (routed to the `"supervisor"` inbox), and the supervisor agent SHALL read and respond to them via curl + the supervisor pane. The dashboard's role is observation only — agent status and (optionally, in v0.6.0+) a recent-messages log.
+`agent.question` messages SHALL continue to flow through the broker per the `message-delivery` capability (routed to the `"supervisor"` inbox), and the orchestrator — the operator's own agent session outside the tmux session, or a person — SHALL read and respond to them through the bundled helpers or the MCP tools. The dashboard's role is observation only — agent status and, optionally, a recent-messages log.
 
 The `q` keybind SHALL remain the sole keyboard input handled by the dashboard.
 
@@ -674,24 +674,18 @@ when they arrive.
 
 ### Requirement: Dashboard chapter reflects the supervisor-as-pane state
 
-`docs/src/user-guide/dashboard.md` SHALL describe the dashboard
-in its current state: it lives in pane 1 of supervisor sessions,
-shows the agents status table, and does NOT include an
-interactive prompt inbox panel. The chapter SHALL NOT contain
-forward-looking statements claiming that v0.4 (or later) will add
-features that have since either shipped and been removed
-(prompt inbox) or shipped already (conflict detection,
-learnings mode).
+`docs/src/user-guide/dashboard.md` SHALL describe the dashboard in its current state: it lives at pane 0 in every session mode (bare and supervised), shows the agents status table and the broker log panel, and does NOT include an interactive prompt inbox panel. The chapter SHALL NOT contain forward-looking statements claiming that an earlier version will add features that have since shipped or been removed, and SHALL NOT place the dashboard at pane 1.
 
-#### Scenario: Dashboard chapter does not promise v0.4 prompt inbox
+#### Scenario: Dashboard chapter does not promise a prompt inbox
 
 - **WHEN** `docs/src/user-guide/dashboard.md` is inspected
-- **THEN** it does NOT contain forward-looking text claiming v0.4 will add an interactive prompt inbox panel
+- **THEN** it does NOT contain forward-looking text claiming a future version will add an interactive prompt inbox panel
 
-#### Scenario: Dashboard chapter places the dashboard at pane 1 in supervisor mode
+#### Scenario: Dashboard chapter places the dashboard at pane 0 in every mode
 
 - **WHEN** `docs/src/user-guide/dashboard.md` is inspected
-- **THEN** any reference to the dashboard's pane location in supervisor mode states that it is at pane 1
+- **THEN** any reference to the dashboard's pane location states that it is at pane 0
+- **AND** no sentence states that the dashboard is at pane 1
 
 ### Requirement: Broker log surfaces the status activity phrase
 

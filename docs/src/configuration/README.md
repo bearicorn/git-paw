@@ -487,7 +487,7 @@ A `[clis.<name>]` entry has two distinct names, and they are used for
 different things:
 
 - **`command` is what the pane launches.** Every launch path — the bare
-  start, the spec-driven start, the supervisor pane, `git paw add`, and
+  start, the spec-driven start, the supervised start, `git paw add`, and
   session recovery — spawns the entry's `command`, not the key. It is
   emitted as exactly one shell word: single-quoted (with embedded single
   quotes escaped) whenever it contains any character outside the portable
@@ -852,7 +852,7 @@ branch_refresh = false
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `false` | Whether to use supervisor mode by default (can also use `--supervisor` flag, or override with `--no-supervisor` for a single session) |
-| `cli` | (uses `default_cli`) | CLI binary for the supervisor agent |
+| `cli` | (uses `default_cli`) | The orchestrator's CLI, named in its context (`.git-paw/AGENTS.local.md`); no pane runs it, and no orchestrator CLI is needed to launch. Also the coding agents' last CLI fallback (`--cli` > `default_cli` > `[supervisor].cli`) |
 | `test_command` | (none) | Test runner — gate 1 (e.g. `"just check"`, `"cargo test"`, `"npm test"`, `"pytest"`) |
 | `lint_command` | (none) | Lint check — gate 1 (e.g. `"cargo clippy -- -D warnings"`, `"npm run lint"`, `"ruff check ."`, `"golangci-lint run"`) |
 | `build_command` | (none) | Compile step — gate 1 when build is distinct from test (e.g. `"cargo build"`, `"npm run build"`, `"mvn package"`, `"go build ./..."`) |
@@ -862,7 +862,7 @@ branch_refresh = false
 | `spec_validate_command` | (none) | Spec validator — gate 3 (e.g. `"openspec validate {{CHANGE_ID}} --strict"` for OpenSpec). `{{CHANGE_ID}}` is substituted by the supervisor agent at verification time with the change name being audited; it is **not** expanded at config load |
 | `security_audit_command` | (none) | Security audit tooling — gate 5 (e.g. `"cargo audit"`, `"npm audit"`, `"bandit -r ."`, `"gosec ./..."`) |
 | `agent_approval` | `"auto"` | Permission level for coding agents: `"manual"`, `"auto"`, or `"full-auto"` |
-| `approval` | (inherits `agent_approval`) | The SUPERVISOR pane's **own** permission level: `"manual"`, `"auto"`, or `"full-auto"`, decoupled from `agent_approval`. Unset → the supervisor pane inherits `agent_approval` exactly as before v0.11.0. Trusted-pane semantics: the supervisor runs in the repo root, not a scoped worktree, so `"full-auto"` here relaxes only the orchestrator pane while every coding agent keeps resolving from `agent_approval`. When `"full-auto"` resolves to no known flags for the CLI, git-paw warns at launch and starts the pane flagless (`auto` behavior) instead of failing |
+| `approval` | (unset) | The orchestrator's **own** permission level: `"manual"`, `"auto"`, or `"full-auto"`, distinct from `agent_approval`. Still parsed, with no warning, so earlier configs load and launch unchanged — but no pane runs an orchestrator, so it changes **no** pane command; it is reserved for git-paw-initiated orchestrator invocations. Coding agents resolve from `agent_approval` alone |
 | `verify_on_commit_nudge` | `true` | When on, the broker posts a `supervisor.verify-now` message to the supervisor inbox on every `agent.artifact { status: "committed" }`, so the supervisor verifies each commit promptly on an explicit event instead of batching. Set `false` to fall back to sweep-cadence verification |
 | `strict_branch_guard` | `true` | When `true`, a per-worktree **pre-commit** hook refuses any commit whose checked-out branch differs from the branch the worktree was created for, blocking cross-worktree contamination (linked worktrees share `.git/refs`, so a stray `cd` can otherwise advance the wrong branch). Set `false` to disable *enforcement* — the **post-commit** hook still publishes an `agent.feedback` + `agent.learning` record when it detects a mismatch (detection without enforcement) |
 | `manual_approvals_log` | `true` | When `true`, every live permission prompt the `--unattended` drive loop escalates for a human decision is appended to `.git-paw/sessions/<session>.manual-approvals.jsonl` and surfaced via [`git paw approvals`](../cli-reference.md). Applies to `--unattended` runs only — an attended session runs no drive loop and records nothing. On a pattern's first sighting a `permission_pattern` learning is also emitted (when `learnings = true`). Set `false` to suppress both the log writes and the learnings emission; the opt-out affects writes only, so `git paw approvals` still reads any pre-existing log |
@@ -876,9 +876,8 @@ branch_refresh = false
 **Approval flag resolution.** When composing a pane's launch command, git-paw
 resolves the permission flags for a `(CLI, level)` pair in order: (1) the
 per-CLI [`[clis.<name>] approval_args`](#custom-clis) override, (2) the
-built-in table below, (3) no flags. The supervisor pane resolves at its own
-effective level (`approval`, falling back to `agent_approval`); coding-agent
-panes always resolve at `agent_approval`. This resolution applies on **every**
+built-in table below, (3) no flags. Coding-agent panes always resolve at
+`agent_approval`; no pane resolves at `approval`. This resolution applies on **every**
 launch path that spawns a worker CLI — supervisor mode, a bare `git paw
 start`, a non-supervisor `--specs` / `--from-all-specs` launch, and `git paw
 add` alike — not only supervisor sessions, even though `agent_approval` is
@@ -1089,7 +1088,7 @@ recorded.
 ### Routing through the supervisor (`/tell`)
 
 The `[supervisor.tell]` table tunes the `/agents` and `/tell` commands you
-type in the supervisor pane to route prompts to individual agents (see
+type to the orchestrator to route prompts to individual agents (see
 [Routing through the supervisor](../user-guide/supervisor.md#routing-through-the-supervisor)).
 
 ```toml
@@ -1241,7 +1240,7 @@ The section is optional; omitting it (or `name`) makes the server advertise `git
 
 ## Dashboard
 
-Configure the dashboard TUI rendered in its own pane when the broker is enabled (pane 0 in a session without a supervisor, pane 1 beside the supervisor in supervisor mode).
+Configure the dashboard TUI rendered in its own pane when the broker is enabled (pane 0 in every mode; in supervisor mode it is the full-width top row).
 
 ```toml
 [dashboard]

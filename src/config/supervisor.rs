@@ -138,16 +138,13 @@ pub struct SupervisorConfig {
     /// Approval policy applied to agent actions.
     #[serde(default)]
     pub agent_approval: ApprovalLevel,
-    /// The SUPERVISOR pane's own approval level, decoupled from
+    /// The orchestrator's own approval level, decoupled from
     /// [`Self::agent_approval`].
     ///
-    /// `None` (the default — every pre-v0.11.0 config) makes the supervisor
-    /// pane inherit `agent_approval`, preserving the pre-v0.11.0 behavior
-    /// exactly. Setting `approval = "full-auto"` launches only the
-    /// supervisor pane with its CLI's native skip-permissions flags while
-    /// coding agents keep resolving from `agent_approval` (trusted-pane
-    /// semantics: the supervisor runs in the repo root, not a worktree, so
-    /// relaxing it is a deliberate, supervisor-scoped choice).
+    /// Still parsed and round-tripped, with no warning, so earlier configs
+    /// load and launch unchanged. No pane runs an orchestrator, so it changes
+    /// no pane command: it is reserved for git-paw-initiated orchestrator
+    /// invocations. Coding agents resolve from `agent_approval` alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalLevel>,
     /// **Deprecated: parsed for compatibility; no effect.**

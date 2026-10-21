@@ -2,9 +2,8 @@
 //! `session.json` state when the session is stopped or stale. Extracted
 //! verbatim from `main.rs` (code-analysis-refactor R2c).
 //!
-//! `resolve_supervisor_flags` lives in [`super::supervisor`] (the supervisor
-//! cluster, R2d) and `attach_or_print_hint` remains in `main.rs`; both are
-//! referenced here across module boundaries.
+//! `attach_or_print_hint` remains in `main.rs` and is referenced here across
+//! module boundaries.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -17,7 +16,6 @@ use git_paw::surface::SessionLayout;
 use git_paw::tmux;
 
 use super::helpers::{dashboard_command, warn_if_broker_is_exposed};
-use super::supervisor::resolve_supervisor_flags;
 use crate::attach_or_print_hint;
 
 /// Builds the recovery-time CLI launch command for `entry`: the command
@@ -133,7 +131,7 @@ pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<()
         .unwrap_or(&default_sup)
         .agent_approval;
 
-    let (tmux_session, pane_offset, orchestrator) = match mode {
+    let (tmux_session, layout) = match mode {
         SessionMode::Supervisor => {
             recover_supervisor_session(repo_root, existing, &config, broker_url.as_deref(), mouse)?
         }
@@ -152,6 +150,10 @@ pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<()
     let mut updated = existing.clone();
     updated.status = SessionStatus::Active;
     updated.mode = mode;
+    // Record the dashboard index of the layout just rebuilt — `Some(0)` for
+    // every supervised recovery, including one of a session an earlier binary
+    // saved with its dashboard at pane 1 (design D6).
+    updated.dashboard_pane = layout.recorded_dashboard_pane();
     // Re-stamp the broker log path. A session saved by a git-paw that used a
     // single shared `broker.log` would otherwise have the dashboard write the
     // per-session name while purge deleted the old one, orphaning a log.
@@ -183,8 +185,7 @@ pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<()
         repo_root,
         &tmux_session.name,
         &updated.worktrees,
-        pane_offset,
-        orchestrator,
+        layout.first_agent_index(),
     );
 
     attach_or_print_hint(&tmux_session.name)
@@ -193,10 +194,9 @@ pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<()
 /// Rebuild a bare-mode (non-supervisor) session: dashboard at pane 0 (when
 /// broker enabled), coding agents at pane 1+.
 ///
-/// Returns the built session together with the agent pane offset of the
-/// rebuilt layout and its orchestrator entry (`None` — a bare session has no
-/// orchestrator pane), so [`recover_session`] can rewrite the per-repo
-/// discovery file against the layout it actually produced.
+/// Returns the built session together with the layout record of what it
+/// rebuilt, so [`recover_session`] can re-save the session and rewrite the
+/// per-repo discovery file against the layout it actually produced.
 fn recover_bare_session<S: std::hash::BuildHasher>(
     repo_root: &Path,
     existing: &Session,
@@ -205,14 +205,7 @@ fn recover_bare_session<S: std::hash::BuildHasher>(
     border_affordances: bool,
     approval: ApprovalLevel,
     clis: &HashMap<String, CustomCli, S>,
-) -> Result<
-    (
-        tmux::TmuxSession,
-        usize,
-        Option<session::RepoOrchestratorEntry>,
-    ),
-    PawError,
-> {
+) -> Result<(tmux::TmuxSession, SessionLayout), PawError> {
     let mut builder = tmux::TmuxSessionBuilder::new(&existing.project_name)
         .session_name(existing.session_name.clone())
         .mouse_mode(mouse)
@@ -239,31 +232,24 @@ fn recover_bare_session<S: std::hash::BuildHasher>(
     // The dashboard occupies pane 0 when the broker is enabled, so coding
     // agents start at pane 1; without it they start at pane 0.
     let layout = SessionLayout::planned(SessionMode::Bare, broker_url.is_some());
-    Ok((builder.build()?, layout.first_agent_index(), None))
+    Ok((builder.build()?, layout))
 }
 
-/// Rebuild a supervisor-mode session with the v0.5 layout: supervisor at pane
-/// 0, dashboard at pane 1, coding agents at pane 2+.
+/// Rebuild a supervisor-mode session with the current layout: dashboard at
+/// pane 0, coding agents at panes 1..N — `N + 1` panes, whatever layout the
+/// stopped session was saved with. No orchestrator pane is rebuilt, so no
+/// orchestrator CLI is needed.
 ///
-/// Returns the built session together with the agent pane offset of the
-/// rebuilt layout and the orchestrator entry describing the supervisor's own
-/// pane, so [`recover_session`] can rewrite the per-repo discovery file
-/// against the layout it actually produced — including the orchestrator entry
-/// a supervisor-mode discovery file carries.
+/// Returns the built session together with the layout record of what it
+/// rebuilt, so [`recover_session`] can re-save `dashboard_pane` and rewrite
+/// the per-repo discovery file against the layout it actually produced.
 fn recover_supervisor_session(
     repo_root: &Path,
     existing: &Session,
     config: &PawConfig,
     broker_url: Option<&str>,
     mouse: bool,
-) -> Result<
-    (
-        tmux::TmuxSession,
-        usize,
-        Option<session::RepoOrchestratorEntry>,
-    ),
-    PawError,
-> {
+) -> Result<(tmux::TmuxSession, SessionLayout), PawError> {
     // Fall back to a default config when [supervisor] is absent so a
     // re-launched session does not error on a config the prior boot
     // already accepted.
@@ -272,38 +258,10 @@ fn recover_supervisor_session(
         .supervisor
         .as_ref()
         .unwrap_or(&default_supervisor_cfg);
-    let supervisor_cli = supervisor_cfg
-        .cli
-        .clone()
-        .or_else(|| config.default_cli.clone())
-        .ok_or_else(|| {
-            PawError::ConfigError(
-                "supervisor recovery requires either [supervisor].cli or default_cli to be set"
-                    .to_string(),
-            )
-        })?;
-    // Same effective-level resolution as the auto-start flow: the
-    // supervisor's own `approval` when set, else `agent_approval`.
-    let supervisor_approval = supervisor_cfg
-        .approval
-        .unwrap_or(supervisor_cfg.agent_approval);
-    let supervisor_flags =
-        resolve_supervisor_flags(&supervisor_cli, supervisor_approval, &config.clis);
-    let supervisor_launch = config::launch_command(&supervisor_cli, &config.clis);
-    let supervisor_cli_command = if supervisor_flags.is_empty() {
-        supervisor_launch
-    } else {
-        format!("{supervisor_launch} {supervisor_flags}")
-    };
 
     let layout = git_paw::surface::supervisor_layout(existing.worktrees.len())?;
 
     let repo_str = repo_root.to_string_lossy().to_string();
-    let supervisor_pane = tmux::PaneSpec {
-        branch: "supervisor".to_string(),
-        worktree: repo_str.clone(),
-        cli_command: supervisor_cli_command,
-    };
     let dashboard_pane = tmux::PaneSpec {
         branch: "dashboard".to_string(),
         worktree: repo_str,
@@ -330,7 +288,6 @@ fn recover_supervisor_session(
     let session = tmux::build_supervisor_session(
         &existing.project_name,
         Some(existing.session_name.clone()),
-        &supervisor_pane,
         &dashboard_pane,
         &agent_panes,
         layout,
@@ -339,16 +296,9 @@ fn recover_supervisor_session(
         &env_vars,
     )?;
 
-    let session_layout = SessionLayout::planned(SessionMode::Supervisor, broker_url.is_some());
     Ok((
         session,
-        session_layout.first_agent_index(),
-        session_layout
-            .orchestrator_index()
-            .map(|pane_index| session::RepoOrchestratorEntry {
-                cli: supervisor_cli,
-                pane_index,
-            }),
+        SessionLayout::planned(SessionMode::Supervisor, broker_url.is_some()),
     ))
 }
 

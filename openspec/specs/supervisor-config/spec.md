@@ -379,30 +379,27 @@ The block SHALL include at minimum the six keys (`lint_command`, `build_command`
 
 ### Requirement: Supervisor-specific approval level resolution
 
-The system SHALL resolve the SUPERVISOR pane's effective approval level as `supervisor.approval` when the field is `Some(level)`, and as `supervisor.agent_approval` when the field is `None`. Coding-agent panes SHALL continue to resolve from `agent_approval` alone — setting `approval` SHALL NOT change any coding-agent pane's launch flags.
+The system SHALL continue to parse `[supervisor].approval` and SHALL treat it as the orchestrator's own approval level, distinct from `agent_approval`. With no orchestrator pane inside the session, this field SHALL NOT influence any pane's launch command in this release; it is reserved for git-paw-initiated orchestrator invocations (bound by the `orchestrator-escalation-handoff` change). Coding-agent panes SHALL resolve their flags from `agent_approval` alone — setting `approval` SHALL NOT change any coding-agent pane's launch flags. Setting `approval` SHALL NOT produce a warning or an error.
 
-When the supervisor's effective level is `FullAuto` and flag resolution yields `""` (no built-in row and no `[clis.<name>].approval_args` override), the system SHALL print a warning naming the CLI and pointing at the `[clis.<name>]` override, and SHALL launch the supervisor pane without flags (behaving as `auto`). The launch SHALL NOT fail.
-
-#### Scenario: approval set to full-auto relaxes only the supervisor pane
+#### Scenario: approval does not change any pane command
 
 - **GIVEN** a config with `[supervisor]` containing `agent_approval = "auto"` and `approval = "full-auto"` and `cli = "claude"`
-- **WHEN** the supervisor session launch commands are built
-- **THEN** the supervisor pane command SHALL include `--dangerously-skip-permissions`
-- **AND** every coding-agent pane command SHALL NOT include it
+- **WHEN** the supervised session launch commands are built
+- **THEN** every pane command SHALL be identical to the commands built for the same config without the `approval` key
+- **AND** no pane command SHALL include `--dangerously-skip-permissions`
 
-#### Scenario: Absent approval inherits agent_approval for the supervisor pane
+#### Scenario: Coding agents resolve from agent_approval
 
-- **GIVEN** a config with `[supervisor]` containing `agent_approval = "full-auto"` and no `approval` key and `cli = "claude"`
-- **WHEN** the supervisor session launch commands are built
-- **THEN** the supervisor pane command SHALL include `--dangerously-skip-permissions` (identical to pre-v0.11.0 behavior)
+- **GIVEN** a config with `[supervisor]` containing `agent_approval = "full-auto"` and `approval = "manual"`
+- **WHEN** the coding-agent pane commands are built for `cli = "claude"`
+- **THEN** each SHALL include `--dangerously-skip-permissions`
 
-#### Scenario: Full-auto with an unmapped CLI warns and degrades
+#### Scenario: Pre-relocation config with approval still loads
 
-- **GIVEN** a config with `[supervisor]` containing `approval = "full-auto"` and `cli = "my-agent"` and no `[clis.my-agent].approval_args`
-- **WHEN** the supervisor session is launched
-- **THEN** a warning SHALL be printed naming `my-agent` and the `[clis.my-agent]` override
-- **AND** the supervisor pane SHALL launch with no approval flags
-- **AND** the launch SHALL NOT fail
+- **GIVEN** a `.git-paw/config.toml` written before this change with `[supervisor] approval = "full-auto"`
+- **WHEN** the config is loaded and a session launched
+- **THEN** loading SHALL succeed without error or warning
+- **AND** the launch SHALL succeed
 
 ### Requirement: CustomCli approval_args override field
 

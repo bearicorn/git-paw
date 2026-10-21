@@ -32,12 +32,23 @@ decides to ask about is a prompt, and every prompt is answered by a human.
 
 What git-paw does is narrower, and it is the part it can do honestly: it
 *detects* that a pane is sitting on a live permission prompt and gets that prompt
-in front of you — on the broker, in the orchestrator pane, in the exit summary
-and in the manual-decision log — without stalling the rest of the wave. Under
+in front of you — on the broker, in the exit summary and in the manual-decision
+log — without stalling the rest of the wave. Under
 `git paw start --unattended` every live prompt is escalated this way. Approval
 keystrokes reach a pane only when a human explicitly runs
 `sweep.sh approve <pane>`, which answers once with option 1 and refuses an
 option 1 that would grant a durable "don't ask again" permission.
+
+**No LLM process runs at the repository root inside a session.** A supervised
+session holds only the dashboard and the coding agents, each confined to its own
+worktree; the orchestrator runs in your own agent session, under the permission
+mode you chose for it, and git-paw launches it with no flags. Every git-paw
+keystroke sender — `sweep.sh approve`, and the drive loop's nudges, stale-input
+recovery and buffered-input submits — follows one role-based rule: keystrokes
+reach only a pane resolved as a coding agent (by the session's discovery roster
+for the helper, by the recorded layout and the pane's owning worktree for the
+loop). The dashboard and any pane no agent worktree owns are refused, whatever
+their index.
 
 > **Earlier versions did decide.** Up to and including v0.16.0, git-paw ran a
 > command classifier that answered prompts it judged safe, often choosing the
@@ -57,7 +68,7 @@ safe."
 
 | Control | What it does | What it does **not** do |
 |---|---|---|
-| **The agent CLI's permission system** | The `[supervisor] approval` / `agent_approval` level maps to that CLI's own launch flags (`manual`, `auto`, `full-auto`), and the CLI then applies its own allow and deny rules to decide what runs without asking. This is the only thing deciding whether a command needs approval. | It is **the CLI's** guarantee, not git-paw's, and it is only as narrow as the rules you wrote: an allow rule for a command prefix permits everything that prefix permits. A `full-auto` level **skips the prompts entirely**, so no rule is consulted and nothing is escalated. Path-scope your rules; never grant `curl *` / `cd *`. |
+| **The agent CLI's permission system** | The `[supervisor] agent_approval` level maps to each coding agent's own launch flags (`manual`, `auto`, `full-auto`), and the CLI then applies its own allow and deny rules to decide what runs without asking. This is the only thing deciding whether a command needs approval. | It is **the CLI's** guarantee, not git-paw's, and it is only as narrow as the rules you wrote: an allow rule for a command prefix permits everything that prefix permits. A `full-auto` level **skips the prompts entirely**, so no rule is consulted and nothing is escalated. Path-scope your rules; never grant `curl *` / `cd *`. |
 | **FS-scoped sandbox** (optional, you configure it) | When you wrap an agent CLI in `sandbox-exec`/`bwrap`, the **kernel** confines the agent's *writes* to its worktree — `rm -rf ~`, dotfile corruption, and planted git hooks are blocked at the syscall level. This is the only control here that is kernel-enforced. | It protects the machine **around** the work area, not the work area (the worktree, including uncommitted work, stays destroyable by design). The default profile does **not** restrict *reads*, so it protects write-integrity and **not the confidentiality** of host secrets unless you add read-hardening. It does not cover network, resource-exhaustion, or exposed-socket vectors unless you add rules. See [Sandbox](./sandbox.md). |
 | **Broker Host/Origin guard** | Refuses browser-shaped requests (a non-loopback or `null` `Origin`) and, on a loopback bind, requests whose `Host` is not loopback — closing the DNS-rebinding path into the unauthenticated coordination bus. See [Browser exposure](#browser-exposure--the-brokers-host-and-origin-guard). | It is **not authentication**: any local process can still reach the broker, read the whole log, and publish any message. A non-loopback `[broker] bind` disables the `Host` half entirely. |
 | **Remote control** (documented workflow) | Lets you drive a session from elsewhere via each tool's own remote-control. | Exposing a session to remote control extends the blast radius to whoever reaches that channel; secure the channel yourself. |

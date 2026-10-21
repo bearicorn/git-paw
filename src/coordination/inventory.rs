@@ -23,8 +23,7 @@ use serde::Deserialize;
 
 use crate::config::claude_prompt_profile;
 use crate::error::PawError;
-use crate::session::SessionMode;
-use crate::surface::{SUPERVISOR_AGENT_ID, SessionLayout};
+use crate::surface::SUPERVISOR_AGENT_ID;
 
 /// Best-effort detected interaction mode of an agent's CLI pane.
 ///
@@ -125,9 +124,8 @@ impl AgentInventory {
 /// is the same drift in miniature.
 ///
 /// The broker wire identity `supervisor` is passed through. This names a
-/// ROSTER ROW, not a surface whose role is being decided — the supervisor's
-/// own index still comes from the layout record (see [`match_pane`]). It has
-/// to be excluded from slugification because it is a reserved id, not a
+/// ROSTER ROW, not a surface whose role is being decided — no surface carries
+/// it (see [`match_pane`]). It has to be excluded from slugification because it is a reserved id, not a
 /// branch: slugifying it would yield `agent-supervisor` and stop the
 /// supervisor from being addressable by name.
 fn normalize_id(id: &str) -> String {
@@ -199,11 +197,12 @@ pub fn parse_pane_paths(output: &str) -> Vec<(usize, String)> {
 /// mapping, per the v0.5.0 doctrine (match on the worktree path, never on
 /// index ordering).
 ///
-/// The supervisor row has no worktree of its own, so its index comes from
-/// `layout` — `None` in a layout that reserves no supervisor surface. Every
-/// other agent's worktree basename ends in `-<agent_id>` (e.g.
-/// `myproj-feat-auth` for `feat-auth`). The `-` prefix on the suffix prevents
-/// `feat-a` from matching `…-feat-api`.
+/// The supervisor row has no pane: the orchestrator runs outside the session,
+/// so the row resolves to `None` — and is never path-matched, so a coding
+/// worktree named `…-supervisor` cannot lend it a pane. Every other agent's
+/// worktree basename ends in `-<agent_id>` (e.g. `myproj-feat-auth` for
+/// `feat-auth`). The `-` prefix on the suffix prevents `feat-a` from matching
+/// `…-feat-api`.
 ///
 /// A single-word branch is matched by its unprefixed form too. The worktree
 /// directory is named from the branch (`hotfix`), while the branch's
@@ -211,15 +210,11 @@ pub fn parse_pane_paths(output: &str) -> Vec<(usize, String)> {
 /// requires (`agent-hotfix`), so the two no longer agree on their own —
 /// without this, every single-word branch's pane went unmatched.
 #[must_use]
-pub fn match_pane(
-    agent_id: &str,
-    pane_paths: &[(usize, String)],
-    layout: &SessionLayout,
-) -> Option<usize> {
+pub fn match_pane(agent_id: &str, pane_paths: &[(usize, String)]) -> Option<usize> {
     // Wire identity: this is the broker roster row named `supervisor`, not a
-    // surface whose role is being decided. The INDEX is the layout's.
+    // surface whose role is being decided. No surface carries it.
     if agent_id == SUPERVISOR_AGENT_ID {
-        return layout.supervisor_index();
+        return None;
     }
     let candidates = [
         Some(agent_id),
@@ -245,19 +240,17 @@ pub fn match_pane(
 /// modes into inventory entries.
 ///
 /// `modes` maps a pane index to its detected [`Mode`]; an agent whose pane is
-/// absent from the map (or unmatched) reports [`Mode::Unknown`]. `layout`
-/// answers the reserved indices no worktree path can resolve.
+/// absent from the map (or unmatched) reports [`Mode::Unknown`].
 #[must_use]
 pub fn join_inventory<S: std::hash::BuildHasher>(
     agents: Vec<StatusAgent>,
     pane_paths: &[(usize, String)],
     modes: &HashMap<usize, Mode, S>,
-    layout: &SessionLayout,
 ) -> Vec<AgentEntry> {
     agents
         .into_iter()
         .map(|a| {
-            let pane_index = match_pane(&a.agent_id, pane_paths, layout);
+            let pane_index = match_pane(&a.agent_id, pane_paths);
             let mode = pane_index
                 .and_then(|idx| modes.get(&idx).copied())
                 .unwrap_or(Mode::Unknown);
@@ -471,10 +464,7 @@ pub fn build_inventory(broker_url: &str, tmux_session: &str) -> Result<AgentInve
     for (idx, _) in &pane_paths {
         modes.insert(*idx, detect_pane_mode(tmux_session, *idx));
     }
-    // The coordination commands drive a supervisor-mode session, whose layout
-    // reserves the supervisor surface the roster's `supervisor` row names.
-    let layout = SessionLayout::planned(SessionMode::Supervisor, true);
-    let entries = join_inventory(agents, &pane_paths, &modes, &layout);
+    let entries = join_inventory(agents, &pane_paths, &modes);
     Ok(AgentInventory {
         entries,
         refreshed_at: Instant::now(),
@@ -589,21 +579,17 @@ mod tests {
         ]
     }"#;
 
-    /// The layout the coordination commands drive: supervisor at pane 0,
-    /// dashboard at 1, coding agents from 2.
-    fn supervised() -> SessionLayout {
-        SessionLayout::planned(SessionMode::Supervisor, true)
-    }
-
     fn fixture_inventory() -> AgentInventory {
         let agents = parse_status_agents(STATUS_JSON).unwrap();
-        // Non-sequential pane mapping: feat-api on a lower index than feat-auth.
+        // Non-sequential pane mapping: feat-api on a lower index than
+        // feat-auth. Pane 0 is the dashboard, running at the repo root.
         let panes = parse_pane_paths(
             "0 /home/user/myproj\n1 /home/user/myproj-feat-api\n2 /home/user/myproj-feat-auth\n",
         );
         let mut modes = HashMap::new();
+        modes.insert(0usize, Mode::AcceptEdits);
         modes.insert(2usize, Mode::AcceptEdits);
-        let entries = join_inventory(agents, &panes, &modes, &supervised());
+        let entries = join_inventory(agents, &panes, &modes);
         AgentInventory {
             entries,
             refreshed_at: Instant::now(),
@@ -643,8 +629,8 @@ mod tests {
     fn match_pane_does_not_partial_match_prefix() {
         let panes = parse_pane_paths("1 /home/user/proj-feat-api\n");
         // `feat-a` must NOT match `…-feat-api`.
-        assert_eq!(match_pane("feat-a", &panes, &supervised()), None);
-        assert_eq!(match_pane("feat-api", &panes, &supervised()), Some(1));
+        assert_eq!(match_pane("feat-a", &panes), None);
+        assert_eq!(match_pane("feat-api", &panes), Some(1));
     }
 
     /// A single-word branch's worktree is named `hotfix`, but its `agent_id`
@@ -653,10 +639,10 @@ mod tests {
     #[test]
     fn match_pane_resolves_a_single_word_branchs_agent_prefixed_id() {
         let panes = parse_pane_paths("1 /home/user/proj/.git-paw/worktrees/hotfix\n");
-        assert_eq!(match_pane("agent-hotfix", &panes, &supervised()), Some(1));
+        assert_eq!(match_pane("agent-hotfix", &panes), Some(1));
 
         let sibling = parse_pane_paths("2 /home/user/proj-hotfix\n");
-        assert_eq!(match_pane("agent-hotfix", &sibling, &supervised()), Some(2));
+        assert_eq!(match_pane("agent-hotfix", &sibling), Some(2));
     }
 
     /// Stripping the prefix must not let a real two-segment id match some
@@ -666,14 +652,18 @@ mod tests {
     #[test]
     fn match_pane_does_not_strip_the_prefix_off_a_two_segment_id() {
         let panes = parse_pane_paths("1 /home/user/proj-feat-x\n");
-        assert_eq!(match_pane("agent-feat-x", &panes, &supervised()), None);
+        assert_eq!(match_pane("agent-feat-x", &panes), None);
     }
 
+    /// The broker can still list a `supervisor` roster row, but no surface
+    /// carries it: pane 0 is the dashboard, so the row gets no pane and its
+    /// mode is not read off the dashboard's pane.
     #[test]
-    fn supervisor_resolves_to_pane_zero() {
+    fn supervisor_row_gets_no_pane_and_unknown_mode() {
         let inv = fixture_inventory();
         let sup = inv.find("supervisor").unwrap();
-        assert_eq!(sup.pane_index, Some(0));
+        assert_eq!(sup.pane_index, None);
+        assert_eq!(sup.mode, Mode::Unknown);
     }
 
     /// Naming a target by its BRANCH resolves to the agent whose id is that
@@ -692,12 +682,7 @@ mod tests {
             ]
         }"#;
         let inv = AgentInventory {
-            entries: join_inventory(
-                parse_status_agents(status).unwrap(),
-                &[],
-                &HashMap::new(),
-                &supervised(),
-            ),
+            entries: join_inventory(parse_status_agents(status).unwrap(), &[], &HashMap::new()),
             refreshed_at: Instant::now(),
         };
 
@@ -726,25 +711,15 @@ mod tests {
         );
     }
 
+    /// The supervisor row is never path-matched: a coding worktree whose
+    /// basename ends in `-supervisor` keeps its pane to itself.
     #[test]
-    fn supervisor_row_resolves_to_the_layouts_supervisor_index() {
-        // The supervisor row owns no worktree, so its index is the layout's —
-        // and a layout that reserves no supervisor surface yields none.
-        let panes = parse_pane_paths("0 /home/user/myproj\n1 /home/user/myproj-feat-a\n");
-        assert_eq!(
-            match_pane(SUPERVISOR_AGENT_ID, &panes, &supervised()),
-            Some(0)
+    fn supervisor_row_never_borrows_a_coding_agents_pane() {
+        let panes = parse_pane_paths(
+            "0 /home/user/myproj\n1 /home/user/myproj-feat-a\n2 /home/user/myproj-feat-supervisor\n",
         );
-        for bare in [
-            SessionLayout::planned(SessionMode::Bare, true),
-            SessionLayout::planned(SessionMode::Bare, false),
-        ] {
-            assert_eq!(
-                match_pane(SUPERVISOR_AGENT_ID, &panes, &bare),
-                None,
-                "a bare layout reserves no supervisor surface"
-            );
-        }
+        assert_eq!(match_pane(SUPERVISOR_AGENT_ID, &panes), None);
+        assert_eq!(match_pane("feat-supervisor", &panes), Some(2));
     }
 
     #[test]
@@ -763,7 +738,7 @@ mod tests {
         // lingers until the next sweep but no pane matches → pane_index None.
         let agents = parse_status_agents(STATUS_JSON).unwrap();
         let panes = parse_pane_paths("0 /home/user/myproj\n2 /home/user/myproj-feat-auth\n");
-        let entries = join_inventory(agents, &panes, &HashMap::new(), &supervised());
+        let entries = join_inventory(agents, &panes, &HashMap::new());
         let inv = AgentInventory {
             entries,
             refreshed_at: Instant::now(),
@@ -952,12 +927,12 @@ mod tests {
     fn build_inventory_against_fake_broker_no_tmux() {
         let url = spawn_status_server(STATUS_JSON);
         // The tmux session does not exist, so list-panes fails and every
-        // pane_index degrades to None (except the supervisor's pane-0 rule).
+        // pane_index degrades to None — the supervisor row has none anyway.
         let inv = build_inventory(&url, "paw-nonexistent-xyz-123").expect("inventory builds");
         assert_eq!(inv.entries.len(), 3);
         assert_eq!(inv.find("feat-auth").unwrap().pane_index, None);
         assert_eq!(inv.find("feat-auth").unwrap().mode, Mode::Unknown);
-        assert_eq!(inv.find("supervisor").unwrap().pane_index, Some(0));
+        assert_eq!(inv.find("supervisor").unwrap().pane_index, None);
     }
 
     #[test]

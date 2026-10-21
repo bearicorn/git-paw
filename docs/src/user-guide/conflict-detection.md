@@ -222,8 +222,8 @@ is classified a true collision** (see [In-flight conflict](#in-flight-conflict))
 the detector escalates to the supervisor by publishing an `agent.question`
 addressed to the *supervisor* (not to either of the conflicting agents).
 Additive overlaps are downgraded to an `agent.feedback` and never land in
-this inbox. The supervisor pane sees the question in its broker inbox and
-can:
+this inbox. The orchestrator (your own agent session outside the tmux
+session) sees the question in its broker inbox and can:
 
 1. Type a reply, which the supervisor skill forwards to both involved
    agents via `tmux send-keys` (the same dual-write pattern documented in

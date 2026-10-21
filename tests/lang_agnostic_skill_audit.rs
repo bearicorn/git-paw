@@ -632,7 +632,6 @@ const AUDITED_PROSE_ASSETS: &[&str] = &[
     "assets/boot-block-mcp-template.md",
     "assets/inter-agent-rules.md",
     "assets/governance-section-header.md",
-    "assets/supervisor-framing.md",
     "assets/spec-path-doctrine/openspec.md",
     "assets/spec-path-doctrine/speckit.md",
     "assets/spec-path-doctrine/markdown.md",

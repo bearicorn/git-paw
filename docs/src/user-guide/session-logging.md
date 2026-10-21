@@ -11,7 +11,7 @@ Add the `[logging]` section to your `.git-paw/config.toml` (or global config):
 enabled = true
 ```
 
-When enabled, git-paw uses `tmux pipe-pane` to capture each coding-agent pane's output to a log file when it launches a fresh session — a plain `git paw start`, a spec-driven launch, or a supervisor session. The dashboard and supervisor panes are not logged, and neither are panes attached later with `git paw add` or the panes of a session recovered by `git paw start` after `git paw stop`.
+When enabled, git-paw uses `tmux pipe-pane` to capture each coding-agent pane's output to a log file when it launches a fresh session — a plain `git paw start`, a spec-driven launch, or a supervisor session. The dashboard pane is not logged, and neither are panes attached later with `git paw add` or the panes of a session recovered by `git paw start` after `git paw stop`.
 
 ## Log Storage
 

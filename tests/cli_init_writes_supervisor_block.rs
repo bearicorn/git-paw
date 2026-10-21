@@ -15,7 +15,7 @@ use helpers::*;
 /// enumerate. Listed in the order they appear in `generate_default_config`.
 /// The trailing `agent_approval` is part of the block but is not in scope
 /// for the gate-templating spec, so this list omits it. `approval` (the
-/// supervisor pane's own level, supervisor-native-auto-mode) IS asserted.
+/// orchestrator's own level, supervisor-native-auto-mode) IS asserted.
 const SUPERVISOR_KEYS: [&str; 10] = [
     "enabled",
     "cli",
@@ -161,7 +161,7 @@ fn init_commented_supervisor_block_parses_as_valid_config_when_uncommented() {
     assert_eq!(
         supervisor.approval,
         Some(git_paw::config::ApprovalLevel::Manual),
-        "uncommented approval line parses as the supervisor pane's own level"
+        "uncommented approval line parses as the orchestrator's own level"
     );
 
     // The spec_validate_command value SHALL still contain the literal

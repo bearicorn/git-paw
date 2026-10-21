@@ -20,10 +20,37 @@ Each coding agent then launches with **the CLI that selection mapped to its
 branch** — the uniform choice, or that branch's own per-branch choice.
 `default_cli` only pre-selects an entry in those pickers; it never skips them.
 
-The session-wide fallback — `--cli`, else `default_cli`, else the supervisor's
-own CLI — applies only to launch paths that show no CLI picker, such as
-`--branches` without `--cli`. Spec-driven branches keep their own resolution
-chain (see [Spec-driven launch](spec-driven-launch.md)).
+The session-wide fallback — `--cli`, else `default_cli`, else
+`[supervisor].cli` — applies only to launch paths that show no CLI picker,
+such as `--branches` without `--cli`; when none of the three is set the
+launch fails, naming `--cli` and `default_cli`. Spec-driven branches keep
+their own resolution chain (see [Spec-driven launch](spec-driven-launch.md)).
+
+## Session layout: the orchestrator runs outside the session
+
+A supervised session holds the **dashboard at pane 0**, as a full-width top
+row, and **one coding agent per pane from pane 1**, row-major below it (at
+most five per row). No pane runs an orchestrator CLI. The orchestrator is your
+own agent session, run outside tmux at the repository root: the launch renders
+its context — the bundled orchestrator skill, the gate commands, the
+spec-path doctrine, any `[governance]` documents and, under `--unattended`,
+the drive-loop directive — into the gitignored sidecar
+`.git-paw/AGENTS.local.md` and prints that path with the attach hint. The
+orchestrator reads it and drives the run through the broker, the bundled
+helpers (`.git-paw/scripts/sweep.sh`, `broker.sh`) or the MCP server. Its
+roster row (`supervisor`) appears on the dashboard once it publishes its own
+`agent.status`; the launcher never publishes on its behalf.
+
+`[supervisor].cli` (else `default_cli`) names the orchestrator's CLI in that
+context and is the coding agents' last CLI fallback; no orchestrator CLI is
+needed to launch. `[supervisor].approval` is still parsed but shapes no pane
+command — it is reserved for git-paw-initiated orchestrator invocations.
+
+A live session started by an earlier release (orchestrator CLI at pane 0,
+dashboard at pane 1, agents from pane 2) keeps working until it ends: every
+command derives the agent panes from the session's recorded dashboard index,
+and nothing types into that session's first two panes. Recovering it rebuilds
+the layout above.
 
 ## Unattended mode (`--unattended`)
 
@@ -44,15 +71,16 @@ supervisor CLI. It is mutually exclusive with `--no-supervisor`.
 > and escalates every one of them for a human decision; it never answers one.
 > For a run that genuinely does not stop for prompts, the decision has to be
 > made *before* the prompt exists — in your agent CLI's own allow rules, or by
-> launching at `[supervisor] approval = "full-auto"` inside the documented
-> [sandbox](./sandbox.md). See [Agent permissions](#agent-permissions).
+> launching the agents at `[supervisor] agent_approval = "full-auto"` inside the
+> documented [sandbox](./sandbox.md). See [Agent permissions](#agent-permissions).
 
 Each poll (~15 seconds) the loop:
 
-- **Sweeps every pane** — the supervisor's own pane (pane 0) and every
-  coding-agent pane. It enumerates panes and resolves each to its agent by
-  `pane_current_path` (never by pane index, which drifts), capturing each pane
-  with its own `capture-pane` call.
+- **Sweeps every coding-agent pane** — and only those. It enumerates panes and
+  resolves each to its agent by `pane_current_path` (never by pane index,
+  which drifts), capturing each coding pane with its own `capture-pane` call.
+  The dashboard, and any pane no agent worktree owns, is never captured,
+  escalated or typed into.
 - **Acts only on a live prompt** — the prompt's structural markers (numbered
   option glyphs and/or the `Do you want to …` question, with the
   `Esc to cancel` footer) anchored on the modal block itself, searching
@@ -66,12 +94,12 @@ Each poll (~15 seconds) the loop:
   text scrolled well past that bound is ignored.
 - **Escalates every live prompt, whatever the command is.** The loop makes no
   judgement about the prompted command — `ls -la` and `rm -rf /` are handled
-  identically. The prompt is recorded on the broker as an `agent.question`,
-  handed to the supervisor pane to relay (when one is present), written to the
+  identically. The prompt is recorded on the broker as an `agent.question`
+  review item (from `supervisor`), written to the
   [manual-decision log](#manual-approvals), captured as a learning, and listed
-  in the exit summary. **No keystroke is sent.** The supervisor's own pane 0 is
-  swept the same way — a prompt there is escalated as agent `supervisor` and is
-  never typed into.
+  in the exit summary. **No keystroke is sent**, to that pane or any other: the
+  orchestrator outside the session reads the review item and relays it to the
+  human.
 - **Submits a directive left buffered on an idle pane.** A pane showing no
   live prompt and no mid-response marker, whose input box still holds
   unsubmitted text, has a stranded directive: the CLI swallowed the first
@@ -89,7 +117,7 @@ Each poll (~15 seconds) the loop:
   prompt still unanswered after that window is re-escalated as a reminder
   rather than every fifteen seconds. A prompt nobody ever answers does not, on
   its own, end the run — the wave ends on completion or the heartbeat.
-- **Hands judgment calls to the supervisor pane**, when one is present — see
+- **Leaves judgment calls on the broker** — see
   [The loop is a pump, the supervisor is the brain](#the-loop-is-a-pump-the-supervisor-is-the-brain).
 - **Re-engages a gate-failed worker**, when
   [`[supervisor.correction] auto_loopback`](#unattended-correction-loop) is
@@ -105,15 +133,13 @@ The loop keeps polling until one of:
 4. **Session torn down** — the loop's own session instance is purged, stopped,
    or replaced (see [Session-instance lifecycle](#session-instance-lifecycle)
    below).
-5. **CLI unavailable** — the orchestrator pane's CLI has stopped serving
-   anything but a usage/session-limit or expired/missing-login status line
-   (see [CLI unavailability](#cli-unavailability) below).
 
 On exit it prints a summary: the outcome (`completed` /
-`escalated-for-review` / `stuck` / `heartbeat` / `session-torn-down` /
-`cli-unavailable`), each agent's **resolved** final state and its
-merged/unmerged status, the deduped list of prompts escalated for human
-review, and pointers to the broker log and captured learnings. Because there
+`escalated-for-review` / `stuck` / `heartbeat` / `session-torn-down`), each
+agent's **resolved** final state and its merged/unmerged status, the deduped
+list of prompts escalated for human review, a line stating that the
+orchestrator runs outside the session and its CLI is not monitored by the
+loop, and pointers to the broker log and captured learnings. Because there
 is no human to hand-write findings, the loop self-captures qualitative
 learnings during the run and once more at wind-down.
 
@@ -145,20 +171,16 @@ this list, not just the outcome word, before running `purge`.
 
 ### CLI unavailability
 
-A rate-limited or logged-out CLI in the **orchestrator's own pane** is a loud,
-explicit, non-success exit — not a silent idle pane the loop waits out for up
-to 25 minutes. Each poll, every pane's capture tail is also scanned for a
+A rate-limited or logged-out coding agent is an explicit non-success signal —
+not a silent idle pane the loop waits out for up to 25 minutes. Each poll,
+every coding-agent pane's capture tail is also scanned for a
 CLI-unavailability marker (a usage/session-limit phrase, an organisation
 spend-limit phrase, or a login-loss phrase such as an expired/missing
-credential). A match on the orchestrator pane ends the loop immediately with
-outcome `cli-unavailable`; the summary names the pane and quotes the matching
-line, and the `--unattended` process **exits non-zero** — the one outcome
-whose exit status differs from every outcome that predates this behaviour.
-Nothing is killed: the tmux session and worker panes are left running for you
-to attach to or resume later. A match on a coding-agent pane instead becomes a
-deduped `cli-unavailable` escalation and the loop keeps driving the rest of
-the wave — that worker's branch will show as unmerged in the exit summary
-regardless.
+credential). A match becomes a deduped `cli-unavailable` escalation that
+quotes the matching line, and the loop keeps driving the rest of the wave; a
+wave carrying one is never reported `completed`, and that worker's branch
+shows as unmerged in the exit summary regardless. Text on the dashboard —
+whose broker log can quote a worker's banner — is never scanned.
 
 The scan tolerates the same bounded trailing region of non-prompt content the
 live-prompt gate does, so a banner is still found underneath chrome a CLI
@@ -167,8 +189,7 @@ or similar — rather than only a fixed last few lines. A marker separated from
 the end of the capture by more than that bound still counts as scrolled away
 and is ignored, same as before.
 
-Markers are resolved **per pane, for its own CLI** — the orchestrator pane
-included: a `[clis.<name>]` override of `cli_unavailable_markers` applies to
+Markers are resolved **per pane, for its own CLI**: a `[clis.<name>]` override of `cli_unavailable_markers` applies to
 that CLI's panes, falling back to the embedded Claude Code default (which
 includes `You've hit your session limit`, an organisation `org's monthly
 spend limit`, an expired/missing login, and an invalid API key) when the CLI
@@ -189,11 +210,10 @@ or countdown — so the same banner observed across sweeps is one escalation,
 while two distinct banners on one agent (e.g. a session limit followed later
 by a login failure) are two.
 
-With no orchestrator pane in the session (a pure `--unattended` run), coding
-pane detection is unaffected, but there is nothing in the roster to watch for
-the orchestrator's own CLI dying — the exit summary says so explicitly
-(`No orchestrator pane was monitored for CLI unavailability this run.`)
-instead of implying coverage it does not have.
+The orchestrator runs outside the session, so the loop has no pane to watch
+for the orchestrator's own CLI dying — every exit summary says so explicitly
+(`The orchestrator runs outside the session; its CLI is not monitored by the
+loop.`) instead of implying coverage it does not have.
 
 Nothing in an unattended session approves a prompt — the loop escalates and
 the human answers. The dashboard subprocess runs no approver either, attended
@@ -226,54 +246,35 @@ treated as a stuck signal — the loop lets agents iterate.
 
 ### The loop is a pump, the supervisor is the brain
 
-The drive loop is deliberately mechanical: it cannot decide *anything*. A
-supervisor CLI is the opposite — it can reason about anything, but only acts
-when something triggers it. Left uncombined, those two halves produce the
-failure the unattended mode was supposed to remove: the loop escalates every
-judgment call into a broker inbox, and in a headless run nobody ever reads it.
+The drive loop is deliberately mechanical: it cannot decide *anything*. The
+orchestrator is the opposite — it can reason about anything — and it runs
+outside the session, so the loop never types into it. Every judgment call the
+loop meets is a **broker review item**, and nothing is injected into any pane:
 
-So when a **supervisor (orchestrator) pane is present**, the loop stops merely
-*recording* judgment calls and starts *handing them over*. It types the call
-directly into the supervisor's pane and moves straight on — the same free-text
-plus separate `Enter` keystrokes it uses to re-engage a worker. Four things
-arrive that way:
-
-| Handed over | Trigger |
+| Judgment call | The broker record |
 |---|---|
-| A live permission prompt — **to relay to the human, not to decide** | any live prompt was detected on a pane |
-| An ambiguous question | a worker published `agent.question` |
-| A merge decision | a worker published a terminal `agent.artifact` |
-| A non-converging branch | the correction loop's slow / exhausted signal |
+| A live permission prompt — **to relay to the human, not to decide** | the loop's `agent.question` from `supervisor` |
+| An ambiguous question | the worker's own `agent.question` |
+| A merge decision | the worker's own `committed`/`done` `agent.artifact` |
+| A non-converging branch | the loop's correction slow / exhausted escalation |
 
-Three properties make this safe to run unattended:
+The loop never waits on any of them: one call being deliberated cannot freeze
+the wave, and every record stays on the broker until it is answered. The
+orchestrator reads them there — through `sweep.sh`, the broker helper or the
+MCP server — and so does a human reading the dashboard's broker log.
 
-- **The broker record is unchanged.** Every escalation is still published as a
-  drainable review item, whether or not a supervisor is running. The injection is
-  a *trigger* laid on top of that record, not a replacement for it — so if the
-  supervisor's pane happened to be busy, nothing is lost.
-- **The loop never waits.** A hand-off is fire-and-forget. The supervisor
-  deliberating over one call cannot freeze the wave; the other agents keep
-  being swept.
-- **Injection is guarded by a fresh capture.** Nothing is typed into a pane that
-  is showing a live permission prompt or that is mid-response. A task landing in
-  the middle of the supervisor's own turn would pollute its context, so it is
-  deferred instead. A pane-0 prompt is therefore carried by the broker record
-  and the exit summary only.
-
-**A permission-prompt hand-off asks for a relay, not a decision.** The other
-three hand-offs ask the supervisor to *decide and act*. A permission prompt is
-different: deciding it from the pane text would make the orchestrator a
-classifier — one reading untrusted output, and so reachable by prompt
-injection. The hand-off text asks the supervisor to put the prompt in front of
-the human, naming the agent and the command, and to run
-`sweep.sh approve <pane>` only when the human explicitly says to.
+**A permission prompt is relayed, not decided.** Deciding it from the pane text
+would make the orchestrator a classifier — one reading untrusted output, and so
+reachable by prompt injection. The orchestrator puts the prompt in front of the
+human, naming the agent and the command, and runs `sweep.sh approve <pane>`
+only when the human explicitly says to.
 
 **A nudge is sent reliably, not fired and forgotten.** Typing text into a pane
 and immediately following it with `Enter` is not enough: on a paste-aware CLI
 the text can land in a paste buffer, and a bare follow-up `Enter` against a
 stale input line is a proven no-op — it does not submit anything. So every
-nudge — the orchestration nudge below, a hand-off, and a worker re-engagement
-alike — sends the text, waits the CLI's configured settle delay (the same
+nudge — a worker re-engagement, and a stranded directive's recovery — sends the
+text, waits the CLI's configured settle delay (the same
 `[clis.<name>].submit_delay_ms` the boot prompt uses), then sends `Enter` as
 a separate keystroke. Verification waits that same settle delay again, so the
 pane has redrawn, before taking the check capture — and judges by the input
@@ -295,19 +296,8 @@ recovery only ever clears a line the loop itself just put there, never text a
 worker agent typed.
 
 **No nudge is sent once the loop is winding down.** The wind-down/exit state
-is checked before dispatching any nudge on a tick, not just before the
-cadenced orchestration nudge — so a message observed on the same tick the
-wave completes is never handed to the supervisor's pane, and a worker's idle
-pane gains no further unsubmitted text on the loop's way out.
-
-**Orchestration nudge.** Some orchestration work has no triggering event at all —
-reconsidering spawn order, resequencing merges, revisiting a blocked worker. On a
-cadence of about five minutes (20× the approval tick, so the fast sweep is
-unaffected and the pane is not prompt-stormed) the loop nudges the supervisor to
-re-run its orchestration sweep. The nudge is suppressed while the pane is
-mid-response, and because its timer only advances on a *delivered* nudge, a busy
-supervisor has it deferred to the next tick rather than losing the whole
-interval.
+is checked before dispatching any nudge on a tick, so a worker's idle pane
+gains no further unsubmitted text on the loop's way out.
 
 **Worker nudges skip finished workers.** Any nudge aimed at a *worker* pane is
 suppressed once that worker has **finished** — its broker status is `done` or
@@ -326,21 +316,17 @@ they are precisely who the
 them would silently disable it for its most common path. Finished and quiet are
 different conditions; only the first ends a worker's eligibility for a nudge.
 
-**What the supervisor does with a hand-off** is documented in the bundled
-supervisor skill under *Judgment calls handed to you*: derive spawn order from
+**What the orchestrator does with a judgment call** is documented in the
+bundled supervisor skill under *Judgment calls handed to you*: derive spawn order from
 the agents' `agent.intent` declarations and the conflict detector's edges; answer
 a question from the specs plus cross-agent state; sequence merges after
 verifying; and declare a worker unrecoverable only per
 [`max_cycles` / `on_exhausted`](#unattended-correction-loop).
 
 **The human is the exception handler.** A human is re-engaged for what the
-supervisor genuinely cannot decide — plus the two structural cases: the
-heartbeat exit described above, and a run with **no supervisor pane at all**.
-In that no-supervisor case nothing is injected into any pane and
-escalations remain broker-only review items, so a pure `--unattended` run
-behaves exactly as it did before this existed. Presence of the supervisor pane is
-the only opt-in; there is no separate config switch, and the loop performs no
-liveness probe — pane presence *is* the signal.
+orchestrator genuinely cannot decide — plus the heartbeat exit described
+above, and any run no orchestrator is driving, where the broker review items
+and the exit summary are the whole escalation.
 
 ### Unattended correction loop
 
@@ -405,43 +391,21 @@ a `correction_exhausted` learning carrying the branch, the worker CLI, and the
 cycle count — the tiered-model tuning signal that tells you a worker's model is
 under-powered for a class of task. With learnings off, nothing is recorded.
 
-### Run the supervisor pane at native full-auto
+### The orchestrator's own permission level
 
-Even with the drive loop sweeping prompts, the dominant residual babysitting
-cost of an unattended wave is the supervisor pane's **own** permission
-prompts: its compound verification commands (subshells, `$(mktemp)`,
-`git -C … diff <merge-base>...<tip>`) cannot be prefix-matched by allowlists,
-so each one otherwise waits for a sweep to clear it. For fully unattended
-runs, set the supervisor pane's own approval level to `full-auto`:
-
-```toml
-[supervisor]
-approval = "full-auto"   # the supervisor pane only
-agent_approval = "auto"  # coding agents keep their guardrails
-```
-
-The supervisor pane then launches with its CLI's native skip-permissions
-flags (for example `claude --dangerously-skip-permissions`) and simply stops
-presenting prompts to sweep. Coding agents are unaffected — they keep
-resolving their flags from `agent_approval`. When the field is unset, the
-supervisor pane inherits `agent_approval`, exactly as before v0.11.0.
-
-**Blast radius.** This is a trusted-pane relaxation, not a session-wide one:
-the supervisor runs in the **repo root**, not a scoped worktree, so a
-full-auto supervisor can touch anything in the repository and carries its
-CLI's own persistent memory across sessions. Opt in deliberately, and pair it
-with agent-memory-isolation (shipping in the same release), which scopes each
-pane CLI's persistent memory so an unattended full-auto pane cannot bleed
-state across projects. For a CLI with no known full-auto flags, git-paw warns
-at launch and degrades the pane to flagless (`auto`) rather than failing —
-supply native flags for unlisted CLIs via
-[`[clis.<name>] approval_args`](../configuration/README.md#custom-clis).
+No pane runs an orchestrator, so no git-paw launch flag reaches it: the
+orchestrator runs in your own agent session, under whatever permission mode
+you started that session with. `[supervisor].approval` is still parsed — an
+earlier config that sets it loads and launches unchanged, with no warning —
+but it changes no pane command; it is reserved for git-paw-initiated
+orchestrator invocations. Coding agents resolve their flags from
+`agent_approval` alone.
 
 ### `auto` resolves to a deterministic permission mode
 
-`agent_approval` (and `approval`) accept three levels: `manual`, `auto`, and
-`full-auto`. `full-auto` maps to the CLI's native skip-permissions flag (see
-above); `manual` appends no flags at all. Previously `auto` also appended no
+`agent_approval` accepts three levels: `manual`, `auto`, and `full-auto`.
+`full-auto` maps to the CLI's native skip-permissions flag (for example
+`claude --dangerously-skip-permissions`); `manual` appends no flags at all. Previously `auto` also appended no
 flags, so an `auto` pane silently inherited whatever default its CLI's config
 directory happened to carry — sometimes manual approval, sometimes something
 else, depending on machine state outside git-paw's control.
@@ -483,8 +447,8 @@ boot:
   whether from an unanswered dialog, a crash, or any other reason — the pane
   does not close; it reverts to its underlying interactive shell. `tmux
   has-session` alone cannot tell a live wave from one where every agent's CLI
-  has quietly died, because the session (kept up by the supervisor/dashboard
-  panes) still exists. `git paw status` and `git paw doctor` now additionally
+  has quietly died, because the session (kept up by the dashboard pane) still
+  exists. `git paw status` and `git paw doctor` now additionally
   require at least one agent pane whose foreground process is not a bare
   shell before reporting a session healthy, so a fully-dead wave is reported
   `stale`/stopped rather than active. A session within its first ~30 seconds
@@ -493,8 +457,8 @@ boot:
 ## Pane Layout and Labelling
 
 When you attach to a supervisor session, git-paw styles the tmux panes so the
-boundary between the top row (supervisor + dashboard) and the agent grid below
-is easy to see. By default each session gets:
+boundary between the top row (the full-width dashboard) and the agent grid
+below is easy to see. By default each session gets:
 
 - **Double-line pane borders** (`═║`) instead of tmux's default light `─│`
   lines, so the rows visibly separate even with four or more agents.
@@ -502,16 +466,16 @@ is easy to see. By default each session gets:
   showing its index and role:
 
   ```text
-  ╔═ 0: supervisor ═════════╗╔═ 1: dashboard ═════════╗
-  ║ (supervisor agent)      ║║ (live agent table)     ║
-  ╚═════════════════════════╝╚════════════════════════╝
-  ╔═ 2: feat/cold-start ════╗╔═ 3: feat/conflict-det ═╗
+  ╔═ 0: dashboard ══════════════════════════════════╗
+  ║ (live agent table)                              ║
+  ╚═════════════════════════════════════════════════╝
+  ╔═ 1: feat/cold-start ════╗╔═ 2: feat/conflict-det ═╗
   ║ (coding agent)          ║║ (coding agent)         ║
   ╚═════════════════════════╝╚════════════════════════╝
   ```
 
-  Pane `0` is always `supervisor`, pane `1` is `dashboard`, and the agent panes
-  are labelled with their branch id (`feat/<branch>`). The index shown is the
+  Pane `0` is always `dashboard` and the agent panes are labelled with their
+  branch id (`feat/<branch>`). The index shown is the
   same one you pass to `tmux send-keys -t paw-<project>:0.<N>`, so you can
   cross-reference the label strip with the broker's `/status` agent listing.
 - **An active-pane highlight** — the focused pane's border is cyan-bold while
@@ -532,8 +496,8 @@ failing.
 
 ## Understanding what the supervisor is doing
 
-You rarely need to read the supervisor's pane to know what it is up to. The
-supervisor tags each status heartbeat it publishes with a **phase** — a
+You rarely need to read the orchestrator's own session to know what it is up
+to. The supervisor tags each status heartbeat it publishes with a **phase** — a
 short label for its current lifecycle activity — and a structured `detail`
 body. The dashboard's supervisor row shows the current phase in its status
 column, and the MCP `get_session_status` tool returns the same `phase` and
@@ -641,9 +605,9 @@ session runs without the human approving the supervisor's every command:
   per-pane sends with no variable expansion. A single explicit
   `tmux send-keys -t ...:0.<index>` is reserved for pushing one typed reply
   to one pane.
-- **Never send-keys to the supervisor's own pane (pane 0).** The supervisor
-  is pane 0; targeting it interrupts its own in-flight command. `sweep.sh`
-  targets agent panes by design.
+- **Never send-keys to the dashboard (pane 0).** It is a TUI, not an agent;
+  keys sent there land in the dashboard, not in any agent. `sweep.sh`
+  targets coding-agent panes by design.
 - **Cross-worktree git uses `git -C <path>`, never `cd <path> && git`.**
   A bare `cd` trips the untrusted-hooks warning on some CLIs and leaks the
   working directory, so a later mutating git command can land on the wrong
@@ -681,9 +645,8 @@ whether an agent's command is safe.** It has no safe-command list, no danger
 list and no path-based safety rule. Whether a command runs without asking is
 decided entirely by the **agent CLI's own permission system**:
 
-1. **The CLI's resolved permission mode.** `[supervisor] agent_approval` (and
-   `approval` for the supervisor's own pane) maps to that CLI's native launch
-   flags — see [`auto` resolves to a deterministic permission
+1. **The CLI's resolved permission mode.** `[supervisor] agent_approval` maps
+   to each coding agent's native launch flags — see [`auto` resolves to a deterministic permission
    mode](#auto-resolves-to-a-deterministic-permission-mode). This is git-paw's
    only influence on what runs unprompted.
 2. **The CLI's own allow and deny rules.** Whatever that CLI reads from its own
@@ -695,14 +658,15 @@ decided entirely by the **agent CLI's own permission system**:
 
 Anything the resolved mode leaves prompting *stays* prompting. git-paw's job
 starts there: it detects the live prompt and escalates it for a human decision
-(broker `agent.question`, the orchestrator pane, the
+(the broker `agent.question` the orchestrator reads, the
 [manual-decision log](#manual-approvals), and the exit summary) without
 blocking the rest of the wave. Then a human decides, and the approval is typed
 only by an explicit [`sweep.sh approve <pane>`](#the-explicit-approve-action).
 
 A fully prompt-free unattended run therefore needs the decision made *before*
 the prompt exists: either CLI allow rules covering everything the agents do, or
-`approval = "full-auto"` inside a sandbox. Without that, expect escalations.
+`agent_approval = "full-auto"` inside a sandbox. Without that, expect
+escalations.
 
 > **Deprecated: `[supervisor.auto_approve]` and `[supervisor.common_dev_allowlist]`.**
 > Up to v0.16.0 these configured a git-paw command classifier that answered
@@ -766,11 +730,16 @@ reports `cleared before send, no keys sent`. This closes the stray-input race
 where the option digit would otherwise land in the CLI's chat box as literal
 text, polluting context and leaving dangling unsubmitted commands.
 
-**Pane 0 is excluded.** `sweep.sh approve 0` sends nothing and reports that
-pane 0 — the supervisor's own pane — is excluded, whatever the capture shows.
-The drive loop likewise never sends approval keystrokes to pane 0; a prompt
-there is escalated as agent `supervisor` and carried by the broker and the exit
-summary. The refusal is compiled in and cannot be changed by a prompt profile.
+**Coding-agent panes only.** The helper sends keys only to a pane the session's
+discovery roster (`.git-paw/sessions/<session>.json`) lists as a coding
+agent's `pane_index`. `sweep.sh approve 0` against a broker-enabled session —
+pane 0 is the dashboard — sends nothing and reports that the pane is excluded
+because it is not a coding agent, whatever the capture shows; so does a pane
+no roster entry claims. In a broker-less session the first coding agent sits
+at pane 0, and the roster makes it approvable. With no readable roster the
+helper falls back to refusing pane 0. The drive loop applies the same
+role-based rule: it never types into the dashboard or an unattributed pane.
+The refusal cannot be changed by a prompt profile.
 
 **One sender per pane, enforced.** Keystrokes can come from `sweep.sh approve`
 and from the drive loop's own nudge and buffered-input recovery. If two land on
@@ -1097,8 +1066,8 @@ format, the category set, and how to opt in.
 
 ## When the user types in your pane
 
-The supervisor pane is interactive — the user can type at any time while
-the autonomous monitoring loop is running. The supervisor finishes the
+The orchestrator runs in your own interactive agent session (outside tmux) —
+you can type at any time while its autonomous monitoring loop is running. The supervisor finishes the
 current step (spec audit, test run), responds, then resumes the loop. User
 input is a high-priority interrupt, not a replacement for the loop.
 
@@ -1127,9 +1096,9 @@ to use which* in response to user input.
 
 ## Routing through the supervisor
 
-The supervisor is the single conversational surface: you work in its pane
-and address individual agents *through* it, rather than tab-switching into
-each agent's pane. Two commands you type in the supervisor pane drive this.
+The orchestrator is the single conversational surface: you work in its
+session and address individual agents *through* it, rather than tab-switching
+into each agent's pane. Two commands you type to the orchestrator drive this.
 
 ### `/agents` — the live inventory
 

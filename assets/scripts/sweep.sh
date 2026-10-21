@@ -19,7 +19,7 @@
 #                                         re-confirm live prompt on a fresh capture,
 #                                         then answer it ONCE with option 1 + Enter;
 #                                         judges no command, never selects a durable
-#                                         grant; refuses pane 0 and skips a pane
+#                                         grant; refuses any pane the discovery roster does not list as a coding agent (pane 0 without a roster) and skips a pane
 #                                         another approver has claimed. Run only by a
 #                                         human, or by the orchestrator on the human's
 #                                         explicit instruction
@@ -411,7 +411,7 @@ usage: $0 <subcommand> [args]
   approve <pane>                      re-confirm live prompt on a fresh capture, then
                                       answer it once with option 1 + Enter; judges no
                                       command and never selects a durable grant;
-                                      refuses pane 0; skips a pane another approver
+                                      refuses a pane the roster does not list as a coding agent; skips a pane another approver
                                       has claimed
   detect-stuck                        flag stuck agents (prompt/stream-timeout/bloat/no-progress/blocked)
   stuck-eval <agent> <last_seen> [checkbox_count] [commit_count] [blocked_age]
@@ -572,11 +572,27 @@ cmd_approve() {
     echo "usage: $0 approve <pane>" >&2
     exit 2
   fi
-  # Pane 0 is the supervisor's own pane; never blind-send keys into it
-  # (broker-mediated-approvals). Clearing pane 0's own prompt is a non-blind
-  # concern owned by the drive loop.
-  if [[ "${pane}" == "0" ]]; then
-    echo "pane 0 excluded from blind send-keys (supervisor pane)"
+  # A pane is a numeric index, checked before the roster lookup: tmux resolves
+  # a non-numeric target such as `.` to the active pane, so no other spelling
+  # may reach the claim or any tmux call.
+  if ! [[ "${pane}" =~ ^[0-9]+$ ]]; then
+    echo "pane ${pane} refused: approve takes a numeric pane index, no keys sent" >&2
+    exit 2
+  fi
+  # Keys go only to a pane the discovery roster lists as a coding agent. The
+  # dashboard, and any pane no roster entry claims, is refused by role, never
+  # by index: pane 0 is the dashboard in a broker-enabled session but the
+  # first coding agent in a broker-less one. With no readable roster, fall
+  # back to refusing pane 0.
+  local roster_panes
+  roster_panes=$(roster_pane_indices)
+  if [[ -n "${roster_panes}" ]]; then
+    if ! grep -qxF -- "${pane}" <<<"${roster_panes}"; then
+      echo "pane ${pane} excluded from blind send-keys (not a coding agent)"
+      return 0
+    fi
+  elif [[ "${pane}" == "0" ]]; then
+    echo "pane 0 excluded from blind send-keys (not a coding agent; no roster to check)"
     return 0
   fi
   # Take the pane's exclusive claim before doing anything else that could send
@@ -1235,6 +1251,25 @@ for agent in d.get("agents", []):
     aid = agent.get("branch_id", "")
     if aid:
         print(aid)
+PY
+)"
+}
+
+# Print the pane_index of every coding agent in the per-repo discovery
+# roster, one per line. Prints nothing when no discovery file is present or
+# it cannot be read, which tells the caller no roster is available.
+roster_pane_indices() {
+  [[ -z "${SESSION_FILE}" ]] && return
+  SESSION_FILE="${SESSION_FILE}" "${PY}" -c "$(cat <<'PY'
+import json, os
+try:
+    d = json.load(open(os.environ["SESSION_FILE"]))
+except Exception:  # noqa: BLE001
+    raise SystemExit(0)
+for agent in d.get("agents", []):
+    idx = agent.get("pane_index")
+    if isinstance(idx, int) and not isinstance(idx, bool):
+        print(idx)
 PY
 )"
 }

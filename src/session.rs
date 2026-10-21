@@ -1699,14 +1699,29 @@ mod tests {
 
     // -- agent_pane_offset --
 
+    /// A supervised session this binary launched records its dashboard at 0,
+    /// so its agents start at the layout constant (1).
     #[test]
     fn agent_pane_offset_supervisor_mode_is_the_layout_constant() {
         let mut session = sample_session();
         session.mode = SessionMode::Supervisor;
+        session.dashboard_pane = Some(0);
         assert_eq!(
             session.agent_pane_offset(),
             crate::surface::SUPERVISOR_PANE_OFFSET
         );
+    }
+
+    /// Scenario "A session without `dashboard_pane` follows the earlier
+    /// rules": a supervised session saved by an earlier binary with no
+    /// recorded dashboard keeps its agents from pane 2.
+    #[test]
+    fn agent_pane_offset_unrecorded_supervisor_session_keeps_the_earlier_offset() {
+        let mut session = sample_session();
+        session.mode = SessionMode::Supervisor;
+        session.dashboard_pane = None;
+        session.broker_port = None;
+        assert_eq!(session.agent_pane_offset(), 2);
     }
 
     #[test]

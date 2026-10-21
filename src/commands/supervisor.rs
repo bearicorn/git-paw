@@ -150,32 +150,6 @@ fn publish_supervisor_question(question: &str, broker_url: &str) -> Result<(), P
     publish_to_broker_http(broker_url, &msg)
 }
 
-/// Resolves the supervisor pane's approval flags at its effective level,
-/// warning (never failing) when `full-auto` has no known flag mapping for
-/// the CLI.
-///
-/// The warning names the CLI and the `[clis.<name>].approval_args` override
-/// so the operator can supply native flags; the pane then launches flagless
-/// (`auto` behavior) rather than bricking the session on a typo'd CLI name.
-/// Used by every path that builds the supervisor pane command: the
-/// `cmd_supervisor` auto-start flow and session recovery.
-pub(crate) fn resolve_supervisor_flags(
-    supervisor_cli: &str,
-    level: config::ApprovalLevel,
-    clis: &std::collections::HashMap<String, config::CustomCli>,
-) -> String {
-    let flags = config::resolve_approval_flags(supervisor_cli, &level, clis);
-    if level == config::ApprovalLevel::FullAuto && flags.is_empty() {
-        eprintln!(
-            "warning: [supervisor] approval is \"full-auto\" but no permission flags are known \
-             for CLI '{supervisor_cli}'; launching the supervisor pane without flags (auto \
-             behavior). Define [clis.{supervisor_cli}] approval_args = {{ \"full-auto\" = \
-             \"<flags>\" }} to supply them."
-        );
-    }
-    flags
-}
-
 /// Runs the interactive branch + CLI selection for a supervised launch that
 /// has neither `--branches` nor a spec selection, and splits the result into
 /// the branches to launch and their per-branch CLI overrides.
@@ -357,36 +331,6 @@ mod interactive_cli_selection_tests {
     }
 }
 
-/// Bundled template for [`build_supervisor_framing`], carrying the
-/// `{{SIDECAR_REL_PATH}}` substitution placeholder.
-const SUPERVISOR_FRAMING_TEMPLATE: &str = include_str!("../../assets/supervisor-framing.md");
-
-/// Builds the framing sentence appended to the supervisor pane's boot block,
-/// introducing the supervisor skill and pointing at the "When the user types
-/// in your pane" section for interactive directives.
-fn build_supervisor_framing() -> String {
-    SUPERVISOR_FRAMING_TEMPLATE.replace("{{SIDECAR_REL_PATH}}", git_paw::agents::SIDECAR_REL_PATH)
-}
-
-#[cfg(test)]
-mod supervisor_framing_tests {
-    use super::build_supervisor_framing;
-
-    // Byte-identical safety net (D1 / task 1.3): the supervisor framing
-    // sentence, relocated from a compiled `format!` call into an asset, must
-    // render exactly as before.
-    #[test]
-    fn supervisor_framing_is_byte_identical_to_ground_truth() {
-        assert_eq!(
-            build_supervisor_framing(),
-            "Begin observing the spec implementation session. Your skill \
-             (.git-paw/AGENTS.local.md) describes your role — read it, then start the autonomous loop. The user \
-             can type questions or directives directly into your pane; handle them per the 'When \
-             the user types in your pane' section of your skill."
-        );
-    }
-}
-
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(crate) fn cmd_supervisor(
     repo_root: &Path,
@@ -455,23 +399,21 @@ pub(crate) fn cmd_supervisor(
         .as_ref()
         .unwrap_or(&default_supervisor_cfg);
 
-    // Resolve the supervisor CLI: explicit override > default_cli > error.
-    let supervisor_cli = supervisor_cfg
+    // The orchestrator runs outside the session, so no orchestrator CLI is
+    // needed to launch: `[supervisor].cli`, else `default_cli`, only names it
+    // in the orchestrator context when one is configured.
+    let orchestrator_cli = supervisor_cfg
         .cli
         .clone()
-        .or_else(|| config.default_cli.clone())
-        .ok_or_else(|| {
-            PawError::ConfigError(
-                "supervisor mode requires either [supervisor].cli or default_cli to be set"
-                    .to_string(),
-            )
-        })?;
+        .or_else(|| config.default_cli.clone());
 
-    // Resolve coding agent CLI: explicit flag > default_cli > supervisor CLI.
+    // Resolve the coding agents' fallback CLI: explicit flag > default_cli >
+    // `[supervisor].cli` (kept so earlier configs launch unchanged). Checked
+    // against the branches that need it once they are known.
     let agent_cli = cli_flag
         .map(ToString::to_string)
         .or_else(|| config.default_cli.clone())
-        .unwrap_or_else(|| supervisor_cli.clone());
+        .or_else(|| supervisor_cfg.cli.clone());
 
     // Resolve branches. Precedence:
     //   1. `--branches` — explicit branch list wins.
@@ -557,6 +499,17 @@ pub(crate) fn cmd_supervisor(
         out
     };
 
+    // A branch without a per-branch CLI (the `--branches` path) launches with
+    // the fallback; when it is needed and nothing resolved it, no coding agent
+    // can start.
+    if agent_cli.is_none() && branches.iter().any(|b| !spec_cli_overrides.contains_key(b)) {
+        return Err(PawError::ConfigError(
+            "supervisor mode could not resolve a coding-agent CLI: pass --cli or set default_cli"
+                .to_string(),
+        ));
+    }
+    let agent_cli = agent_cli.unwrap_or_default();
+
     // Refuse before anything is touched when two of the session's branches
     // derive the same broker agent id — they would share one inbox, so a
     // verdict or feedback meant for one would reach the other. As early as
@@ -581,15 +534,10 @@ pub(crate) fn cmd_supervisor(
     // Warn before the session exists: the dashboard pane prints the same
     // warning but immediately switches to the alternate screen.
     warn_if_broker_is_exposed(&broker_config);
+    // Coding agents resolve their flags from `agent_approval` alone.
+    // `[supervisor].approval` is the orchestrator's own level and no pane runs
+    // an orchestrator, so it shapes no command here.
     let agent_approval = &supervisor_cfg.agent_approval;
-    // The supervisor pane resolves its own level, inheriting agent_approval
-    // when [supervisor] approval is unset (pre-v0.11.0 behavior). Coding
-    // agents always resolve from agent_approval.
-    let supervisor_approval = supervisor_cfg
-        .approval
-        .unwrap_or(supervisor_cfg.agent_approval);
-    let supervisor_flags =
-        resolve_supervisor_flags(&supervisor_cli, supervisor_approval, &config.clis);
 
     // Resolves the CLI `branch` launches with: its per-branch override when
     // one was resolved — the spec-driven priority chain (GP-10) or the
@@ -605,11 +553,6 @@ pub(crate) fn cmd_supervisor(
 
     // Dry-run: print the plan and exit without touching the filesystem.
     if dry_run {
-        let supervisor_cmd = if supervisor_flags.is_empty() {
-            supervisor_cli.clone()
-        } else {
-            format!("{supervisor_cli} {supervisor_flags}")
-        };
         if let Some(existing) = &existing_session {
             eprintln!(
                 "warning: session '{}' already exists — purge it before starting a new one\n",
@@ -618,18 +561,12 @@ pub(crate) fn cmd_supervisor(
         }
         println!("Dry run — supervisor session plan:\n");
         println!("  Session:    {session_name}");
-        println!("  Supervisor: {supervisor_cmd}");
         if spec_cli_overrides.values().any(|cli| cli != &agent_cli) {
             println!("  Agent CLI:  (resolved per branch, see below)");
         } else {
             println!("  Agent CLI:  {agent_cli}");
         }
-        if supervisor_approval == *agent_approval {
-            println!("  Approval:   {agent_approval:?}");
-        } else {
-            println!("  Supervisor approval: {supervisor_approval:?}");
-            println!("  Agent approval:      {agent_approval:?}");
-        }
+        println!("  Approval:   {agent_approval:?}");
         println!("  Mouse:      {}", if mouse { "on" } else { "off" });
         if broker_config.enabled {
             println!("  Broker URL: {}", broker_config.url());
@@ -670,9 +607,10 @@ pub(crate) fn cmd_supervisor(
         seen
     };
 
-    // Resolve and materialise the supervisor skill into the repo-root
-    // AGENTS.md BEFORE pane 0 starts the supervisor CLI. The supervisor pane
-    // launches from `repo_root` so Claude reads this file as its skill.
+    // Render the orchestrator context into the repo-root sidecar
+    // (`.git-paw/AGENTS.local.md`). No pane reads it: the orchestrator drives
+    // the session from outside tmux — the operator's own agent session — and
+    // the launch prints the sidecar path so the operator can point it there.
     let supervisor_skill_template = git_paw::skills::resolve("supervisor")?;
     let supervisor_md = git_paw::skills::render_for_supervisor(
         &supervisor_skill_template,
@@ -683,14 +621,18 @@ pub(crate) fn cmd_supervisor(
     );
     let supervisor_assignment = git_paw::agents::WorktreeAssignment {
         branch: "supervisor".to_string(),
-        cli: supervisor_cli.clone(),
+        // The configured orchestrator CLI, else the CLI the coding agents run.
+        cli: orchestrator_cli
+            .clone()
+            .unwrap_or_else(|| agent_cli.clone()),
         spec_content: None,
         owned_files: None,
         // When unattended, append the drive-loop coordination directive so the
-        // supervisor consumes the loop's escalations instead of blanket-approving
-        // (supervisor-loop-escalation-tiering), then the `## Governance documents`
-        // section so a configured `[governance]` table reaches the launched
-        // session (boot-block: governance follows the supervisor skill content).
+        // orchestrator consumes the loop's escalations instead of
+        // blanket-approving (supervisor-loop-escalation-tiering), then the
+        // `## Governance documents` section so a configured `[governance]`
+        // table reaches the orchestrator context (boot-block: governance
+        // follows the supervisor skill content).
         skill_content: Some(git_paw::skills::supervisor_boot_context(
             &supervisor_md,
             unattended,
@@ -727,21 +669,6 @@ pub(crate) fn cmd_supervisor(
     let repo_str = repo_root.to_string_lossy().to_string();
     let dashboard_command = dashboard_command();
 
-    // The pane launches the supervisor CLI identity's configured
-    // `[clis.<name>].command`; `supervisor_cli` stays the identity that
-    // resolved `supervisor_flags`, the prompt profile, and the settle delay.
-    let supervisor_launch = config::launch_command(&supervisor_cli, &config.clis);
-    let supervisor_cli_command = if supervisor_flags.is_empty() {
-        supervisor_launch
-    } else {
-        format!("{supervisor_launch} {supervisor_flags}")
-    };
-
-    let supervisor_pane = tmux::PaneSpec {
-        branch: "supervisor".to_string(),
-        worktree: repo_str.clone(),
-        cli_command: supervisor_cli_command,
-    };
     let dashboard_pane = tmux::PaneSpec {
         branch: "dashboard".to_string(),
         worktree: repo_str,
@@ -812,7 +739,6 @@ pub(crate) fn cmd_supervisor(
     let mut tmux_session = tmux::build_supervisor_session(
         &project,
         Some(session_name.clone()),
-        &supervisor_pane,
         &dashboard_pane,
         &agent_panes,
         layout,
@@ -822,16 +748,16 @@ pub(crate) fn cmd_supervisor(
     )?;
 
     // Every reserved-index fact for this launch — the logging offset, the
-    // recorded `dashboard_pane`, the discovery-file offset and orchestrator
-    // entry, and the gate/submit targets below — comes from this one layout
-    // record. (`layout` above is the grid GEOMETRY for `agent_count` panes;
-    // this is the index record for the window those panes land in.)
+    // recorded `dashboard_pane`, the discovery-file offset, and the
+    // gate/submit targets below — comes from this one layout record.
+    // (`layout` above is the grid GEOMETRY for `agent_count` panes; this is
+    // the index record for the window those panes land in.)
     let session_layout = SessionLayout::planned(SessionMode::Supervisor, broker_config.enabled);
 
-    // Attach session logging (no-op unless `[logging] enabled`). Supervisor
-    // mode reserves pane 0 (supervisor) and pane 1 (dashboard), so coding
-    // agents — in `branches` order, matching `agent_panes` and the boot loop
-    // below — start at the layout's first agent index.
+    // Attach session logging (no-op unless `[logging] enabled`). The
+    // supervised layout reserves pane 0 for the dashboard, so coding agents —
+    // in `branches` order, matching `agent_panes` and the boot loop below —
+    // start at the layout's first agent index.
     attach_session_logging(
         &mut tmux_session,
         config,
@@ -845,7 +771,11 @@ pub(crate) fn cmd_supervisor(
     // Rebalance each agent row to equal width on the live window (design D4,
     // G3): the raw `split-window -h` chain renders a row as 50/25/25, so a
     // column-precise resize evens it out now that the panes exist.
-    if let Err(e) = tmux::rebalance_agent_rows(&tmux_session.name, agent_panes.len()) {
+    if let Err(e) = tmux::rebalance_agent_rows(
+        &tmux_session.name,
+        session_layout.first_agent_index(),
+        agent_panes.len(),
+    ) {
         eprintln!("warning: could not rebalance agent-row widths: {e}");
     }
 
@@ -861,9 +791,9 @@ pub(crate) fn cmd_supervisor(
         broker_bind: None,
         broker_log_path: None,
         mode: SessionMode::Supervisor,
-        // A broker-less supervisor launch still builds the dashboard pane but
-        // records no index for it; the layout already answers `None` there, so
-        // this needs no broker guard of its own.
+        // Every supervised launch builds the dashboard at pane 0, broker or
+        // not, and records it, so a recorded `None` keeps meaning "an earlier
+        // binary" (design D6).
         dashboard_pane: session_layout.recorded_dashboard_pane(),
     };
     if broker_config.enabled {
@@ -874,23 +804,18 @@ pub(crate) fn cmd_supervisor(
     session::save_session(&state)?;
 
     // Write the per-repo discovery file sweep.sh reads. Coding agents start
-    // at the layout's first agent index (supervisor pane 0, dashboard pane 1).
+    // at the layout's first agent index (dashboard pane 0); no orchestrator
+    // entry is written, since no pane runs one.
     write_repo_discovery_file(
         repo_root,
         &tmux_session.name,
         &state.worktrees,
         session_layout.first_agent_index(),
-        session_layout
-            .orchestrator_index()
-            .map(|pane_index| session::RepoOrchestratorEntry {
-                cli: supervisor_cli.clone(),
-                pane_index,
-            }),
     );
 
-    // Inject the initial prompt into the supervisor surface and each coding
-    // agent pane (indices 2..N+1). The dashboard pane (index 1) is a TUI
-    // process and does NOT receive a send-keys prompt.
+    // Inject the initial prompt into each coding agent pane (indices 1..N).
+    // The dashboard pane (index 0) is a TUI process and does NOT receive a
+    // send-keys prompt.
     //
     // Instead of a blind fixed sleep, each pane's boot block is gated on
     // observed CLI readiness (design D1, G1): `gate_pane_for_injection` polls
@@ -900,36 +825,11 @@ pub(crate) fn cmd_supervisor(
     // bare shell (the v0.8.0 G1 failure).
     //
     // A single Enter is sent per pane — on paste-aware CLIs (Claude Code
-    // v2.1.x) this leaves the prompt in a paste-buffer state which is then
-    // recovered by the supervisor agent via the paste-buffer-recovery skill
-    // (see assets/agent-skills/supervisor.md). Sending more than one Enter
-    // at launch risks accidentally accepting a follow-on permission prompt
-    // on fast CLIs and is intentionally avoided.
-    // Always the helper form, never the MCP form — the supervisor pane runs in
-    // the main working tree, where the MCP publish tools refuse to derive an
-    // identity, so an MCP-form block would fail on its first publish. See
-    // `build_supervisor_boot_block`.
-    let supervisor_boot_block = git_paw::skills::build_supervisor_boot_block(&broker_config.url());
-    let supervisor_framing = build_supervisor_framing();
-    let supervisor_prompt = format!("{supervisor_boot_block}\n\n{supervisor_framing}");
-    let supervisor_delay = resolve_submit_delay_ms(&supervisor_cli, &config.clis);
-    // This launch is BUILDING the supervisor surface, so the layout answers
-    // its index totally rather than as an `Option` to be unwrapped here.
-    let supervisor_idx = session_layout.supervisor_launch_index();
-    gate_pane_or_fail_on_dialog(
-        &tmux_session.name,
-        supervisor_idx,
-        &supervisor_cli,
-        &supervisor_pane.cli_command,
-        &config.clis,
-    )?;
-    submit_prompt_to_pane(
-        &tmux_session.name,
-        supervisor_idx,
-        &supervisor_prompt,
-        supervisor_delay,
-    );
-
+    // v2.1.x) this leaves the prompt in a paste-buffer state which the drive
+    // loop's buffered-input submit (or the orchestrator, per its skill's
+    // paste-buffer-recovery section) recovers. Sending more than one Enter at
+    // launch risks accidentally accepting a follow-on permission prompt on
+    // fast CLIs and is intentionally avoided.
     for (idx, prompt) in agent_prompts.iter().enumerate() {
         // Per-branch delay: a spec-driven session can resolve a distinct CLI
         // per branch (GP-10), and each CLI's configured settle delay differs.
@@ -946,11 +846,10 @@ pub(crate) fn cmd_supervisor(
         submit_prompt_to_pane(&tmux_session.name, pane_idx, prompt, agent_delay);
     }
 
-    // Supervisor self-registration is published from inside the supervisor
-    // pane itself (via the embedded supervisor skill's bootstrap curl).
-    // The launcher does not publish on the supervisor's behalf so aborted
-    // launches do not leave a phantom supervisor row on the dashboard
-    // (D1 of supervisor-as-pane-followups).
+    // The orchestrator's roster row appears only when the external
+    // orchestrator publishes its own `agent.status`. The launcher does not
+    // publish on its behalf, so a launch no orchestrator drives leaves no
+    // phantom `supervisor` row on the dashboard.
 
     // Learnings-mode privacy disclosure: when the user has opted into
     // learnings (`[supervisor] learnings = true`), surface where the local
@@ -965,6 +864,12 @@ pub(crate) fn cmd_supervisor(
         "Supervisor session '{}' launched with {} coding agent(s).",
         tmux_session.name,
         branches.len()
+    );
+    // The orchestrator runs outside the session: point the operator's own
+    // agent session at the context rendered for it.
+    println!(
+        "Orchestrator context: {} (point your orchestrating agent session at it)",
+        git_paw::agents::SIDECAR_REL_PATH
     );
 
     // Step 15 (supervisor-launch): branch on `--unattended`.
@@ -1074,11 +979,6 @@ fn drive_unattended_loop(
         branch_refresh_enabled: supervisor_cfg.branch_refresh_enabled(),
         session_created_at,
         clis: loaded_config.clis.clone(),
-        supervisor_cli: supervisor_cfg
-            .cli
-            .clone()
-            .or_else(|| loaded_config.default_cli.clone())
-            .unwrap_or_default(),
         layout: git_paw::surface::SessionLayout::of(state),
     };
 

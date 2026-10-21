@@ -3,13 +3,23 @@
 //! A git-paw session arranges its work across *surfaces* — today tmux panes.
 //! Which index holds which surface is a property of the **session**, not of
 //! any one consumer, so this module owns every reserved-index fact in one
-//! place:
+//! place. No orchestrator CLI runs inside a session: the orchestrator drives
+//! from outside tmux, so a window holds a dashboard (when it has one) and
+//! coding agents only.
 //!
-//! | layout | supervisor | dashboard | first coding agent |
-//! |---|---|---|---|
-//! | supervisor mode | 0 | 1 | [`SUPERVISOR_PANE_OFFSET`] (2) |
-//! | bare mode, broker enabled | — | 0 | 1 |
-//! | bare mode, no broker | — | — | 0 |
+//! | layout | dashboard | first coding agent |
+//! |---|---|---|
+//! | supervised mode | 0 | [`SUPERVISOR_PANE_OFFSET`] (1) |
+//! | bare mode, broker enabled | 0 | 1 |
+//! | bare mode, no broker | — | 0 |
+//!
+//! The layout is read from the RECORDED `Session::dashboard_pane`: `Some(n)`
+//! puts the dashboard at `n` and the first coding agent at `n + 1`, so a
+//! session saved by a pre-relocation binary (`Some(1)`: supervisor 0,
+//! dashboard 1, agents from 2) keeps resolving while it is still alive.
+//! `None` falls back to the earlier rules: a supervised session's agents start
+//! at 2 (after the old supervisor and dashboard panes), a bare session's at 1
+//! with a broker and 0 without.
 //!
 //! [`SessionLayout`] is that record, derived from a saved
 //! [`Session`](crate::session::Session) or from a launch plan before one
@@ -19,10 +29,9 @@
 //! re-derive a role by comparing an agent id against the broker wire identity
 //! [`SUPERVISOR_AGENT_ID`].
 //!
-//! The grid geometry for the supervisor window ([`SupervisorLayout`],
+//! The grid geometry for the supervised window ([`SupervisorLayout`],
 //! [`supervisor_layout`], [`layout_for`]) lives here too, so the tmux adapter
 //! can compute pane targets without depending on `crate::supervisor`.
-//! `crate::supervisor::layout` re-exports every item for one release.
 
 use std::path::{Path, PathBuf};
 
@@ -33,23 +42,22 @@ use crate::session::{Session, SessionMode};
 // Wire identity
 // ---------------------------------------------------------------------------
 
-/// The broker wire identity of the supervisor surface.
+/// The broker wire identity of the orchestrator (`supervisor`).
 ///
-/// This is the single source of the string: the broker roster, the drive
-/// loop's escalations, role gating and the dashboard's pinned row all key on
-/// it. A comparison against this value identifies a *message sender, a roster
-/// row or a pane label* — it is NOT how surface roles are decided (that is
-/// [`SessionLayout::resolve`]).
+/// No surface carries it: the orchestrator runs outside the session. It
+/// survives as a *sender* and a *roster row* — the drive loop publishes its
+/// escalations and branch-refresh feedback as `supervisor`, the bundled
+/// helper's verdict verbs do too, and the broker seeds that row's CLI column.
+/// This is the single source of the string; a comparison against it
+/// identifies a message sender, a roster row or a pane label, never the role
+/// of a surface (that is [`SessionLayout::resolve`]).
 pub const SUPERVISOR_AGENT_ID: &str = "supervisor";
-
-/// The `agent_id` the loop reports for a surface it could not attribute.
-const UNKNOWN_AGENT_ID: &str = "unknown";
 
 // ---------------------------------------------------------------------------
 // Grid geometry
 // ---------------------------------------------------------------------------
 
-/// Maximum agents per supervisor session. Above this, the launch is rejected
+/// Maximum agents per supervised session. Above this, the launch is rejected
 /// with an actionable "split into multiple sessions" error. Configurable
 /// extension deferred to v1.0.0 (issue #17).
 pub const SUPERVISOR_MAX_AGENTS: usize = 25;
@@ -57,32 +65,33 @@ pub const SUPERVISOR_MAX_AGENTS: usize = 25;
 /// Agents per agent-grid row. Hard-coded; configurable in v1.0.0.
 pub const SUPERVISOR_AGENTS_PER_ROW: usize = 5;
 
-/// Offset applied to agent-pane indices in supervisor mode: supervisor at 0,
-/// dashboard at 1, so the first coding agent lands at pane 2.
-pub const SUPERVISOR_PANE_OFFSET: usize = 2;
+/// Index of the first coding agent in a supervised window built by this
+/// binary: the dashboard is the full-width top row at pane 0, so the agents
+/// start at pane 1.
+pub const SUPERVISOR_PANE_OFFSET: usize = 1;
 
-/// Index a supervisor window reserves for the supervisor's own surface.
-/// Private: outside this module the answer comes from
-/// [`SessionLayout::supervisor_index`] or
-/// [`SessionLayout::supervisor_launch_index`].
-const SUPERVISOR_SURFACE_INDEX: usize = 0;
+/// Index every layout this binary builds reserves for the dashboard. Private:
+/// outside this module the answer comes from [`SessionLayout`].
+const DASHBOARD_INDEX: usize = 0;
 
-/// Index a supervisor window reserves for the dashboard. Private for the same
-/// reason as [`SUPERVISOR_SURFACE_INDEX`].
-const SUPERVISOR_DASHBOARD_INDEX: usize = 1;
+/// Index a pre-relocation supervised window reserved for the dashboard
+/// (supervisor at 0). Only a session that recorded no `dashboard_pane` falls
+/// back to it.
+const LEGACY_SUPERVISED_DASHBOARD_INDEX: usize = 1;
 
-/// Index a broker-enabled bare window reserves for the dashboard. Private for
-/// the same reason as [`SUPERVISOR_SURFACE_INDEX`].
-const BARE_DASHBOARD_INDEX: usize = 0;
+/// First coding-agent index of a pre-relocation supervised window
+/// (supervisor 0, dashboard 1). Only a session that recorded no
+/// `dashboard_pane` falls back to it.
+const LEGACY_SUPERVISED_FIRST_AGENT: usize = 2;
 
-/// Computed layout parameters for a supervisor-mode tmux session.
+/// Computed layout parameters for a supervised tmux session.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SupervisorLayout {
     /// Number of horizontal rows holding coding agents (excludes the top row).
     pub agent_rows: usize,
-    /// Total tmux rows = `agent_rows + 1` (1 top row + agent rows).
+    /// Total tmux rows = `agent_rows + 1` (the dashboard row + agent rows).
     pub total_rows: usize,
-    /// Height percentage allocated to the top row (supervisor + dashboard).
+    /// Height percentage allocated to the top (dashboard) row.
     /// Always 50: the top row is half the session whatever the agent count.
     pub top_row_pct: u8,
     /// Height percentage allocated to each agent row: `50 / agent_rows`, the
@@ -91,7 +100,7 @@ pub struct SupervisorLayout {
     pub agent_row_pct: f32,
 }
 
-/// Compute the layout for a supervisor session with `agent_count` coding agents.
+/// Compute the layout for a supervised session with `agent_count` coding agents.
 ///
 /// The top row is always 50% of the session height; the agent rows split the
 /// remaining 50% evenly. Adding agents shrinks the agent rows, never the top row.
@@ -127,8 +136,8 @@ pub fn supervisor_layout(agent_count: usize) -> Result<SupervisorLayout, PawErro
 }
 
 /// Pure grid-geometry function of agent count, named per the add/remove
-/// design (D1). The v0.5.0 layout builder ([`supervisor_layout`]) is already a
-/// pure function of `agent_count`; `layout_for` is the canonical name the
+/// design (D1). The layout builder ([`supervisor_layout`]) is already a pure
+/// function of `agent_count`; `layout_for` is the canonical name the
 /// `add-branch` / `remove-branch` specs use to make explicit that the same
 /// geometry is recomputed for `N → N+1` (add) and `N → N−1` (remove)
 /// re-tiling, not just the initial start-time layout.
@@ -147,41 +156,32 @@ pub fn layout_for(agent_count: usize) -> Result<SupervisorLayout, PawError> {
 /// The role a session surface plays.
 ///
 /// Produced only by [`SessionLayout::resolve`], so every consumer agrees on
-/// what a surface is. Matching on this enum is how the compiler will enumerate
-/// the work when `Supervisor` is removed.
+/// what a surface is. There is no supervisor role: the orchestrator runs
+/// outside the session. Only [`SurfaceRole::Coding`] is ever acted on — no
+/// keystroke sender types into the dashboard or an unattributed surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SurfaceRole {
-    /// The supervisor's own surface.
-    Supervisor,
     /// The dashboard TUI; a `git-paw __dashboard` process, not an agent CLI,
     /// and never acted on.
     Dashboard,
     /// A coding-agent surface, resolved by its owning worktree path. Carries
     /// the resolved agent id.
     Coding(String),
-    /// The surface's owner matched no known worktree and its index is not one
-    /// the layout reserves.
+    /// The surface's owner matched no known worktree and its index is not the
+    /// one the layout reserves for the dashboard — including a pre-relocation
+    /// session's old supervisor pane. Never acted on.
     Unknown,
 }
 
 impl SurfaceRole {
-    /// The `agent_id` used for broker alerts and the exit summary, or `None`
-    /// for the dashboard surface (which is never acted on).
+    /// The coding agent's id when this surface is a coding agent — the only
+    /// role a keystroke sender acts on — or `None` for every other surface.
     #[must_use]
-    pub fn agent_id(&self) -> Option<&str> {
+    pub fn coding_agent(&self) -> Option<&str> {
         match self {
-            SurfaceRole::Supervisor => Some(SUPERVISOR_AGENT_ID),
             SurfaceRole::Coding(id) => Some(id.as_str()),
-            SurfaceRole::Unknown => Some(UNKNOWN_AGENT_ID),
-            SurfaceRole::Dashboard => None,
+            SurfaceRole::Dashboard | SurfaceRole::Unknown => None,
         }
-    }
-
-    /// Whether this is the supervisor surface. The predicate decision code
-    /// uses in place of `agent_id == "supervisor"`.
-    #[must_use]
-    pub fn is_supervisor(&self) -> bool {
-        matches!(self, SurfaceRole::Supervisor)
     }
 }
 
@@ -200,8 +200,9 @@ pub struct SessionLayout {
     mode: SessionMode,
     has_broker: bool,
     /// The dashboard index this session recorded (`Session::dashboard_pane`),
-    /// or the one a launch of this shape will record. `None` on sessions saved
-    /// by a v0.4 binary and on broker-less launches.
+    /// or the one a launch of this shape will record. `None` on a broker-less
+    /// bare launch and on sessions saved by earlier binaries that recorded
+    /// none — the case the earlier rules cover.
     dashboard_pane: Option<usize>,
 }
 
@@ -218,73 +219,37 @@ impl SessionLayout {
 
     /// The layout a launch of this shape produces, before a session exists.
     ///
-    /// `has_broker` is whether the launch enables the broker — the condition
-    /// that decides whether a bare launch creates a dashboard surface at all,
-    /// and the condition under which EITHER launch records the dashboard's
-    /// index. A supervised launch builds a dashboard pane whether or not the
-    /// broker is on, but records `dashboard_pane` only with a broker; that is
-    /// why the recorded value is gated here and the role-resolution index
-    /// ([`Self::dashboard_index`]) is not. Encoding it once lets every launch
-    /// write [`Self::recorded_dashboard_pane`] unconditionally.
+    /// A supervised launch always builds the dashboard at pane 0, broker or
+    /// not, so it records the dashboard unconditionally; a bare launch builds
+    /// a dashboard only when the broker is enabled. Recording the supervised
+    /// dashboard every time keeps a recorded `None` unambiguous: it means a
+    /// broker-less bare session, or a session saved by an earlier binary.
     #[must_use]
     pub fn planned(mode: SessionMode, has_broker: bool) -> Self {
-        let mut layout = Self {
+        let dashboard_pane = match mode {
+            SessionMode::Supervisor => Some(DASHBOARD_INDEX),
+            SessionMode::Bare => has_broker.then_some(DASHBOARD_INDEX),
+        };
+        Self {
             mode,
             has_broker,
-            dashboard_pane: None,
-        };
-        layout.dashboard_pane = has_broker
-            .then(|| layout.reserved_dashboard_index())
-            .flatten();
-        layout
-    }
-
-    /// Index of the supervisor surface, or `None` in a layout that has none.
-    #[must_use]
-    pub fn supervisor_index(&self) -> Option<usize> {
-        match self.mode {
-            SessionMode::Supervisor => Some(SUPERVISOR_SURFACE_INDEX),
-            SessionMode::Bare => None,
+            dashboard_pane,
         }
     }
 
-    /// Index of the supervisor surface for a launch that is BUILDING one, so
-    /// the caller needs an index rather than an `Option`.
+    /// Index of the dashboard surface for role resolution: what the session
+    /// recorded, else the earlier rules (a pre-relocation supervised window
+    /// kept its dashboard at 1; a bare window has one only with a broker).
+    /// `None` when the layout has no dashboard at all.
     ///
-    /// A supervised launch creates the supervisor pane unconditionally, so
-    /// [`Self::supervisor_index`] is always `Some` on that path; this spells
-    /// the total answer out — `0`, the index a supervisor window reserves —
-    /// instead of leaving each caller to pick its own `unwrap_or` fallback.
-    /// A bare layout builds no supervisor surface and never calls this.
-    #[must_use]
-    pub fn supervisor_launch_index(&self) -> usize {
-        SUPERVISOR_SURFACE_INDEX
-    }
-
-    /// The index this layout reserves for the dashboard, independent of what
-    /// any session recorded. `None` for a bare layout with no broker, which
-    /// has no dashboard surface.
-    fn reserved_dashboard_index(&self) -> Option<usize> {
-        match self.mode {
-            SessionMode::Supervisor => Some(SUPERVISOR_DASHBOARD_INDEX),
-            SessionMode::Bare => self.has_broker.then_some(BARE_DASHBOARD_INDEX),
-        }
-    }
-
-    /// Index of the dashboard surface: what the session recorded, falling back
-    /// to the index this layout reserves. `None` when the layout has no
-    /// dashboard at all.
-    ///
-    /// This is the ROLE-RESOLUTION answer, deliberately distinct from
-    /// [`Self::dashboard_index_or_default`]: the derived fallback is what
-    /// makes a broker-less supervisor session — which builds a dashboard pane
-    /// but records no index for it — still resolve index 1 as
-    /// [`SurfaceRole::Dashboard`]. Private because only [`Self::resolve`] may
-    /// mix the recorded and derived values; a caller that needs the index a
-    /// session actually recorded must take the recorded one.
+    /// Private: a caller that needs the index a session actually recorded
+    /// takes [`Self::recorded_dashboard_pane`], and one that needs a kill or
+    /// re-split target takes [`Self::dashboard_index_or_default`].
     fn dashboard_index(&self) -> Option<usize> {
-        self.dashboard_pane
-            .or_else(|| self.reserved_dashboard_index())
+        self.dashboard_pane.or(match self.mode {
+            SessionMode::Supervisor => Some(LEGACY_SUPERVISED_DASHBOARD_INDEX),
+            SessionMode::Bare => self.has_broker.then_some(DASHBOARD_INDEX),
+        })
     }
 
     /// The dashboard index a session of this layout records in
@@ -303,12 +268,17 @@ impl SessionLayout {
     }
 
     /// Index of the first coding-agent surface — the offset every agent index
-    /// is counted from.
+    /// is counted from. A recorded dashboard at `n` puts the first agent at
+    /// `n + 1`; with none recorded the earlier rules apply (supervised → 2,
+    /// bare → 1 with a broker, 0 without).
     #[must_use]
     pub fn first_agent_index(&self) -> usize {
-        match self.mode {
-            SessionMode::Supervisor => SUPERVISOR_PANE_OFFSET,
-            SessionMode::Bare => usize::from(self.has_broker),
+        match self.dashboard_pane {
+            Some(dashboard) => dashboard + 1,
+            None => match self.mode {
+                SessionMode::Supervisor => LEGACY_SUPERVISED_FIRST_AGENT,
+                SessionMode::Bare => usize::from(self.has_broker),
+            },
         }
     }
 
@@ -318,13 +288,6 @@ impl SessionLayout {
         self.first_agent_index() + nth
     }
 
-    /// The orchestrator entry a per-repo discovery file records for this
-    /// layout, or `None` when the layout has no supervisor surface.
-    #[must_use]
-    pub fn orchestrator_index(&self) -> Option<usize> {
-        self.supervisor_index()
-    }
-
     /// Resolves one surface to its [`SurfaceRole`].
     ///
     /// `owners` is the session's coding agents as `(agent_id, worktree root)`
@@ -332,7 +295,9 @@ impl SessionLayout {
     /// or CLI-argument order, because indices are neither alphabetical nor
     /// argument-ordered and drift on layout changes — so a coding worktree
     /// whose surface happens to sit at a reserved index still resolves to
-    /// `Coding`. Only then are the layout's reserved indices consulted.
+    /// `Coding`. Only then is the layout's dashboard index consulted; any
+    /// other surface (a pre-relocation session's old supervisor pane
+    /// included) is `Unknown` and never acted on.
     #[must_use]
     pub fn resolve<'a, I>(&self, index: usize, owner_path: &str, owners: I) -> SurfaceRole
     where
@@ -343,9 +308,6 @@ impl SessionLayout {
             if paths_match(&candidate, worktree_root) {
                 return SurfaceRole::Coding(agent_id.to_string());
             }
-        }
-        if self.supervisor_index() == Some(index) {
-            return SurfaceRole::Supervisor;
         }
         if self.dashboard_index() == Some(index) {
             return SurfaceRole::Dashboard;
@@ -400,13 +362,23 @@ mod tests {
         SessionLayout::planned(SessionMode::Bare, false)
     }
 
+    /// A supervised session saved by a pre-relocation binary: supervisor at
+    /// 0, dashboard at 1 (recorded), agents from 2.
+    fn legacy_supervised(recorded: Option<usize>) -> SessionLayout {
+        SessionLayout {
+            mode: SessionMode::Supervisor,
+            has_broker: recorded.is_some(),
+            dashboard_pane: recorded,
+        }
+    }
+
     // --- Scenario: Roles resolve from the layout record ---------------------
 
     #[test]
     fn roles_resolve_from_the_layout_record() {
         let owned = owners(&[("feat-a", "/repo-feat-a"), ("feat-b", "/repo-feat-b")]);
         // (layout, index, owner path) -> expected role. The supervised rows
-        // walk 0/1/2+, the bare-with-broker rows 0/1+, the bare-without-broker
+        // walk 0/1+, the bare-with-broker rows 0/1+, the bare-without-broker
         // rows 0+, and each layout also exercises an unmatched surface.
         let cases: Vec<(&str, SessionLayout, usize, &str, SurfaceRole)> = vec![
             (
@@ -414,26 +386,19 @@ mod tests {
                 supervised(),
                 0,
                 "/repo",
-                SurfaceRole::Supervisor,
-            ),
-            (
-                "supervised",
-                supervised(),
-                1,
-                "/repo",
                 SurfaceRole::Dashboard,
             ),
             (
                 "supervised",
                 supervised(),
-                2,
+                1,
                 "/repo-feat-a",
                 SurfaceRole::Coding("feat-a".to_string()),
             ),
             (
                 "supervised",
                 supervised(),
-                3,
+                2,
                 "/repo-feat-b",
                 SurfaceRole::Coding("feat-b".to_string()),
             ),
@@ -498,20 +463,50 @@ mod tests {
     }
 
     #[test]
-    fn supervised_layout_yields_supervisor_dashboard_then_coding_in_index_order() {
+    fn supervised_layout_yields_dashboard_then_coding_in_index_order() {
         let owned = owners(&[("feat-a", "/repo-feat-a")]);
         let layout = supervised();
-        let roles: Vec<SurfaceRole> = [(0, "/repo"), (1, "/repo"), (2, "/repo-feat-a")]
+        let roles: Vec<SurfaceRole> = [(0, "/repo"), (1, "/repo-feat-a")]
             .into_iter()
             .map(|(i, p)| layout.resolve(i, p, refs(&owned)))
             .collect();
         assert_eq!(
             roles,
             vec![
-                SurfaceRole::Supervisor,
                 SurfaceRole::Dashboard,
                 SurfaceRole::Coding("feat-a".to_string()),
             ]
+        );
+    }
+
+    /// Spec scenario "A pre-relocation live session keeps its agent offset":
+    /// a session saved with `dashboard_pane = Some(1)` resolves its agents
+    /// from 2, its pane 1 as the dashboard and its old supervisor pane 0 as
+    /// `Unknown` — so neither pane 0 nor pane 1 is ever a coding surface.
+    #[test]
+    fn a_pre_relocation_session_keeps_its_agent_offset_and_acts_on_neither_reserved_pane() {
+        let owned = owners(&[("feat-a", "/repo-feat-a")]);
+        let layout = legacy_supervised(Some(1));
+        assert_eq!(layout.first_agent_index(), 2);
+        assert_eq!(layout.agent_index(0), 2);
+        assert_eq!(
+            layout.resolve(0, "/repo", refs(&owned)),
+            SurfaceRole::Unknown
+        );
+        assert_eq!(
+            layout.resolve(1, "/repo", refs(&owned)),
+            SurfaceRole::Dashboard
+        );
+        for index in [0, 1] {
+            assert_eq!(
+                layout.resolve(index, "/repo", refs(&owned)).coding_agent(),
+                None,
+                "reserved pane {index} of a legacy session is never a coding surface"
+            );
+        }
+        assert_eq!(
+            layout.resolve(2, "/repo-feat-a", refs(&owned)),
+            SurfaceRole::Coding("feat-a".to_string())
         );
     }
 
@@ -520,8 +515,8 @@ mod tests {
     #[test]
     fn coding_agents_resolve_by_owner_not_index() {
         let owned = owners(&[("feat-a", "/repo-feat-a")]);
-        // The agent's surface sits at an index the layout reserves for the
-        // supervisor (0) and for the dashboard (1); the owner path wins.
+        // The agent's surface sits at the index the layout reserves for the
+        // dashboard (0) and the next one (1); the owner path wins.
         for layout in [supervised(), bare_with_broker()] {
             for index in [0, 1] {
                 assert_eq!(
@@ -533,42 +528,34 @@ mod tests {
         }
     }
 
+    /// Only a coding surface names an agent a keystroke sender may act on.
     #[test]
-    fn role_agent_ids_map_to_the_wire_identity() {
+    fn only_a_coding_role_names_an_agent() {
         assert_eq!(
-            SurfaceRole::Supervisor.agent_id(),
-            Some(SUPERVISOR_AGENT_ID)
-        );
-        assert_eq!(SurfaceRole::Dashboard.agent_id(), None);
-        assert_eq!(SurfaceRole::Unknown.agent_id(), Some("unknown"));
-        assert_eq!(
-            SurfaceRole::Coding("feat-a".to_string()).agent_id(),
+            SurfaceRole::Coding("feat-a".to_string()).coding_agent(),
             Some("feat-a")
         );
-        assert!(SurfaceRole::Supervisor.is_supervisor());
-        assert!(!SurfaceRole::Dashboard.is_supervisor());
-        assert!(!SurfaceRole::Coding("feat-a".to_string()).is_supervisor());
-        assert!(!SurfaceRole::Unknown.is_supervisor());
+        assert_eq!(SurfaceRole::Dashboard.coding_agent(), None);
+        assert_eq!(SurfaceRole::Unknown.coding_agent(), None);
     }
 
     // --- Reserved indices ---------------------------------------------------
 
     #[test]
     fn reserved_indices_per_layout() {
-        // layout -> (supervisor, dashboard, first agent, recorded dashboard)
-        for (label, layout, supervisor, dashboard, first, recorded) in [
-            ("supervised", supervised(), Some(0), Some(1), 2, Some(1_u32)),
+        // layout -> (dashboard, first agent, recorded dashboard)
+        for (label, layout, dashboard, first, recorded) in [
+            ("supervised", supervised(), Some(0), 1, Some(0_u32)),
             (
-                "bare+broker",
-                bare_with_broker(),
-                None,
+                "supervised without broker",
+                SessionLayout::planned(SessionMode::Supervisor, false),
                 Some(0),
                 1,
                 Some(0_u32),
             ),
-            ("bare-no-broker", bare_without_broker(), None, None, 0, None),
+            ("bare+broker", bare_with_broker(), Some(0), 1, Some(0_u32)),
+            ("bare-no-broker", bare_without_broker(), None, 0, None),
         ] {
-            assert_eq!(layout.supervisor_index(), supervisor, "{label} supervisor");
             assert_eq!(layout.dashboard_index(), dashboard, "{label} dashboard");
             assert_eq!(layout.first_agent_index(), first, "{label} first agent");
             assert_eq!(layout.agent_index(0), first, "{label} agent 0");
@@ -578,33 +565,31 @@ mod tests {
                 recorded,
                 "{label} recorded dashboard_pane"
             );
-            assert_eq!(
-                layout.orchestrator_index(),
-                supervisor,
-                "{label} orchestrator entry index"
-            );
         }
     }
 
+    /// Spec scenarios "A pre-relocation live session keeps its agent offset"
+    /// and "A session without `dashboard_pane` follows the earlier rules": a
+    /// recorded dashboard at `n` puts the first agent at `n + 1`; `None`
+    /// falls back to the earlier rules (supervised 2, bare 1 with a broker and
+    /// 0 without), and the dashboard kill/re-split target keeps its `0`
+    /// fallback.
     #[test]
     fn recorded_dashboard_pane_drives_the_dashboard_index_and_its_fallback() {
-        // `dashboard_pane` Some(0) / Some(1) / None against each mode: the
-        // recorded value wins for the dashboard index, the first-agent index
-        // never moves, and the `unwrap_or(0)` fallback is preserved for a
-        // session that recorded nothing.
         for (mode, has_broker, recorded, dashboard, fallback, first) in [
             (
                 SessionMode::Supervisor,
                 true,
-                Some(1_usize),
-                Some(1),
-                1_u32,
-                2,
+                Some(0_usize),
+                Some(0),
+                0_u32,
+                1,
             ),
-            (SessionMode::Supervisor, true, Some(0), Some(0), 0, 2),
+            (SessionMode::Supervisor, true, Some(1), Some(1), 1, 2),
+            (SessionMode::Supervisor, false, Some(0), Some(0), 0, 1),
             (SessionMode::Supervisor, true, None, Some(1), 0, 2),
+            (SessionMode::Supervisor, false, None, Some(1), 0, 2),
             (SessionMode::Bare, true, Some(0), Some(0), 0, 1),
-            (SessionMode::Bare, true, Some(1), Some(1), 1, 1),
             (SessionMode::Bare, true, None, Some(0), 0, 1),
             (SessionMode::Bare, false, None, None, 0, 0),
         ] {
@@ -631,22 +616,17 @@ mod tests {
         }
     }
 
-    /// Spec scenario "Recorded indices come from the layout record": the
-    /// value a launch writes into `Session::dashboard_pane` must equal what
-    /// the same launch recorded before this requirement. Those pre-change
-    /// values were the literals `Some(0)` (bare, inside `if broker.enabled`),
-    /// `Some(1)` (supervised, inside `if broker.enabled`) and the struct
-    /// literal's `None` when the broker was off — note that a SUPERVISED
-    /// broker-less launch builds a dashboard pane but recorded no index for
-    /// it. All four combinations are pinned here because the launch sites now
-    /// write this value unconditionally.
+    /// Spec scenarios "Supervised start records the dashboard at pane 0" and
+    /// "A broker-less supervised start still records the dashboard": every
+    /// supervised launch records `Some(0)`, broker or not; only a broker-less
+    /// bare launch records `None`.
     #[test]
-    fn a_launch_records_the_same_dashboard_pane_it_recorded_before() {
+    fn a_launch_records_the_dashboard_it_builds() {
         for (mode, has_broker, expected) in [
             (SessionMode::Bare, true, Some(0_u32)),
             (SessionMode::Bare, false, None),
-            (SessionMode::Supervisor, true, Some(1_u32)),
-            (SessionMode::Supervisor, false, None),
+            (SessionMode::Supervisor, true, Some(0_u32)),
+            (SessionMode::Supervisor, false, Some(0_u32)),
         ] {
             assert_eq!(
                 SessionLayout::planned(mode, has_broker).recorded_dashboard_pane(),
@@ -654,29 +634,6 @@ mod tests {
                 "{mode:?} launch with broker={has_broker}"
             );
         }
-    }
-
-    /// The role-resolution dashboard index is deliberately NOT gated on the
-    /// broker: a broker-less supervised session records no index but still
-    /// has a dashboard surface at 1, and resolving it as `Coding`/`Unknown`
-    /// would make the drive loop sweep a TUI process.
-    #[test]
-    fn a_broker_less_supervised_layout_still_resolves_its_dashboard_surface() {
-        let layout = SessionLayout::planned(SessionMode::Supervisor, false);
-        assert_eq!(layout.recorded_dashboard_pane(), None);
-        assert_eq!(
-            layout.dashboard_index_or_default(),
-            0,
-            "the historical `unwrap_or(0)` fallback is unchanged"
-        );
-        assert_eq!(
-            layout.resolve(1, "/repo", Vec::<(&str, &Path)>::new()),
-            SurfaceRole::Dashboard
-        );
-        assert_eq!(
-            layout.resolve(0, "/repo", Vec::<(&str, &Path)>::new()),
-            SurfaceRole::Supervisor
-        );
     }
 
     #[test]
@@ -701,12 +658,23 @@ mod tests {
         let supervised_session = Session {
             mode: SessionMode::Supervisor,
             broker_port: Some(9119),
-            dashboard_pane: Some(1),
+            dashboard_pane: Some(0),
             ..base.clone()
         };
         assert_eq!(
             SessionLayout::of(&supervised_session),
             SessionLayout::planned(SessionMode::Supervisor, true)
+        );
+
+        let legacy_session = Session {
+            mode: SessionMode::Supervisor,
+            broker_port: Some(9119),
+            dashboard_pane: Some(1),
+            ..base.clone()
+        };
+        assert_eq!(
+            SessionLayout::of(&legacy_session),
+            legacy_supervised(Some(1))
         );
 
         let bare_broker = Session {
