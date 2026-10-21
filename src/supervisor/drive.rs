@@ -973,6 +973,18 @@ pub trait MergeCheck {
     /// branch, a bad ref). Callers must treat an `Err` as **unmerged** — the
     /// fail-safe direction (D2) — never as an unknown to be skipped.
     fn merge_state(&self, branch: &str) -> Result<MergeState, PawError>;
+
+    /// Reads `branch`'s current full tip SHA — the narrow query the
+    /// heartbeat uses to observe a branch tip moving between two ticks
+    /// (`unattended-heartbeat-progress`). Full, so an abbreviation can never
+    /// make two different tips compare equal. Distinct from
+    /// [`MergeState::tip`], which is short and empty for a merged branch.
+    ///
+    /// # Errors
+    /// Returns an error when the tip cannot be read (a deleted branch, a bad
+    /// ref). Callers treat an `Err` as no observation — never as progress,
+    /// and never as a reason to stop the loop.
+    fn branch_tip(&self, branch: &str) -> Result<String, PawError>;
 }
 
 /// Bundled dependencies for [`drive_loop`].
@@ -1086,6 +1098,72 @@ impl Default for DriveConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Heartbeat decision (pure)
+// ---------------------------------------------------------------------------
+
+/// Whether the heartbeat is due: a full `interval` has passed since
+/// `last_progress`, the most recent instant the loop observed the wave make
+/// progress (or the loop's start, if it has observed none).
+///
+/// A pure function of its three inputs, so the exit rule is decided in one
+/// place and tested without a clock. An instant earlier than `last_progress`
+/// (which a monotonic clock never produces) counts as no time elapsed.
+fn heartbeat_due(last_progress: Instant, now: Instant, interval: Duration) -> bool {
+    now.saturating_duration_since(last_progress) >= interval
+}
+
+/// Whether this tick observed the wave make progress: a coding agent's phase
+/// advanced (`phase_advanced`), or a coding branch's tip differs from the tip
+/// read on an earlier tick.
+///
+/// `tips` holds only this tick's successful reads, so a failed read is no
+/// observation; a branch absent from `prev_tips` is a first read, recorded by
+/// the caller but not counted. Nothing the loop does itself — an escalation,
+/// a re-escalation of a prompt still unanswered, a learning, a nudge or a
+/// buffered-input submit — is an input, so none of them can defer the
+/// heartbeat.
+fn tick_made_progress(
+    prev_tips: &HashMap<String, String>,
+    tips: &HashMap<String, String>,
+    phase_advanced: bool,
+) -> bool {
+    phase_advanced
+        || tips
+            .iter()
+            .any(|(branch, tip)| prev_tips.get(branch).is_some_and(|prev| prev != tip))
+}
+
+/// Raises each agent's recorded phase to the most-progressed one ever seen
+/// (GP-05) and reports whether a CODING agent's phase rank rose this tick.
+///
+/// The rank only rises on `committed`, `verified` or `done`; every other
+/// status — including the stuck-detection helper's synthetic statuses, which
+/// carry `working` with a free-form `phase` such as `stuck-on-prompt` or
+/// `no-progress` — is rank 0 and can never advance it. An agent's first
+/// observed status is recorded, not counted.
+fn advance_resolved_phases(
+    resolved: &mut HashMap<String, WorkerPhase>,
+    rows: &[AgentStatusRow],
+    coding_ids: &[String],
+) -> bool {
+    let mut advanced = false;
+    for row in rows {
+        let phase = WorkerPhase::from_status(&row.status);
+        match resolved.get_mut(&row.agent_id) {
+            Some(best) if phase.rank() > best.rank() => {
+                *best = phase;
+                advanced |= coding_ids.contains(&row.agent_id);
+            }
+            Some(_) => {}
+            None => {
+                resolved.insert(row.agent_id.clone(), phase);
+            }
+        }
+    }
+    advanced
+}
+
+// ---------------------------------------------------------------------------
 // The loop
 // ---------------------------------------------------------------------------
 
@@ -1136,6 +1214,15 @@ pub fn drive_loop(
     let mut resolved_phase: HashMap<String, WorkerPhase> = HashMap::new();
 
     let start = deps.clock.now();
+    // The heartbeat is measured from the most recent progress the loop
+    // observed — a coding branch tip moving or a coding agent's phase
+    // advancing — or from the start until it has observed any.
+    let mut last_progress = start;
+    // Each coding branch's tip as last read, keyed by branch name.
+    let mut branch_tips: HashMap<String, String> = HashMap::new();
+    // Whether the heartbeat's fresh look already deferred the exit for a
+    // completion with no progress since; it may do so only once.
+    let mut heartbeat_deferred = false;
     // The most recent `/status` snapshot, used to resolve a coding pane's
     // nudge settle delay during the sweep — which runs BEFORE this tick's own
     // fetch below (GP-16's sweep/fetch ordering stays as-is). Empty on the
@@ -1192,17 +1279,9 @@ pub fn drive_loop(
         // Track the most-progressed phase ever seen per agent (GP-05): only
         // ever raises the recorded phase, never lowers it, so a later generic
         // `working` heartbeat cannot erase an earlier `verified`/`done` signal.
-        for row in &latest_status {
-            let phase = WorkerPhase::from_status(&row.status);
-            resolved_phase
-                .entry(row.agent_id.clone())
-                .and_modify(|best| {
-                    if phase.rank() > best.rank() {
-                        *best = phase;
-                    }
-                })
-                .or_insert(phase);
-        }
+        // A coding agent's rank rising is wave progress for the heartbeat.
+        let phase_advanced =
+            advance_resolved_phases(&mut resolved_phase, &latest_status, &coding_ids);
 
         // Wind-down guard (GP-16): once this tick's own fetch shows the wave
         // complete, the loop is about to exit — no nudge is dispatched below,
@@ -1219,7 +1298,7 @@ pub fn drive_loop(
         );
 
         // --- Branch refresh (post-merge, opt-in) ------------------------------
-        trigger_branch_refresh(
+        let refreshed_branches = trigger_branch_refresh(
             config.branch_refresh_enabled,
             ctx,
             agents,
@@ -1249,9 +1328,51 @@ pub fn drive_loop(
         };
         run_correction_pass(&mut pass, deps, config);
 
+        // --- Progress observation (unattended-heartbeat-progress) ------------
+        // A failed tip read is no observation. A branch this loop rebased
+        // itself (branch refresh) is re-baselined rather than compared: its
+        // new tip is the loop's own doing, not the wave progressing.
+        for branch in &refreshed_branches {
+            branch_tips.remove(branch);
+        }
+        let tips: HashMap<String, String> = agents
+            .iter()
+            .filter_map(|a| {
+                deps.merge_check
+                    .branch_tip(&a.branch)
+                    .ok()
+                    .map(|tip| (a.branch.clone(), tip))
+            })
+            .collect();
+        if tick_made_progress(&branch_tips, &tips, phase_advanced) {
+            last_progress = deps.clock.now();
+            heartbeat_deferred = false;
+        }
+        branch_tips.extend(tips);
+
         // --- Heartbeat check -------------------------------------------------
-        if deps.clock.now().duration_since(start) >= config.heartbeat {
-            break (DriveOutcome::Heartbeat, latest_status);
+        if heartbeat_due(last_progress, deps.clock.now(), config.heartbeat) {
+            // One last look before giving up: this tick's status was fetched
+            // at its top, and a long tick (nudges, buffered-input submits,
+            // branch-refresh rebases) can miss a phase
+            // advance or completion published while it worked. A phase advance
+            // is progress; a completion defers the exit once, for the next
+            // tick to act on — never twice without progress between, so a
+            // completion that never reaches a tick cannot hold the loop open.
+            let fresh = deps.status.fetch();
+            if advance_resolved_phases(&mut resolved_phase, &fresh, &coding_ids) {
+                last_progress = deps.clock.now();
+                heartbeat_deferred = false;
+            } else if !heartbeat_deferred && detect_completion(&fresh, &coding_ids).is_some() {
+                heartbeat_deferred = true;
+            } else {
+                let final_status = if fresh.is_empty() {
+                    latest_status
+                } else {
+                    fresh
+                };
+                break (DriveOutcome::Heartbeat, final_status);
+            }
         }
 
         deps.clock.sleep(config.poll_interval);
@@ -1433,13 +1554,22 @@ fn trigger_branch_refresh(
     latest_status: &[AgentStatusRow],
     merged_bases: &[String],
     deps: &mut DriveDeps<'_>,
-) {
+) -> Vec<String> {
     if !enabled {
-        return;
+        return Vec::new();
     }
+    let mut rebased = Vec::new();
     for base in merged_bases {
-        refresh_branches_after_merge(ctx, agents, pane_by_agent, latest_status, base, deps);
+        rebased.extend(refresh_branches_after_merge(
+            ctx,
+            agents,
+            pane_by_agent,
+            latest_status,
+            base,
+            deps,
+        ));
     }
+    rebased
 }
 
 /// Evaluates the `supervisor-branch-refresh` preconditions for every live
@@ -1454,6 +1584,9 @@ fn trigger_branch_refresh(
 /// degraded attempt, and the skip is neither retried within this merge event
 /// nor escalated to the supervisor inbox (task 4.7) — it is simply not
 /// acted on, and the next merge re-evaluates it.
+///
+/// Returns the branches it rebased, so the heartbeat can tell a tip the loop
+/// moved itself from the wave progressing.
 fn refresh_branches_after_merge(
     ctx: SweepContext<'_>,
     agents: &[AgentPane],
@@ -1461,7 +1594,8 @@ fn refresh_branches_after_merge(
     latest_status: &[AgentStatusRow],
     base: &str,
     deps: &mut DriveDeps<'_>,
-) {
+) -> Vec<String> {
+    let mut rebased = Vec::new();
     for agent in agents {
         // No live pane this sweep (booted but not yet resolved, or the pane
         // closed) — nothing to capture or claim, so nothing to evaluate.
@@ -1500,9 +1634,11 @@ fn refresh_branches_after_merge(
         }
 
         if deps.refresher.rebase(&agent.worktree_path).is_ok() {
+            rebased.push(agent.branch.clone());
             deps.refresher.notify(&agent.agent_id, base);
         }
     }
+    rebased
 }
 
 /// The tmux session and the repository root for the current sweep.
@@ -2726,6 +2862,10 @@ impl MergeCheck for GitMergeCheck {
             tip,
         })
     }
+
+    fn branch_tip(&self, branch: &str) -> Result<String, PawError> {
+        crate::git::branch_tip(&self.repo_root, branch)
+    }
 }
 
 /// Inputs for [`run_drive_loop`] beyond the session name, repo root, and agent
@@ -3392,8 +3532,20 @@ mod tests {
     struct FakeMergeCheck {
         unmerged: HashMap<String, (usize, String)>,
         errors: HashMap<String, String>,
+        /// Scripted tip reads per branch, one per `branch_tip` call; the last
+        /// repeats once exhausted. A branch with no script has no readable tip
+        /// (the read errors), which the heartbeat treats as no observation.
+        tips: RefCell<HashMap<String, Vec<String>>>,
+        tip_reads: Cell<usize>,
     }
     impl FakeMergeCheck {
+        fn with_tips(self, branch: &str, tips: &[&str]) -> Self {
+            self.tips.borrow_mut().insert(
+                branch.to_string(),
+                tips.iter().map(|t| (*t).to_string()).collect(),
+            );
+            self
+        }
         fn with_unmerged(mut self, branch: &str, ahead: usize, tip: &str) -> Self {
             self.unmerged
                 .insert(branch.to_string(), (ahead, tip.to_string()));
@@ -3421,6 +3573,22 @@ mod tests {
                 ahead: 0,
                 tip: String::new(),
             })
+        }
+        fn branch_tip(&self, branch: &str) -> Result<String, PawError> {
+            self.tip_reads.set(self.tip_reads.get() + 1);
+            let mut tips = self.tips.borrow_mut();
+            let Some(script) = tips.get_mut(branch) else {
+                return Err(PawError::WorktreeError(format!("no tip for {branch}")));
+            };
+            let tip = if script.len() > 1 {
+                script.remove(0)
+            } else {
+                script
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| PawError::WorktreeError(format!("no tip for {branch}")))?
+            };
+            Ok(tip)
         }
     }
 
@@ -5200,6 +5368,425 @@ mod tests {
         // (feedback-cycle tolerance, task 5.4).
         assert!(dispatcher.events.is_empty());
         assert!(alerts.escalations.is_empty());
+    }
+
+    // === `unattended-heartbeat-progress`: the heartbeat counts from progress ===
+
+    /// What one fake-clock heartbeat scenario observed.
+    struct HeartbeatRun {
+        summary: DriveSummary,
+        /// Fake-clock time from the loop's start to its exit.
+        elapsed: Duration,
+        escalations: usize,
+        learnings: usize,
+        rebases: usize,
+    }
+
+    /// Runs a single coding agent (`feat-a` on branch `feat/a`, pane 2) under
+    /// a fake clock with a 1s poll and a 5s heartbeat, so tick `k` happens at
+    /// roughly `k` seconds. `configure` adjusts the config per test.
+    fn run_heartbeat_scenario(
+        capture: &str,
+        statuses: Vec<Vec<AgentStatusRow>>,
+        merge_check: &FakeMergeCheck,
+        message_batches: Vec<Vec<BrokerMessage>>,
+        configure: impl FnOnce(&mut DriveConfig),
+    ) -> HeartbeatRun {
+        let agents = one_agent_at("/repo-feat-a");
+        let enumerator = FakeEnumerator {
+            panes: vec![PaneInfo {
+                pane_index: 2,
+                pane_current_path: "/repo-feat-a".to_string(),
+            }],
+        };
+        let capturer = FakeCapturer::new(&[(2, capture)]);
+        let mut dispatcher = RecordingDispatcher::default();
+        let status = ScriptedStatus::new(statuses);
+        let messages = ScriptedMessages::new(message_batches);
+        let clock = FakeClock::new();
+        let start = clock.now();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
+        let mut refresher = RecordingRefresher::default();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            merge_check,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
+            refresher: &mut refresher,
+            wedged: Vec::new(),
+        };
+        let mut config = DriveConfig {
+            poll_interval: Duration::from_secs(1),
+            heartbeat: Duration::from_secs(5),
+            ..DriveConfig::default()
+        };
+        configure(&mut config);
+        let summary = drive_loop_in_tmp("paw-test", &agents, &mut deps, &config);
+        HeartbeatRun {
+            summary,
+            elapsed: clock.now().duration_since(start),
+            escalations: alerts.escalations.len(),
+            learnings: learnings.records.len(),
+            rebases: refresher.rebase_calls.len(),
+        }
+    }
+
+    /// Spec scenario "A progressing wave is not ended by the heartbeat": the
+    /// branch tip moves at tick 3, so the 5s heartbeat — which would fire at
+    /// tick 5 counted from the start — fires only one full quiet interval
+    /// after that move, at tick 8.
+    #[test]
+    fn branch_tip_movement_defers_the_heartbeat() {
+        let merge_check = FakeMergeCheck::default().with_tips("feat/a", &["a1", "a1", "a1", "a2"]);
+        let run = run_heartbeat_scenario(
+            "working on it...\n$ ",
+            vec![vec![row("feat-a", "working")]],
+            &merge_check,
+            Vec::new(),
+            |_| {},
+        );
+        assert_eq!(run.summary.outcome, DriveOutcome::Heartbeat);
+        assert!(
+            run.elapsed >= Duration::from_secs(8),
+            "the tip move at ~3s must defer the heartbeat to ~8s, exited at {:?}",
+            run.elapsed
+        );
+        assert!(
+            run.elapsed < Duration::from_secs(9),
+            "and it fires one quiet interval later, not never: {:?}",
+            run.elapsed
+        );
+    }
+
+    /// Control for the test above: with the tip never moving, the same loop
+    /// exits on the heartbeat one interval after its start.
+    #[test]
+    fn an_unmoving_tip_lets_the_heartbeat_fire_from_the_start() {
+        let merge_check = FakeMergeCheck::default().with_tips("feat/a", &["a1"]);
+        let run = run_heartbeat_scenario(
+            "working on it...\n$ ",
+            vec![vec![row("feat-a", "working")]],
+            &merge_check,
+            Vec::new(),
+            |_| {},
+        );
+        assert_eq!(run.summary.outcome, DriveOutcome::Heartbeat);
+        assert!(
+            run.elapsed < Duration::from_secs(6),
+            "no progress, so the heartbeat fires at ~5s: {:?}",
+            run.elapsed
+        );
+    }
+
+    /// A coding agent's phase advancing (`working` → `committed`) is progress
+    /// too: it moves the heartbeat out by one interval from the advance.
+    #[test]
+    fn a_phase_advance_defers_the_heartbeat() {
+        let merge_check = FakeMergeCheck::default().with_tips("feat/a", &["a1"]);
+        let run = run_heartbeat_scenario(
+            "working on it...\n$ ",
+            vec![
+                vec![row("feat-a", "working")],
+                vec![row("feat-a", "working")],
+                vec![row("feat-a", "committed")],
+            ],
+            &merge_check,
+            Vec::new(),
+            |_| {},
+        );
+        assert_eq!(run.summary.outcome, DriveOutcome::Heartbeat);
+        assert!(
+            run.elapsed >= Duration::from_secs(7),
+            "the advance at ~2s defers the heartbeat to ~7s: {:?}",
+            run.elapsed
+        );
+    }
+
+    /// Spec scenario "Only a tip move or a phase advance resets the
+    /// interval", as a pure table over the two decisions the loop feeds.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn progress_kinds_reset_the_heartbeat() {
+        let tips = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(b, t)| ((*b).to_string(), (*t).to_string()))
+                .collect()
+        };
+        let coding = vec!["feat-a".to_string()];
+        let working = HashMap::from([("feat-a".to_string(), WorkerPhase::Working)]);
+
+        // (case, previous tips, this tick's tips, prior phases, this tick's rows, expected)
+        #[allow(clippy::type_complexity)]
+        let cases: Vec<(
+            &str,
+            HashMap<String, String>,
+            HashMap<String, String>,
+            HashMap<String, WorkerPhase>,
+            Vec<AgentStatusRow>,
+            bool,
+        )> = vec![
+            (
+                "a branch tip move",
+                tips(&[("feat/a", "a1")]),
+                tips(&[("feat/a", "a2")]),
+                working.clone(),
+                vec![row("feat-a", "working")],
+                true,
+            ),
+            (
+                "a phase advance",
+                tips(&[("feat/a", "a1")]),
+                tips(&[("feat/a", "a1")]),
+                working.clone(),
+                vec![row("feat-a", "committed")],
+                true,
+            ),
+            (
+                "changed pane output only (no tip move, no phase change)",
+                tips(&[("feat/a", "a1")]),
+                tips(&[("feat/a", "a1")]),
+                working.clone(),
+                vec![row("feat-a", "working")],
+                false,
+            ),
+            (
+                "a repeated working status",
+                tips(&[("feat/a", "a1")]),
+                tips(&[("feat/a", "a1")]),
+                working.clone(),
+                vec![row("feat-a", "working"), row("feat-a", "working")],
+                false,
+            ),
+            (
+                "a re-escalation of an unanswered prompt (not an input at all)",
+                tips(&[("feat/a", "a1")]),
+                tips(&[("feat/a", "a1")]),
+                working.clone(),
+                vec![row("feat-a", "working")],
+                false,
+            ),
+            (
+                "a learning the loop recorded (not an input at all)",
+                tips(&[("feat/a", "a1")]),
+                tips(&[("feat/a", "a1")]),
+                working.clone(),
+                Vec::new(),
+                false,
+            ),
+            (
+                "a branch's first tip read",
+                HashMap::new(),
+                tips(&[("feat/a", "a1")]),
+                working.clone(),
+                vec![row("feat-a", "working")],
+                false,
+            ),
+            (
+                "a failed tip read",
+                tips(&[("feat/a", "a1")]),
+                HashMap::new(),
+                working.clone(),
+                vec![row("feat-a", "working")],
+                false,
+            ),
+            (
+                "an agent's first observed status, even a late phase",
+                tips(&[("feat/a", "a1")]),
+                tips(&[("feat/a", "a1")]),
+                HashMap::new(),
+                vec![row("feat-a", "committed")],
+                false,
+            ),
+            (
+                "the supervisor's own status rising (not a coding agent)",
+                tips(&[("feat/a", "a1")]),
+                tips(&[("feat/a", "a1")]),
+                HashMap::from([
+                    ("feat-a".to_string(), WorkerPhase::Working),
+                    ("supervisor".to_string(), WorkerPhase::Working),
+                ]),
+                vec![row("supervisor", "done")],
+                false,
+            ),
+        ];
+
+        for (case, prev_tips, now_tips, mut phases, rows, expected) in cases {
+            let advanced = advance_resolved_phases(&mut phases, &rows, &coding);
+            assert_eq!(
+                tick_made_progress(&prev_tips, &now_tips, advanced),
+                expected,
+                "{case}"
+            );
+        }
+    }
+
+    /// The stuck-detection helper's synthetic statuses carry `working` with a
+    /// free-form `phase` (`stuck-on-prompt`, `no-progress`, ...); they report
+    /// a wave that is NOT moving, so they never advance the resolved phase.
+    #[test]
+    fn stuck_detection_statuses_are_not_a_phase_advance() {
+        let coding = vec!["feat-a".to_string()];
+        let mut phases = HashMap::from([("feat-a".to_string(), WorkerPhase::Working)]);
+        // `row` builds the status only; the synthetic `phase` field is not
+        // part of the loop's phase model, which derives from `status` alone.
+        let synthetic = row("feat-a", "working");
+        assert!(!advance_resolved_phases(&mut phases, &[synthetic], &coding));
+        assert_eq!(phases["feat-a"], WorkerPhase::Working);
+    }
+
+    /// `heartbeat_due` is due exactly once a full interval has passed since
+    /// the last progress, and never for an instant before it.
+    #[test]
+    fn heartbeat_due_is_a_pure_interval_check() {
+        let t0 = Instant::now();
+        let interval = Duration::from_secs(5);
+        assert!(!heartbeat_due(t0, t0, interval));
+        assert!(!heartbeat_due(
+            t0,
+            t0 + Duration::from_millis(4_999),
+            interval
+        ));
+        assert!(heartbeat_due(t0, t0 + interval, interval));
+        assert!(heartbeat_due(t0, t0 + Duration::from_secs(60), interval));
+        // A `now` before the last progress is no time elapsed, not a panic.
+        assert!(!heartbeat_due(t0 + interval, t0, interval));
+    }
+
+    /// Spec scenario "Re-escalating an unanswered prompt does not defer the
+    /// heartbeat": the loop re-escalates the same live prompt every dedup
+    /// window and records a learning for it, and still exits on the heartbeat
+    /// one interval after its start.
+    #[test]
+    fn re_escalations_do_not_defer_the_heartbeat() {
+        let merge_check = FakeMergeCheck::default().with_tips("feat/a", &["a1"]);
+        let run = run_heartbeat_scenario(
+            &live_safe_capture("ls -la"),
+            vec![vec![row("feat-a", "working")]],
+            &merge_check,
+            Vec::new(),
+            |config| {
+                config.dedup_window = Duration::from_secs(2);
+                config.learnings_enabled = true;
+            },
+        );
+        assert_eq!(run.summary.outcome, DriveOutcome::Heartbeat);
+        assert!(
+            run.escalations >= 2,
+            "the unanswered prompt is re-escalated each dedup window, got {}",
+            run.escalations
+        );
+        assert!(run.learnings >= 1, "and its learnings are recorded");
+        assert!(
+            run.elapsed < Duration::from_secs(6),
+            "yet the heartbeat still fires ~5s after start: {:?}",
+            run.elapsed
+        );
+    }
+
+    /// A merge check whose tip query always errors never counts as progress
+    /// and never stops the loop: it exits only on the heartbeat, on time.
+    #[test]
+    fn a_failing_tip_read_is_no_observation() {
+        let merge_check = FakeMergeCheck::default();
+        let run = run_heartbeat_scenario(
+            "working on it...\n$ ",
+            vec![vec![row("feat-a", "working")]],
+            &merge_check,
+            Vec::new(),
+            |_| {},
+        );
+        assert!(merge_check.tip_reads.get() > 0, "the tip was queried");
+        assert_eq!(run.summary.outcome, DriveOutcome::Heartbeat);
+        assert!(run.elapsed < Duration::from_secs(6), "{:?}", run.elapsed);
+    }
+
+    /// A long tick can miss a completion published while it worked, because
+    /// the tick's status was fetched at its top. Before exiting on the
+    /// heartbeat the loop takes one fresh look; here the agent's `done` shows
+    /// up only in that fresh fetch, and the run ends `completed`, not on the
+    /// heartbeat.
+    #[test]
+    fn a_heartbeat_takes_a_fresh_look_before_exiting() {
+        let working = vec![row("feat-a", "working")];
+        let mut statuses = vec![working; 6];
+        statuses.push(vec![row("feat-a", "done")]);
+        let run = run_heartbeat_scenario(
+            "working on it...\n$ ",
+            statuses,
+            &FakeMergeCheck::default(),
+            Vec::new(),
+            |_| {},
+        );
+        assert_eq!(
+            run.summary.outcome,
+            DriveOutcome::Completed,
+            "a completion visible at heartbeat time must not be cut off"
+        );
+    }
+
+    /// The fresh look's deferral is capped: a completion it sees that never
+    /// reaches a tick's own fetch (a flapping status) defers the heartbeat
+    /// exit once, not on every tick. The agent's first `done` shows up only in
+    /// the fresh look at tick 5 (a phase advance — progress); from then on
+    /// every tick's fetch reads `working` while every fresh look reads `done`
+    /// (no advance — already resolved). The heartbeat falls due again at
+    /// tick 10, is deferred once, and exits at tick 11 rather than running
+    /// until the flapping stops.
+    #[test]
+    fn a_fresh_look_defers_the_heartbeat_at_most_once_without_progress() {
+        let working = || vec![row("feat-a", "working")];
+        let done = || vec![row("feat-a", "done")];
+        let mut statuses = vec![working(); 6];
+        statuses.push(done());
+        statuses.extend(std::iter::repeat_with(working).take(5));
+        for _ in 0..20 {
+            statuses.push(done());
+            statuses.push(working());
+        }
+        let run = run_heartbeat_scenario(
+            "working on it...\n$ ",
+            statuses,
+            &FakeMergeCheck::default(),
+            Vec::new(),
+            |_| {},
+        );
+        assert_eq!(run.summary.outcome, DriveOutcome::Heartbeat);
+        assert!(
+            run.elapsed < Duration::from_secs(12),
+            "a flapping completion must defer the exit only once: {:?}",
+            run.elapsed
+        );
+    }
+
+    /// A tip the loop moved itself — its own post-merge branch refresh — is
+    /// re-baselined, not counted: the heartbeat still fires ~5s after start
+    /// even though the refreshed branch's tip changed at tick 1.
+    #[test]
+    fn a_tip_moved_by_the_loops_own_branch_refresh_is_not_progress() {
+        let merge_check = FakeMergeCheck::default().with_tips("feat/a", &["a1", "a2"]);
+        let run = run_heartbeat_scenario(
+            IDLE_PANE,
+            vec![vec![row_with_modified_files("feat-a", "working", &[])]],
+            &merge_check,
+            vec![Vec::new(), vec![advanced_main("main")]],
+            |config| config.branch_refresh_enabled = true,
+        );
+        assert_eq!(run.rebases, 1, "the refresh rebased the branch");
+        assert_eq!(run.summary.outcome, DriveOutcome::Heartbeat);
+        assert!(
+            run.elapsed < Duration::from_secs(6),
+            "the refresh's tip move must not defer the heartbeat: {:?}",
+            run.elapsed
+        );
     }
 
     /// Spec scenario "A prompt nobody answers does not end the run"

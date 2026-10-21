@@ -199,14 +199,102 @@ The drive loop SHALL detect wave completion and exit. Completion SHALL be recogn
 
 ### Requirement: Heartbeat re-engages the human after prolonged inactivity
 
-When the drive loop has run for approximately 25 minutes without reaching a completion condition, it SHALL re-engage the human by exiting (or surfacing) with a status summary rather than running forever silently.
+When the drive loop has observed no progress for approximately 25 minutes without reaching a completion condition, it SHALL re-engage the human by exiting with a status summary (outcome `heartbeat`) rather than running forever silently. The interval SHALL be measured from the most recent progress the loop observed — or from the loop's start, if it has observed none — and NOT from the loop's start alone, so a wave that keeps progressing is never ended by the heartbeat. Progress SHALL be either of: a coding agent's branch tip moving between two ticks (tips compared as full commit SHAs), or a coding agent's phase advancing (its resolved `WorkerPhase` rising). Nothing the drive loop does itself SHALL count as progress: in particular, an escalation it records, its re-escalation of a permission prompt that is still unanswered, and a learning it records SHALL NOT count. A change in pane output alone, or a broker message that does not advance the agent's phase, SHALL NOT count as progress. The phase that advances SHALL be the `WorkerPhase` resolved from the agent's reported `status`; the broker's free-form `phase` label — including the synthetic phases the stuck-detection helper publishes (`stuck-on-prompt`, `stuck-stream-timeout`, `context-bloat`, `no-progress`, `blocked-on-supervisor`) — SHALL NOT count as a phase advance. A branch tip moved by the drive loop's own rebase of that branch (its branch refresh after a merge) SHALL NOT count as progress: the loop SHALL take that branch's next tip read as a fresh baseline. A tip read that fails SHALL be no observation — never progress, and never a reason to abort the loop. A wave whose agents all sit on unanswered permission prompts therefore exits with `heartbeat` one interval after its last progress. The decision whether the heartbeat is due SHALL be a pure function of the last-progress instant, the current instant and the interval. When the heartbeat is due, the loop SHALL take one fresh status observation before exiting. A coding agent's phase advance in that observation SHALL count as progress. A completion condition in it SHALL defer the exit to the loop's next tick, so a terminal status published while a long tick was running is not lost — but at most once until the loop observes progress again, so a completion that never reaches a tick's own status fetch cannot hold the loop open. The behaviour SHALL NOT depend on whether the process has a controlling terminal.
 
-#### Scenario: Heartbeat fires after prolonged run without completion
+#### Scenario: Heartbeat fires after prolonged run without progress
 
-- **GIVEN** an unattended drive loop that has run for approximately 25 minutes with no completion signal
+- **GIVEN** an unattended drive loop whose agents have made no progress for approximately 25 minutes and have not completed
 - **WHEN** the heartbeat interval elapses
-- **THEN** the loop SHALL surface a status summary to re-engage the human
+- **THEN** the loop SHALL exit and surface a status summary with outcome `heartbeat` to re-engage the human
 - **AND** SHALL NOT continue running indefinitely without surfacing status
+
+Test: `supervisor::drive::tests::loop_exits_on_heartbeat_when_never_completing` (fake clock); `supervisor::drive::tests::an_unmoving_tip_lets_the_heartbeat_fire_from_the_start` (fake clock); `supervisor::drive::tests::heartbeat_due_is_a_pure_interval_check` (pure); `tests/unattended_drive_e2e.rs::unattended_heartbeat_exits_with_summary`.
+
+#### Scenario: A progressing wave is not ended by the heartbeat
+
+- **GIVEN** an unattended drive loop that has run longer than the heartbeat interval
+- **AND** a coding agent's branch tip moved less than one interval ago
+- **WHEN** the loop evaluates the heartbeat
+- **THEN** the loop SHALL keep driving the wave
+- **AND** SHALL exit with `heartbeat` only once a full interval passes with no further progress
+
+Test: `supervisor::drive::tests::branch_tip_movement_defers_the_heartbeat` (fake clock); `supervisor::drive::tests::a_phase_advance_defers_the_heartbeat` (fake clock).
+
+#### Scenario: Only a tip move or a phase advance resets the interval
+
+- **GIVEN** the heartbeat decision with a last-progress instant and the current instant
+- **WHEN** the tick observes a branch tip move or a phase advance
+- **THEN** the last-progress instant SHALL become the current instant
+- **AND** a tick that observes only changed pane output, a repeated `working` status, the loop's re-escalation of an unanswered prompt, or a learning the loop recorded SHALL leave it unchanged
+
+Test: `supervisor::drive::tests::progress_kinds_reset_the_heartbeat` (table-driven, pure).
+
+#### Scenario: Re-escalating an unanswered prompt does not defer the heartbeat
+
+- **GIVEN** an unattended drive loop whose only coding agent sits on an unanswered live permission prompt
+- **AND** the loop re-escalates that prompt each dedup window and records a learning for it
+- **WHEN** a full heartbeat interval passes with no branch tip move and no phase advance
+- **THEN** the loop SHALL exit with outcome `heartbeat`
+
+Test: `supervisor::drive::tests::re_escalations_do_not_defer_the_heartbeat` (fake clock).
+
+#### Scenario: Stuck-detection phases are not a phase advance
+
+- **GIVEN** a coding agent whose broker rows carry `status` `working` with a synthetic stuck-detection `phase` such as `stuck-on-prompt`, `context-bloat` or `blocked-on-supervisor`
+- **WHEN** the loop resolves the agent's phase
+- **THEN** the resolved `WorkerPhase` SHALL NOT rise
+- **AND** the tick SHALL NOT count as progress
+
+Test: `supervisor::drive::tests::stuck_detection_statuses_are_not_a_phase_advance`.
+
+#### Scenario: A tip moved by the loop's own branch refresh is not progress
+
+- **GIVEN** an unattended drive loop that rebases a coding branch onto the default branch after another branch merges
+- **AND** no agent commits or advances its phase afterwards
+- **WHEN** a full heartbeat interval passes after the last real progress
+- **THEN** the loop SHALL exit with outcome `heartbeat`
+- **AND** the rebased tip SHALL have been taken as a fresh baseline, not counted as progress
+
+Test: `supervisor::drive::tests::a_tip_moved_by_the_loops_own_branch_refresh_is_not_progress` (fake clock).
+
+#### Scenario: A failing tip read is no observation
+
+- **GIVEN** an unattended drive loop whose tip query fails for every coding branch
+- **WHEN** a full heartbeat interval passes with no phase advance
+- **THEN** the loop SHALL keep running until then without aborting
+- **AND** SHALL exit with outcome `heartbeat`
+
+Test: `supervisor::drive::tests::a_failing_tip_read_is_no_observation` (fake clock).
+
+#### Scenario: A completion published during a long tick is not lost to the heartbeat
+
+- **GIVEN** an unattended drive loop whose heartbeat falls due at the end of a tick
+- **AND** the tick's status was fetched before a coding agent published `done` with its branch merged
+- **WHEN** the loop evaluates the heartbeat
+- **THEN** it SHALL take one fresh status observation
+- **AND** SHALL end with outcome `completed`, not `heartbeat`
+
+Test: `supervisor::drive::tests::a_heartbeat_takes_a_fresh_look_before_exiting` (fake clock); `tests/unattended_drive_e2e.rs::detached_unattended_run_completes_past_the_heartbeat`.
+
+#### Scenario: The fresh look defers the exit at most once without progress
+
+- **GIVEN** an unattended drive loop whose heartbeat is due
+- **AND** every fresh look shows a completion condition that no tick's own status fetch shows
+- **WHEN** the heartbeat falls due on the next tick with no progress in between
+- **THEN** the loop SHALL exit with outcome `heartbeat`
+- **AND** SHALL NOT defer the exit a second time
+
+Test: `supervisor::drive::tests::a_fresh_look_defers_the_heartbeat_at_most_once_without_progress` (fake clock).
+
+#### Scenario: A detached run reaches completion
+
+- **GIVEN** `git paw start --unattended` launched with no controlling terminal and stdin not a TTY, with the heartbeat interval shortened for the test
+- **AND** coding agents that keep committing for longer than that interval, then publish a terminal status with their branches merged
+- **WHEN** the run proceeds
+- **THEN** the loop SHALL NOT exit with `heartbeat`
+- **AND** the run SHALL end with outcome `completed`
+
+Test: `tests/unattended_drive_e2e.rs::detached_unattended_run_completes_past_the_heartbeat`.
 
 ### Requirement: Exit summary
 

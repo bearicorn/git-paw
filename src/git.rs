@@ -668,6 +668,40 @@ pub fn branch_tip_short(repo_root: &Path, branch: &str) -> Result<String, PawErr
     branch_tip_short_with(&RealCommandRunner, repo_root, branch)
 }
 
+/// The full SHA of `branch`'s tip — `git rev-parse --verify <branch>` — which
+/// the unattended drive loop compares tick to tick to observe progress. Full,
+/// not abbreviated, so two different tips can never compare equal.
+///
+/// # Errors
+/// Returns [`PawError::WorktreeError`] if `git rev-parse` cannot be spawned
+/// or exits non-zero (e.g. the branch was deleted mid-wave).
+pub(crate) fn branch_tip_with(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    branch: &str,
+) -> Result<String, PawError> {
+    let cwd = repo_root.to_string_lossy();
+    let branch_ref = heads_ref(branch);
+    let output = runner
+        .run("git", &["-C", &cwd, "rev-parse", "--verify", &branch_ref])
+        .map_err(|e| PawError::WorktreeError(format!("failed to run git rev-parse: {e}")))?;
+    if output.code != Some(0) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(PawError::WorktreeError(format!(
+            "git rev-parse --verify {branch_ref} failed: {stderr}"
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// [`branch_tip_with`] against [`RealCommandRunner`].
+///
+/// # Errors
+/// Propagates the errors of [`branch_tip_with`].
+pub fn branch_tip(repo_root: &Path, branch: &str) -> Result<String, PawError> {
+    branch_tip_with(&RealCommandRunner, repo_root, branch)
+}
+
 /// Resolves the absolute worktree directory path for `branch` under the
 /// given `placement`.
 ///
@@ -2750,6 +2784,24 @@ mod tests {
             });
             let err = super::super::branch_tip_short_with(&fake, Path::new("/repo"), "feat/gone")
                 .unwrap_err();
+            assert!(matches!(err, PawError::WorktreeError(_)));
+        }
+
+        #[test]
+        fn branch_tip_returns_the_full_sha_for_a_real_repo() {
+            let r = super::setup_rebase_repo();
+            let tip = super::super::branch_tip(r.path(), "feat/example")
+                .expect("rev-parse runs against a real repo");
+            assert_eq!(tip, super::head_sha(r.path(), "feat/example"));
+        }
+
+        #[test]
+        fn branch_tip_errors_when_branch_is_gone() {
+            let fake = FakeCommandRunner::scripted(|_, _| {
+                Ok(fail_with(128, "fatal: Needed a single revision"))
+            });
+            let err =
+                super::super::branch_tip_with(&fake, Path::new("/repo"), "feat/gone").unwrap_err();
             assert!(matches!(err, PawError::WorktreeError(_)));
         }
 

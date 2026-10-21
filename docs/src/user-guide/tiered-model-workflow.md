@@ -115,7 +115,7 @@ for exactly what it handles.
 
 You are the **exception handler**, not the operator. A human is re-engaged only for
 what the orchestrator genuinely cannot decide, plus two structural cases: the
-~25-minute heartbeat exit, and a run with **no orchestrator session at all** (a pure
+heartbeat exit after ~25 minutes without progress, and a run with **no orchestrator session at all** (a pure
 `--unattended` run nobody orchestrates leaves every judgment call as a broker review
 item for you, exactly as it did before). Everything the fleet can resolve — safe approvals, cross-agent
 questions, verify-fix cycles, merge sequencing — resolves without you.
