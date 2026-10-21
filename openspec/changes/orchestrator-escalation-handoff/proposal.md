@@ -23,8 +23,8 @@ Archive position 20, the last change of the release (after the skill export the 
   correction-exhausted branch — and when a headless invocation is resolvable, the drive loop invokes
   the orchestrator CLI once, non-interactively, at the repository root, with the escalation context on
   **stdin** (never argv), `GIT_PAW_BROKER_URL` in the environment, and approval flags from
-  `[supervisor].approval` (falling back to `agent_approval`). The broker review item is still recorded
-  first. The loop never blocks the wave on the invocation. In the functional core this is one more
+  `[supervisor].approval` (falling back to `agent_approval`). The broker review item is still in place
+  first (the worker's own message for a question or merge decision, a loop record otherwise). The loop never blocks the wave on the invocation. In the functional core this is one more
   effect (`InvokeOrchestrator`), returned by `drive-loop-functional-core`'s `decide_message` for its
   question and merge-decision judgment calls and by `decide_nudge`'s correction-exhausted branch. The
   early correction heads-up is **not** handed off: its own text says "no action is required yet"

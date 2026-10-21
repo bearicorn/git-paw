@@ -128,8 +128,19 @@ The loop keeps polling until one of:
 1. **Completion** — a terminal PASS/FAIL verdict is signalled, or every agent's
    tasks are checked complete.
 2. **Stuck / bloat** — the stuck-detection signal fires.
-3. **Heartbeat** — about 25 minutes elapse with no completion, so you are
+3. **Heartbeat** — about 25 minutes pass **without progress**, so you are
    re-engaged with a status summary rather than the loop running forever.
+   Progress is a coding agent's branch tip moving (a new commit) or its phase
+   advancing (e.g. `working` → `committed` → `verified`/`done`); the interval
+   is measured from the last progress the loop saw, not from launch. Nothing
+   the loop does itself counts — its escalations, its reminder re-escalations
+   of an unanswered prompt, the learnings it records, its own rebases of a
+   branch after a merge — and neither does changed pane output or a repeated
+   `working` status. So a wave that keeps committing is never cut off at 25
+   minutes, while a wave whose agents all sit on unanswered prompts still
+   exits one interval after its last progress. Before exiting, the loop takes
+   one fresh status look, so a `done` published during a long tick still ends
+   the run as `completed`.
 4. **Session torn down** — the loop's own session instance is purged, stopped,
    or replaced (see [Session-instance lifecycle](#session-instance-lifecycle)
    below).

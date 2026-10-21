@@ -129,8 +129,9 @@ discovered spec, the other narrows to a subset or opens the picker.
 returning with an attach hint: it polls the panes on a ~15-second cadence,
 escalates **every** live permission prompt it finds — on a coding pane or the
 supervisor's own — for a human decision WITHOUT blocking the rest of the wave,
-and exits with a summary on completion, a stuck signal, or a ~25-minute
-heartbeat. It is designed for detached operation and needs no attached
+and exits with a summary on completion, a stuck signal, or a heartbeat after
+~25 minutes without progress (no new commit on a coding branch and no agent
+phase advance). It is designed for detached operation and needs no attached
 terminal. It is mutually exclusive with `--no-supervisor`.
 
 **It approves nothing.** git-paw sends no approval keystroke on its own

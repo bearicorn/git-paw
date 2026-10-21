@@ -65,8 +65,16 @@
 // - N feedback→fix→re-verify cycles are tolerated → drive::loop_exits_on_heartbeat_when_never_completing
 // - PASS/FAIL verdict ends the loop → drive::completion_on_supervisor_verdict
 // - all-tasks-checked ends the loop → drive::completion_when_all_agents_checked
-// - heartbeat fires after a prolonged run → drive::loop_exits_on_heartbeat_when_never_completing,
-//   e2e::heartbeat_exits_with_summary
+// - heartbeat fires after a prolonged run without progress →
+//   drive::loop_exits_on_heartbeat_when_never_completing, e2e::heartbeat_exits_with_summary
+// - a progressing wave is not ended by the heartbeat → drive::branch_tip_movement_defers_the_heartbeat,
+//   drive::a_phase_advance_defers_the_heartbeat
+// - only a tip move or a phase advance resets the interval → drive::progress_kinds_reset_the_heartbeat,
+//   drive::a_tip_moved_by_the_loops_own_branch_refresh_is_not_progress
+// - re-escalating an unanswered prompt does not defer the heartbeat →
+//   drive::re_escalations_do_not_defer_the_heartbeat
+// - a detached run reaches completion → e2e::detached_unattended_run_completes_past_the_heartbeat,
+//   drive::a_heartbeat_takes_a_fresh_look_before_exiting
 // - exit summary reports outcome + escalations → drive::summary_reports_outcome_states_and_escalations,
 //   e2e::escalates_live_prompt_without_blocking_other_agent (summary read from stdout)
 // - an escalated prompt is recorded as a learning → drive::formerly_safe_command_is_escalated_not_approved
@@ -167,6 +175,50 @@ fn write_prompt_dummy_with_trailing_region(dir: &Path, name: &str, shown_cmd: &s
 /// A dummy CLI that just holds its pane open with no prompt.
 fn plain_dummy() -> &'static str {
     "cat"
+}
+
+/// Writes an executable dummy CLI that commits to its own branch every 0.6s —
+/// a cadence shorter than the test's heartbeat — until `stop_file` appears,
+/// then touches `stopped_marker` and holds the pane with `cat`. Each commit
+/// moves the branch tip, which is the progress `unattended-heartbeat-progress`
+/// measures the heartbeat from.
+fn write_committing_dummy(
+    dir: &Path,
+    name: &str,
+    stop_file: &Path,
+    stopped_marker: &Path,
+) -> PathBuf {
+    let path = dir.join(name);
+    let stop = stop_file.display();
+    let stopped = stopped_marker.display();
+    let script = format!(
+        "#!/usr/bin/env bash\n\
+         # Test dummy CLI: commit on a short cadence until told to stop.\n\
+         # Drain whatever is typed into the pane (the boot prompt) with echo\n\
+         # off, so the pane never shows buffered input the loop would try to\n\
+         # recover; this dummy models an agent busy working, not one waiting.\n\
+         stty -echo 2>/dev/null\n\
+         cat >/dev/null &\n\
+         n=0\n\
+         while [ ! -e '{stop}' ]; do\n\
+         \x20 n=$((n + 1))\n\
+         \x20 echo \"$n\" >> progress.txt\n\
+         \x20 git add progress.txt >/dev/null 2>&1\n\
+         \x20 git commit -q -m \"progress $n\" >/dev/null 2>&1\n\
+         \x20 sleep 0.6\n\
+         done\n\
+         : > '{stopped}'\n\
+         exec tail -f /dev/null\n"
+    );
+    fs::write(&path, script).expect("write committing dummy");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path).expect("stat dummy").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("chmod dummy");
+    }
+    path
 }
 
 /// Writes an executable dummy CLI that, on branch `prompt_branch`, reprints a
@@ -360,6 +412,54 @@ fn spawn_unattended(
     (child, stdout_path)
 }
 
+/// [`spawn_unattended`], fully detached: stdin is null as well, so the run has
+/// no controlling terminal on any stream — the shape of a `nohup … &` launch.
+#[allow(clippy::too_many_arguments)]
+fn spawn_unattended_detached(
+    repo: &Path,
+    home: &Path,
+    socket_dir: &Path,
+    out_dir: &Path,
+    branches: &str,
+    poll_ms: &str,
+    heartbeat_ms: &str,
+) -> (Child, PathBuf) {
+    let stdout_path = out_dir.join("stdout.log");
+    let stdout = fs::File::create(&stdout_path).expect("create stdout log");
+    let stderr = fs::File::create(out_dir.join("stderr.log")).expect("create stderr log");
+
+    let child = StdCommand::new(BIN)
+        .current_dir(repo)
+        .args(["start", "--unattended", "--branches", branches])
+        .env("TMUX_TMPDIR", socket_dir)
+        .env("HOME", home)
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("GIT_PAW_READINESS_TIMEOUT_MS", "120")
+        .env("GIT_PAW_DRIVE_POLL_MS", poll_ms)
+        .env("GIT_PAW_DRIVE_HEARTBEAT_MS", heartbeat_ms)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("spawn detached git paw start --unattended");
+    (child, stdout_path)
+}
+
+/// Counts the commits on `branch` in `repo`, or 0 when it cannot be read.
+fn commit_count(repo: &Path, branch: &str) -> usize {
+    StdCommand::new("git")
+        .current_dir(repo)
+        .args(["rev-list", "--count", branch])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
 /// Polls until the broker at `url` accepts a `/status` request, or the budget
 /// elapses.
 fn wait_for_broker(url: &str, budget: Duration) -> bool {
@@ -524,6 +624,118 @@ fn unattended_heartbeat_exits_with_summary() {
     assert!(
         stdout.contains("Per-agent final state"),
         "summary should include the per-agent state section; stdout:\n{stdout}"
+    );
+}
+
+/// Spec scenario "A detached run reaches completion"
+/// (`unattended-heartbeat-progress`): launched with no terminal on any stream
+/// and a 4s heartbeat, a wave whose agent keeps committing for three
+/// heartbeat intervals is NOT cut off, because the heartbeat counts from the
+/// last branch-tip move rather than from launch. Once the agent stops, its
+/// branch is merged and it reports `done`, so the run ends `completed`.
+#[test]
+#[serial]
+fn detached_unattended_run_completes_past_the_heartbeat() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let home = TempDir::new().expect("home dir");
+    let out = TempDir::new().expect("out dir");
+    let port = pick_broker_port();
+    let url = format!("http://127.0.0.1:{port}");
+    let stop = out.path().join("stop");
+    let stopped = out.path().join("stopped");
+
+    let agent = write_committing_dummy(tr.path(), "dummy_commit.sh", &stop, &stopped);
+    write_config(tr.path(), port, plain_dummy(), &agent.to_string_lossy());
+
+    let heartbeat = Duration::from_secs(4);
+    let (mut child, stdout_path) = spawn_unattended_detached(
+        tr.path(),
+        home.path(),
+        tmux_env.socket_dir(),
+        out.path(),
+        "feat/alpha",
+        "300",
+        "4000",
+    );
+
+    assert!(
+        wait_for_broker(&url, Duration::from_secs(20)),
+        "broker should come up on the ephemeral port"
+    );
+
+    // The run must outlive three heartbeat intervals while the agent keeps
+    // committing — measured from the broker coming up, which precedes the
+    // loop, so the loop has run at least that long by the time this holds.
+    let since_broker = Instant::now();
+    let main_commits = commit_count(tr.path(), "main");
+    let mut exited_early = None;
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            exited_early = Some(status);
+            break;
+        }
+        // The process can outlive its loop briefly while it prints the
+        // summary, so the loop's own exit line is the earlier signal.
+        if read_to_string(&stdout_path).contains("Unattended drive loop exited") {
+            exited_early = child.wait().ok();
+            break;
+        }
+        let committing = commit_count(tr.path(), "feat/alpha") >= main_commits + 5;
+        if since_broker.elapsed() >= heartbeat * 3 && committing {
+            break;
+        }
+        assert!(
+            since_broker.elapsed() < Duration::from_secs(60),
+            "the agent never committed enough to test the heartbeat"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    if let Some(status) = exited_early {
+        let stdout = read_to_string(&stdout_path);
+        kill_session(tmux_env.socket_dir(), &stdout);
+        panic!(
+            "a progressing wave was cut off ({status}) before three heartbeat intervals; \
+             stdout:\n{stdout}"
+        );
+    }
+
+    // Stop the agent, wait until it has really stopped committing, then merge
+    // its branch and report it done — quickly, well inside one heartbeat.
+    fs::write(&stop, "").expect("write stop file");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !stopped.exists() {
+        assert!(Instant::now() < deadline, "the agent never stopped");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let merge = StdCommand::new("git")
+        .current_dir(tr.path())
+        .args(["merge", "--ff-only", "-q", "feat/alpha"])
+        .output()
+        .expect("git merge");
+    assert!(
+        merge.status.success(),
+        "fast-forward main to the agent's branch: {}",
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    publish_terminal(&url, "feat-alpha", "done");
+
+    let status = wait_child(&mut child, Duration::from_secs(30));
+    let stdout = read_to_string(&stdout_path);
+    kill_session(tmux_env.socket_dir(), &stdout);
+
+    let status = status.unwrap_or_else(|| panic!("child did not exit; stdout:\n{stdout}"));
+    assert!(
+        status.success(),
+        "unattended run should exit 0; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Unattended drive loop exited: completed"),
+        "a wave that kept progressing must reach completion, not the heartbeat; stdout:\n{stdout}"
     );
 }
 
