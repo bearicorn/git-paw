@@ -208,6 +208,12 @@ pub(crate) fn cmd_start(
     // warning but immediately switches to the alternate screen.
     warn_if_broker_is_exposed(&broker_config);
 
+    // Enforce the agent cap BEFORE creating any worktree, as `cmd_supervisor`
+    // and `cmd_add` do. The grid builder rejects the same count at build time,
+    // but that is after the loop below has created and provisioned a worktree
+    // per branch — so the user would be left with N worktrees and no session.
+    git_paw::surface::layout_for(selection.mappings.len(), broker_config.enabled)?;
+
     let mut builder = tmux::TmuxSessionBuilder::new(&project)
         .session_name(session_name)
         .mouse_mode(mouse)
@@ -392,6 +398,7 @@ pub(crate) fn cmd_start(
         // The layout already answers `None` for a broker-less launch, so this
         // needs no broker guard of its own.
         dashboard_pane: layout.recorded_dashboard_pane(),
+        layout: layout.recorded_pane_layout(),
     };
 
     if broker_config.enabled {
@@ -618,6 +625,9 @@ fn launch_spec_session(
     // See `cmd_start`: the port clash has to be caught before any pane exists.
     broker::ensure_port_free_for_repo(&broker_config, repo_root)?;
 
+    // And, as in `cmd_start`, the agent cap before any worktree is created.
+    git_paw::surface::layout_for(mappings.len(), broker_config.enabled)?;
+
     let mut builder = tmux::TmuxSessionBuilder::new(project)
         .session_name(session_name)
         .mouse_mode(mouse)
@@ -818,6 +828,7 @@ fn launch_spec_session(
         // The layout already answers `None` for a broker-less launch, so this
         // needs no broker guard of its own.
         dashboard_pane: layout.recorded_dashboard_pane(),
+        layout: layout.recorded_pane_layout(),
     };
 
     if broker_config.enabled {
@@ -993,25 +1004,7 @@ pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result
     // session it believes is already active.
     updated.status = SessionStatus::Active;
 
-    // Submit boot prompts held for agents added while the session was paused
-    // (design D4 of git-paw-add): they were registered with the pane created
-    // but their prompt left unsubmitted; resume starts them alongside the
-    // rest. Existing (pre-pause) agents carry no pending prompt and are left
-    // untouched — they continue their in-flight conversations on reattach.
-    let has_pending = updated
-        .worktrees
-        .iter()
-        .any(|w| w.pending_boot_prompt.is_some());
-    if has_pending {
-        let session_name = updated.session_name.clone();
-        let offset = agent_pane_offset(&updated);
-        for (idx, wt) in updated.worktrees.iter_mut().enumerate() {
-            if let Some(pending) = wt.pending_boot_prompt.take() {
-                let delay = resolve_submit_delay_ms(&wt.cli, &config.clis);
-                submit_prompt_to_pane(&session_name, offset + idx, &pending, delay);
-            }
-        }
-    }
+    submit_held_boot_prompts(&mut updated, &config);
 
     session::save_session(&updated)?;
 
@@ -1042,6 +1035,89 @@ pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result
     crate::write_repo_discovery_file_with_agents(repo_root, &updated.session_name, agents);
 
     attach_or_print_hint(&existing.session_name)
+}
+
+/// Submit the boot prompts held for agents added while the session was paused
+/// (design D4 of git-paw-add): they were registered with their pane created
+/// but their prompt left unsubmitted, and a resume starts them alongside the
+/// rest. Existing (pre-pause) agents carry no pending prompt and are left
+/// untouched — they continue their in-flight conversations on reattach.
+///
+/// Each submit passes the launch-readiness gate first: this path sends a real
+/// `Enter`, so a blind submit into a pane still showing an unanswered
+/// first-run trust/bypass dialog could accidentally accept it. Unlike every
+/// other gated path, a blocked pane does NOT fail the command — the rest of
+/// the session has already restarted, so the pane KEEPS its held prompt for
+/// the next restart (the `take` happens only once the gate passes) and is
+/// reported on stderr instead.
+///
+/// Takes `&mut Session` because a submitted prompt is cleared from the
+/// session the caller then saves; a blocked pane's prompt stays on it.
+fn submit_held_boot_prompts(updated: &mut Session, config: &PawConfig) {
+    if !updated
+        .worktrees
+        .iter()
+        .any(|w| w.pending_boot_prompt.is_some())
+    {
+        return;
+    }
+
+    let session_name = updated.session_name.clone();
+    let offset = agent_pane_offset(updated);
+    // The approval level a relaunch would need, resolved as the recovery path
+    // resolves it: a session with no `[supervisor]` section falls back to the
+    // default, exactly as `cmd_start` and `cmd_add` do.
+    let default_sup = SupervisorConfig::default();
+    let approval = config
+        .supervisor
+        .as_ref()
+        .unwrap_or(&default_sup)
+        .agent_approval;
+    let mut blocked: Vec<String> = Vec::new();
+
+    for (idx, wt) in updated.worktrees.iter_mut().enumerate() {
+        if wt.pending_boot_prompt.is_none() {
+            continue;
+        }
+        // Resolve the pane LIVE rather than from the launch-time offset: a
+        // resume splits a new dashboard pane in at whatever index tmux
+        // assigns, so `offset + idx` can name a different agent's pane (the
+        // same reason the discovery-file rewrite re-resolves).
+        let pane_idx = tmux::resolve_pane_index_for_worktree(&session_name, &wt.worktree_path)
+            .ok()
+            .flatten()
+            .unwrap_or(offset + idx);
+        let agent_flags = config::resolve_approval_flags(&wt.cli, &approval, &config.clis);
+        let cli_command =
+            apply_approval_flags(&config::launch_command(&wt.cli, &config.clis), &agent_flags);
+
+        match gate_pane_or_fail_on_dialog(
+            &session_name,
+            pane_idx,
+            &wt.cli,
+            &cli_command,
+            &config.clis,
+        ) {
+            Ok(()) => {
+                if let Some(pending) = wt.pending_boot_prompt.take() {
+                    let delay = resolve_submit_delay_ms(&wt.cli, &config.clis);
+                    submit_prompt_to_pane(&session_name, pane_idx, &pending, delay);
+                }
+            }
+            Err(e) => blocked.push(format!("  {} (pane {pane_idx}): {e}", wt.branch)),
+        }
+    }
+
+    if !blocked.is_empty() {
+        eprintln!(
+            "warning: {} pane(s) were blocked on an unanswered first-run dialog, so their \
+             held boot prompts were NOT submitted and remain held for the next \
+             `git paw start`:\n{}\n\
+             The rest of the session has restarted.",
+            blocked.len(),
+            blocked.join("\n")
+        );
+    }
 }
 
 /// Appends `flags` to `command` with a single separating space, or returns

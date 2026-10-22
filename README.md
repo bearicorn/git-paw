@@ -238,7 +238,7 @@ All examples below use `git paw`, but `git-paw` works identically.
 |---------|--------------|
 | `init` | Scaffold `.git-paw/` (default config + `.gitignore`). |
 | `start` | Launch or reattach a session — interactive, `--cli`/`--branches`, or spec-driven (`--from-all-specs`, `--specs`, `--preset`, `--dry-run`, `--unattended`). Auto-recovers a stopped session. |
-| `add` | Attach a branch + agent pane mid-session (v0.6.0+). |
+| `add` | Attach a branch + agent pane mid-session, on any live session (v0.6.0+). |
 | `remove` | Detach one agent — pane + worktree — with `--force` / `--keep-worktree` (v0.6.0+). |
 | `pause` | Soft-stop: detach and stop the broker, keep CLI panes for instant resume (v0.5.0+). |
 | `stop` | Kill the tmux session and CLIs; keep worktrees + state. |

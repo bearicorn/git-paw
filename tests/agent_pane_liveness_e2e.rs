@@ -98,6 +98,7 @@ fn dead_panes_receipt(session_name: &str, repo_path: &Path) -> Session {
         broker_log_path: None,
         mode: SessionMode::Bare,
         dashboard_pane: None,
+        layout: None,
     }
 }
 

@@ -1691,6 +1691,7 @@ mod tests {
             broker_log_path: None,
             mode: crate::session::SessionMode::Bare,
             dashboard_pane: None,
+            layout: None,
         }
     }
 

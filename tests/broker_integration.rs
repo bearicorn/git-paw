@@ -41,6 +41,7 @@ fn make_session_with_broker(suffix: &str) -> Session {
         broker_log_path: Some(PathBuf::from(format!("/tmp/broker-{suffix}.log"))),
         mode: SessionMode::Bare,
         dashboard_pane: Some(0),
+        layout: Some(git_paw::session::PaneLayout::Grid),
     }
 }
 
@@ -67,6 +68,7 @@ fn make_session_without_broker(suffix: &str) -> Session {
         broker_log_path: None,
         mode: SessionMode::Bare,
         dashboard_pane: None,
+        layout: Some(git_paw::session::PaneLayout::Grid),
     }
 }
 

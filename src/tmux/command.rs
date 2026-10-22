@@ -529,64 +529,30 @@ impl TmuxSessionBuilder {
             "Enter",
         ]));
 
-        // 6. Subsequent panes — tiled layout before each split
-        for (i, pane) in self.panes.iter().enumerate().skip(1) {
-            // Apply tiled layout before split to ensure space
-            commands.push(TmuxCommand::new(&[
-                "select-layout",
-                "-t",
-                &session_name,
-                "tiled",
-            ]));
-
-            // Split window to create new pane. Pass `-c <worktree>` so the
-            // new pane's shell starts in the agent worktree directly — this
-            // avoids the `cd <worktree> && <cli>` send-keys race where the
-            // `cd` prefix is lost when send-keys fires before the shell is
-            // ready to accept input.
-            commands.push(TmuxCommand::new(&[
-                "split-window",
-                "-t",
-                &session_name,
-                "-c",
-                &pane.worktree,
-            ]));
-
-            // Title and command for the new pane
-            let pane_target = format!("{session_name}:0.{i}");
-            push_pane_title(
-                &mut commands,
-                self.border_affordances,
-                &pane_target,
-                &pane.branch,
-            );
-            commands.push(TmuxCommand::new(&[
-                "send-keys",
-                "-t",
-                &pane_target,
-                &pane.cli_command,
-                "Enter",
-            ]));
-        }
-
-        // 7. Final layout - use main-horizontal if we have a dashboard, otherwise tiled
-        if self.panes.len() > 1 && self.panes[0].branch == "dashboard" {
-            // Dashboard layout: dashboard pane takes full width at top, worktree panes tiled below
-            commands.push(TmuxCommand::new(&[
-                "select-layout",
-                "-t",
-                &session_name,
-                "main-horizontal",
-            ]));
+        // 6. The remaining panes — the agent grid, identical to the one
+        //    `build_supervisor_session` builds, so every pane-less session has
+        //    one layout (`tmux-orchestration`: "Every pane-less session uses
+        //    the agent grid"). A dashboard, when present, is pane 0 and
+        //    becomes the full-width top row; without one the agent rows start
+        //    at pane 0 and share the full height. The whole-window
+        //    `select-layout tiled` / `main-horizontal` layouts are NOT used:
+        //    neither can be re-tiled incrementally for `add` / `remove`, and
+        //    `select-layout` reorders pane indices unpredictably.
+        let has_top_row = first.branch == DASHBOARD_PANE_BRANCH;
+        let agents = if has_top_row {
+            &self.panes[1..]
         } else {
-            // Standard tiled layout for sessions without dashboard
-            commands.push(TmuxCommand::new(&[
-                "select-layout",
-                "-t",
-                &session_name,
-                "tiled",
-            ]));
-        }
+            &self.panes[..]
+        };
+        let layout = crate::surface::layout_for(agents.len(), has_top_row)?;
+        push_agent_grid(
+            &mut commands,
+            &session_name,
+            agents,
+            layout,
+            self.border_affordances,
+            false,
+        );
 
         Ok(TmuxSession {
             name: session_name,
@@ -594,6 +560,17 @@ impl TmuxSessionBuilder {
         })
     }
 }
+
+/// The [`PaneSpec::branch`] value every launch path gives the dashboard pane,
+/// and the marker [`TmuxSessionBuilder::build`] reads to decide whether a
+/// built pane list starts with a full-width top row.
+///
+/// A coding agent CAN collide with it — `dashboard` is a legal branch name —
+/// in which case that agent's pane is treated as the top row. The same string
+/// compare decided the dashboard layout before the grid did, so the collision
+/// and its consequence are unchanged; it is called out here rather than left
+/// implicit because the marker now also decides the agent offset.
+const DASHBOARD_PANE_BRANCH: &str = "dashboard";
 
 /// Builds the argv for `tmux send-keys` that injects `text` into
 /// `<session_name>:0.<pane_index>` literally (`-l`) and *without* a trailing
@@ -651,8 +628,6 @@ pub fn build_supervisor_session(
     border_affordances: bool,
     env_vars: &[(String, String)],
 ) -> Result<TmuxSession, PawError> {
-    use crate::surface::{SUPERVISOR_AGENTS_PER_ROW, SUPERVISOR_PANE_OFFSET};
-
     let session_name = session_name_override
         .unwrap_or_else(|| crate::domain::SessionName::from_project(project_name).into_string());
     let mut commands: Vec<TmuxCommand> = Vec::new();
@@ -770,127 +745,137 @@ pub fn build_supervisor_session(
         ],
     );
 
-    // 5. Populate the agent grid.
-    if let Some(first) = agents.first() {
-        // Split pane 0 vertically -> the full-width agent area becomes pane 1,
-        // born in the first agent's worktree via `-c` so its CLI runs there
-        // without a `cd <worktree> && <cli>` chain (which races shell
-        // startup).
-        //
-        // Use `-l <N>%` (the modern tmux 3.1+ form) instead of the deprecated
-        // `-p <N>`. On Linux tmux 3.4 (Ubuntu 24.04 apt-package), `-p`
-        // resolves the percentage against the parent pane's laid-out size,
-        // which is empty on a detached server with no attached client — tmux
-        // bails with `cmd-split-window.c: "size missing"`. `-l <N>%` resolves
-        // against the window's `-y` dimension instead, which is the value we
-        // set on `new-session -x 200 -y 50`, so the split math succeeds in
-        // headless mode. macOS tmux 3.6a tolerates either form.
-        let bottom_pct = format!("{}%", 100u16 - u16::from(layout.top_row_pct));
-        push(
-            &mut commands,
-            &[
-                "split-window",
-                "-v",
-                "-t",
-                &dashboard_target,
-                "-l",
-                &bottom_pct,
-                "-c",
-                &first.worktree,
-            ],
-        );
-        let first_target = format!("{session_name}:0.{SUPERVISOR_PANE_OFFSET}");
-        push_pane_title(
-            &mut commands,
-            border_affordances,
-            &first_target,
-            &first.branch,
-        );
-        push(&mut commands, &["send-keys", "-t", &first_target, "C-u"]);
-        push(
-            &mut commands,
-            &[
-                "send-keys",
-                "-t",
-                &first_target,
-                &first.cli_command,
-                "Enter",
-            ],
-        );
-
-        let mut row_first_pane = SUPERVISOR_PANE_OFFSET;
-
-        for (i, agent) in agents.iter().enumerate().skip(1) {
-            let pane_idx = SUPERVISOR_PANE_OFFSET + i;
-            let pane_target = format!("{session_name}:0.{pane_idx}");
-            let position_in_row = i % SUPERVISOR_AGENTS_PER_ROW;
-            let starts_new_row = position_in_row == 0;
-
-            if starts_new_row {
-                // Vertical split from this row's first pane to add a new row
-                // below.
-                let src_target = format!("{session_name}:0.{row_first_pane}");
-                push(
-                    &mut commands,
-                    &[
-                        "split-window",
-                        "-v",
-                        "-t",
-                        &src_target,
-                        "-c",
-                        &agent.worktree,
-                    ],
-                );
-                row_first_pane = pane_idx;
-            } else {
-                // Horizontal split from the previous pane to add a sibling in
-                // the same row.
-                let prev_idx = pane_idx - 1;
-                let prev_target = format!("{session_name}:0.{prev_idx}");
-                push(
-                    &mut commands,
-                    &[
-                        "split-window",
-                        "-h",
-                        "-t",
-                        &prev_target,
-                        "-c",
-                        &agent.worktree,
-                    ],
-                );
-            }
-
-            push_pane_title(
-                &mut commands,
-                border_affordances,
-                &pane_target,
-                &agent.branch,
-            );
-            push(&mut commands, &["send-keys", "-t", &pane_target, "C-u"]);
-            push(
-                &mut commands,
-                &["send-keys", "-t", &pane_target, &agent.cli_command, "Enter"],
-            );
-        }
-    }
-
-    // 6. Final pass: resize-pane to enforce the layout-table heights. One
-    //    resize-pane per row (top + each agent row). Shared with the add /
-    //    remove re-tile path via `push_supervisor_resize_pass` so an
-    //    incrementally re-tiled grid matches a start-time grid of the same
-    //    agent count. Percentages use `<pct>%` syntax which tmux 3.x accepts.
-    push_supervisor_resize_pass(
+    // 5. Populate the agent grid, and 6. the final per-row resize pass. Shared
+    //    with the bare builder (`TmuxSessionBuilder::build`) so every
+    //    pane-less session gets the same geometry, and with the add / remove
+    //    re-tile path via `push_supervisor_resize_pass` so an incrementally
+    //    re-tiled grid matches a start-time grid of the same agent count.
+    push_agent_grid(
         &mut commands,
         &session_name,
+        agents,
         layout,
-        SUPERVISOR_PANE_OFFSET,
-        agents.len(),
+        border_affordances,
+        true,
     );
 
     Ok(TmuxSession {
         name: session_name,
         commands,
     })
+}
+
+/// Emit the agent-grid splits for `agents` plus the per-row `resize-pane`
+/// pass, for the session whose pane 0 already exists.
+///
+/// Pane 0 is the full-width top row (the dashboard) when `layout.has_top_row`,
+/// in which case the first agent is split off it and the agents run from pane
+/// one. Without a top row pane 0 IS the first agent — already titled and
+/// launched by the caller — so this emits splits for the remaining agents only
+/// and the agent rows share the whole window height.
+///
+/// Within a row each agent is a `split-window -h` off its predecessor; each
+/// new row is a `split-window -v` off the previous row's first pane. Every
+/// split carries `-c <that agent's worktree>` so the pane's shell starts there
+/// rather than racing a `cd <worktree> && <cli>` chain. `select-layout` and
+/// `swap-pane` are intentionally avoided — neither preserves the predictable
+/// pane-index ordering the rest of the system relies on.
+///
+/// `clear_input` sends `C-u` before each launch command (W2-2: a stray
+/// shell-startup prompt could otherwise eat the command's leading character).
+fn push_agent_grid(
+    commands: &mut Vec<TmuxCommand>,
+    session_name: &str,
+    agents: &[PaneSpec],
+    layout: crate::surface::SupervisorLayout,
+    border_affordances: bool,
+    clear_input: bool,
+) {
+    use crate::surface::SUPERVISOR_AGENTS_PER_ROW;
+
+    if agents.is_empty() {
+        return;
+    }
+
+    let first_agent = usize::from(layout.has_top_row);
+
+    let launch = |commands: &mut Vec<TmuxCommand>, pane_idx: usize, spec: &PaneSpec| {
+        let pane_target = format!("{session_name}:0.{pane_idx}");
+        push_pane_title(commands, border_affordances, &pane_target, &spec.branch);
+        if clear_input {
+            commands.push(TmuxCommand::new(&["send-keys", "-t", &pane_target, "C-u"]));
+        }
+        commands.push(TmuxCommand::new(&[
+            "send-keys",
+            "-t",
+            &pane_target,
+            &spec.cli_command,
+            "Enter",
+        ]));
+    };
+
+    if layout.has_top_row {
+        // Split the top row vertically -> the full-width agent area becomes
+        // pane 1, born in the first agent's worktree.
+        //
+        // Use `-l <N>%` (the modern tmux 3.1+ form) instead of the deprecated
+        // `-p <N>`. On Linux tmux 3.4 (Ubuntu 24.04 apt-package), `-p`
+        // resolves the percentage against the parent pane's laid-out size,
+        // which is empty on a detached server with no attached client — tmux
+        // bails with `cmd-split-window.c: "size missing"`. `-l <N>%` resolves
+        // against the window's `-y` dimension instead, which is the value set
+        // on `new-session -x … -y …`, so the split math succeeds in headless
+        // mode. macOS tmux 3.6a tolerates either form.
+        let top_target = format!("{session_name}:0.0");
+        let bottom_pct = format!("{}%", 100u16 - u16::from(layout.top_row_pct));
+        commands.push(TmuxCommand::new(&[
+            "split-window",
+            "-v",
+            "-t",
+            &top_target,
+            "-l",
+            &bottom_pct,
+            "-c",
+            &agents[0].worktree,
+        ]));
+        launch(commands, first_agent, &agents[0]);
+    }
+
+    let mut row_first_pane = first_agent;
+    for (i, agent) in agents.iter().enumerate().skip(1) {
+        let pane_idx = first_agent + i;
+        let starts_new_row = i.is_multiple_of(SUPERVISOR_AGENTS_PER_ROW);
+
+        if starts_new_row {
+            // Vertical split from this row's first pane to add a new row below.
+            let src_target = format!("{session_name}:0.{row_first_pane}");
+            commands.push(TmuxCommand::new(&[
+                "split-window",
+                "-v",
+                "-t",
+                &src_target,
+                "-c",
+                &agent.worktree,
+            ]));
+            row_first_pane = pane_idx;
+        } else {
+            // Horizontal split from the previous pane to add a sibling in the
+            // same row.
+            let prev_target = format!("{session_name}:0.{}", pane_idx - 1);
+            commands.push(TmuxCommand::new(&[
+                "split-window",
+                "-h",
+                "-t",
+                &prev_target,
+                "-c",
+                &agent.worktree,
+            ]));
+        }
+
+        launch(commands, pane_idx, agent);
+    }
+
+    push_supervisor_resize_pass(commands, session_name, layout, first_agent, agents.len());
 }
 
 /// Build the tmux commands that splice ONE new agent pane into a running
@@ -1045,22 +1030,31 @@ fn push_supervisor_resize_pass(
 ) {
     use crate::surface::SUPERVISOR_AGENTS_PER_ROW;
 
-    let top_target = format!("{session_name}:0.0");
-    let top_pct_str = format!("{}%", layout.top_row_pct);
-    commands.push(TmuxCommand::new(&[
-        "resize-pane",
-        "-t",
-        &top_target,
-        "-y",
-        &top_pct_str,
-    ]));
+    // The pass runs after the agent CLIs start, so a CLI that exits together
+    // with its pane takes a resize target with it. Row heights are cosmetic:
+    // each resize is soft (warn and continue), never a launch abort.
+    //
+    // Only a window WITH a top row has one to size. Without a dashboard pane 0
+    // is the first agent, and resizing it here would fight the agent-row pass
+    // below.
+    if layout.has_top_row {
+        let top_target = format!("{session_name}:0.0");
+        let top_pct_str = format!("{}%", layout.top_row_pct);
+        commands.push(TmuxCommand::new_soft(&[
+            "resize-pane",
+            "-t",
+            &top_target,
+            "-y",
+            &top_pct_str,
+        ]));
+    }
 
     let agent_row_pct_str = format_supervisor_pct(layout.agent_row_pct);
     for row in 0..layout.agent_rows {
         let pane_idx = first_agent + row * SUPERVISOR_AGENTS_PER_ROW;
         if pane_idx < first_agent + agent_count {
             let target = format!("{session_name}:0.{pane_idx}");
-            commands.push(TmuxCommand::new(&[
+            commands.push(TmuxCommand::new_soft(&[
                 "resize-pane",
                 "-t",
                 &target,

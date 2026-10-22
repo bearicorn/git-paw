@@ -47,6 +47,22 @@ pub enum SessionMode {
     Supervisor,
 }
 
+/// The pane layout a session's window was built with.
+///
+/// Recorded additively on [`Session::layout`]: every session this binary
+/// builds is the agent grid, so the only value is [`PaneLayout::Grid`] and the
+/// field's *absence* is the signal — a session saved by an earlier binary. The
+/// enum exists rather than a bare `bool` so a later layout can be added
+/// without re-interpreting what a recorded value means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PaneLayout {
+    /// The agent grid: the dashboard as the full-width top row when the
+    /// session has one, coding agents row-major below at no more than
+    /// [`crate::surface::SUPERVISOR_AGENTS_PER_ROW`] per row.
+    Grid,
+}
+
 impl fmt::Display for SessionStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -276,6 +292,20 @@ pub struct Session {
     /// position. `None` on v0.4-saved sessions; consumers SHALL default to `0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dashboard_pane: Option<u32>,
+
+    /// Pane layout this session's window was built with. Written as
+    /// [`PaneLayout::Grid`] by every start, recovery and restart that builds
+    /// or rebuilds the window, so a session saved by an earlier binary is the
+    /// only one that records none.
+    ///
+    /// Absence is read through
+    /// [`SessionLayout`](crate::surface::SessionLayout), which falls back to
+    /// the grid for a supervised session (its layout was already the grid) and
+    /// to the earlier whole-window tiled layout for a bare one. Consumers that
+    /// depend on the geometry (`add`, `remove`) decide from that, never from
+    /// [`Session::mode`] alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<PaneLayout>,
 }
 
 impl Session {
@@ -974,6 +1004,7 @@ mod tests {
             broker_log_path: None,
             mode: SessionMode::Bare,
             dashboard_pane: None,
+            layout: None,
         }
     }
 
@@ -1787,6 +1818,71 @@ mod tests {
         assert!(
             !json.contains("dashboard_pane"),
             "JSON should not include dashboard_pane when None, got: {json}"
+        );
+    }
+
+    // -- layout field (session-state: "Session records its pane layout") --
+
+    /// Scenario "New sessions record the grid" — the recorded value survives a
+    /// save/load round trip.
+    #[test]
+    fn pane_layout_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let mut session = sample_session();
+        session.layout = Some(PaneLayout::Grid);
+        save_session_in(&session, dir.path()).unwrap();
+
+        let json = std::fs::read_to_string(dir.path().join("paw-my-project.json")).unwrap();
+        assert!(
+            json.contains(r#""layout": "grid""#),
+            "the grid layout should serialize as `grid`, got: {json}"
+        );
+
+        let loaded = load_session_from("paw-my-project", dir.path())
+            .unwrap()
+            .expect("session should exist");
+        assert_eq!(loaded.layout, Some(PaneLayout::Grid));
+    }
+
+    /// Scenario "Earlier session files load unchanged" — a file written before
+    /// the field existed still loads, with the field absent.
+    #[test]
+    fn session_file_without_layout_loads_with_the_field_absent() {
+        let dir = TempDir::new().unwrap();
+        let json = r#"{
+            "session_name": "paw-legacy-layout",
+            "repo_path": "/tmp/legacy-repo",
+            "project_name": "legacy",
+            "created_at": "2024-03-23T12:00:00Z",
+            "status": "active",
+            "worktrees": [],
+            "mode": "bare",
+            "dashboard_pane": 0
+        }"#;
+        std::fs::write(dir.path().join("paw-legacy-layout.json"), json).unwrap();
+
+        let loaded = load_session_from("paw-legacy-layout", dir.path())
+            .unwrap()
+            .expect("an earlier session file should still load");
+        assert!(
+            loaded.layout.is_none(),
+            "a session saved before the field existed records no layout"
+        );
+        // The rest of the record is untouched by the new field.
+        assert_eq!(loaded.dashboard_pane, Some(0));
+        assert_eq!(loaded.mode, SessionMode::Bare);
+    }
+
+    #[test]
+    fn layout_none_is_omitted_from_json() {
+        let dir = TempDir::new().unwrap();
+        let session = sample_session(); // layout is None by default
+        save_session_in(&session, dir.path()).unwrap();
+
+        let json = std::fs::read_to_string(dir.path().join("paw-my-project.json")).unwrap();
+        assert!(
+            !json.contains("layout"),
+            "JSON should not include layout when None, got: {json}"
         );
     }
 

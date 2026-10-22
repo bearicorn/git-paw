@@ -588,7 +588,9 @@ pub(crate) fn cmd_supervisor(
 
     // Hard cap (D4): 25 agents per session for v0.5.0. Configurable layout
     // arrives in v1.0.0 (issue #17).
-    let layout = git_paw::surface::supervisor_layout(branches.len())?;
+    // A supervised launch always builds the dashboard as the full-width top
+    // row, broker or not, so the grid always has one.
+    let layout = git_paw::surface::supervisor_layout(branches.len(), true)?;
 
     // Real launch.
     git::prune_worktrees(repo_root)?;
@@ -795,6 +797,7 @@ pub(crate) fn cmd_supervisor(
         // not, and records it, so a recorded `None` keeps meaning "an earlier
         // binary" (design D6).
         dashboard_pane: session_layout.recorded_dashboard_pane(),
+        layout: session_layout.recorded_pane_layout(),
     };
     if broker_config.enabled {
         state.broker_port = Some(broker_config.port);

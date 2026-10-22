@@ -13,10 +13,11 @@ use git_paw::config::{self, SupervisorConfig};
 use git_paw::detect;
 use git_paw::error::PawError;
 use git_paw::git;
-use git_paw::session::{self, SessionMode, SessionStatus};
+use git_paw::session::{self, SessionStatus};
+use git_paw::surface::SessionLayout;
 use git_paw::tmux;
 
-use super::helpers::{agent_pane_offset, bare_mode_unsupported, config_to_custom_defs};
+use super::helpers::{agent_pane_offset, config_to_custom_defs, legacy_tiled_layout_unsupported};
 use crate::{
     AttachContext, AttachedAgent, attach_agent, gate_pane_or_fail_on_dialog,
     resolve_submit_delay_ms, submit_prompt_to_pane, write_repo_discovery_file,
@@ -58,8 +59,21 @@ pub(crate) fn cmd_add(
         }
     };
 
-    if existing.mode == SessionMode::Bare {
-        return Err(bare_mode_unsupported(&existing.session_name, "add"));
+    // Every reserved-index and geometry fact about the live window — the
+    // first coding-agent pane, whether the grid sits under a dashboard top
+    // row — comes from this one record, never from `SessionMode`.
+    let session_layout = SessionLayout::of(&existing);
+
+    // Hot-attach works on every grid session — bare, spec-driven and
+    // supervised alike, including a supervised one an earlier binary saved
+    // (its recorded offset still resolves). Only a live session built with the
+    // earlier tiled layout is refused, and it is refused HERE: before the
+    // worktree, the pane or the session JSON is touched.
+    if session_layout.is_legacy_tiled() {
+        return Err(legacy_tiled_layout_unsupported(
+            &existing.session_name,
+            "add",
+        ));
     }
 
     tmux::ensure_tmux_installed()?;
@@ -158,9 +172,12 @@ pub(crate) fn cmd_add(
     }
 
     // 4.4 Enforce the 25-agent cap BEFORE mutating. layout_for(N+1) errors with
-    // the same "split into multiple sessions" message `start` uses.
+    // the same "split into multiple sessions" message `start` uses. Whether the
+    // grid has a top row comes from the session's own layout record, so a
+    // broker-less session (agents from pane 0, rows sharing the full height)
+    // re-tiles to its own geometry rather than a dashboard-bearing one.
     let prev_agent_count = existing.worktrees.len();
-    let layout = git_paw::surface::layout_for(prev_agent_count + 1)?;
+    let layout = git_paw::surface::layout_for(prev_agent_count + 1, session_layout.has_top_row())?;
 
     // 4.5 Take the advisory lock for the rest of the critical section.
     let _lock = git_paw::lock::SessionLock::acquire(&repo_root)?;

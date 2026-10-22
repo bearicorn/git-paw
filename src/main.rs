@@ -1843,6 +1843,7 @@ mod tests {
             broker_log_path: None,
             mode: git_paw::session::SessionMode::Bare,
             dashboard_pane: None,
+            layout: None,
         }
     }
 
@@ -2727,6 +2728,7 @@ mod tests {
             broker_log_path: None,
             mode: git_paw::session::SessionMode::Bare,
             dashboard_pane: None,
+            layout: None,
         };
         session::save_session_in(&session, &sessions_dir).expect("save session");
 
@@ -2808,6 +2810,7 @@ mod tests {
             broker_log_path: None,
             mode: git_paw::session::SessionMode::Bare,
             dashboard_pane: None,
+            layout: None,
         };
         session::save_session_in(&session, &sessions_dir).expect("save session");
 

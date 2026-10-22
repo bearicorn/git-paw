@@ -105,6 +105,35 @@ Archive position 9 (the pane-less companion of the pane removal).
 
 v0.17.0 dropped `approval-pane-map-refresh` (superseded by `classifier-retirement`, which deletes the dashboard auto-approve poll loop it targeted), so no archived roster-refresh requirement exists to align with. The drive loop's per-sweep roster re-read in this change stands on its own. Under `classifier-retirement` the loop escalates every live permission prompt and answers none, so an agent added mid-run has its prompts escalated, never approved; the scenarios here say so.
 
+## Rebase note (2026-10-26): audit against the v0.18.0 integration branch
+
+Re-checked every code premise against the branch this change is built on, which already carries
+`supervisor-pane-removal`, `unattended-heartbeat-progress` and `agent-hook-and-tmux-guards`. Four
+premises had moved:
+
+- **The incremental builders are already parameterised.** `build_add_agent_commands`,
+  `build_remove_retile_commands` and `rebalance_agent_rows` take `first_agent` from `SessionLayout`
+  as of `supervisor-pane-removal`, and `SessionLayout::first_agent_index` already derives it from
+  the recorded `dashboard_pane` (so a pre-relocation supervised session resolves without new code).
+  §1.1 shrinks to the "has top row" geometry input and the no-dashboard variant.
+- **The bare launch paths share one builder.** `cmd_start`, `launch_spec_session` and
+  `recover_bare_session` all build through `TmuxSessionBuilder`, so §1.2 and §1.3 are one change —
+  making `TmuxSessionBuilder::build` emit the grid — rather than three call-site rewrites.
+- **`drive_loop` moved** to `src/supervisor/drive.rs` and takes its roster as a borrowed
+  `&[AgentPane]` fixed for the run, with a `coding_ids` list derived once at loop start; the
+  per-sweep re-read needs an injected `DriveDeps` port, because `drive_loop`'s unit-test harness
+  runs against an empty tempdir where a direct session read would always fail (and so would
+  silently exercise only the fallback branch).
+- **Every line number in §5 was stale.** `restart_from_pause`'s held-prompt submit is at
+  `start.rs:1005-1014`, not `~:973`; the already-gated bare and spec-driven submits are at `:430`
+  and `:861`, not `:406` and `:823`. Two substantive consequences, now in §5.1: the submit loop
+  `.take()`s the pending prompt before saving the session, so the gate must run *before* the take
+  for a stuck pane to keep its prompt; and it addresses panes by `offset + idx` while the
+  discovery-file rewrite immediately below deliberately re-resolves live indices, because a resume
+  re-splits the dashboard wherever tmux puts it.
+
+The change's shape, decisions and spec deltas are unaffected.
+
 ## Rebase note (2026-10-25): audit against released v0.17.0
 
 - DS-5 shrank to one path: v0.17.0 already gates bare `start` (`commands/start.rs:406`) and spec-driven `start` (`:823`) and tests both (`tests/start_spec_launch_parity_integration.rs:903`, `:1000`). Only `restart_from_pause`'s pending-prompt submit (around `start.rs:973`) is ungated; §5 tasks, the Why, the design and Impact now say so. The MODIFIED gate requirement still names every path, and its bare / spec-driven scenarios map to the existing tests.

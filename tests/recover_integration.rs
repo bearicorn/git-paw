@@ -328,3 +328,193 @@ fn recover_session_reconstructs_dashboard_and_watchers() {
         "first pane listed should be pane 0 (dashboard); got listing:\n{listing}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `tmux-orchestration` — "Every pane-less session uses the agent grid":
+// scenario "Recovery rebuilds a grid".
+// ---------------------------------------------------------------------------
+
+/// A stopped bare session saved with the earlier whole-window tiled layout
+/// (no recorded `layout`) and 3 worktrees, with the broker enabled, recovers
+/// as the agent grid: a full-width dashboard top row taking half the window
+/// and one agent row of 3 below it. The re-saved session records the grid, so
+/// the recovered session is hot-attachable where the stopped one was not.
+#[test]
+#[serial]
+fn recovery_rebuilds_a_tiled_bare_session_as_a_grid() {
+    if skip_if_no_tmux() {
+        return;
+    }
+
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let project = unique_project_name("recovergrid");
+    let repo = rename_repo_basename(&tr, &project);
+    let canonical_repo = canonical_repo_root(&repo);
+
+    let branches = ["feat/alpha", "feat/beta", "feat/gamma"];
+    let worktrees: Vec<_> = branches
+        .iter()
+        .map(|b| create_worktree(&repo, &project, b))
+        .collect();
+
+    let broker_port = find_free_port();
+    let paw_dir = repo.join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    fs::write(
+        paw_dir.join("config.toml"),
+        format!("[broker]\nenabled = true\nport = {broker_port}\n\n[clis.sh]\ncommand = \"sh\"\n"),
+    )
+    .expect("write config");
+
+    let fake_home = TempDir::new().expect("create temp HOME");
+    let sessions_dir = if cfg!(target_os = "macos") {
+        fake_home
+            .path()
+            .join("Library/Application Support/git-paw/sessions")
+    } else {
+        fake_home.path().join(".local/share/git-paw/sessions")
+    };
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+    let session_name = format!("paw-{project}");
+    let session_path = sessions_dir.join(format!("{session_name}.json"));
+
+    // An earlier binary's bare session: mode "bare", no `layout` key at all.
+    let session_json = serde_json::json!({
+        "session_name": session_name,
+        "repo_path": canonical_repo.to_string_lossy(),
+        "project_name": project,
+        "created_at": "2026-01-01T00:00:00Z",
+        "status": "stopped",
+        "mode": "bare",
+        "worktrees": branches.iter().zip(&worktrees).map(|(branch, wt)| serde_json::json!({
+            "branch": branch,
+            "worktree_path": wt.to_string_lossy(),
+            "cli": "sh",
+            "branch_created": true,
+        })).collect::<Vec<_>>(),
+        "broker_port": broker_port,
+        "broker_bind": "127.0.0.1",
+    });
+    fs::write(
+        &session_path,
+        serde_json::to_string_pretty(&session_json).expect("serialize session"),
+    )
+    .expect("write session json");
+
+    let mut start_cmd = cmd();
+    start_cmd
+        .current_dir(&repo)
+        .env("HOME", fake_home.path())
+        .env_remove("XDG_DATA_HOME");
+    tmux_env.apply_assert(&mut start_cmd);
+    let _ = start_cmd.args(["start"]).output().expect("run start");
+
+    // Geometry of the rebuilt window: index, left, top, width, height.
+    let mut list_panes_cmd = StdCommand::new("tmux");
+    tmux_env.apply(&mut list_panes_cmd);
+    let output = list_panes_cmd
+        .args([
+            "list-panes",
+            "-t",
+            &session_name,
+            "-F",
+            "#{pane_index} #{pane_left} #{pane_top} #{pane_width} #{pane_height}",
+        ])
+        .output()
+        .expect("tmux list-panes");
+    let listing = String::from_utf8_lossy(&output.stdout).to_string();
+
+    let mut window_cmd = StdCommand::new("tmux");
+    tmux_env.apply(&mut window_cmd);
+    let window = window_cmd
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            &format!("{session_name}:0"),
+            "#{window_width} #{window_height}",
+        ])
+        .output()
+        .expect("tmux display-message");
+    let window = String::from_utf8_lossy(&window.stdout).trim().to_string();
+
+    let saved = fs::read_to_string(&session_path).expect("re-read session json");
+
+    // Tear down before any assertion can fail.
+    let mut kill_cmd = StdCommand::new("tmux");
+    tmux_env.apply(&mut kill_cmd);
+    let _ = kill_cmd
+        .args(["kill-session", "-t", &session_name])
+        .status();
+
+    let panes: Vec<Vec<usize>> = listing
+        .lines()
+        .map(|l| {
+            l.split_whitespace()
+                .filter_map(|f| f.parse().ok())
+                .collect()
+        })
+        .filter(|f: &Vec<usize>| f.len() == 5)
+        .collect();
+    assert_eq!(
+        panes.len(),
+        4,
+        "dashboard + 3 agents; got listing:\n{listing}"
+    );
+
+    let (window_width, window_height) = {
+        let mut it = window.split_whitespace();
+        let w: usize = it
+            .next()
+            .and_then(|v| v.parse().ok())
+            .expect("window width");
+        let h: usize = it
+            .next()
+            .and_then(|v| v.parse().ok())
+            .expect("window height");
+        (w, h)
+    };
+
+    // Pane 0 is the full-width top row, and it is HALF the window — the grid's
+    // top row. The earlier `main-horizontal` layout sized it to tmux's
+    // `main-pane-height` instead, so this is what distinguishes the two.
+    // `pane-border-status top` costs each pane a border row, so compare tops
+    // relatively and allow a few rows of slack on the height.
+    let dashboard = &panes[0];
+    assert_eq!(dashboard[1], 0, "dashboard starts at the left edge");
+    assert_eq!(
+        dashboard[3], window_width,
+        "dashboard spans the full width; listing:\n{listing}"
+    );
+    let half = window_height / 2;
+    assert!(
+        dashboard[4].abs_diff(half) <= 4,
+        "the grid's top row is half the window ({half} ± 4), got {}; listing:\n{listing}",
+        dashboard[4]
+    );
+
+    // The 3 agents are one row: same top, below the dashboard, side by side.
+    let agents = &panes[1..];
+    let agent_top = agents[0][2];
+    assert!(
+        agent_top > dashboard[2],
+        "the agent row sits below the dashboard; listing:\n{listing}"
+    );
+    assert!(
+        agents.iter().all(|p| p[2] == agent_top),
+        "all 3 agents share one row; listing:\n{listing}"
+    );
+    assert!(
+        agents[0][1] < agents[1][1] && agents[1][1] < agents[2][1],
+        "agents run left to right in branch order; listing:\n{listing}"
+    );
+
+    // And the re-saved session records the grid, so `add` / `remove` now work
+    // on it.
+    assert!(
+        saved.contains(r#""layout": "grid""#),
+        "recovery must re-save the session with the grid layout recorded; got:\n{saved}"
+    );
+}
