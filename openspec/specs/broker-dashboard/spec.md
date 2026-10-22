@@ -303,20 +303,20 @@ The system SHALL display a title line above the agent table containing the text 
 
 ### Requirement: Dashboard pane layout
 
-The system SHALL arrange tmux panes with the dashboard in a full-width top row and worktree panes tiled below. This layout SHALL be applied automatically when the dashboard starts and maintained throughout the session.
+The system SHALL arrange tmux panes with the dashboard in a full-width top row and the coding-agent panes in the agent grid below it (row-major, at most five per row, each row at equal widths, per `tmux-orchestration`'s "Every pane-less session uses the agent grid"). This layout SHALL be applied when the session is built, re-applied when an agent is added or removed, and maintained throughout the session.
 
 #### Scenario: Dashboard takes full width at top
 
-- **GIVEN** a tmux session with dashboard pane and 3 worktree panes
-- **WHEN** the dashboard applies its layout
+- **GIVEN** a tmux session with a dashboard pane and 3 coding-agent panes
+- **WHEN** the session is built
 - **THEN** the dashboard pane occupies the full window width as the top row
-- **AND** the worktree panes are arranged in a tiled layout below the dashboard
+- **AND** the 3 coding-agent panes form one equal-width row below the dashboard
 
-#### Scenario: Layout is maintained after tmux operations
+#### Scenario: Layout is maintained after add and remove
 
-- **GIVEN** dashboard with proper layout applied
-- **WHEN** a tmux operation occurs that might disrupt layout (e.g., window resize)
-- **THEN** the system re-applies the correct layout on next render cycle
+- **GIVEN** a dashboard session with the grid applied
+- **WHEN** an agent is added or removed
+- **THEN** the dashboard SHALL remain the full-width top row and the agent rows SHALL re-flow to the grid for the new count
 
 ### Requirement: Committed status in counter and symbols
 

@@ -225,7 +225,7 @@ fn tmux_builder_with_dashboard_pane_and_env_var() {
     use git_paw::tmux::{PaneSpec, TmuxSessionBuilder};
 
     let session = TmuxSessionBuilder::new("broker-test")
-        .add_pane(PaneSpec {
+        .dashboard(PaneSpec {
             branch: "dashboard".to_string(),
             worktree: "/tmp/repo".to_string(),
             cli_command: "git paw __dashboard".to_string(),

@@ -1,5 +1,5 @@
 //! `git paw remove <branch>` — detach a single agent from a running
-//! supervisor-mode session. Extracted verbatim from `main.rs`
+//! grid session (bare or supervised). Extracted verbatim from `main.rs`
 //! (code-analysis-refactor R2c).
 //!
 //! `detach_worktree` (shared with the purge cluster, relocated in R2b) and

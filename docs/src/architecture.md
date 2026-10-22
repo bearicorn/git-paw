@@ -458,6 +458,20 @@ top row.
 | 4 | 50% | 12.5% |
 | 5 | 50% | 10% |
 
+### Pane order
+
+Every agent's pane index is its row-major position: agent *i* is pane
+`first_agent + i`. That holds because every split targets the session's
+**last** pane, and tmux places a split's new pane right after its target in
+the pane list: a sibling in the current row is `split-window -h` off the
+previous pane, and a new row is a full-width `split-window -v -f` off the
+previous pane, so the row spans the window below the rows above it. Splitting
+a new row off the previous row's *first* pane instead would put the new pane
+mid-list and shift every later pane by one, so each launch command and prompt
+typed by index would land in the wrong agent's pane. `git paw add` uses the
+same two splits, so an added agent takes the next index without renumbering
+any existing pane.
+
 ### Equal-width agent columns
 
 Agent panes are spliced into a row by successive `tmux split-window -h`, and
@@ -470,8 +484,9 @@ rebalances that row to equal width: `tmux::rebalance_agent_rows` queries the
 live window width and issues `tmux resize-pane -x <cols>` so each pane in the
 row gets an equal column share (the last pane absorbs the rounding remainder),
 leaving the row equal-width within a one-column tolerance. The rebalance runs
-on every path that changes the grid — `git paw start`, `git paw add`, and
-`git paw remove` — so an incrementally-built grid matches a start-time grid of
+on every path that changes the grid — `git paw start` (bare, spec-driven and
+supervised, and the recovery of each), `git paw add`, and `git paw remove` —
+so an incrementally-built grid matches a start-time grid of
 the same agent count. It never touches the full-width dashboard row nor the
 per-row vertical heights. No agent row exceeds five panes
 (`SUPERVISOR_AGENTS_PER_ROW`), bounding the smallest equal-width target to

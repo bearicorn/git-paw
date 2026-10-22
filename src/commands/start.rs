@@ -222,7 +222,7 @@ pub(crate) fn cmd_start(
     // Broker: inject dashboard pane and environment variable
     if broker_config.enabled {
         let repo_str = repo_root.to_string_lossy().to_string();
-        builder = builder.add_pane(tmux::PaneSpec {
+        builder = builder.dashboard(tmux::PaneSpec {
             branch: "dashboard".to_string(),
             worktree: repo_str,
             cli_command: dashboard_command(),
@@ -376,6 +376,18 @@ pub(crate) fn cmd_start(
 
     // Execute tmux session
     tmux_session.execute()?;
+
+    // Rebalance each agent row to equal width on the live window, as the
+    // supervised start does (design D4): the raw `split-window -h` chain
+    // renders a row as 50/25/25, so a column-precise resize evens it out now
+    // that the panes exist.
+    if let Err(e) = tmux::rebalance_agent_rows(
+        &tmux_session.name,
+        layout.first_agent_index(),
+        worktree_entries.len(),
+    ) {
+        eprintln!("warning: could not rebalance agent-row widths: {e}");
+    }
 
     // Save session state and write the per-repo discovery file BEFORE
     // gating/injecting — matching the supervisor path's order (save, then
@@ -636,7 +648,7 @@ fn launch_spec_session(
     // Broker: inject dashboard pane and environment variable
     if broker_config.enabled {
         let repo_str = repo_root.to_string_lossy().to_string();
-        builder = builder.add_pane(tmux::PaneSpec {
+        builder = builder.dashboard(tmux::PaneSpec {
             branch: "dashboard".to_string(),
             worktree: repo_str,
             cli_command: dashboard_command(),
@@ -806,6 +818,18 @@ fn launch_spec_session(
 
     // Execute tmux session
     tmux_session.execute()?;
+
+    // Rebalance each agent row to equal width on the live window, as the
+    // supervised start does (design D4): the raw `split-window -h` chain
+    // renders a row as 50/25/25, so a column-precise resize evens it out now
+    // that the panes exist.
+    if let Err(e) = tmux::rebalance_agent_rows(
+        &tmux_session.name,
+        layout.first_agent_index(),
+        worktree_entries.len(),
+    ) {
+        eprintln!("warning: could not rebalance agent-row widths: {e}");
+    }
 
     // Save session state and write the per-repo discovery file BEFORE
     // gating/injecting — matching the supervisor path's order (save, then
@@ -1049,7 +1073,9 @@ pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result
 /// other gated path, a blocked pane does NOT fail the command — the rest of
 /// the session has already restarted, so the pane KEEPS its held prompt for
 /// the next restart (the `take` happens only once the gate passes) and is
-/// reported on stderr instead.
+/// reported on stderr instead. A pane whose worktree cannot be resolved to a
+/// live pane is treated the same way — held and reported as "pane not found"
+/// — rather than submitted at a computed index another agent may occupy.
 ///
 /// Takes `&mut Session` because a submitted prompt is cleared from the
 /// session the caller then saves; a blocked pane's prompt stays on it.
@@ -1063,7 +1089,6 @@ fn submit_held_boot_prompts(updated: &mut Session, config: &PawConfig) {
     }
 
     let session_name = updated.session_name.clone();
-    let offset = agent_pane_offset(updated);
     // The approval level a relaunch would need, resolved as the recovery path
     // resolves it: a session with no `[supervisor]` section falls back to the
     // default, exactly as `cmd_start` and `cmd_add` do.
@@ -1075,18 +1100,25 @@ fn submit_held_boot_prompts(updated: &mut Session, config: &PawConfig) {
         .agent_approval;
     let mut blocked: Vec<String> = Vec::new();
 
-    for (idx, wt) in updated.worktrees.iter_mut().enumerate() {
+    for wt in &mut updated.worktrees {
         if wt.pending_boot_prompt.is_none() {
             continue;
         }
         // Resolve the pane LIVE rather than from the launch-time offset: a
         // resume splits a new dashboard pane in at whatever index tmux
-        // assigns, so `offset + idx` can name a different agent's pane (the
-        // same reason the discovery-file rewrite re-resolves).
-        let pane_idx = tmux::resolve_pane_index_for_worktree(&session_name, &wt.worktree_path)
-            .ok()
-            .flatten()
-            .unwrap_or(offset + idx);
+        // assigns, so a computed index can name a different agent's pane (the
+        // same reason the discovery-file rewrite re-resolves). Fail closed: a
+        // pane that cannot be resolved keeps its prompt held and is reported,
+        // never typed into at a guessed index where another agent's ready CLI
+        // would take the prompt and its Enter.
+        let Some(pane_idx) =
+            tmux::resolve_pane_index_for_worktree(&session_name, &wt.worktree_path)
+                .ok()
+                .flatten()
+        else {
+            blocked.push(format!("  {}: pane not found", wt.branch));
+            continue;
+        };
         let agent_flags = config::resolve_approval_flags(&wt.cli, &approval, &config.clis);
         let cli_command =
             apply_approval_flags(&config::launch_command(&wt.cli, &config.clis), &agent_flags);
@@ -1110,9 +1142,10 @@ fn submit_held_boot_prompts(updated: &mut Session, config: &PawConfig) {
 
     if !blocked.is_empty() {
         eprintln!(
-            "warning: {} pane(s) were blocked on an unanswered first-run dialog, so their \
-             held boot prompts were NOT submitted and remain held for the next \
-             `git paw start`:\n{}\n\
+            "warning: {} pane(s) were blocked on an unanswered first-run dialog or could \
+             not be found, so their held boot prompts were NOT submitted and stay held; \
+             they are retried the next time the session is resumed from pause \
+             (`git paw pause`, then `git paw start`):\n{}\n\
              The rest of the session has restarted.",
             blocked.len(),
             blocked.join("\n")

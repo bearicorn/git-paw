@@ -655,7 +655,6 @@ fn restart_from_pause_gates_a_held_prompt() {
     let restart_stderr = String::from_utf8_lossy(&restart.stderr).to_string();
     let after = fs::read_to_string(&receipt).expect("read receipt after restart");
 
-    kill_tmux_session(&session_name);
     let mut kill = StdCommand::new("tmux");
     tmux_env.apply(&mut kill);
     let _ = kill.args(["kill-session", "-t", &session_name]).status();
@@ -674,13 +673,128 @@ fn restart_from_pause_gates_a_held_prompt() {
         "stderr must name the blocked agent; stderr:\n{restart_stderr}"
     );
     assert!(
-        restart_stderr.contains("remain held for the next"),
-        "stderr must say the prompt is kept for the next restart; stderr:\n{restart_stderr}"
+        restart_stderr.contains("stay held") && restart_stderr.contains("resumed from pause"),
+        "stderr must say the prompt is kept for the next resume from pause; \
+         stderr:\n{restart_stderr}"
     );
 
     // And the prompt is still held, so the next restart can submit it.
     assert!(
         after.contains("pending_boot_prompt"),
         "a dialog-stuck pane must KEEP its held prompt; receipt:\n{after}"
+    );
+}
+
+/// Scenario "A held prompt whose pane cannot be found stays held": on restart
+/// from pause, an agent whose worktree no longer resolves to a live pane keeps
+/// its held prompt and is reported — the prompt is never submitted at a
+/// computed index, where another pane's ready CLI would take it and its Enter.
+///
+/// The held agent's pane is replaced by a foreign pane running `cat` at the
+/// SAME index, standing in for another agent's ready CLI: a submit by computed
+/// index would type the boot prompt into it.
+#[test]
+#[serial]
+fn restart_from_pause_keeps_a_held_prompt_whose_pane_is_gone() {
+    if skip_if_no_tmux() {
+        return;
+    }
+
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let project = unique_project_name("gonepane");
+    let repo = rename_repo_basename(&tr, &project);
+    let session_name = format!("paw-{project}");
+
+    // Broker OFF so pane indices are stable across the pause (see
+    // `restart_from_pause_gates_a_held_prompt`).
+    let paw_dir = repo.join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    fs::write(
+        paw_dir.join("config.toml"),
+        "default_cli = \"cat\"\n\n[clis.cat]\ncommand = \"cat\"\n\n[broker]\nenabled = false\n",
+    )
+    .expect("write config");
+
+    let home = TempDir::new().expect("home tempdir");
+    let receipt = sessions_dir_for(home.path()).join(format!("{session_name}.json"));
+    let foreign_dir = TempDir::new().expect("foreign pane dir");
+
+    let run = |args: &[&str]| {
+        let mut c = cmd();
+        tmux_env.apply_assert(&mut c);
+        c.current_dir(&repo)
+            .env("HOME", home.path())
+            .env_remove("XDG_DATA_HOME")
+            .args(args)
+            .timeout(Duration::from_secs(60))
+            .output()
+            .expect("run git paw")
+    };
+    let tmux = |args: &[&str]| {
+        let mut c = StdCommand::new("tmux");
+        tmux_env.apply(&mut c);
+        c.args(args).output().expect("run tmux")
+    };
+
+    let start = run(&["start", "--cli", "cat", "--branches", "a"]);
+    assert!(
+        start.status.success(),
+        "initial start failed; stderr:\n{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let pause = run(&["pause"]);
+    assert!(
+        pause.status.success(),
+        "pause failed; stderr:\n{}",
+        String::from_utf8_lossy(&pause.stderr)
+    );
+    let add = run(&["add", "b", "--cli", "cat"]);
+    assert!(
+        add.status.success(),
+        "add to the paused session failed; stderr:\n{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let held = fs::read_to_string(&receipt).expect("read receipt after add");
+    assert!(
+        held.contains("pending_boot_prompt"),
+        "add while paused must hold a boot prompt; receipt:\n{held}"
+    );
+
+    // Replace b's pane (pane 1: agents start at 0 with the broker off) with a
+    // foreign `cat` pane at the same index, outside every worktree.
+    let target = format!("{session_name}:0.1");
+    let killed = tmux(&["kill-pane", "-t", &target]);
+    assert!(killed.status.success(), "could not kill b's pane");
+    let split = tmux(&[
+        "split-window",
+        "-h",
+        "-t",
+        &format!("{session_name}:0.0"),
+        "-c",
+        &foreign_dir.path().to_string_lossy(),
+        "cat",
+    ]);
+    assert!(split.status.success(), "could not create the foreign pane");
+
+    let restart = run(&["start"]);
+    let restart_stderr = String::from_utf8_lossy(&restart.stderr).to_string();
+    let after = fs::read_to_string(&receipt).expect("read receipt after restart");
+    let foreign = tmux(&["capture-pane", "-p", "-S", "-", "-t", &target]);
+    let foreign_text = String::from_utf8_lossy(&foreign.stdout).to_string();
+    let _ = tmux(&["kill-session", "-t", &session_name]);
+
+    assert!(
+        restart_stderr.contains("b: pane not found"),
+        "stderr must report the held agent whose pane is gone; stderr:\n{restart_stderr}"
+    );
+    assert!(
+        after.contains("pending_boot_prompt"),
+        "a held prompt whose pane cannot be found must stay held; receipt:\n{after}"
+    );
+    assert!(
+        foreign_text.trim().is_empty(),
+        "the boot prompt must not be typed into the pane at the computed index; \
+         it shows:\n{foreign_text}"
     );
 }
