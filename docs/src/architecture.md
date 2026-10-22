@@ -420,6 +420,28 @@ consumer derives the first agent pane from the recorded `dashboard_pane`
 ever treated as a coding agent. Recovering such a session rebuilds the layout
 above.
 
+### One layout for every session
+
+There is a single pane layout. Bare `start`, spec-driven `start` and
+supervisor-mode `start` — and the recovery of any of them — all build the grid
+above through one routine, so the geometry never depends on how the session
+was launched. With the broker disabled there is no dashboard: the agent rows
+start at pane 0 and share the full window height instead of the 50% the
+dashboard row leaves.
+
+This is why `git paw add` and `git paw remove` work on every session. The grid
+is laid out by explicit `split-window` + `resize-pane` calls with predictable,
+stable pane indices, which is what lets it be re-tiled incrementally for a new
+agent count. Bare sessions were previously laid out with tmux's whole-window
+`select-layout tiled` / `main-horizontal` layouts, which cannot be extended in
+place; those layouts are no longer used for coding agents anywhere.
+
+Each session records the layout it was built with (`Session.layout`), so a
+live session started by an earlier binary — which recorded none, and for a
+bare session therefore was tiled — is refused by `add` / `remove` rather than
+re-tiled under the user. Recovery rebuilds such a session as a grid and
+records it.
+
 ### Row-height proportions
 
 The top row is always half the session height — the dashboard spans its full

@@ -529,3 +529,158 @@ fn stop_after_pause_kills_remaining_panes() {
         "session.status should be stopped. JSON: {final_json}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `tmux-orchestration` — "Launch-readiness gate before boot-block injection":
+// scenario "Restart from pause gates a held prompt".
+// ---------------------------------------------------------------------------
+
+/// A CLI stub whose pane prints a first-run dialog heading and then blocks
+/// forever — the gate classifies it `DialogStuck`. Copied from
+/// `tests/start_spec_launch_parity_integration.rs`, which pins the same
+/// condition on the bare and spec-driven launch paths.
+fn write_dialog_stub_cli(bin_dir: &std::path::Path) -> &'static str {
+    use std::os::unix::fs::PermissionsExt;
+    let script_path = bin_dir.join("paw-test-dialog");
+    fs::write(
+        &script_path,
+        "#!/bin/sh\necho 'Bypass Permissions mode'\nwhile true; do sleep 5; done\n",
+    )
+    .expect("write dialog stub script");
+    fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))
+        .expect("chmod dialog stub script");
+    "paw-test-dialog"
+}
+
+/// A session paused with a held boot prompt for an agent added while paused,
+/// whose pane is blocked on an unanswered first-run dialog: the restart does
+/// NOT submit the prompt on top of the dialog, keeps it held for the next
+/// restart, names the blocked pane on stderr, and still restarts the rest of
+/// the session.
+#[test]
+#[serial]
+fn restart_from_pause_gates_a_held_prompt() {
+    if skip_if_no_tmux() {
+        return;
+    }
+
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let project = unique_project_name("gatehold");
+    let repo = rename_repo_basename(&tr, &project);
+    let session_name = format!("paw-{project}");
+
+    let bin_dir = TempDir::new().expect("bin dir");
+    let dialog_cli = write_dialog_stub_cli(bin_dir.path());
+    let test_path = format!(
+        "{}:{}",
+        bin_dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    // `cat` for the pre-pause agent (it never shows a dialog, so the restart
+    // has something that must still succeed); the stub for the agent added
+    // while paused.
+    //
+    // The broker is OFF so the agent pane indices are stable across the
+    // pause: pausing a broker-enabled session kills its dashboard pane, and
+    // tmux renumbers the survivors, which `add` does not currently account for
+    // (unrelated to the gate under test here).
+    let paw_dir = repo.join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    fs::write(
+        paw_dir.join("config.toml"),
+        format!(
+            "default_cli = \"cat\"\n\n[broker]\nenabled = false\n\n\
+             [clis.{dialog_cli}]\ncommand = \"{dialog_cli}\"\n"
+        ),
+    )
+    .expect("write config");
+
+    let home = TempDir::new().expect("home tempdir");
+    let sessions_dir = sessions_dir_for(home.path());
+    let receipt = sessions_dir.join(format!("{session_name}.json"));
+
+    let run = |args: &[&str], timeout_ms: Option<&str>| {
+        let mut c = cmd();
+        tmux_env.apply_assert(&mut c);
+        c.current_dir(&repo)
+            .env("PATH", &test_path)
+            .env("HOME", home.path())
+            .env_remove("XDG_DATA_HOME");
+        if let Some(ms) = timeout_ms {
+            c.env("GIT_PAW_READINESS_TIMEOUT_MS", ms);
+        }
+        c.args(args)
+            .timeout(Duration::from_secs(60))
+            .output()
+            .expect("run git paw")
+    };
+
+    let start = run(&["start", "--cli", "cat", "--branches", "a"], None);
+    assert!(
+        start.status.success(),
+        "initial start failed; stderr:\n{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+
+    let pause = run(&["pause"], None);
+    assert!(
+        pause.status.success(),
+        "pause failed; stderr:\n{}",
+        String::from_utf8_lossy(&pause.stderr)
+    );
+
+    // Adding to a PAUSED session creates the pane and holds the boot prompt
+    // for the restart rather than submitting it — the prompt this scenario is
+    // about. The pane runs the dialog stub, so it is stuck.
+    let add = run(&["add", "stuck-agent", "--cli", dialog_cli], None);
+    assert!(
+        add.status.success(),
+        "add to the paused session failed; stderr:\n{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let held = fs::read_to_string(&receipt).expect("read receipt after add");
+    assert!(
+        held.contains("pending_boot_prompt"),
+        "add while paused must hold a boot prompt for the restart; receipt:\n{held}"
+    );
+
+    // Restart. The readiness budget is raised over the suite-wide compressed
+    // default for the same reason the bare/spec-driven dialog tests raise it:
+    // a short budget races the gate's relaunch cycle and falls back to
+    // injecting before the stub's dialog line renders.
+    let restart = run(&["start"], Some("3000"));
+    let restart_stdout = String::from_utf8_lossy(&restart.stdout).to_string();
+    let restart_stderr = String::from_utf8_lossy(&restart.stderr).to_string();
+    let after = fs::read_to_string(&receipt).expect("read receipt after restart");
+
+    kill_tmux_session(&session_name);
+    let mut kill = StdCommand::new("tmux");
+    tmux_env.apply(&mut kill);
+    let _ = kill.args(["kill-session", "-t", &session_name]).status();
+
+    // The rest of the session restarted: this is a warning, not a failure.
+    assert!(
+        restart_stdout.contains("Restarting paused session"),
+        "the restart must run; stdout:\n{restart_stdout}\nstderr:\n{restart_stderr}"
+    );
+    assert!(
+        restart_stderr.contains("acceptance dialog"),
+        "stderr must report the blocked pane's condition; stderr:\n{restart_stderr}"
+    );
+    assert!(
+        restart_stderr.contains("stuck-agent"),
+        "stderr must name the blocked agent; stderr:\n{restart_stderr}"
+    );
+    assert!(
+        restart_stderr.contains("remain held for the next"),
+        "stderr must say the prompt is kept for the next restart; stderr:\n{restart_stderr}"
+    );
+
+    // And the prompt is still held, so the next restart can submit it.
+    assert!(
+        after.contains("pending_boot_prompt"),
+        "a dialog-stuck pane must KEEP its held prompt; receipt:\n{after}"
+    );
+}

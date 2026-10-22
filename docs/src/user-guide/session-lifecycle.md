@@ -295,9 +295,24 @@ What it does:
 agent passively: its heartbeat stops, and the supervisor drops it from
 its coordination scope on the next `/status` poll.
 
-> **Scope:** `add` / `remove` operate on **supervisor-mode** sessions only.
-> Bare (`--no-supervisor`) sessions report an actionable error — stop and
-> re-start them with the full branch set. Dynamic branch attachment requires
-> supervisor mode for the session's tiled grid to be re-tiled incrementally.
-> One branch per invocation; bulk add/remove and configurable layouts
-> are tracked for a later release.
+> **Scope:** `add` / `remove` operate on **every** live session — bare,
+> spec-driven and supervisor-mode alike. Every session git-paw builds uses
+> the agent grid, which is the layout that can be re-tiled incrementally for
+> a new agent count, so dynamic branch attachment no longer depends on the
+> session's mode. One branch per invocation; bulk add/remove and configurable
+> layouts are tracked for a later release.
+>
+> **One exception — a session started by an earlier git-paw.** Bare sessions
+> used to be laid out with tmux's whole-window tiled layout, which cannot be
+> re-tiled while the session runs (re-tiling it would move every running pane
+> under you). `add` and `remove` refuse such a session before touching
+> anything, with an error naming the tiled layout. The fix is one restart:
+>
+> ```bash
+> git paw stop     # or detach and let the session go stale
+> git paw start    # rebuilds the window in the agent grid layout
+> ```
+>
+> Recovery rebuilds the window as a grid and records it, so after that
+> restart `add` and `remove` work on the session normally. Sessions started
+> by this version are already grids and are never refused.

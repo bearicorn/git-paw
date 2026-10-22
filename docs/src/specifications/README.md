@@ -120,7 +120,7 @@ have no user-guide chapter: the spec itself is their documentation.
 
 ### tmux-
 
-- [`tmux-orchestration`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/tmux-orchestration/spec.md) — orchestrates tmux sessions with per-pane CLIs in worktrees via a testable builder with dry-run and automatic tiled layout.
+- [`tmux-orchestration`](https://github.com/bearicorn/git-paw/blob/main/openspec/specs/tmux-orchestration/spec.md) — orchestrates tmux sessions with per-pane CLIs in worktrees via a testable builder with dry-run and the agent-grid layout.
 
 ### safe-
 

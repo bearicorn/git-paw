@@ -154,6 +154,11 @@ pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<()
     // every supervised recovery, including one of a session an earlier binary
     // saved with its dashboard at pane 1 (design D6).
     updated.dashboard_pane = layout.recorded_dashboard_pane();
+    // Recovery REBUILDS the window, so whatever layout the stopped session was
+    // saved with, what is live now is the agent grid — including a bare session
+    // an earlier binary saved with the whole-window tiled layout, which is how
+    // such a session becomes hot-attachable again.
+    updated.layout = layout.recorded_pane_layout();
     // Re-stamp the broker log path. A session saved by a git-paw that used a
     // single shared `broker.log` would otherwise have the dashboard write the
     // per-session name while purge deleted the old one, orphaning a log.
@@ -259,7 +264,7 @@ fn recover_supervisor_session(
         .as_ref()
         .unwrap_or(&default_supervisor_cfg);
 
-    let layout = git_paw::surface::supervisor_layout(existing.worktrees.len())?;
+    let layout = git_paw::surface::supervisor_layout(existing.worktrees.len(), true)?;
 
     let repo_str = repo_root.to_string_lossy().to_string();
     let dashboard_pane = tmux::PaneSpec {

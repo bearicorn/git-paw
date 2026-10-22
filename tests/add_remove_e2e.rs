@@ -52,6 +52,110 @@ fn write_supervisor_config(repo: &Path) {
     .expect("write config");
 }
 
+/// An ephemeral free port, so a broker-enabled test never collides with a
+/// lingering broker from another run.
+fn find_free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral")
+        .local_addr()
+        .expect("local_addr")
+        .port()
+}
+
+/// Write a BARE config (no `[supervisor]` section) with the broker ENABLED,
+/// using the same `cat` stand-in CLI. The broker gives the session a dashboard
+/// at pane 0 and its coding agents from pane 1 — the same grid a supervised
+/// session has (`git-add-remove-branch`: "Hot-attach works on every grid
+/// session").
+fn write_bare_config(repo: &Path) {
+    let paw_dir = repo.join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    let port = find_free_port();
+    fs::write(
+        paw_dir.join("config.toml"),
+        format!("default_cli = \"cat\"\n\n[clis.cat]\ncommand = \"cat\"\n\n[broker]\nenabled = true\nport = {port}\n"),
+    )
+    .expect("write config");
+}
+
+/// A bare config with the broker OFF: no dashboard pane, so the coding agents
+/// start at pane 0 and the agent rows share the full window height.
+fn write_brokerless_bare_config(repo: &Path) {
+    let paw_dir = repo.join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    fs::write(
+        paw_dir.join("config.toml"),
+        "default_cli = \"cat\"\n\n[clis.cat]\ncommand = \"cat\"\n\n[broker]\nenabled = false\n",
+    )
+    .expect("write config");
+}
+
+/// Path of the global session receipt under an isolated `HOME`.
+fn session_receipt_path(home: &Path, session: &str) -> std::path::PathBuf {
+    let dir = if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/git-paw/sessions")
+    } else {
+        home.join(".local/share/git-paw/sessions")
+    };
+    dir.join(format!("{session}.json"))
+}
+
+/// Rewrite the saved session so it looks like one an earlier binary wrote:
+/// drop the recorded `layout`, and optionally force `mode`. A bare session
+/// without a recorded layout is the earlier whole-window tiled layout.
+fn strip_recorded_layout(home: &Path, session: &str) {
+    let path = session_receipt_path(home, session);
+    let raw = fs::read_to_string(&path).expect("read session receipt");
+    let mut value: serde_json::Value = serde_json::from_str(&raw).expect("parse session receipt");
+    assert!(
+        value.as_object().is_some_and(|o| o.contains_key("layout")),
+        "this binary must record a layout for the test to strip; got:\n{raw}"
+    );
+    value
+        .as_object_mut()
+        .expect("session receipt is an object")
+        .remove("layout");
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&value).expect("serialize session receipt"),
+    )
+    .expect("write session receipt");
+}
+
+/// Pad the saved session's worktree list out to `total` entries by appending
+/// synthetic ones, so a cap that counts `session.worktrees` can be exercised
+/// without standing up that many live panes.
+///
+/// The entries never need to exist on disk: `cmd_add` enforces the cap before
+/// it creates anything, which is exactly the property under test — a run that
+/// got far enough to touch these paths would fail loudly instead.
+fn pad_session_worktrees(home: &Path, session: &str, total: usize) {
+    let path = session_receipt_path(home, session);
+    let raw = fs::read_to_string(&path).expect("read session receipt");
+    let mut value: serde_json::Value = serde_json::from_str(&raw).expect("parse session receipt");
+    let worktrees = value
+        .get_mut("worktrees")
+        .and_then(serde_json::Value::as_array_mut)
+        .expect("session receipt lists worktrees");
+    assert!(
+        worktrees.len() <= total,
+        "the session already has more than {total} agents"
+    );
+    for i in worktrees.len()..total {
+        worktrees.push(serde_json::json!({
+            "branch": format!("feat/pad-{i}"),
+            "worktree_path": format!("/nonexistent/pad-{i}"),
+            "cli": "cat",
+            "branch_created": false,
+        }));
+    }
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&value).expect("serialize session receipt"),
+    )
+    .expect("write session receipt");
+}
+
 /// Count agent entries in the per-repo discovery file the session writes
 /// (`<repo>/.git-paw/sessions/<name>.json`). Returns `(count, raw_json)`.
 fn read_discovery(repo: &Path, session: &str) -> (usize, String) {
@@ -81,6 +185,52 @@ fn list_pane_count(tmux_env: &TmuxTestEnv, session: &str) -> usize {
     String::from_utf8_lossy(&out.stdout).lines().count()
 }
 
+/// Capture every live pane's visible content, keyed by the worktree it runs
+/// in. Used to prove `add` / `remove` type into no surface but the one they
+/// are creating: a pane that received a keystroke would render new text.
+///
+/// Captures the FULL scrollback (`-S -`), not the visible region, and strips
+/// whitespace: the re-tile legitimately changes each pane's width and height,
+/// so tmux both re-wraps the text already on it and scrolls a different part
+/// of it into view. Neither is a keystroke. What this compares is the
+/// characters the pane has ever shown, which no re-tile can add to.
+///
+/// Only AGENT panes are returned (their worktrees are `<repo>-<branch>`
+/// siblings). The dashboard pane is excluded because it is a live TUI that
+/// redraws itself about once a second, so its content changes with no input
+/// at all and cannot be compared this way. That the dashboard is never typed
+/// into is pinned instead by the role resolution — `SurfaceRole::Dashboard`
+/// is never acted on — and by the drive-loop tests.
+fn capture_panes_by_worktree(
+    tmux_env: &TmuxTestEnv,
+    session: &str,
+) -> std::collections::HashMap<String, String> {
+    pane_paths(tmux_env, session)
+        .into_iter()
+        .filter(|(_, path)| path.contains("repo-"))
+        .map(|(idx, path)| {
+            let mut c = StdCommand::new("tmux");
+            tmux_env.apply(&mut c);
+            let out = c
+                .args([
+                    "capture-pane",
+                    "-p",
+                    "-S",
+                    "-",
+                    "-t",
+                    &format!("{session}:0.{idx}"),
+                ])
+                .output()
+                .expect("tmux capture-pane");
+            let text = String::from_utf8_lossy(&out.stdout)
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            (path, text)
+        })
+        .collect()
+}
+
 fn kill(tmux_env: &TmuxTestEnv, session: &str) {
     let mut c = StdCommand::new("tmux");
     tmux_env.apply(&mut c);
@@ -90,13 +240,34 @@ fn kill(tmux_env: &TmuxTestEnv, session: &str) {
 /// Start a supervisor session with the given comma-separated branches and
 /// return its session name (parsed from stdout).
 fn start_session(repo: &Path, home: &Path, tmux_env: &TmuxTestEnv, branches: &str) -> String {
+    start_session_with(repo, home, tmux_env, branches, true)
+}
+
+/// [`start_session`], with `--supervisor` optional so the bare launch path can
+/// be driven too.
+fn start_session_with(
+    repo: &Path,
+    home: &Path,
+    tmux_env: &TmuxTestEnv,
+    branches: &str,
+    supervisor: bool,
+) -> String {
     let mut start = cmd();
     tmux_env.apply_assert(&mut start);
+    let mut args: Vec<&str> = vec!["start"];
+    if supervisor {
+        args.push("--supervisor");
+    } else {
+        // The bare path prompts for the CLI when none is named on the command
+        // line; naming it keeps the launch non-interactive.
+        args.extend(["--cli", "cat"]);
+    }
+    args.extend(["--branches", branches]);
     let out = start
         .current_dir(repo)
         .env("HOME", home)
         .env_remove("XDG_DATA_HOME")
-        .args(["start", "--supervisor", "--branches", branches])
+        .args(&args)
         .timeout(Duration::from_secs(40))
         .output()
         .expect("run start");
@@ -842,4 +1013,411 @@ fn add_from_spec_resolves_and_attaches() {
         agent_count, 2,
         "the spec-derived agent should be registered in the session"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `git-add-remove-branch` — "Hot-attach works on every grid session".
+//
+// `add` / `remove` no longer refuse a session for being bare: every session
+// this binary builds is the agent grid, which the incremental re-tile builders
+// can extend. Only a live session an earlier binary built with the tiled
+// layout is refused.
+// ---------------------------------------------------------------------------
+
+/// Scenario "Add to a bare grid session": a bare session started with two
+/// branches and the broker enabled accepts a third agent, landing at pane 3
+/// (dashboard 0, agents 1-3) — the grid a 3-agent start would produce.
+#[test]
+#[serial]
+fn add_attaches_to_a_bare_grid_session() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    write_bare_config(tr.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let session = start_session_with(tr.path(), home.path(), &tmux_env, "a,b", false);
+    assert_eq!(
+        list_pane_count(&tmux_env, &session),
+        3,
+        "a 2-agent bare start is dashboard + 2 agents"
+    );
+    let before = capture_panes_by_worktree(&tmux_env, &session);
+
+    let mut add = cmd();
+    tmux_env.apply_assert(&mut add);
+    let out = add
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .args(["add", "c"])
+        .timeout(Duration::from_secs(40))
+        .output()
+        .expect("run add");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    let panes = list_pane_count(&tmux_env, &session);
+    let paths = pane_paths(&tmux_env, &session);
+    let after = capture_panes_by_worktree(&tmux_env, &session);
+    let (agent_count, raw) = read_discovery(tr.path(), &session);
+    kill(&tmux_env, &session);
+
+    assert!(
+        out.status.success(),
+        "add on a bare grid session must not be refused; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    // Scenario "The new agent appears in the roster sources": no keystroke is
+    // sent to any surface other than the new agent's pane — every
+    // pre-existing agent pane has shown exactly what it had shown before.
+    assert!(
+        !before.is_empty(),
+        "the start must leave agent panes to compare"
+    );
+    for (worktree, content) in &before {
+        assert_eq!(
+            after.get(worktree),
+            Some(content),
+            "add typed into {worktree}, a surface other than the new agent's pane"
+        );
+    }
+    assert_eq!(panes, 4, "add should splice one pane (3 -> 4)");
+    assert_eq!(agent_count, 3, "discovery file should list 3 agents");
+    assert!(
+        raw.contains("\"branch_id\": \"agent-c\""),
+        "the added branch should be registered; raw:\n{raw}"
+    );
+    // The new agent is the last pane of the agent row, matching a 3-agent
+    // start's grid.
+    let new_pane = paths
+        .iter()
+        .find(|(_, path)| path.ends_with("repo-c"))
+        .map(|(idx, _)| idx.clone())
+        .expect("the added worktree should own a pane");
+    assert_eq!(
+        new_pane, "3",
+        "the third agent takes pane 3 below the dashboard; panes:\n{paths:?}"
+    );
+}
+
+/// Scenario "Remove from a bare grid session": only the named agent's pane
+/// closes and the grid re-flows for the smaller count.
+#[test]
+#[serial]
+fn remove_detaches_from_a_bare_grid_session() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    write_bare_config(tr.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let session = start_session_with(tr.path(), home.path(), &tmux_env, "a,b,c", false);
+    assert_eq!(list_pane_count(&tmux_env, &session), 4);
+
+    let wt_b = tr.path().parent().unwrap().join("repo-b");
+    assert!(wt_b.exists(), "worktree for 'b' should exist after start");
+    let before = capture_panes_by_worktree(&tmux_env, &session);
+
+    let mut rm = cmd();
+    tmux_env.apply_assert(&mut rm);
+    let out = rm
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .args(["remove", "b"])
+        .timeout(Duration::from_secs(40))
+        .output()
+        .expect("run remove");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    let panes = list_pane_count(&tmux_env, &session);
+    let paths = pane_paths(&tmux_env, &session);
+    let after = capture_panes_by_worktree(&tmux_env, &session);
+    let wt_gone = !wt_b.exists();
+    kill(&tmux_env, &session);
+
+    assert!(
+        out.status.success(),
+        "remove on a bare grid session must not be refused; stderr:\n{stderr}"
+    );
+    // Scenario "The removed agent leaves the roster sources": no keystroke is
+    // sent to any surface as part of the removal — every surviving agent pane
+    // has shown exactly what it had shown before.
+    assert!(
+        !after.is_empty(),
+        "agents must survive the removal to compare"
+    );
+    for (worktree, content) in &after {
+        assert_eq!(
+            before.get(worktree),
+            Some(content),
+            "remove typed into the surviving surface {worktree}"
+        );
+    }
+    assert_eq!(panes, 3, "remove should close one pane (4 -> 3)");
+    assert!(wt_gone, "worktree for 'b' should be removed from disk");
+    // Only 'b' went: 'a' and 'c' each still own exactly one pane.
+    for survivor in ["repo-a", "repo-c"] {
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|(_, path)| path.ends_with(survivor))
+                .count(),
+            1,
+            "{survivor} should still own exactly one pane; panes:\n{paths:?}"
+        );
+    }
+    assert!(
+        !paths.iter().any(|(_, path)| path.ends_with("repo-b")),
+        "the removed agent should own no pane; panes:\n{paths:?}"
+    );
+}
+
+/// Scenario "Add to a broker-less grid session": with no dashboard the agents
+/// start at pane 0, and the new agent takes the next index after them.
+#[test]
+#[serial]
+fn add_attaches_to_a_brokerless_grid_session() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    write_brokerless_bare_config(tr.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let session = start_session_with(tr.path(), home.path(), &tmux_env, "a,b", false);
+    assert_eq!(
+        list_pane_count(&tmux_env, &session),
+        2,
+        "with the broker off there is no dashboard pane"
+    );
+
+    let mut add = cmd();
+    tmux_env.apply_assert(&mut add);
+    let out = add
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .args(["add", "c"])
+        .timeout(Duration::from_secs(40))
+        .output()
+        .expect("run add");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    let panes = list_pane_count(&tmux_env, &session);
+    let paths = pane_paths(&tmux_env, &session);
+    kill(&tmux_env, &session);
+
+    assert!(
+        out.status.success(),
+        "add on a broker-less grid session must not be refused; \
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(panes, 3, "add should splice one pane (2 -> 3)");
+    let new_pane = paths
+        .iter()
+        .find(|(_, path)| path.ends_with("repo-c"))
+        .map(|(idx, _)| idx.clone())
+        .expect("the added worktree should own a pane");
+    assert_eq!(
+        new_pane, "2",
+        "agents start at pane 0, so the third takes pane 2; panes:\n{paths:?}"
+    );
+}
+
+/// Scenario "A supervised session saved earlier stays hot-attachable": a
+/// supervised session whose receipt records no layout is the grid already, so
+/// it is NOT refused — the refusal keys on the layout, not the mode. (The
+/// offset half of the scenario, a receipt whose dashboard sits at pane 1 with
+/// agents from 2, is pinned by the unit test
+/// `add_agent_to_a_pre_relocation_session_uses_its_recorded_offset`.)
+#[test]
+#[serial]
+fn add_still_works_on_a_supervised_session_saved_without_a_layout() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    write_supervisor_config(tr.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let session = start_session(tr.path(), home.path(), &tmux_env, "a,b");
+    strip_recorded_layout(home.path(), &session);
+
+    let mut add = cmd();
+    tmux_env.apply_assert(&mut add);
+    let out = add
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .args(["add", "c"])
+        .timeout(Duration::from_secs(40))
+        .output()
+        .expect("run add");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    let panes = list_pane_count(&tmux_env, &session);
+    kill(&tmux_env, &session);
+
+    assert!(
+        out.status.success(),
+        "a supervised session saved by an earlier binary stays hot-attachable; \
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("tiled"),
+        "a supervised session was never the tiled layout; stderr:\n{stderr}"
+    );
+    assert_eq!(panes, 4, "add should splice one pane (3 -> 4)");
+}
+
+/// Scenario "Adding past the agent cap is rejected": a session already at the
+/// 25-agent cap refuses the next `add` with the same actionable error `start`
+/// uses, and creates no worktree or pane doing so.
+#[test]
+#[serial]
+fn adding_past_the_agent_cap_is_rejected_without_creating_anything() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    write_brokerless_bare_config(tr.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let session = start_session_with(tr.path(), home.path(), &tmux_env, "a,b", false);
+    pad_session_worktrees(home.path(), &session, 25);
+
+    let panes_before = list_pane_count(&tmux_env, &session);
+
+    let mut add = cmd();
+    tmux_env.apply_assert(&mut add);
+    let out = add
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .args(["add", "twenty-six"])
+        .timeout(Duration::from_secs(40))
+        .output()
+        .expect("run add");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    let panes_after = list_pane_count(&tmux_env, &session);
+    let wt_created = tr.path().parent().unwrap().join("repo-twenty-six").exists();
+    kill(&tmux_env, &session);
+
+    assert!(
+        !out.status.success(),
+        "the 26th agent must be refused; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("maximum is 25") && stderr.contains("Split into multiple sessions"),
+        "add must surface the same cap error `start` uses; stderr:\n{stderr}"
+    );
+    assert_eq!(panes_after, panes_before, "no pane may be created");
+    assert!(
+        !wt_created,
+        "no worktree may be created for the refused branch"
+    );
+}
+
+/// Scenario "An earlier tiled session is refused explicitly": a live BARE
+/// session whose receipt records no layout is the earlier tiled layout. Both
+/// verbs refuse it, naming the layout and the fix, citing no version — and
+/// touching no worktree, pane or session entry.
+#[test]
+#[serial]
+fn an_earlier_tiled_bare_session_is_refused_without_mutating_anything() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    write_bare_config(tr.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let session = start_session_with(tr.path(), home.path(), &tmux_env, "a,b", false);
+    strip_recorded_layout(home.path(), &session);
+
+    let panes_before = list_pane_count(&tmux_env, &session);
+    let (agents_before, _) = read_discovery(tr.path(), &session);
+    let receipt_before =
+        fs::read_to_string(session_receipt_path(home.path(), &session)).expect("read receipt");
+    let wt_a = tr.path().parent().unwrap().join("repo-a");
+
+    let mut results = Vec::new();
+    for args in [["add", "x"], ["remove", "a"]] {
+        let mut c = cmd();
+        tmux_env.apply_assert(&mut c);
+        let out = c
+            .current_dir(tr.path())
+            .env("HOME", home.path())
+            .env_remove("XDG_DATA_HOME")
+            .args(args)
+            .timeout(Duration::from_secs(40))
+            .output()
+            .expect("run command");
+        results.push((
+            args[0],
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        ));
+    }
+
+    let panes_after = list_pane_count(&tmux_env, &session);
+    let (agents_after, _) = read_discovery(tr.path(), &session);
+    let receipt_after =
+        fs::read_to_string(session_receipt_path(home.path(), &session)).expect("read receipt");
+    let wt_a_alive = wt_a.exists();
+    let wt_x_absent = !tr.path().parent().unwrap().join("repo-x").exists();
+    kill(&tmux_env, &session);
+
+    for (verb, success, stderr) in &results {
+        assert!(
+            !success,
+            "`git paw {verb}` must exit non-zero on a tiled session; stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("tiled"),
+            "`{verb}` error must name the tiled layout; stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("git paw start"),
+            "`{verb}` error must tell the user to start the session again; stderr:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("v0.6.0") && !stderr.contains("v1.0.0"),
+            "`{verb}` error must not cite a release version; stderr:\n{stderr}"
+        );
+    }
+
+    // Refused BEFORE any mutation: no pane, worktree or session entry moved.
+    assert_eq!(
+        panes_after, panes_before,
+        "no pane may be created or killed"
+    );
+    assert_eq!(
+        agents_after, agents_before,
+        "no session entry may be added or removed"
+    );
+    assert_eq!(
+        receipt_after, receipt_before,
+        "the session receipt must be untouched"
+    );
+    assert!(wt_a_alive, "the removal target's worktree must survive");
+    assert!(wt_x_absent, "no worktree may be created for the add target");
 }

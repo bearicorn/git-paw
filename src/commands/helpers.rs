@@ -116,13 +116,21 @@ pub(crate) fn warn_if_broker_is_exposed(broker: &git_paw::config::BrokerConfig) 
     }
 }
 
-/// Error returned when add/remove is invoked on a bare-mode session.
-pub(crate) fn bare_mode_unsupported(session_name: &str, verb: &str) -> PawError {
+/// Error returned when add/remove is invoked on a live session an earlier
+/// binary built with the whole-window tiled layout.
+///
+/// `add` and `remove` work on every session built with the agent grid, bare
+/// and supervised alike — the grid is what the incremental re-tile builders
+/// can extend. The tiled layout cannot be extended in place, and re-tiling a
+/// live window into a grid would move every running pane under the user, so
+/// the refusal names the layout (not the session's mode) and points at the one
+/// thing that fixes it: stop the session and start it again, which rebuilds it
+/// as a grid. No release version is cited — the user cannot act on one.
+pub(crate) fn legacy_tiled_layout_unsupported(session_name: &str, verb: &str) -> PawError {
     PawError::SessionError(format!(
-        "`git paw {verb}` is not supported on session '{session_name}' (bare/no-supervisor mode). \
-         The tiled grid cannot be re-tiled incrementally for dynamic branch addition. Stop and \
-         re-start with the full branch set, or run the session in supervisor mode to use \
-         add/remove."
+        "`git paw {verb}` cannot change session '{session_name}': its panes are the earlier tiled \
+         layout, which cannot be re-tiled while the session runs. Stop the session and run \
+         `git paw start` to relaunch it in the agent grid layout, then `git paw {verb}` will work."
     ))
 }
 
@@ -234,59 +242,45 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bare_mode_add_error_names_session_and_states_limitation() {
-        let err = bare_mode_unsupported("test-session", "add");
-        let msg = err.to_string();
+    // `git-add-remove-branch` — "Hot-attach works on every grid session": the
+    // only refusal left names the tiled LAYOUT, never the session's mode.
+    // (Replaces the tests that pinned the removed bare-session refusal.)
 
-        assert!(msg.contains("test-session"), "error must name the session");
-        assert!(msg.contains("bare"), "error must mention bare mode");
-        assert!(msg.contains("add"), "error must mention the add command");
-        assert!(
-            msg.contains("supervisor"),
-            "error must mention supervisor mode"
-        );
-        assert!(
-            !msg.contains("the default"),
-            "error must not claim supervisor is the default"
-        );
-        assert!(
-            !msg.contains("v0.6.0"),
-            "error must not cite a release version"
-        );
-        assert!(
-            !msg.contains("v1.0.0"),
-            "error must not cite a release version"
-        );
+    #[test]
+    fn the_tiled_layout_refusal_names_the_layout_and_the_fix() {
+        for (session, verb) in [("test-session", "add"), ("my-session", "remove")] {
+            let msg = legacy_tiled_layout_unsupported(session, verb).to_string();
+
+            assert!(msg.contains(session), "error must name the session: {msg}");
+            assert!(msg.contains(verb), "error must name the command: {msg}");
+            assert!(
+                msg.contains("tiled"),
+                "error must name the tiled layout as the reason: {msg}"
+            );
+            assert!(
+                msg.contains("Stop the session") && msg.contains("git paw start"),
+                "error must tell the user to stop and start the session again: {msg}"
+            );
+        }
     }
 
     #[test]
-    fn bare_mode_remove_error_names_session_and_states_limitation() {
-        let err = bare_mode_unsupported("my-session", "remove");
-        let msg = err.to_string();
+    fn the_tiled_layout_refusal_blames_the_layout_not_the_mode() {
+        let msg = legacy_tiled_layout_unsupported("test-session", "add").to_string();
 
-        assert!(msg.contains("my-session"), "error must name the session");
-        assert!(msg.contains("bare"), "error must mention bare mode");
+        // The removed requirement refused a session for being bare and sent
+        // the user to supervisor mode. Both are gone: bare grid sessions are
+        // hot-attachable, and there is no supervisor mode to switch to.
         assert!(
-            msg.contains("remove"),
-            "error must mention the remove command"
+            !msg.contains("bare") && !msg.contains("supervisor"),
+            "the refusal must not blame the session's mode: {msg}"
         );
-        assert!(
-            msg.contains("supervisor"),
-            "error must mention supervisor mode"
-        );
-        assert!(
-            !msg.contains("the default"),
-            "error must not claim supervisor is the default"
-        );
-        assert!(
-            !msg.contains("v0.6.0"),
-            "error must not cite a release version"
-        );
-        assert!(
-            !msg.contains("v1.0.0"),
-            "error must not cite a release version"
-        );
+        for version in ["v0.6.0", "v1.0.0", "v0.18"] {
+            assert!(
+                !msg.contains(version),
+                "error must not cite a release version ({version}): {msg}"
+            );
+        }
     }
 
     // Gate review item 6: the broker's own warning lands in the dashboard

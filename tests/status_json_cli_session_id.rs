@@ -74,6 +74,7 @@ fn receipt(
         broker_log_path: None,
         mode: SessionMode::Bare,
         dashboard_pane: None,
+        layout: None,
     }
 }
 

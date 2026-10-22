@@ -36,7 +36,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::PawError;
-use crate::session::{Session, SessionMode};
+use crate::session::{PaneLayout, Session, SessionMode};
 
 // ---------------------------------------------------------------------------
 // Wire identity
@@ -84,30 +84,41 @@ const LEGACY_SUPERVISED_DASHBOARD_INDEX: usize = 1;
 /// `dashboard_pane` falls back to it.
 const LEGACY_SUPERVISED_FIRST_AGENT: usize = 2;
 
-/// Computed layout parameters for a supervised tmux session.
+/// Computed geometry for one session's agent grid.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SupervisorLayout {
     /// Number of horizontal rows holding coding agents (excludes the top row).
     pub agent_rows: usize,
-    /// Total tmux rows = `agent_rows + 1` (the dashboard row + agent rows).
+    /// Total tmux rows: `agent_rows + 1` with a top row, `agent_rows` without.
     pub total_rows: usize,
-    /// Height percentage allocated to the top (dashboard) row.
-    /// Always 50: the top row is half the session whatever the agent count.
+    /// Whether the window has a full-width top row above the agent grid — that
+    /// is, whether the session has a dashboard. Without one the agent rows
+    /// start at pane 0 and share the whole window height.
+    pub has_top_row: bool,
+    /// Height percentage allocated to the top (dashboard) row: 50 with a top
+    /// row — half the session whatever the agent count — and 0 without one.
     pub top_row_pct: u8,
-    /// Height percentage allocated to each agent row: `50 / agent_rows`, the
-    /// even split of the half the top row leaves. `f32` because the split is
-    /// fractional for some row counts (3 agent rows land on 16.67%).
+    /// Height percentage allocated to each agent row: the even split of
+    /// whatever height the top row leaves (`50 / agent_rows` with a top row,
+    /// `100 / agent_rows` without). `f32` because the split is fractional for
+    /// some row counts (3 agent rows under a top row land on 16.67%).
     pub agent_row_pct: f32,
 }
 
-/// Compute the layout for a supervised session with `agent_count` coding agents.
+/// Compute the agent-grid geometry for a session with `agent_count` coding
+/// agents, with (`has_top_row`) or without a full-width dashboard row above
+/// the grid.
 ///
-/// The top row is always 50% of the session height; the agent rows split the
-/// remaining 50% evenly. Adding agents shrinks the agent rows, never the top row.
+/// With a top row it takes 50% of the session height and the agent rows split
+/// the remaining 50% evenly, so adding agents shrinks the agent rows and never
+/// the top row. Without one the agent rows split the full height.
 ///
 /// # Errors
 /// Returns [`PawError::ConfigError`] when `agent_count > SUPERVISOR_MAX_AGENTS`.
-pub fn supervisor_layout(agent_count: usize) -> Result<SupervisorLayout, PawError> {
+pub fn supervisor_layout(
+    agent_count: usize,
+    has_top_row: bool,
+) -> Result<SupervisorLayout, PawError> {
     if agent_count > SUPERVISOR_MAX_AGENTS {
         return Err(PawError::ConfigError(format!(
             "{agent_count} agents requested; maximum is {SUPERVISOR_MAX_AGENTS} per session.\n\
@@ -120,17 +131,19 @@ pub fn supervisor_layout(agent_count: usize) -> Result<SupervisorLayout, PawErro
     }
 
     let agent_rows = agent_count.div_ceil(SUPERVISOR_AGENTS_PER_ROW).max(1);
-    let total_rows = agent_rows + 1;
+    let total_rows = agent_rows + usize::from(has_top_row);
+    let top_row_pct: u8 = if has_top_row { 50 } else { 0 };
 
     // `agent_rows` is capped at SUPERVISOR_MAX_AGENTS / SUPERVISOR_AGENTS_PER_ROW,
     // so the widening cast is exact.
     #[allow(clippy::cast_precision_loss)]
-    let agent_row_pct = 50.0_f32 / agent_rows as f32;
+    let agent_row_pct = f32::from(100 - top_row_pct) / agent_rows as f32;
 
     Ok(SupervisorLayout {
         agent_rows,
         total_rows,
-        top_row_pct: 50,
+        has_top_row,
+        top_row_pct,
         agent_row_pct,
     })
 }
@@ -145,8 +158,8 @@ pub fn supervisor_layout(agent_count: usize) -> Result<SupervisorLayout, PawErro
 /// # Errors
 /// Returns [`PawError::ConfigError`] when `agent_count > SUPERVISOR_MAX_AGENTS`
 /// — the same "split into multiple sessions" error `git paw start` surfaces.
-pub fn layout_for(agent_count: usize) -> Result<SupervisorLayout, PawError> {
-    supervisor_layout(agent_count)
+pub fn layout_for(agent_count: usize, has_top_row: bool) -> Result<SupervisorLayout, PawError> {
+    supervisor_layout(agent_count, has_top_row)
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +217,10 @@ pub struct SessionLayout {
     /// bare launch and on sessions saved by earlier binaries that recorded
     /// none — the case the earlier rules cover.
     dashboard_pane: Option<usize>,
+    /// The pane layout this session recorded (`Session::layout`), or the one a
+    /// launch of this shape will record. `None` only on a session saved by an
+    /// earlier binary — see [`Self::is_legacy_tiled`].
+    pane_layout: Option<PaneLayout>,
 }
 
 impl SessionLayout {
@@ -214,6 +231,7 @@ impl SessionLayout {
             mode: session.mode,
             has_broker: session.broker_port.is_some(),
             dashboard_pane: session.dashboard_pane.map(|p| p as usize),
+            pane_layout: session.layout,
         }
     }
 
@@ -234,7 +252,34 @@ impl SessionLayout {
             mode,
             has_broker,
             dashboard_pane,
+            pane_layout: Some(PaneLayout::Grid),
         }
+    }
+
+    /// The pane layout a session of this shape records in `Session::layout`.
+    #[must_use]
+    pub fn recorded_pane_layout(&self) -> Option<PaneLayout> {
+        self.pane_layout
+    }
+
+    /// Whether this session's window is the whole-window tiled layout an
+    /// earlier binary built, rather than the agent grid.
+    ///
+    /// Every session this binary builds records [`PaneLayout::Grid`]. A
+    /// session that recorded none was saved by an earlier binary: a supervised
+    /// one was already the grid, so only a bare one is tiled. The grid is the
+    /// layout the incremental re-tile builders can extend, so this is the
+    /// question `add` and `remove` ask — not whether the session is bare.
+    #[must_use]
+    pub fn is_legacy_tiled(&self) -> bool {
+        self.pane_layout.is_none() && self.mode == SessionMode::Bare
+    }
+
+    /// Whether this session's window has a full-width top row above the agent
+    /// grid — that is, whether it has a dashboard at all.
+    #[must_use]
+    pub fn has_top_row(&self) -> bool {
+        self.dashboard_index().is_some()
     }
 
     /// Index of the dashboard surface for role resolution: what the session
@@ -369,6 +414,7 @@ mod tests {
             mode: SessionMode::Supervisor,
             has_broker: recorded.is_some(),
             dashboard_pane: recorded,
+            pane_layout: None,
         }
     }
 
@@ -597,6 +643,7 @@ mod tests {
                 mode,
                 has_broker,
                 dashboard_pane: recorded,
+                pane_layout: None,
             };
             assert_eq!(
                 layout.dashboard_index(),
@@ -653,6 +700,7 @@ mod tests {
             broker_log_path: None,
             mode: SessionMode::Bare,
             dashboard_pane: None,
+            layout: Some(PaneLayout::Grid),
         };
 
         let supervised_session = Session {
@@ -670,6 +718,7 @@ mod tests {
             mode: SessionMode::Supervisor,
             broker_port: Some(9119),
             dashboard_pane: Some(1),
+            layout: None,
             ..base.clone()
         };
         assert_eq!(
@@ -693,6 +742,107 @@ mod tests {
         );
     }
 
+    /// Scenarios "An earlier bare session reads as tiled" and "An earlier
+    /// supervised session reads as the grid" (`session-state`): what `add` and
+    /// `remove` ask is the recorded layout plus the mode, never the mode alone.
+    #[test]
+    fn a_recorded_layout_decides_tiled_versus_grid_not_the_mode() {
+        use crate::session::{SessionStatus, WorktreeEntry};
+        use std::time::SystemTime;
+
+        let base = Session {
+            session_name: "paw-proj".to_string(),
+            repo_path: PathBuf::from("/repo"),
+            project_name: "proj".to_string(),
+            created_at: SystemTime::UNIX_EPOCH,
+            status: SessionStatus::Active,
+            worktrees: Vec::<WorktreeEntry>::new(),
+            broker_port: Some(9119),
+            broker_bind: None,
+            broker_log_path: None,
+            mode: SessionMode::Bare,
+            dashboard_pane: Some(0),
+            layout: None,
+        };
+
+        // mode, recorded layout, is_legacy_tiled
+        for (mode, layout, tiled, case) in [
+            (
+                SessionMode::Bare,
+                None,
+                true,
+                "a bare session saved by an earlier binary is the tiled layout",
+            ),
+            (
+                SessionMode::Supervisor,
+                None,
+                false,
+                "a supervised session saved by an earlier binary was already the grid",
+            ),
+            (
+                SessionMode::Bare,
+                Some(PaneLayout::Grid),
+                false,
+                "a bare session this binary built records the grid",
+            ),
+            (
+                SessionMode::Supervisor,
+                Some(PaneLayout::Grid),
+                false,
+                "a supervised session this binary built records the grid",
+            ),
+        ] {
+            let session = Session {
+                mode,
+                layout,
+                ..base.clone()
+            };
+            assert_eq!(
+                SessionLayout::of(&session).is_legacy_tiled(),
+                tiled,
+                "{case}"
+            );
+        }
+    }
+
+    /// Every launch this binary plans records the grid, so a recorded `None`
+    /// stays unambiguous ("an earlier binary").
+    #[test]
+    fn every_planned_launch_records_the_grid() {
+        for mode in [SessionMode::Bare, SessionMode::Supervisor] {
+            for has_broker in [true, false] {
+                let planned = SessionLayout::planned(mode, has_broker);
+                assert_eq!(
+                    planned.recorded_pane_layout(),
+                    Some(PaneLayout::Grid),
+                    "{mode:?} launch with broker={has_broker}"
+                );
+                assert!(
+                    !planned.is_legacy_tiled(),
+                    "{mode:?} launch with broker={has_broker} is never the tiled layout"
+                );
+            }
+        }
+    }
+
+    /// A session has a top row exactly when it has a dashboard — the input the
+    /// grid geometry takes.
+    #[test]
+    fn has_top_row_tracks_the_dashboard() {
+        for (mode, has_broker, expected) in [
+            (SessionMode::Bare, true, true),
+            (SessionMode::Bare, false, false),
+            (SessionMode::Supervisor, true, true),
+            (SessionMode::Supervisor, false, true),
+        ] {
+            assert_eq!(
+                SessionLayout::planned(mode, has_broker).has_top_row(),
+                expected,
+                "{mode:?} with broker={has_broker}"
+            );
+        }
+    }
+
     // --- Grid geometry ------------------------------------------------------
 
     #[test]
@@ -713,7 +863,7 @@ mod tests {
             (21, 5, 10.0),
             (25, 5, 10.0),
         ] {
-            let layout = supervisor_layout(agent_count).expect("layout should compute");
+            let layout = supervisor_layout(agent_count, true).expect("layout should compute");
             assert_eq!(
                 layout.agent_rows, expected_rows,
                 "agent_rows for {agent_count}"
@@ -738,8 +888,8 @@ mod tests {
     #[test]
     fn top_row_stays_half_the_session_as_agents_grow() {
         // Growing the agent count must shrink the agent rows, never the top row.
-        let small = supervisor_layout(2).expect("small layout should compute");
-        let large = supervisor_layout(25).expect("large layout should compute");
+        let small = supervisor_layout(2, true).expect("small layout should compute");
+        let large = supervisor_layout(25, true).expect("large layout should compute");
 
         assert_eq!(small.top_row_pct, large.top_row_pct, "top row is unchanged");
         assert_eq!(small.top_row_pct, 50, "top row is half the session");
@@ -756,7 +906,7 @@ mod tests {
         // Whatever the row count, the agent rows sum back to the 50% the top
         // row leaves.
         for agent_count in 1..=SUPERVISOR_MAX_AGENTS {
-            let layout = supervisor_layout(agent_count).expect("layout should compute");
+            let layout = supervisor_layout(agent_count, true).expect("layout should compute");
             #[allow(clippy::cast_precision_loss)]
             let total = layout.agent_row_pct * layout.agent_rows as f32;
             assert!(
@@ -768,7 +918,7 @@ mod tests {
 
     #[test]
     fn layout_rejects_26_agents() {
-        let err = supervisor_layout(26).expect_err("26 agents should be rejected");
+        let err = supervisor_layout(26, true).expect_err("26 agents should be rejected");
         let msg = err.to_string();
         assert!(
             msg.contains("26 agents requested"),
@@ -783,7 +933,7 @@ mod tests {
 
     #[test]
     fn layout_rejects_far_above_cap() {
-        let err = supervisor_layout(100).expect_err("100 agents should be rejected");
+        let err = supervisor_layout(100, true).expect_err("100 agents should be rejected");
         assert!(err.to_string().contains("100 agents requested"));
     }
 
@@ -792,15 +942,91 @@ mod tests {
         // layout_for is the D1-named alias; it must be identical to
         // supervisor_layout for every valid count and reject the same way.
         for n in 1..=SUPERVISOR_MAX_AGENTS {
-            assert_eq!(
-                layout_for(n).expect("layout_for should compute"),
-                supervisor_layout(n).expect("supervisor_layout should compute"),
-                "layout_for({n}) should match supervisor_layout({n})"
-            );
+            for has_top_row in [true, false] {
+                assert_eq!(
+                    layout_for(n, has_top_row).expect("layout_for should compute"),
+                    supervisor_layout(n, has_top_row).expect("supervisor_layout should compute"),
+                    "layout_for({n}, {has_top_row}) should match supervisor_layout"
+                );
+            }
         }
         assert!(
-            layout_for(SUPERVISOR_MAX_AGENTS + 1).is_err(),
+            layout_for(SUPERVISOR_MAX_AGENTS + 1, true).is_err(),
             "layout_for should reject above the cap like supervisor_layout"
         );
+        assert!(
+            layout_for(SUPERVISOR_MAX_AGENTS + 1, false).is_err(),
+            "the cap applies to a session with no top row too"
+        );
+    }
+
+    /// The no-dashboard grid (design D2): no top row, so the agent rows share
+    /// the whole window height and agents start at pane 0.
+    #[test]
+    fn a_grid_without_a_top_row_gives_the_agent_rows_the_full_height() {
+        // agent_count, expected rows, expected per-row share
+        for (agent_count, expected_rows, expected_agent) in [
+            (1_usize, 1_usize, 100.0_f32),
+            (5, 1, 100.0),
+            (6, 2, 50.0),
+            (10, 2, 50.0),
+            (25, 5, 20.0),
+        ] {
+            let layout = supervisor_layout(agent_count, false).expect("layout should compute");
+            assert!(!layout.has_top_row, "{agent_count} agents: no top row");
+            assert_eq!(
+                layout.agent_rows, expected_rows,
+                "agent_rows for {agent_count}"
+            );
+            assert_eq!(
+                layout.total_rows, expected_rows,
+                "total_rows for {agent_count} excludes a top row it does not have"
+            );
+            assert_eq!(
+                layout.top_row_pct, 0,
+                "top_row_pct for {agent_count} with no dashboard"
+            );
+            assert!(
+                (layout.agent_row_pct - expected_agent).abs() < 0.01,
+                "agent_row_pct for {agent_count}: expected {expected_agent}, got {}",
+                layout.agent_row_pct
+            );
+        }
+    }
+
+    /// Whatever the row count, a top-row-less grid's rows sum back to the full
+    /// height — the counterpart of `agent_rows_evenly_split_the_lower_half`.
+    #[test]
+    fn agent_rows_without_a_top_row_sum_to_the_whole_window() {
+        for agent_count in 1..=SUPERVISOR_MAX_AGENTS {
+            let layout = supervisor_layout(agent_count, false).expect("layout should compute");
+            #[allow(clippy::cast_precision_loss)]
+            let total = layout.agent_row_pct * layout.agent_rows as f32;
+            assert!(
+                (total - 100.0).abs() < 0.01,
+                "agent rows for {agent_count} should sum to 100%, got {total}"
+            );
+        }
+    }
+
+    /// The two variants differ only in what the top row takes: the row *count*
+    /// for a given agent count is the same either way.
+    #[test]
+    fn row_count_is_the_same_with_and_without_a_top_row() {
+        for agent_count in 1..=SUPERVISOR_MAX_AGENTS {
+            let with = supervisor_layout(agent_count, true).expect("layout");
+            let without = supervisor_layout(agent_count, false).expect("layout");
+            assert_eq!(
+                with.agent_rows, without.agent_rows,
+                "agent rows for {agent_count} do not depend on the top row"
+            );
+            assert!(
+                (without.agent_row_pct - with.agent_row_pct * 2.0).abs() < 0.01,
+                "without a top row each agent row takes twice the height ({agent_count} agents): \
+                 {} vs {}",
+                without.agent_row_pct,
+                with.agent_row_pct
+            );
+        }
     }
 }

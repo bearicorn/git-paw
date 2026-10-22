@@ -9,10 +9,11 @@
 use git_paw::agents;
 use git_paw::error::PawError;
 use git_paw::git;
-use git_paw::session::{self, SessionMode};
+use git_paw::session;
+use git_paw::surface::SessionLayout;
 use git_paw::tmux;
 
-use super::helpers::{agent_pane_offset, bare_mode_unsupported};
+use super::helpers::{agent_pane_offset, legacy_tiled_layout_unsupported};
 use crate::{detach_worktree, write_repo_discovery_file};
 
 /// `git paw remove <branch>` — detach a single agent from a running session
@@ -41,8 +42,15 @@ pub(crate) fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Resu
         ));
     };
 
-    if existing.mode == SessionMode::Bare {
-        return Err(bare_mode_unsupported(&existing.session_name, "remove"));
+    // As in `cmd_add`: every grid session is hot-attachable, and only a live
+    // session built with the earlier tiled layout is refused — before the
+    // pane is killed, the worktree detached or the session JSON rewritten.
+    let session_layout = SessionLayout::of(&existing);
+    if session_layout.is_legacy_tiled() {
+        return Err(legacy_tiled_layout_unsupported(
+            &existing.session_name,
+            "remove",
+        ));
     }
 
     let Some(pos) = existing.worktrees.iter().position(|w| w.branch == branch) else {
@@ -116,7 +124,8 @@ pub(crate) fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Resu
     // 5.6 Recompute layout_for(N-1) and re-apply so the grid re-flows.
     let remaining = existing.worktrees.len() - 1;
     if session_alive && remaining > 0 {
-        let layout = git_paw::surface::layout_for(remaining)?;
+        let layout =
+            git_paw::surface::layout_for(remaining, SessionLayout::of(&existing).has_top_row())?;
         tmux::build_remove_retile_commands(&existing.session_name, offset, remaining, layout)
             .execute()?;
         // Rebalance the re-flowed agent rows to equal width on the live window

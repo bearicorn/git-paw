@@ -585,6 +585,47 @@ fn paw_role_failure_is_silent_on_older_tmux() {
     );
 }
 
+/// The row-height `resize-pane` pass runs after the agent CLIs start, so a CLI
+/// that exits together with its pane takes a resize target with it. That must
+/// warn and let the launch go on, never abort it: the session is up, only the
+/// row heights are off.
+#[test]
+fn row_resize_failure_warns_and_does_not_abort_the_launch() {
+    let session = TmuxSessionBuilder::new("pane-gone")
+        .add_pane(make_pane("feat/a", "/tmp/wt", "claude"))
+        .build()
+        .unwrap();
+    assert!(
+        session
+            .command_strings()
+            .iter()
+            .any(|c| c.contains("resize-pane")),
+        "the grid build carries a row-height resize pass"
+    );
+
+    let mut warnings: Vec<String> = Vec::new();
+    // Simulate a pane that vanished after its CLI started.
+    let result = session.execute_with(
+        |cmd| {
+            if cmd.as_command_string().contains("resize-pane") {
+                Err(PawError::TmuxError("can't find pane: 0".into()))
+            } else {
+                Ok(())
+            }
+        },
+        |w| warnings.push(w),
+    );
+
+    assert!(
+        result.is_ok(),
+        "a failed row resize must not abort the launch"
+    );
+    assert!(
+        warnings.iter().any(|w| w.contains("resize-pane")),
+        "the failed resize is reported; warnings: {warnings:#?}"
+    );
+}
+
 /// A non-soft command failure aborts the build (the double-line tolerance is
 /// scoped to the soft affordance commands, not every command).
 #[test]
@@ -611,7 +652,7 @@ fn hard_command_failure_aborts() {
 /// the supervised builder also emits all five affordances.
 #[test]
 fn supervisor_session_titles_are_roles_and_emits_affordances() {
-    let layout = crate::surface::supervisor_layout(2).expect("layout");
+    let layout = crate::surface::supervisor_layout(2, true).expect("layout");
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let agent = make_pane("feat/foo", "/tmp/wt", "claude");
     let session =
@@ -648,7 +689,7 @@ fn supervisor_session_titles_are_roles_and_emits_affordances() {
 /// launch keystroke) and clears the input line before each launch.
 #[test]
 fn supervisor_build_suppresses_startup_prompts_and_clears_input() {
-    let layout = crate::surface::supervisor_layout(1).expect("layout");
+    let layout = crate::surface::supervisor_layout(1, true).expect("layout");
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let agent = make_pane("feat/foo", "/tmp/wt", "claude");
     let session =
@@ -698,7 +739,7 @@ fn supervisor_build_suppresses_startup_prompts_and_clears_input() {
 /// and no `swap-pane` is emitted.
 #[test]
 fn supervisor_build_spawns_every_agent_in_its_own_worktree_without_a_swap() {
-    let layout = crate::surface::supervisor_layout(2).expect("layout");
+    let layout = crate::surface::supervisor_layout(2, true).expect("layout");
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let a0 = make_pane("feat/foo", "/tmp/wt-foo", "claude");
     let a1 = make_pane("feat/bar", "/tmp/wt-bar", "claude");
@@ -763,7 +804,7 @@ fn supervisor_build_spawns_every_agent_in_its_own_worktree_without_a_swap() {
 /// affordances" (`supervisor-launch` / *`border_affordances` config field*).
 #[test]
 fn supervisor_session_opt_out_omits_affordances() {
-    let layout = crate::surface::supervisor_layout(1).expect("layout");
+    let layout = crate::surface::supervisor_layout(1, true).expect("layout");
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let agent = make_pane("feat/foo", "/tmp/wt", "claude");
     let session = build_supervisor_session(
@@ -1145,89 +1186,234 @@ fn set_environment_in_dry_run_output() {
 }
 
 // -----------------------------------------------------------------------
-// AC: Dashboard layout selection
-// Behavioral: verifies the correct layout is chosen based on pane structure
+// AC: `tmux-orchestration` — "Every pane-less session uses the agent grid".
+// The bare builder emits the same grid `build_supervisor_session` does, so
+// `add` / `remove` can re-tile it. The whole-window `select-layout tiled` and
+// `main-horizontal` layouts are gone: neither can be extended incrementally,
+// and `select-layout` reorders pane indices unpredictably.
 // -----------------------------------------------------------------------
 
-#[test]
-fn session_without_dashboard_uses_tiled_layout() {
-    let session = TmuxSessionBuilder::new("proj")
-        .add_pane(make_pane("feat/a", "/tmp/a", "claude"))
-        .add_pane(make_pane("feat/b", "/tmp/b", "codex"))
-        .build()
-        .unwrap();
+/// The agent pane indices a built session's `send-keys <cli>` commands target,
+/// in emission order — the grid's row-major agent order.
+fn agent_pane_indices(cmds: &[String], cli: &str) -> Vec<usize> {
+    cmds.iter()
+        .filter(|c| c.contains("send-keys") && c.ends_with(&format!("{cli} Enter")))
+        .filter_map(|c| {
+            let target = c.split_whitespace().nth(3)?;
+            target.rsplit('.').next()?.parse().ok()
+        })
+        .collect()
+}
 
-    let cmds = session.command_strings();
-    let layout_cmds: Vec<&String> = cmds
-        .iter()
-        .filter(|c| c.contains("select-layout"))
-        .collect();
-    let final_layout = layout_cmds
-        .last()
-        .expect("should have at least one select-layout");
+/// Scenario "Broker-less start uses the full height" — with no dashboard the
+/// agents start at pane 0 and the rows share the whole window.
+#[test]
+fn a_bare_session_without_a_dashboard_puts_agents_from_pane_zero() {
+    let mut builder = TmuxSessionBuilder::new("proj");
+    for i in 0..6 {
+        builder = builder.add_pane(make_pane(
+            &format!("feat/{i}"),
+            &format!("/tmp/{i}"),
+            "claude",
+        ));
+    }
+    let cmds = builder.build().unwrap().command_strings();
+
+    assert_eq!(
+        agent_pane_indices(&cmds, "claude"),
+        vec![0, 1, 2, 3, 4, 5],
+        "agents occupy panes 0-5 in row-major order, got: {cmds:#?}"
+    );
+    // Panes 0-4 are the first row (horizontal splits off their predecessor);
+    // pane 5 starts the second row (a vertical split off the row's first pane).
+    assert_eq!(
+        cmds.iter()
+            .filter(|c| c.contains("split-window -h"))
+            .count(),
+        4,
+        "four horizontal splits fill the first row of five"
+    );
     assert!(
-        final_layout.contains("tiled"),
-        "sessions without dashboard should use tiled layout, got: {final_layout}"
+        cmds.iter()
+            .any(|c| c.contains("split-window -v -t paw-proj:0.0 -c /tmp/5")),
+        "the sixth agent starts a new row off pane 0, got: {cmds:#?}"
+    );
+    // The two rows share the full height: 50% each, and no top row is sized.
+    assert!(
+        cmds.iter()
+            .any(|c| c == "tmux resize-pane -t paw-proj:0.0 -y 50%"),
+        "first agent row takes half the window, got: {cmds:#?}"
+    );
+    assert!(
+        cmds.iter()
+            .any(|c| c == "tmux resize-pane -t paw-proj:0.5 -y 50%"),
+        "second agent row takes the other half, got: {cmds:#?}"
     );
 }
 
+/// Scenario "Bare start builds the grid" — the dashboard is the full-width top
+/// row at pane 0 and seven agents fill panes 1-5 then 6-7.
 #[test]
-fn session_with_dashboard_uses_main_horizontal_layout() {
+fn a_bare_session_with_a_dashboard_builds_the_grid_below_it() {
+    let mut builder = TmuxSessionBuilder::new("proj").add_pane(make_pane(
+        "dashboard",
+        "/tmp/repo",
+        "git-paw __dashboard",
+    ));
+    for i in 0..7 {
+        builder = builder.add_pane(make_pane(
+            &format!("feat/{i}"),
+            &format!("/tmp/{i}"),
+            "claude",
+        ));
+    }
+    let cmds = builder.build().unwrap().command_strings();
+
+    assert_eq!(
+        agent_pane_indices(&cmds, "claude"),
+        vec![1, 2, 3, 4, 5, 6, 7],
+        "agents occupy panes 1-7 below the dashboard, got: {cmds:#?}"
+    );
+    assert!(
+        cmds.iter()
+            .any(|c| c.contains("split-window -v -t paw-proj:0.0 -l 50% -c /tmp/0")),
+        "the agent area is split off the dashboard at 50%, got: {cmds:#?}"
+    );
+    assert!(
+        cmds.iter()
+            .any(|c| c.contains("split-window -v -t paw-proj:0.1 -c /tmp/5")),
+        "the sixth agent starts a second row off pane 1, got: {cmds:#?}"
+    );
+    assert!(
+        cmds.iter()
+            .any(|c| c == "tmux resize-pane -t paw-proj:0.0 -y 50%"),
+        "the dashboard keeps the full-width top half, got: {cmds:#?}"
+    );
+    assert!(
+        cmds.iter()
+            .any(|c| c == "tmux resize-pane -t paw-proj:0.1 -y 25%"),
+        "each of the two agent rows takes a quarter, got: {cmds:#?}"
+    );
+}
+
+/// Scenario "Spec-driven start builds the grid" — three agents are one
+/// equal-width row under the dashboard. (Spec-driven `start` builds through
+/// the same `TmuxSessionBuilder`, so this is that path's geometry.)
+#[test]
+fn three_agents_under_a_dashboard_are_a_single_row() {
     let session = TmuxSessionBuilder::new("proj")
         .add_pane(make_pane("dashboard", "/tmp/repo", "git-paw __dashboard"))
         .add_pane(make_pane("feat/a", "/tmp/a", "claude"))
-        .add_pane(make_pane("feat/b", "/tmp/b", "codex"))
+        .add_pane(make_pane("feat/b", "/tmp/b", "claude"))
+        .add_pane(make_pane("feat/c", "/tmp/c", "claude"))
         .build()
         .unwrap();
-
     let cmds = session.command_strings();
-    let layout_cmds: Vec<&String> = cmds
-        .iter()
-        .filter(|c| c.contains("select-layout"))
-        .collect();
-    let final_layout = layout_cmds
-        .last()
-        .expect("should have at least one select-layout");
+
+    assert_eq!(agent_pane_indices(&cmds, "claude"), vec![1, 2, 3]);
+    assert_eq!(
+        cmds.iter()
+            .filter(|c| c.contains("split-window -v"))
+            .count(),
+        1,
+        "only the agent area is split off vertically — one row, got: {cmds:#?}"
+    );
     assert!(
-        final_layout.contains("main-horizontal"),
-        "sessions with dashboard should use main-horizontal layout, got: {final_layout}"
+        cmds.iter()
+            .any(|c| c == "tmux resize-pane -t paw-proj:0.1 -y 50%"),
+        "the single agent row takes the half the dashboard leaves, got: {cmds:#?}"
     );
 }
 
+/// The whole-window layouts are not emitted on any bare build — they are what
+/// made a bare session un-re-tilable.
 #[test]
-fn single_pane_session_uses_tiled_layout() {
+fn the_bare_builder_never_emits_a_whole_window_layout() {
+    for panes in [
+        vec![make_pane("main", "/tmp/wt", "claude")],
+        vec![
+            make_pane("feat/a", "/tmp/a", "claude"),
+            make_pane("feat/b", "/tmp/b", "codex"),
+        ],
+        vec![
+            make_pane("dashboard", "/tmp/repo", "git-paw __dashboard"),
+            make_pane("feat/a", "/tmp/a", "claude"),
+            make_pane("feat/b", "/tmp/b", "codex"),
+        ],
+    ] {
+        let mut builder = TmuxSessionBuilder::new("proj");
+        for pane in panes {
+            builder = builder.add_pane(pane);
+        }
+        let cmds = builder.build().unwrap().command_strings();
+        assert!(
+            !cmds.iter().any(|c| c.contains("select-layout")),
+            "no select-layout should be emitted, got: {cmds:#?}"
+        );
+        assert!(
+            !cmds.iter().any(|c| c.contains("main-horizontal")),
+            "no main-horizontal should be emitted, got: {cmds:#?}"
+        );
+    }
+}
+
+/// A single-pane session is a one-agent grid: nothing to split, nothing to
+/// re-tile, and — unlike the layout it replaces — no whole-window
+/// `select-layout tiled` to scramble the pane index.
+#[test]
+fn a_single_pane_session_is_a_bare_one_agent_grid() {
     let session = TmuxSessionBuilder::new("proj")
         .add_pane(make_pane("main", "/tmp/wt", "claude"))
         .build()
         .unwrap();
-
     let cmds = session.command_strings();
-    let layout_cmds: Vec<&String> = cmds
-        .iter()
-        .filter(|c| c.contains("select-layout"))
-        .collect();
-    let final_layout = layout_cmds
-        .last()
-        .expect("should have at least one select-layout");
+
     assert!(
-        final_layout.contains("tiled"),
-        "single pane sessions should use tiled layout, got: {final_layout}"
+        !cmds.iter().any(|c| c.contains("split-window")),
+        "a lone agent needs no split, got: {cmds:#?}"
+    );
+    assert!(
+        !cmds.iter().any(|c| c.contains("select-layout")),
+        "the lone agent's pane index must not be re-ordered, got: {cmds:#?}"
+    );
+    // Its one row takes the whole window — there is no top row to leave room
+    // for.
+    assert_eq!(
+        cmds.iter()
+            .filter(|c| c.contains("resize-pane"))
+            .collect::<Vec<_>>(),
+        vec!["tmux resize-pane -t paw-proj:0.0 -y 100%"],
+        "the lone agent row fills the window, got: {cmds:#?}"
+    );
+    assert_eq!(agent_pane_indices(&cmds, "claude"), vec![0]);
+}
+
+/// The agent cap is the grid's, so a bare launch is rejected with the same
+/// "split into multiple sessions" error `start` surfaces rather than building
+/// an unusable window.
+#[test]
+fn the_bare_builder_rejects_more_agents_than_the_cap() {
+    let mut builder = TmuxSessionBuilder::new("proj");
+    for i in 0..=git_paw_surface_max_agents() {
+        builder = builder.add_pane(make_pane(
+            &format!("feat/{i}"),
+            &format!("/tmp/{i}"),
+            "claude",
+        ));
+    }
+    let err = builder
+        .build()
+        .expect_err("above the cap should be refused");
+    let msg = err.to_string();
+    assert!(msg.contains("maximum is 25"), "error names the cap: {msg}");
+    assert!(
+        msg.contains("Split into multiple sessions"),
+        "error is actionable: {msg}"
     );
 }
 
-#[test]
-fn dashboard_layout_appears_in_dry_run_output() {
-    let session = TmuxSessionBuilder::new("proj")
-        .add_pane(make_pane("dashboard", "/tmp/repo", "git-paw __dashboard"))
-        .add_pane(make_pane("feat/a", "/tmp/a", "claude"))
-        .build()
-        .unwrap();
-
-    let cmds = session.command_strings();
-    assert!(
-        cmds.iter().any(|c| c.contains("main-horizontal")),
-        "dry-run output should include main-horizontal layout command"
-    );
+fn git_paw_surface_max_agents() -> usize {
+    crate::surface::SUPERVISOR_MAX_AGENTS
 }
 
 // -----------------------------------------------------------------------
@@ -1469,7 +1655,7 @@ fn make_layout_panes(n: usize) -> (PaneSpec, Vec<PaneSpec>) {
 }
 
 fn build_for(agent_count: usize) -> TmuxSession {
-    let layout = crate::surface::supervisor_layout(agent_count).expect("layout computes");
+    let layout = crate::surface::supervisor_layout(agent_count, true).expect("layout computes");
     let (dashboard, agents) = make_layout_panes(agent_count);
     build_supervisor_session(
         "proj",
@@ -1645,7 +1831,7 @@ fn supervisor_layout_25_agents_five_rows() {
 fn supervisor_layout_26_agents_rejected_by_layout_helper() {
     // The layout helper is the single gate for the hard cap; the tmux
     // builder is unreachable when supervisor_layout errors.
-    let err = crate::surface::supervisor_layout(26).expect_err("26 agents rejected");
+    let err = crate::surface::supervisor_layout(26, true).expect_err("26 agents rejected");
     let msg = err.to_string();
     assert!(msg.contains("26 agents requested"));
     assert!(msg.contains("maximum is 25"));
@@ -1922,7 +2108,7 @@ fn every_new_session_command() -> Vec<(&'static str, String)> {
     // Builder 2: supervisor-mode layout. Build a small variant so the
     // sample is fast; the new-session shape doesn't depend on agent
     // count.
-    let layout = crate::surface::supervisor_layout(2).expect("layout");
+    let layout = crate::surface::supervisor_layout(2, true).expect("layout");
     let (dashboard, agents) = make_layout_panes(2);
     let supervisor_session = build_supervisor_session(
         "conv-supervisor",
@@ -1983,7 +2169,7 @@ fn every_new_session_passes_c() {
 /// SHALL NOT use the `cd <worktree> && <cli>` race chain.
 #[test]
 fn supervisor_layout_agent_splits_carry_worktree_no_cd_chain() {
-    let layout = crate::surface::supervisor_layout(2).expect("layout");
+    let layout = crate::surface::supervisor_layout(2, true).expect("layout");
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let agent_a = make_pane("feat/a", "/tmp/wt-a", "claude");
     let agent_b = make_pane("feat/b", "/tmp/wt-b", "claude");
@@ -2033,7 +2219,7 @@ fn add_agent_same_row_splits_horizontally_from_previous_pane() {
     // 4 agents already present (single row, indices 1..=4); adding a 5th
     // (agent index 4) stays in the same row -> horizontal split from the
     // immediately-preceding pane (index 4), new pane at index 5.
-    let layout = crate::surface::layout_for(5).expect("layout");
+    let layout = crate::surface::layout_for(5, true).expect("layout");
     let new_agent = make_pane("feat/fifth", "/tmp/wt5", "claude");
     let session = build_add_agent_commands("paw-x", &new_agent, 1, 4, layout, true);
     let cmds = session.command_strings();
@@ -2058,7 +2244,7 @@ fn add_agent_new_row_splits_vertically_from_previous_row_first_pane() {
     // 5 agents present (one full row, indices 1..=5); adding a 6th (agent
     // index 5) starts a new row -> vertical split from the previous row's
     // first pane (index 1).
-    let layout = crate::surface::layout_for(6).expect("layout");
+    let layout = crate::surface::layout_for(6, true).expect("layout");
     let new_agent = make_pane("feat/sixth", "/tmp/wt6", "claude");
     let session = build_add_agent_commands("paw-x", &new_agent, 1, 5, layout, false);
     let cmds = session.command_strings();
@@ -2077,7 +2263,7 @@ fn add_agent_new_row_splits_vertically_from_previous_row_first_pane() {
 /// first agent the session's layout record answers, not this binary's.
 #[test]
 fn add_agent_to_a_pre_relocation_session_uses_its_recorded_offset() {
-    let layout = crate::surface::layout_for(3).expect("layout");
+    let layout = crate::surface::layout_for(3, true).expect("layout");
     let new_agent = make_pane("feat/third", "/tmp/wt3", "claude");
     let session = build_add_agent_commands("paw-x", &new_agent, 2, 2, layout, false);
     let cmds = session.command_strings();
@@ -2098,7 +2284,7 @@ fn add_agent_to_a_pre_relocation_session_uses_its_recorded_offset() {
 fn add_agent_reapplies_row_height_resize_pass() {
     // The re-tile must end with the same per-row resize pass start uses:
     // one resize for the top row (:0.0) at top_row_pct, one per agent row.
-    let layout = crate::surface::layout_for(5).expect("layout");
+    let layout = crate::surface::layout_for(5, true).expect("layout");
     let new_agent = make_pane("feat/fifth", "/tmp/wt5", "claude");
     let session = build_add_agent_commands("paw-x", &new_agent, 1, 4, layout, false);
     let cmds = session.command_strings();
@@ -2111,11 +2297,52 @@ fn add_agent_reapplies_row_height_resize_pass() {
     );
 }
 
+/// The re-tile pass sizes a top row only when the session HAS one. On a
+/// broker-less grid the agents start at pane 0, so resizing `:0.0` as a top
+/// row would squash the first agent instead.
+#[test]
+fn add_agent_on_a_grid_without_a_top_row_resizes_no_top_row() {
+    let layout = crate::surface::layout_for(6, false).expect("layout");
+    let new_agent = make_pane("feat/sixth", "/tmp/wt6", "claude");
+    let session = build_add_agent_commands("paw-x", &new_agent, 0, 5, layout, false);
+    let cmds = session.command_strings();
+
+    // The sixth agent starts a second row off the first row's first pane,
+    // which IS pane 0 here.
+    assert!(
+        cmds.iter()
+            .any(|c| c == "tmux split-window -v -t paw-x:0.0 -c /tmp/wt6"),
+        "the new row splits off pane 0; cmds:\n{cmds:#?}"
+    );
+    // Two agent rows, each half the window, and no separate top-row resize.
+    let resizes: Vec<&String> = cmds.iter().filter(|c| c.contains("resize-pane")).collect();
+    assert_eq!(
+        resizes,
+        vec![
+            "tmux resize-pane -t paw-x:0.0 -y 50%",
+            "tmux resize-pane -t paw-x:0.5 -y 50%",
+        ],
+        "one resize per agent row and nothing else; cmds:\n{cmds:#?}"
+    );
+}
+
+#[test]
+fn remove_retile_on_a_grid_without_a_top_row_resizes_no_top_row() {
+    let layout = crate::surface::layout_for(4, false).expect("layout");
+    let cmds = build_remove_retile_commands("paw-x", 0, 4, layout).command_strings();
+
+    assert_eq!(
+        cmds,
+        vec!["tmux resize-pane -t paw-x:0.0 -y 100%"],
+        "4 agents with no dashboard are one row filling the window; cmds:\n{cmds:#?}"
+    );
+}
+
 #[test]
 fn remove_retile_emits_resize_pass_for_remaining_count() {
     // After removing one of 5 agents, the grid re-tiles to the 4-agent
     // layout: a top-row resize plus one agent-row resize (single row).
-    let layout = crate::surface::layout_for(4).expect("layout");
+    let layout = crate::surface::layout_for(4, true).expect("layout");
     let session = build_remove_retile_commands("paw-x", 1, 4, layout);
     let cmds = session.command_strings();
 
@@ -2137,7 +2364,7 @@ fn remove_retile_emits_resize_pass_for_remaining_count() {
 /// 2) re-tiles that session's own agent rows, never its pane 1 dashboard.
 #[test]
 fn remove_retile_on_a_pre_relocation_session_uses_its_recorded_offset() {
-    let layout = crate::surface::layout_for(2).expect("layout");
+    let layout = crate::surface::layout_for(2, true).expect("layout");
     let session = build_remove_retile_commands("paw-x", 2, 2, layout);
     let cmds = session.command_strings();
     let resizes = commands_containing(&cmds, "resize-pane");
@@ -2153,7 +2380,7 @@ fn remove_retile_on_a_pre_relocation_session_uses_its_recorded_offset() {
 
 #[test]
 fn remove_retile_with_zero_remaining_is_empty() {
-    let layout = crate::surface::layout_for(1).expect("layout");
+    let layout = crate::surface::layout_for(1, true).expect("layout");
     let session = build_remove_retile_commands("paw-x", 1, 0, layout);
     assert!(
         session.command_strings().is_empty(),
@@ -2821,7 +3048,7 @@ fn has_live_agent_pane_true_for_a_renumbered_agent_pane_after_pause() {
 /// asserted on here.
 #[test]
 fn affordances_off_panes_are_still_labelled_so_pause_renumbering_is_safe() {
-    let layout = crate::surface::supervisor_layout(1).expect("layout");
+    let layout = crate::surface::supervisor_layout(1, true).expect("layout");
     let dashboard = make_pane("dashboard", "/repo", "git-paw __dashboard");
     let agent = make_pane("feat/foo", "/tmp/wt", "claude");
     let session = build_supervisor_session(

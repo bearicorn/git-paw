@@ -207,7 +207,7 @@ See [Spec-Driven Launch](user-guide/spec-driven-launch.md) for details on spec f
 
 ## `git paw add`
 
-Hot-attaches a worktree and agent pane to a running **supervisor-mode** session without a stop/purge/restart. The agent grid re-tiles to the layout a `start` of that many agents would produce, the new branch is registered in the session, and the agent boots with the same broker boot block + initial prompt a start-time agent receives. The supervisor discovers it on its next broker poll — no restart.
+Hot-attaches a worktree and agent pane to a running session — bare, spec-driven or supervisor-mode — without a stop/purge/restart. The agent grid re-tiles to the layout a `start` of that many agents would produce, the new branch is registered in the session, and the agent boots with the same broker boot block + initial prompt a start-time agent receives. The orchestrator discovers it passively on its next broker poll, and an in-process drive loop picks it up on its next sweep — no restart.
 
 Provide a branch name, or use `--from-spec` to derive the branch (and CLI) from a spec discovered in the configured spec system — OpenSpec, Markdown, Spec Kit, or Superpowers (same resolution as `start --specs NAME`). Adding past the 25-agent cap is rejected with the same "split into multiple sessions" message `start` uses. Adding to a paused session leaves the new pane paused until `git paw start`.
 
@@ -236,7 +236,7 @@ A branch whose broker `agent_id` is already taken by an agent in the session is 
 
 ## `git paw remove`
 
-Detaches a single agent from an active **supervisor-mode** session: closes its tmux pane, re-tiles the grid for the smaller agent count, removes its worktree (reusing `git paw purge`'s per-worktree teardown), and drops it from the session. The other agents are untouched; the supervisor notices the departure on its next poll (the agent stops heartbeating).
+Detaches a single agent from any active session: closes its tmux pane, re-tiles the grid for the smaller agent count, removes its worktree (reusing `git paw purge`'s per-worktree teardown), and drops it from the session. The other agents are untouched; the orchestrator notices the departure on its next poll (the agent stops heartbeating) and a running drive loop stops driving it on its next sweep.
 
 Safe by default: `remove` refuses to delete a worktree with uncommitted changes — listing the changed files — unless `--force` is passed. `--keep-worktree` detaches the pane and session entry but leaves the worktree and branch on disk (and skips the uncommitted-work check, since nothing is deleted). `git paw remove supervisor` is refused — use `git paw stop` to end the whole session.
 
@@ -259,7 +259,9 @@ git paw remove feat/wip --force
 git paw remove feat/keep --keep-worktree
 ```
 
-> Both `add` and `remove` operate on supervisor-mode sessions (the default). A bare (`--no-supervisor`) session reports an actionable error; stop and re-start it with the full branch set. One branch per invocation.
+> Both `add` and `remove` operate on every session git-paw builds — every one uses the agent grid, which is the layout that can be re-tiled incrementally. One branch per invocation.
+>
+> A live session started by an *earlier* git-paw with the whole-window tiled layout is the one exception: it is refused before any worktree, pane or session entry is touched, with an error naming the tiled layout. Stop the session and run `git paw start` to relaunch it in the grid layout, after which `add` and `remove` work normally.
 
 ## `git paw pause`
 

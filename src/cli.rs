@@ -264,6 +264,9 @@ pub enum Command {
                       session is paused, the new pane starts paused too and begins on the next \
                       `git paw start`. The supervisor (if any) discovers the new agent on its \
                       next broker poll — no restart.\n\n\
+                      Works on every session built with the agent grid. A live session started \
+                      by an earlier git-paw with the tiled layout is refused: stop it and run \
+                      `git paw start` to relaunch it in the grid layout.\n\n\
                       Examples:\n  \
                       git paw add feat/new-thing\n  \
                       git paw add feat/api --cli codex\n  \
@@ -312,6 +315,9 @@ pub enum Command {
                       `remove supervisor` is refused — use `git paw stop` to end \
                       the whole session. The supervisor notices the departure on its next broker \
                       poll (the agent stops heartbeating) — no restart.\n\n\
+                      Works on every session built with the agent grid. A live session started \
+                      by an earlier git-paw with the tiled layout is refused: stop it and run \
+                      `git paw start` to relaunch it in the grid layout.\n\n\
                       Examples:\n  \
                       git paw remove feat/done-thing\n  \
                       git paw remove feat/wip --force\n  \

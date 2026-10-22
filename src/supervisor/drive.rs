@@ -111,6 +111,53 @@ pub struct AgentPane {
     pub branch: String,
 }
 
+/// Reads the session's coding-agent roster as the persisted state currently
+/// records it.
+///
+/// A port, not a direct read, because [`drive_loop`] re-reads the roster every
+/// sweep: an agent attached with `git paw add` while the loop runs must be
+/// driven, and one detached with `git paw remove` must stop being driven. The
+/// seam is what lets a test hand the loop a roster that changes mid-run.
+pub trait RosterReader: std::fmt::Debug {
+    /// The session's coding agents right now, or `None` when the state could
+    /// not be read on this sweep — in which case the loop keeps the roster it
+    /// last read rather than driving nothing.
+    fn read_roster(&self) -> Option<Vec<AgentPane>>;
+}
+
+/// The production [`RosterReader`]: the session receipt for one repository.
+#[derive(Debug, Clone)]
+pub struct SessionFileRoster {
+    repo_root: PathBuf,
+}
+
+impl SessionFileRoster {
+    /// A reader for the session recorded against `repo_root`.
+    #[must_use]
+    pub fn new(repo_root: impl Into<PathBuf>) -> Self {
+        Self {
+            repo_root: repo_root.into(),
+        }
+    }
+}
+
+impl RosterReader for SessionFileRoster {
+    fn read_roster(&self) -> Option<Vec<AgentPane>> {
+        let session = crate::session::find_session_for_repo(&self.repo_root).ok()??;
+        Some(
+            session
+                .worktrees
+                .iter()
+                .map(|w| AgentPane {
+                    agent_id: crate::broker::messages::slugify_branch(&w.branch),
+                    worktree_path: w.worktree_path.clone(),
+                    branch: w.branch.clone(),
+                })
+                .collect(),
+        )
+    }
+}
+
 /// Borrows `agents` as the `(agent_id, worktree root)` owner pairs
 /// [`SessionLayout::resolve`] matches a surface's owning directory against.
 fn surface_owners(agents: &[AgentPane]) -> impl Iterator<Item = (&str, &Path)> {
@@ -1075,6 +1122,16 @@ pub struct DriveConfig {
     /// The session's reserved-index record. Every role the loop resolves comes
     /// from it, so no decision compares a pane index to a literal.
     pub layout: SessionLayout,
+    /// Where [`drive_loop`] re-reads its coding-agent roster each sweep, so an
+    /// agent attached or detached while the loop runs is picked up or dropped
+    /// (`supervisor-unattended-operation`: "The drive loop follows the live
+    /// agent roster").
+    ///
+    /// Every production launch supplies a [`SessionFileRoster`]. `None` —
+    /// the default, which exists so a unit test that is not about the roster
+    /// need not construct one — pins the loop to the roster it was started
+    /// with, the behaviour before the roster followed the session.
+    pub roster: Option<std::sync::Arc<dyn RosterReader + Send + Sync>>,
 }
 
 impl Default for DriveConfig {
@@ -1093,6 +1150,7 @@ impl Default for DriveConfig {
             // The loop runs only under `cmd_supervisor`, so the supervised
             // layout (dashboard 0, agents 1+) is the default.
             layout: SessionLayout::planned(crate::session::SessionMode::Supervisor, true),
+            roster: None,
         }
     }
 }
@@ -1203,7 +1261,14 @@ pub fn drive_loop(
     instance: &dyn SessionInstanceGuard,
 ) -> DriveSummary {
     let layout = config.layout;
-    let coding_ids: Vec<String> = agents.iter().map(|a| a.agent_id.clone()).collect();
+    // The roster the loop drives, as last read. It starts as the one the
+    // launch handed over and is refreshed from the session state at the top of
+    // every sweep, so `git paw add` and `git paw remove` take effect on the
+    // next tick without restarting the loop. Completion, the branch-refresh
+    // pass and the exit summary all read this, so they see the roster as last
+    // read rather than the one the wave started with.
+    let mut agents: Vec<AgentPane> = agents.to_vec();
+    let mut coding_ids: Vec<String> = agents.iter().map(|a| a.agent_id.clone()).collect();
     let mut dedup = DedupWindow::new(config.dedup_window);
     let mut escalations: Vec<Escalation> = Vec::new();
     let mut correction = CorrectionState::new();
@@ -1241,13 +1306,26 @@ pub fn drive_loop(
             break (DriveOutcome::SessionTornDown, Vec::new());
         }
 
+        // --- Refresh the roster from the session state -----------------------
+        // Before any surface is resolved, so an agent added since the last
+        // sweep resolves as a coding agent on this one and a removed agent
+        // stops resolving. A read that fails leaves the previous roster in
+        // place: driving the agents we know about beats driving none.
+        if let Some(reader) = config.roster.as_ref()
+            && let Some(fresh) = reader.read_roster()
+        {
+            coding_ids = fresh.iter().map(|a| a.agent_id.clone()).collect();
+            agents = fresh;
+        }
+
         // --- Sweep every coding surface (explicit per-pane capture) ----------
         // Only a surface the layout resolves to a coding agent is captured or
         // typed into (GP-46): the dashboard and an unowned surface are skipped
         // before any capture, so nothing drawn there can drive a decision.
         let mut pane_by_agent: HashMap<String, usize> = HashMap::new();
         for pane in deps.enumerator.list_panes(session) {
-            let role = resolve_pane_agent(layout, pane.pane_index, &pane.pane_current_path, agents);
+            let role =
+                resolve_pane_agent(layout, pane.pane_index, &pane.pane_current_path, &agents);
             let Some(agent_id) = role.coding_agent() else {
                 continue; // not a coding surface — never acted on
             };
@@ -1301,7 +1379,7 @@ pub fn drive_loop(
         let refreshed_branches = trigger_branch_refresh(
             config.branch_refresh_enabled,
             ctx,
-            agents,
+            &agents,
             &pane_by_agent,
             &latest_status,
             &merged_bases,
@@ -2986,6 +3064,10 @@ pub fn run_drive_loop(
         clis,
         default_branch,
         layout,
+        // Every production run follows the live roster: the loop re-reads the
+        // session receipt each sweep so `git paw add` / `git paw remove` take
+        // effect without restarting it.
+        roster: Some(std::sync::Arc::new(SessionFileRoster::new(repo_root))),
         ..DriveConfig::default()
     };
 
@@ -3092,6 +3174,7 @@ struct StatusResponse {
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+    use std::sync::{Arc, Mutex};
 
     /// The layout the loop runs under in production: `cmd_supervisor` is its
     /// only caller, so the dashboard sits at 0 and coding agents from 1.
@@ -7903,6 +7986,7 @@ mod tests {
             broker_log_path: None,
             mode: crate::session::SessionMode::Supervisor,
             dashboard_pane: Some(1),
+            layout: None,
         };
         let trace = trace_one_sweep(
             SessionLayout::of(&legacy),
@@ -8077,6 +8161,248 @@ mod tests {
             dispatcher.events.is_empty(),
             "no surface receives a keystroke; events were {:?}",
             dispatcher.events
+        );
+    }
+
+    // --- the drive loop follows the live agent roster -----------------------
+    // `supervisor-unattended-operation`: "The drive loop follows the live
+    // agent roster". An agent attached with `git paw add` while the loop runs
+    // is driven; one detached with `git paw remove` stops being driven; a
+    // sweep whose roster read fails keeps the roster it last read.
+
+    /// A [`RosterReader`] that yields one scripted answer per sweep, repeating
+    /// its last answer once the script runs out. `None` stands for a sweep
+    /// whose session state could not be read.
+    #[derive(Debug)]
+    struct ScriptedRoster {
+        rounds: Mutex<std::collections::VecDeque<Option<Vec<AgentPane>>>>,
+        last: Mutex<Option<Vec<AgentPane>>>,
+    }
+
+    impl ScriptedRoster {
+        fn new(rounds: Vec<Option<Vec<AgentPane>>>) -> Arc<Self> {
+            Arc::new(Self {
+                rounds: Mutex::new(rounds.into()),
+                last: Mutex::new(None),
+            })
+        }
+    }
+
+    impl RosterReader for ScriptedRoster {
+        fn read_roster(&self) -> Option<Vec<AgentPane>> {
+            let mut rounds = self.rounds.lock().ok()?;
+            let mut last = self.last.lock().ok()?;
+            match rounds.pop_front() {
+                Some(answer) => {
+                    if answer.is_some() {
+                        last.clone_from(&answer);
+                    }
+                    answer
+                }
+                // Script exhausted: hold the last answer rather than snapping
+                // back to the launch-time roster.
+                None => last.clone(),
+            }
+        }
+    }
+
+    fn agent(id: &str, worktree: &str, branch: &str) -> AgentPane {
+        AgentPane {
+            agent_id: id.to_string(),
+            worktree_path: PathBuf::from(worktree),
+            branch: branch.to_string(),
+        }
+    }
+
+    /// [`run_loop`], plus a scripted roster and the full [`DriveSummary`], so a
+    /// test can assert on what the loop drove AND on what the summary says.
+    fn run_loop_with_roster(
+        agents: &[AgentPane],
+        roster: Arc<dyn RosterReader + Send + Sync>,
+        panes: Vec<PaneInfo>,
+        pane_text: &[(usize, &str)],
+        statuses: Vec<Vec<AgentStatusRow>>,
+        merge_check: &dyn MergeCheck,
+    ) -> (DriveSummary, RecordingDispatcher, RecordingAlerts) {
+        let enumerator = FakeEnumerator { panes };
+        let capturer = FakeCapturer::new(pane_text);
+        let mut dispatcher = RecordingDispatcher::default();
+        let status = ScriptedStatus::new(statuses);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
+        let mut refresher = RecordingRefresher::default();
+        let messages = ScriptedMessages::none();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            merge_check,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
+            refresher: &mut refresher,
+            wedged: Vec::new(),
+        };
+        let config = DriveConfig {
+            poll_interval: Duration::from_secs(1),
+            heartbeat: Duration::from_hours(1),
+            roster: Some(roster),
+            ..DriveConfig::default()
+        };
+        let summary = drive_loop_in_tmp("paw-test", agents, &mut deps, &config);
+        (summary, dispatcher, alerts)
+    }
+
+    /// Scenario "An added agent is driven by a running loop": the loop starts
+    /// with one agent; a second appears in the roster mid-run and its live
+    /// permission prompt is escalated by name on a subsequent sweep — with no
+    /// keystroke answering it.
+    #[test]
+    fn an_agent_added_mid_run_is_swept_and_escalated_by_the_running_loop() {
+        let started_with = vec![agent("feat-a", "/repo-feat-a", "feat/a")];
+        let after_add = vec![
+            agent("feat-a", "/repo-feat-a", "feat/a"),
+            agent("feat-b", "/repo-feat-b", "feat/b"),
+        ];
+        let (_, dispatcher, alerts) = run_loop_with_roster(
+            &started_with,
+            ScriptedRoster::new(vec![Some(started_with.clone()), Some(after_add)]),
+            vec![
+                pane(0, "/repo"),
+                pane(1, "/repo-feat-a"),
+                pane(2, "/repo-feat-b"),
+            ],
+            &[
+                (0, IDLE_PANE),
+                (1, IDLE_PANE),
+                (2, &live_safe_capture("cargo build")),
+            ],
+            vec![
+                vec![row("feat-a", "working")],
+                vec![row("supervisor", "done")],
+            ],
+            &FakeMergeCheck::default(),
+        );
+
+        assert_eq!(
+            alerts
+                .escalations
+                .iter()
+                .map(|e| (e.agent_id.as_str(), e.verdict.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("feat-b", PERMISSION_PROMPT_VERDICT)],
+            "the added agent's prompt is escalated by name once the roster \
+             carries it; escalations were {:?}",
+            alerts.escalations
+        );
+        assert!(
+            dispatcher.events.is_empty(),
+            "no keystroke answers the escalated prompt; events were {:?}",
+            dispatcher.events
+        );
+    }
+
+    /// Scenario "A removed agent is no longer driven": once the roster drops an
+    /// agent, no later sweep resolves its surface, and the exit summary counts
+    /// and lists only the agents that remain.
+    #[test]
+    fn an_agent_removed_mid_run_leaves_the_roster_and_the_summary() {
+        let started_with = vec![
+            agent("feat-a", "/repo-feat-a", "feat/a"),
+            agent("feat-x", "/repo-feat-x", "feat/x"),
+        ];
+        let after_remove = vec![agent("feat-a", "/repo-feat-a", "feat/a")];
+        // Both branches are unmerged, so a roster still carrying `feat/x`
+        // would put an `[unmerged]` entry for it in the summary.
+        let merge_check = FakeMergeCheck::default()
+            .with_unmerged("feat/a", 1, "aaa1111")
+            .with_unmerged("feat/x", 2, "xxx2222");
+        let (summary, dispatcher, _) = run_loop_with_roster(
+            &started_with,
+            ScriptedRoster::new(vec![Some(after_remove)]),
+            vec![
+                pane(0, "/repo"),
+                pane(1, "/repo-feat-a"),
+                pane(2, "/repo-feat-x"),
+            ],
+            &[
+                (0, IDLE_PANE),
+                (1, IDLE_PANE),
+                (2, &live_safe_capture("rm -rf build")),
+            ],
+            vec![vec![row("supervisor", "done")]],
+            &merge_check,
+        );
+
+        let rendered = format!("{summary:?}");
+        assert!(
+            !rendered.contains("feat-x") && !rendered.contains("feat/x"),
+            "the removed agent must not appear in the exit summary; summary: {rendered}"
+        );
+        assert!(
+            dispatcher.events.is_empty(),
+            "no keystroke is attributed to the removed agent; events were {:?}",
+            dispatcher.events
+        );
+    }
+
+    /// Scenario "An unreadable roster keeps the previous one": a sweep whose
+    /// session state cannot be read keeps driving the agents the loop already
+    /// knows about rather than driving none.
+    #[test]
+    fn a_sweep_whose_roster_read_fails_keeps_the_previous_roster() {
+        let agents = two_agents();
+        let panes = vec![
+            pane(0, "/repo"),
+            pane(1, "/repo-feat-a"),
+            pane(2, "/repo-feat-b"),
+        ];
+        let text: &[(usize, &str)] = &[
+            (0, IDLE_PANE),
+            (1, &live_safe_capture("frobnicate --all")),
+            (2, &live_safe_capture("cargo build")),
+        ];
+        let statuses = vec![
+            vec![row("feat-a", "working"), row("feat-b", "working")],
+            vec![row("supervisor", "done")],
+        ];
+
+        // Every read fails.
+        let (_, _, kept) = run_loop_with_roster(
+            &agents,
+            ScriptedRoster::new(vec![None, None]),
+            panes.clone(),
+            text,
+            statuses.clone(),
+            &FakeMergeCheck::default(),
+        );
+        assert_eq!(
+            kept.escalations.len(),
+            2,
+            "an unreadable roster keeps both agents in play; escalations were {:?}",
+            kept.escalations
+        );
+
+        // Control: a roster that reads back EMPTY really does stop the loop
+        // driving anyone, so the assertion above is about the read failing —
+        // not about the refresh being inert.
+        let (_, _, emptied) = run_loop_with_roster(
+            &agents,
+            ScriptedRoster::new(vec![Some(Vec::new())]),
+            panes,
+            text,
+            statuses,
+            &FakeMergeCheck::default(),
+        );
+        assert!(
+            emptied.escalations.is_empty(),
+            "an empty roster drives nobody; escalations were {:?}",
+            emptied.escalations
         );
     }
 

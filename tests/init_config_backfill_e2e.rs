@@ -138,6 +138,7 @@ impl Fixture {
             broker_log_path: None,
             mode: SessionMode::Bare,
             dashboard_pane: None,
+            layout: None,
         };
         git_paw::session::save_session_in(&receipt, &sdir).expect("save receipt");
         canon(&sibling)

@@ -1482,3 +1482,73 @@ fn broker_session_full_lifecycle() {
         "feat/smoke-b should be deleted after purge, branches:\n{branches}"
     );
 }
+
+/// `tmux-orchestration` — "Every pane-less session uses the agent grid": the
+/// grid's 25-agent cap applies to a bare launch, and like every other
+/// pre-flight refusal it fires BEFORE anything is created. The grid builder
+/// would reject the count anyway, but only after a worktree per branch had
+/// been created and provisioned — leaving the user N worktrees and no
+/// session.
+#[test]
+#[serial]
+fn a_bare_start_past_the_agent_cap_is_refused_before_any_worktree_exists() {
+    let tr = setup_test_repo();
+    let home = TempDir::new().expect("home tempdir");
+
+    let branches: Vec<String> = (0..26).map(|i| format!("feat/cap-{i}")).collect();
+    for branch in &branches {
+        let st = std::process::Command::new("git")
+            .current_dir(tr.path())
+            .args(["branch", branch])
+            .status()
+            .expect("git branch");
+        assert!(st.success(), "creating {branch} must succeed");
+    }
+
+    // Register the `cat` stand-in so the launch reaches the cap check on a
+    // machine with no AI CLI on PATH.
+    let paw_dir = tr.path().join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    fs::write(
+        paw_dir.join("config.toml"),
+        "[clis.cat]\ncommand = \"/bin/cat\"\n",
+    )
+    .expect("write config");
+
+    let out = cmd()
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .args(["start", "--cli", "cat", "--branches", &branches.join(",")])
+        .output()
+        .expect("run start");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    assert!(
+        !out.status.success(),
+        "26 branches must be refused; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("maximum is 25") && stderr.contains("Split into multiple sessions"),
+        "the refusal must be the same actionable cap error; stderr:\n{stderr}"
+    );
+
+    // Nothing was created: no worktree directory for any branch, and no
+    // session receipt.
+    let parent = tr.path().parent().expect("repo has parent");
+    for branch in &branches {
+        let slug = branch.replace('/', "-");
+        let candidate = parent.join(format!(
+            "{}-{slug}",
+            tr.path()
+                .file_name()
+                .expect("repo basename")
+                .to_string_lossy()
+        ));
+        assert!(
+            !candidate.exists(),
+            "no worktree may be created for {branch}, found {}",
+            candidate.display()
+        );
+    }
+}

@@ -1,10 +1,11 @@
 # Dashboard
 
 When the broker is enabled, one tmux pane runs the dashboard instead of an
-agent CLI, and it is **pane 0 in every mode**: in **supervisor mode** it is
-the full-width top row above the agent grid (no orchestrator CLI runs inside
-the session), and in **broker-only mode** (broker on, supervisor off) it sits
-ahead of the agent panes. Either way it renders the
+agent CLI, and it is **pane 0 in every mode**: the full-width top row above
+the agent grid, with the coding agents laid out row-major beneath it (no
+orchestrator CLI runs inside the session). That is the same layout in a
+supervisor-mode session, a bare one and a spec-driven one — every session
+git-paw builds uses the agent grid. It renders the
 same live status table that refreshes about once a second (and immediately on a key press), giving you an at-a-glance
 view of what each agent is doing. A supervised session builds the dashboard
 pane even with the broker off.
