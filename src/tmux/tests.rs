@@ -1205,6 +1205,35 @@ fn agent_pane_indices(cmds: &[String], cli: &str) -> Vec<usize> {
         .collect()
 }
 
+/// Every agent split after the first one must target the immediately
+/// preceding pane: tmux inserts a split's new pane right after its target in
+/// the pane list, so a split off any earlier pane lands mid-list and shifts
+/// every later pane's index (GP-81). Returns the `(target, new_pane)` pairs
+/// that break the rule.
+fn splits_off_a_non_preceding_pane(cmds: &[String], first_agent: usize) -> Vec<(usize, usize)> {
+    let mut next_pane = first_agent + 1;
+    let mut bad = Vec::new();
+    for c in cmds.iter().filter(|c| c.contains("split-window")) {
+        let target: usize = c
+            .split_whitespace()
+            .skip_while(|w| *w != "-t")
+            .nth(1)
+            .and_then(|t| t.rsplit('.').next())
+            .and_then(|i| i.parse().ok())
+            .expect("every split names a pane target");
+        // The dashboard's own split (off pane 0, creating the first agent at
+        // pane 1) is the one split that precedes the agent grid.
+        if first_agent == 1 && target == 0 && next_pane == 2 && c.contains(" -l ") {
+            continue;
+        }
+        if target + 1 != next_pane {
+            bad.push((target, next_pane));
+        }
+        next_pane += 1;
+    }
+    bad
+}
+
 /// Scenario "Broker-less start uses the full height" — with no dashboard the
 /// agents start at pane 0 and the rows share the whole window.
 #[test]
@@ -1225,7 +1254,8 @@ fn a_bare_session_without_a_dashboard_puts_agents_from_pane_zero() {
         "agents occupy panes 0-5 in row-major order, got: {cmds:#?}"
     );
     // Panes 0-4 are the first row (horizontal splits off their predecessor);
-    // pane 5 starts the second row (a vertical split off the row's first pane).
+    // pane 5 starts the second row: a full-width vertical split off pane 4,
+    // the last pane, so it lands at index 5 (GP-81).
     assert_eq!(
         cmds.iter()
             .filter(|c| c.contains("split-window -h"))
@@ -1235,8 +1265,13 @@ fn a_bare_session_without_a_dashboard_puts_agents_from_pane_zero() {
     );
     assert!(
         cmds.iter()
-            .any(|c| c.contains("split-window -v -t paw-proj:0.0 -c /tmp/5")),
-        "the sixth agent starts a new row off pane 0, got: {cmds:#?}"
+            .any(|c| c.contains("split-window -v -f -t paw-proj:0.4 -c /tmp/5")),
+        "the sixth agent starts a full-width row off pane 4, got: {cmds:#?}"
+    );
+    assert_eq!(
+        splits_off_a_non_preceding_pane(&cmds, 0),
+        vec![],
+        "every split must target the preceding pane, got: {cmds:#?}"
     );
     // The two rows share the full height: 50% each, and no top row is sized.
     assert!(
@@ -1252,10 +1287,13 @@ fn a_bare_session_without_a_dashboard_puts_agents_from_pane_zero() {
 }
 
 /// Scenario "Bare start builds the grid" — the dashboard is the full-width top
-/// row at pane 0 and seven agents fill panes 1-5 then 6-7.
+/// row at pane 0 and seven agents fill panes 1-5 then 6-7. The live proof
+/// that each pane index really holds its agent's worktree is
+/// `tests/add_remove_e2e.rs` (`a_seven_agent_bare_start_puts_every_agent_in_its_own_pane`);
+/// this pins the command shape that gives it.
 #[test]
 fn a_bare_session_with_a_dashboard_builds_the_grid_below_it() {
-    let mut builder = TmuxSessionBuilder::new("proj").add_pane(make_pane(
+    let mut builder = TmuxSessionBuilder::new("proj").dashboard(make_pane(
         "dashboard",
         "/tmp/repo",
         "git-paw __dashboard",
@@ -1281,8 +1319,13 @@ fn a_bare_session_with_a_dashboard_builds_the_grid_below_it() {
     );
     assert!(
         cmds.iter()
-            .any(|c| c.contains("split-window -v -t paw-proj:0.1 -c /tmp/5")),
-        "the sixth agent starts a second row off pane 1, got: {cmds:#?}"
+            .any(|c| c.contains("split-window -v -f -t paw-proj:0.5 -c /tmp/5")),
+        "the sixth agent starts a full-width second row off pane 5, got: {cmds:#?}"
+    );
+    assert_eq!(
+        splits_off_a_non_preceding_pane(&cmds, 1),
+        vec![],
+        "every agent split must target the preceding pane, got: {cmds:#?}"
     );
     assert!(
         cmds.iter()
@@ -1302,7 +1345,7 @@ fn a_bare_session_with_a_dashboard_builds_the_grid_below_it() {
 #[test]
 fn three_agents_under_a_dashboard_are_a_single_row() {
     let session = TmuxSessionBuilder::new("proj")
-        .add_pane(make_pane("dashboard", "/tmp/repo", "git-paw __dashboard"))
+        .dashboard(make_pane("dashboard", "/tmp/repo", "git-paw __dashboard"))
         .add_pane(make_pane("feat/a", "/tmp/a", "claude"))
         .add_pane(make_pane("feat/b", "/tmp/b", "claude"))
         .add_pane(make_pane("feat/c", "/tmp/c", "claude"))
@@ -1325,23 +1368,60 @@ fn three_agents_under_a_dashboard_are_a_single_row() {
     );
 }
 
+/// The top row comes from `TmuxSessionBuilder::dashboard` alone, never from a
+/// branch name: a coding agent whose branch is literally `dashboard`, added as
+/// an ordinary pane, is an agent at pane 0 of a grid with no top row.
+#[test]
+fn an_agent_branch_named_dashboard_is_not_a_top_row() {
+    let cmds = TmuxSessionBuilder::new("proj")
+        .add_pane(make_pane("dashboard", "/tmp/dash-agent", "claude"))
+        .add_pane(make_pane("feat/b", "/tmp/b", "claude"))
+        .build()
+        .unwrap()
+        .command_strings();
+
+    assert_eq!(
+        agent_pane_indices(&cmds, "claude"),
+        vec![0, 1],
+        "both agents run from pane 0 with no top row, got: {cmds:#?}"
+    );
+    assert!(
+        !cmds.iter().any(|c| c.contains("split-window -v")),
+        "no top row is split off, got: {cmds:#?}"
+    );
+    assert!(
+        !cmds
+            .iter()
+            .any(|c| c.contains("resize-pane -t paw-proj:0.0 -y 50%")),
+        "pane 0 is not sized as a top row, got: {cmds:#?}"
+    );
+}
+
 /// The whole-window layouts are not emitted on any bare build — they are what
 /// made a bare session un-re-tilable.
 #[test]
 fn the_bare_builder_never_emits_a_whole_window_layout() {
-    for panes in [
-        vec![make_pane("main", "/tmp/wt", "claude")],
-        vec![
-            make_pane("feat/a", "/tmp/a", "claude"),
-            make_pane("feat/b", "/tmp/b", "codex"),
-        ],
-        vec![
-            make_pane("dashboard", "/tmp/repo", "git-paw __dashboard"),
-            make_pane("feat/a", "/tmp/a", "claude"),
-            make_pane("feat/b", "/tmp/b", "codex"),
-        ],
+    for (with_dashboard, panes) in [
+        (false, vec![make_pane("main", "/tmp/wt", "claude")]),
+        (
+            false,
+            vec![
+                make_pane("feat/a", "/tmp/a", "claude"),
+                make_pane("feat/b", "/tmp/b", "codex"),
+            ],
+        ),
+        (
+            true,
+            vec![
+                make_pane("feat/a", "/tmp/a", "claude"),
+                make_pane("feat/b", "/tmp/b", "codex"),
+            ],
+        ),
     ] {
         let mut builder = TmuxSessionBuilder::new("proj");
+        if with_dashboard {
+            builder = builder.dashboard(make_pane("dashboard", "/tmp/repo", "git-paw __dashboard"));
+        }
         for pane in panes {
             builder = builder.add_pane(pane);
         }
@@ -1750,8 +1830,13 @@ fn supervisor_layout_10_agents_two_rows() {
     assert!(
         splits
             .iter()
-            .any(|c| c.contains("-v") && c.contains(":0.1") && c.ends_with("-c /tmp/wt5")),
-        "the sixth agent starts a new row below the first agent row; got {splits:#?}"
+            .any(|c| c.contains("-v -f") && c.contains(":0.5 ") && c.ends_with("-c /tmp/wt5")),
+        "the sixth agent starts a full-width row off pane 5, the last pane; got {splits:#?}"
+    );
+    assert_eq!(
+        splits_off_a_non_preceding_pane(&cmds, 1),
+        vec![],
+        "every agent split must target the preceding pane; got {splits:#?}"
     );
 }
 
@@ -1859,8 +1944,8 @@ fn supervisor_layout_7_agents_row_major_indices() {
             "pane {pane} runs agent {agent}; send-keys {send_keys:#?}"
         );
     }
-    // The sixth agent opens row 2 with a vertical split below row 1's
-    // first pane; the fifth closes row 1 with a horizontal split.
+    // The sixth agent opens row 2 with a full-width vertical split off pane
+    // 5, the last pane (GP-81); the fifth closes row 1 with a horizontal split.
     let splits = commands_containing(&cmds, "split-window");
     assert!(
         splits
@@ -1871,7 +1956,7 @@ fn supervisor_layout_7_agents_row_major_indices() {
     assert!(
         splits
             .iter()
-            .any(|c| c.contains("-v") && c.contains(":0.1") && c.ends_with("-c /tmp/wt5")),
+            .any(|c| c.contains("-v -f") && c.contains(":0.5 ") && c.ends_with("-c /tmp/wt5")),
         "the sixth agent starts row 2; got {splits:#?}"
     );
 }
@@ -1960,16 +2045,16 @@ fn supervisor_sets_default_size_after_new_session() {
 }
 
 // Maps to scenario `Broker enabled in bare-start mode adds dashboard as
-// pane 0` from supervisor-as-pane. The bare-start tmux build uses
-// `TmuxSessionBuilder::add_pane(...)` in source order — production code
-// adds the dashboard pane first when broker is enabled. We mirror that
-// order in the test fixture so the pane-index contract is asserted.
+// pane 0` from supervisor-as-pane. The bare-start tmux build makes the
+// dashboard pane 0 through `TmuxSessionBuilder::dashboard(...)` when the
+// broker is enabled; the agents follow via `add_pane` in source order. We
+// mirror that in the test fixture so the pane-index contract is asserted.
 // (test-coverage-v0-5-0 task 12.1)
 #[test]
 fn bare_start_with_broker_places_dashboard_at_pane_0() {
     // Mirror cmd_start with broker enabled: dashboard first, then agents.
     let session = TmuxSessionBuilder::new("proj")
-        .add_pane(make_pane("dashboard", "/repo", "git-paw __dashboard"))
+        .dashboard(make_pane("dashboard", "/repo", "git-paw __dashboard"))
         .add_pane(make_pane("feat/a", "/tmp/wt-a", "claude"))
         .add_pane(make_pane("feat/b", "/tmp/wt-b", "claude"))
         .add_pane(make_pane("feat/c", "/tmp/wt-c", "claude"))
@@ -2240,21 +2325,27 @@ fn add_agent_same_row_splits_horizontally_from_previous_pane() {
 }
 
 #[test]
-fn add_agent_new_row_splits_vertically_from_previous_row_first_pane() {
+fn add_agent_new_row_splits_full_width_off_the_last_pane() {
     // 5 agents present (one full row, indices 1..=5); adding a 6th (agent
-    // index 5) starts a new row -> vertical split from the previous row's
-    // first pane (index 1).
+    // index 5) starts a new row -> a full-width vertical split off pane 5, the
+    // last pane, so the new pane lands at index 6 and nothing is renumbered
+    // (GP-81). A split off the row's first pane (index 1) would put the new
+    // pane at index 2 and shift agents 2-5.
     let layout = crate::surface::layout_for(6, true).expect("layout");
     let new_agent = make_pane("feat/sixth", "/tmp/wt6", "claude");
     let session = build_add_agent_commands("paw-x", &new_agent, 1, 5, layout, false);
     let cmds = session.command_strings();
 
+    let splits: Vec<&String> = cmds.iter().filter(|c| c.contains("split-window")).collect();
+    assert_eq!(
+        splits,
+        vec!["tmux split-window -v -f -t paw-x:0.5 -c /tmp/wt6"],
+        "the 6th agent's row is one full-width split off pane 5; cmds:\n{cmds:#?}"
+    );
     assert!(
-        cmds.iter().any(|c| c.contains("split-window")
-            && c.contains("-v")
-            && c.contains(":0.1")
-            && c.contains("-c /tmp/wt6")),
-        "6th agent should -v split from pane 1 (prev row first); cmds:\n{cmds:#?}"
+        cmds.iter()
+            .any(|c| c.contains("send-keys") && c.contains(":0.6") && c.contains("claude")),
+        "the new agent launches in pane 6; cmds:\n{cmds:#?}"
     );
 }
 
@@ -2307,12 +2398,12 @@ fn add_agent_on_a_grid_without_a_top_row_resizes_no_top_row() {
     let session = build_add_agent_commands("paw-x", &new_agent, 0, 5, layout, false);
     let cmds = session.command_strings();
 
-    // The sixth agent starts a second row off the first row's first pane,
-    // which IS pane 0 here.
+    // The sixth agent starts a second row: a full-width split off pane 4, the
+    // last pane (GP-81).
     assert!(
         cmds.iter()
-            .any(|c| c == "tmux split-window -v -t paw-x:0.0 -c /tmp/wt6"),
-        "the new row splits off pane 0; cmds:\n{cmds:#?}"
+            .any(|c| c == "tmux split-window -v -f -t paw-x:0.4 -c /tmp/wt6"),
+        "the new row splits full width off pane 4; cmds:\n{cmds:#?}"
     );
     // Two agent rows, each half the window, and no separate top-row resize.
     let resizes: Vec<&String> = cmds.iter().filter(|c| c.contains("resize-pane")).collect();

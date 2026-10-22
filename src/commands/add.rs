@@ -1,5 +1,5 @@
 //! `git paw add <branch>` — hot-attach a worktree + agent pane to a running
-//! supervisor-mode session. Extracted verbatim from `main.rs`
+//! grid session (bare or supervised). Extracted verbatim from `main.rs`
 //! (code-analysis-refactor R2c).
 //!
 //! The shared attach primitives (`attach_agent`, `AttachContext`,

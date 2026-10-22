@@ -1421,3 +1421,338 @@ fn an_earlier_tiled_bare_session_is_refused_without_mutating_anything() {
     assert!(wt_a_alive, "the removal target's worktree must survive");
     assert!(wt_x_absent, "no worktree may be created for the add target");
 }
+
+// --- GP-81: every agent's pane index holds that agent, from the 6th on ---
+
+/// `(pane_index, pane_current_command)` for every pane on the test socket.
+fn pane_commands(tmux_env: &TmuxTestEnv, session: &str) -> Vec<(String, String)> {
+    let mut c = StdCommand::new("tmux");
+    tmux_env.apply(&mut c);
+    let out = c
+        .args([
+            "list-panes",
+            "-t",
+            session,
+            "-F",
+            "#{pane_index} #{pane_current_command}",
+        ])
+        .output()
+        .expect("tmux list-panes commands");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let (i, cmd) = l.split_once(' ')?;
+            Some((i.to_string(), cmd.to_string()))
+        })
+        .collect()
+}
+
+/// `(pane_index, pane_width)` for every pane on the test socket.
+fn pane_widths(tmux_env: &TmuxTestEnv, session: &str) -> Vec<(usize, u32)> {
+    let mut c = StdCommand::new("tmux");
+    tmux_env.apply(&mut c);
+    let out = c
+        .args([
+            "list-panes",
+            "-t",
+            session,
+            "-F",
+            "#{pane_index} #{pane_width}",
+        ])
+        .output()
+        .expect("tmux list-panes widths");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let (i, w) = l.split_once(' ')?;
+            Some((i.parse().ok()?, w.parse().ok()?))
+        })
+        .collect()
+}
+
+/// Assert pane `first_agent + i` runs in `branches[i]`'s worktree AND runs the
+/// stand-in CLI there. A misrouted grid fails both halves: an agent's
+/// worktree lands at another index, and the launch command typed by computed
+/// index runs in the wrong pane, leaving one agent pane a bare shell (GP-81).
+///
+/// Polls briefly: a pane's current command reads as the shell until it has
+/// exec'd the CLI typed into it.
+fn assert_grid_order(tmux_env: &TmuxTestEnv, session: &str, first_agent: usize, branches: &[&str]) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let paths = pane_paths(tmux_env, session);
+        let commands = pane_commands(tmux_env, session);
+        let mismatches: Vec<String> = branches
+            .iter()
+            .enumerate()
+            .filter_map(|(i, branch)| {
+                let idx = (first_agent + i).to_string();
+                let path = paths.iter().find(|(p, _)| *p == idx).map(|(_, p)| p);
+                let command = commands.iter().find(|(p, _)| *p == idx).map(|(_, c)| c);
+                let in_worktree = path.is_some_and(|p| p.ends_with(&format!("repo-{branch}")));
+                let runs_cli = command.is_some_and(|c| c == "cat");
+                (!in_worktree || !runs_cli).then(|| {
+                    format!("pane {idx}: expected repo-{branch} running cat, got {path:?} running {command:?}")
+                })
+            })
+            .collect();
+        if mismatches.is_empty() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "every agent pane must hold its own worktree and CLI:\n{}\npanes: {paths:?}\ncommands: {commands:?}",
+            mismatches.join("\n")
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Scenarios "Bare start builds the grid" and "Every agent's pane index holds
+/// that agent": a seven-agent bare start with the broker on puts the dashboard
+/// at pane 0 and agent i at pane 1 + i, the CLI running in each.
+#[test]
+#[serial]
+fn a_seven_agent_bare_start_puts_every_agent_in_its_own_pane() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    write_bare_config(tr.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let branches = ["a", "b", "c", "d", "e", "f", "g"];
+    let session = start_session_with(
+        tr.path(),
+        home.path(),
+        &tmux_env,
+        &branches.join(","),
+        false,
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_eq!(
+            list_pane_count(&tmux_env, &session),
+            8,
+            "dashboard + 7 agents"
+        );
+        assert_grid_order(&tmux_env, &session, 1, &branches);
+    }));
+    kill(&tmux_env, &session);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// Scenario "Broker-less start uses the full height", for more than one row:
+/// with no dashboard agent i is pane i, the CLI running in each.
+#[test]
+#[serial]
+fn a_seven_agent_brokerless_start_puts_every_agent_in_its_own_pane() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    write_brokerless_bare_config(tr.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let branches = ["a", "b", "c", "d", "e", "f", "g"];
+    let session = start_session_with(
+        tr.path(),
+        home.path(),
+        &tmux_env,
+        &branches.join(","),
+        false,
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_eq!(
+            list_pane_count(&tmux_env, &session),
+            7,
+            "7 agents, no dashboard"
+        );
+        assert_grid_order(&tmux_env, &session, 0, &branches);
+    }));
+    kill(&tmux_env, &session);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// Scenario "Bare start builds the grid" (equal-width rows): a bare start
+/// rebalances its row, so three agents under the dashboard get equal widths
+/// within tmux's one-column rounding, not the 50/25/25 the raw splits give.
+#[test]
+#[serial]
+fn a_bare_start_gives_its_agent_row_equal_widths() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    write_bare_config(tr.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let session = start_session_with(tr.path(), home.path(), &tmux_env, "a,b,c", false);
+    let widths = pane_widths(&tmux_env, &session);
+    kill(&tmux_env, &session);
+
+    let agent_widths: Vec<u32> = widths
+        .iter()
+        .filter(|(idx, _)| (1..=3).contains(idx))
+        .map(|(_, w)| *w)
+        .collect();
+    assert_eq!(
+        agent_widths.len(),
+        3,
+        "three agent panes; widths: {widths:?}"
+    );
+    let (min, max) = (
+        agent_widths.iter().min().copied().unwrap_or(0),
+        agent_widths.iter().max().copied().unwrap_or(0),
+    );
+    assert!(
+        max - min <= 1,
+        "the agent row must be equal-width within one column; widths: {widths:?}"
+    );
+}
+
+/// Scenarios "Added grid matches a start-time grid" and "The new agent appears
+/// in the roster sources", at the row boundary: adding a sixth agent to a
+/// five-agent bare session opens a second row, the new agent lands at pane 6
+/// running its CLI, every existing agent keeps its pane, and no existing
+/// agent pane receives a keystroke.
+#[test]
+#[serial]
+fn adding_a_sixth_agent_opens_a_row_and_types_into_no_other_pane() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    write_bare_config(tr.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let session = start_session_with(tr.path(), home.path(), &tmux_env, "a,b,c,d,e", false);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_grid_order(&tmux_env, &session, 1, &["a", "b", "c", "d", "e"]);
+        let before = capture_panes_by_worktree(&tmux_env, &session);
+
+        let mut add = cmd();
+        tmux_env.apply_assert(&mut add);
+        let out = add
+            .current_dir(tr.path())
+            .env("HOME", home.path())
+            .env_remove("XDG_DATA_HOME")
+            .args(["add", "f"])
+            .timeout(Duration::from_secs(40))
+            .output()
+            .expect("run add");
+        assert!(
+            out.status.success(),
+            "add of a sixth agent failed; stderr:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        assert_grid_order(&tmux_env, &session, 1, &["a", "b", "c", "d", "e", "f"]);
+        let after = capture_panes_by_worktree(&tmux_env, &session);
+        for (worktree, content) in &before {
+            assert_eq!(
+                after.get(worktree),
+                Some(content),
+                "add typed into {worktree}, a surface other than the new agent's pane"
+            );
+        }
+    }));
+    kill(&tmux_env, &session);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// Scenario "A supervised session saved earlier stays hot-attachable", the
+/// offset half, end to end: a live session an earlier binary built (its
+/// dashboard at pane 1, agents from pane 2) takes a sixth agent at the next
+/// index after its own last agent, opening a new row without renumbering any
+/// existing pane or typing into one.
+#[test]
+#[serial]
+fn adding_a_sixth_agent_to_a_pre_relocation_session_keeps_its_offset() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    write_supervisor_config(tr.path());
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+
+    let session = start_session(tr.path(), home.path(), &tmux_env, "a,b,c,d,e");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Recreate the pre-relocation shape: a pane ahead of the dashboard (the
+        // old supervisor pane), so the dashboard is pane 1 and the agents run
+        // from pane 2, and a receipt that records it that way.
+        let mut split = StdCommand::new("tmux");
+        tmux_env.apply(&mut split);
+        let status = split
+            .args([
+                "split-window",
+                "-b",
+                "-v",
+                "-t",
+                &format!("{session}:0.0"),
+                "-c",
+                &tr.path().to_string_lossy(),
+            ])
+            .status()
+            .expect("tmux split-window -b");
+        assert!(status.success(), "could not insert the legacy pane 0");
+        strip_recorded_layout(home.path(), &session);
+        let path = session_receipt_path(home.path(), &session);
+        let raw = fs::read_to_string(&path).expect("read session receipt");
+        let mut value: serde_json::Value = serde_json::from_str(&raw).expect("parse receipt");
+        value["dashboard_pane"] = serde_json::json!(1);
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&value).expect("serialize"),
+        )
+        .expect("write session receipt");
+
+        assert_grid_order(&tmux_env, &session, 2, &["a", "b", "c", "d", "e"]);
+        let before = capture_panes_by_worktree(&tmux_env, &session);
+
+        let mut add = cmd();
+        tmux_env.apply_assert(&mut add);
+        let out = add
+            .current_dir(tr.path())
+            .env("HOME", home.path())
+            .env_remove("XDG_DATA_HOME")
+            .args(["add", "f"])
+            .timeout(Duration::from_secs(40))
+            .output()
+            .expect("run add");
+        assert!(
+            out.status.success(),
+            "add to a pre-relocation session failed; stderr:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        assert_grid_order(&tmux_env, &session, 2, &["a", "b", "c", "d", "e", "f"]);
+        let after = capture_panes_by_worktree(&tmux_env, &session);
+        for (worktree, content) in &before {
+            assert_eq!(
+                after.get(worktree),
+                Some(content),
+                "add typed into {worktree}, a surface other than the new agent's pane"
+            );
+        }
+    }));
+    kill(&tmux_env, &session);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}

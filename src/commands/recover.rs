@@ -180,6 +180,17 @@ pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<()
 
     tmux_session.execute()?;
 
+    // Rebalance each agent row to equal width on the live window, as a fresh
+    // start does (design D4): recovery rebuilds the grid with the same raw
+    // `split-window -h` chain, which renders a row as 50/25/25.
+    if let Err(e) = tmux::rebalance_agent_rows(
+        &tmux_session.name,
+        layout.first_agent_index(),
+        updated.worktrees.len(),
+    ) {
+        eprintln!("warning: could not rebalance agent-row widths: {e}");
+    }
+
     // Rewrite the per-repo discovery file `sweep.sh` reads. Recovery REBUILDS
     // the layout, so a file written by the original launch records pane
     // indices that no longer describe the live session (and a session recovered
@@ -218,7 +229,7 @@ fn recover_bare_session<S: std::hash::BuildHasher>(
 
     if let Some(url) = broker_url {
         let repo_str = repo_root.to_string_lossy().to_string();
-        builder = builder.add_pane(tmux::PaneSpec {
+        builder = builder.dashboard(tmux::PaneSpec {
             branch: "dashboard".to_string(),
             worktree: repo_str,
             cli_command: dashboard_command(),
