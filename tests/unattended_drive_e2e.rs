@@ -494,6 +494,70 @@ fn wait_for_status(url: &str, agent: &str, want_status: &str, budget: Duration) 
     }
 }
 
+/// Launches a supervised session with a short heartbeat and lets its first
+/// drive loop exit, leaving the session live, idle and unbound — the starting
+/// point for the Paused and Stopped re-attach tests.
+///
+/// Returns the fixtures the caller has to keep alive (the repo, the tmux
+/// socket and the isolated `HOME`) plus the session name, or `None` when the
+/// launch did not produce a session to re-attach to.
+fn launched_then_idle_session() -> (TestRepo, TmuxTestEnv, TempDir, String) {
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let home = TempDir::new().expect("home dir");
+    let out = TempDir::new().expect("out dir");
+    let port = pick_broker_port();
+    write_config(tr.path(), port, plain_dummy(), plain_dummy());
+
+    let (mut child, stdout_path) = spawn_unattended_detached(
+        tr.path(),
+        home.path(),
+        tmux_env.socket_dir(),
+        out.path(),
+        "feat/alpha",
+        "300",
+        "2500",
+    );
+    let status = wait_child(&mut child, Duration::from_secs(45));
+    let stdout = read_to_string(&stdout_path);
+    assert!(
+        status.is_some_and(|s| s.success()),
+        "the launch should exit 0; stdout:\n{stdout}"
+    );
+    let session = session_name_in(&stdout)
+        .unwrap_or_else(|| panic!("the launch should name its session; stdout:\n{stdout}"));
+    (tr, tmux_env, home, session)
+}
+
+/// The global session receipts under an isolated `HOME`, concatenated — the
+/// durable record a refusal must leave byte-identical.
+/// Walks `HOME` rather than rebuilding the data-dir path, because that path is
+/// platform-specific (`Library/Application Support` on macOS,
+/// `.local/share` elsewhere) and git-paw's own `dirs` module owns it — a
+/// hand-written guess silently reads nothing and makes the comparison vacuous.
+fn session_records(home: &Path) -> String {
+    fn walk(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "json")
+                && path.parent().is_some_and(|p| p.ends_with("sessions"))
+                && let Ok(text) = fs::read_to_string(&path)
+            {
+                out.push((path, text));
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(home, &mut found);
+    found.sort();
+    found.into_iter().map(|(_, text)| text).collect()
+}
+
 /// Polls until `path` exists, or the budget elapses.
 fn wait_for_path(path: &Path, budget: Duration) -> bool {
     let deadline = Instant::now() + budget;
@@ -562,24 +626,859 @@ fn read_to_string(path: &Path) -> String {
     s
 }
 
-/// Kills any tmux session named in the child's "launched" stdout line, on the
-/// test-owned socket.
-fn kill_session(socket_dir: &Path, stdout: &str) {
-    if let Some(name) = stdout
+/// The session name from a launch's "Supervisor session 'paw-…' launched"
+/// stdout line.
+fn session_name_in(stdout: &str) -> Option<String> {
+    stdout
         .lines()
         .find(|l| l.contains("Supervisor session 'paw-"))
         .and_then(|l| l.split('\'').nth(1))
-    {
-        let _ = StdCommand::new("tmux")
-            .env("TMUX_TMPDIR", socket_dir)
-            .args(["kill-session", "-t", name])
-            .status();
+        .map(ToString::to_string)
+}
+
+/// The session name from a non-attaching launch's "Session '…' started in
+/// detached mode." stdout line — what a bare launch prints when stdin is not a
+/// terminal.
+fn detached_session_name_in(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .find(|l| l.contains("started in detached mode"))
+        .and_then(|l| l.split('\'').nth(1))
+        .map(ToString::to_string)
+}
+
+/// Kills any tmux session named in the child's "launched" stdout line, on the
+/// test-owned socket.
+fn kill_session(socket_dir: &Path, stdout: &str) {
+    if let Some(name) = session_name_in(stdout) {
+        kill_session_named(socket_dir, &name);
     }
+}
+
+/// Kills `name` on the test-owned socket. A missing session is a no-op.
+fn kill_session_named(socket_dir: &Path, name: &str) {
+    let _ = StdCommand::new("tmux")
+        .env("TMUX_TMPDIR", socket_dir)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .args(["kill-session", "-t", name])
+        .status();
+}
+
+/// How many broker-log lines contain every needle.
+fn broker_log_hits(home: &Path, needles: &[&str]) -> usize {
+    read_broker_log(home)
+        .lines()
+        .filter(|l| needles.iter().all(|n| l.contains(n)))
+        .count()
+}
+
+/// Polls `cond` until it holds or the budget elapses.
+fn wait_until(mut cond: impl FnMut() -> bool, budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    loop {
+        if cond() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+}
+
+/// Every session name on the test-owned socket — diagnostic only.
+fn sessions_on(socket_dir: &Path) -> Vec<String> {
+    StdCommand::new("tmux")
+        .env("TMUX_TMPDIR", socket_dir)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.lines().map(ToString::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// Whether a tmux session named `name` exists on the test-owned socket.
+fn session_exists(socket_dir: &Path, name: &str) -> bool {
+    StdCommand::new("tmux")
+        .env("TMUX_TMPDIR", socket_dir)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .args(["has-session", "-t", name])
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// `<pane_index> <pane_title>` for every pane of `session`, in tmux order —
+/// the shape a re-attach must leave untouched (D6: binding rebuilds, re-titles
+/// and injects nothing).
+fn pane_roster(socket_dir: &Path, session: &str) -> Vec<String> {
+    StdCommand::new("tmux")
+        .env("TMUX_TMPDIR", socket_dir)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .args([
+            "list-panes",
+            // `-s`: every pane in the session, so the roster does not depend
+            // on which window tmux made current.
+            "-s",
+            "-t",
+            session,
+            "-F",
+            "#{pane_index} #{pane_title}",
+        ])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.lines().map(ToString::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// Every worktree path registered in `repo`, sorted — a re-attach must add
+/// none.
+fn worktree_paths(repo: &Path) -> Vec<String> {
+    let mut paths: Vec<String> = StdCommand::new("git")
+        .current_dir(repo)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| {
+            s.lines()
+                .filter_map(|l| l.strip_prefix("worktree ").map(ToString::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    paths.sort();
+    paths
+}
+
+/// Runs `git paw <args>` to completion with the isolation env applied and no
+/// terminal on any stream, returning `(success, stdout, stderr)`.
+///
+/// The synchronous counterpart of [`spawn_unattended_detached`], for the paths
+/// that are expected to REFUSE: a refusal has to be read off the exit status
+/// and stderr of a run that ends on its own.
+fn run_paw(repo: &Path, home: &Path, socket_dir: &Path, args: &[&str]) -> (bool, String, String) {
+    let out = StdCommand::new(BIN)
+        .current_dir(repo)
+        .args(args)
+        .env("TMUX_TMPDIR", socket_dir)
+        .env("HOME", home)
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("GIT_PAW_READINESS_TIMEOUT_MS", "120")
+        .env("GIT_PAW_DRIVE_POLL_MS", "300")
+        .env("GIT_PAW_DRIVE_HEARTBEAT_MS", "2500")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run git paw");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Spec scenarios "Re-running the launch command after a heartbeat exit
+/// re-binds the loop", "A released binding lets the next loop bind at once"
+/// (`supervisor-unattended-operation`) and "Non-interactive re-start with
+/// --unattended binds a drive loop" (`tmux-orchestration`).
+///
+/// The same command, re-run with no controlling terminal against the session
+/// its first run left Active, drives it again — and leaves the session itself
+/// exactly as it found it: same panes, same titles, no new worktree, no
+/// `paw-x-2`, and none of the GP-13 non-interactive refusal.
+#[test]
+#[serial]
+fn unattended_rebinds_a_loop_to_a_live_session_after_heartbeat() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let home = TempDir::new().expect("home dir");
+    let out = TempDir::new().expect("out dir");
+    let out2 = TempDir::new().expect("second out dir");
+    let port = pick_broker_port();
+    write_config(tr.path(), port, plain_dummy(), plain_dummy());
+
+    // First run: launches the session and exits on its heartbeat, leaving the
+    // session Active and the binding released.
+    let (mut first, first_stdout_path) = spawn_unattended_detached(
+        tr.path(),
+        home.path(),
+        tmux_env.socket_dir(),
+        out.path(),
+        "feat/alpha",
+        "300",
+        "2500",
+    );
+    let first_status = wait_child(&mut first, Duration::from_secs(45));
+    let first_stdout = read_to_string(&first_stdout_path);
+    let session = session_name_in(&first_stdout)
+        .unwrap_or_else(|| panic!("first run should name its session; stdout:\n{first_stdout}"));
+
+    assert!(
+        first_status.is_some_and(|s| s.success()),
+        "first run should exit 0; stdout:\n{first_stdout}"
+    );
+    assert!(
+        first_stdout.contains("Unattended drive loop exited: heartbeat"),
+        "first run should end on its heartbeat; stdout:\n{first_stdout}"
+    );
+    assert!(
+        session_exists(tmux_env.socket_dir(), &session),
+        "the session must survive its drive loop's heartbeat exit; sessions on the \
+         test socket: {:?}; stdout:\n{first_stdout}",
+        sessions_on(tmux_env.socket_dir())
+    );
+
+    let panes_before = pane_roster(tmux_env.socket_dir(), &session);
+    let worktrees_before = worktree_paths(tr.path());
+    assert!(
+        !panes_before.is_empty(),
+        "the live session must have panes to compare against"
+    );
+
+    // Re-run, binding a loop to the live session rather than attaching,
+    // refusing or forking. A DIFFERENT `--branches` than the launch used:
+    // selection flags are never applied to a live session (that is what
+    // `git paw add` is for), so the pane and worktree assertions below would
+    // catch `feat/beta` being launched into this session — and with the same
+    // branch they could not tell "ignored" from "applied idempotently".
+    let started = Instant::now();
+    let (mut second, second_stdout_path) = spawn_unattended_detached(
+        tr.path(),
+        home.path(),
+        tmux_env.socket_dir(),
+        out2.path(),
+        "feat/beta",
+        "300",
+        "2500",
+    );
+    let second_status = wait_child(&mut second, Duration::from_secs(45));
+    let elapsed = started.elapsed();
+    let second_stdout = read_to_string(&second_stdout_path);
+    let second_stderr = read_to_string(&out2.path().join("stderr.log"));
+
+    assert!(
+        second_status.is_some_and(|s| s.success()),
+        "the re-run should bind a loop and exit 0; stdout:\n{second_stdout}\nstderr:\n{second_stderr}"
+    );
+    assert!(
+        second_stdout.contains("Unattended drive loop exited:"),
+        "the re-bound loop must run to an exit summary; stdout:\n{second_stdout}"
+    );
+    assert!(
+        !second_stderr.contains("already running for this repository"),
+        "--unattended must not take the GP-13 non-interactive refusal; stderr:\n{second_stderr}"
+    );
+    // The released binding must not make the next loop wait out the staleness
+    // window (a floor of two minutes); finishing a 2.5s-heartbeat run well
+    // inside that is only possible if it bound immediately.
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "a released binding must be taken at once, not waited out; took {elapsed:?}"
+    );
+
+    assert_eq!(
+        pane_roster(tmux_env.socket_dir(), &session),
+        panes_before,
+        "binding must not create, rebuild or re-title any pane"
+    );
+    assert_eq!(
+        worktree_paths(tr.path()),
+        worktrees_before,
+        "binding must not create or touch any worktree — in particular none for \
+         the `feat/beta` the re-run named"
+    );
+    assert!(
+        !session_exists(tmux_env.socket_dir(), &format!("{session}-2")),
+        "--unattended must bind to the live session, never fork a parallel one"
+    );
+    kill_session_named(tmux_env.socket_dir(), &session);
+}
+
+/// Spec scenario "A second loop on a live session is refused": while one loop
+/// drives `paw-x`, a second `start --unattended` refuses — naming the session
+/// and the holding process — without running a loop or disturbing the first.
+#[test]
+#[serial]
+fn second_unattended_loop_on_a_live_session_is_refused() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let home = TempDir::new().expect("home dir");
+    let out = TempDir::new().expect("out dir");
+    let port = pick_broker_port();
+    write_config(tr.path(), port, plain_dummy(), plain_dummy());
+
+    // A long heartbeat keeps the first loop running for the whole test; only
+    // the completion published at the end ends it.
+    let (mut first, first_stdout_path) = spawn_unattended_detached(
+        tr.path(),
+        home.path(),
+        tmux_env.socket_dir(),
+        out.path(),
+        "feat/alpha",
+        "300",
+        "600000",
+    );
+
+    let url = format!("http://127.0.0.1:{port}");
+    assert!(
+        wait_for_broker(&url, Duration::from_secs(30)),
+        "the first run's broker should come up"
+    );
+    // The binding file is the loop's own proof that it is bound and driving.
+    let binding = git_paw::supervisor::loop_binding::binding_path(tr.path());
+    assert!(
+        wait_for_path(&binding, Duration::from_secs(30)),
+        "the first loop must hold the drive-loop binding while it runs"
+    );
+    let held = fs::read_to_string(&binding).expect("read the held binding");
+    let session = session_name_in(&read_to_string(&first_stdout_path))
+        .unwrap_or_else(|| panic!("the first run should name its session"));
+    let panes_before = pane_roster(tmux_env.socket_dir(), &session);
+    let worktrees_before = worktree_paths(tr.path());
+    assert!(
+        !panes_before.is_empty(),
+        "the driven session must have panes to compare against"
+    );
+
+    // A dry run binds nothing and is unaffected by the live loop, so it must
+    // not be refused even while the binding is held.
+    let (dry_ok, dry_stdout, dry_stderr) = run_paw(
+        tr.path(),
+        home.path(),
+        tmux_env.socket_dir(),
+        &[
+            "start",
+            "--unattended",
+            "--dry-run",
+            "--branches",
+            "feat/alpha",
+        ],
+    );
+    assert!(
+        dry_ok,
+        "a dry run binds nothing, so the held binding must not refuse it; \
+         stdout:\n{dry_stdout}\nstderr:\n{dry_stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(&binding).expect("read the binding after the dry run"),
+        held,
+        "a dry run must not touch the binding"
+    );
+
+    let (ok, stdout, stderr) = run_paw(
+        tr.path(),
+        home.path(),
+        tmux_env.socket_dir(),
+        &["start", "--unattended", "--branches", "feat/alpha"],
+    );
+
+    assert!(
+        !ok,
+        "a second drive loop must be refused; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&session),
+        "the refusal must name the session; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&first.id().to_string()),
+        "the refusal must name the holding process {}; stderr:\n{stderr}",
+        first.id()
+    );
+    assert!(
+        stderr.contains("only one drive loop may drive a session"),
+        "the refusal must say why; stderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("Unattended drive loop exited:"),
+        "the refused caller must run no loop; stdout:\n{stdout}"
+    );
+    assert_eq!(
+        fs::read_to_string(&binding).expect("read the binding after the refusal"),
+        held,
+        "a refused caller must leave the first loop's binding untouched"
+    );
+    assert_eq!(
+        pane_roster(tmux_env.socket_dir(), &session),
+        panes_before,
+        "a refused caller must leave the session's panes unchanged"
+    );
+    assert_eq!(
+        worktree_paths(tr.path()),
+        worktrees_before,
+        "a refused caller must leave the session's worktrees unchanged"
+    );
+    assert!(
+        matches!(first.try_wait(), Ok(None)),
+        "the first loop must keep driving the session"
+    );
+
+    // Let the first loop finish on a completion signal, then clean up.
+    publish_terminal(&url, "feat-alpha", "done");
+    let status = wait_child(&mut first, Duration::from_secs(45));
+    let first_stdout = read_to_string(&first_stdout_path);
+    kill_session(tmux_env.socket_dir(), &first_stdout);
+    assert!(
+        status.is_some(),
+        "the first loop should exit after completion; stdout:\n{first_stdout}"
+    );
+}
+
+/// Spec scenario "The re-bound loop uses the session's recorded broker": a
+/// `[broker] port` edited after launch must not redirect the loop — it
+/// publishes to the port the SESSION records, where the live broker actually
+/// is.
+#[test]
+#[serial]
+fn unattended_rebind_uses_the_recorded_broker_endpoint() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let home = TempDir::new().expect("home dir");
+    let out = TempDir::new().expect("out dir");
+    let out2 = TempDir::new().expect("second out dir");
+    let scripts = TempDir::new().expect("scripts dir");
+    let recorded_port = pick_broker_port();
+    // The agent keeps a live permission prompt on screen, so the re-bound
+    // loop has something to escalate.
+    let agent = write_prompt_dummy(scripts.path(), "agent.sh", "rm -rf /tmp/x");
+    write_config(
+        tr.path(),
+        recorded_port,
+        plain_dummy(),
+        &agent.to_string_lossy(),
+    );
+
+    let (mut first, first_stdout_path) = spawn_unattended_detached(
+        tr.path(),
+        home.path(),
+        tmux_env.socket_dir(),
+        out.path(),
+        "feat/alpha",
+        "300",
+        "2500",
+    );
+    let first_status = wait_child(&mut first, Duration::from_secs(45));
+    let first_stdout = read_to_string(&first_stdout_path);
+    let session = session_name_in(&first_stdout)
+        .unwrap_or_else(|| panic!("first run should name its session; stdout:\n{first_stdout}"));
+    assert!(
+        first_status.is_some_and(|s| s.success()),
+        "first run should exit 0; stdout:\n{first_stdout}"
+    );
+
+    // Point the CONFIG at a different port. The live broker stays where the
+    // session recorded it.
+    let stale_port = pick_broker_port();
+    assert_ne!(recorded_port, stale_port, "the two ports must differ");
+    write_config(
+        tr.path(),
+        stale_port,
+        plain_dummy(),
+        &agent.to_string_lossy(),
+    );
+
+    // Listen on the RECONFIGURED port for the whole re-bind. This is the
+    // discriminating half: if the loop took its endpoint from the current
+    // config instead of the session, it would connect here. Counting broker
+    // log lines alone cannot prove that — the first run's own escalations
+    // land in the same log, and a late flush can arrive after any sample.
+    let decoy = TcpListener::bind(("127.0.0.1", stale_port)).expect("listen on the stale port");
+    decoy
+        .set_nonblocking(true)
+        .expect("decoy listener must not block the test");
+
+    // Sample the log only once the first run's writes have settled, so a
+    // trailing flush cannot be mistaken for the re-bound loop's own line.
+    let mut before = broker_log_hits(home.path(), &["question:", "rm -rf /tmp/x"]);
+    loop {
+        std::thread::sleep(Duration::from_millis(500));
+        let now = broker_log_hits(home.path(), &["question:", "rm -rf /tmp/x"]);
+        if now == before {
+            break;
+        }
+        before = now;
+    }
+
+    let (mut second, second_stdout_path) = spawn_unattended_detached(
+        tr.path(),
+        home.path(),
+        tmux_env.socket_dir(),
+        out2.path(),
+        "feat/alpha",
+        "300",
+        "2500",
+    );
+
+    // The escalation landing in the broker log is the observation: that log is
+    // written by the broker the SESSION started, on `recorded_port`. Nothing
+    // listens on the reconfigured port at all, so an escalation sent there
+    // would simply never arrive.
+    let escalated = wait_until(
+        || broker_log_hits(home.path(), &["question:", "rm -rf /tmp/x"]) > before,
+        Duration::from_secs(40),
+    );
+    let second_status = wait_child(&mut second, Duration::from_secs(45));
+    let second_stdout = read_to_string(&second_stdout_path);
+
+    assert!(
+        escalated,
+        "the re-bound loop must escalate to the broker the session recorded; \
+         stdout:\n{second_stdout}\nbroker log:\n{}",
+        read_broker_log(home.path())
+    );
+    assert!(
+        second_status.is_some_and(|s| s.success()),
+        "the re-bound run should exit 0; stdout:\n{second_stdout}"
+    );
+    assert!(
+        matches!(
+            decoy.accept(),
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+        ),
+        "nothing may reach the reconfigured port {stale_port}: the loop takes its \
+         broker endpoint from the session, not the current config"
+    );
+    kill_session_named(tmux_env.socket_dir(), &session);
+}
+
+/// Spec clause "In every case the system SHALL NOT attach the terminal, even
+/// when stdin is interactive, and SHALL print the session name and how to
+/// attach from another terminal."
+///
+/// Every other test here runs with `Stdio::null()` or file-redirected stdio,
+/// so none of them can see this: they would all pass a regression that
+/// attaches on a TTY *in addition to* running the loop. This one runs the
+/// command inside a real tmux pane — a genuine pty on stdin — on the
+/// test-owned socket.
+///
+/// Note the helpers in `tests/helpers/pty.rs` are deliberately NOT used: they
+/// set no `TMUX_TMPDIR` and remove no inherited `TMUX`, so they would drive
+/// whichever tmux server the test process happens to be running under.
+#[test]
+#[serial]
+fn unattended_rebind_does_not_attach_the_terminal_on_a_tty() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let (tr, tmux_env, home, session) = launched_then_idle_session();
+    let out = TempDir::new().expect("out dir");
+    let log = out.path().join("tty-run.log");
+    let marker = out.path().join("tty-run.done");
+
+    // A shell in a pane of its own session: its stdin is a pty, so
+    // `is_terminal()` is true for the git-paw run below — the condition under
+    // which an attach would be attempted.
+    let shell = format!("{session}-tty");
+    let started = StdCommand::new("tmux")
+        .env("TMUX_TMPDIR", tmux_env.socket_dir())
+        .env("HOME", home.path())
+        .env("XDG_DATA_HOME", home.path().join(".local/share"))
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("GIT_PAW_READINESS_TIMEOUT_MS", "120")
+        .env("GIT_PAW_DRIVE_POLL_MS", "300")
+        .env("GIT_PAW_DRIVE_HEARTBEAT_MS", "2500")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            &shell,
+            "-x",
+            "200",
+            "-y",
+            "50",
+            "sh",
+        ])
+        .status()
+        .expect("tmux new-session for the tty shell");
+    assert!(started.success(), "could not create the tty shell session");
+
+    let command = format!(
+        "cd {} && {BIN} start --unattended --branches feat/alpha > {} 2>&1; touch {}\n",
+        tr.path().display(),
+        log.display(),
+        marker.display()
+    );
+    let sent = StdCommand::new("tmux")
+        .env("TMUX_TMPDIR", tmux_env.socket_dir())
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .args(["send-keys", "-t", &format!("{shell}:0.0"), &command])
+        .status()
+        .expect("tmux send-keys");
+    assert!(sent.success(), "could not type the command into the pane");
+
+    let finished = wait_for_path(&marker, Duration::from_secs(90));
+    let text = read_to_string(&log);
+    kill_session_named(tmux_env.socket_dir(), &shell);
+    kill_session_named(tmux_env.socket_dir(), &session);
+
+    assert!(finished, "the tty run never completed; output:\n{text}");
+    assert!(
+        text.contains("Unattended drive loop exited:"),
+        "the loop must run even from a terminal; output:\n{text}"
+    );
+    assert!(
+        text.contains("git paw attach"),
+        "the command must print how to attach from another terminal; output:\n{text}"
+    );
+    // tmux refuses a nested attach with "sessions should be nested with care";
+    // a client that got as far as trying would say so here. Neither message
+    // may appear, because no attach may be attempted at all.
+    assert!(
+        !text.contains("sessions should be nested") && !text.contains("open terminal failed"),
+        "no attach may be attempted on a tty; output:\n{text}"
+    );
+}
+
+/// Spec scenario "A paused session is revived, then driven": the re-attach
+/// brings the session back exactly as `git paw start` revives it, and only
+/// then runs the loop — without attaching the terminal.
+#[test]
+#[serial]
+fn unattended_revives_a_paused_session_then_drives() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let (tr, tmux_env, home, session) = launched_then_idle_session();
+    let out = TempDir::new().expect("out dir");
+
+    let (ok, stdout, stderr) = run_paw(tr.path(), home.path(), tmux_env.socket_dir(), &["pause"]);
+    assert!(
+        ok,
+        "pause should succeed; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let (mut child, stdout_path) = spawn_unattended_detached(
+        tr.path(),
+        home.path(),
+        tmux_env.socket_dir(),
+        out.path(),
+        "feat/alpha",
+        "300",
+        "2500",
+    );
+    let status = wait_child(&mut child, Duration::from_secs(60));
+    let run_stdout = read_to_string(&stdout_path);
+    let run_stderr = read_to_string(&out.path().join("stderr.log"));
+
+    assert!(
+        status.is_some_and(|s| s.success()),
+        "the re-attach should revive and drive; stdout:\n{run_stdout}\nstderr:\n{run_stderr}"
+    );
+    assert!(
+        run_stdout.contains("Restarting paused session"),
+        "the paused session must be revived first; stdout:\n{run_stdout}"
+    );
+    assert!(
+        run_stdout.contains("Unattended drive loop exited:"),
+        "a drive loop must then run against the revived session; stdout:\n{run_stdout}"
+    );
+    assert!(
+        session_records(home.path()).contains("\"active\""),
+        "the revived session must be recorded active; records:\n{}",
+        session_records(home.path())
+    );
+    kill_session_named(tmux_env.socket_dir(), &session);
+}
+
+/// Spec scenario "A stopped session is recovered, then driven": the re-attach
+/// rebuilds the session exactly as `git paw start` recovers it, then runs the
+/// loop against what it rebuilt.
+#[test]
+#[serial]
+fn unattended_recovers_a_stopped_session_then_drives() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let (tr, tmux_env, home, session) = launched_then_idle_session();
+    let out = TempDir::new().expect("out dir");
+
+    let (ok, stdout, stderr) = run_paw(tr.path(), home.path(), tmux_env.socket_dir(), &["stop"]);
+    assert!(
+        ok,
+        "stop should succeed; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !git_paw::supervisor::loop_binding::binding_path(tr.path()).exists(),
+        "stop must revoke the drive-loop binding"
+    );
+
+    let (mut child, stdout_path) = spawn_unattended_detached(
+        tr.path(),
+        home.path(),
+        tmux_env.socket_dir(),
+        out.path(),
+        "feat/alpha",
+        "300",
+        "2500",
+    );
+    let status = wait_child(&mut child, Duration::from_secs(60));
+    let run_stdout = read_to_string(&stdout_path);
+    let run_stderr = read_to_string(&out.path().join("stderr.log"));
+
+    assert!(
+        status.is_some_and(|s| s.success()),
+        "the re-attach should recover and drive; stdout:\n{run_stdout}\nstderr:\n{run_stderr}"
+    );
+    assert!(
+        run_stdout.contains("Recovering session"),
+        "the stopped session must be recovered first; stdout:\n{run_stdout}"
+    );
+    assert!(
+        run_stdout.contains("Unattended drive loop exited:"),
+        "a drive loop must then run against the recovered session; stdout:\n{run_stdout}"
+    );
+    assert!(
+        session_exists(tmux_env.socket_dir(), &session),
+        "the recovered session must be live"
+    );
+    kill_session_named(tmux_env.socket_dir(), &session);
+}
+
+/// Spec scenario "A bare session is refused without being changed": a session
+/// launched without supervisor mode deliberately leaves its boot prompts for
+/// the human, and the loop submits an idle pane's buffered input — so driving
+/// one would send exactly what the human was meant to review.
+#[test]
+#[serial]
+fn unattended_refuses_a_bare_session() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let home = TempDir::new().expect("home dir");
+    // No broker, so the bare session is exactly one coding pane: the refusal
+    // is decided on the session's recorded mode and needs nothing else, and a
+    // one-pane session makes "the panes are unchanged" unambiguous.
+    fs::create_dir_all(tr.path().join(".git-paw")).expect("create .git-paw");
+    fs::write(
+        tr.path().join(".git-paw/config.toml"),
+        format!(
+            "default_cli = \"{0}\"\n\n[clis.{0}]\ncommand = \"{0}\"\n\n[broker]\nenabled = false\n",
+            plain_dummy()
+        ),
+    )
+    .expect("write bare config");
+
+    // A bare launch: --no-supervisor overrides the config's supervisor mode.
+    let (ok, stdout, stderr) = run_paw(
+        tr.path(),
+        home.path(),
+        tmux_env.socket_dir(),
+        &[
+            "start",
+            "--no-supervisor",
+            "--branches",
+            "feat/alpha",
+            "--cli",
+            plain_dummy(),
+        ],
+    );
+    assert!(
+        ok,
+        "the bare launch should succeed; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let session = detached_session_name_in(&stdout)
+        .unwrap_or_else(|| panic!("the bare launch should name its session; stdout:\n{stdout}"));
+
+    // The session as the refusal must leave it. Liveness is captured
+    // alongside the roster rather than asserted: the refusal is decided on
+    // the session's RECORDED mode, so it must hold for an Active, a Paused
+    // and a Stopped bare session alike (as the scenario's GIVEN says), and
+    // this pair is what "the panes are unchanged" means in all three.
+    let panes_before = (
+        session_exists(tmux_env.socket_dir(), &session),
+        pane_roster(tmux_env.socket_dir(), &session),
+    );
+    let worktrees_before = worktree_paths(tr.path());
+    let record_before = session_records(home.path());
+    assert!(
+        !worktrees_before.is_empty(),
+        "the bare launch should have registered a worktree; stdout:\n{stdout}"
+    );
+
+    let (ok, stdout, stderr) = run_paw(
+        tr.path(),
+        home.path(),
+        tmux_env.socket_dir(),
+        &["start", "--unattended", "--branches", "feat/alpha"],
+    );
+
+    assert!(
+        !ok,
+        "a bare session must not be driven unattended; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&session),
+        "the refusal must name the session; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("supervisor mode"),
+        "the refusal must say only supervised sessions can be driven; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("git paw attach"),
+        "the refusal must name how to drive it by hand; stderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("Unattended drive loop exited:"),
+        "no drive loop may run against a bare session; stdout:\n{stdout}"
+    );
+    assert_eq!(
+        (
+            session_exists(tmux_env.socket_dir(), &session),
+            pane_roster(tmux_env.socket_dir(), &session),
+        ),
+        panes_before,
+        "the refusal must leave the session's panes unchanged"
+    );
+    assert_eq!(
+        worktree_paths(tr.path()),
+        worktrees_before,
+        "the refusal must leave the session's worktrees unchanged"
+    );
+    assert_eq!(
+        session_records(home.path()),
+        record_before,
+        "the refusal must leave the session record unchanged"
+    );
+    assert!(
+        !git_paw::supervisor::loop_binding::binding_path(tr.path()).exists(),
+        "a refused bare session must not even have had a binding taken"
+    );
+    kill_session_named(tmux_env.socket_dir(), &session);
+}
 
 /// Heartbeat exit — the simplest proof the `--unattended` launch runs the loop
 /// in-process (not the return-with-attach-hint path) and exits with a summary,

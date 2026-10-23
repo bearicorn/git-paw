@@ -924,6 +924,29 @@ fn launch_spec_session(
 /// injection — coding-agent panes are already running and retain their
 /// in-memory conversation state.
 pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result<(), PawError> {
+    restart_from_pause_detached(repo_root, existing)?;
+    attach_or_print_hint(&existing.session_name)
+}
+
+/// Revives a paused session exactly as [`restart_from_pause`] does, but
+/// returns once it is up instead of attaching the terminal.
+///
+/// This is the half an unattended re-attach reuses: it binds a drive loop to
+/// the revived session rather than handing the terminal over, and a fresh
+/// `--unattended` launch does not attach either. Keeping the revive itself
+/// shared is the point — a second revive path would be a second place for the
+/// pending-prompt submit and the broker restart to drift.
+///
+/// # Errors
+///
+/// Returns an error when the dashboard pane cannot be recreated or the
+/// session cannot be saved; on every such path the session stays recorded
+/// `Paused`, so a retry restarts the broker rather than reattaching to a
+/// session it believes is already active.
+pub(crate) fn restart_from_pause_detached(
+    repo_root: &Path,
+    existing: &Session,
+) -> Result<(), PawError> {
     tmux::ensure_tmux_installed()?;
 
     let dashboard_index = SessionLayout::of(existing).dashboard_index_or_default();
@@ -1058,7 +1081,7 @@ pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result
         .collect();
     crate::write_repo_discovery_file_with_agents(repo_root, &updated.session_name, agents);
 
-    attach_or_print_hint(&existing.session_name)
+    Ok(())
 }
 
 /// Submit the boot prompts held for agents added while the session was paused

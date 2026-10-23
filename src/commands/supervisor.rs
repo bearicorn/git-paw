@@ -24,6 +24,8 @@ use git_paw::error::PawError;
 use git_paw::git;
 use git_paw::interactive;
 use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry};
+use git_paw::supervisor::drive;
+use git_paw::supervisor::loop_binding::{self, BindMode, DriveLoopBinding};
 use git_paw::surface::SessionLayout;
 use git_paw::tmux;
 
@@ -31,8 +33,8 @@ use super::helpers::{
     attach_session_logging, config_to_custom_defs, dashboard_command, to_interactive_cli,
     warn_if_broker_is_exposed,
 };
-use super::recover::recover_session;
-use super::start::restart_from_pause;
+use super::recover::{recover_session, recover_session_detached};
+use super::start::{restart_from_pause, restart_from_pause_detached};
 use crate::{
     AttachContext, SpecMode, apply_spec_mode, attach_agent, gate_pane_or_fail_on_dialog,
     invalidate_if_stale, reattach_active_session_or_refuse, resolve_submit_delay_ms,
@@ -361,6 +363,9 @@ pub(crate) fn cmd_supervisor(
                 tmux::SessionLiveness::Alive
             )
         });
+        if unattended {
+            return reattach_drive_loop(repo_root, config, existing, &effective);
+        }
         match effective {
             SessionStatus::Paused => {
                 println!(
@@ -884,17 +889,184 @@ pub(crate) fn cmd_supervisor(
     // returns — it does NOT replace the foreground terminal with an
     // interactive supervisor CLI and does NOT require an attached terminal.
     if unattended {
+        // The binding is taken after the session is saved (so the instance
+        // token is the one on disk) and before the loop runs. A fresh launch
+        // just created this instance, so nothing may already be driving it:
+        // `Fresh` refuses rather than displacing a holder.
+        let created_at = recorded_created_at(repo_root, state.created_at);
+        let binding = bind_drive_loop(repo_root, &tmux_session.name, created_at, BindMode::Fresh)?;
         return drive_unattended_loop(
             repo_root,
             supervisor_cfg,
             &broker_config,
             &tmux_session.name,
             &state,
+            created_at,
+            binding,
         );
     }
 
     println!("Attach with:  tmux attach -t {}", tmux_session.name);
     Ok(())
+}
+
+/// Binds a new drive loop to the repository's live supervised session and
+/// runs it (`supervisor-unattended-operation`, *A drive loop can be bound to
+/// a live supervised session*).
+///
+/// This is what `git paw start --unattended` does instead of attaching or
+/// refusing when the repository already has a live session — the remedy after
+/// a loop exits on its heartbeat or is interrupted, and the actuator an
+/// external orchestrator restarts. The loop that runs here is the same loop a
+/// fresh launch runs, with the same cadence, escalation, correction and exit
+/// summary; like that loop, it approves nothing.
+///
+/// The order matters and is the whole safety argument: the bare-session
+/// refusal and the binding both come BEFORE any revive or recovery, so a
+/// refused caller leaves every session, pane and worktree exactly as it found
+/// them.
+///
+/// The terminal is never attached, even on a TTY — a fresh `--unattended`
+/// launch does not attach either, so the loop, not the operator's terminal,
+/// is what takes the session over.
+///
+/// # Errors
+///
+/// Returns an error when the session is bare, when another drive loop already
+/// drives this instance, or when the revive or recovery fails — in which case
+/// no loop runs.
+fn reattach_drive_loop(
+    repo_root: &Path,
+    config: &PawConfig,
+    existing: &Session,
+    effective: &SessionStatus,
+) -> Result<(), PawError> {
+    // A bare session pre-fills its boot prompts and deliberately leaves them
+    // for the human to submit; the loop submits an idle pane's buffered
+    // input, so driving one would send exactly what the human was meant to
+    // review. Refused on the recorded mode, before anything is touched.
+    if existing.mode != SessionMode::Supervisor {
+        return Err(PawError::SessionError(format!(
+            "session '{}' was launched without supervisor mode, so it cannot be driven \
+             unattended: a bare session leaves its prompts for you to submit. Drive it by hand \
+             with: git paw attach",
+            existing.session_name
+        )));
+    }
+
+    // Recovery supersedes any binding left for this instance: the loop of a
+    // stopped instance is already required to stop acting, so its binding is
+    // not evidence of a live driver of the recovered session.
+    let mode = if *effective == SessionStatus::Stopped {
+        BindMode::Supersede
+    } else {
+        BindMode::Fresh
+    };
+    let created_at = recorded_created_at(repo_root, existing.created_at);
+    let binding = bind_drive_loop(repo_root, &existing.session_name, created_at, mode)?;
+
+    // Bring the session up where it is not already. Both paths are the ones
+    // `git paw start` uses, minus the terminal attach; a failure here fails
+    // the command with no loop run, and dropping `binding` on the way out
+    // releases it.
+    match effective {
+        SessionStatus::Active => {}
+        SessionStatus::Paused => {
+            println!(
+                "Restarting paused session '{}' (broker + drive loop)...",
+                existing.session_name
+            );
+            restart_from_pause_detached(repo_root, existing)?;
+        }
+        SessionStatus::Stopped => {
+            println!("Recovering session '{}'...", existing.session_name);
+            recover_session_detached(repo_root, existing)?;
+        }
+    }
+
+    // Re-read the receipt: a revive or recovery rewrites it (status, layout,
+    // broker log path, and the pending prompts it just submitted), so the
+    // roster and broker endpoint the loop drives must come from the session
+    // as it now stands, not from the pre-revive snapshot.
+    let state = session::find_session_for_repo(repo_root)?.unwrap_or_else(|| existing.clone());
+
+    // The broker endpoint comes from the SESSION, not the current config: a
+    // `[broker] port` edited since launch would otherwise point the loop at
+    // no broker at all, or at another repository's.
+    let broker_config = match (state.broker_port, state.broker_bind.as_ref()) {
+        (Some(port), Some(bind)) => git_paw::config::BrokerConfig {
+            enabled: true,
+            port,
+            bind: bind.clone(),
+            ..config.broker.clone()
+        },
+        // A session saved with no broker fields has no broker to reach.
+        _ => git_paw::config::BrokerConfig {
+            enabled: false,
+            ..config.broker.clone()
+        },
+    };
+
+    let default_supervisor_cfg = SupervisorConfig::default();
+    let supervisor_cfg = config
+        .supervisor
+        .as_ref()
+        .unwrap_or(&default_supervisor_cfg);
+
+    println!("Driving session '{}' unattended.", state.session_name);
+    println!("Attach from another terminal with:  git paw attach");
+
+    drive_unattended_loop(
+        repo_root,
+        supervisor_cfg,
+        &broker_config,
+        &state.session_name,
+        &state,
+        created_at,
+        binding,
+    )
+}
+
+/// Reads the session receipt's `created_at` back from disk — the durable
+/// instance token both the drive-loop binding and the session-instance guard
+/// (GP-06) compare against.
+///
+/// The receipt round-trips `created_at` through a whole-seconds ISO 8601
+/// string (the field's serializer is frozen — see AGENTS.md), so binding to
+/// the in-memory `SystemTime::now()` value would almost never equal the
+/// truncated value read back, and the loop would see its own session as torn
+/// down on its very first tick. `fallback` covers an unreadable receipt.
+fn recorded_created_at(repo_root: &Path, fallback: SystemTime) -> SystemTime {
+    session::find_session_for_repo(repo_root)
+        .ok()
+        .flatten()
+        .map_or(fallback, |s| s.created_at)
+}
+
+/// Takes the drive-loop binding for `session_name`'s instance, so this loop is
+/// the session's sole driver (`supervisor-unattended-operation`, *At most one
+/// drive loop drives a session instance*).
+///
+/// Every caller acquires BEFORE it revives, recovers or drives anything, so a
+/// refusal leaves the session, its panes and its worktrees untouched.
+///
+/// # Errors
+///
+/// Returns an error naming the session, the holding process and the binding
+/// file when another drive loop is already driving this instance.
+fn bind_drive_loop(
+    repo_root: &Path,
+    session_name: &str,
+    created_at: SystemTime,
+    mode: BindMode,
+) -> Result<DriveLoopBinding, PawError> {
+    DriveLoopBinding::acquire(
+        repo_root,
+        session_name,
+        &loop_binding::instance_token(created_at),
+        mode,
+        loop_binding::stale_window(drive::effective_poll_interval()),
+    )
 }
 
 /// Runs the in-process unattended drive loop for a freshly-launched supervisor
@@ -905,12 +1077,19 @@ pub(crate) fn cmd_supervisor(
 /// at the broker log and the learnings file, then drives the loop to an exit
 /// condition and prints the summary. Blocks in the foreground process; requires
 /// no attached interactive terminal.
+///
+/// `session_created_at` is the instance token read back from disk
+/// ([`recorded_created_at`]) and `binding` the drive-loop binding the caller
+/// already took for that instance — both resolved before this is called,
+/// because a re-attach has to bind *before* it revives or recovers anything.
 fn drive_unattended_loop(
     repo_root: &Path,
     supervisor_cfg: &SupervisorConfig,
     broker_config: &git_paw::config::BrokerConfig,
     session_name: &str,
     state: &Session,
+    session_created_at: SystemTime,
+    binding: DriveLoopBinding,
 ) -> Result<(), PawError> {
     use git_paw::supervisor::drive::{self, AgentPane, DriveRunOptions};
 
@@ -923,19 +1102,6 @@ fn drive_unattended_loop(
             branch: wt.branch.clone(),
         })
         .collect();
-
-    // The session-instance guard (GP-06) compares against what
-    // `find_session_for_repo` reads back from disk, which round-trips
-    // `created_at` through a whole-seconds ISO 8601 string (the field's
-    // serializer is frozen — see AGENTS.md). Binding to the in-memory
-    // `state.created_at` (sub-second `SystemTime::now()`) would almost never
-    // equal that truncated value and make the loop see its own session as
-    // torn down on the very first tick, so re-read the just-saved session to
-    // bind to the same truncated value the guard will later compare against.
-    let session_created_at = session::find_session_for_repo(repo_root)
-        .ok()
-        .flatten()
-        .map_or(state.created_at, |s| s.created_at);
 
     // Loaded once and reused: the `[clis]` table the nudge path resolves its
     // settle delay from. Config parse problems degrade to the defaults rather
@@ -983,6 +1149,7 @@ fn drive_unattended_loop(
         session_created_at,
         clis: loaded_config.clis.clone(),
         layout: git_paw::surface::SessionLayout::of(state),
+        binding: Some(binding),
     };
 
     drive::run_drive_loop(session_name, repo_root, &agents, options)?;

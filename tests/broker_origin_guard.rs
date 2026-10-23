@@ -385,6 +385,11 @@ fn loopback_bind_does_not_warn() {
 /// crash — and a Paused one re-spawns the dashboard pane in
 /// `restart_from_pause`.
 ///
+/// The last two are matched on their `_detached` halves: `drive-loop-reattach`
+/// split the terminal attach off each one, so the body that raises the broker —
+/// and must carry the warning — is now `recover_session_detached` /
+/// `restart_from_pause_detached`, which the attaching wrappers delegate to.
+///
 /// Matching is by function scope rather than a byte window: the window would
 /// both miss a warning placed further away and risk slicing a multi-byte
 /// character (these files are full of em dashes).
@@ -415,7 +420,7 @@ fn every_launch_path_warns_about_an_exposed_bind() {
         },
         Site {
             file: "src/commands/start.rs",
-            function: "pub(crate) fn restart_from_pause(",
+            function: "pub(crate) fn restart_from_pause_detached(",
             trigger: "\"split-window\"",
             warning: "warn_if_broker_is_exposed(&config.broker)",
         },
@@ -427,7 +432,7 @@ fn every_launch_path_warns_about_an_exposed_bind() {
         },
         Site {
             file: "src/commands/recover.rs",
-            function: "pub(crate) fn recover_session(",
+            function: "pub(crate) fn recover_session_detached(",
             trigger: "tmux_session.execute()?;",
             warning: "warn_if_broker_is_exposed(&config.broker)",
         },
@@ -436,7 +441,7 @@ fn every_launch_path_warns_about_an_exposed_bind() {
         sites.len(),
         5,
         "the five broker-raising paths: start, start --from-specs, supervisor, recover_session, \
-         restart_from_pause"
+         restart_from_pause_detached"
     );
 
     for site in &sites {

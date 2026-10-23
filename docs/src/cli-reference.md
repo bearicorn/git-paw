@@ -102,7 +102,7 @@ Options:
       --no-supervisor                Disable supervisor for this session, overriding any [supervisor] enabled = true in config
       --force                        Bypass uncommitted-spec validation warning
       --no-rebase                    Skip rebasing existing agent branches onto the default branch before opening worktrees
-      --unattended                   Run the supervisor wave to completion with no human babysitting (escalate every permission prompt for a human decision, detect completion, exit with a summary)
+      --unattended                   Drive the supervisor wave to completion unattended: escalate every permission prompt for a human decision without blocking the wave, detect completion, exit with a summary (approves nothing). On a repo with a live supervised session, binds a new drive loop to it instead of launching
   -h, --help                         Print help
 ```
 
@@ -119,7 +119,7 @@ Options:
 | `--no-supervisor` | (flag) | Force supervisor mode off (highest precedence in the resolution chain). Mutually exclusive with `--supervisor`. |
 | `--force` | (flag) | Bypass the uncommitted-spec validation warning when launching from specs. |
 | `--no-rebase` | (flag) | Skip the default-on rebase of existing agent branches onto the repository's default branch. |
-| `--unattended` | (flag) | Run the supervisor wave to completion with no human in the seat: engages supervisor mode and drives an in-process loop that escalates every live permission prompt for a human decision without blocking the wave, detects completion, and exits with a summary. It approves nothing. Mutually exclusive with `--no-supervisor`. |
+| `--unattended` | (flag) | Run the supervisor wave to completion with no human in the seat: engages supervisor mode and drives an in-process loop that escalates every live permission prompt for a human decision without blocking the wave, detects completion, and exits with a summary. It approves nothing. On a repository that already has a live supervised session, binds a new drive loop to it instead of launching. Mutually exclusive with `--no-supervisor`. |
 
 `--from-all-specs` and `--specs` are mutually exclusive — one launches every
 discovered spec, the other narrows to a subset or opens the picker.
@@ -140,6 +140,20 @@ CLI's own permission system. For a run that truly does not stop, pre-approve
 the commands in that CLI's own allow rules, or use
 `[supervisor] agent_approval = "full-auto"` inside the documented sandbox. See
 [Supervisor → Unattended mode](user-guide/supervisor.md).
+
+**On a repository that already has a live supervised session**, `--unattended`
+binds a *new* drive loop to that session instead of launching or refusing: an
+active session is driven as it stands (no pane rebuilt, no worktree touched,
+nothing injected), a paused one is revived first, a stopped one recovered
+first. The terminal is never attached. Launch-selection flags are not applied
+to a live session, so re-running the command that launched a wave is what
+drives it again after its loop exits. The loop drives the session's own roster
+and reaches the broker at the endpoint recorded for that session, not the
+configured one. A session launched *without* supervisor mode is refused — it
+leaves its prompts for a human to submit. At most one drive loop may drive a
+session at a time; a second `--unattended` refuses, naming the holding process,
+before changing anything. See
+[Re-attaching a drive loop to a live session](user-guide/supervisor.md#re-attaching-a-drive-loop-to-a-live-session).
 
 No orchestrator runs inside the session — it drives from your own agent
 session, pointed at `.git-paw/AGENTS.local.md` — so the loop sweeps and types
@@ -185,6 +199,10 @@ git paw start --from-all-specs --no-supervisor
 # Run the whole wave to completion with no human in the seat (detached)
 git paw start --unattended --from-all-specs
 git paw start --unattended --branches feat/auth,feat/api
+
+# After the loop exits (heartbeat, stuck, interrupted): the same command again
+# binds a new loop to the still-live session
+git paw start --unattended --from-all-specs
 ```
 
 Every launch path refuses, before creating any worktree or pane, a session whose branches do not all derive distinct broker `agent_id`s. The id is the slugified branch name, so two different branches can map to one: `git paw start --branches feat/x,feat-x` fails naming both branches and the shared id `feat-x`, because the two agents would otherwise share an inbox and receive each other's feedback and verdicts. Rename one branch so the ids differ. (Only when the broker is enabled; with it off, nothing addresses agents by id and the launch proceeds as before.)

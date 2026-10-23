@@ -85,6 +85,52 @@ fn selftest_passes_and_exits_zero_on_healthy_build() {
     );
 }
 
+/// The harness sweeps and then removes its namespace root wholesale, so that
+/// root must never be `.git-paw/tmp/` itself: a drive loop's binding lives
+/// there, and removing it revokes the binding, ending a running unattended
+/// wave with `session-torn-down` on its next tick. `git paw doctor --live`
+/// runs this same harness against a repository that may well have a wave in
+/// flight — the diagnostic must not stop what it is diagnosing.
+///
+/// Anything else sharing that directory (the per-pane approval claims) is
+/// protected by the same property.
+#[test]
+#[serial]
+fn selftest_leaves_a_live_drive_loop_binding_intact() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+
+    // Stand in for a running loop's lease. Written directly rather than by
+    // starting a wave: the assertion is about the harness's reach on disk, so
+    // a real session would add cost without adding evidence.
+    let binding = git_paw::supervisor::loop_binding::binding_path(tr.path());
+    std::fs::create_dir_all(binding.parent().expect("binding has a parent"))
+        .expect("create .git-paw/tmp");
+    std::fs::write(&binding, "{\"held\":\"by a running loop\"}").expect("stage a binding");
+
+    let out = cmd()
+        .current_dir(tr.path())
+        .arg("selftest")
+        .timeout(Duration::from_secs(90))
+        .output()
+        .expect("run selftest");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    assert!(
+        binding.exists(),
+        "selftest must not remove a live drive-loop binding; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&binding).expect("read the binding back"),
+        "{\"held\":\"by a running loop\"}",
+        "selftest must not rewrite a live drive-loop binding either"
+    );
+}
+
 // --- 4.2 session lands on the private socket, never the default socket ---
 
 #[test]
@@ -126,7 +172,7 @@ fn selftest_session_lands_on_private_socket_not_default() {
     );
 }
 
-// --- 4.3 dummy CLI + throwaway repo under .git-paw/tmp/ removed afterward ---
+// --- 4.3 dummy CLI + throwaway repo under .git-paw/tmp/selftest/ removed afterward ---
 
 #[test]
 #[serial]
@@ -136,7 +182,10 @@ fn selftest_throwaway_repo_lives_under_git_paw_tmp_and_is_removed() {
         return;
     }
     let tr = setup_test_repo();
-    let tmp_dir = tr.path().join(".git-paw").join("tmp");
+    // The harness owns `.git-paw/tmp/selftest/`, not `.git-paw/tmp/` itself:
+    // that directory also holds a running wave's drive-loop binding and the
+    // per-pane approval claims, which a selftest must leave alone.
+    let tmp_dir = tr.path().join(".git-paw").join("tmp").join("selftest");
 
     let out = cmd()
         .current_dir(tr.path())
@@ -154,11 +203,11 @@ fn selftest_throwaway_repo_lives_under_git_paw_tmp_and_is_removed() {
         "selftest should pass; stdout:\n{stdout}"
     );
 
-    // The harness namespaces its throwaway repo under .git-paw/tmp/ and removes
+    // The harness namespaces its throwaway repo under .git-paw/tmp/selftest/ and removes
     // that directory after the run completes.
     assert!(
         !tmp_dir.exists(),
-        "the throwaway .git-paw/tmp/ dir should be removed after the run; \
+        "the throwaway .git-paw/tmp/selftest/ dir should be removed after the run; \
          it still exists at {}",
         tmp_dir.display()
     );
@@ -213,7 +262,10 @@ fn selftest_forced_failure_exits_nonzero_and_names_step() {
         return;
     }
     let tr = setup_test_repo();
-    let tmp_dir = tr.path().join(".git-paw").join("tmp");
+    // The harness owns `.git-paw/tmp/selftest/`, not `.git-paw/tmp/` itself:
+    // that directory also holds a running wave's drive-loop binding and the
+    // per-pane approval claims, which a selftest must leave alone.
+    let tmp_dir = tr.path().join(".git-paw").join("tmp").join("selftest");
 
     // Inject a forced failure at a real lifecycle step: start and add run for
     // real, then the post-add roster check is forced to fail.
@@ -237,7 +289,7 @@ fn selftest_forced_failure_exits_nonzero_and_names_step() {
     // Cleanup runs on the failure path too.
     assert!(
         !tmp_dir.exists(),
-        "the throwaway .git-paw/tmp/ dir should be removed even on the failure path; \
+        "the throwaway .git-paw/tmp/selftest/ dir should be removed even on the failure path; \
          it still exists at {}",
         tmp_dir.display()
     );

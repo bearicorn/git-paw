@@ -79,6 +79,12 @@ pub enum Command {
         about = "Launch a new session or reattach to an existing one",
         long_about = "Smart start: reattaches if a session is active, recovers if stopped/crashed, \
                       or launches a new interactive session.\n\n\
+                      With `--unattended`, a repository that already has a supervised session \
+                      gets a new drive loop bound to it instead: the session is driven as it \
+                      stands when active, revived first when paused, recovered first when \
+                      stopped. Launch-selection flags are not applied to a live session, so \
+                      re-running the command that launched a wave drives it again after its \
+                      loop exits. Only one drive loop may drive a session at a time.\n\n\
                       By default, every existing agent branch is rebased onto the repository's \
                       default branch (whatever `origin/HEAD` tracks — typically `main`) before \
                       its worktree is opened, so agents always start from current main. Pass \
@@ -99,7 +105,8 @@ pub enum Command {
                       git paw start --preset backend\n  \
                       git paw start --supervisor   # dashboard + agents; your own session orchestrates\n  \
                       git paw start --no-supervisor  # disable supervisor for this session (overrides config)\n  \
-                      git paw start --no-rebase   # skip rebasing agent branches onto the default branch"
+                      git paw start --no-rebase   # skip rebasing agent branches onto the default branch\n  \
+                      git paw start --unattended --from-all-specs   # drive the wave; re-run to drive it again"
     )]
     Start {
         /// AI CLI to use (e.g., claude, codex, agy). Skips CLI picker if provided.
@@ -239,6 +246,25 @@ pub enum Command {
         /// `max_cycles` and ending in the `on_exhausted` policy. It defaults to
         /// off, so an existing unattended setup keeps today's behaviour.
         ///
+        /// Run against a repository that already has a supervised session, it
+        /// binds a NEW drive loop to that session rather than refusing or
+        /// forking a parallel one — the remedy after a loop exits on the
+        /// heartbeat or is interrupted. An active session is driven as it
+        /// stands (no pane rebuilt, no worktree touched, nothing injected); a
+        /// paused one is revived first; a stopped one is recovered first. The
+        /// terminal is never attached. Selection flags are NOT applied to a
+        /// live session, so re-running the original launch command re-binds.
+        /// The loop drives the session's own roster and reaches the broker at
+        /// the endpoint recorded for that session, not the configured one. A
+        /// session launched WITHOUT supervisor mode is refused: it leaves its
+        /// prompts for a human to submit.
+        ///
+        /// At most one drive loop drives a session at a time. A second
+        /// `--unattended` while a live loop holds the session's binding
+        /// refuses before changing any session, pane or worktree state, naming
+        /// the holding process. A binding left by a killed loop lapses, so
+        /// there is nothing to clear by hand; `git paw stop` revokes it.
+        ///
         /// Mutually exclusive with `--no-supervisor` (they express opposing
         /// intents). May be combined with `--supervisor`, `--from-all-specs`,
         /// `--specs`, `--cli`, and `--branches`.
@@ -246,7 +272,7 @@ pub enum Command {
             long,
             default_value_t = false,
             conflicts_with = "no_supervisor",
-            help = "Drive the supervisor wave to completion unattended: escalate every permission prompt for a human decision without blocking the wave, detect completion, exit with a summary (approves nothing)"
+            help = "Drive the supervisor wave to completion unattended: escalate every permission prompt for a human decision without blocking the wave, detect completion, exit with a summary (approves nothing). On a repo with a live supervised session, binds a new drive loop to it instead of launching"
         )]
         unattended: bool,
     },

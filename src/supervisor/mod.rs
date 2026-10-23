@@ -15,5 +15,6 @@ pub mod branch_refresh;
 pub mod claim;
 pub mod drive;
 pub mod keys;
+pub mod loop_binding;
 pub mod manual_approvals;
 pub mod permission_prompt;

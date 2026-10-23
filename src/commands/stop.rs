@@ -5,6 +5,7 @@ use git_paw::agents;
 use git_paw::error::PawError;
 use git_paw::git;
 use git_paw::session::{self, SessionStatus};
+use git_paw::supervisor::loop_binding;
 use git_paw::tmux;
 
 /// Stops the session: kills tmux but preserves worktrees and state.
@@ -32,6 +33,15 @@ pub(crate) fn cmd_stop() -> Result<(), PawError> {
     let mut updated = existing;
     updated.status = SessionStatus::Stopped;
     session::save_session(&updated)?;
+
+    // Revoke the drive-loop binding AFTER `Stopped` is recorded, so a loop
+    // that reads the receipt between the two sees the stop either way.
+    // Revoking is what makes the stop observable at all to a loop that is
+    // about to be re-attached: recovery keeps the receipt's `created_at`, so a
+    // session stopped and recovered inside one poll interval looks unchanged
+    // to the loop's record check, and the old loop would go on driving the
+    // recovered session (GP-06).
+    loop_binding::revoke(&repo_root);
 
     println!("Session stopped. Worktrees and state preserved.");
     println!("Run `git paw start` to recover.");

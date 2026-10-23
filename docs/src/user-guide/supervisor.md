@@ -154,6 +154,11 @@ loop, and pointers to the broker log and captured learnings. Because there
 is no human to hand-write findings, the loop self-captures qualitative
 learnings during the run and once more at wind-down.
 
+A `heartbeat`, `stuck` or interrupted exit ends the *loop*, not the session —
+the panes, their conversations and their worktrees are all still there. Re-run
+the same `git paw start --unattended` to drive it again; see
+[Re-attaching a drive loop to a live session](#re-attaching-a-drive-loop-to-a-live-session).
+
 Each agent's final state is resolved from the most-progressed lifecycle phase
 ever observed for it during the run — not simply the last `/status` row — so a
 generic `working` heartbeat published after a `verified`/`done` artifact event
@@ -230,19 +235,126 @@ Nothing in an unattended session approves a prompt — the loop escalates and
 the human answers. The dashboard subprocess runs no approver either, attended
 or unattended; it renders the broker log and nothing more.
 
+### Re-attaching a drive loop to a live session
+
+A drive loop ends while the session it was driving is still perfectly alive —
+on the heartbeat, on a stuck signal, or because you interrupted it. To drive
+that session again, **re-run the same `git paw start --unattended` command** in
+its repository:
+
+```bash
+# Drove the wave the first time; drives it again the second time
+git paw start --unattended --from-all-specs
+```
+
+The live session is neither relaunched nor forked. Launch-selection flags
+(`--branches`, `--specs`, `--from-all-specs`, `--cli`) are never applied to a
+session that already exists — attaching a new agent to a live session is
+[`git paw add`](./session-lifecycle.md#git-paw-add--hot-attach-an-agent) — and that is exactly what lets the
+original launch command double as the re-attach command. No `paw-<project>-2`
+is created.
+
+What it does next depends on the session's effective status:
+
+| Status | What `start --unattended` does |
+|---|---|
+| **Active** | Binds a loop and drives the session as it stands. No pane is created, rebuilt or re-titled, no worktree is touched, and no boot block, prompt or keystroke is injected anywhere. |
+| **Paused** | Revives the session exactly as `git paw start` revives it, then drives it. |
+| **Stopped** | Recovers the session exactly as `git paw start` recovers it, then drives it. |
+
+A revive or recovery that fails fails the command, without running a loop.
+
+The terminal is **never attached**, even from an interactive shell — the drive
+loop occupies the foreground process, exactly as it does on a fresh
+`--unattended` launch. The command prints the session name and the
+`git paw attach` line for watching it from another terminal.
+
+In every other respect the re-bound loop is the same loop: the same cadence,
+the same escalation, correction and heartbeat behaviour, the same exit summary,
+and it **approves nothing**. It drives the session's own agent roster, and
+reaches the broker at the endpoint **recorded for that session** rather than
+the one in your current configuration — so a `[broker] port` changed after
+launch cannot point the loop at another repository's broker, or at none.
+
+**Bare sessions are refused.** A session started without supervisor mode
+deliberately leaves its boot prompts unsubmitted for a human to send, and the
+loop's buffered-input recovery would submit them. `start --unattended` against
+one exits non-zero naming the session, stating that only a session launched in
+supervised mode can be driven unattended, and pointing at `git paw attach` for
+driving it by hand. Nothing about the session is changed. A `--dry-run`
+likewise binds nothing and is unaffected.
+
+### One drive loop per session
+
+Two loops on one session would each nudge, submit buffered input and escalate
+into the same panes, so at most one may drive a session instance at a time.
+Every loop — whether from a fresh launch or a re-attach — holds a **drive-loop
+binding**: a lease file at `.git-paw/tmp/drive-loop.binding` (gitignored,
+beside the approval claims) naming the session instance and the loop itself. It
+is refreshed every poll and released when the loop exits.
+
+A `start --unattended` that finds a live loop already holding the binding
+**refuses before changing anything** — no session, pane or worktree state is
+touched, and no second loop runs. It exits non-zero with an error naming the
+session, the process id holding the binding, and the binding file. Wait for
+that loop to exit (or stop that process), then re-run the command.
+
+A loop killed without releasing its binding does not wedge the next one. A
+binding that stops being refreshed lapses after the staleness window — the
+larger of four poll intervals and two minutes, and of the window the holder
+itself recorded, so a loop polling more slowly than the caller is never
+displaced while it is alive — and the next `start --unattended` simply takes
+it. There is never a lock file to clear by hand. A loop that exits cleanly
+releases its binding immediately, so a re-attach right after a heartbeat exit
+binds without waiting at all.
+
+Two `start --unattended` runs that reach a lapsed binding at the same instant
+still produce exactly one loop: the binding is read, judged and rewritten
+under an exclusive lock (`.git-paw/tmp/drive-loop.lock`), so the second runs
+its check against the first's result and refuses. That lock file is left in
+place between runs; it is empty, and nothing needs to be done about it.
+
+`git paw stop` revokes the session's binding, and recovering a stopped session
+supersedes any binding left behind for it. A loop that finds its binding
+revoked or taken over exits `session-torn-down` on its next poll without acting
+— see [Session-instance lifecycle](#session-instance-lifecycle) below.
+
+> **Deleting `.git-paw/tmp/` ends a running loop.** The binding goes with it
+> and the loop exits on its next poll. That is fail-safe rather than
+> destructive: a loop that is not running approves nothing, so the panes go on
+> waiting for a human exactly as they would have. Re-run
+> `git paw start --unattended` to bind a new loop.
+
+> **Upgrading mid-run.** A drive loop started by a git-paw older than this one
+> holds no binding, so a re-attach is **not** refused while it is still
+> running — and you would end up with two loops driving the same panes. Stop
+> that older `--unattended` process before re-attaching to its session.
+
 ### Session-instance lifecycle
 
-The loop binds to the *specific session instance* it began driving — not just
-the session name — using the session receipt's creation timestamp as a
-durable instance token. Every tick re-reads the receipt and compares it before
-acting: if the receipt is gone, its `created_at` no longer matches (a new
-session of the same name was started after a `purge`), or its status is now
-`stopped`, the loop exits immediately — without sweeping panes or sending any
-keystrokes — rather than continuing to drive whatever now occupies that
-session name. This is what makes `purge`/`stop` safe to run against a session
-still being driven unattended: the old loop notices on its very next poll and
-gets out of the way instead of approving prompts in a session it no longer
-owns.
+A loop binds to the *specific session instance* it began driving — not just
+the session name — and re-confirms on every tick, **before** it sweeps or
+sends anything, that it is still that instance's driver. Two things must hold:
+
+- **The session receipt still describes the instance it bound to.** The
+  receipt's creation timestamp is the durable instance token. If the receipt is
+  gone, its `created_at` no longer matches (a new session of the same name was
+  started after a `purge`), or its status is now `stopped`, the loop is done.
+- **The drive-loop binding still names this loop.** `git paw stop` revokes it,
+  and a re-attach that recovers a stopped session supersedes it.
+
+Either one failing exits the loop immediately — without sweeping panes or
+sending any keystrokes — rather than continuing to drive whatever now occupies
+that session name. This is what makes `purge`/`stop` safe to run against a
+session still being driven unattended: the old loop notices on its very next
+poll and gets out of the way instead of escalating prompts from a session it
+no longer owns.
+
+The binding covers the gap the receipt alone cannot see. Recovering a session
+keeps its `created_at`, so a session stopped and recovered inside one poll
+interval looks *unchanged* to the receipt check — and the loop bound to the
+stopped instance would go on driving the recovered one. Revoking the binding on
+`stop` is what tells it otherwise.
 
 ```bash
 # Drive every discovered spec to completion, unattended
