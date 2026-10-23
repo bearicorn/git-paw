@@ -69,6 +69,7 @@ use crate::surface::{SessionLayout, SurfaceRole};
 use super::approval_gate::{approval_dedup_key, live_prompt_in_tail};
 use super::claim::PaneClaim;
 use super::keys::{KeyDispatcher, TmuxKeyDispatcher};
+use super::loop_binding::DriveLoopBinding;
 use super::permission_prompt::{
     LIVE_PROMPT_TAIL, anchor_on_trailing_region, extract_command_slice,
     extract_path_from_file_prompt, is_idle_input_box_line, is_live_prompt, is_rule_line,
@@ -77,6 +78,18 @@ use super::permission_prompt::{
 
 /// Poll cadence: the loop re-sweeps every pane on approximately this interval.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(15);
+
+/// The poll cadence this process's drive loop will actually run at:
+/// [`POLL_INTERVAL`], or the `GIT_PAW_DRIVE_POLL_MS` override.
+///
+/// Exposed because the drive-loop binding's staleness window is derived from
+/// the cadence (four ticks), and the binding is taken by the caller *before*
+/// [`run_drive_loop`] builds its [`DriveConfig`] — so both sides have to read
+/// the same answer from one place rather than each resolving the override.
+#[must_use]
+pub fn effective_poll_interval() -> Duration {
+    duration_from_env_ms("GIT_PAW_DRIVE_POLL_MS", POLL_INTERVAL)
+}
 
 /// Heartbeat window: after approximately this long with no completion the loop
 /// re-engages the human by exiting with a status summary rather than running
@@ -2622,6 +2635,43 @@ impl SessionInstanceGuard for FileSessionInstanceGuard {
     }
 }
 
+/// Adds the drive-loop binding to another guard's verdict: the loop is current
+/// only while it still *holds* the binding for its session instance, and every
+/// affirmative check re-asserts the lease for one more tick.
+///
+/// The binding is the half of the check the session receipt cannot make.
+/// Recovery clones the receipt, `created_at` and all, so a session stopped and
+/// recovered inside one poll interval looks unchanged to
+/// [`FileSessionInstanceGuard`] alone — and `git paw stop` revoking the binding
+/// is what tells the loop of the *stopped* instance that it is done. It also
+/// covers the other direction: a loop whose binding was superseded by a
+/// re-attach learns so here, before it acts.
+///
+/// A loop with no binding (`None`) degrades to the inner guard's verdict
+/// unchanged.
+struct BoundInstanceGuard<G: SessionInstanceGuard> {
+    /// The session-receipt check this composes with.
+    inner: G,
+    /// The lease proving this loop is the session instance's sole driver.
+    binding: Option<DriveLoopBinding>,
+}
+
+impl<G: SessionInstanceGuard> SessionInstanceGuard for BoundInstanceGuard<G> {
+    fn is_current(&self) -> bool {
+        // The binding first: it is the cheaper read and the stronger signal.
+        if let Some(binding) = &self.binding
+            && !binding.refresh()
+        {
+            eprintln!(
+                "drive loop: the drive-loop binding was revoked or taken over by another loop \
+                 — exiting without acting."
+            );
+            return false;
+        }
+        self.inner.is_current()
+    }
+}
+
 /// Production [`PaneEnumerator`]: `tmux list-panes -t <session> -F ...`.
 struct TmuxPaneEnumerator;
 
@@ -2980,6 +3030,14 @@ pub struct DriveRunOptions {
     /// surface plays which role, so the loop never compares an index to a
     /// literal.
     pub layout: SessionLayout,
+    /// The drive-loop binding proving this loop is the session instance's
+    /// sole driver, taken by the caller *before* it revived, recovered or
+    /// changed anything. The loop holds it for the whole run, refreshes it
+    /// every tick, and releases it on exit.
+    ///
+    /// `None` runs the loop with no exclusion at all; it exists only so a
+    /// caller that cannot take a binding is not forced to fabricate one.
+    pub binding: Option<DriveLoopBinding>,
 }
 
 /// Runs the unattended drive loop with production dependencies, prints the exit
@@ -3011,12 +3069,16 @@ pub fn run_drive_loop(
         session_created_at,
         clis,
         layout,
+        binding,
     } = options;
 
-    let instance = FileSessionInstanceGuard {
-        repo_root: repo_root.to_path_buf(),
-        session_name: session.to_string(),
-        bound_created_at: session_created_at,
+    let instance = BoundInstanceGuard {
+        inner: FileSessionInstanceGuard {
+            repo_root: repo_root.to_path_buf(),
+            session_name: session.to_string(),
+            bound_created_at: session_created_at,
+        },
+        binding,
     };
     let default_branch = crate::git::default_branch(repo_root)?;
     let merge_check = GitMergeCheck {
@@ -3054,7 +3116,7 @@ pub fn run_drive_loop(
         // in seconds rather than minutes. These are advanced/test overrides,
         // not a documented user knob (configurability is deferred per the
         // design's open questions).
-        poll_interval: duration_from_env_ms("GIT_PAW_DRIVE_POLL_MS", POLL_INTERVAL),
+        poll_interval: effective_poll_interval(),
         heartbeat: duration_from_env_ms("GIT_PAW_DRIVE_HEARTBEAT_MS", HEARTBEAT_INTERVAL),
         correction,
         learnings_enabled,
@@ -4949,6 +5011,107 @@ mod tests {
         assert!(
             dispatcher.events.is_empty(),
             "no pane is typed into either way: {:?}",
+            dispatcher.events
+        );
+    }
+
+    /// Spec scenarios "Stop revokes the binding before a quick recovery" and
+    /// "Recovering a stopped session supersedes a leftover binding": a loop
+    /// whose binding was revoked or taken over exits with `session-torn-down`
+    /// *before* it acts, even though the session record still says it is the
+    /// current instance (recovery keeps `created_at`, so the record check
+    /// alone cannot see a quick stop-then-recover).
+    ///
+    /// The pane on offer carries a live permission prompt, so a sweep that
+    /// happened at all would leave an escalation behind. None does.
+    #[test]
+    fn lost_binding_ends_the_loop_before_it_acts() {
+        use super::super::loop_binding::{BindMode, DriveLoopBinding, revoke};
+
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
+        }];
+        let enumerator = FakeEnumerator {
+            panes: vec![PaneInfo {
+                pane_index: 1,
+                pane_current_path: "/repo-feat-a".to_string(),
+            }],
+        };
+        let capturer = FakeCapturer::new(&[(1, &live_safe_capture("cargo test"))]);
+        let mut dispatcher = RecordingDispatcher::default();
+        // Never completes on its own — only the lost binding ends it.
+        let status = ScriptedStatus::new(vec![vec![row("feat-a", "working")]]);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
+        let mut refresher = RecordingRefresher::default();
+        let messages = ScriptedMessages::none();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            merge_check: &FakeMergeCheck::default(),
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
+            refresher: &mut refresher,
+            wedged: Vec::new(),
+        };
+        let config = DriveConfig {
+            poll_interval: Duration::from_millis(0),
+            heartbeat: Duration::from_hours(1),
+            ..DriveConfig::default()
+        };
+
+        let repo = tempfile::tempdir().expect("temp repo root");
+        let binding = DriveLoopBinding::acquire(
+            repo.path(),
+            "paw-test",
+            "1700000000",
+            BindMode::Fresh,
+            Duration::from_secs(120),
+        )
+        .expect("the loop binds before it runs");
+        // `git paw stop` (or a re-attach superseding this loop) between the
+        // bind and the first tick.
+        revoke(repo.path());
+
+        let instance = BoundInstanceGuard {
+            // The record half still reports the instance current, so the
+            // binding is demonstrably what ends the loop.
+            inner: AlwaysCurrentGuard,
+            binding: Some(binding),
+        };
+
+        let summary = drive_loop(
+            "paw-test",
+            repo.path(),
+            &agents,
+            &mut deps,
+            &config,
+            &instance,
+        );
+
+        assert_eq!(
+            summary.outcome,
+            DriveOutcome::SessionTornDown,
+            "a revoked binding ends the loop as a torn-down instance"
+        );
+        assert!(
+            alerts.escalations.is_empty(),
+            "the loop must exit before sweeping — a sweep of this pane would \
+             have escalated its live prompt: {:?}",
+            alerts.escalations
+        );
+        assert!(
+            dispatcher.events.is_empty(),
+            "no keystroke reaches a session this loop no longer drives: {:?}",
             dispatcher.events
         );
     }

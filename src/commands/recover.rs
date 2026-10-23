@@ -57,6 +57,26 @@ fn cli_command_for_recovery<S: std::hash::BuildHasher>(
 
 /// Recovers a stopped/stale session by recreating the tmux session from saved state.
 pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<(), PawError> {
+    let session_name = recover_session_detached(repo_root, existing)?;
+    attach_or_print_hint(&session_name)
+}
+
+/// Recovers a stopped session exactly as [`recover_session`] does, but returns
+/// the rebuilt session's name once it is up instead of attaching the terminal.
+///
+/// The detached half an unattended re-attach reuses, for the same reason as
+/// [`crate::commands::start::restart_from_pause_detached`]: the loop, not the
+/// terminal, takes the session over, and the recovery itself must stay one
+/// implementation.
+///
+/// # Errors
+///
+/// Returns an error when tmux is missing, the recorded broker port is held by
+/// another repository, or the session cannot be rebuilt or saved.
+pub(crate) fn recover_session_detached(
+    repo_root: &Path,
+    existing: &Session,
+) -> Result<String, PawError> {
     tmux::ensure_tmux_installed()?;
     let config = config::load_config(repo_root, None)?;
     let mouse = config.mouse.unwrap_or(true);
@@ -204,7 +224,7 @@ pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<()
         layout.first_agent_index(),
     );
 
-    attach_or_print_hint(&tmux_session.name)
+    Ok(tmux_session.name)
 }
 
 /// Rebuild a bare-mode (non-supervisor) session: dashboard at pane 0 (when

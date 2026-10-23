@@ -209,7 +209,9 @@ fn extract_session_name(stdout: &str) -> Option<String> {
 struct Harness {
     /// The running `git-paw` binary, re-invoked for each lifecycle subcommand.
     exe: PathBuf,
-    /// The `.git-paw/tmp/` namespace root (removed wholesale on cleanup).
+    /// The selftest's own namespace root, `.git-paw/tmp/selftest/` (removed
+    /// wholesale on cleanup — which is why it is not `.git-paw/tmp/` itself,
+    /// whose other contents belong to a possibly-running session).
     tmp_root: PathBuf,
     /// The throwaway git repository (`<tmp_root>/repo`).
     repo: PathBuf,
@@ -238,7 +240,15 @@ impl Harness {
         let exe = std::env::current_exe()
             .map_err(|e| PawError::SessionError(format!("cannot resolve git-paw binary: {e}")))?;
 
-        let tmp_root = repo_root.join(".git-paw").join("tmp");
+        // A subdirectory of `.git-paw/tmp/`, never `.git-paw/tmp/` itself.
+        // The sweep and the cleanup below both remove this root wholesale, and
+        // that directory is shared live state: it holds the drive-loop binding
+        // and the per-pane approval claims. Removing it during an unattended
+        // wave revokes the running loop's binding, and the loop exits
+        // `session-torn-down` on its next tick — so `git paw doctor --live`,
+        // which exists to reassure, would silently stop the wave it was run
+        // against.
+        let tmp_root = repo_root.join(".git-paw").join("tmp").join("selftest");
         // Stale-dir sweep: remove any leftover directory from a prior aborted
         // run before creating a fresh one.
         if tmp_root.exists() {
