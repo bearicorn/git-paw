@@ -865,6 +865,390 @@ fn add_to_paused_session_holds_prompt_for_resume() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// launch-prompt-entry-point task 3.2 — a held prompt carries its held entry
+// point across a pause, and the restart submits them in order
+// ---------------------------------------------------------------------------
+
+/// Resolves the sessions directory a `git paw` subprocess given `HOME = home`
+/// (and `XDG_DATA_HOME` removed) writes its receipt into, mirroring
+/// `git_paw::dirs::data_dir()`.
+fn sessions_dir_under(home: &Path) -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        home.join("Library/Application Support")
+            .join("git-paw")
+            .join("sessions")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        home.join(".local/share").join("git-paw").join("sessions")
+    }
+}
+
+fn read_receipt(home: &Path, session: &str) -> String {
+    fs::read_to_string(sessions_dir_under(home).join(format!("{session}.json")))
+        .expect("read session receipt")
+}
+
+/// Writes a probe CLI that appends every newline-terminated line it reads from
+/// stdin to `log_path`, and a supervisor config naming it with an `OpenSpec`
+/// spec directory. Returns the CLI name and the `PATH` to run `git paw` with.
+///
+/// The probe is what makes "was it submitted" observable: the composed
+/// prompt's last line (the worktree rule) and the entry-point template both
+/// end without a newline, so each reaches the log only if its own separate
+/// `Enter` arrived.
+fn write_spec_probe_setup(repo: &Path, bin_dir: &Path, log_path: &Path) -> (String, String) {
+    use std::os::unix::fs::PermissionsExt;
+
+    // `exec tee`, not a `while read` loop: the loop would leave the pane's
+    // `#{pane_current_command}` as `sh`, and the entry-point submit refuses
+    // to type into a pane running a shell — a pane whose CLI exited is a
+    // command interpreter, not a composer. `exec` makes the pane's process
+    // `tee`, so the stub stands in for a CLI as intended.
+    let cli = "paw-test-add-probe";
+    let script = format!(
+        "#!/bin/sh\nexec tee -a '{}' > /dev/null\n",
+        log_path.display()
+    );
+    let script_path = bin_dir.join(cli);
+    fs::write(&script_path, script).expect("write probe script");
+    fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).expect("chmod probe");
+
+    let paw_dir = repo.join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    fs::write(
+        paw_dir.join("config.toml"),
+        format!(
+            "default_cli = \"{cli}\"\n\n\
+             [specs]\ntype = \"openspec\"\ndir = \"specs\"\n\n\
+             [supervisor]\nenabled = true\ncli = \"{cli}\"\n\n\
+             [clis.{cli}]\ncommand = \"{cli}\"\n"
+        ),
+    )
+    .expect("write config");
+
+    let inherited = std::env::var("PATH").unwrap_or_default();
+    (
+        cli.to_string(),
+        format!("{}:{inherited}", bin_dir.display()),
+    )
+}
+
+/// Writes and commits a pending `OpenSpec` change at `<repo>/specs/<id>/tasks.md`.
+fn write_committed_spec(repo: &Path, id: &str) {
+    let dir = repo.join("specs").join(id);
+    fs::create_dir_all(&dir).expect("create change dir");
+    fs::write(dir.join("tasks.md"), format!("Implement {id}.\n")).expect("write tasks.md");
+    for args in [["add", "."], ["commit", "-m"]] {
+        let mut c = StdCommand::new("git");
+        c.current_dir(repo);
+        if args[0] == "commit" {
+            c.args(["commit", "-m", "add spec"]);
+        } else {
+            c.args(args);
+        }
+        c.output().expect("git");
+    }
+}
+
+/// The tail of the bundled worktree rule — the composed prompt's last line.
+const WORKTREE_RULE_TAIL: &str = "not by a relative path that climbs out of it";
+
+/// Maps to `boot-block` scenario "An agent added while paused holds its entry
+/// point": `git paw add --from-spec` into a paused session records BOTH the
+/// held prompt and the held entry point, and the restart submits the prompt,
+/// then the entry point once the pane is idle, clearing both.
+#[test]
+#[serial]
+fn paused_add_holds_its_entry_point_and_the_restart_submits_both() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+    let bin_dir = TempDir::new().unwrap();
+    let log_dir = TempDir::new().unwrap();
+    let log_path = log_dir.path().join("probe.log");
+    let (cli, test_path) = write_spec_probe_setup(tr.path(), bin_dir.path(), &log_path);
+    let spec_id = "held-entry-point";
+    write_committed_spec(tr.path(), spec_id);
+
+    let mut start = cmd();
+    tmux_env.apply_assert(&mut start);
+    let out = start
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env("PATH", &test_path)
+        .env_remove("XDG_DATA_HOME")
+        .args(["start", "--supervisor", "--branches", "a", "--cli", &cli])
+        .timeout(Duration::from_secs(60))
+        .output()
+        .expect("run start");
+    assert!(
+        out.status.success(),
+        "start failed; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let session = stdout
+        .lines()
+        .find(|l| l.contains("tmux attach -t"))
+        .and_then(|l| l.split_whitespace().last())
+        .expect("session name")
+        .to_string();
+
+    let mut pause = cmd();
+    tmux_env.apply_assert(&mut pause);
+    let _ = pause
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .args(["pause"])
+        .timeout(Duration::from_secs(20))
+        .output()
+        .expect("run pause");
+
+    let mut add = cmd();
+    tmux_env.apply_assert(&mut add);
+    let out = add
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env("PATH", &test_path)
+        .env_remove("XDG_DATA_HOME")
+        .args(["add", "--from-spec", spec_id])
+        .timeout(Duration::from_secs(60))
+        .output()
+        .expect("run add --from-spec (paused)");
+    assert!(
+        out.status.success(),
+        "paused add --from-spec should succeed; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let held = read_receipt(home.path(), &session);
+    assert!(
+        held.contains("pending_boot_prompt"),
+        "the prompt is held for the restart; receipt:\n{held}"
+    );
+    assert!(
+        held.contains("pending_entry_point"),
+        "the entry point must be held WITH it — it cannot precede the prompt \
+         it follows; receipt:\n{held}"
+    );
+    assert!(
+        held.contains(&format!("/opsx:apply {spec_id}")),
+        "the held entry point is the rendered template; receipt:\n{held}"
+    );
+
+    // Nothing has been typed into the HELD pane yet.
+    //
+    // Both panes append to one probe log, and branch `a`'s supervised launch
+    // already submitted its own composed prompt — worktree rule and all —
+    // before the pause. So everything below must be read as the SUFFIX
+    // written after this point; asserting on the whole log would let the
+    // pre-pause launch satisfy claims about the restart.
+    let before_restart = fs::read_to_string(&log_path).unwrap_or_default();
+    assert!(
+        !before_restart.contains(&format!("/opsx:apply {spec_id}")),
+        "a paused pane receives no entry point; probe log:\n{before_restart}"
+    );
+    // That pre-pause content is itself the supervised-start leg of
+    // `boot-block`'s "Every launch path carries the rule": `git paw start
+    // --supervisor` submitted a prompt ending in the worktree rule.
+    assert!(
+        before_restart.contains(WORKTREE_RULE_TAIL),
+        "a supervised start must submit a prompt ending in the worktree rule; \
+         probe log:\n{before_restart}"
+    );
+    let prefix_len = before_restart.len();
+
+    let mut restart = cmd();
+    tmux_env.apply_assert(&mut restart);
+    let out = restart
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env("PATH", &test_path)
+        .env_remove("XDG_DATA_HOME")
+        .env("GIT_PAW_ENTRY_POINT_BUDGET_MS", "10000")
+        .args(["start"])
+        .timeout(Duration::from_secs(60))
+        .output()
+        .expect("run start (restart from pause)");
+    assert!(
+        out.status.success(),
+        "restart should succeed; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut log = String::new();
+    while std::time::Instant::now() < deadline {
+        log = fs::read_to_string(&log_path).unwrap_or_default();
+        if log.contains(&format!("/opsx:apply {spec_id}")) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    let after = read_receipt(home.path(), &session);
+    kill(&tmux_env, &session);
+
+    // Only what the RESTART wrote — see the prefix note above.
+    let restarted = log.get(prefix_len..).unwrap_or_default();
+    assert!(
+        restarted.contains(WORKTREE_RULE_TAIL),
+        "the restart submits the held prompt first; restart wrote:\n{restarted}"
+    );
+    assert!(
+        restarted
+            .lines()
+            .any(|line| line.trim() == format!("/opsx:apply {spec_id}")),
+        "then the held entry point, as its own submitted line; restart \
+         wrote:\n{restarted}"
+    );
+    assert!(
+        restarted.find(WORKTREE_RULE_TAIL) < restarted.find(&format!("/opsx:apply {spec_id}")),
+        "in that order — the entry point is what the agent runs after reading \
+         the sidecar the prompt pointed it at; restart wrote:\n{restarted}"
+    );
+    assert!(
+        !after.contains("pending_boot_prompt") && !after.contains("pending_entry_point"),
+        "both are cleared once submitted, so a second restart does not retype \
+         them; receipt:\n{after}"
+    );
+}
+
+/// Maps to `boot-block` scenario "A session saved without the field restarts
+/// as before": a receipt written by an earlier binary carries a held prompt
+/// and no held entry point. The prompt is submitted and nothing else typed.
+#[test]
+#[serial]
+fn a_receipt_without_a_held_entry_point_restarts_unchanged() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let home = TempDir::new().unwrap();
+    let tmux_env = tmux_test_env();
+    let bin_dir = TempDir::new().unwrap();
+    let log_dir = TempDir::new().unwrap();
+    let log_path = log_dir.path().join("probe.log");
+    let (cli, test_path) = write_spec_probe_setup(tr.path(), bin_dir.path(), &log_path);
+    let spec_id = "legacy-receipt";
+    write_committed_spec(tr.path(), spec_id);
+
+    let mut start = cmd();
+    tmux_env.apply_assert(&mut start);
+    let out = start
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env("PATH", &test_path)
+        .env_remove("XDG_DATA_HOME")
+        .args(["start", "--supervisor", "--branches", "a", "--cli", &cli])
+        .timeout(Duration::from_secs(60))
+        .output()
+        .expect("run start");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let session = stdout
+        .lines()
+        .find(|l| l.contains("tmux attach -t"))
+        .and_then(|l| l.split_whitespace().last())
+        .expect("session name")
+        .to_string();
+
+    let mut pause = cmd();
+    tmux_env.apply_assert(&mut pause);
+    let _ = pause
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .args(["pause"])
+        .timeout(Duration::from_secs(20))
+        .output()
+        .expect("run pause");
+
+    let mut add = cmd();
+    tmux_env.apply_assert(&mut add);
+    let out = add
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env("PATH", &test_path)
+        .env_remove("XDG_DATA_HOME")
+        .args(["add", "--from-spec", spec_id])
+        .timeout(Duration::from_secs(60))
+        .output()
+        .expect("run add --from-spec (paused)");
+    assert!(out.status.success());
+
+    // Age the receipt: strip the field this change added, leaving exactly
+    // what an earlier binary would have written.
+    let receipt_path = sessions_dir_under(home.path()).join(format!("{session}.json"));
+    let aged: String = fs::read_to_string(&receipt_path)
+        .expect("read receipt")
+        .lines()
+        .filter(|line| !line.contains("\"pending_entry_point\""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !aged.contains("pending_entry_point"),
+        "the aged receipt must not carry the field"
+    );
+    fs::write(&receipt_path, &aged).expect("write aged receipt");
+
+    // Both panes share one probe log and branch `a` already submitted its
+    // prompt pre-pause, so only the suffix written from here can speak to
+    // what the restart did.
+    let prefix_len = fs::read_to_string(&log_path).unwrap_or_default().len();
+
+    let mut restart = cmd();
+    tmux_env.apply_assert(&mut restart);
+    let out = restart
+        .current_dir(tr.path())
+        .env("HOME", home.path())
+        .env("PATH", &test_path)
+        .env_remove("XDG_DATA_HOME")
+        .env("GIT_PAW_ENTRY_POINT_BUDGET_MS", "3000")
+        .args(["start"])
+        .timeout(Duration::from_secs(60))
+        .output()
+        .expect("run start (restart from pause)");
+    assert!(
+        out.status.success(),
+        "an older receipt must still restart; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut log = String::new();
+    while std::time::Instant::now() < deadline {
+        log = fs::read_to_string(&log_path).unwrap_or_default();
+        if log
+            .get(prefix_len..)
+            .unwrap_or_default()
+            .contains(WORKTREE_RULE_TAIL)
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    kill(&tmux_env, &session);
+
+    let restarted = log.get(prefix_len..).unwrap_or_default();
+    assert!(
+        restarted.contains(WORKTREE_RULE_TAIL),
+        "the held prompt is still submitted; restart wrote:\n{restarted}"
+    );
+    assert!(
+        !restarted.contains("/opsx:apply"),
+        "no entry point was held, so none may be typed; restart wrote:\n{restarted}"
+    );
+}
+
 /// Collect `(pane_index, pane_current_path)` for every pane on the test socket.
 ///
 /// The index/path pair is space-delimited, NOT tab-delimited: a literal tab in

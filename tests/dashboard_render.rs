@@ -34,6 +34,7 @@ fn make_session_with_broker(suffix: &str) -> Session {
             branch_created: false,
             base_branch: None,
             pending_boot_prompt: None,
+            pending_entry_point: None,
             runtime_slot: None,
             cli_session_id: None,
             spec_id: None,

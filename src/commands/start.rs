@@ -31,10 +31,9 @@ use super::helpers::{
 use super::recover::recover_session;
 use super::supervisor::cmd_supervisor;
 use crate::{
-    SpecMode, apply_spec_mode, attach_or_print_hint, build_task_prompt,
-    combine_boot_and_task_prompt, gate_pane_or_fail_on_dialog, invalidate_if_stale,
-    reattach_active_session_or_refuse, resolve_submit_delay_ms, submit_prompt_to_pane,
-    write_repo_discovery_file,
+    SpecMode, apply_spec_mode, attach_or_print_hint, build_task_prompt, compose_launch_prompt,
+    gate_pane_or_fail_on_dialog, invalidate_if_stale, reattach_active_session_or_refuse,
+    resolve_submit_delay_ms, submit_prompt_to_pane, write_repo_discovery_file,
 };
 
 /// Smart start: reattach if active, recover if stale, launch fresh if new.
@@ -348,6 +347,7 @@ pub(crate) fn cmd_start(
             branch_created: wt.branch_created,
             base_branch: crate::created_branch_base(&repo_root, wt.branch_created),
             pending_boot_prompt: None,
+            pending_entry_point: None,
             runtime_slot: provisioned.runtime_slot,
             cli_session_id: None,
             // Bare launch: no spec drove this branch.
@@ -431,10 +431,17 @@ pub(crate) fn cmd_start(
         layout.first_agent_index(),
     );
 
-    // Inject boot blocks for manual broker mode (without supervisor).
+    // Pre-fill the boot block for manual broker mode (without supervisor).
     // The argv shape is determined by `tmux::build_boot_inject_args` so the
     // call shape (literal mode, no trailing Enter, `-l` before `-t`) has a
     // single source of truth that tests can verify directly.
+    //
+    // No human types a spec here, so the pre-fill carries no task prose — but
+    // it still ends with the worktree rule naming this pane's own worktree
+    // root (`boot-block`, "Launch prompts name the agent's worktree root"),
+    // which is why it goes through `compose_launch_prompt` rather than
+    // injecting the boot block raw. The user's task is appended after it and
+    // submitted by hand, so no `Enter` is sent.
     //
     // Gated on launch-readiness first (`tmux-orchestration`'s Launch-readiness
     // gate requirement applies uniformly to the start-time path): a pane still
@@ -458,9 +465,11 @@ pub(crate) fn cmd_start(
                 &broker_config.url(),
                 git_paw::skills::cli_speaks_mcp(cli, &config.clis),
             );
+            let prefill =
+                compose_launch_prompt(Some(&boot_block), None, &state.worktrees[idx].worktree_path);
 
             let args =
-                git_paw::tmux::build_boot_inject_args(&tmux_session.name, pane_idx, &boot_block);
+                git_paw::tmux::build_boot_inject_args(&tmux_session.name, pane_idx, &prefill);
             let _ = std::process::Command::new("tmux").args(&args).status();
         }
     }
@@ -790,6 +799,7 @@ fn launch_spec_session(
             branch_created: wt.branch_created,
             base_branch: crate::created_branch_base(repo_root, wt.branch_created),
             pending_boot_prompt: None,
+            pending_entry_point: None,
             runtime_slot: provisioned.runtime_slot,
             cli_session_id: None,
             spec_id: spec_by_branch
@@ -875,9 +885,9 @@ fn launch_spec_session(
     );
 
     // Inject and submit each agent's prompt: the broker boot block (when
-    // enabled) plus the task prompt naming its spec assignment and apply
-    // invocation — byte-identical to what the supervisor path builds for the
-    // same spec (`combine_boot_and_task_prompt`). Unlike the bare `cmd_start`
+    // enabled), the task prompt's prose naming its spec assignment, and the
+    // worktree rule — byte-identical to what the supervisor path builds for
+    // the same spec (`compose_launch_prompt`). Unlike the bare `cmd_start`
     // pre-fill (no human types a spec-driven task, so leaving it unsubmitted
     // would strand the agent), this submits via the same split-send +
     // settle-delay mechanism the supervisor path uses, and runs even when the
@@ -888,6 +898,7 @@ fn launch_spec_session(
     // each agent pane: this path now sends a real `Enter` (unlike the bare
     // pre-fill above), so a blind submit into a pane still showing an
     // unanswered first-run trust/bypass dialog could accidentally accept it.
+    let mut pending_entry_points: Vec<crate::PendingEntryPoint> = Vec::new();
     for (idx, (branch, cli)) in mappings.iter().enumerate() {
         let pane_idx = layout.agent_index(idx);
         let agent_flags = config::resolve_approval_flags(cli, approval, &config.clis);
@@ -901,19 +912,33 @@ fn launch_spec_session(
             &config.clis,
         )?;
         let task_prompt = build_task_prompt(spec_by_branch.get(branch.as_str()).copied());
-        let prompt = if broker_config.enabled {
-            let boot_block = git_paw::skills::build_boot_block(
+        let boot_block = broker_config.enabled.then(|| {
+            git_paw::skills::build_boot_block(
                 branch,
                 &broker_config.url(),
                 git_paw::skills::cli_speaks_mcp(cli, &config.clis),
-            );
-            combine_boot_and_task_prompt(&boot_block, &task_prompt)
-        } else {
-            task_prompt
-        };
+            )
+        });
+        let prompt = compose_launch_prompt(
+            boot_block.as_deref(),
+            Some(&task_prompt.prose),
+            &state.worktrees[idx].worktree_path,
+        );
         let delay = resolve_submit_delay_ms(cli, &config.clis);
         submit_prompt_to_pane(&tmux_session.name, pane_idx, &prompt, delay);
+        if let Some(entry_point) = task_prompt.entry_point {
+            pending_entry_points.push(crate::PendingEntryPoint {
+                pane_index: pane_idx,
+                agent_id: git_paw::broker::messages::slugify_branch(branch),
+                entry_point,
+                settle_delay_ms: delay,
+            });
+        }
     }
+
+    // Every prompt is out; now submit the workflow entry points declared by
+    // the spec formats that have one, each once its own pane goes idle.
+    crate::submit_entry_points(&tmux_session.name, pending_entry_points);
 
     attach_or_print_hint(&tmux_session.name)
 }
@@ -1100,6 +1125,15 @@ pub(crate) fn restart_from_pause_detached(
 /// live pane is treated the same way — held and reported as "pane not found"
 /// — rather than submitted at a computed index another agent may occupy.
 ///
+/// A held **workflow entry point** is taken INSIDE the same arm that takes
+/// its prompt, and queued against the same live pane index. That nesting is
+/// what keeps the pair together: a prompt the gate blocks, or whose pane was
+/// not found, never reaches the `take` of its entry point, so both stay held
+/// for the next restart. The entry points are submitted once, after the
+/// blocked report, under the idle rule every launch path applies
+/// (`boot-block`, "A declared workflow entry point is submitted as its own
+/// composer line").
+///
 /// Takes `&mut Session` because a submitted prompt is cleared from the
 /// session the caller then saves; a blocked pane's prompt stays on it.
 fn submit_held_boot_prompts(updated: &mut Session, config: &PawConfig) {
@@ -1112,6 +1146,7 @@ fn submit_held_boot_prompts(updated: &mut Session, config: &PawConfig) {
     }
 
     let session_name = updated.session_name.clone();
+    let dashboard = updated.dashboard_pane;
     // The approval level a relaunch would need, resolved as the recovery path
     // resolves it: a session with no `[supervisor]` section falls back to the
     // default, exactly as `cmd_start` and `cmd_add` do.
@@ -1122,6 +1157,7 @@ fn submit_held_boot_prompts(updated: &mut Session, config: &PawConfig) {
         .unwrap_or(&default_sup)
         .agent_approval;
     let mut blocked: Vec<String> = Vec::new();
+    let mut pending_entry_points: Vec<crate::PendingEntryPoint> = Vec::new();
 
     for wt in &mut updated.worktrees {
         if wt.pending_boot_prompt.is_none() {
@@ -1157,6 +1193,34 @@ fn submit_held_boot_prompts(updated: &mut Session, config: &PawConfig) {
                 if let Some(pending) = wt.pending_boot_prompt.take() {
                     let delay = resolve_submit_delay_ms(&wt.cli, &config.clis);
                     submit_prompt_to_pane(&session_name, pane_idx, &pending, delay);
+                    // Taken INSIDE this arm, against the pane index already
+                    // resolved above: a prompt the gate blocked, or whose
+                    // pane was not found, never reaches here, so its entry
+                    // point stays held with it.
+                    if let Some(entry_point) = wt.pending_entry_point.take() {
+                        // The resolved index should never be the dashboard,
+                        // but refuse it if it is: the idle predicate cannot
+                        // catch a mistargeted pane, because a dashboard pane
+                        // has no input box and none of the prompt or
+                        // mid-response markers, so it reads as idle.
+                        if dashboard
+                            .is_some_and(|d| usize::try_from(d).is_ok_and(|d| d == pane_idx))
+                        {
+                            eprintln!(
+                                "warning: '{}' resolved to the dashboard pane, so its workflow \
+                                 command was not submitted; once the agent is idle, submit: \
+                                 {entry_point}",
+                                wt.branch
+                            );
+                        } else {
+                            pending_entry_points.push(crate::PendingEntryPoint {
+                                pane_index: pane_idx,
+                                agent_id: git_paw::broker::messages::slugify_branch(&wt.branch),
+                                entry_point,
+                                settle_delay_ms: delay,
+                            });
+                        }
+                    }
                 }
             }
             Err(e) => blocked.push(format!("  {} (pane {pane_idx}): {e}", wt.branch)),
@@ -1174,6 +1238,10 @@ fn submit_held_boot_prompts(updated: &mut Session, config: &PawConfig) {
             blocked.join("\n")
         );
     }
+
+    // After the blocked report, so a user reading stderr sees what was held
+    // before the launch blocks waiting for the panes that were not.
+    crate::submit_entry_points(&session_name, pending_entry_points);
 }
 
 /// Appends `flags` to `command` with a single separating space, or returns

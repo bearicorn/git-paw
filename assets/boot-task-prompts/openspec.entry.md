@@ -1,0 +1,1 @@
+/opsx:apply {{SPEC_ID}}

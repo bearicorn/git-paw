@@ -1,0 +1,1 @@
+Your worktree root is {{WORKTREE_ROOT}}. Every file you create or edit SHALL lie under that directory. Never write outside it — not by an absolute path, and not by a relative path that climbs out of it (such as `../`).

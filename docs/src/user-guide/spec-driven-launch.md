@@ -331,20 +331,20 @@ below.
 
 Not every launch path treats its agent pane's initial prompt the same way:
 
-- **Bare `git paw start`** (no spec selection) pre-fills the boot block into
-  the pane's input line and stops — no `Enter` is sent. This is deliberate:
-  the launch is human-driven, so you type your actual task after the boot
-  instructions and submit it yourself.
+- **Bare `git paw start`** (no spec selection) pre-fills the boot block —
+  followed by the [worktree rule](coordination.md#the-worktree-rule) naming
+  that pane's own worktree root — into the pane's input line and stops. No
+  `Enter` is sent. This is deliberate: the launch is human-driven, so you
+  type your actual task after the boot instructions and submit it yourself.
 - **A spec-driven launch** (`--specs` / `--from-all-specs`, with or without
   `--supervisor`) has no human typing the task — the task comes from the
   spec — so leaving the prompt pre-filled would strand the agent with
   nothing to act on. Both the supervisor path and the non-supervisor
-  spec-mode path submit the combined boot block + task prompt automatically:
-  the text is injected, then — after a brief per-CLI settle delay — a
-  separate `Enter` submits it. The task prompt names the agent's spec
-  assignment and the backend's apply invocation (e.g. `/opsx:apply <id>` for
-  OpenSpec), so the agent drives its spec workflow and checks off tasks as it
-  completes them, rather than improvising an ad hoc one.
+  spec-mode path submit the agent's prompt automatically: the text is
+  injected, then — after a brief per-CLI settle delay — a separate `Enter`
+  submits it. That prompt is the boot block (when the broker is enabled),
+  the task prompt's prose naming the agent's spec assignment, and the
+  worktree rule, joined by blank lines.
 - With `[broker] enabled = false`, the **non-supervisor** spec-mode path
   (bare `--specs` / `--from-all-specs`, no `--supervisor`) injects no boot
   block — it is broker-specific content — but still injects and submits the
@@ -358,6 +358,103 @@ Every launch path also composes its pane's command from the [resolved
 approval flags](../configuration/README.md#supervisor) (`agent_approval` and
 any per-CLI `approval_args` override) — a bare or spec-driven launch is not
 exempt just because no supervisor is watching.
+
+## The workflow entry point
+
+A spec format may declare a **workflow entry point**: one command line that
+brings the agent into the format's native workflow, so it walks its task list
+and ticks tasks off rather than improvising a private process. Today only
+OpenSpec declares one — `/opsx:apply <id>`. Markdown, Spec Kit, Superpowers
+and the no-spec `--branches` path declare none.
+
+When a format declares an entry point, a launch that submits the agent's
+prompt sends **two messages**, not one:
+
+1. the composed prompt above (boot block + task prose + worktree rule), and
+2. the entry point on its own, as a separate composer line with its own
+   `Enter`.
+
+The command used to sit inside the task prompt's prose, at the end of a
+sentence — and a weaker model read that sentence and *narrated* the command
+instead of running it, going idle with the work untouched. Submitted alone,
+the line is what a paste-aware CLI parses as a slash-command invocation,
+which is the behaviour the agent needs. The text comes only from the spec
+format's own bundled template; git-paw's code names no workflow command, so a
+format whose apply invocation changes changes only its template.
+
+A pane whose format declares no entry point receives exactly one message, and
+the launch does not wait on it at all.
+
+### The idle wait
+
+git-paw does not type the second message the instant the first one is sent.
+Typing into a CLI that is still working is unpredictable — a slash command
+dropped into a busy composer may be queued as text, run later, or discarded,
+and a keystroke that lands on a live permission prompt *answers* it. So after
+the first message's `Enter`, the launch waits until the pane is **idle**:
+
+- no live permission prompt,
+- not mid-response, and
+- an input box that is empty, or whose shape the CLI's
+  [prompt-shape profile](cli-prompt-profiles.md) does not recognise,
+
+observed on two consecutive captures. A single idle-looking capture is not
+enough: the instant between the `Enter` and the CLI starting its turn reads
+as idle too. Immediately before typing, git-paw captures the pane once more
+and types nothing unless it is still idle — so a pane that raised a prompt or
+started responding in the meantime receives no stray keystroke. The entry
+point is then submitted with the same split-send the first message used:
+literal text, settle delay, separate `Enter`.
+
+Every waiting pane is polled in one loop, concurrently, under a single
+~120-second budget — so a session's launch grows by its *slowest* first turn,
+not by the sum of them. The OpenSpec prose tells the agent its workflow
+command is coming, which keeps that first turn short.
+
+This wait happens **before** the launch attaches you to the session (and
+before `git paw add` prints its confirmation), so git-paw announces it first:
+
+```
+Waiting for 3 agent(s) to go idle before submitting their workflow command (up to 120s)...
+```
+
+If you see that line and nothing after it for a while, a pane is still
+working or is sitting at a permission prompt — attach in another terminal
+with `tmux attach -t paw-<project>` to see which.
+
+A CLI git-paw has no profile for matches none of the markers above and
+therefore reads as idle. At worst its entry point follows the first message
+almost immediately — exactly what that CLI's own input queue would see from a
+human typing two messages in a row.
+
+### If a pane never goes idle
+
+When the budget elapses with a pane still busy or still sitting at a
+permission prompt, git-paw types **nothing** into it and prints a warning to
+stderr naming the pane, the agent, and the exact line to submit:
+
+```
+warning: pane 2 (spec-add-auth) did not go idle within 120s, so its workflow
+command was not submitted; once the agent is idle, submit: /opsx:apply add-auth
+```
+
+The launch continues normally — the agent has its assignment and its boot
+block, it simply has not been dropped into its spec workflow. Attach to the
+session, answer whatever the pane is waiting on, and type the quoted command
+into that pane yourself. An unattended run leaves the same line in its output
+for an orchestrator to act on.
+
+## `git paw add` and paused sessions
+
+`git paw add` to a **running** session follows the same rule: the new agent's
+prompt is submitted, then its entry point once its pane goes idle.
+
+`git paw add` to a **paused** session submits nothing — the pane is created
+but the prompt is held in the session record for the restart. The entry point
+is held alongside it. `git paw start` then submits the held prompt, waits for
+the pane to go idle, submits the entry point, and clears both. A session
+receipt written by an earlier git-paw carries no held entry point and
+restarts exactly as it did before; see [Pause and Resume](pause.md).
 
 ## Non-interactive launches
 

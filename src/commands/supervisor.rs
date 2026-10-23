@@ -685,6 +685,7 @@ pub(crate) fn cmd_supervisor(
     // Pre-compute per-agent panes, prompts, and worktree records.
     let mut agent_panes: Vec<tmux::PaneSpec> = Vec::with_capacity(branches.len());
     let mut agent_prompts: Vec<String> = Vec::with_capacity(branches.len());
+    let mut agent_entry_points: Vec<Option<String>> = Vec::with_capacity(branches.len());
     let mut worktree_entries: Vec<WorktreeEntry> = Vec::with_capacity(branches.len());
 
     // Per-agent setup is delegated to the shared `attach_agent` pipeline
@@ -735,6 +736,7 @@ pub(crate) fn cmd_supervisor(
         let attached = attach_agent(&attach_ctx, branch, spec_by_branch.get(branch), slot)?;
         agent_panes.push(attached.pane);
         agent_prompts.push(attached.prompt);
+        agent_entry_points.push(attached.entry_point);
         worktree_entries.push(attached.entry);
     }
 
@@ -838,6 +840,7 @@ pub(crate) fn cmd_supervisor(
     // paste-buffer-recovery section) recovers. Sending more than one Enter at
     // launch risks accidentally accepting a follow-on permission prompt on
     // fast CLIs and is intentionally avoided.
+    let mut pending_entry_points: Vec<crate::PendingEntryPoint> = Vec::new();
     for (idx, prompt) in agent_prompts.iter().enumerate() {
         // Per-branch delay: a spec-driven session can resolve a distinct CLI
         // per branch (GP-10), and each CLI's configured settle delay differs.
@@ -852,7 +855,21 @@ pub(crate) fn cmd_supervisor(
             &config.clis,
         )?;
         submit_prompt_to_pane(&tmux_session.name, pane_idx, prompt, agent_delay);
+        if let Some(entry_point) = agent_entry_points[idx].clone() {
+            pending_entry_points.push(crate::PendingEntryPoint {
+                pane_index: pane_idx,
+                agent_id: git_paw::broker::messages::slugify_branch(&branches[idx]),
+                entry_point,
+                settle_delay_ms: agent_delay,
+            });
+        }
     }
+
+    // Every prompt is out; the declared workflow entry points follow as their
+    // own composer lines, each once its pane goes idle. The second `Enter`
+    // this sends is the only other standalone `Enter` the launch emits, and
+    // only into a pane re-checked idle immediately before.
+    crate::submit_entry_points(&tmux_session.name, pending_entry_points);
 
     // The orchestrator's roster row appears only when the external
     // orchestrator publishes its own `agent.status`. The launcher does not

@@ -65,6 +65,7 @@ fn receipt(
             branch_created: false,
             base_branch: None,
             pending_boot_prompt: None,
+            pending_entry_point: None,
             runtime_slot: None,
             cli_session_id: cli_session_id.map(String::from),
             spec_id: None,

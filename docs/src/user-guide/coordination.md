@@ -234,6 +234,42 @@ table, the protection rules that come with it, and the residual risks.
 - **Spec-driven, non-supervisor mode** (`--specs` / `--from-all-specs` without `--supervisor`): the boot block (when the broker is enabled) is prepended to the task prompt the same way, and submitted the same way — the task comes from the spec, not a human, so the combined prompt cannot be left for someone to complete and submit by hand
 - **Bare, human-driven mode** (`git paw start` with no spec selection): Boot block is pre-filled into each agent pane's input line and left unsubmitted (user pastes their task after the boot instructions, then submits both together)
 
+Both submitting modes end the injected prompt with the [worktree
+rule](#the-worktree-rule). When the agent's spec format declares a workflow
+entry point, a second line follows as its own message once the pane goes idle
+— see [The workflow entry
+point](spec-driven-launch.md#the-workflow-entry-point).
+
+### The worktree rule
+
+Every prompt git-paw injects into a coding agent pane at launch ends with a
+bundled **worktree rule** naming that agent's absolute worktree root. It is
+appended by every injecting path — the bare pre-fill (which is still left
+unsubmitted, with no `Enter`), spec-driven and supervised `start`, `git paw
+add`, and a prompt held for an agent added while the session was paused — so
+no path can forget it. The rule is placed last, for recency: it is the
+constraint the agent should still be holding when it starts editing.
+
+The rendered text, with the pane's own recorded worktree path substituted:
+
+> Your worktree root is `<worktree root>`. Every file you create or edit
+> SHALL lie under that directory. Never write outside it — not by an absolute
+> path, and not by a relative path that climbs out of it (such as `../`).
+
+The `../` clause is the point. Under [child
+placement](worktree-placement.md) the repository's main checkout is an
+*ancestor* of every worktree, so a relative path that climbs far enough
+reaches it — and an agent told only to "use relative paths" can edit the main
+checkout without ever typing an absolute path. Naming the root makes the
+boundary something the agent can check a path against.
+
+Like the rest of the boot prompt, the rule is **instruction, not
+enforcement**. What actually stops an out-of-worktree write is the agent
+CLI's own outside-directory permission prompt and, if you have configured
+one, the [FS-scoped sandbox](sandbox.md) — see [Memory
+Isolation](#memory-isolation) below. The template is project-agnostic: it
+names no tool, CLI or project, only the path.
+
 ### Paste Handling
 
 The boot block includes instructions for proper paste handling, particularly the requirement to send an additional Enter key after paste operations to ensure full content processing.
@@ -287,6 +323,11 @@ worktree is their entire writable territory:
 - **Question instead of write.** When a task appears to require writing
   outside the worktree, the agent publishes `agent.question` describing the
   path and waits for an answer rather than writing.
+
+The agent is told the same boundary twice, on purpose: once here, by the
+bundled coordination skill it reads from its sidecar, and once at the end of
+its very first prompt, by the [worktree rule](#the-worktree-rule) — which
+names the absolute path rather than leaving the agent to infer it.
 
 This boundary is carried by doctrine, not by a mechanical check in git-paw:
 a write targeting operator territory raises the CLI's own permission prompt,

@@ -412,15 +412,15 @@ When the session is NOT unattended (no drive loop), the orchestrator context SHA
 
 ### Requirement: Manual mode boot block pre-fill
 
-In manual broker mode on a **bare, human-driven launch** — `git paw start` with no spec selection and no supervisor mode — the system SHALL pre-fill the boot instruction block into each agent pane's input line without sending an Enter key. This allows users to paste their actual task after the boot instructions. This pre-fill-only behaviour SHALL NOT apply to a spec-driven launch, where the task is supplied by the spec rather than typed by a human and an unsubmitted prompt would strand the agent; a spec-driven launch submits per "Boot-block injection in cmd_start_from_specs".
+In manual broker mode on a **bare, human-driven launch** — `git paw start` with no spec selection and no supervisor mode — the system SHALL pre-fill the boot instruction block, followed by the worktree rule ("Launch prompts name the agent's worktree root"), into each agent pane's input line without sending an Enter key. This allows users to paste their actual task after the boot instructions. This pre-fill-only behaviour SHALL NOT apply to a spec-driven launch, where the task is supplied by the spec rather than typed by a human and an unsubmitted prompt would strand the agent; a spec-driven launch submits per "Boot-block injection in cmd_start_from_specs".
 
 #### Scenario: Boot block pre-filled without Enter
 
 - **GIVEN** broker-enabled session in manual mode launched with no spec selection
 - **WHEN** agent panes are created
-- **THEN** boot block SHALL be sent to input line
+- **THEN** boot block SHALL be sent to input line, followed by the worktree rule naming that pane's worktree root
 - **AND** no Enter key SHALL be sent
-- **AND** cursor SHALL remain at end of boot block
+- **AND** cursor SHALL remain at end of the pre-filled text
 
 #### Scenario: User can append task after boot block
 
@@ -467,9 +467,9 @@ When `git paw start --from-specs` is invoked WITHOUT supervisor mode (the bare f
 
 The injection SHALL use the split-send + settle-delay submission mechanism required by `cli-resolution` ("Boot prompt submitted via split-send + settle delay"): the prompt text is sent literally, then `Enter` is sent as a separate keystroke after the per-CLI settle delay. A spec-driven launch SHALL NOT leave the prompt unsubmitted.
 
-The injected prompt SHALL carry both the boot block and the task prompt. The boot block carries the agent's `BRANCH_ID`, broker URL, and the publish patterns it needs to participate in broker coordination. The task prompt SHALL name the agent's assignment and the format-native apply invocation for the spec's backend, so the agent drives the spec workflow — walking its task list and marking tasks off — rather than improvising a private one. Without it an agent may complete the work while leaving every task unchecked, so `openspec status` and any orchestrator reading progress see none.
+The injected prompt SHALL carry the boot block, the task prompt's prose and the worktree rule. The boot block carries the agent's `BRANCH_ID`, broker URL, and the publish patterns it needs to participate in broker coordination. The task prompt SHALL name the agent's assignment, and the spec's backend SHALL bring the agent into its format-native workflow — when the backend declares a workflow entry point (the apply invocation), that entry point SHALL be submitted as its own line per "A declared workflow entry point is submitted as its own composer line" — so the agent drives the spec workflow — walking its task list and marking tasks off — rather than improvising a private one. Without it an agent may complete the work while leaving every task unchecked, so `openspec status` and any orchestrator reading progress see none.
 
-When `[broker] enabled = false`, no boot-block injection occurs (matching the existing `cmd_start` behaviour — the boot block is broker-specific content). The task prompt SHALL still be injected and submitted for a spec-driven launch, since the agent's assignment does not depend on the broker.
+When `[broker] enabled = false`, no boot-block injection occurs (matching the existing `cmd_start` behaviour — the boot block is broker-specific content). The task prompt's prose and the worktree rule SHALL still be injected and submitted for a spec-driven launch, and a declared entry point still submitted after them, since the agent's assignment does not depend on the broker.
 
 #### Scenario: Boot block is injected per agent pane in spec-mode-with-broker
 
@@ -490,15 +490,16 @@ When `[broker] enabled = false`, no boot-block injection occurs (matching the ex
 
 - **GIVEN** a spec-driven launch without supervisor mode, for a spec with a known backend
 - **WHEN** the agent's prompt is built
-- **THEN** it SHALL include the task prompt naming the assignment and the backend's apply invocation
+- **THEN** it SHALL include the task prompt's prose naming the assignment
 - **AND** the prompt SHALL match the one the supervisor path builds for the same spec
+- **AND** a backend that declares an entry point SHALL have it submitted as a separate line, not inside the prompt
 
 #### Scenario: Task prompt is injected even with the broker disabled
 
 - **GIVEN** `[broker] enabled = false` and a spec-driven launch without supervisor mode
 - **WHEN** agent panes are created
 - **THEN** no boot block SHALL be injected
-- **AND** the task prompt SHALL still be injected and submitted
+- **AND** the task prompt's prose and the worktree rule SHALL still be injected and submitted
 
 #### Scenario: No boot-block injection when broker is disabled
 
@@ -606,4 +607,100 @@ Test: `config::tests::custom_cli_mcp_field_round_trips_and_is_skipped_when_unset
 - **THEN** the boot prompt delivered to that worker's pane SHALL contain the MCP publish tool form, not the `broker.sh` helper invocations
 
 Test: `tests/cli_launch_identity_e2e.rs::mcp_opt_in_reaches_worker_boot_prompt`
+
+### Requirement: Launch prompts name the agent's worktree root
+
+Every prompt git-paw injects into a coding agent pane at launch — the bare pre-fill, the spec-driven and supervised `start` prompts, the `git paw add` prompt, and a prompt held for an agent added while paused — SHALL end with the worktree rule: a bundled, project-agnostic template that names the absolute path of that agent's worktree root and states that every file the agent creates or edits SHALL lie under that directory, and never outside it — neither by an absolute path nor by a relative path that climbs out of it (such as `../` into the repository's main checkout). The path SHALL be the worktree path the session records for the agent, substituted at launch; the template SHALL name no project, tool or CLI.
+
+#### Scenario: A child worktree's prompt names its absolute root
+
+- **GIVEN** child placement and an agent on `feat/x` whose worktree is `<repo>/.git-paw/worktrees/feat-x`
+- **WHEN** its launch prompt is composed
+- **THEN** the prompt SHALL end with the worktree rule naming the absolute path `<repo>/.git-paw/worktrees/feat-x`
+- **AND** the rule SHALL state that edits outside that directory, including through `../`, are not allowed
+
+#### Scenario: Every launch path carries the rule
+
+- **WHEN** the prompts built by the bare pre-fill, spec-driven `start`, supervised `start`, `git paw add`, and `add` to a paused session are inspected
+- **THEN** each SHALL end with the worktree rule naming that agent's recorded worktree path
+
+### Requirement: A declared workflow entry point is submitted as its own composer line
+
+When an agent's task prompt declares a workflow entry point, the launch path that submits its prompt — spec-driven `start`, supervised `start`, `git paw add` to an active session, and the submit of a held prompt when a paused session is restarted — SHALL submit the entry point as a separate line after the prompt has been submitted, as follows:
+
+0. The rendered entry point SHALL contain only letters, digits, `.`, `_`, `:`, `/`, space and `-`. The spec id substituted into the backend's template is a change-directory name that nothing validates, and a directory may legally carry shell metacharacters; a pane whose CLI has exited is a command interpreter. Text outside that set SHALL NOT be typed into any pane, and SHALL be reported per rule 4.
+1. The system SHALL wait, bounded by a fixed budget and for all such panes concurrently, until the pane is idle: no live permission prompt, no mid-response marker, and an input box that is empty or not recognised, judged by the CLI prompt-shape profile (`cli-prompt-profiles`) on two consecutive captures taken after the prompt's `Enter`. A CLI whose markers the profile does not recognise SHALL be treated as idle. A capture the system could not take SHALL NOT count as idle and SHALL reset the consecutive count, since a failed capture is indistinguishable from an empty one by content alone.
+2. Immediately before typing, the system SHALL capture the pane again and SHALL type nothing unless it is still idle; and SHALL read the pane's foreground process, typing nothing when it is a shell rather than an agent CLI. A pane whose CLI exited satisfies every content-based idle marker — it has no input box, no prompt and no mid-response footer — so the pane's process is what distinguishes a waiting composer from a command interpreter. This is distinct from rule 1's unrecognised-CLI allowance: a shell process is not a CLI whose markers went unrecognised.
+3. The system SHALL then inject the entry point literally and submit it with a separate `Enter` after the settle delay, using the split-send mechanism (`cli-resolution`). Before that `Enter`, the system SHALL capture the pane once more and SHALL withhold the `Enter` when the pane is no longer responsive, because the settle delay is a window in which a fork or a tool call can raise a permission prompt that the `Enter` would answer. A withheld `Enter` SHALL be reported per rule 4, naming that the text is already in the composer and SHALL NOT be retyped.
+4. When the budget elapses before the pane is idle, or any rule above withholds the keystroke, the system SHALL NOT type (or SHALL NOT submit) into the pane, SHALL print to stderr the pane, the agent, the reason and the exact entry point to submit once the agent is idle, and SHALL continue the launch.
+
+An agent added while the session is paused SHALL hold its entry point together with its held prompt, in an additive optional field of the session record. Restarting the session SHALL submit the held prompt and then the held entry point under the rule above; when the held prompt stays held (its pane is blocked on a first-run dialog), the entry point SHALL stay held with it. The system SHALL NOT type an entry point into a pane whose task prompt declares none, and the entry point's text SHALL come only from the backend's bundled template.
+
+#### Scenario: The OpenSpec entry point is submitted after the first message
+
+- **GIVEN** a spec-driven launch of an OpenSpec change `my-change` whose agent's CLI finishes its first turn within the budget
+- **WHEN** the launch submits the agent's prompt
+- **THEN** the pane SHALL receive the composed prompt and its `Enter`
+- **AND** after the pane is idle, the line `/opsx:apply my-change` typed literally and its own separate `Enter`
+
+#### Scenario: A pane at a permission prompt gets nothing typed
+
+- **GIVEN** a spec-driven launch whose agent pane shows a live permission prompt for the whole budget
+- **WHEN** the budget elapses
+- **THEN** no keystroke SHALL be sent to that pane after the prompt's `Enter`
+- **AND** stderr SHALL name the pane and `/opsx:apply my-change`
+
+#### Scenario: A pane whose CLI has exited is not typed into
+
+- **GIVEN** an agent pane whose CLI process has exited, leaving a foreground shell (`tmux-orchestration`, GP-03c)
+- **AND** the pane therefore shows no input box, no permission prompt and no mid-response marker
+- **WHEN** the system is about to type that pane's entry point
+- **THEN** it SHALL read the pane's foreground process and SHALL type nothing, because the keystrokes would reach a command interpreter rather than a composer
+- **AND** stderr SHALL name the pane, the shell it is running and the exact entry point
+
+#### Scenario: An unsafe rendered entry point is refused
+
+- **GIVEN** a change directory whose name carries characters outside letters, digits, `.`, `_`, `:`, `/`, space and `-`
+- **WHEN** the backend's entry-point template is rendered with that id
+- **THEN** the system SHALL type the result into no pane at all, and SHALL NOT wait for any pane on its behalf
+- **AND** stderr SHALL name the pane, the agent and the rejected text
+
+#### Scenario: A prompt raised during the settle delay withholds the Enter
+
+- **GIVEN** a pane that was idle when its entry point was typed
+- **WHEN** a permission prompt appears during the settle delay, before the separate `Enter`
+- **THEN** the `Enter` SHALL be withheld, so that it cannot answer the prompt
+- **AND** stderr SHALL report the command as typed but not submitted, and SHALL state that the text is already in the composer and must not be retyped
+
+#### Scenario: A failed capture is not read as idle
+
+- **GIVEN** a pane whose `capture-pane` fails, yielding no content
+- **WHEN** the system evaluates whether that pane is idle
+- **THEN** the failed capture SHALL NOT count towards the consecutive-idle requirement, and SHALL reset it
+- **AND** nothing SHALL be typed into a pane the system could not observe
+
+#### Scenario: A busy pane is not typed into
+
+- **GIVEN** an agent pane showing the mid-response marker of its CLI profile
+- **WHEN** the system waits to submit the entry point
+- **THEN** it SHALL NOT type until two consecutive captures show the pane idle
+
+#### Scenario: A backend without an entry point is unchanged
+
+- **GIVEN** a spec-driven launch of a Markdown, Spec Kit or Superpowers spec
+- **WHEN** the agent's prompt is submitted
+- **THEN** no further line SHALL be typed into its pane and the launch SHALL NOT wait for it to become idle
+
+#### Scenario: An agent added while paused holds its entry point
+
+- **GIVEN** a paused session
+- **WHEN** `git paw add feat/x --from-spec my-change` is run and then `git paw start` restarts the session
+- **THEN** the session record SHALL hold the entry point `/opsx:apply my-change` until the restart
+- **AND** the restart SHALL submit the held prompt, then the entry point once the pane is idle, and clear both
+
+#### Scenario: A session saved without the field restarts as before
+
+- **GIVEN** a paused session saved by an earlier binary, with a held prompt and no held entry point
+- **WHEN** `git paw start` restarts it
+- **THEN** the held prompt SHALL be submitted and no entry point typed
 

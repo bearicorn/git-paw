@@ -71,8 +71,11 @@ tmux, it takes the restart-from-pause path:
 Cost: one tmux pane spawn + one broker boot. **No** worktree
 creation, **no** CLI process spawn, **no** boot-prompt injection
 (beyond submitting the held boot prompt of any agent added with
-`git paw add` while paused). The agent panes are exactly as you left
-them — open conversations intact, prompt buffer intact.
+`git paw add` while paused — and, when that agent's spec format
+declares a [workflow entry point](spec-driven-launch.md#the-workflow-entry-point),
+the held entry point after it, once its pane goes idle). The agent
+panes are exactly as you left them — open conversations intact,
+prompt buffer intact.
 
 If the tmux server died while paused (rare — typically only happens
 on machine reboot or `tmux kill-server`), `git paw status` shows

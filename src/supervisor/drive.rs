@@ -2398,9 +2398,41 @@ fn input_box_shows_placeholder(capture: &str) -> bool {
 /// to the long stuck detector (it never reports itself stalled), so nothing else
 /// in the loop would surface it.
 fn pane_has_buffered_input(capture: &str) -> bool {
-    !live_prompt_in_tail(capture)
-        && !pane_is_mid_response(capture)
-        && input_box_text(capture).is_some()
+    pane_is_responsive(capture) && input_box_text(capture).is_some()
+}
+
+/// Whether `capture` shows a pane that can accept a keystroke at all: no live
+/// permission prompt ([`live_prompt_in_tail`], the wider marker set so an
+/// `approval`-worded prompt also counts) and no mid-response footer
+/// ([`pane_is_mid_response`]).
+///
+/// This is the shared half of two different questions. The drive loop asks it
+/// and then wants text in the input box ([`pane_has_buffered_input`] — a
+/// directive stranded by a swallowed `Enter`); the launch flow asks it and
+/// then wants the box *empty* ([`pane_is_idle_and_empty`] — safe to type a
+/// workflow entry point into). Keeping the responsiveness half in one place
+/// means a marker set that improves for one improves for both.
+#[must_use]
+pub fn pane_is_responsive(capture: &str) -> bool {
+    !live_prompt_in_tail(capture) && !pane_is_mid_response(capture)
+}
+
+/// Whether `capture` shows an IDLE pane whose composer is free — responsive
+/// per [`pane_is_responsive`], with an input box that is empty or whose shape
+/// the prompt profile does not recognise.
+///
+/// This is the precondition for typing a launch-time workflow entry point
+/// (`boot-block`, "A declared workflow entry point is submitted as its own
+/// composer line"). Both "empty" and "unrecognised" answer `true` for the
+/// same reason the mid-response marker set is conservative: an unrecognised
+/// CLI matches nothing, so it is treated as idle, which at worst submits the
+/// entry point right behind the first message — exactly what the CLI's own
+/// input queue would see from a human typing twice. Text the profile DOES
+/// recognise in the box is never typed over: that is someone else's content,
+/// and appending to it would submit a line neither party wrote.
+#[must_use]
+pub fn pane_is_idle_and_empty(capture: &str) -> bool {
+    pane_is_responsive(capture) && input_box_text(capture).is_none()
 }
 
 /// Submits a directive stranded in an idle pane's input box: a follow-up

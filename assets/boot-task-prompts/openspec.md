@@ -1,1 +1,1 @@
-Read {{SIDECAR_REL_PATH}} first — it carries your assignment and coordination rules — then run /opsx:apply {{SPEC_ID}}.
+Read {{SIDECAR_REL_PATH}} first — it carries your assignment and coordination rules. Your workflow command follows as the next message; run it once you have read the sidecar.

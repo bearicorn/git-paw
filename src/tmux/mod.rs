@@ -24,9 +24,10 @@ pub use readiness::{
 };
 pub use session::{
     SessionLiveness, agents_without_live_pane, attach, detach_client, ensure_tmux_installed,
-    is_session_alive, kill_pane, kill_pane_by_id, kill_session, list_panes_with_indices,
-    list_panes_with_paths, reconcile_agents_to_panes, resolve_pane_id_for_worktree,
-    resolve_pane_index_for_worktree, resolve_session_name, session_liveness, session_liveness_for,
+    is_session_alive, is_shell_command, kill_pane, kill_pane_by_id, kill_session,
+    list_panes_with_indices, list_panes_with_paths, reconcile_agents_to_panes,
+    resolve_pane_id_for_worktree, resolve_pane_index_for_worktree, resolve_session_name,
+    session_liveness, session_liveness_for,
 };
 
 // Private helpers exercised only by the in-crate test module (widened from

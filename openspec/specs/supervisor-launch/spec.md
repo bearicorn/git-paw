@@ -102,24 +102,26 @@ The Rust merge loop SHALL NOT be invoked from `cmd_supervisor`. Merge orchestrat
 
 ### Requirement: Initial prompt injection via tmux send-keys
 
-After the tmux session is created in detached mode, the system SHALL wait approximately 2 seconds for all panes to reach an interactive state, then inject the initial task prompt for each coding agent pane via a single `tmux send-keys` invocation.
+After the tmux session is created in detached mode, the system SHALL wait until each coding agent pane passes the launch-readiness gate (`tmux-orchestration`, "Launch-readiness gate before boot-block injection"), then inject the initial task prompt for that pane and submit it with the split-send mechanism (`cli-resolution`, "Boot prompt submitted via split-send + settle delay").
 
-The initial task prompt SHALL be constructed by appending a per-agent **task prompt** to the standardized boot block (separated by a blank line). The task prompt SHALL be derived from the agent's associated `SpecEntry` (if any) via the pure helper `build_task_prompt(spec_entry: Option<&SpecEntry>) -> String`. Because the managed assignment block moved out of the worktree-root `AGENTS.md` into the gitignored sidecar `.git-paw/AGENTS.local.md` (`git_paw::agents::SIDECAR_REL_PATH`) — which coding CLIs do NOT auto-load — every arm of `build_task_prompt` SHALL first point the agent at that sidecar. `build_task_prompt` SHALL dispatch on `SpecEntry.backend`:
+The initial task prompt SHALL be constructed by appending a per-agent **task prompt** to the standardized boot block (separated by a blank line), followed by the worktree rule (`boot-block`, "Launch prompts name the agent's worktree root"). The task prompt SHALL be derived from the agent's associated `SpecEntry` (if any) via the pure helper `build_task_prompt(spec_entry: Option<&SpecEntry>) -> TaskPrompt`, which returns the task prompt's prose and, when the backend's bundled task-prompt templates declare one, a workflow entry point: a single command line taken from the backend's template with its placeholders substituted. The system SHALL NOT hard-code an entry-point command anywhere but in those templates. The prose is what the initial task prompt carries; the entry point SHALL NOT be embedded in it and SHALL be submitted as its own line per `boot-block`, "A declared workflow entry point is submitted as its own composer line". Because the managed assignment block moved out of the worktree-root `AGENTS.md` into the gitignored sidecar `.git-paw/AGENTS.local.md` (`git_paw::agents::SIDECAR_REL_PATH`) — which coding CLIs do NOT auto-load — every arm of `build_task_prompt` SHALL first point the agent at that sidecar. `build_task_prompt` SHALL dispatch on `SpecEntry.backend`:
 
-1. `SpecBackendKind::OpenSpec` — the task prompt SHALL point the agent at the sidecar and then invoke the slash command `/opsx:apply {id}` (`{id} = spec_entry.id`). It SHALL contain the substring `/opsx:apply {id}` and SHALL NOT contain the path prose `openspec/changes/` (the sidecar already carries the artifact map). The slash command is retained so paste-aware CLIs parse it as a slash-command invocation.
-2. `SpecBackendKind::Markdown` or `SpecBackendKind::SpecKit` — the task prompt SHALL point the agent at the sidecar for the project rules and full spec, AND name the sibling-artifact directory `openspec/changes/{id}/`. It SHALL NOT contain `/opsx:apply` (these backends have no slash-command apply workflow).
-3. `SpecBackendKind::Superpowers` — the task prompt SHALL point the agent at the sidecar for the project rules and the full superpowers plan (goal, tasks, exact file paths, per-step verification commands), instructing the agent to work the steps in order and flip `- [ ]` to `- [x]` as each lands.
-4. When no spec is associated with the agent's branch (the `--branches` path), the task prompt SHALL be the verbatim fallback `"Read .git-paw/AGENTS.local.md first for your assignment, then begin your assigned task."`.
+1. `SpecBackendKind::OpenSpec` — the prose SHALL point the agent at the sidecar and state that its workflow command follows as the next message. The prose SHALL NOT contain `/opsx:apply` and SHALL NOT contain the path prose `openspec/changes/` (the sidecar already carries the artifact map). The entry point SHALL be the slash command `/opsx:apply {id}` (`{id} = spec_entry.id`), submitted as its own line so paste-aware CLIs parse it as a slash-command invocation and a weaker model cannot narrate it instead of running it.
+2. `SpecBackendKind::Markdown` — the prose SHALL point the agent at the sidecar for the project rules and full spec, AND name the sibling-artifact directory `openspec/changes/{id}/`. It SHALL NOT contain `/opsx:apply` and SHALL declare no entry point (this backend has no slash-command apply workflow).
+3. `SpecBackendKind::SpecKit` — the prose SHALL point the agent at the sidecar, which carries the project rules and the full Spec Kit assignment inline, and SHALL NOT name an `openspec/changes/` directory (per `core-lang-agnostic`). It SHALL NOT contain `/opsx:apply` and SHALL declare no entry point.
+4. `SpecBackendKind::Superpowers` — the prose SHALL point the agent at the sidecar for the project rules and the full superpowers plan (goal, tasks, exact file paths, per-step verification commands), instructing the agent to work the steps in order and flip `- [ ]` to `- [x]` as each lands. It SHALL declare no entry point.
+5. When no spec is associated with the agent's branch (the `--branches` path), the prose SHALL be the verbatim fallback `"Read .git-paw/AGENTS.local.md first for your assignment, then begin your assigned task."` and there SHALL be no entry point.
 
 The task prompt SHALL NOT contain the spec body itself, nor a truncated heading from the spec body. The full spec body remains the source of truth for the sidecar's generation (`WorktreeAssignment.spec_content` is unchanged); only the injected task-prompt portion changes per backend.
 
-The single `tmux send-keys` invocation SHALL pass the constructed prompt followed by the `Enter` keystroke. The longer pointer prompts may still trip paste-aware CLIs' paste-buffer behaviour, which the supervisor agent recovers from via the paste-buffer-recovery skill (see the `agent-skills` capability).
+The initial prompt SHALL be submitted with exactly one `Enter`, sent as a separate keystroke after the settle delay; a declared entry point SHALL be the only other line the launch flow submits to that pane. The longer pointer prompts may still trip paste-aware CLIs' paste-buffer behaviour, which the supervisor agent recovers from via the paste-buffer-recovery skill (see the `agent-skills` capability).
 
-#### Scenario: Initial prompt is injected after boot delay
+#### Scenario: Initial prompt is injected once the pane is ready
 
 - **GIVEN** two coding agent panes have been created
-- **WHEN** `cmd_supervisor()` injects initial prompts
-- **THEN** `tmux send-keys` SHALL be called for each agent pane with the task prompt followed by `Enter`
+- **WHEN** the launch flow injects initial prompts
+- **THEN** each agent pane SHALL first pass the launch-readiness gate
+- **AND** each SHALL receive its composed prompt typed literally, followed by a separate `Enter` after the settle delay
 
 #### Scenario: Default prompt when no spec content
 
@@ -127,13 +129,13 @@ The single `tmux send-keys` invocation SHALL pass the constructed prompt followe
 - **WHEN** the initial prompt is injected
 - **THEN** the injected task-prompt portion SHALL be the verbatim fallback `"Read .git-paw/AGENTS.local.md first for your assignment, then begin your assigned task."`
 
-#### Scenario: Launch flow sends exactly one Enter per pane
+#### Scenario: Launch flow sends one Enter per submitted line
 
 - **GIVEN** N coding agent panes
-- **WHEN** the supervisor launch flow runs through the prompt-injection loop
-- **THEN** the system SHALL invoke `tmux send-keys` exactly once per pane
-- **AND** the invocation SHALL include the prompt text and the `Enter` keystroke
-- **AND** the system SHALL NOT emit any additional standalone `Enter` keystrokes to the pane during the launch flow
+- **WHEN** the launch flow runs through the prompt-injection loop
+- **THEN** a pane whose task prompt declares no entry point SHALL receive exactly one standalone `Enter`, submitting the composed prompt
+- **AND** a pane whose task prompt declares an entry point SHALL receive exactly two: one submitting the composed prompt and one submitting the entry point
+- **AND** the system SHALL NOT emit any other standalone `Enter` keystroke to the pane during the launch flow
 
 #### Scenario: Paste-buffer recovery is delegated to the supervisor skill
 
@@ -142,46 +144,61 @@ The single `tmux send-keys` invocation SHALL pass the constructed prompt followe
 - **THEN** the supervisor SHALL apply the paste-buffer-recovery sub-case from the embedded skill (`agent-skills` capability)
 - **AND** the launch flow itself SHALL have already exited; the launch flow is NOT responsible for retrying the keystroke
 
-#### Scenario: OpenSpec-backed task prompt points at the sidecar then invokes opsx:apply
+#### Scenario: OpenSpec task prompt declares opsx:apply as its entry point
 
 - **GIVEN** a coding agent on branch `feat/my-change` whose associated spec entry has `id = "my-change"` and `backend = SpecBackendKind::OpenSpec`
-- **WHEN** the supervisor launch flow builds the task prompt for that agent
-- **THEN** `build_task_prompt(Some(&entry))` SHALL return a string containing the sidecar path `.git-paw/AGENTS.local.md`
-- **AND** the returned string SHALL contain the substring `/opsx:apply my-change`
-- **AND** the returned string SHALL NOT contain the substring `openspec/changes/`
-- **AND** the returned string SHALL NOT contain any portion of the spec's prompt body
-
-Test: `main::tests::task_prompt_openspec_backend_points_at_sidecar_then_invokes_opsx_apply`
+- **WHEN** the launch flow builds the task prompt for that agent
+- **THEN** the prose returned by `build_task_prompt(Some(&entry))` SHALL contain the sidecar path `.git-paw/AGENTS.local.md`
+- **AND** the prose SHALL NOT contain the substring `/opsx:apply` nor the substring `openspec/changes/`
+- **AND** the prose SHALL NOT contain any portion of the spec's prompt body
+- **AND** the entry point SHALL equal `/opsx:apply my-change`
 
 #### Scenario: Markdown-backed task prompt uses the sidecar pointer
 
 - **GIVEN** a coding agent on branch `feat/my-feature` whose associated spec entry has `id = "my-feature"` and `backend = SpecBackendKind::Markdown`
-- **WHEN** the supervisor launch flow builds the task prompt for that agent
-- **THEN** the returned string SHALL contain the sidecar path `.git-paw/AGENTS.local.md`
-- **AND** the returned string SHALL contain the substring `openspec/changes/my-feature`
-- **AND** the returned string SHALL NOT contain `/opsx:apply`
+- **WHEN** the launch flow builds the task prompt for that agent
+- **THEN** the prose SHALL contain the sidecar path `.git-paw/AGENTS.local.md`
+- **AND** the prose SHALL contain the substring `openspec/changes/my-feature`
+- **AND** the prose SHALL NOT contain `/opsx:apply`
+- **AND** there SHALL be no entry point
 
 Test: `main::tests::task_prompt_markdown_backend_uses_sidecar_pointer`
+
+#### Scenario: Spec Kit task prompt names no artifact directory and no entry point
+
+- **GIVEN** a coding agent whose associated spec entry has `backend = SpecBackendKind::SpecKit`
+- **WHEN** the launch flow builds the task prompt for that agent
+- **THEN** the prose SHALL contain the sidecar path `.git-paw/AGENTS.local.md`
+- **AND** the prose SHALL NOT contain `openspec/changes/` nor `/opsx:apply`
+- **AND** there SHALL be no entry point
+
+Test: `main::tests::build_task_prompt_speckit_does_not_reference_openspec_changes_path`
 
 #### Scenario: No-spec fallback points at the sidecar verbatim
 
 - **WHEN** `build_task_prompt(None)` is called
-- **THEN** the returned string SHALL equal `"Read .git-paw/AGENTS.local.md first for your assignment, then begin your assigned task."` byte-for-byte
+- **THEN** its prose SHALL equal `"Read .git-paw/AGENTS.local.md first for your assignment, then begin your assigned task."` byte-for-byte
+- **AND** there SHALL be no entry point
 
-Test: `main::tests::task_prompt_without_spec_points_at_sidecar_verbatim`
+#### Scenario: The composed prompt ends with the worktree rule
+
+- **GIVEN** a coding agent whose worktree root is `/repo/.git-paw/worktrees/feat-x`
+- **WHEN** the launch flow composes its initial prompt
+- **THEN** the prompt SHALL be the boot block (when the broker is enabled), the task prompt's prose, and the worktree rule naming `/repo/.git-paw/worktrees/feat-x`, in that order, separated by blank lines
 
 #### Scenario: Backend dispatch is exhaustive over SpecBackendKind
 
 - **GIVEN** `SpecBackendKind` enumerates the backends supported in the current build (`OpenSpec`, `Markdown`, `SpecKit`, `Superpowers`)
-- **WHEN** the supervisor launch flow's task-prompt construction is inspected
-- **THEN** `build_task_prompt` SHALL match every variant of `SpecBackendKind` exhaustively
-- **AND** the compiler SHALL reject `build_task_prompt` if a future variant is added to `SpecBackendKind` without a corresponding match arm
+- **WHEN** the launch flow's task-prompt construction is inspected
+- **THEN** the template selector `build_task_prompt` reads SHALL match every variant of `SpecBackendKind` exhaustively, naming both the prose template and the entry-point template in each arm
+- **AND** that selector SHALL be the only such match in the codebase for task-prompt purposes, so the doctor's spec-workflow probe reads the same answer rather than keeping its own
+- **AND** the compiler SHALL reject the selector if a future variant is added to `SpecBackendKind` without a corresponding match arm
 
 #### Scenario: build_task_prompt remains a pure function
 
-- **WHEN** the supervisor launch flow's task-prompt construction is inspected
-- **THEN** it SHALL be implemented as a pure function `build_task_prompt(spec_entry: Option<&SpecEntry>) -> String`
-- **AND** the function SHALL have no I/O side effects (no filesystem reads, no process spawns, no config lookups)
+- **WHEN** the launch flow's task-prompt construction is inspected
+- **THEN** it SHALL be implemented as a pure function `build_task_prompt(spec_entry: Option<&SpecEntry>) -> TaskPrompt`
+- **AND** the function SHALL have no I/O side effects (no filesystem reads, no process spawns, no config lookups), nor SHALL the template selector it delegates to
 - **AND** the function SHALL be callable from `cfg(test)` without launching tmux
 
 ### Requirement: Supervisor AGENTS.md from supervisor skill template

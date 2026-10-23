@@ -798,3 +798,156 @@ fn restart_from_pause_keeps_a_held_prompt_whose_pane_is_gone() {
          it shows:\n{foreign_text}"
     );
 }
+
+/// Scenario "An agent added while paused holds its entry point" — the held
+/// half of it: when the held prompt STAYS held, its workflow entry point
+/// stays held with it.
+///
+/// The pair is kept together structurally rather than by a rule: the entry
+/// point is taken inside the same arm that takes its prompt, so a prompt the
+/// restart does not submit can never reach the take of its entry point. This
+/// pins that, using the same pane-not-found path as
+/// `restart_from_pause_keeps_a_held_prompt_whose_pane_is_gone` — the held
+/// agent's pane is replaced by a foreign `cat` pane at the same index, so a
+/// submit by computed index would be visible in it.
+///
+/// Only testable once the restart resolves panes live and fails closed; both
+/// arrived with `pane-less-session-parity`.
+#[test]
+#[serial]
+fn restart_from_pause_keeps_a_held_entry_point_with_its_held_prompt() {
+    if skip_if_no_tmux() {
+        return;
+    }
+
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let project = unique_project_name("heldentry");
+    let repo = rename_repo_basename(&tr, &project);
+    let session_name = format!("paw-{project}");
+
+    // Broker OFF so pane indices are stable across the pause; supervisor ON
+    // so `add --from-spec` is available. A supervised launch builds the
+    // dashboard at pane 0 either way, so agent `a` is pane 1 and the added
+    // agent is pane 2.
+    let paw_dir = repo.join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    fs::write(
+        paw_dir.join("config.toml"),
+        "default_cli = \"cat\"\n\n\
+         [specs]\ntype = \"openspec\"\ndir = \"specs\"\n\n\
+         [broker]\nenabled = false\n\n\
+         [supervisor]\nenabled = true\ncli = \"cat\"\n",
+    )
+    .expect("write config");
+
+    // A pending OpenSpec change, so the added agent's format declares an
+    // entry point to hold.
+    let spec_id = "held-pair";
+    let change_dir = repo.join("specs").join(spec_id);
+    fs::create_dir_all(&change_dir).expect("create change dir");
+    fs::write(change_dir.join("tasks.md"), "Implement it.\n").expect("write tasks.md");
+    for args in [vec!["add", "."], vec!["commit", "-m", "add spec"]] {
+        StdCommand::new("git")
+            .current_dir(&repo)
+            .args(&args)
+            .output()
+            .expect("git");
+    }
+
+    let home = TempDir::new().expect("home tempdir");
+    let receipt = sessions_dir_for(home.path()).join(format!("{session_name}.json"));
+    let foreign_dir = TempDir::new().expect("foreign pane dir");
+
+    let run = |args: &[&str]| {
+        let mut c = cmd();
+        tmux_env.apply_assert(&mut c);
+        c.current_dir(&repo)
+            .env("HOME", home.path())
+            .env_remove("XDG_DATA_HOME")
+            .env("GIT_PAW_ENTRY_POINT_BUDGET_MS", "2000")
+            .args(args)
+            .timeout(Duration::from_secs(60))
+            .output()
+            .expect("run git paw")
+    };
+    let tmux = |args: &[&str]| {
+        let mut c = StdCommand::new("tmux");
+        tmux_env.apply(&mut c);
+        c.args(args).output().expect("run tmux")
+    };
+
+    let start = run(&["start", "--supervisor", "--branches", "a", "--cli", "cat"]);
+    assert!(
+        start.status.success(),
+        "initial start failed; stderr:\n{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let pause = run(&["pause"]);
+    assert!(
+        pause.status.success(),
+        "pause failed; stderr:\n{}",
+        String::from_utf8_lossy(&pause.stderr)
+    );
+    let add = run(&["add", "--from-spec", spec_id]);
+    assert!(
+        add.status.success(),
+        "add --from-spec to the paused session failed; stderr:\n{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let held = fs::read_to_string(&receipt).expect("read receipt after add");
+    assert!(
+        held.contains("pending_boot_prompt"),
+        "add while paused must hold a boot prompt; receipt:\n{held}"
+    );
+    assert!(
+        held.contains("pending_entry_point"),
+        "and an OpenSpec agent's entry point with it; receipt:\n{held}"
+    );
+
+    // Replace the added agent's pane (index 2) with a foreign `cat` pane at
+    // the same index, outside every worktree.
+    let target = format!("{session_name}:0.2");
+    let killed = tmux(&["kill-pane", "-t", &target]);
+    assert!(killed.status.success(), "could not kill the added pane");
+    let split = tmux(&[
+        "split-window",
+        "-h",
+        "-t",
+        &format!("{session_name}:0.1"),
+        "-c",
+        &foreign_dir.path().to_string_lossy(),
+        "cat",
+    ]);
+    assert!(split.status.success(), "could not create the foreign pane");
+
+    let restart = run(&["start"]);
+    let restart_stderr = String::from_utf8_lossy(&restart.stderr).to_string();
+    let after = fs::read_to_string(&receipt).expect("read receipt after restart");
+    let foreign = tmux(&["capture-pane", "-p", "-S", "-", "-t", &target]);
+    let foreign_text = String::from_utf8_lossy(&foreign.stdout).to_string();
+    let _ = tmux(&["kill-session", "-t", &session_name]);
+
+    assert!(
+        restart_stderr.contains("pane not found"),
+        "stderr must report the held agent whose pane is gone; stderr:\n{restart_stderr}"
+    );
+    assert!(
+        after.contains("pending_boot_prompt"),
+        "a held prompt whose pane cannot be found must stay held; receipt:\n{after}"
+    );
+    assert!(
+        after.contains("pending_entry_point"),
+        "and its entry point must stay held WITH it — a submitted entry point \
+         whose prompt was never submitted would arrive first, and a cleared one \
+         would be lost for good; receipt:\n{after}"
+    );
+    assert!(
+        after.contains(&format!("/opsx:apply {spec_id}")),
+        "the held entry point is still the rendered command; receipt:\n{after}"
+    );
+    assert!(
+        foreign_text.trim().is_empty(),
+        "nothing may be typed into the pane at the computed index; it shows:\n{foreign_text}"
+    );
+}
