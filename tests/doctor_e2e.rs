@@ -624,7 +624,7 @@ fn a_repository_without_a_spec_system_reports_no_workflow_command() {
         check["detail"]
             .as_str()
             .unwrap_or_default()
-            .contains("no workflow command"),
+            .contains("no workflow entry point"),
         "check: {check}"
     );
 }

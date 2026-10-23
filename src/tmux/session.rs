@@ -107,8 +107,25 @@ pub(crate) fn session_liveness_with(runner: &dyn CommandRunner, name: &str) -> S
 /// Foreground-shell process names — a pane whose `#{pane_current_command}`
 /// is one of these has reverted to an interactive prompt (its launched CLI
 /// process exited), not a still-running agent. Used by
-/// [`has_live_agent_pane_with`] (GP-03c).
+/// [`has_live_agent_pane_with`] (GP-03c) and [`is_shell_command`].
 const SHELL_COMMAND_NAMES: &[&str] = &["bash", "zsh", "sh", "dash", "fish", "ksh", "csh", "tcsh"];
+
+/// Whether `command` — a pane's `#{pane_current_command}` — is a foreground
+/// shell rather than a running agent CLI.
+///
+/// A pane that has reverted to a shell looks *idle* to every capture-based
+/// predicate: it shows no input box, no permission prompt and no
+/// mid-response marker, because none of those are a shell's. Anything that
+/// decides whether to type into a pane therefore has to ask what the pane is
+/// RUNNING as well as what it looks like — otherwise free text intended for
+/// a CLI composer is handed to a command interpreter.
+///
+/// Shares [`SHELL_COMMAND_NAMES`] with the liveness probe so the two cannot
+/// disagree about what counts as a shell.
+#[must_use]
+pub fn is_shell_command(command: &str) -> bool {
+    SHELL_COMMAND_NAMES.contains(&command.trim())
+}
 
 /// Grace period after a session's `created_at` during which
 /// [`session_liveness_for`] treats the session as alive purely from tmux

@@ -772,18 +772,15 @@ pub fn check_spec_cli(probe: &SpecCliProbe) -> CheckResult {
 /// The workflow command the boot task prompt for `backend` instructs a
 /// spec-driven agent to run, or `None` when that prompt names no command.
 ///
-/// Mirrors `build_task_prompt`'s per-backend dispatch: only the `OpenSpec`
-/// template ends `run /opsx:apply <id>`; the Markdown, Spec Kit and
-/// Superpowers templates point at the sidecar instead. Kept as one small
-/// function so `launch-prompt-entry-point` can swap it for its entry-point
-/// selector without touching [`check_spec_workflow`].
+/// Reads the launch's own entry-point selector
+/// ([`crate::task_prompts::workflow_command`]) rather than keeping a second
+/// per-backend match: the command this check probes for reachability is, by
+/// construction, the command the launch will submit. A format whose entry
+/// point changes — or a new [`SpecBackendKind`](crate::specs::SpecBackendKind)
+/// variant — cannot leave the doctor reporting on a command nothing types.
 #[must_use]
 fn instructed_workflow_command(backend: crate::specs::SpecBackendKind) -> Option<&'static str> {
-    use crate::specs::SpecBackendKind;
-    match backend {
-        SpecBackendKind::OpenSpec => Some("/opsx:apply"),
-        SpecBackendKind::Markdown | SpecBackendKind::SpecKit | SpecBackendKind::Superpowers => None,
-    }
+    crate::task_prompts::workflow_command(backend)
 }
 
 /// Where an agent CLI keeps its definitions of `command`, as repo-relative
@@ -852,8 +849,8 @@ pub fn check_spec_workflow(probe: &SpecWorkflowProbe) -> CheckResult {
 
     let Some(command) = probe.command.as_deref() else {
         let detail = match probe.resolved_format.as_deref() {
-            Some(format) => format!("{format} — the boot task prompt names no workflow command"),
-            None => "no spec system configured — the boot task prompt names no workflow command"
+            Some(format) => format!("{format} — the format declares no workflow entry point"),
+            None => "no spec system configured — the format declares no workflow entry point"
                 .to_string(),
         };
         return CheckResult::ok(GROUP_SPEC_SYSTEM, NAME, detail);

@@ -1681,6 +1681,7 @@ mod tests {
                     branch_created: false,
                     base_branch: None,
                     pending_boot_prompt: None,
+                    pending_entry_point: None,
                     runtime_slot: None,
                     cli_session_id: None,
                     spec_id: spec_id.map(str::to_string),

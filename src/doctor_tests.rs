@@ -646,7 +646,7 @@ fn spec_workflow_check_is_not_applicable_for_a_format_without_a_workflow_command
         });
         assert_eq!(check.status, CheckStatus::Ok, "{format}");
         assert!(
-            check.detail.contains("no workflow command"),
+            check.detail.contains("no workflow entry point"),
             "{}",
             check.detail
         );
@@ -792,13 +792,20 @@ fn spec_workflow_check_is_never_a_failure() {
 
 #[test]
 fn only_the_openspec_format_instructs_a_workflow_command() {
-    // The per-format match is the seam `launch-prompt-entry-point` later
-    // swaps; pin it against the boot task prompts it mirrors.
+    // OVERRIDE (launch-prompt-entry-point): this used to pin the probe
+    // against the OpenSpec PROSE template, which embedded the command. The
+    // command now lives in that backend's entry-point template, which the
+    // launch submits as its own composer line — so the prose is pinned free
+    // of it and the entry-point template is what the probe must mirror.
     use crate::specs::SpecBackendKind;
     let openspec_prompt = include_str!("../assets/boot-task-prompts/openspec.md");
     assert!(
-        openspec_prompt.contains("/opsx:apply"),
-        "the OpenSpec boot task prompt should still instruct the command the check names"
+        !openspec_prompt.contains("/opsx:apply"),
+        "the OpenSpec prose must not embed the command; it is the declared entry point"
+    );
+    assert!(
+        include_str!("../assets/boot-task-prompts/openspec.entry.md").contains("/opsx:apply"),
+        "the entry-point template is the single source of the command the check names"
     );
     assert_eq!(
         instructed_workflow_command(SpecBackendKind::OpenSpec),

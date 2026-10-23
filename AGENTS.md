@@ -293,11 +293,18 @@ mid-flight discovery costs a blocked round-trip). Two enums carry this hazard:
 **`SpecBackendKind`** (spec-format changes):
 - Compile-forcing exhaustive matches:
   - `src/skills.rs` — `render_spec_path_doctrine`.
-  - `src/main.rs` — `build_task_prompt`.
+  - `src/task_prompts.rs` — `templates_for`, which names BOTH of a format's
+    bundled task-prompt templates: the prose, and the optional workflow
+    entry point the launch submits as its own composer line. This is the
+    only match for task-prompt purposes; three consumers read it rather
+    than keeping their own, so a new variant is decided once:
+    - `src/main.rs` — `build_task_prompt` renders both templates.
+    - `src/doctor.rs` — `instructed_workflow_command` delegates to
+      `task_prompts::workflow_command`, so the command the spec-workflow
+      check probes for reachability is by construction the command the
+      launch types. Do NOT reintroduce a per-backend match here.
   - `src/mcp/query/specs.rs` — `backend_str`, `derive_title`, `get_spec`.
   - `src/mcp/tools/project.rs` — `get_skill`'s backend-to-doctrine match.
-  - `src/doctor.rs` — `instructed_workflow_command` (which workflow command
-    the format's boot task prompt names; mirrors `build_task_prompt`).
 - Plus the dispatch (`backend_for_type`, `SpecBackendKind::parse`, and
   `SpecBackendKind::type_str` in `src/specs/mod.rs`) and the `SpecsFormat`
   CLI enum in `src/cli.rs`.

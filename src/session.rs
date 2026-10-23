@@ -202,6 +202,25 @@ pub struct WorktreeEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_boot_prompt: Option<String>,
 
+    /// Workflow entry point held alongside [`Self::pending_boot_prompt`].
+    ///
+    /// Set with it when an agent whose spec format declares an entry point is
+    /// attached via `git paw add` to a *paused* session: the entry point
+    /// cannot be submitted before the prompt it follows, so it waits with it.
+    /// Restart-from-pause submits the held prompt, then — once the pane goes
+    /// idle — the held entry point, and clears both; a prompt that stays held
+    /// (its pane blocked on a first-run dialog) keeps its entry point held
+    /// too, so the pair is never split across restarts.
+    ///
+    /// `None` for every agent whose format declares no entry point, for
+    /// start-time agents and adds to an active session (submitted
+    /// immediately), and on every session file written before this field
+    /// existed — those restart exactly as they did, their held prompt still
+    /// carrying whatever the older binary embedded in it. Omitted from JSON
+    /// when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_entry_point: Option<String>,
+
     /// Runtime port slot assigned to this worktree, when `[worktree.ports]` is
     /// configured.
     ///
@@ -972,6 +991,7 @@ mod tests {
                     branch_created: false,
                     base_branch: None,
                     pending_boot_prompt: None,
+                    pending_entry_point: None,
                     runtime_slot: None,
                     cli_session_id: None,
                     spec_id: None,
@@ -983,6 +1003,7 @@ mod tests {
                     branch_created: false,
                     base_branch: None,
                     pending_boot_prompt: None,
+                    pending_entry_point: None,
                     runtime_slot: None,
                     cli_session_id: None,
                     spec_id: None,
@@ -994,6 +1015,7 @@ mod tests {
                     branch_created: false,
                     base_branch: None,
                     pending_boot_prompt: None,
+                    pending_entry_point: None,
                     runtime_slot: None,
                     cli_session_id: None,
                     spec_id: None,

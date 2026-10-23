@@ -136,7 +136,24 @@ fn write_committed_spec(repo: &std::path::Path, id: &str, body: &str) {
     let change_dir = repo.join("specs").join(id);
     fs::create_dir_all(&change_dir).expect("create change dir");
     fs::write(change_dir.join("tasks.md"), body).expect("write tasks.md");
+    commit_specs(repo);
+}
 
+/// Writes and commits a pending **Markdown**-backend spec at
+/// `<repo>/specs/<id>.md`. That backend declares no workflow entry point, so
+/// a launch from it must type exactly one message.
+fn write_committed_markdown_spec(repo: &std::path::Path, id: &str, body: &str) {
+    let specs = repo.join("specs");
+    fs::create_dir_all(&specs).expect("create specs dir");
+    fs::write(
+        specs.join(format!("{id}.md")),
+        format!("---\npaw_status: pending\n---\n{body}"),
+    )
+    .expect("write markdown spec");
+    commit_specs(repo);
+}
+
+fn commit_specs(repo: &std::path::Path) {
     StdCommand::new("git")
         .current_dir(repo)
         .args(["add", "."])
@@ -147,6 +164,28 @@ fn write_committed_spec(repo: &std::path::Path, id: &str, body: &str) {
         .args(["commit", "-m", "add spec"])
         .output()
         .expect("git commit");
+}
+
+/// The tail of the bundled worktree rule (`assets/worktree-root-rule.md`),
+/// which every launch prompt now ends with. Because it is the prompt's LAST
+/// line and the asset carries no trailing newline, its arrival in the probe's
+/// log is the submission signal — and its absence there, with the text
+/// visible in the pane, is the pre-fill-only signal.
+const WORKTREE_RULE_TAIL: &str = "not by a relative path that climbs out of it";
+
+/// Polls `path` until its contents contain `needle`, or `timeout` elapses.
+/// Returns the final contents either way (callers assert).
+fn wait_for_log(path: &std::path::Path, needle: &str, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    let mut contents = String::new();
+    while Instant::now() < deadline {
+        contents = fs::read_to_string(path).unwrap_or_default();
+        if contents.contains(needle) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    contents
 }
 
 /// Writes an executable shell script at `<bin_dir>/paw-test-dialog` that
@@ -237,9 +276,20 @@ fn wait_for_session(env: &TmuxTestEnv, session: &str, timeout: Duration) -> bool
 /// resolves the pane's command — a bare binary name, no absolute path —
 /// against its inherited `PATH`, same as it already does for the `echo` /
 /// `sh` stub CLIs other tests in this suite use).
+/// The script `exec`s `tee` rather than running a `while read` loop, so the
+/// pane's `#{pane_current_command}` is `tee` and not `sh`. That matters
+/// because the entry-point submit refuses to type into a pane whose
+/// foreground process is a shell (a pane whose CLI exited is a command
+/// interpreter, and free text there would be executed). A shell-loop stub
+/// is indistinguishable from exactly that case, so it would be skipped —
+/// correctly, but it would stop the stub from standing in for a CLI.
+///
+/// The submission signal is unchanged: a terminal's cooked-mode line
+/// discipline still delivers a line to the reading process only once a
+/// newline arrives, whether that reader is `read` or `tee`.
 fn write_probe_cli(bin_dir: &std::path::Path, log_path: &std::path::Path) -> &'static str {
     let script = format!(
-        "#!/bin/sh\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> '{}'\ndone\n",
+        "#!/bin/sh\nexec tee -a '{}' > /dev/null\n",
         log_path.display()
     );
     let script_path = bin_dir.join("paw-test-probe");
@@ -349,7 +399,7 @@ command = "{probe_cli}"
     write_committed_spec(&repo, spec_id, "Implement feature parity.\n");
 
     let session_name = format!("paw-{project}");
-    let anchor = format!("opsx:apply {spec_id}.");
+    let entry_point = format!("/opsx:apply {spec_id}");
 
     let home = TempDir::new().expect("home tempdir");
     let mut start_cmd = cmd();
@@ -359,8 +409,9 @@ command = "{probe_cli}"
         .env("PATH", &test_path)
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env("GIT_PAW_ENTRY_POINT_BUDGET_MS", "8000")
         .args(["start", "--from-specs", "--cli", probe_cli])
-        .timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(40))
         .output()
         .expect("run start --from-specs");
     assert!(
@@ -370,16 +421,16 @@ command = "{probe_cli}"
     );
 
     // Pane 0 is the dashboard (broker enabled), pane 1 is the sole agent.
-    let buffer =
-        wait_for_pane_content(&tmux_env, &session_name, 1, &anchor, Duration::from_secs(8));
+    let buffer = wait_for_pane_content(
+        &tmux_env,
+        &session_name,
+        1,
+        WORKTREE_RULE_TAIL,
+        Duration::from_secs(8),
+    );
 
     // Task 1.2: the task prompt must have been injected at all — the
     // pre-fix code never appended it to the boot block in the first place.
-    assert!(
-        buffer.contains(&anchor),
-        "agent pane must carry the task prompt naming the spec apply invocation \
-         (anchor {anchor:?} not found); got:\n{buffer}"
-    );
     assert!(
         buffer.contains(".git-paw/AGENTS.local.md"),
         "task prompt must point the agent at the sidecar; got:\n{buffer}"
@@ -387,24 +438,436 @@ command = "{probe_cli}"
 
     // Task 1.1: the prompt must have been fully SUBMITTED — the probe only
     // logs a line once its terminating newline (an explicit Enter, since the
-    // task prompt itself carries none) actually arrives.
-    let deadline = Instant::now() + Duration::from_secs(8);
-    let mut log_contents = String::new();
-    while Instant::now() < deadline {
-        log_contents = fs::read_to_string(&log_path).unwrap_or_default();
-        if log_contents.contains(&anchor) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(150));
-    }
+    // composed prompt itself carries none) actually arrives. The last line is
+    // now the worktree rule, so its arrival proves BOTH that the prompt was
+    // submitted and that the rule is where the prompt ends.
+    let log_contents = wait_for_log(&log_path, WORKTREE_RULE_TAIL, Duration::from_secs(8));
     kill_session(&tmux_env, &session_name);
 
     assert!(
-        log_contents.contains(&anchor),
-        "spec-driven launch must submit its boot+task prompt (trailing Enter) — \
-         the probe's log never received the final line (anchor {anchor:?} absent), \
-         meaning it is still sitting unterminated in the pane's input buffer; \
+        log_contents.contains(WORKTREE_RULE_TAIL),
+        "spec-driven launch must submit its composed prompt (trailing Enter) — \
+         the probe's log never received the final line, meaning it is still \
+         sitting unterminated in the pane's input buffer; \
          probe log:\n{log_contents}\npane buffer:\n{buffer}"
+    );
+    assert!(
+        log_contents.contains(&repo.display().to_string()),
+        "the worktree rule must name this agent's own absolute worktree root, \
+         which lies under {}; probe log:\n{log_contents}",
+        repo.display()
+    );
+
+    // OVERRIDE (launch-prompt-entry-point): this test used to anchor on
+    // `opsx:apply <id>.` INSIDE the prose. The command left the prose (a
+    // weaker model narrated it, GP-54) and is now the declared entry point,
+    // submitted as its own composer line — checked by the test below. Here we
+    // pin the prose free of it, since a command still in the sentence is
+    // exactly the regression this change exists to prevent.
+    let prose_lines: Vec<&str> = log_contents
+        .lines()
+        .filter(|line| line.contains(".git-paw/AGENTS.local.md"))
+        .collect();
+    assert!(
+        !prose_lines.is_empty(),
+        "the sidecar pointer must have been submitted; probe log:\n{log_contents}"
+    );
+    assert!(
+        prose_lines.iter().all(|line| !line.contains(&entry_point)),
+        "the workflow command must not ride along inside the prose; got: {prose_lines:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// launch-prompt-entry-point task 3.1 — the declared entry point arrives as a
+// SECOND submitted line, and only for a format that declares one
+// ---------------------------------------------------------------------------
+
+/// Maps to `boot-block` scenario "The `OpenSpec` entry point is submitted after
+/// the first message": once the pane is idle, `/opsx:apply <id>` is typed
+/// literally and submitted with its own `Enter` — after the composed prompt,
+/// never inside it.
+///
+/// Both lines are proven submitted the same way: neither the worktree rule
+/// nor the entry-point template carries a trailing newline, so each reaches
+/// the probe's log only if its own separate `Enter` arrived.
+#[test]
+#[serial]
+fn openspec_launch_submits_the_entry_point_as_a_second_line() {
+    if skip_if_no_tmux() {
+        return;
+    }
+
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let project = unique_project_name("entrypoint");
+    let repo = rename_repo_basename(&tr, &project);
+
+    let bin_dir = TempDir::new().expect("probe bin dir");
+    let log_dir = TempDir::new().expect("probe log dir");
+    let log_path = log_dir.path().join("probe.log");
+    let probe_cli = write_probe_cli(bin_dir.path(), &log_path);
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let test_path = format!("{}:{inherited_path}", bin_dir.path().display());
+
+    let paw_dir = repo.join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    let broker_port = find_free_port();
+    let config = format!(
+        r#"
+default_cli = "{probe_cli}"
+
+[specs]
+type = "openspec"
+dir = "specs"
+
+[broker]
+enabled = true
+port = {broker_port}
+
+[clis.{probe_cli}]
+command = "{probe_cli}"
+"#
+    );
+    fs::write(paw_dir.join("config.toml"), config).expect("write config");
+    let spec_id = "entry-point-change";
+    write_committed_spec(&repo, spec_id, "Implement the entry point.\n");
+
+    let session_name = format!("paw-{project}");
+    let entry_point = format!("/opsx:apply {spec_id}");
+
+    let home = TempDir::new().expect("home tempdir");
+    let mut start_cmd = cmd();
+    tmux_env.apply_assert(&mut start_cmd);
+    let out = start_cmd
+        .current_dir(&repo)
+        .env("PATH", &test_path)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .env("GIT_PAW_ENTRY_POINT_BUDGET_MS", "8000")
+        .args(["start", "--from-specs", "--cli", probe_cli])
+        .timeout(Duration::from_secs(40))
+        .output()
+        .expect("run start --from-specs");
+    assert!(
+        out.status.success(),
+        "spec-driven launch should succeed; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let log_contents = wait_for_log(&log_path, &entry_point, Duration::from_secs(15));
+    let buffer = capture_pane(&tmux_env, &session_name, 1);
+    kill_session(&tmux_env, &session_name);
+
+    assert!(
+        log_contents.contains(WORKTREE_RULE_TAIL),
+        "the composed prompt must be submitted first; probe log:\n{log_contents}"
+    );
+    assert!(
+        log_contents.contains(&entry_point),
+        "the entry point must be submitted as its own line (its own `Enter`); \
+         stderr:\n{}\nprobe log:\n{log_contents}\npane:\n{buffer}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Order matters: the entry point is what the agent runs after reading the
+    // sidecar the first message pointed it at.
+    let rule_at = log_contents
+        .find(WORKTREE_RULE_TAIL)
+        .expect("rule line present");
+    let entry_at = log_contents.find(&entry_point).expect("entry line present");
+    assert!(
+        rule_at < entry_at,
+        "the entry point must follow the composed prompt, not precede it; \
+         probe log:\n{log_contents}"
+    );
+
+    // It is its OWN line — not appended to the rule, not wrapped in prose.
+    assert!(
+        log_contents
+            .lines()
+            .any(|line| line.trim() == entry_point.as_str()),
+        "the entry point must occupy a line of its own; probe log:\n{log_contents}"
+    );
+}
+
+/// Maps to `boot-block` scenario "A pane whose CLI has exited is not typed
+/// into".
+///
+/// The stub exits immediately, so after the readiness gate gives up the pane
+/// is a bare login shell — which shows no input box, no permission prompt
+/// and no mid-response marker, and therefore satisfies every content-based
+/// idle check. Only reading the pane's foreground process distinguishes it
+/// from a CLI waiting at its composer. Without that check the rendered
+/// command would be handed to a command interpreter.
+#[test]
+#[serial]
+fn a_pane_whose_cli_exited_gets_no_entry_point_typed() {
+    if skip_if_no_tmux() {
+        return;
+    }
+
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let project = unique_project_name("deadcli");
+    let repo = rename_repo_basename(&tr, &project);
+
+    let bin_dir = TempDir::new().expect("bin dir");
+    let cli = "paw-test-exits";
+    let script_path = bin_dir.path().join(cli);
+    fs::write(&script_path, "#!/bin/sh\nexit 0\n").expect("write exiting stub");
+    fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).expect("chmod stub");
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let test_path = format!("{}:{inherited_path}", bin_dir.path().display());
+
+    let paw_dir = repo.join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    let broker_port = find_free_port();
+    let config = format!(
+        r#"
+default_cli = "{cli}"
+
+[specs]
+type = "openspec"
+dir = "specs"
+
+[broker]
+enabled = true
+port = {broker_port}
+
+[clis.{cli}]
+command = "{cli}"
+"#
+    );
+    fs::write(paw_dir.join("config.toml"), config).expect("write config");
+    let spec_id = "dead-cli-change";
+    write_committed_spec(&repo, spec_id, "Implement it.\n");
+
+    let session_name = format!("paw-{project}");
+
+    let home = TempDir::new().expect("home tempdir");
+    let mut start_cmd = cmd();
+    tmux_env.apply_assert(&mut start_cmd);
+    let out = start_cmd
+        .current_dir(&repo)
+        .env("PATH", &test_path)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .env("GIT_PAW_ENTRY_POINT_BUDGET_MS", "8000")
+        .args(["start", "--from-specs", "--cli", cli])
+        .timeout(Duration::from_secs(60))
+        .output()
+        .expect("run start --from-specs");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    kill_session(&tmux_env, &session_name);
+
+    assert!(
+        out.status.success(),
+        "a dead CLI degrades the launch, it does not fail it; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("is running a shell"),
+        "the launch must report that it refused to type into a shell; \
+         stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("/opsx:apply {spec_id}")),
+        "and still name the exact command; stderr:\n{stderr}"
+    );
+}
+
+/// Maps to `boot-block` scenario "A backend without an entry point is
+/// unchanged": a Markdown-backed launch declares none, so nothing further is
+/// typed into its pane and the launch does not wait for it to go idle.
+#[test]
+#[serial]
+fn markdown_launch_types_no_second_line() {
+    if skip_if_no_tmux() {
+        return;
+    }
+
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let project = unique_project_name("noentry");
+    let repo = rename_repo_basename(&tr, &project);
+
+    let bin_dir = TempDir::new().expect("probe bin dir");
+    let log_dir = TempDir::new().expect("probe log dir");
+    let log_path = log_dir.path().join("probe.log");
+    let probe_cli = write_probe_cli(bin_dir.path(), &log_path);
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let test_path = format!("{}:{inherited_path}", bin_dir.path().display());
+
+    let paw_dir = repo.join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    let broker_port = find_free_port();
+    let config = format!(
+        r#"
+default_cli = "{probe_cli}"
+
+[specs]
+type = "markdown"
+dir = "specs"
+
+[broker]
+enabled = true
+port = {broker_port}
+
+[clis.{probe_cli}]
+command = "{probe_cli}"
+"#
+    );
+    fs::write(paw_dir.join("config.toml"), config).expect("write config");
+    write_committed_markdown_spec(&repo, "plain-feature", "Implement a plain feature.\n");
+
+    let session_name = format!("paw-{project}");
+
+    let home = TempDir::new().expect("home tempdir");
+    let mut start_cmd = cmd();
+    tmux_env.apply_assert(&mut start_cmd);
+    let out = start_cmd
+        .current_dir(&repo)
+        .env("PATH", &test_path)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        // Deliberately short: a backend with no entry point must not wait at
+        // all, so even an 800 ms budget cannot be reached by this launch.
+        .env("GIT_PAW_ENTRY_POINT_BUDGET_MS", "800")
+        .args(["start", "--from-specs", "--cli", probe_cli])
+        .timeout(Duration::from_secs(40))
+        .output()
+        .expect("run start --from-specs");
+    assert!(
+        out.status.success(),
+        "markdown-backed launch should succeed; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let log_contents = wait_for_log(&log_path, WORKTREE_RULE_TAIL, Duration::from_secs(10));
+    kill_session(&tmux_env, &session_name);
+
+    assert!(
+        log_contents.contains(WORKTREE_RULE_TAIL),
+        "the composed prompt must still be submitted; probe log:\n{log_contents}"
+    );
+    assert!(
+        !log_contents.contains("/opsx:apply"),
+        "a Markdown-backed launch declares no entry point, so no second line \
+         may be typed; probe log:\n{log_contents}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("did not go idle"),
+        "a pane with no entry point is never waited for, so it can never \
+         expire; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// launch-prompt-entry-point task 3.3 — the bare pre-fill ends with the
+// worktree rule and is still NOT submitted
+// ---------------------------------------------------------------------------
+
+/// Maps to `boot-block` scenario "Boot block pre-filled without Enter": bare
+/// `git paw start` still leaves the prompt sitting in the composer for the
+/// user to append their task to — but it now ends with the worktree rule
+/// naming that pane's recorded worktree root.
+///
+/// The two claims are read from two different sinks, which is the whole point
+/// of the probe: the rule is VISIBLE in the pane (local terminal echo shows
+/// typed characters whether or not an `Enter` followed) and ABSENT from the
+/// probe's log (cooked-mode line discipline delivers a line only once its
+/// newline arrives, and the rule asset carries none).
+#[test]
+#[serial]
+fn bare_pre_fill_ends_with_the_worktree_rule_and_is_not_submitted() {
+    if skip_if_no_tmux() {
+        return;
+    }
+
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let project = unique_project_name("prefillrule");
+    let repo = rename_repo_basename(&tr, &project);
+
+    let bin_dir = TempDir::new().expect("probe bin dir");
+    let log_dir = TempDir::new().expect("probe log dir");
+    let log_path = log_dir.path().join("probe.log");
+    let probe_cli = write_probe_cli(bin_dir.path(), &log_path);
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let test_path = format!("{}:{inherited_path}", bin_dir.path().display());
+
+    let paw_dir = repo.join(".git-paw");
+    fs::create_dir_all(&paw_dir).expect("create .git-paw");
+    let broker_port = find_free_port();
+    let config = format!(
+        r#"
+default_cli = "{probe_cli}"
+
+[broker]
+enabled = true
+port = {broker_port}
+
+[clis.{probe_cli}]
+command = "{probe_cli}"
+"#
+    );
+    fs::write(paw_dir.join("config.toml"), config).expect("write config");
+
+    let session_name = format!("paw-{project}");
+
+    let home = TempDir::new().expect("home tempdir");
+    let mut start_cmd = cmd();
+    tmux_env.apply_assert(&mut start_cmd);
+    let out = start_cmd
+        .current_dir(&repo)
+        .env("PATH", &test_path)
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .args([
+            "start",
+            "--cli",
+            probe_cli,
+            "--branches",
+            "feat/prefill-rule",
+        ])
+        .timeout(Duration::from_secs(40))
+        .output()
+        .expect("run bare start");
+    assert!(
+        out.status.success(),
+        "bare launch should succeed; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Broker enabled -> dashboard at pane 0, the sole agent at pane 1.
+    let buffer = wait_for_pane_content(
+        &tmux_env,
+        &session_name,
+        1,
+        WORKTREE_RULE_TAIL,
+        Duration::from_secs(8),
+    );
+    // Give the probe the same grace the submission tests give it, so "absent"
+    // means absent rather than not-yet-flushed.
+    let log_contents = wait_for_log(&log_path, WORKTREE_RULE_TAIL, Duration::from_secs(3));
+    kill_session(&tmux_env, &session_name);
+
+    assert!(
+        buffer.contains("Your worktree root is"),
+        "the bare pre-fill must end with the worktree rule; pane:\n{buffer}"
+    );
+    assert!(
+        buffer.contains(&repo.display().to_string()),
+        "the rule must name this pane's own recorded worktree path, under {}; \
+         pane:\n{buffer}",
+        repo.display()
+    );
+    assert!(
+        !log_contents.contains(WORKTREE_RULE_TAIL),
+        "the bare pre-fill must stay UNSUBMITTED so the user can append their \
+         task — the rule reaching the probe's log means an `Enter` was sent; \
+         probe log:\n{log_contents}"
     );
 }
 
@@ -706,7 +1169,10 @@ command = "{probe_cli}"
     write_committed_spec(&repo, spec_id, "Implement feature no-broker.\n");
 
     let session_name = format!("paw-{project}");
-    let anchor = format!("opsx:apply {spec_id}.");
+    // OVERRIDE (launch-prompt-entry-point): the apply invocation left the
+    // prose and is now the declared entry point, submitted as its own line.
+    // The sidecar pointer is what identifies the task prompt in the pane.
+    let anchor = ".git-paw/AGENTS.local.md".to_string();
 
     let home = TempDir::new().expect("home tempdir");
     let mut start_cmd = cmd();
@@ -830,7 +1296,10 @@ readiness_markers = ["{MARKER}"]
     write_committed_spec(&repo, spec_id, "Implement feature wait ready.\n");
 
     let session_name = format!("paw-{project}");
-    let anchor = format!("opsx:apply {spec_id}.");
+    // OVERRIDE (launch-prompt-entry-point): the apply invocation left the
+    // prose and is now the declared entry point, submitted as its own line.
+    // The sidecar pointer is what identifies the task prompt in the pane.
+    let anchor = ".git-paw/AGENTS.local.md".to_string();
 
     // Generous custom budget (the suite-wide default is compressed to 120ms
     // so unrecognised-CLI tests fall back fast) so the gate genuinely waits
@@ -1142,8 +1611,9 @@ command = "{probe_cli}"
         .env("PATH", &test_path)
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        .env("GIT_PAW_ENTRY_POINT_BUDGET_MS", "10000")
         .args(["start", "--from-all-specs", "--cli", probe_cli])
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(60))
         .output()
         .expect("run start --from-all-specs");
     assert!(
@@ -1157,10 +1627,22 @@ command = "{probe_cli}"
     // order is not guaranteed to match the names' sort order — only that
     // each pane carries exactly one spec's content and every spec is
     // covered by exactly one pane (a bijection).
-    let anchors: Vec<String> = spec_ids
-        .iter()
-        .map(|id| format!("opsx:apply {id}."))
-        .collect();
+    //
+    // OVERRIDE (launch-prompt-entry-point): the per-pane anchor used to be
+    // the spec id inside the prose. The OpenSpec prose now names no spec at
+    // all — it points at the sidecar and says the workflow command follows —
+    // so every pane's prose is byte-identical and cannot distinguish them.
+    // The worktree rule can: it names this agent's own worktree root, whose
+    // slug is derived from the branch the spec produced.
+    //
+    // The anchor deliberately carries text only the worktree rule emits. A
+    // bare `spec-<id>` would also match the boot block's `--agent spec-<id>`
+    // and the pane's own shell prompt, both of which predate this change —
+    // so it would hold with the rule removed, and prove nothing. Anchoring on
+    // the path's slug IMMEDIATELY followed by the rule's next sentence pins
+    // both facts at once, under either worktree placement.
+    let anchor_for = |id: &str| format!("spec-{id}. Every file you create");
+    let anchors: Vec<String> = spec_ids.iter().map(|id| anchor_for(id)).collect();
     let mut covered: Vec<&str> = Vec::new();
     for pane_idx in 1..=3 {
         // Wait for *some* anchor to land in this pane before reading it.
@@ -1176,7 +1658,7 @@ command = "{probe_cli}"
         let matches: Vec<&str> = spec_ids
             .iter()
             .copied()
-            .filter(|id| buffer.contains(&format!("opsx:apply {id}.")))
+            .filter(|id| buffer.contains(&anchor_for(id)))
             .collect();
         assert_eq!(
             matches.len(),
@@ -1202,7 +1684,7 @@ command = "{probe_cli}"
         log_contents = fs::read_to_string(&log_path).unwrap_or_default();
         if spec_ids
             .iter()
-            .all(|id| log_contents.contains(&format!("opsx:apply {id}.")))
+            .all(|id| log_contents.contains(&format!("/opsx:apply {id}")))
         {
             break;
         }
@@ -1212,9 +1694,22 @@ command = "{probe_cli}"
 
     for id in spec_ids {
         assert!(
-            log_contents.contains(&format!("opsx:apply {id}.")),
-            "spec '{id}'s task prompt must have been submitted (trailing Enter); \
-             probe log:\n{log_contents}"
+            log_contents.contains(&anchor_for(id)),
+            "spec '{id}'s composed prompt must have been submitted, ending in its \
+             own worktree rule (trailing Enter); probe log:\n{log_contents}"
+        );
+        // And its entry point too: design D3 waits for every pane under ONE
+        // budget, concurrently. A sequential wait would spend three budgets
+        // and leave the later panes unserved.
+        //
+        // On a LINE OF ITS OWN — a `contains` would be satisfied by the old
+        // prose, which ended `… then run /opsx:apply <id>.`
+        assert!(
+            log_contents
+                .lines()
+                .any(|line| line.trim() == format!("/opsx:apply {id}")),
+            "spec '{id}'s entry point must have been submitted as its own \
+             line; probe log:\n{log_contents}"
         );
     }
 
@@ -1311,8 +1806,15 @@ command = "{selfkill_cli}"
         .env("PATH", &test_path)
         .env("HOME", home.path())
         .env_remove("XDG_DATA_HOME")
+        // The pane this stub kills can never be captured again, so it can
+        // never read idle — correctly, since a capture that fails is not
+        // evidence of idleness. The launch therefore waits out the whole
+        // entry-point budget before reporting and moving on; bound it so
+        // this test measures injection-failure tolerance rather than the
+        // default 120s budget.
+        .env("GIT_PAW_ENTRY_POINT_BUDGET_MS", "1000")
         .args(["start", "--from-specs", "--cli", selfkill_cli])
-        .timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(30))
         .output()
         .expect("run start --from-specs");
     kill_session(&tmux_env, &session_name);
