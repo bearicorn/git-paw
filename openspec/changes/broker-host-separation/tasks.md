@@ -20,6 +20,7 @@
 - [ ] 3.5 `cmd_stop`: unchanged kill-session (no prompt, no `--force`, per `stop-without-confirmation`); test the flush now comes from the host window
 - [ ] 3.6 `src/commands/status.rs`: broker line "running" only when `probe_broker_for_repo` answers AND `service_alive` reports the `broker` surface (pre-split sessions: the terminal session's liveness); an answering probe with no live host is reported as a leftover broker; tests for the *Status shows broker information* scenarios, including "Status after stop does not report the broker running" (PP-27)
 - [ ] 3.7 E2E: `pause_e2e.rs` (port free, dashboard pane remains, degraded indicator, pre-split fallback), `e2e_supervisor_stop.rs` (flush via window SIGHUP), `recover_integration.rs` (window recreated), `e2e_supervisor_launch.rs` (`/status` answered before the first agent injection)
+- [ ] 3.8 GP-82: `probe_existing_broker` classifies a reset / broken pipe / EOF before any response bytes as no live broker (re-probe once, then bind), not `Timeout`; a genuine read timeout stays `ProbeTimeout`. Add the MODIFIED `broker-runtime` probe requirement (the stale-broker probe, released spec lines 96-103) with a scenario for a listener that resets mid-handshake; apply the same wait-until-refused rule to `selftest::pick_broker_port` (`src/selftest.rs`, GP-76). Tests: a listener that accepts then resets is treated as no broker; a silent listener still yields `ProbeTimeout`
 
 ## 4. DS-3 remainder: agent → spec mapping in the host
 

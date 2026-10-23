@@ -1225,15 +1225,29 @@ mod tests {
         assert_eq!(result, ProbeResult::NoListener);
     }
 
-    /// Binds and immediately releases an ephemeral port, yielding a port
-    /// number that is free right now. Good enough for a test that starts its
-    /// own broker on it a moment later.
+    /// Binds and releases an ephemeral port, yielding a port number that is
+    /// free right now, for a test that starts its own broker on it next.
+    ///
+    /// Returns only once a connect to the port is refused. Closing the
+    /// listener does not take effect at once: under load macOS can still
+    /// complete a handshake against the listener it is tearing down and then
+    /// reset it, and `start_broker`'s pre-start probe — which runs a moment
+    /// later — reads that reset as `ProbeTimeout` instead of `NoListener`.
     fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
             .expect("bind ephemeral port")
             .local_addr()
             .expect("read ephemeral addr")
-            .port()
+            .port();
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline
+            && std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(100))
+                .is_ok()
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        port
     }
 
     fn config_on(port: u16) -> BrokerConfig {
