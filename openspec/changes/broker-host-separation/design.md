@@ -78,18 +78,25 @@ status-line indicator and keeps the last snapshot; it is never an exit condition
 
 ### D3 — Start ordering and readiness
 
-With a separate host, `start` does: set env → spawn the `broker` service with the session name and the
+With a separate host, `start` does: open the session (env, dashboard pane 0, agent panes — one
+terminal-port step, `open_session`) → spawn the `broker` service with the session name and the
 per-session log path on argv → wait (≤10 s) for `/status` with the `git_paw` marker and this
-repository's `repo_root` → create the dashboard pane → create agent panes → register each agent through
-`POST /watch` (agent id, worktree, CLI, spec id) → save the receipt → readiness gate → inject boot
-prompts. A host that never answers fails the launch with the port named and leaves session state for
-recovery.
+repository's `repo_root` → register each agent through `POST /watch` (agent id, worktree, CLI, spec id)
+→ save the receipt → readiness gate → inject boot prompts. A host that never answers (or exits first)
+fails the launch with the port named and leaves session state for recovery.
+
+*Amended 2026-10-28 against the merged terminal port:* the earlier order spawned the host before any
+pane existed. A service surface is a surface *of a session*, and the port's `open_session` creates the
+session together with its dashboard and agent surfaces (the launch argv fixtures pin that), so the host
+starts right after the session opens instead. Nothing is lost: agent CLIs do nothing broker-facing until
+their boot prompt, which still waits for `/status`; the dashboard renders degraded for the moment until
+the host answers.
 
 The receipt cannot move ahead of the host: v0.17 saves it only after the panes exist
-(`start.rs:377/:790`, `supervisor.rs:848`) and released *A failed start preserves persisted session
-state* requires that order. v0.17's dashboard races the receipt (`main.rs:1006-1014` documents it); a
-host that must answer before any pane exists would lose that race every time — log path falling back
-to `git-paw.broker.log` (`session.rs:786`), no watch targets, no `spec_id` seeding. So the launcher
+(`cmd_start`, `launch_spec_session`, `cmd_supervisor`) and released *A failed start preserves persisted session
+state* requires that order. v0.17's dashboard races the receipt (`cmd_dashboard` documents it); a
+host that must answer before the receipt exists would lose that race every time — log path falling back
+to `git-paw.broker.log` (`session::resolve_broker_log_path`), no watch targets, no `spec_id` seeding. So the launcher
 hands the host what it needs instead (design call 3, shared with `broker-verdict-authority`, which adds
 the credential on stdin): session name and log path on argv (not secret), and each agent through
 `/watch` once its pane exists — the path `git paw add` already uses. Recovery and restart-from-pause
@@ -148,7 +155,7 @@ liveness. A probe that answers with no live host is reported as a leftover, neve
 
 ## Risks / Trade-offs
 
-- [Host vs first boot prompt race] → explicit bounded `/status` wait before any pane; failure is
+- [Host vs first boot prompt race] → explicit bounded `/status` wait before any registration, receipt or prompt; failure is
   loud and preserves state.
 - [Host vs receipt race] → the host never waits for the receipt on a fresh launch: name and log path on
   argv, agents through `/watch` (D3).

@@ -767,10 +767,6 @@ fn parse_repo_root(response: &str) -> Option<String> {
 /// repository at all — is [`ProbeResult::OtherRepoBroker`]. When it is `None`
 /// the caller has declared no repository, so the comparison is skipped.
 fn probe_existing_broker(url: &str, expected_repo_root: Option<&std::path::Path>) -> ProbeResult {
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
-    use std::time::Duration;
-
     // Parse host:port from URL like "http://127.0.0.1:9119"
     let addr = url.strip_prefix("http://").unwrap_or(url);
 
@@ -787,32 +783,24 @@ fn probe_existing_broker(url: &str, expected_repo_root: Option<&std::path::Path>
         }
     };
 
-    let Ok(mut stream) = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(500))
-    else {
-        return ProbeResult::NoListener;
+    // A reset, broken pipe or EOF before any response byte is a listener that
+    // is going away (a broker mid-shutdown, its socket closing under us), not
+    // a broker that answers too slowly. Re-probe once after a short pause: a
+    // refusal or a second reset then means nothing will serve the port, so
+    // the caller binds instead of failing with a probe timeout (GP-82).
+    let response = match probe_attempt(&socket_addr, addr) {
+        ProbeAttempt::Refused => return ProbeResult::NoListener,
+        ProbeAttempt::TimedOut => return ProbeResult::Timeout,
+        ProbeAttempt::Answered(response) => response,
+        ProbeAttempt::Reset => {
+            std::thread::sleep(PROBE_RESET_RETRY_PAUSE);
+            match probe_attempt(&socket_addr, addr) {
+                ProbeAttempt::Refused | ProbeAttempt::Reset => return ProbeResult::NoListener,
+                ProbeAttempt::TimedOut => return ProbeResult::Timeout,
+                ProbeAttempt::Answered(response) => response,
+            }
+        }
     };
-
-    stream
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .ok();
-    stream
-        .set_write_timeout(Some(Duration::from_millis(500)))
-        .ok();
-
-    let request = format!("GET /status HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-    if stream.write_all(request.as_bytes()).is_err() {
-        return ProbeResult::Timeout;
-    }
-
-    let mut response = String::new();
-    if (&stream)
-        .take(MAX_PROBE_RESPONSE_BYTES)
-        .read_to_string(&mut response)
-        .is_err()
-        && response.is_empty()
-    {
-        return ProbeResult::Timeout;
-    }
 
     if response.contains("\"git_paw\":true") || response.contains("\"git_paw\": true") {
         let Some(expected) = expected_repo_root else {
@@ -831,6 +819,80 @@ fn probe_existing_broker(url: &str, expected_repo_root: Option<&std::path::Path>
         ProbeResult::ForeignServer
     } else {
         ProbeResult::Timeout
+    }
+}
+
+/// Pause before the single re-probe that follows a reset or EOF.
+const PROBE_RESET_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// How one `GET /status` probe attempt ended, before its body is classified.
+#[derive(Debug, PartialEq, Eq)]
+enum ProbeAttempt {
+    /// The connection was refused (or could not be made at all).
+    Refused,
+    /// The peer reset, broke the pipe or closed before sending a single byte.
+    Reset,
+    /// The peer accepted but sent nothing within the read timeout.
+    TimedOut,
+    /// The peer answered; the (bounded) response so far.
+    Answered(String),
+}
+
+/// Whether an I/O error is the peer tearing the connection down, as opposed
+/// to a timeout or anything else.
+fn is_teardown(kind: std::io::ErrorKind) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        kind,
+        ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::BrokenPipe
+            | ErrorKind::UnexpectedEof
+            | ErrorKind::NotConnected
+    )
+}
+
+/// Runs one probe attempt against `socket_addr`, with `addr` as the `Host` header.
+fn probe_attempt(socket_addr: &std::net::SocketAddr, addr: &str) -> ProbeAttempt {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let Ok(mut stream) = TcpStream::connect_timeout(socket_addr, Duration::from_millis(500)) else {
+        return ProbeAttempt::Refused;
+    };
+
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .ok();
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .ok();
+
+    let request = format!("GET /status HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    if let Err(e) = stream.write_all(request.as_bytes()) {
+        return if is_teardown(e.kind()) {
+            ProbeAttempt::Reset
+        } else {
+            ProbeAttempt::TimedOut
+        };
+    }
+
+    let mut response = String::new();
+    match (&stream)
+        .take(MAX_PROBE_RESPONSE_BYTES)
+        .read_to_string(&mut response)
+    {
+        // EOF before a single byte: the listener closed without answering.
+        Ok(_) if response.is_empty() => ProbeAttempt::Reset,
+        Err(e) if response.is_empty() => {
+            if is_teardown(e.kind()) {
+                ProbeAttempt::Reset
+            } else {
+                ProbeAttempt::TimedOut
+            }
+        }
+        _ => ProbeAttempt::Answered(response),
     }
 }
 
@@ -1223,6 +1285,84 @@ mod tests {
         // Use a port that is almost certainly not in use.
         let result = probe_existing_broker("http://127.0.0.1:19999", None);
         assert_eq!(result, ProbeResult::NoListener);
+    }
+
+    /// Spawns a listener that accepts every connection and closes it at once,
+    /// before sending a byte — a broker socket being torn down under the
+    /// probe. Returns its URL; the listener lives for the test's duration.
+    fn resetting_listener() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                // Dropping the accepted stream closes it with nothing sent:
+                // the client reads EOF or a reset, never a response byte.
+                drop(stream);
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// `broker-runtime` *Stale broker detection*, "A listener that resets
+    /// mid-handshake is not a live broker" (GP-82): a reset / EOF before any
+    /// response byte, on the probe and on its single re-probe, is no live
+    /// broker — not a probe timeout.
+    #[test]
+    fn a_listener_that_resets_mid_handshake_is_not_a_live_broker() {
+        let url = resetting_listener();
+        assert_eq!(probe_existing_broker(&url, None), ProbeResult::NoListener);
+        let repo = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            probe_broker_for_repo(&url, repo.path()),
+            ProbeResult::NoListener,
+            "the repository-scoped probe classifies a reset the same way"
+        );
+    }
+
+    /// `broker-runtime` *Stale broker detection*, "A silent listener is a
+    /// probe timeout": a listener that accepts and never answers is still
+    /// `Timeout` (→ `BrokerError::ProbeTimeout`), not mistaken for a reset.
+    #[test]
+    fn a_silent_listener_is_a_probe_timeout() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            // Hold the accepted stream open, silent, until the probe is done.
+            let held = listener.accept();
+            let _ = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+            drop(held);
+        });
+        let result = probe_existing_broker(&format!("http://{addr}"), None);
+        let _ = done_tx.send(());
+        assert_eq!(result, ProbeResult::Timeout);
+    }
+
+    /// A reset on the first probe followed by a real answer on the re-probe
+    /// is classified from that answer: the re-probe is a retry, not a verdict.
+    #[test]
+    fn a_reset_followed_by_an_answer_classifies_the_answer() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        std::thread::spawn(move || {
+            let mut incoming = listener.incoming();
+            drop(incoming.next());
+            if let Some(Ok(mut stream)) = incoming.next() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let body = "not found";
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        assert_eq!(
+            probe_existing_broker(&format!("http://{addr}"), None),
+            ProbeResult::ForeignServer
+        );
     }
 
     /// Binds and releases an ephemeral port, yielding a port number that is

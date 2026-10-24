@@ -2,7 +2,7 @@
 
 ### Requirement: Terminal backend hosts detached service surfaces
 
-The `TerminalBackend` trait SHALL provide a way to run a non-interactive service command inside a session without occupying a surface in the agent grid, and to stop it: `spawn_service(session, name, command) -> ServiceHandle` and `stop_service(handle)`, plus a liveness query. The tmux backend SHALL implement a service as a detached window named after the service (created with `new-window -d -n <name>`), so that window 0's pane indices are unaffected and `kill-session` still terminates the service with `SIGHUP`. The fake backend SHALL record spawned and stopped services.
+The `TerminalBackend` trait SHALL provide a way to run a non-interactive service command inside a session without occupying a surface in the agent grid, and to stop it: `spawn_service(session, name, command, working_dir) -> ServiceHandle` and `stop_service(handle)`, a liveness query `service_alive(handle)`, and `service(session, name)` to address an existing service by name (so `pause` and `status` can reach a host a previous process started). Stopping a service that is already gone SHALL NOT be an error. The tmux backend SHALL implement a service as a detached window named after the service (created with `new-window -d -n <name>`), so that window 0's pane indices are unaffected and `kill-session` still terminates the service with `SIGHUP`. The fake backend SHALL record spawned and stopped services.
 
 #### Scenario: tmux service is a detached window
 
