@@ -37,36 +37,97 @@ pub(crate) fn agent_pane_offset(session: &Session) -> usize {
     session.agent_pane_offset()
 }
 
-/// Attaches `tmux pipe-pane` to each coding-agent pane so the session-logging
-/// capture contract (spec `session-logging` → "Attach pipe-pane to capture
-/// output": *when logging is enabled and a pane is created*) is honoured on
-/// every launch path — bare `start`, `--from-specs`, and supervisor. A no-op
-/// when `[logging]` is disabled.
+/// Streams each coding-agent surface's output to its session log so the
+/// session-logging capture contract (spec `session-logging` → "Attach
+/// pipe-pane to capture output": *when logging is enabled and a pane is
+/// created*) is honoured on every launch path — bare `start`, `--from-specs`,
+/// and supervisor. A no-op when `[logging]` is disabled.
 ///
-/// Must be called after the session is built (`builder.build()` /
-/// `build_supervisor_session`) and before `tmux_session.execute()`:
-/// [`pipe_pane`](git_paw::tmux::TmuxSession::pipe_pane) queues into the
-/// session's command list, applied in order at execute time (so the panes
-/// exist by the time pipe-pane runs). `first_agent_pane` is the pane index of
-/// the first coding agent (see [`agent_pane_offset`]); branch `i` maps to pane
-/// `first_agent_pane + i` in window 0.
+/// Must be called after the session is opened
+/// ([`TerminalBackend::open_session`](git_paw::terminal::TerminalBackend::open_session)),
+/// so the surfaces exist. `first_agent` is the layout position of the first
+/// coding agent (see [`agent_pane_offset`]); branch `i` is the surface at
+/// `first_agent + i`.
 pub(crate) fn attach_session_logging(
-    tmux_session: &mut git_paw::tmux::TmuxSession,
+    backend: &dyn git_paw::terminal::TerminalBackend,
+    session_name: &str,
     config: &PawConfig,
     repo_root: &std::path::Path,
     branches: &[&str],
-    first_agent_pane: usize,
+    first_agent: usize,
 ) -> Result<(), PawError> {
     if !config.logging.as_ref().is_some_and(|l| l.enabled) {
         return Ok(());
     }
-    git_paw::logging::ensure_log_dir(repo_root, &tmux_session.name)?;
+    git_paw::logging::ensure_log_dir(repo_root, session_name)?;
     for (i, branch) in branches.iter().enumerate() {
-        let log_path = git_paw::logging::log_file_path(repo_root, &tmux_session.name, branch);
-        let pane_target = format!("{}:0.{}", tmux_session.name, first_agent_pane + i);
-        tmux_session.pipe_pane(&pane_target, &log_path);
+        let log_path = git_paw::logging::log_file_path(repo_root, session_name, branch);
+        backend.stream_to(
+            &backend.surface_at(session_name, first_agent + i),
+            &log_path,
+        )?;
     }
     Ok(())
+}
+
+/// Opens a launch's session through the terminal port: every surface in
+/// `plan`, then (when `logging` carries the config and repository root) each
+/// coding-agent surface's log stream, then the agent grid's even column
+/// widths — the order every launch path issued before the port existed.
+///
+/// A failed width rebalance only warns: the session is up and usable, just
+/// with uneven columns.
+///
+/// # Errors
+/// Returns [`PawError`] when the session cannot be opened or a log stream
+/// cannot be started.
+pub(crate) fn launch_session(
+    backend: &dyn git_paw::terminal::TerminalBackend,
+    plan: &git_paw::terminal::SessionPlan,
+    layout: &git_paw::surface::SessionLayout,
+    logging: Option<(&PawConfig, &std::path::Path)>,
+) -> Result<(), PawError> {
+    backend.open_session(plan)?;
+    if let Some((config, repo_root)) = logging {
+        let branches: Vec<&str> = plan.surfaces.iter().map(|s| s.label.as_str()).collect();
+        attach_session_logging(
+            backend,
+            &plan.name,
+            config,
+            repo_root,
+            &branches,
+            layout.first_agent_index(),
+        )?;
+    }
+    // Rebalance each agent row to equal width on the live window (design D4,
+    // G3): the raw `split-window -h` chain renders a row as 50/25/25, so a
+    // column-precise resize evens it out now that the surfaces exist.
+    if let Err(e) = backend.layout(
+        &plan.name,
+        &git_paw::terminal::GridGeometry {
+            first_agent: layout.first_agent_index(),
+            agent_count: plan.surfaces.len(),
+            has_top_row: layout.has_top_row(),
+        },
+    ) {
+        eprintln!("warning: could not rebalance agent-row widths: {e}");
+    }
+    Ok(())
+}
+
+/// Whether `existing`'s session `name` is alive with at least one agent CLI
+/// still running, probed through the terminal port — the liveness check the
+/// launch paths make before deciding to reattach, revive or recover.
+pub(crate) fn session_has_live_agents(name: &str, existing: &Session) -> bool {
+    use git_paw::terminal::TerminalBackend;
+    matches!(
+        git_paw::terminal::tmux::TmuxBackend::new().liveness(
+            name,
+            existing.created_at,
+            existing.agent_pane_offset()
+        ),
+        git_paw::terminal::SessionLiveness::Alive
+    )
 }
 
 /// The command that launches the dashboard in its own tmux pane.
@@ -321,6 +382,64 @@ mod tests {
             broker_exposure_warning(&broker(false, "0.0.0.0")),
             None,
             "a disabled broker is never started, so it must not warn"
+        );
+    }
+
+    /// Session logging is wired through the port on every launch path: after
+    /// the session opens, each coding-agent surface (from the layout's first
+    /// agent position) streams to its branch's log, before the grid is evened.
+    #[test]
+    fn launch_session_streams_each_coding_surface_to_its_log_before_the_layout() {
+        use git_paw::session::SessionMode;
+        use git_paw::surface::SessionLayout;
+        use git_paw::terminal::fake::{FakeBackend, Operation};
+        use git_paw::terminal::{SessionPlan, SurfaceSpec, TerminalBackend};
+
+        let repo = tempfile::TempDir::new().unwrap();
+        let spec = |x: &str| SurfaceSpec {
+            label: format!("feat/{x}"),
+            owner: repo.path().join(format!("wt-{x}")),
+            launch_command: "claude".to_string(),
+        };
+        let plan = SessionPlan {
+            name: "paw-proj".to_string(),
+            mode: SessionMode::Bare,
+            dashboard: Some(SurfaceSpec {
+                label: "dashboard".to_string(),
+                owner: repo.path().to_path_buf(),
+                launch_command: "git-paw __dashboard".to_string(),
+            }),
+            surfaces: vec![spec("a"), spec("b")],
+            env: Vec::new(),
+            mouse: false,
+            show_labels: false,
+        };
+        let mut config = PawConfig::default();
+        config.logging = Some(git_paw::config::LoggingConfig { enabled: true });
+        let layout = SessionLayout::planned(SessionMode::Bare, true);
+
+        let fake = FakeBackend::new();
+        launch_session(&fake, &plan, &layout, Some((&config, repo.path()))).unwrap();
+
+        let streamed: Vec<_> = fake
+            .operations()
+            .into_iter()
+            .filter_map(|op| match op {
+                Operation::StreamTo { surface, log } => Some((surface, log)),
+                _ => None,
+            })
+            .collect();
+        let log = |branch: &str| git_paw::logging::log_file_path(repo.path(), "paw-proj", branch);
+        assert_eq!(
+            streamed,
+            vec![
+                (fake.surface_at("paw-proj", 1), log("feat/a")),
+                (fake.surface_at("paw-proj", 2), log("feat/b")),
+            ]
+        );
+        assert!(
+            matches!(fake.operations().last(), Some(Operation::Layout { .. })),
+            "the grid is evened after the streams start"
         );
     }
 }

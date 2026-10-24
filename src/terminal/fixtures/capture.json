@@ -1,0 +1,12 @@
+[
+  {
+    "argv": [
+      "tmux",
+      "capture-pane",
+      "-p",
+      "-t",
+      "paw-proj:0.3"
+    ],
+    "stdio": "captured"
+  }
+]

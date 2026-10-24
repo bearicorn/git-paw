@@ -11,6 +11,8 @@ use git_paw::error::PawError;
 use git_paw::git;
 use git_paw::session;
 use git_paw::surface::SessionLayout;
+use git_paw::terminal::tmux::TmuxBackend;
+use git_paw::terminal::{GridGeometry, TerminalBackend};
 use git_paw::tmux;
 
 use super::helpers::{agent_pane_offset, legacy_tiled_layout_unsupported};
@@ -105,7 +107,10 @@ pub(crate) fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Resu
     let _lock = git_paw::lock::SessionLock::acquire(&repo_root)?;
 
     let offset = agent_pane_offset(&existing);
-    let session_alive = tmux::is_session_alive(&existing.session_name).unwrap_or(false);
+    let backend = TmuxBackend::new();
+    let session_alive = backend
+        .session_alive(&existing.session_name)
+        .unwrap_or(false);
 
     // 5.5 Kill the target tmux pane by RESOLVED pane id, not a JSON-position
     // index (design D2, G2a): map the removed branch's worktree to its live
@@ -115,23 +120,25 @@ pub(crate) fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Resu
     // stale orphan pane has shifted the grid (the v0.8.0 G2 failure), and is
     // an idempotent no-op when no pane maps (the pane is already gone).
     if session_alive
-        && let Some(pane_id) =
-            tmux::resolve_pane_id_for_worktree(&existing.session_name, &target.worktree_path)?
+        && let Some(surface) =
+            backend.surface_owned_by(&existing.session_name, &target.worktree_path)?
     {
-        tmux::kill_pane_by_id(&pane_id)?;
+        backend.kill(&surface)?;
     }
 
     // 5.6 Recompute layout_for(N-1) and re-apply so the grid re-flows.
     let remaining = existing.worktrees.len() - 1;
     if session_alive && remaining > 0 {
-        let layout =
-            git_paw::surface::layout_for(remaining, SessionLayout::of(&existing).has_top_row())?;
-        tmux::build_remove_retile_commands(&existing.session_name, offset, remaining, layout)
-            .execute()?;
+        let grid = GridGeometry {
+            first_agent: offset,
+            agent_count: remaining,
+            has_top_row: SessionLayout::of(&existing).has_top_row(),
+        };
+        backend.reflow_rows(&existing.session_name, &grid)?;
         // Rebalance the re-flowed agent rows to equal width on the live window
         // (design D4, G3): tmux renumbered the survivors after the kill, so the
         // contiguous rows are resized to even columns for the new count.
-        if let Err(e) = tmux::rebalance_agent_rows(&existing.session_name, offset, remaining) {
+        if let Err(e) = backend.layout(&existing.session_name, &grid) {
             eprintln!("warning: could not rebalance agent-row widths: {e}");
         }
     }

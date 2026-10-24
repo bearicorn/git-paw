@@ -27,11 +27,13 @@ use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry}
 use git_paw::supervisor::drive;
 use git_paw::supervisor::loop_binding::{self, BindMode, DriveLoopBinding};
 use git_paw::surface::SessionLayout;
+use git_paw::terminal::tmux::TmuxBackend;
+use git_paw::terminal::{SessionPlan, SurfaceSpec};
 use git_paw::tmux;
 
 use super::helpers::{
-    attach_session_logging, config_to_custom_defs, dashboard_command, to_interactive_cli,
-    warn_if_broker_is_exposed,
+    config_to_custom_defs, dashboard_command, launch_session, session_has_live_agents,
+    to_interactive_cli, warn_if_broker_is_exposed,
 };
 use super::recover::{recover_session, recover_session_detached};
 use super::start::{restart_from_pause, restart_from_pause_detached};
@@ -357,12 +359,7 @@ pub(crate) fn cmd_supervisor(
         && let Some(existing) = &existing_session
         && !invalidate_if_stale(repo_root, existing)?
     {
-        let effective = existing.effective_status(|name| {
-            matches!(
-                tmux::session_liveness_for(name, existing.created_at, existing.agent_pane_offset()),
-                tmux::SessionLiveness::Alive
-            )
-        });
+        let effective = existing.effective_status(|name| session_has_live_agents(name, existing));
         if unattended {
             return reattach_drive_loop(repo_root, config, existing, &effective);
         }
@@ -595,7 +592,7 @@ pub(crate) fn cmd_supervisor(
     // arrives in v1.0.0 (issue #17).
     // A supervised launch always builds the dashboard as the full-width top
     // row, broker or not, so the grid always has one.
-    let layout = git_paw::surface::supervisor_layout(branches.len(), true)?;
+    git_paw::surface::supervisor_layout(branches.len(), true)?;
 
     // Real launch.
     git::prune_worktrees(repo_root)?;
@@ -673,17 +670,14 @@ pub(crate) fn cmd_supervisor(
     // identical, un-interpolatable string.
     let branch_refs: Vec<&str> = branches.iter().map(String::as_str).collect();
 
-    let repo_str = repo_root.to_string_lossy().to_string();
-    let dashboard_command = dashboard_command();
-
-    let dashboard_pane = tmux::PaneSpec {
-        branch: "dashboard".to_string(),
-        worktree: repo_str,
-        cli_command: dashboard_command,
+    let dashboard_pane = SurfaceSpec {
+        label: "dashboard".to_string(),
+        owner: repo_root.to_path_buf(),
+        launch_command: dashboard_command(),
     };
 
     // Pre-compute per-agent panes, prompts, and worktree records.
-    let mut agent_panes: Vec<tmux::PaneSpec> = Vec::with_capacity(branches.len());
+    let mut agent_panes: Vec<SurfaceSpec> = Vec::with_capacity(branches.len());
     let mut agent_prompts: Vec<String> = Vec::with_capacity(branches.len());
     let mut agent_entry_points: Vec<Option<String>> = Vec::with_capacity(branches.len());
     let mut worktree_entries: Vec<WorktreeEntry> = Vec::with_capacity(branches.len());
@@ -745,16 +739,16 @@ pub(crate) fn cmd_supervisor(
     } else {
         Vec::new()
     };
-    let mut tmux_session = tmux::build_supervisor_session(
-        &project,
-        Some(session_name.clone()),
-        &dashboard_pane,
-        &agent_panes,
-        layout,
+    let backend = TmuxBackend::new();
+    let plan = SessionPlan {
+        name: session_name.clone(),
+        mode: SessionMode::Supervisor,
+        dashboard: Some(dashboard_pane),
+        surfaces: agent_panes,
+        env: env_vars,
         mouse,
-        config.border_affordances_enabled(),
-        &env_vars,
-    )?;
+        show_labels: config.border_affordances_enabled(),
+    };
 
     // Every reserved-index fact for this launch — the logging offset, the
     // recorded `dashboard_pane`, the discovery-file offset, and the
@@ -763,34 +757,20 @@ pub(crate) fn cmd_supervisor(
     // the index record for the window those panes land in.)
     let session_layout = SessionLayout::planned(SessionMode::Supervisor, broker_config.enabled);
 
-    // Attach session logging (no-op unless `[logging] enabled`). The
-    // supervised layout reserves pane 0 for the dashboard, so coding agents —
-    // in `branches` order, matching `agent_panes` and the boot loop below —
-    // start at the layout's first agent index.
-    attach_session_logging(
-        &mut tmux_session,
-        config,
-        repo_root,
-        &branch_refs,
-        session_layout.first_agent_index(),
-    )?;
-
-    tmux_session.execute()?;
-
-    // Rebalance each agent row to equal width on the live window (design D4,
-    // G3): the raw `split-window -h` chain renders a row as 50/25/25, so a
-    // column-precise resize evens it out now that the panes exist.
-    if let Err(e) = tmux::rebalance_agent_rows(
-        &tmux_session.name,
-        session_layout.first_agent_index(),
-        agent_panes.len(),
-    ) {
-        eprintln!("warning: could not rebalance agent-row widths: {e}");
-    }
+    // Open the session, attach session logging (no-op unless `[logging]
+    // enabled`) — the supervised layout reserves pane 0 for the dashboard, so
+    // coding agents start at the layout's first agent index — and even the
+    // grid's columns.
+    launch_session(&backend, &plan, &session_layout, Some((config, repo_root)))?;
+    let agent_commands: Vec<String> = plan
+        .surfaces
+        .iter()
+        .map(|spec| spec.launch_command.clone())
+        .collect();
 
     // Save session state so `git paw status`/`stop`/`purge` see the session.
     let mut state = Session {
-        session_name: tmux_session.name.clone(),
+        session_name: session_name.clone(),
         repo_path: repo_root.to_path_buf(),
         project_name: project.clone(),
         created_at: SystemTime::now(),
@@ -818,7 +798,7 @@ pub(crate) fn cmd_supervisor(
     // entry is written, since no pane runs one.
     write_repo_discovery_file(
         repo_root,
-        &tmux_session.name,
+        &session_name,
         &state.worktrees,
         session_layout.first_agent_index(),
     );
@@ -848,13 +828,14 @@ pub(crate) fn cmd_supervisor(
         let agent_delay = resolve_submit_delay_ms(&agent_cli, &config.clis);
         let pane_idx = session_layout.agent_index(idx);
         gate_pane_or_fail_on_dialog(
-            &tmux_session.name,
+            &backend,
+            &session_name,
             pane_idx,
             &agent_cli,
-            &agent_panes[idx].cli_command,
+            &agent_commands[idx],
             &config.clis,
         )?;
-        submit_prompt_to_pane(&tmux_session.name, pane_idx, prompt, agent_delay);
+        submit_prompt_to_pane(&backend, &session_name, pane_idx, prompt, agent_delay);
         if let Some(entry_point) = agent_entry_points[idx].clone() {
             pending_entry_points.push(crate::PendingEntryPoint {
                 pane_index: pane_idx,
@@ -869,7 +850,7 @@ pub(crate) fn cmd_supervisor(
     // own composer lines, each once its pane goes idle. The second `Enter`
     // this sends is the only other standalone `Enter` the launch emits, and
     // only into a pane re-checked idle immediately before.
-    crate::submit_entry_points(&tmux_session.name, pending_entry_points);
+    crate::submit_entry_points(&backend, &session_name, pending_entry_points);
 
     // The orchestrator's roster row appears only when the external
     // orchestrator publishes its own `agent.status`. The launcher does not
@@ -887,7 +868,7 @@ pub(crate) fn cmd_supervisor(
 
     println!(
         "Supervisor session '{}' launched with {} coding agent(s).",
-        tmux_session.name,
+        session_name,
         branches.len()
     );
     // The orchestrator runs outside the session: point the operator's own
@@ -911,19 +892,19 @@ pub(crate) fn cmd_supervisor(
         // just created this instance, so nothing may already be driving it:
         // `Fresh` refuses rather than displacing a holder.
         let created_at = recorded_created_at(repo_root, state.created_at);
-        let binding = bind_drive_loop(repo_root, &tmux_session.name, created_at, BindMode::Fresh)?;
+        let binding = bind_drive_loop(repo_root, &session_name, created_at, BindMode::Fresh)?;
         return drive_unattended_loop(
             repo_root,
             supervisor_cfg,
             &broker_config,
-            &tmux_session.name,
+            &session_name,
             &state,
             created_at,
             binding,
         );
     }
 
-    println!("Attach with:  tmux attach -t {}", tmux_session.name);
+    println!("Attach with:  tmux attach -t {session_name}");
     Ok(())
 }
 

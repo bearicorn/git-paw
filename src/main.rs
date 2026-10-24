@@ -485,8 +485,8 @@ struct AttachContext<'a> {
 /// splice into the session, the initial boot+task prompt to submit, and the
 /// session-JSON worktree entry to register.
 struct AttachedAgent {
-    /// Pane spec (branch, worktree path, CLI command) for the tmux layout.
-    pane: tmux::PaneSpec,
+    /// Surface spec (label, owning worktree, launch command) for the layout.
+    pane: git_paw::terminal::SurfaceSpec,
     /// Composed boot block + task prose + worktree rule to inject into the
     /// pane as its first message.
     prompt: String,
@@ -565,7 +565,6 @@ fn attach_agent(
     runtime_slot: u16,
 ) -> Result<AttachedAgent, PawError> {
     let wt = git::create_worktree(ctx.repo_root, branch, !ctx.no_rebase, ctx.placement)?;
-    let wt_str = wt.path.to_string_lossy().to_string();
 
     // Provision the worktree's runtime state — the declared env-file copies,
     // this agent's port block in a generated `.env.local`, and the consumer's
@@ -674,10 +673,10 @@ fn attach_agent(
     let (prompt, entry_point) = compose_agent_launch(ctx, branch, spec_entry, &wt.path);
 
     Ok(AttachedAgent {
-        pane: tmux::PaneSpec {
-            branch: branch.to_string(),
-            worktree: wt_str,
-            cli_command,
+        pane: git_paw::terminal::SurfaceSpec {
+            label: branch.to_string(),
+            owner: wt.path.clone(),
+            launch_command: cli_command,
         },
         prompt,
         entry_point,
@@ -734,6 +733,7 @@ fn compose_agent_launch(
 /// pass-through name), which resolves the readiness markers; `cli_command` is
 /// what the pane actually runs and is what a bare-shell relaunch types.
 fn gate_pane_or_fail_on_dialog<S: std::hash::BuildHasher>(
+    backend: &dyn git_paw::terminal::TerminalBackend,
     session_name: &str,
     pane_index: usize,
     cli_id: &str,
@@ -741,7 +741,7 @@ fn gate_pane_or_fail_on_dialog<S: std::hash::BuildHasher>(
     clis: &std::collections::HashMap<String, config::CustomCli, S>,
 ) -> Result<(), PawError> {
     dialog_stuck_result(
-        tmux::gate_pane_for_injection(session_name, pane_index, cli_id, cli_command, clis),
+        tmux::gate_pane_for_injection(backend, session_name, pane_index, cli_id, cli_command, clis),
         session_name,
         pane_index,
         cli_command,
@@ -768,7 +768,8 @@ fn dialog_stuck_result(
     Ok(())
 }
 
-/// Inject and submit an initial prompt into a tmux pane.
+/// Inject and submit an initial prompt into an agent surface through the
+/// terminal port.
 ///
 /// The boot block is injected literally, then — after `delay_ms` for a
 /// paste-aware CLI to settle the (often large) paste — a separate `Enter`
@@ -777,18 +778,20 @@ fn dialog_stuck_result(
 /// across CLIs (W15-1). `delay_ms` is resolved per-CLI from config so this
 /// path carries no CLI-specific assumptions. Failures are swallowed —
 /// best-effort by design.
-fn submit_prompt_to_pane(session_name: &str, pane_idx: usize, prompt: &str, delay_ms: u64) {
-    let target = format!("{session_name}:0.{pane_idx}");
+fn submit_prompt_to_pane(
+    backend: &dyn git_paw::terminal::TerminalBackend,
+    session_name: &str,
+    pane_idx: usize,
+    prompt: &str,
+    delay_ms: u64,
+) {
+    let surface = backend.surface_at(session_name, pane_idx);
     // 1. Inject the boot block literally (no Enter yet).
-    let _ = std::process::Command::new("tmux")
-        .args(["send-keys", "-t", &target, "-l", prompt])
-        .status();
+    let _ = backend.send_text(&surface, prompt);
     // 2. Let a paste-aware CLI settle the paste before we submit.
     std::thread::sleep(std::time::Duration::from_millis(delay_ms));
     // 3. Submit with a separate Enter.
-    let _ = std::process::Command::new("tmux")
-        .args(["send-keys", "-t", &target, "Enter"])
-        .status();
+    let _ = backend.send_key(&surface, git_paw::terminal::Key::Enter);
 }
 
 /// One pane still owing its declared workflow entry point.
@@ -818,37 +821,22 @@ const ENTRY_POINT_MIN_POLL_MS: u64 = 250;
 /// reads as idle — cannot be mistaken for a finished turn.
 const ENTRY_POINT_IDLE_CAPTURES: u8 = 2;
 
-/// The pane I/O and clock [`submit_entry_points_with`] needs, so the wait's
-/// decisions are testable over captured fixtures without a live tmux pane.
-trait EntryPointIo {
-    /// The pane's current contents (`tmux capture-pane -p`), or `None` when
-    /// the capture failed.
-    ///
-    /// The distinction matters: a failed `capture-pane` yields an empty
-    /// string, and an empty capture satisfies every idle marker — no prompt,
-    /// no mid-response footer, no input box. Returning `Option` forces the
-    /// caller to treat "I could not look" as "not idle" rather than as the
-    /// strongest possible evidence of idleness.
-    fn capture(&mut self, session: &str, pane_index: usize) -> Option<String>;
-    /// The pane's foreground process name (`#{pane_current_command}`), or
-    /// `None` when it could not be read.
-    fn pane_command(&mut self, session: &str, pane_index: usize) -> Option<String>;
-    /// Type `text` into the pane literally, submitting nothing.
-    fn send_text(&mut self, session: &str, pane_index: usize, text: &str);
-    /// Send one named key (`Enter`).
-    fn send_key(&mut self, session: &str, pane_index: usize, key: &str);
+/// The clock [`submit_entry_points_with`] waits on, so the wait's decisions
+/// are testable over scripted screens without real time passing. The surface
+/// I/O goes through the terminal port.
+trait EntryPointClock {
     /// Wait `ms` milliseconds.
     fn sleep(&mut self, ms: u64);
     /// Milliseconds elapsed since the wait began.
     fn elapsed_ms(&self) -> u64;
 }
 
-/// The live implementation: real `tmux` keystrokes and a real clock.
-struct TmuxEntryPointIo {
+/// The live clock.
+struct WallClock {
     started: std::time::Instant,
 }
 
-impl TmuxEntryPointIo {
+impl WallClock {
     fn new() -> Self {
         Self {
             started: std::time::Instant::now(),
@@ -856,49 +844,7 @@ impl TmuxEntryPointIo {
     }
 }
 
-impl EntryPointIo for TmuxEntryPointIo {
-    fn capture(&mut self, session: &str, pane_index: usize) -> Option<String> {
-        let target = format!("{session}:0.{pane_index}");
-        let out = std::process::Command::new("tmux")
-            .args(["capture-pane", "-p", "-t", &target])
-            .output()
-            .ok()?;
-        out.status
-            .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).to_string())
-    }
-
-    fn pane_command(&mut self, session: &str, pane_index: usize) -> Option<String> {
-        let target = format!("{session}:0.{pane_index}");
-        let out = std::process::Command::new("tmux")
-            .args([
-                "display-message",
-                "-p",
-                "-t",
-                &target,
-                "#{pane_current_command}",
-            ])
-            .output()
-            .ok()?;
-        out.status
-            .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-    }
-
-    fn send_text(&mut self, session: &str, pane_index: usize, text: &str) {
-        let target = format!("{session}:0.{pane_index}");
-        let _ = std::process::Command::new("tmux")
-            .args(["send-keys", "-t", &target, "-l", text])
-            .status();
-    }
-
-    fn send_key(&mut self, session: &str, pane_index: usize, key: &str) {
-        let target = format!("{session}:0.{pane_index}");
-        let _ = std::process::Command::new("tmux")
-            .args(["send-keys", "-t", &target, key])
-            .status();
-    }
-
+impl EntryPointClock for WallClock {
     fn sleep(&mut self, ms: u64) {
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
@@ -949,7 +895,8 @@ fn entry_point_text_is_safe(text: &str) -> bool {
 }
 
 /// The bounded, all-panes-at-once wait behind [`submit_entry_points`],
-/// parameterised over its pane I/O.
+/// reading screens and typing through the terminal port and waiting on
+/// `clock`.
 ///
 /// Polls every pane still owing an entry point on one shared interval — so
 /// the launch costs the slowest first turn rather than the sum of them — and
@@ -976,13 +923,15 @@ fn entry_point_text_is_safe(text: &str) -> bool {
 /// Returns one report per pane that did not complete, in input order.
 ///
 /// [`pane_is_idle_and_empty`]: git_paw::supervisor::drive::pane_is_idle_and_empty
-fn submit_entry_points_with<I: EntryPointIo>(
-    io: &mut I,
+fn submit_entry_points_with<C: EntryPointClock>(
+    backend: &dyn git_paw::terminal::TerminalBackend,
+    clock: &mut C,
     session: &str,
     mut pending: Vec<PendingEntryPoint>,
     budget_ms: u64,
 ) -> Vec<EntryPointReport> {
     use git_paw::supervisor::drive::{pane_is_idle_and_empty, pane_is_responsive};
+    use git_paw::terminal::Key;
 
     // A capture we could not take is not evidence of idleness: an empty
     // string satisfies every idle marker there is.
@@ -1017,11 +966,11 @@ fn submit_entry_points_with<I: EntryPointIo>(
     let mut idle_streak = vec![0u8; pending.len()];
 
     loop {
-        io.sleep(poll_ms);
+        clock.sleep(poll_ms);
         let mut idx = 0;
         while idx < pending.len() {
-            let pane_index = pending[idx].pane_index;
-            if looks_idle(io.capture(session, pane_index)) {
+            let surface = backend.surface_at(session, pending[idx].pane_index);
+            if looks_idle(backend.capture_tail(&surface)) {
                 idle_streak[idx] += 1;
             } else {
                 idle_streak[idx] = 0;
@@ -1031,7 +980,7 @@ fn submit_entry_points_with<I: EntryPointIo>(
                 continue;
             }
             // Look once more, immediately before typing.
-            if !looks_idle(io.capture(session, pane_index)) {
+            if !looks_idle(backend.capture_tail(&surface)) {
                 idle_streak[idx] = 0;
                 idx += 1;
                 continue;
@@ -1039,13 +988,13 @@ fn submit_entry_points_with<I: EntryPointIo>(
             // A pane that looks idle may simply have no CLI left in it.
             //
             // A process we could not read is not a process we may type into:
-            // `display-message` fails when the pane has vanished or been
+            // the read fails when the pane has vanished or been
             // respawned since the idle re-check a moment ago, which is
             // exactly the window where it might now be a shell. Reset the
             // streak and look again on the next poll rather than typing on
             // the strength of a failed read; if it never resolves, the budget
             // reports it.
-            let Some(command) = io.pane_command(session, pane_index) else {
+            let Some(command) = backend.foreground_process(&surface) else {
                 idle_streak[idx] = 0;
                 idx += 1;
                 continue;
@@ -1060,17 +1009,17 @@ fn submit_entry_points_with<I: EntryPointIo>(
             }
             let settled = pending[idx].settle_delay_ms;
             let text = pending[idx].entry_point.clone();
-            io.send_text(session, pane_index, &text);
-            io.sleep(settled);
+            let _ = backend.send_text(&surface, &text);
+            clock.sleep(settled);
             // The settle delay is a window in which a fork or a tool call can
             // raise a permission prompt. An `Enter` arriving then ANSWERS it,
             // so look before submitting and withhold the key if anything
             // changed.
-            let still_ours = io
-                .capture(session, pane_index)
+            let still_ours = backend
+                .capture_tail(&surface)
                 .is_some_and(|c| pane_is_responsive(&c));
             if still_ours {
-                io.send_key(session, pane_index, "Enter");
+                let _ = backend.send_key(&surface, Key::Enter);
                 pending.remove(idx);
                 idle_streak.remove(idx);
             } else {
@@ -1081,7 +1030,7 @@ fn submit_entry_points_with<I: EntryPointIo>(
                 idle_streak.remove(idx);
             }
         }
-        if pending.is_empty() || io.elapsed_ms() >= budget_ms {
+        if pending.is_empty() || clock.elapsed_ms() >= budget_ms {
             reports.extend(pending.into_iter().map(|pane| EntryPointReport {
                 pane,
                 failure: EntryPointFailure::Expired,
@@ -1099,7 +1048,11 @@ fn submit_entry_points_with<I: EntryPointIo>(
 /// never waited for. A pane the budget expires on is left untouched and
 /// reported on stderr with the exact line to submit by hand, so an attached
 /// human or an orchestrator reading the launch output can finish the job.
-pub(crate) fn submit_entry_points(session: &str, pending: Vec<PendingEntryPoint>) {
+pub(crate) fn submit_entry_points(
+    backend: &dyn git_paw::terminal::TerminalBackend,
+    session: &str,
+    pending: Vec<PendingEntryPoint>,
+) {
     if pending.is_empty() {
         return;
     }
@@ -1118,7 +1071,7 @@ pub(crate) fn submit_entry_points(session: &str, pending: Vec<PendingEntryPoint>
         format_budget(budget_ms)
     );
     let reports =
-        submit_entry_points_with(&mut TmuxEntryPointIo::new(), session, pending, budget_ms);
+        submit_entry_points_with(backend, &mut WallClock::new(), session, pending, budget_ms);
     for report in reports {
         eprintln!("{}", entry_point_expiry_notice(&report, budget_ms));
     }
@@ -2502,79 +2455,93 @@ mod tests {
     // point is submitted as its own composer line")
     // -----------------------------------------------------------------------
 
-    /// A scripted pane capturer and virtual clock. Each pane's script is
-    /// consumed one capture at a time; the final entry repeats forever, so a
-    /// fixture that never goes idle simply runs the budget out.
-    struct FakeEntryPointIo {
-        scripts: std::collections::HashMap<usize, Vec<String>>,
-        taken: std::collections::HashMap<usize, usize>,
-        /// Per-pane `#{pane_current_command}`; absent panes report a CLI.
-        commands: std::collections::HashMap<usize, String>,
-        /// Every keystroke, in order, as `(pane, "text:…" | "key:…")`.
-        sent: Vec<(usize, String)>,
+    /// A virtual clock: sleeping advances it, nothing waits.
+    #[derive(Default)]
+    struct VirtualClock {
         elapsed: u64,
     }
 
-    /// The sentinel a script entry uses to mean "this capture FAILED" — not
-    /// "the pane was empty". The two are opposites for the idle decision.
-    const CAPTURE_FAILED: &str = "<<capture-failed>>";
-
-    impl FakeEntryPointIo {
-        fn new(scripts: &[(usize, &[&str])]) -> Self {
-            Self {
-                scripts: scripts
-                    .iter()
-                    .map(|(pane, script)| {
-                        (*pane, script.iter().map(|s| (*s).to_string()).collect())
-                    })
-                    .collect(),
-                taken: std::collections::HashMap::new(),
-                commands: std::collections::HashMap::new(),
-                sent: Vec::new(),
-                elapsed: 0,
-            }
-        }
-
-        /// Makes `pane`'s foreground process `command` (e.g. a shell name).
-        fn with_command(mut self, pane: usize, command: &str) -> Self {
-            self.commands.insert(pane, command.to_string());
-            self
-        }
-    }
-
-    impl EntryPointIo for FakeEntryPointIo {
-        fn capture(&mut self, _session: &str, pane_index: usize) -> Option<String> {
-            let script = self.scripts.get(&pane_index).cloned().unwrap_or_default();
-            let cursor = self.taken.entry(pane_index).or_insert(0);
-            let idx = (*cursor).min(script.len().saturating_sub(1));
-            *cursor += 1;
-            let frame = script.get(idx).cloned().unwrap_or_default();
-            (frame != CAPTURE_FAILED).then_some(frame)
-        }
-
-        fn pane_command(&mut self, _session: &str, pane_index: usize) -> Option<String> {
-            let command = self
-                .commands
-                .get(&pane_index)
-                .cloned()
-                .unwrap_or_else(|| "paw-test-cli".to_string());
-            (command != CAPTURE_FAILED).then_some(command)
-        }
-
-        fn send_text(&mut self, _session: &str, pane_index: usize, text: &str) {
-            self.sent.push((pane_index, format!("text:{text}")));
-        }
-
-        fn send_key(&mut self, _session: &str, pane_index: usize, key: &str) {
-            self.sent.push((pane_index, format!("key:{key}")));
-        }
-
+    impl EntryPointClock for VirtualClock {
         fn sleep(&mut self, ms: u64) {
             self.elapsed += ms;
         }
 
         fn elapsed_ms(&self) -> u64 {
             self.elapsed
+        }
+    }
+
+    /// The shared fake terminal backend scripted per pane, plus a virtual
+    /// clock. Each pane's screens are read one capture at a time and the
+    /// final one repeats, so a fixture that never goes idle simply runs the
+    /// budget out.
+    struct FakeEntryPointIo {
+        backend: git_paw::terminal::fake::FakeBackend,
+        clock: VirtualClock,
+        panes: Vec<usize>,
+    }
+
+    /// The sentinel a script entry uses to mean "this read FAILED" — not
+    /// "the pane was empty". The two are opposites for the idle decision.
+    const CAPTURE_FAILED: &str = "<<capture-failed>>";
+
+    /// The session every entry-point fixture runs in.
+    const SESSION: &str = "paw-x";
+
+    impl FakeEntryPointIo {
+        fn new(scripts: &[(usize, &[&str])]) -> Self {
+            use git_paw::terminal::TerminalBackend;
+            let backend = git_paw::terminal::fake::FakeBackend::new();
+            for (pane, script) in scripts {
+                let screens: Vec<Option<&str>> = script
+                    .iter()
+                    .map(|frame| (*frame != CAPTURE_FAILED).then_some(*frame))
+                    .collect();
+                backend.script_screens(&backend.surface_at(SESSION, *pane), &screens);
+            }
+            Self {
+                backend,
+                clock: VirtualClock::default(),
+                panes: scripts.iter().map(|(pane, _)| *pane).collect(),
+            }
+        }
+
+        /// Makes `pane`'s foreground process `command` (e.g. a shell name),
+        /// or a failed read for [`CAPTURE_FAILED`].
+        fn with_command(self, pane: usize, command: &str) -> Self {
+            use git_paw::terminal::TerminalBackend;
+            self.backend.script_foreground_process(
+                &self.backend.surface_at(SESSION, pane),
+                (command != CAPTURE_FAILED).then_some(command),
+            );
+            self
+        }
+
+        /// Every keystroke, in order, as `(pane, "text:…" | "key:…")`.
+        fn sent(&self) -> Vec<(usize, String)> {
+            use git_paw::terminal::TerminalBackend;
+            use git_paw::terminal::fake::Operation;
+            let pane_of = |surface: &git_paw::terminal::SurfaceId| {
+                self.panes
+                    .iter()
+                    .copied()
+                    .find(|p| self.backend.surface_at(SESSION, *p) == *surface)
+                    .expect("keystroke on a scripted pane")
+            };
+            self.backend
+                .operations()
+                .into_iter()
+                .filter_map(|op| match op {
+                    Operation::SendText { surface, text } => {
+                        Some((pane_of(&surface), format!("text:{text}")))
+                    }
+                    Operation::SendKey { surface, key } => {
+                        Some((pane_of(&surface), format!("key:{key:?}")))
+                    }
+                    Operation::PrefillText { .. } => panic!("the entry point is never pre-filled"),
+                    _ => None,
+                })
+                .collect()
         }
     }
 
@@ -2605,13 +2572,60 @@ mod tests {
     #[test]
     fn an_idle_pane_receives_the_entry_point_and_its_own_enter() {
         let mut io = FakeEntryPointIo::new(&[(1, &[IDLE])]);
-        let expired = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 60_000);
+        let expired = submit_entry_points_with(
+            &io.backend,
+            &mut io.clock,
+            SESSION,
+            vec![pending(1)],
+            60_000,
+        );
         assert!(expired.is_empty(), "the pane was idle, so nothing expired");
         assert_eq!(
-            io.sent,
+            io.sent(),
             vec![
                 (1, "text:/opsx:apply my-change".to_string()),
                 (1, "key:Enter".to_string()),
+            ]
+        );
+    }
+
+    /// Maps to `code-architecture` scenario "Entry-point idle wait and submit
+    /// are asserted without tmux": a busy screen and then idle screens are
+    /// observed only through screen-tail reads; typing waits for the idle
+    /// streak, a fresh read and the foreground-process read, and the entry
+    /// point goes out as a text operation, a further read, then `Enter`.
+    #[test]
+    fn the_entry_point_wait_and_submit_go_through_the_terminal_port() {
+        use git_paw::terminal::fake::Operation;
+        use git_paw::terminal::{Key, TerminalBackend};
+        let mut io = FakeEntryPointIo::new(&[(1, &[MID_RESPONSE, IDLE])]);
+        let reports = submit_entry_points_with(
+            &io.backend,
+            &mut io.clock,
+            SESSION,
+            vec![pending(1)],
+            60_000,
+        );
+        assert!(reports.is_empty(), "the pane went idle: {reports:?}");
+        let surface = io.backend.surface_at(SESSION, 1);
+        let read = Operation::CaptureTail(surface.clone());
+        assert_eq!(
+            io.backend.operations_on(&surface),
+            vec![
+                read.clone(), // busy
+                read.clone(), // idle 1
+                read.clone(), // idle 2
+                read.clone(), // fresh read immediately before typing
+                Operation::ForegroundProcess(surface.clone()),
+                Operation::SendText {
+                    surface: surface.clone(),
+                    text: "/opsx:apply my-change".to_string(),
+                },
+                read, // the pre-Enter re-check
+                Operation::SendKey {
+                    surface,
+                    key: Key::Enter,
+                },
             ]
         );
     }
@@ -2621,9 +2635,10 @@ mod tests {
     #[test]
     fn a_pane_mid_response_is_never_typed_into() {
         let mut io = FakeEntryPointIo::new(&[(1, &[MID_RESPONSE])]);
-        let expired = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 1_000);
+        let expired =
+            submit_entry_points_with(&io.backend, &mut io.clock, SESSION, vec![pending(1)], 1_000);
         assert_eq!(expired.len(), 1, "the pane never went idle");
-        assert!(io.sent.is_empty(), "no keystroke may reach a busy pane");
+        assert!(io.sent().is_empty(), "no keystroke may reach a busy pane");
     }
 
     /// Maps to scenario "A pane at a permission prompt gets nothing typed" —
@@ -2632,10 +2647,11 @@ mod tests {
     #[test]
     fn a_pane_at_a_permission_prompt_is_never_typed_into() {
         let mut io = FakeEntryPointIo::new(&[(1, &[LIVE_PROMPT])]);
-        let expired = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 1_000);
+        let expired =
+            submit_entry_points_with(&io.backend, &mut io.clock, SESSION, vec![pending(1)], 1_000);
         assert_eq!(expired.len(), 1);
         assert!(
-            io.sent.is_empty(),
+            io.sent().is_empty(),
             "a keystroke here would ANSWER the prompt"
         );
 
@@ -2670,9 +2686,10 @@ mod tests {
     #[test]
     fn a_pane_with_a_non_empty_composer_is_never_typed_into() {
         let mut io = FakeEntryPointIo::new(&[(1, &[BUFFERED])]);
-        let expired = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 1_000);
+        let expired =
+            submit_entry_points_with(&io.backend, &mut io.clock, SESSION, vec![pending(1)], 1_000);
         assert_eq!(expired.len(), 1);
-        assert!(io.sent.is_empty());
+        assert!(io.sent().is_empty());
     }
 
     /// A single idle capture is not enough — the instant between the
@@ -2680,9 +2697,10 @@ mod tests {
     #[test]
     fn one_idle_capture_is_not_enough_to_type() {
         let mut io = FakeEntryPointIo::new(&[(1, &[IDLE, MID_RESPONSE])]);
-        let expired = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 1_000);
+        let expired =
+            submit_entry_points_with(&io.backend, &mut io.clock, SESSION, vec![pending(1)], 1_000);
         assert_eq!(expired.len(), 1, "the streak was broken before the second");
-        assert!(io.sent.is_empty());
+        assert!(io.sent().is_empty());
     }
 
     /// The TOCTOU re-check: two idle captures, then a permission prompt on
@@ -2690,10 +2708,11 @@ mod tests {
     #[test]
     fn a_prompt_raised_between_the_check_and_the_keystroke_cancels_it() {
         let mut io = FakeEntryPointIo::new(&[(1, &[IDLE, IDLE, LIVE_PROMPT])]);
-        let expired = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 1_000);
+        let expired =
+            submit_entry_points_with(&io.backend, &mut io.clock, SESSION, vec![pending(1)], 1_000);
         assert_eq!(expired.len(), 1);
         assert!(
-            io.sent.is_empty(),
+            io.sent().is_empty(),
             "the re-capture before typing must veto the keystroke"
         );
     }
@@ -2704,9 +2723,15 @@ mod tests {
     #[test]
     fn an_unrecognised_cli_is_treated_as_idle() {
         let mut io = FakeEntryPointIo::new(&[(1, &["some other CLI's chrome, no known markers"])]);
-        let expired = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 60_000);
+        let expired = submit_entry_points_with(
+            &io.backend,
+            &mut io.clock,
+            SESSION,
+            vec![pending(1)],
+            60_000,
+        );
         assert!(expired.is_empty());
-        assert_eq!(io.sent.len(), 2);
+        assert_eq!(io.sent().len(), 2);
     }
 
     /// Maps to decision D3: the panes are waited for concurrently, so a pane
@@ -2715,8 +2740,13 @@ mod tests {
     #[test]
     fn panes_are_waited_for_concurrently_not_one_after_another() {
         let mut io = FakeEntryPointIo::new(&[(1, &[IDLE]), (2, &[MID_RESPONSE])]);
-        let expired =
-            submit_entry_points_with(&mut io, "paw-x", vec![pending(1), pending(2)], 1_000);
+        let expired = submit_entry_points_with(
+            &io.backend,
+            &mut io.clock,
+            SESSION,
+            vec![pending(1), pending(2)],
+            1_000,
+        );
         assert_eq!(
             expired
                 .iter()
@@ -2724,8 +2754,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![2]
         );
-        assert!(io.sent.iter().all(|(pane, _)| *pane == 1));
-        assert_eq!(io.sent.len(), 2);
+        assert!(io.sent().iter().all(|(pane, _)| *pane == 1));
+        assert_eq!(io.sent().len(), 2);
     }
 
     /// Maps to scenario "A pane whose CLI has exited is not typed into".
@@ -2738,11 +2768,17 @@ mod tests {
     fn a_pane_that_reverted_to_a_shell_is_never_typed_into() {
         for shell in ["bash", "zsh", "sh", "fish"] {
             let mut io = FakeEntryPointIo::new(&[(1, &[IDLE])]).with_command(1, shell);
-            let reports = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 60_000);
+            let reports = submit_entry_points_with(
+                &io.backend,
+                &mut io.clock,
+                SESSION,
+                vec![pending(1)],
+                60_000,
+            );
             assert!(
-                io.sent.is_empty(),
+                io.sent().is_empty(),
                 "{shell} is a command interpreter, not a composer; sent: {:?}",
-                io.sent
+                io.sent()
             );
             assert_eq!(
                 reports[0].failure,
@@ -2776,14 +2812,19 @@ mod tests {
             let mut pane = pending(1);
             pane.entry_point = hostile.to_string();
             let mut io = FakeEntryPointIo::new(&[(1, &[IDLE])]);
-            let reports = submit_entry_points_with(&mut io, "paw-x", vec![pane], 60_000);
+            let reports =
+                submit_entry_points_with(&io.backend, &mut io.clock, SESSION, vec![pane], 60_000);
             assert!(
-                io.sent.is_empty(),
+                io.sent().is_empty(),
                 "{hostile:?} must never be typed; sent: {:?}",
-                io.sent
+                io.sent()
             );
             assert_eq!(reports[0].failure, EntryPointFailure::UnsafeText);
-            assert_eq!(io.elapsed_ms(), 0, "and it must not even be waited for");
+            assert_eq!(
+                io.clock.elapsed_ms(),
+                0,
+                "and it must not even be waited for"
+            );
         }
     }
 
@@ -2811,9 +2852,15 @@ mod tests {
     #[test]
     fn a_prompt_raised_during_the_settle_delay_withholds_the_enter() {
         let mut io = FakeEntryPointIo::new(&[(1, &[IDLE, IDLE, IDLE, LIVE_PROMPT])]);
-        let reports = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 60_000);
+        let reports = submit_entry_points_with(
+            &io.backend,
+            &mut io.clock,
+            SESSION,
+            vec![pending(1)],
+            60_000,
+        );
         assert_eq!(
-            io.sent,
+            io.sent(),
             vec![(1, "text:/opsx:apply my-change".to_string())],
             "the text went out, but the Enter must be withheld"
         );
@@ -2836,8 +2883,9 @@ mod tests {
     #[test]
     fn a_failed_capture_is_not_evidence_of_idleness() {
         let mut io = FakeEntryPointIo::new(&[(1, &[CAPTURE_FAILED])]);
-        let reports = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 1_000);
-        assert!(io.sent.is_empty(), "a blind pane must not be typed into");
+        let reports =
+            submit_entry_points_with(&io.backend, &mut io.clock, SESSION, vec![pending(1)], 1_000);
+        assert!(io.sent().is_empty(), "a blind pane must not be typed into");
         assert_eq!(reports[0].failure, EntryPointFailure::Expired);
     }
 
@@ -2850,11 +2898,12 @@ mod tests {
     #[test]
     fn a_failed_capture_resets_the_idle_streak() {
         let mut io = FakeEntryPointIo::new(&[(1, &[IDLE, CAPTURE_FAILED, IDLE, MID_RESPONSE])]);
-        let reports = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 1_000);
+        let reports =
+            submit_entry_points_with(&io.backend, &mut io.clock, SESSION, vec![pending(1)], 1_000);
         assert!(
-            io.sent.is_empty(),
+            io.sent().is_empty(),
             "a capture that failed must not complete the streak; sent: {:?}",
-            io.sent
+            io.sent()
         );
         assert_eq!(reports[0].failure, EntryPointFailure::Expired);
     }
@@ -2867,11 +2916,12 @@ mod tests {
     #[test]
     fn a_pane_whose_process_cannot_be_read_is_not_typed_into() {
         let mut io = FakeEntryPointIo::new(&[(1, &[IDLE])]).with_command(1, CAPTURE_FAILED);
-        let reports = submit_entry_points_with(&mut io, "paw-x", vec![pending(1)], 1_000);
+        let reports =
+            submit_entry_points_with(&io.backend, &mut io.clock, SESSION, vec![pending(1)], 1_000);
         assert!(
-            io.sent.is_empty(),
+            io.sent().is_empty(),
             "a pane whose process could not be read must receive nothing; sent: {:?}",
-            io.sent
+            io.sent()
         );
         assert_eq!(reports[0].failure, EntryPointFailure::Expired);
     }
@@ -2905,9 +2955,14 @@ mod tests {
     #[test]
     fn no_declared_entry_points_means_no_wait_at_all() {
         let mut io = FakeEntryPointIo::new(&[]);
-        let expired = submit_entry_points_with(&mut io, "paw-x", Vec::new(), 60_000);
+        let expired =
+            submit_entry_points_with(&io.backend, &mut io.clock, SESSION, Vec::new(), 60_000);
         assert!(expired.is_empty());
-        assert_eq!(io.elapsed_ms(), 0, "the loop must not even sleep once");
+        assert_eq!(
+            io.clock.elapsed_ms(),
+            0,
+            "the loop must not even sleep once"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4897,10 +4952,10 @@ mod permission_seeding_removed_tests {
         assert!(
             attached
                 .pane
-                .cli_command
+                .launch_command
                 .contains(&format!("--session-id {id}")),
             "pane command should carry --session-id <id>, got: {}",
-            attached.pane.cli_command
+            attached.pane.launch_command
         );
     }
 
@@ -4969,7 +5024,7 @@ mod permission_seeding_removed_tests {
 
         let attached = attach_agent(&ctx, "feat-codex", None, 0).expect("attach_agent succeeds");
 
-        assert_eq!(attached.pane.cli_command, "codex");
+        assert_eq!(attached.pane.launch_command, "codex");
         assert_eq!(attached.entry.cli_session_id, None);
     }
 
@@ -5007,18 +5062,18 @@ mod permission_seeding_removed_tests {
 
         let flags_pos = attached
             .pane
-            .cli_command
+            .launch_command
             .find("--dangerously-skip-permissions")
             .expect("approval flag present");
         let session_pos = attached
             .pane
-            .cli_command
+            .launch_command
             .find("--session-id")
             .expect("session-id flag present");
         assert!(
             flags_pos < session_pos,
             "--dangerously-skip-permissions must precede --session-id, got: {}",
-            attached.pane.cli_command
+            attached.pane.launch_command
         );
     }
 }

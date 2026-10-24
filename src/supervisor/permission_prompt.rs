@@ -1,15 +1,14 @@
 //! Permission-prompt detection.
 //!
 //! The one module that answers "is a permission prompt on screen, and which
-//! command is it about?" for every feature that needs it: capture pane via
-//! `tmux capture-pane -p -t <session>:<pane>`, scan for the resolved CLI
+//! command is it about?" for every feature that needs it: given a surface's
+//! screen (read through the terminal port), scan for the resolved CLI
 //! profile's approval markers, decide whether the prompt is LIVE (the
 //! live-prompt gate), read the CLI's idle input box, and extract the prompted
 //! command slice or file-operation target path.
 //!
-//! Detection is intentionally only a thin wrapper around `tmux capture-pane`
-//! and string scanning — no parsing of agent CLI internals. Every marker and
-//! pattern is sourced from the resolved `cli-prompt-profiles` profile, except
+//! Detection is intentionally only string scanning over a captured screen —
+//! no parsing of agent CLI internals. Every marker and pattern is sourced from the resolved `cli-prompt-profiles` profile, except
 //! the security-relevant window sizes and structural rules, which stay
 //! compiled.
 //!
@@ -17,33 +16,12 @@
 //! prompt is asking for is decided by the agent CLI's own permission system or
 //! by a human — never here.
 
-use std::process::Command;
 use std::sync::OnceLock;
 
 use regex::Regex;
 
 use crate::config::{CliPromptProfile, claude_prompt_profile};
 use crate::static_regex::static_regex;
-
-/// Captures the content of pane `pane_index` in `session` via
-/// `tmux capture-pane -p -t <session>:<pane>`.
-///
-/// Returns `None` when tmux is unavailable, the target does not exist, or
-/// the pane has no content. The function never panics on tmux exit codes —
-/// any error is treated as "no content available".
-#[must_use]
-pub fn capture_pane(session: &str, pane_index: usize) -> Option<String> {
-    let target = format!("{session}:0.{pane_index}");
-    let output = Command::new("tmux")
-        .args(["capture-pane", "-p", "-t", &target])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let s = String::from_utf8(output.stdout).ok()?;
-    Some(s)
-}
 
 /// Returns whether `captured` carries one of `profile`'s approval markers —
 /// that is, whether the pane is showing a permission prompt at all.
@@ -555,17 +533,6 @@ mod tests {
             "the command text must not change the detection result"
         );
         assert!(has_approval_marker(curl, profile));
-    }
-
-    /// Detection is non-invasive: capturing a session that does not exist
-    /// yields nothing rather than erroring or touching the pane.
-    #[test]
-    fn capture_pane_returns_none_for_nonexistent_session() {
-        let out = capture_pane("paw-nonexistent-session-aabbccdd-zz", 0);
-        assert!(
-            out.is_none(),
-            "nonexistent session should not capture, got {out:?}"
-        );
     }
 
     #[test]

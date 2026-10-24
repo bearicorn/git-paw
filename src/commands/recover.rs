@@ -13,9 +13,11 @@ use git_paw::config::{self, ApprovalLevel, CustomCli, PawConfig, SupervisorConfi
 use git_paw::error::PawError;
 use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry};
 use git_paw::surface::SessionLayout;
+use git_paw::terminal::tmux::TmuxBackend;
+use git_paw::terminal::{SessionPlan, SurfaceSpec, TerminalBackend};
 use git_paw::tmux;
 
-use super::helpers::{dashboard_command, warn_if_broker_is_exposed};
+use super::helpers::{dashboard_command, launch_session, warn_if_broker_is_exposed};
 use crate::attach_or_print_hint;
 
 /// Builds the recovery-time CLI launch command for `entry`: the command
@@ -131,8 +133,11 @@ pub(crate) fn recover_session_detached(
     // `split-window` commands accumulate panes on top of it, overflowing the
     // window (W2-3: a 4-worktree recovery produced 10-11 panes and
     // `no space for new pane`). Killing a non-existent session is a no-op here.
-    if tmux::is_session_alive(&existing.session_name).unwrap_or(false)
-        && let Err(e) = tmux::kill_session(&existing.session_name)
+    let backend = TmuxBackend::new();
+    if backend
+        .session_alive(&existing.session_name)
+        .unwrap_or(false)
+        && let Err(e) = backend.close_session(&existing.session_name)
     {
         eprintln!(
             "warning: could not tear down stale tmux session '{}' before recovery: {e}",
@@ -151,7 +156,7 @@ pub(crate) fn recover_session_detached(
         .unwrap_or(&default_sup)
         .agent_approval;
 
-    let (tmux_session, layout) = match mode {
+    let (plan, layout) = match mode {
         SessionMode::Supervisor => {
             recover_supervisor_session(repo_root, existing, &config, broker_url.as_deref(), mouse)?
         }
@@ -198,18 +203,9 @@ pub(crate) fn recover_session_detached(
     // the broker comes up.
     warn_if_broker_is_exposed(&config.broker);
 
-    tmux_session.execute()?;
-
-    // Rebalance each agent row to equal width on the live window, as a fresh
-    // start does (design D4): recovery rebuilds the grid with the same raw
-    // `split-window -h` chain, which renders a row as 50/25/25.
-    if let Err(e) = tmux::rebalance_agent_rows(
-        &tmux_session.name,
-        layout.first_agent_index(),
-        updated.worktrees.len(),
-    ) {
-        eprintln!("warning: could not rebalance agent-row widths: {e}");
-    }
+    // Rebuild the session and even each agent row's width, as a fresh start
+    // does (design D4). Recovery attaches no session logging.
+    launch_session(&backend, &plan, &layout, None)?;
 
     // Rewrite the per-repo discovery file `sweep.sh` reads. Recovery REBUILDS
     // the layout, so a file written by the original launch records pane
@@ -219,12 +215,12 @@ pub(crate) fn recover_session_detached(
     // The offsets come from the layout just rebuilt above.
     crate::write_repo_discovery_file(
         repo_root,
-        &tmux_session.name,
+        &plan.name,
         &updated.worktrees,
         layout.first_agent_index(),
     );
 
-    Ok(tmux_session.name)
+    Ok(plan.name)
 }
 
 /// Rebuild a bare-mode (non-supervisor) session: dashboard at pane 0 (when
@@ -241,34 +237,45 @@ fn recover_bare_session<S: std::hash::BuildHasher>(
     border_affordances: bool,
     approval: ApprovalLevel,
     clis: &HashMap<String, CustomCli, S>,
-) -> Result<(tmux::TmuxSession, SessionLayout), PawError> {
-    let mut builder = tmux::TmuxSessionBuilder::new(&existing.project_name)
-        .session_name(existing.session_name.clone())
-        .mouse_mode(mouse)
-        .border_affordances(border_affordances);
+) -> Result<(SessionPlan, SessionLayout), PawError> {
+    let plan = SessionPlan {
+        name: existing.session_name.clone(),
+        mode: SessionMode::Bare,
+        dashboard: broker_url.map(|_| SurfaceSpec {
+            label: "dashboard".to_string(),
+            owner: repo_root.to_path_buf(),
+            launch_command: dashboard_command(),
+        }),
+        surfaces: existing
+            .worktrees
+            .iter()
+            .map(|entry| SurfaceSpec {
+                label: entry.branch.clone(),
+                owner: entry.worktree_path.clone(),
+                launch_command: cli_command_for_recovery(entry, approval, clis),
+            })
+            .collect(),
+        env: broker_url
+            .map(|url| vec![("GIT_PAW_BROKER_URL".to_string(), url.to_string())])
+            .unwrap_or_default(),
+        mouse,
+        show_labels: border_affordances,
+    };
 
-    if let Some(url) = broker_url {
-        let repo_str = repo_root.to_string_lossy().to_string();
-        builder = builder.dashboard(tmux::PaneSpec {
-            branch: "dashboard".to_string(),
-            worktree: repo_str,
-            cli_command: dashboard_command(),
-        });
-        builder = builder.set_environment("GIT_PAW_BROKER_URL", url);
+    // Reject a plan the backend cannot build BEFORE the caller re-saves the
+    // session as active: a session with no surface at all, or more agents
+    // than the grid holds.
+    if plan.dashboard.is_none() && plan.surfaces.is_empty() {
+        return Err(PawError::TmuxError(
+            "cannot create a session with no panes".to_owned(),
+        ));
     }
-
-    for entry in &existing.worktrees {
-        builder = builder.add_pane(tmux::PaneSpec {
-            branch: entry.branch.clone(),
-            worktree: entry.worktree_path.to_string_lossy().to_string(),
-            cli_command: cli_command_for_recovery(entry, approval, clis),
-        });
-    }
+    git_paw::surface::layout_for(plan.surfaces.len(), plan.dashboard.is_some())?;
 
     // The dashboard occupies pane 0 when the broker is enabled, so coding
     // agents start at pane 1; without it they start at pane 0.
     let layout = SessionLayout::planned(SessionMode::Bare, broker_url.is_some());
-    Ok((builder.build()?, layout))
+    Ok((plan, layout))
 }
 
 /// Rebuild a supervisor-mode session with the current layout: dashboard at
@@ -285,7 +292,7 @@ fn recover_supervisor_session(
     config: &PawConfig,
     broker_url: Option<&str>,
     mouse: bool,
-) -> Result<(tmux::TmuxSession, SessionLayout), PawError> {
+) -> Result<(SessionPlan, SessionLayout), PawError> {
     // Fall back to a default config when [supervisor] is absent so a
     // re-launched session does not error on a config the prior boot
     // already accepted.
@@ -295,21 +302,22 @@ fn recover_supervisor_session(
         .as_ref()
         .unwrap_or(&default_supervisor_cfg);
 
-    let layout = git_paw::surface::supervisor_layout(existing.worktrees.len(), true)?;
+    // Reject more agents than the grid holds before the caller re-saves the
+    // session as active.
+    git_paw::surface::supervisor_layout(existing.worktrees.len(), true)?;
 
-    let repo_str = repo_root.to_string_lossy().to_string();
-    let dashboard_pane = tmux::PaneSpec {
-        branch: "dashboard".to_string(),
-        worktree: repo_str,
-        cli_command: dashboard_command(),
+    let dashboard_pane = SurfaceSpec {
+        label: "dashboard".to_string(),
+        owner: repo_root.to_path_buf(),
+        launch_command: dashboard_command(),
     };
-    let agent_panes: Vec<tmux::PaneSpec> = existing
+    let agent_panes: Vec<SurfaceSpec> = existing
         .worktrees
         .iter()
-        .map(|entry| tmux::PaneSpec {
-            branch: entry.branch.clone(),
-            worktree: entry.worktree_path.to_string_lossy().to_string(),
-            cli_command: cli_command_for_recovery(
+        .map(|entry| SurfaceSpec {
+            label: entry.branch.clone(),
+            owner: entry.worktree_path.clone(),
+            launch_command: cli_command_for_recovery(
                 entry,
                 supervisor_cfg.agent_approval,
                 &config.clis,
@@ -321,19 +329,18 @@ fn recover_supervisor_session(
         .map(|url| vec![("GIT_PAW_BROKER_URL".to_string(), url.to_string())])
         .unwrap_or_default();
 
-    let session = tmux::build_supervisor_session(
-        &existing.project_name,
-        Some(existing.session_name.clone()),
-        &dashboard_pane,
-        &agent_panes,
-        layout,
+    let plan = SessionPlan {
+        name: existing.session_name.clone(),
+        mode: SessionMode::Supervisor,
+        dashboard: Some(dashboard_pane),
+        surfaces: agent_panes,
+        env: env_vars,
         mouse,
-        config.border_affordances_enabled(),
-        &env_vars,
-    )?;
+        show_labels: config.border_affordances_enabled(),
+    };
 
     Ok((
-        session,
+        plan,
         SessionLayout::planned(SessionMode::Supervisor, broker_url.is_some()),
     ))
 }
@@ -446,5 +453,113 @@ mod tests {
             cli_command_for_recovery(&e, ApprovalLevel::Auto, &clis),
             "unmapped-cli"
         );
+    }
+
+    /// `code-architecture` scenario "Launch plan is asserted without tmux": a
+    /// two-worktree plan with the broker enabled, opened through the fake
+    /// backend, records one dashboard surface and two coding surfaces with
+    /// their labels, owners and launch commands, then evens the agent grid.
+    #[test]
+    fn launch_plan_is_asserted_without_tmux() {
+        use git_paw::terminal::fake::{FakeBackend, Operation};
+        use git_paw::terminal::{GridGeometry, TerminalBackend};
+
+        let mut a = entry("claude", None);
+        a.branch = "feat/a".to_string();
+        a.worktree_path = PathBuf::from("/repo/.git-paw/worktrees/feat-a");
+        let mut b = entry("codex", None);
+        b.branch = "feat/b".to_string();
+        b.worktree_path = PathBuf::from("/repo/.git-paw/worktrees/feat-b");
+        let existing = Session {
+            session_name: "paw-proj".to_string(),
+            repo_path: PathBuf::from("/repo"),
+            project_name: "proj".to_string(),
+            created_at: std::time::SystemTime::now(),
+            status: SessionStatus::Stopped,
+            worktrees: vec![a, b],
+            broker_port: Some(9119),
+            broker_bind: Some("127.0.0.1".to_string()),
+            broker_log_path: None,
+            mode: SessionMode::Bare,
+            dashboard_pane: Some(0),
+            layout: None,
+        };
+        let clis = HashMap::new();
+        let (plan, layout) = recover_bare_session(
+            Path::new("/repo"),
+            &existing,
+            Some("http://127.0.0.1:9119"),
+            true,
+            true,
+            ApprovalLevel::Manual,
+            &clis,
+        )
+        .expect("a two-agent plan builds");
+
+        let fake = FakeBackend::new();
+        launch_session(&fake, &plan, &layout, None).expect("the fake opens it");
+
+        let ops = fake.operations();
+        let Operation::OpenSession(opened) = &ops[0] else {
+            panic!("the launch opens the session first, got {ops:?}");
+        };
+        let dashboard = opened.dashboard.as_ref().expect("broker → dashboard");
+        assert_eq!(dashboard.label, "dashboard");
+        assert_eq!(dashboard.owner, PathBuf::from("/repo"));
+        assert!(dashboard.launch_command.ends_with("__dashboard"));
+        let coding: Vec<(&str, &Path, &str)> = opened
+            .surfaces
+            .iter()
+            .map(|s| {
+                (
+                    s.label.as_str(),
+                    s.owner.as_path(),
+                    s.launch_command.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            coding,
+            vec![
+                (
+                    "feat/a",
+                    Path::new("/repo/.git-paw/worktrees/feat-a"),
+                    "claude"
+                ),
+                (
+                    "feat/b",
+                    Path::new("/repo/.git-paw/worktrees/feat-b"),
+                    "codex"
+                ),
+            ]
+        );
+        // Three surfaces now exist, owned as planned, in layout order.
+        let owners: Vec<_> = fake
+            .list_surfaces("paw-proj")
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.position, s.owner))
+            .collect();
+        assert_eq!(
+            owners,
+            vec![
+                (0, Some(PathBuf::from("/repo"))),
+                (1, Some(PathBuf::from("/repo/.git-paw/worktrees/feat-a"))),
+                (2, Some(PathBuf::from("/repo/.git-paw/worktrees/feat-b"))),
+            ]
+        );
+        assert_eq!(
+            ops[1],
+            Operation::Layout {
+                session: "paw-proj".to_string(),
+                grid: GridGeometry {
+                    first_agent: 1,
+                    agent_count: 2,
+                    has_top_row: true,
+                },
+            }
+        );
+        // The fake spawns no process: nothing here touched a terminal.
+        assert!(ops.iter().all(|op| !op.is_keystroke()));
     }
 }

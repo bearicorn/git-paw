@@ -1,0 +1,17 @@
+{
+  "session_name": "paw-proj",
+  "agents": [
+    {
+      "branch_id": "feat-a",
+      "worktree_path": "/repo/.git-paw/worktrees/feat-a",
+      "cli": "claude",
+      "pane_index": 1
+    },
+    {
+      "branch_id": "feat-b",
+      "worktree_path": "/repo/.git-paw/worktrees/feat-b",
+      "cli": "codex",
+      "pane_index": 2
+    }
+  ]
+}

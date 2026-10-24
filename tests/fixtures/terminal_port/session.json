@@ -1,0 +1,26 @@
+{
+  "session_name": "paw-proj",
+  "repo_path": "/repo",
+  "project_name": "proj",
+  "created_at": "2026-10-20T08:00:00Z",
+  "status": "active",
+  "worktrees": [
+    {
+      "branch": "feat/a",
+      "worktree_path": "/repo/.git-paw/worktrees/feat-a",
+      "cli": "claude",
+      "branch_created": false
+    },
+    {
+      "branch": "feat/b",
+      "worktree_path": "/repo/.git-paw/worktrees/feat-b",
+      "cli": "codex",
+      "branch_created": false
+    }
+  ],
+  "broker_port": 9119,
+  "broker_bind": "127.0.0.1",
+  "mode": "supervisor",
+  "dashboard_pane": 0,
+  "layout": "grid"
+}

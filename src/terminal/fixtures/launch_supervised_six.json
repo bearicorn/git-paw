@@ -1,0 +1,602 @@
+[
+  {
+    "argv": [
+      "tmux",
+      "new-session",
+      "-d",
+      "-s",
+      "paw-proj",
+      "-x",
+      "480",
+      "-y",
+      "140",
+      "-e",
+      "DISABLE_AUTO_UPDATE=true",
+      "-e",
+      "DISABLE_UPDATE_PROMPT=true",
+      "-c",
+      "/repo"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-option",
+      "-g",
+      "default-size",
+      "480x140"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-environment",
+      "-t",
+      "paw-proj",
+      "DISABLE_AUTO_UPDATE",
+      "true"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-environment",
+      "-t",
+      "paw-proj",
+      "DISABLE_UPDATE_PROMPT",
+      "true"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-option",
+      "-t",
+      "paw-proj",
+      "mouse",
+      "on"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-option",
+      "-t",
+      "paw-proj",
+      "pane-border-lines",
+      "double"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-option",
+      "-t",
+      "paw-proj",
+      "pane-border-style",
+      "fg=colour238"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-option",
+      "-t",
+      "paw-proj",
+      "pane-active-border-style",
+      "fg=colour45,bold"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-option",
+      "-t",
+      "paw-proj",
+      "pane-border-status",
+      "top"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-option",
+      "-t",
+      "paw-proj",
+      "pane-border-format",
+      "#[fg=colour39,bold,reverse] #{pane_index}: #{?#{@paw_role},#{@paw_role},#{pane_title}} #[default]"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-environment",
+      "-t",
+      "paw-proj",
+      "GIT_PAW_BROKER_URL",
+      "http://127.0.0.1:9119"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "select-pane",
+      "-t",
+      "paw-proj:0.0",
+      "-T",
+      "dashboard"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-option",
+      "-p",
+      "-t",
+      "paw-proj:0.0",
+      "@paw_role",
+      "dashboard"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.0",
+      "C-u"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.0",
+      "'/opt/bin/git-paw' __dashboard",
+      "Enter"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "split-window",
+      "-v",
+      "-t",
+      "paw-proj:0.0",
+      "-l",
+      "50%",
+      "-c",
+      "/repo/.git-paw/worktrees/feat-a"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "select-pane",
+      "-t",
+      "paw-proj:0.1",
+      "-T",
+      "feat/a"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-option",
+      "-p",
+      "-t",
+      "paw-proj:0.1",
+      "@paw_role",
+      "feat/a"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.1",
+      "C-u"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.1",
+      "claude",
+      "Enter"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "split-window",
+      "-h",
+      "-t",
+      "paw-proj:0.1",
+      "-c",
+      "/repo/.git-paw/worktrees/feat-b"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "select-pane",
+      "-t",
+      "paw-proj:0.2",
+      "-T",
+      "feat/b"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-option",
+      "-p",
+      "-t",
+      "paw-proj:0.2",
+      "@paw_role",
+      "feat/b"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.2",
+      "C-u"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.2",
+      "codex",
+      "Enter"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "split-window",
+      "-h",
+      "-t",
+      "paw-proj:0.2",
+      "-c",
+      "/repo/.git-paw/worktrees/feat-c"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "select-pane",
+      "-t",
+      "paw-proj:0.3",
+      "-T",
+      "feat/c"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-option",
+      "-p",
+      "-t",
+      "paw-proj:0.3",
+      "@paw_role",
+      "feat/c"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.3",
+      "C-u"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.3",
+      "claude",
+      "Enter"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "split-window",
+      "-h",
+      "-t",
+      "paw-proj:0.3",
+      "-c",
+      "/repo/.git-paw/worktrees/feat-d"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "select-pane",
+      "-t",
+      "paw-proj:0.4",
+      "-T",
+      "feat/d"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-option",
+      "-p",
+      "-t",
+      "paw-proj:0.4",
+      "@paw_role",
+      "feat/d"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.4",
+      "C-u"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.4",
+      "claude",
+      "Enter"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "split-window",
+      "-h",
+      "-t",
+      "paw-proj:0.4",
+      "-c",
+      "/repo/.git-paw/worktrees/feat-e"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "select-pane",
+      "-t",
+      "paw-proj:0.5",
+      "-T",
+      "feat/e"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-option",
+      "-p",
+      "-t",
+      "paw-proj:0.5",
+      "@paw_role",
+      "feat/e"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.5",
+      "C-u"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.5",
+      "claude",
+      "Enter"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "split-window",
+      "-v",
+      "-f",
+      "-t",
+      "paw-proj:0.5",
+      "-c",
+      "/repo/.git-paw/worktrees/feat-f"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "select-pane",
+      "-t",
+      "paw-proj:0.6",
+      "-T",
+      "feat/f"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-option",
+      "-p",
+      "-t",
+      "paw-proj:0.6",
+      "@paw_role",
+      "feat/f"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.6",
+      "C-u"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.6",
+      "claude",
+      "Enter"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.0",
+      "-y",
+      "50%"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.1",
+      "-y",
+      "25%"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.6",
+      "-y",
+      "25%"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "display-message",
+      "-p",
+      "-t",
+      "paw-proj:0",
+      "#{window_width}"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.1",
+      "-x",
+      "95"
+    ],
+    "stdio": "inherited"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.2",
+      "-x",
+      "95"
+    ],
+    "stdio": "inherited"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.3",
+      "-x",
+      "95"
+    ],
+    "stdio": "inherited"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.4",
+      "-x",
+      "95"
+    ],
+    "stdio": "inherited"
+  }
+]

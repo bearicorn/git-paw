@@ -1,0 +1,37 @@
+[
+  {
+    "argv": [
+      "tmux",
+      "split-window",
+      "-h",
+      "-b",
+      "-t",
+      "paw-proj:0.0",
+      "-c",
+      "/repo"
+    ],
+    "stdio": "inherited"
+  },
+  {
+    "argv": [
+      "tmux",
+      "select-pane",
+      "-t",
+      "paw-proj:0.0",
+      "-T",
+      "dashboard"
+    ],
+    "stdio": "inherited"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.0",
+      "'/opt/bin/git-paw' __dashboard",
+      "Enter"
+    ],
+    "stdio": "inherited"
+  }
+]

@@ -1,0 +1,38 @@
+[
+  {
+    "argv": [
+      "tmux",
+      "has-session",
+      "-t",
+      "paw-proj"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "kill-session",
+      "-t",
+      "paw-proj"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "attach-session",
+      "-t",
+      "paw-proj"
+    ],
+    "stdio": "inherited"
+  },
+  {
+    "argv": [
+      "tmux",
+      "detach-client",
+      "-s",
+      "paw-proj"
+    ],
+    "stdio": "captured"
+  }
+]

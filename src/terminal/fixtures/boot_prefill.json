@@ -1,0 +1,13 @@
+[
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-l",
+      "-t",
+      "paw-proj:0.1",
+      "BOOT"
+    ],
+    "stdio": "inherited"
+  }
+]

@@ -6,8 +6,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::command_runner::{CommandRunner, RealCommandRunner};
+use crate::command_runner::CommandRunner;
 use crate::config::{CliPromptProfile, CustomCli, claude_prompt_profile, resolve_prompt_profile};
+use crate::terminal::TerminalBackend;
 
 // ---------------------------------------------------------------------------
 // Launch-readiness gate (design D1, G1)
@@ -320,12 +321,16 @@ pub(crate) struct PaneCli<'a, S> {
 /// to Claude's markers for any variant whose command differs from its key.
 #[must_use]
 pub fn gate_pane_for_injection<S: std::hash::BuildHasher>(
+    backend: &dyn TerminalBackend,
     session_name: &str,
     pane_index: usize,
     cli_id: &str,
     cli_command: &str,
     clis: &HashMap<String, CustomCli, S>,
 ) -> ReadinessOutcome {
+    // Every read and keystroke goes through the terminal port, so this module
+    // depends on no supervisor code and the gate runs on any backend.
+    let surface = backend.surface_at(session_name, pane_index);
     gate_pane_with(
         ReadinessBudget::default(),
         &PaneCli {
@@ -333,10 +338,14 @@ pub fn gate_pane_for_injection<S: std::hash::BuildHasher>(
             cli_command,
             clis,
         },
-        || crate::supervisor::permission_prompt::capture_pane(session_name, pane_index),
-        |command| relaunch_cli_into_pane(&RealCommandRunner, session_name, pane_index, command),
+        || backend.capture_tail(&surface),
+        |command| {
+            let _ = backend.relaunch_surface(&surface, command);
+        },
         std::thread::sleep,
-        |digit| answer_dialog_in_pane(&RealCommandRunner, session_name, pane_index, digit),
+        |digit| {
+            let _ = backend.answer_dialog(&surface, digit);
+        },
     )
 }
 
@@ -380,15 +389,11 @@ where
 /// tmux errors are swallowed, matching [`relaunch_cli_into_pane`]'s posture; a
 /// pane that fails to respond still surfaces as
 /// [`ReadinessOutcome::DialogStuck`] once the launch budget elapses.
-pub(crate) fn answer_dialog_in_pane(
-    runner: &dyn CommandRunner,
-    session_name: &str,
-    pane_index: usize,
-    digit: u8,
-) {
-    let target = format!("{session_name}:0.{pane_index}");
+///
+/// `target` is the pane's tmux target, as the terminal backend encodes it.
+pub(crate) fn answer_dialog_in_pane(runner: &dyn CommandRunner, target: &str, digit: u8) {
     let key = digit.to_string();
-    let _ = runner.run_inheriting_stdio("tmux", &["send-keys", "-t", &target, &key, "Enter"]);
+    let _ = runner.run_inheriting_stdio("tmux", &["send-keys", "-t", target, &key, "Enter"]);
 }
 
 /// Relaunch `cli_command` into a pane that never reached readiness: clear the
@@ -400,14 +405,9 @@ pub(crate) fn answer_dialog_in_pane(
 /// assertable without a live pane. Both invocations inherit git-paw's stdio, as
 /// the previous inline `Command::new("tmux")…status()` calls did, so a tmux
 /// diagnostic still reaches the user's stderr even though the status is ignored.
-pub(crate) fn relaunch_cli_into_pane(
-    runner: &dyn CommandRunner,
-    session_name: &str,
-    pane_index: usize,
-    cli_command: &str,
-) {
-    let target = format!("{session_name}:0.{pane_index}");
-    let _ = runner.run_inheriting_stdio("tmux", &["send-keys", "-t", &target, "C-u"]);
-    let _ =
-        runner.run_inheriting_stdio("tmux", &["send-keys", "-t", &target, cli_command, "Enter"]);
+///
+/// `target` is the pane's tmux target, as the terminal backend encodes it.
+pub(crate) fn relaunch_cli_into_pane(runner: &dyn CommandRunner, target: &str, cli_command: &str) {
+    let _ = runner.run_inheriting_stdio("tmux", &["send-keys", "-t", target, "C-u"]);
+    let _ = runner.run_inheriting_stdio("tmux", &["send-keys", "-t", target, cli_command, "Enter"]);
 }

@@ -1,0 +1,34 @@
+[
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.2",
+      "C-u"
+    ],
+    "stdio": "inherited"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.2",
+      "claude --dangerously-skip-permissions",
+      "Enter"
+    ],
+    "stdio": "inherited"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.2",
+      "1",
+      "Enter"
+    ],
+    "stdio": "inherited"
+  }
+]

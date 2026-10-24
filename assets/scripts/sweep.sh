@@ -1206,6 +1206,13 @@ PY
 # broker agent id (`branch_id`, already slugified by git-paw) and the
 # `worktree_path` it occupies. The longest matching worktree path wins, so a
 # worktree nested inside another resolves to the inner agent.
+#
+# Deliberate difference from git-paw itself: this helper matches by longest
+# realpath PREFIX because it maps arbitrary paths (a pane that changed into a
+# subdirectory, a file path) to an agent. Inside git-paw, a surface resolves
+# to an agent only when its owner EQUALS a worktree root (the core
+# resolve_agent rule). For an owner equal to a worktree root both name the
+# same agent.
 resolve_agent_for_path() {
   local path=$1
   [[ -z "${SESSION_FILE}" || -z "${path}" ]] && return

@@ -23,10 +23,11 @@
 //!   over a window spanning a full multi-option prompt block
 //!   ([`crate::supervisor::permission_prompt::is_live_prompt`]); prompt-like text
 //!   scrolled into history is ignored (D4).
-//! - **Explicit per-pane capture** — one `tmux capture-pane` per pane, never a
-//!   `for p in …` shell loop (D3).
-//! - **Pane→agent resolution via `pane_current_path`** — never pane index or
-//!   CLI-argument order ([`resolve_pane_agent`], D2).
+//! - **Explicit per-pane capture** — one screen-tail read per surface through
+//!   the terminal port, never a `for p in …` shell loop (D3).
+//! - **Pane→agent resolution by owner** — the terminal backend reports which
+//!   worktree owns each surface, matched by exact canonical path; never pane
+//!   index or CLI-argument order ([`resolve_pane_agent`], D2).
 //! - **Coding surfaces only** — every keystroke the loop sends (a nudge, a
 //!   stale-input recovery, a buffered-input submit) reaches a surface the
 //!   layout resolves as a coding agent; the dashboard and unattributed
@@ -42,8 +43,11 @@
 //! Every side effect (pane enumeration, capture, keystroke dispatch, broker
 //! `/status` fetch, the clock, broker publishing, and `sweep.sh learn`) is
 //! behind a trait so [`drive_loop`] can be exercised end-to-end in memory with
-//! fakes — no tmux, no real LLM, no interactive terminal. The production entry
-//! point [`run_drive_loop`] wires the real implementations.
+//! fakes — no tmux, no real LLM, no interactive terminal. Enumeration,
+//! capture and keystrokes go through the terminal port
+//! ([`crate::terminal::TerminalBackend`]), which implements the three seams;
+//! the production entry point [`run_drive_loop`] wires the tmux backend and
+//! the real implementations of the rest.
 
 use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
@@ -65,10 +69,11 @@ use crate::error::PawError;
 use crate::session::{self, SessionStatus};
 use crate::static_regex::static_regex;
 use crate::surface::{SessionLayout, SurfaceRole};
+use crate::terminal::TerminalBackend;
 
 use super::approval_gate::{approval_dedup_key, live_prompt_in_tail};
 use super::claim::PaneClaim;
-use super::keys::{KeyDispatcher, TmuxKeyDispatcher};
+use super::keys::KeyDispatcher;
 use super::loop_binding::DriveLoopBinding;
 use super::permission_prompt::{
     LIVE_PROMPT_TAIL, anchor_on_trailing_region, extract_command_slice,
@@ -117,7 +122,7 @@ const LEARNING_CATEGORY: &str = "tooling_friction";
 pub struct AgentPane {
     /// Broker agent id (slugified branch name).
     pub agent_id: String,
-    /// Absolute worktree root the agent's pane runs in (`pane_current_path`).
+    /// Absolute worktree root the agent's surface runs in — its owner.
     pub worktree_path: PathBuf,
     /// The agent's git branch name, used at exit to ask git whether the
     /// branch is merged into the default branch (`drive-loop-exit-summary-truth`).
@@ -183,18 +188,19 @@ fn surface_owners(agents: &[AgentPane]) -> impl Iterator<Item = (&str, &Path)> {
 ///
 /// A thin delegate to the single resolver in [`crate::surface`], kept here as
 /// the drive loop's name for the operation. Coding agents resolve by matching
-/// `pane_current_path` against a known `worktree_path` (canonicalised where
-/// possible) — NEVER by pane index or CLI-argument order, because pane indices
+/// the surface's owner, as the terminal backend reports it, against a known
+/// `worktree_path` by exact canonical path ([`crate::surface::resolve_agent`])
+/// — NEVER by pane index or CLI-argument order, because pane indices
 /// are neither alphabetical nor argument-ordered and drift on layout changes
 /// (D2). Only then does the layout's reserved-index table decide.
 #[must_use]
 pub fn resolve_pane_agent(
     layout: SessionLayout,
     pane_index: usize,
-    pane_current_path: &str,
+    owner: &str,
     agents: &[AgentPane],
 ) -> SurfaceRole {
-    layout.resolve(pane_index, pane_current_path, surface_owners(agents))
+    layout.resolve(pane_index, owner, surface_owners(agents))
 }
 
 // ---------------------------------------------------------------------------
@@ -879,23 +885,23 @@ impl DriveSummary {
 // Side-effect traits (injected so the loop is testable without tmux/broker)
 // ---------------------------------------------------------------------------
 
-/// One pane in the session, as reported by `tmux list-panes`.
+/// One surface in the session, as the terminal backend lists it.
 #[derive(Debug, Clone)]
 pub struct PaneInfo {
-    /// The pane's tmux index within window 0.
+    /// The surface's position in the session's layout.
     pub pane_index: usize,
-    /// The pane's `pane_current_path` (working directory).
-    pub pane_current_path: String,
+    /// The working tree that owns the surface, as the backend reports it.
+    pub owner: String,
 }
 
-/// Enumerates the session's panes (one explicit `tmux list-panes` per sweep).
+/// Enumerates the session's surfaces (one explicit listing per sweep).
 pub trait PaneEnumerator {
     /// Returns every pane in `session`.
     fn list_panes(&self, session: &str) -> Vec<PaneInfo>;
 }
 
-/// Captures a single pane's content (one explicit `tmux capture-pane` per
-/// pane — never a shell `for` loop).
+/// Captures a single surface's screen (one explicit read per surface — never
+/// a shell `for` loop).
 pub trait PaneCapture {
     /// Returns the captured text of pane `pane_index` in `session`.
     fn capture(&self, session: &str, pane_index: usize) -> String;
@@ -1242,9 +1248,9 @@ fn advance_resolved_phases(
 /// condition (completion or heartbeat) is reached, then returns the summary.
 ///
 /// Each poll iteration:
-/// 1. Enumerates panes (one `list-panes`), resolving each to its agent by
-///    `pane_current_path`.
-/// 2. Captures each pane explicitly (one `capture-pane` per pane) and acts only
+/// 1. Enumerates surfaces (one listing), resolving each to its agent by the
+///    owner the terminal backend reports.
+/// 2. Captures each surface explicitly (one screen read per surface) and acts only
 ///    when a LIVE prompt footer is in the tail.
 /// 3. Classifies the live prompt; safe prompts are approved (audit-logged
 ///    first, then the option digit + `Enter` as separate keystrokes, gated on a
@@ -1337,8 +1343,7 @@ pub fn drive_loop(
         // before any capture, so nothing drawn there can drive a decision.
         let mut pane_by_agent: HashMap<String, usize> = HashMap::new();
         for pane in deps.enumerator.list_panes(session) {
-            let role =
-                resolve_pane_agent(layout, pane.pane_index, &pane.pane_current_path, &agents);
+            let role = resolve_pane_agent(layout, pane.pane_index, &pane.owner, &agents);
             let Some(agent_id) = role.coding_agent() else {
                 continue; // not a coding surface — never acted on
             };
@@ -2704,56 +2709,30 @@ impl<G: SessionInstanceGuard> SessionInstanceGuard for BoundInstanceGuard<G> {
     }
 }
 
-/// Production [`PaneEnumerator`]: `tmux list-panes -t <session> -F ...`.
-struct TmuxPaneEnumerator;
-
-impl PaneEnumerator for TmuxPaneEnumerator {
+/// Every terminal backend enumerates the session's surfaces for the loop: one
+/// listing per sweep, each surface reported by its layout position and owner.
+/// A listing that fails (the session is gone) is no surfaces, as before.
+impl<T: TerminalBackend + ?Sized> PaneEnumerator for T {
     fn list_panes(&self, session: &str) -> Vec<PaneInfo> {
-        let target = format!("{session}:0");
-        let output = Command::new("tmux")
-            .args([
-                "list-panes",
-                "-t",
-                &target,
-                "-F",
-                "#{pane_index} #{pane_current_path}",
-            ])
-            .output();
-        let Ok(output) = output else {
-            return Vec::new();
-        };
-        if !output.status.success() {
-            return Vec::new();
-        }
-        let text = String::from_utf8_lossy(&output.stdout);
-        parse_list_panes(&text)
+        self.list_surfaces(session)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|surface| {
+                Some(PaneInfo {
+                    pane_index: surface.position,
+                    owner: surface.owner?.to_string_lossy().into_owned(),
+                })
+            })
+            .collect()
     }
 }
 
-/// Parses `tmux list-panes -F '#{pane_index} #{pane_current_path}'` output.
-fn parse_list_panes(text: &str) -> Vec<PaneInfo> {
-    text.lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
-            }
-            let (idx, path) = line.split_once(' ')?;
-            let pane_index = idx.trim().parse::<usize>().ok()?;
-            Some(PaneInfo {
-                pane_index,
-                pane_current_path: path.trim().to_string(),
-            })
-        })
-        .collect()
-}
-
-/// Production [`PaneCapture`]: one `tmux capture-pane` per pane.
-struct TmuxPaneCapture;
-
-impl PaneCapture for TmuxPaneCapture {
+/// Every terminal backend captures a surface's screen for the loop. A failed
+/// read is an empty capture here, as it always was for the loop's predicates.
+impl<T: TerminalBackend + ?Sized> PaneCapture for T {
     fn capture(&self, session: &str, pane_index: usize) -> String {
-        super::permission_prompt::capture_pane(session, pane_index).unwrap_or_default()
+        self.capture_tail(&self.surface_at(session, pane_index))
+            .unwrap_or_default()
     }
 }
 
@@ -3118,9 +3097,12 @@ pub fn run_drive_loop(
         default_branch: default_branch.clone(),
     };
 
-    let enumerator = TmuxPaneEnumerator;
-    let capturer = TmuxPaneCapture;
-    let mut dispatcher = TmuxKeyDispatcher;
+    // One stateless tmux backend serves as enumerator, capturer and
+    // dispatcher; it is `Copy`, so each seam holds its own handle.
+    let backend = crate::terminal::tmux::TmuxBackend::new();
+    let enumerator = backend;
+    let capturer = backend;
+    let mut dispatcher = backend;
     let status = HttpStatusFetcher {
         broker_url: broker_url.clone(),
     };
@@ -3981,7 +3963,7 @@ mod tests {
             };
             let pane = PaneInfo {
                 pane_index,
-                pane_current_path: "/repo-feat-a".to_string(),
+                owner: "/repo-feat-a".to_string(),
             };
             sweep_pane(ctx, &pane, agent_id, &mut deps, &config, &mut dedup, &[])
         };
@@ -4156,7 +4138,7 @@ mod tests {
                 };
                 let pane = PaneInfo {
                     pane_index,
-                    pane_current_path: "/repo-feat-a".to_string(),
+                    owner: "/repo-feat-a".to_string(),
                 };
                 sweep_pane(ctx, &pane, agent_id, &mut deps, &config, &mut dedup, &[]);
             }
@@ -4582,7 +4564,7 @@ mod tests {
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
                 pane_index: 2,
-                pane_current_path: "/repo-feat-a".to_string(),
+                owner: "/repo-feat-a".to_string(),
             }],
         };
         let mut dispatcher = RecordingDispatcher::default();
@@ -4846,7 +4828,7 @@ mod tests {
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
                 pane_index: 1,
-                pane_current_path: "/repo-feat-a".to_string(),
+                owner: "/repo-feat-a".to_string(),
             }],
         };
         // An unreadable paste placeholder on every capture: the follow-up
@@ -4985,7 +4967,7 @@ mod tests {
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
                 pane_index: 1,
-                pane_current_path: "/repo-feat-a".to_string(),
+                owner: "/repo-feat-a".to_string(),
             }],
         };
         let capturer = FakeCapturer::new(&[(1, &live_safe_capture("cargo test"))]);
@@ -5068,7 +5050,7 @@ mod tests {
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
                 pane_index: 1,
-                pane_current_path: "/repo-feat-a".to_string(),
+                owner: "/repo-feat-a".to_string(),
             }],
         };
         let capturer = FakeCapturer::new(&[(1, &live_safe_capture("cargo test"))]);
@@ -5191,15 +5173,299 @@ mod tests {
         assert_eq!(summary.outcome, DriveOutcome::Completed);
     }
 
-    // --- parse_list_panes (task 3.4) ---------------------------------------
+    // --- the loop against the fake terminal backend ---------------------------
+    //
+    // These drive the loop through the terminal port's fake: one
+    // `FakeBackend` serves as enumerator, capturer and dispatcher, answering
+    // scripted owners and screens and recording every operation. The fake
+    // spawns no process, so no `tmux` process is spawned by construction.
 
+    use crate::terminal::fake::{FakeBackend, Operation};
+    use crate::terminal::{Key, SurfaceId};
+
+    const FAKE_SESSION: &str = "paw-test";
+
+    /// Lends a shared [`FakeBackend`] to the loop as its dispatcher; the
+    /// port's operations take `&self`, so the same fake is also the
+    /// enumerator and capturer. Delegates to the production key mapping.
+    struct SharedFakeDispatcher<'a, B: TerminalBackend + ?Sized>(&'a B);
+
+    impl<B: TerminalBackend + ?Sized> KeyDispatcher for SharedFakeDispatcher<'_, B> {
+        fn send_key(&mut self, session: &str, pane_index: usize, key: &str) -> std::io::Result<()> {
+            super::super::keys::dispatch_key(self.0, session, pane_index, key)
+        }
+        fn send_text(
+            &mut self,
+            session: &str,
+            pane_index: usize,
+            text: &str,
+        ) -> std::io::Result<()> {
+            super::super::keys::dispatch_text(self.0, session, pane_index, text)
+        }
+    }
+
+    fn agent_pane(agent_id: &str, worktree: &str) -> AgentPane {
+        AgentPane {
+            agent_id: agent_id.to_string(),
+            worktree_path: PathBuf::from(worktree),
+            branch: agent_id.replacen('-', "/", 1),
+        }
+    }
+
+    /// Adds a surface at `position` owned by `owner` showing `screens`.
+    fn fake_surface(
+        fake: &FakeBackend,
+        position: usize,
+        owner: &str,
+        screens: &[&str],
+    ) -> SurfaceId {
+        let surface = fake.add_surface(FAKE_SESSION, position, Some(Path::new(owner)));
+        let screens: Vec<Option<&str>> = screens.iter().map(|s| Some(*s)).collect();
+        fake.script_screens(&surface, &screens);
+        surface
+    }
+
+    /// Runs the loop with `fake` as its terminal and returns the summary and
+    /// the recorded alerts.
+    fn drive_with_fake_backend<B: TerminalBackend>(
+        fake: &B,
+        agents: &[AgentPane],
+        status: &ScriptedStatus,
+    ) -> (DriveSummary, RecordingAlerts) {
+        let mut dispatcher = SharedFakeDispatcher(fake);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut manual_decisions = NoopManualDecisions;
+        let mut refresher = RecordingRefresher::default();
+        let messages = ScriptedMessages::none();
+        let summary = {
+            let mut deps = DriveDeps {
+                enumerator: fake,
+                capturer: fake,
+                dispatcher: &mut dispatcher,
+                status,
+                messages: &messages,
+                clock: &clock,
+                merge_check: &FakeMergeCheck::default(),
+                alerts: &mut alerts,
+                learnings: &mut learnings,
+                manual_decisions: &mut manual_decisions,
+                refresher: &mut refresher,
+                wedged: Vec::new(),
+            };
+            let config = DriveConfig {
+                poll_interval: Duration::from_secs(1),
+                heartbeat: Duration::from_hours(1),
+                ..DriveConfig::default()
+            };
+            drive_loop_in_tmp(FAKE_SESSION, agents, &mut deps, &config)
+        };
+        (summary, alerts)
+    }
+
+    fn keystrokes_on(fake: &FakeBackend, surface: &SurfaceId) -> Vec<Operation> {
+        fake.operations_on(surface)
+            .into_iter()
+            .filter(Operation::is_keystroke)
+            .collect()
+    }
+
+    /// Spec scenario "Drive-loop escalation is asserted without tmux"
+    /// (`code-architecture`): a live permission prompt on an owned surface is
+    /// escalated for that worktree's agent, and nothing is typed into it.
     #[test]
-    fn parses_list_panes_output() {
-        let text = "0 /repo\n2 /repo-feat-a\n3 /repo-feat-b\n";
-        let panes = parse_list_panes(text);
-        assert_eq!(panes.len(), 3);
-        assert_eq!(panes[0].pane_index, 0);
-        assert_eq!(panes[1].pane_current_path, "/repo-feat-a");
+    fn drive_loop_escalation_is_asserted_without_tmux() {
+        let fake = FakeBackend::new();
+        let dashboard = fake_surface(&fake, 0, "/repo", &[""]);
+        let prompting = fake_surface(
+            &fake,
+            2,
+            "/repo-feat-a",
+            &[&live_safe_capture("cargo test")],
+        );
+        let agents = [agent_pane("feat-a", "/repo-feat-a")];
+        let status = ScriptedStatus::new(vec![vec![row("feat-a", "verified")]]);
+
+        let (summary, alerts) = drive_with_fake_backend(&fake, &agents, &status);
+
+        assert_eq!(summary.outcome, DriveOutcome::EscalatedForReview);
+        assert_eq!(alerts.escalations.len(), 1, "{:?}", alerts.escalations);
+        assert_eq!(alerts.escalations[0].verdict, PERMISSION_PROMPT_VERDICT);
+        assert_eq!(alerts.escalations[0].agent_id, "feat-a");
+        assert!(
+            keystrokes_on(&fake, &prompting).is_empty(),
+            "the prompting surface receives no keystroke: {:?}",
+            fake.operations_on(&prompting)
+        );
+        assert!(
+            fake.operations_on(&dashboard).is_empty(),
+            "the dashboard is never captured or typed into"
+        );
+    }
+
+    /// Spec scenario "Drive-loop buffered-input submit is asserted without
+    /// tmux" (`code-architecture`): a directive left unsubmitted on an idle
+    /// input box gets exactly the submit key, and no text.
+    #[test]
+    fn drive_loop_buffered_input_submit_is_asserted_without_tmux() {
+        let fake = FakeBackend::new();
+        let stuck = idle_input_box("/opsx:apply my-change");
+        let surface = fake_surface(&fake, 2, "/repo-feat-a", &[&stuck, &stuck, IDLE_PANE]);
+        let agents = [agent_pane("feat-a", "/repo-feat-a")];
+        let status = ScriptedStatus::new(vec![vec![row("supervisor", "done")]]);
+
+        drive_with_fake_backend(&fake, &agents, &status);
+
+        assert_eq!(
+            keystrokes_on(&fake, &surface),
+            vec![Operation::SendKey {
+                surface: surface.clone(),
+                key: Key::Enter
+            }],
+            "only the submitting Enter, never free text"
+        );
+    }
+
+    /// Spec scenario "Drive loop sweeps through the backend with identical
+    /// effects" (`code-architecture`): the loop wired to the tmux backend over
+    /// a recording runner lists, captures and submits a buffered input with
+    /// the same `list-panes` / `capture-pane` / `send-keys` invocations the
+    /// pre-port loop issued, with the same targets and arguments.
+    #[test]
+    fn drive_loop_sweeps_through_the_tmux_backend_with_identical_effects() {
+        use crate::command_runner::CommandOutput;
+        use crate::command_runner::test_support::FakeCommandRunner;
+        use crate::terminal::tmux::TmuxBackend;
+
+        let stuck = idle_input_box("/opsx:apply my-change");
+        let captures = std::cell::Cell::new(0usize);
+        let runner = FakeCommandRunner::scripted(move |_, args| {
+            let stdout = match args.first().copied() {
+                Some("list-panes") => "2 /repo-feat-a\n".to_string(),
+                Some("capture-pane") => {
+                    let n = captures.get();
+                    captures.set(n + 1);
+                    if n < 2 {
+                        stuck.clone()
+                    } else {
+                        IDLE_PANE.to_string()
+                    }
+                }
+                _ => String::new(),
+            };
+            Ok(CommandOutput {
+                success: true,
+                code: Some(0),
+                stdout: stdout.into_bytes(),
+                stderr: Vec::new(),
+            })
+        });
+        let backend = TmuxBackend::with_runner(&runner);
+        let agents = [agent_pane("feat-a", "/repo-feat-a")];
+        let status = ScriptedStatus::new(vec![vec![row("supervisor", "done")]]);
+
+        drive_with_fake_backend(&backend, &agents, &status);
+
+        let target = format!("{FAKE_SESSION}:0.2");
+        let argv = |parts: &[&str]| -> (String, Vec<String>) {
+            (
+                "tmux".to_string(),
+                parts.iter().map(|p| (*p).to_string()).collect(),
+            )
+        };
+        let calls = runner.calls();
+        let list = argv(&[
+            "list-panes",
+            "-t",
+            &format!("{FAKE_SESSION}:0"),
+            "-F",
+            "#{pane_index} #{pane_current_path}",
+        ]);
+        let capture = argv(&["capture-pane", "-p", "-t", &target]);
+        let enter = argv(&["send-keys", "-t", &target, "Enter"]);
+        assert_eq!(
+            calls.first(),
+            Some(&list),
+            "a sweep starts by listing: {calls:?}"
+        );
+        assert!(calls.contains(&capture), "{calls:?}");
+        let keys: Vec<_> = calls.iter().filter(|c| c.1[0] == "send-keys").collect();
+        assert_eq!(keys, vec![&enter], "exactly the submit key: {calls:?}");
+        assert!(
+            calls
+                .iter()
+                .all(|c| c == &list || c == &capture || c == &enter),
+            "no other tmux invocation: {calls:?}"
+        );
+    }
+
+    /// Spec scenarios "Agent resolved by working directory, not index" and "A
+    /// captured prompt is attributed to the correct agent"
+    /// (`supervisor-unattended-operation`): the backend lists surfaces in an
+    /// order unrelated to the roster, and the prompt is still attributed to
+    /// the agent whose worktree owns the prompting surface.
+    #[test]
+    fn a_captured_prompt_is_attributed_by_owner_not_index() {
+        let fake = FakeBackend::new();
+        // Listed feat-b first, at a lower index than feat-a, against a
+        // roster ordered feat-a, feat-b.
+        let prompting = fake_surface(&fake, 3, "/repo-feat-b", &[&live_safe_capture("make")]);
+        let quiet = fake_surface(&fake, 5, "/repo-feat-a", &[IDLE_PANE]);
+        let agents = [
+            agent_pane("feat-a", "/repo-feat-a"),
+            agent_pane("feat-b", "/repo-feat-b"),
+        ];
+        let status = ScriptedStatus::new(vec![vec![
+            row("feat-a", "verified"),
+            row("feat-b", "verified"),
+        ]]);
+
+        let (_summary, alerts) = drive_with_fake_backend(&fake, &agents, &status);
+
+        assert_eq!(alerts.escalations.len(), 1, "{:?}", alerts.escalations);
+        assert_eq!(alerts.escalations[0].agent_id, "feat-b");
+        assert_eq!(alerts.escalations[0].command, "make");
+        assert!(keystrokes_on(&fake, &prompting).is_empty());
+        assert!(keystrokes_on(&fake, &quiet).is_empty());
+    }
+
+    /// Spec scenarios "A basename collision does not misattribute" and "A
+    /// path below a worktree root is not an owner match"
+    /// (`supervisor-unattended-operation`): surfaces owned by
+    /// `/elsewhere/other-feat-a` and by a directory below feat-a's root are
+    /// not feat-a's, so their live prompts are neither attributed nor swept.
+    #[test]
+    fn a_basename_collision_or_a_subdirectory_owner_is_not_attributed_in_the_loop() {
+        let root = "/work/repo/.git-paw/worktrees/feat-a";
+        let below = format!("{root}/src");
+        let fake = FakeBackend::new();
+        let collision = fake_surface(
+            &fake,
+            2,
+            "/elsewhere/other-feat-a",
+            &[&live_safe_capture("rm -rf x")],
+        );
+        let subdir = fake_surface(&fake, 3, &below, &[&live_safe_capture("rm -rf y")]);
+        let owned = fake_surface(&fake, 4, root, &[IDLE_PANE]);
+        let agents = [agent_pane("feat-a", root)];
+        let status = ScriptedStatus::new(vec![vec![row("feat-a", "verified")]]);
+
+        let (summary, alerts) = drive_with_fake_backend(&fake, &agents, &status);
+
+        assert!(
+            alerts.escalations.is_empty(),
+            "no unowned surface is attributed to feat-a: {:?}",
+            alerts.escalations
+        );
+        assert_eq!(summary.outcome, DriveOutcome::Completed);
+        for surface in [&collision, &subdir] {
+            assert!(
+                fake.operations_on(surface).is_empty(),
+                "an unattributed surface is never captured or typed into"
+            );
+        }
+        assert!(keystrokes_on(&fake, &owned).is_empty());
     }
 
     // --- poll / heartbeat / dedup cadence constants -------------------------
@@ -5259,19 +5525,19 @@ mod tests {
             panes: vec![
                 PaneInfo {
                     pane_index: 0,
-                    pane_current_path: "/repo".to_string(),
+                    owner: "/repo".to_string(),
                 },
                 PaneInfo {
                     pane_index: 1,
-                    pane_current_path: "/repo-feat-a".to_string(),
+                    owner: "/repo-feat-a".to_string(),
                 },
                 PaneInfo {
                     pane_index: 2,
-                    pane_current_path: "/repo-feat-b".to_string(),
+                    owner: "/repo-feat-b".to_string(),
                 },
                 PaneInfo {
                     pane_index: 3,
-                    pane_current_path: "/repo".to_string(),
+                    owner: "/repo".to_string(),
                 },
             ],
         };
@@ -5334,11 +5600,11 @@ mod tests {
             panes: vec![
                 PaneInfo {
                     pane_index: 0,
-                    pane_current_path: "/repo".to_string(),
+                    owner: "/repo".to_string(),
                 },
                 PaneInfo {
                     pane_index: 2,
-                    pane_current_path: "/repo-feat-a".to_string(),
+                    owner: "/repo-feat-a".to_string(),
                 },
             ],
         };
@@ -5422,11 +5688,11 @@ mod tests {
             panes: vec![
                 PaneInfo {
                     pane_index: 2,
-                    pane_current_path: "/repo-feat-a".to_string(),
+                    owner: "/repo-feat-a".to_string(),
                 },
                 PaneInfo {
                     pane_index: 3,
-                    pane_current_path: "/repo-feat-b".to_string(),
+                    owner: "/repo-feat-b".to_string(),
                 },
             ],
         };
@@ -5523,11 +5789,11 @@ mod tests {
             panes: vec![
                 PaneInfo {
                     pane_index: 2,
-                    pane_current_path: "/repo-feat-a".to_string(),
+                    owner: "/repo-feat-a".to_string(),
                 },
                 PaneInfo {
                     pane_index: 3,
-                    pane_current_path: "/repo-feat-b".to_string(),
+                    owner: "/repo-feat-b".to_string(),
                 },
             ],
         };
@@ -5607,7 +5873,7 @@ mod tests {
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
                 pane_index: 2,
-                pane_current_path: "/repo-feat-a".to_string(),
+                owner: "/repo-feat-a".to_string(),
             }],
         };
         // Agent iterates (no live prompt) forever — never completes.
@@ -5674,7 +5940,7 @@ mod tests {
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
                 pane_index: 2,
-                pane_current_path: "/repo-feat-a".to_string(),
+                owner: "/repo-feat-a".to_string(),
             }],
         };
         let capturer = FakeCapturer::new(&[(2, capture)]);
@@ -6086,7 +6352,7 @@ mod tests {
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
                 pane_index: 2,
-                pane_current_path: "/repo-feat-a".to_string(),
+                owner: "/repo-feat-a".to_string(),
             }],
         };
         // The prompt never clears, and the agent never leaves `working`.
@@ -6182,7 +6448,7 @@ mod tests {
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
                 pane_index: 2,
-                pane_current_path: "/repo-feat-a".to_string(),
+                owner: "/repo-feat-a".to_string(),
             }],
         };
         let capturer = FakeCapturer::new(&[(2, &live_safe_capture("cargo test"))]);
@@ -6237,7 +6503,7 @@ mod tests {
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
                 pane_index: 2,
-                pane_current_path: "/repo-feat-a".to_string(),
+                owner: "/repo-feat-a".to_string(),
             }],
         };
         // A resolved prompt scrolled into history: the footer is followed by
@@ -6399,7 +6665,7 @@ mod tests {
         FakeEnumerator {
             panes: vec![PaneInfo {
                 pane_index: 2,
-                pane_current_path: "/repo-feat-a".to_string(),
+                owner: "/repo-feat-a".to_string(),
             }],
         }
     }
@@ -7271,7 +7537,7 @@ mod tests {
     fn pane(pane_index: usize, path: &str) -> PaneInfo {
         PaneInfo {
             pane_index,
-            pane_current_path: path.to_string(),
+            owner: path.to_string(),
         }
     }
 
@@ -8779,7 +9045,7 @@ mod tests {
         let enumerator = FakeEnumerator {
             panes: vec![PaneInfo {
                 pane_index: 2,
-                pane_current_path: "/repo-feat-a".to_string(),
+                owner: "/repo-feat-a".to_string(),
             }],
         };
         let capturer = FakeCapturer::new(&[(2, capture)]);

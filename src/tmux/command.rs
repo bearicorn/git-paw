@@ -231,8 +231,22 @@ impl TmuxSession {
     /// warning naming the failed invocation and do not abort the build; any
     /// other command failure propagates as an error.
     pub fn execute(&self) -> Result<(), PawError> {
-        let runner = RealCommandRunner;
-        self.execute_with(|cmd| cmd.execute(&runner).map(|_| ()), |w| eprintln!("{w}"))
+        self.execute_via(&RealCommandRunner)
+    }
+
+    /// [`execute`](Self::execute) through an injected runner, so the terminal
+    /// backend's argv is assertable without a live tmux server.
+    pub(crate) fn execute_via(&self, runner: &dyn CommandRunner) -> Result<(), PawError> {
+        self.execute_with(|cmd| cmd.execute(runner).map(|_| ()), |w| eprintln!("{w}"))
+    }
+
+    /// A session handle with no queued commands, for queueing follow-up
+    /// commands (a `pipe-pane`) against a session that already exists.
+    pub(crate) fn empty(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            commands: Vec::new(),
+        }
     }
 
     /// Run every queued command via `run`, routing non-fatal warnings to

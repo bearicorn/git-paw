@@ -60,5 +60,6 @@ mod static_regex;
 pub mod supervisor;
 pub mod surface;
 pub mod task_prompts;
+pub mod terminal;
 pub mod tmux;
 pub mod worktree_provision;

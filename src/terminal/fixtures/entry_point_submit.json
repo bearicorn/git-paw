@@ -1,0 +1,74 @@
+[
+  {
+    "argv": [
+      "tmux",
+      "capture-pane",
+      "-p",
+      "-t",
+      "paw-proj:0.1"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "capture-pane",
+      "-p",
+      "-t",
+      "paw-proj:0.1"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "capture-pane",
+      "-p",
+      "-t",
+      "paw-proj:0.1"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "display-message",
+      "-p",
+      "-t",
+      "paw-proj:0.1",
+      "#{pane_current_command}"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.1",
+      "-l",
+      "/opsx:apply feat-a"
+    ],
+    "stdio": "inherited"
+  },
+  {
+    "argv": [
+      "tmux",
+      "capture-pane",
+      "-p",
+      "-t",
+      "paw-proj:0.1"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.1",
+      "Enter"
+    ],
+    "stdio": "inherited"
+  }
+]
