@@ -409,31 +409,31 @@ fn every_launch_path_warns_about_an_exposed_bind() {
         Site {
             file: "src/commands/start.rs",
             function: "pub(crate) fn cmd_start(",
-            trigger: "tmux_session.execute()?;",
+            trigger: "launch_session(",
             warning: "warn_if_broker_is_exposed(&broker_config)",
         },
         Site {
             file: "src/commands/start.rs",
             function: "fn launch_spec_session(",
-            trigger: "tmux_session.execute()?;",
+            trigger: "launch_session(",
             warning: "warn_if_broker_is_exposed(&broker_config)",
         },
         Site {
             file: "src/commands/start.rs",
             function: "pub(crate) fn restart_from_pause_detached(",
-            trigger: "\"split-window\"",
+            trigger: "spawn_surface(",
             warning: "warn_if_broker_is_exposed(&config.broker)",
         },
         Site {
             file: "src/commands/supervisor.rs",
             function: "pub(crate) fn cmd_supervisor(",
-            trigger: "tmux_session.execute()?;",
+            trigger: "launch_session(",
             warning: "warn_if_broker_is_exposed(&broker_config)",
         },
         Site {
             file: "src/commands/recover.rs",
             function: "pub(crate) fn recover_session_detached(",
-            trigger: "tmux_session.execute()?;",
+            trigger: "launch_session(",
             warning: "warn_if_broker_is_exposed(&config.broker)",
         },
     ];

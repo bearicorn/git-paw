@@ -1,0 +1,22 @@
+[
+  {
+    "argv": [
+      "tmux",
+      "has-session",
+      "-t",
+      "paw-proj"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "list-panes",
+      "-t",
+      "paw-proj",
+      "-F",
+      "#{pane_index}|#{pane_current_command}|#{@paw_role}"
+    ],
+    "stdio": "captured"
+  }
+]

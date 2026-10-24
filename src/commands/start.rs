@@ -11,7 +11,6 @@
 //! `main.rs` and are referenced through the crate root.
 
 use std::path::Path;
-use std::process::Command as StdCommand;
 use std::time::SystemTime;
 
 use git_paw::broker;
@@ -21,12 +20,14 @@ use git_paw::error::PawError;
 use git_paw::git;
 use git_paw::interactive;
 use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry};
-use git_paw::surface::SessionLayout;
+use git_paw::surface::{SessionLayout, resolve_agent};
+use git_paw::terminal::tmux::TmuxBackend;
+use git_paw::terminal::{SessionPlan, SurfacePlacement, SurfaceSpec, TerminalBackend};
 use git_paw::tmux;
 
 use super::helpers::{
-    agent_pane_offset, attach_session_logging, config_to_custom_defs, dashboard_command,
-    to_interactive_cli, warn_if_broker_is_exposed,
+    agent_pane_offset, config_to_custom_defs, dashboard_command, launch_session,
+    session_has_live_agents, to_interactive_cli, warn_if_broker_is_exposed,
 };
 use super::recover::recover_session;
 use super::supervisor::cmd_supervisor;
@@ -59,12 +60,7 @@ pub(crate) fn cmd_start(
         && let Some(existing) = &existing_session
         && !invalidate_if_stale(&repo_root, existing)?
     {
-        let effective = existing.effective_status(|name| {
-            matches!(
-                tmux::session_liveness_for(name, existing.created_at, existing.agent_pane_offset()),
-                tmux::SessionLiveness::Alive
-            )
-        });
+        let effective = existing.effective_status(|name| session_has_live_agents(name, existing));
         match effective {
             SessionStatus::Paused => {
                 println!(
@@ -213,21 +209,15 @@ pub(crate) fn cmd_start(
     // per branch — so the user would be left with N worktrees and no session.
     git_paw::surface::layout_for(selection.mappings.len(), broker_config.enabled)?;
 
-    let mut builder = tmux::TmuxSessionBuilder::new(&project)
-        .session_name(session_name)
-        .mouse_mode(mouse)
-        .border_affordances(config.border_affordances_enabled());
-
-    // Broker: inject dashboard pane and environment variable
-    if broker_config.enabled {
-        let repo_str = repo_root.to_string_lossy().to_string();
-        builder = builder.dashboard(tmux::PaneSpec {
-            branch: "dashboard".to_string(),
-            worktree: repo_str,
-            cli_command: dashboard_command(),
-        });
-        builder = builder.set_environment("GIT_PAW_BROKER_URL", &broker_config.url());
-    }
+    let backend = TmuxBackend::new();
+    // Broker: a dashboard surface and the broker URL in the session env.
+    let mut plan = bare_plan(
+        &session_name,
+        mouse,
+        config.border_affordances_enabled(),
+        &broker_config,
+        &repo_root,
+    );
 
     let mut worktree_entries = Vec::new();
 
@@ -255,7 +245,6 @@ pub(crate) fn cmd_start(
 
     for (branch, cli) in &selection.mappings {
         let wt = git::create_worktree(&repo_root, branch, !no_rebase, config.worktree_placement())?;
-        let wt_str = wt.path.to_string_lossy().to_string();
 
         // Provision runtime state (declared env copies, this agent's port
         // block, the `on_create` hook) after the worktree exists and before its
@@ -331,10 +320,10 @@ pub(crate) fn cmd_start(
         }
 
         let agent_flags = config::resolve_approval_flags(cli, approval, &config.clis);
-        builder = builder.add_pane(tmux::PaneSpec {
-            branch: branch.clone(),
-            worktree: wt_str,
-            cli_command: apply_approval_flags(
+        plan.surfaces.push(SurfaceSpec {
+            label: branch.clone(),
+            owner: wt.path.clone(),
+            launch_command: apply_approval_flags(
                 &config::launch_command(cli, &config.clis),
                 &agent_flags,
             ),
@@ -355,39 +344,14 @@ pub(crate) fn cmd_start(
         });
     }
 
-    let mut tmux_session = builder.build()?;
-
     // Every reserved-index fact for this launch — the logging offset below,
     // the recorded `dashboard_pane`, the discovery-file offset and the
     // boot-block pane targets — comes from this one layout record.
     let layout = SessionLayout::planned(SessionMode::Bare, broker_config.enabled);
 
-    // Attach session logging (no-op unless `[logging] enabled`). Pane offset
-    // matches the boot-block/discovery offset below: dashboard occupies pane 0
-    // when the broker is enabled, so coding agents start at pane 1.
-    let logging_branches: Vec<&str> = selection.mappings.iter().map(|(b, _)| b.as_str()).collect();
-    attach_session_logging(
-        &mut tmux_session,
-        &config,
-        &repo_root,
-        &logging_branches,
-        layout.first_agent_index(),
-    )?;
-
-    // Execute tmux session
-    tmux_session.execute()?;
-
-    // Rebalance each agent row to equal width on the live window, as the
-    // supervised start does (design D4): the raw `split-window -h` chain
-    // renders a row as 50/25/25, so a column-precise resize evens it out now
-    // that the panes exist.
-    if let Err(e) = tmux::rebalance_agent_rows(
-        &tmux_session.name,
-        layout.first_agent_index(),
-        worktree_entries.len(),
-    ) {
-        eprintln!("warning: could not rebalance agent-row widths: {e}");
-    }
+    // Open the session, attach session logging (no-op unless `[logging]
+    // enabled`) at the layout's agent offset, and even the grid's columns.
+    launch_session(&backend, &plan, &layout, Some((&config, &repo_root)))?;
 
     // Save session state and write the per-repo discovery file BEFORE
     // gating/injecting — matching the supervisor path's order (save, then
@@ -397,7 +361,7 @@ pub(crate) fn cmd_start(
     // `sweep.sh` needs the discovery file, so a user can clean up or re-run
     // without the next launch forking a parallel `paw-<project>-2` session.
     let mut state = Session {
-        session_name: tmux_session.name.clone(),
+        session_name: session_name.clone(),
         repo_path: repo_root,
         project_name: project,
         created_at: SystemTime::now(),
@@ -426,7 +390,7 @@ pub(crate) fn cmd_start(
     // agents start at pane 1; without the broker they start at pane 0.
     write_repo_discovery_file(
         &state.repo_path,
-        &tmux_session.name,
+        &session_name,
         &state.worktrees,
         layout.first_agent_index(),
     );
@@ -454,7 +418,8 @@ pub(crate) fn cmd_start(
             let cli_command =
                 apply_approval_flags(&config::launch_command(cli, &config.clis), &agent_flags);
             gate_pane_or_fail_on_dialog(
-                &tmux_session.name,
+                &backend,
+                &session_name,
                 pane_idx,
                 cli,
                 &cli_command,
@@ -468,14 +433,42 @@ pub(crate) fn cmd_start(
             let prefill =
                 compose_launch_prompt(Some(&boot_block), None, &state.worktrees[idx].worktree_path);
 
-            let args =
-                git_paw::tmux::build_boot_inject_args(&tmux_session.name, pane_idx, &prefill);
-            let _ = std::process::Command::new("tmux").args(&args).status();
+            let _ = backend.prefill_text(&backend.surface_at(&session_name, pane_idx), &prefill);
         }
     }
 
     // Attach (or print hint when stdin is non-TTY).
-    attach_or_print_hint(&tmux_session.name)
+    attach_or_print_hint(&session_name)
+}
+
+/// The bare launch plan before any agent surface is added: a dashboard
+/// surface at the repository root and the broker URL in the session
+/// environment when the broker is enabled, nothing otherwise.
+fn bare_plan(
+    session_name: &str,
+    mouse: bool,
+    show_labels: bool,
+    broker_config: &config::BrokerConfig,
+    repo_root: &Path,
+) -> SessionPlan {
+    let broker = broker_config.enabled;
+    SessionPlan {
+        name: session_name.to_string(),
+        mode: SessionMode::Bare,
+        dashboard: broker.then(|| SurfaceSpec {
+            label: "dashboard".to_string(),
+            owner: repo_root.to_path_buf(),
+            launch_command: dashboard_command(),
+        }),
+        surfaces: Vec::new(),
+        env: if broker {
+            vec![("GIT_PAW_BROKER_URL".to_string(), broker_config.url())]
+        } else {
+            Vec::new()
+        },
+        mouse,
+        show_labels,
+    }
 }
 
 /// Launches sessions from spec files instead of interactive branch selection.
@@ -500,12 +493,7 @@ pub(crate) fn cmd_start_with_specs(
         && let Some(existing) = &existing_session
         && !invalidate_if_stale(&repo_root, existing)?
     {
-        let effective = existing.effective_status(|name| {
-            matches!(
-                tmux::session_liveness_for(name, existing.created_at, existing.agent_pane_offset()),
-                tmux::SessionLiveness::Alive
-            )
-        });
+        let effective = existing.effective_status(|name| session_has_live_agents(name, existing));
         match effective {
             SessionStatus::Paused => {
                 println!(
@@ -649,21 +637,15 @@ fn launch_spec_session(
     // And, as in `cmd_start`, the agent cap before any worktree is created.
     git_paw::surface::layout_for(mappings.len(), broker_config.enabled)?;
 
-    let mut builder = tmux::TmuxSessionBuilder::new(project)
-        .session_name(session_name)
-        .mouse_mode(mouse)
-        .border_affordances(config.border_affordances_enabled());
-
-    // Broker: inject dashboard pane and environment variable
-    if broker_config.enabled {
-        let repo_str = repo_root.to_string_lossy().to_string();
-        builder = builder.dashboard(tmux::PaneSpec {
-            branch: "dashboard".to_string(),
-            worktree: repo_str,
-            cli_command: dashboard_command(),
-        });
-        builder = builder.set_environment("GIT_PAW_BROKER_URL", &broker_config.url());
-    }
+    let backend = TmuxBackend::new();
+    // Broker: a dashboard surface and the broker URL in the session env.
+    let mut plan = bare_plan(
+        &session_name,
+        mouse,
+        config.border_affordances_enabled(),
+        &broker_config,
+        repo_root,
+    );
 
     // Resolve coordination skill once if broker is enabled
     let skill_template = if broker_config.enabled {
@@ -705,7 +687,6 @@ fn launch_spec_session(
 
     for (branch, cli) in mappings {
         let wt = git::create_worktree(repo_root, branch, !no_rebase, config.worktree_placement())?;
-        let wt_str = wt.path.to_string_lossy().to_string();
 
         // Same seam as `cmd_start`: provision after create, before the pane is
         // built, taking the lowest slot no already-created peer holds.
@@ -783,10 +764,10 @@ fn launch_spec_session(
         }
 
         let agent_flags = config::resolve_approval_flags(cli, approval, &config.clis);
-        builder = builder.add_pane(tmux::PaneSpec {
-            branch: branch.clone(),
-            worktree: wt_str,
-            cli_command: apply_approval_flags(
+        plan.surfaces.push(SurfaceSpec {
+            label: branch.clone(),
+            owner: wt.path.clone(),
+            launch_command: apply_approval_flags(
                 &config::launch_command(cli, &config.clis),
                 &agent_flags,
             ),
@@ -808,38 +789,15 @@ fn launch_spec_session(
         });
     }
 
-    let mut tmux_session = builder.build()?;
-
     // Every reserved-index fact for this launch — the logging offset, the
     // recorded `dashboard_pane`, the discovery-file offset and the per-agent
     // prompt targets — comes from this one layout record.
     let layout = SessionLayout::planned(SessionMode::Bare, broker_config.enabled);
 
-    // Attach session logging (no-op unless `[logging] enabled`). Pane indices
-    // shift by 1 when the broker's dashboard occupies pane 0.
-    let logging_branches: Vec<&str> = mappings.iter().map(|(b, _)| b.as_str()).collect();
-    attach_session_logging(
-        &mut tmux_session,
-        config,
-        repo_root,
-        &logging_branches,
-        layout.first_agent_index(),
-    )?;
-
-    // Execute tmux session
-    tmux_session.execute()?;
-
-    // Rebalance each agent row to equal width on the live window, as the
-    // supervised start does (design D4): the raw `split-window -h` chain
-    // renders a row as 50/25/25, so a column-precise resize evens it out now
-    // that the panes exist.
-    if let Err(e) = tmux::rebalance_agent_rows(
-        &tmux_session.name,
-        layout.first_agent_index(),
-        worktree_entries.len(),
-    ) {
-        eprintln!("warning: could not rebalance agent-row widths: {e}");
-    }
+    // Open the session, attach session logging (no-op unless `[logging]
+    // enabled`; agent indices shift by 1 when the broker's dashboard occupies
+    // pane 0), and even the grid's columns.
+    launch_session(&backend, &plan, &layout, Some((config, repo_root)))?;
 
     // Save session state and write the per-repo discovery file BEFORE
     // gating/injecting — matching the supervisor path's order (save, then
@@ -849,7 +807,7 @@ fn launch_spec_session(
     // `sweep.sh` needs the discovery file, so a user can clean up or re-run
     // without the next launch forking a parallel `paw-<project>-2` session.
     let mut state = Session {
-        session_name: tmux_session.name.clone(),
+        session_name: session_name.clone(),
         repo_path: repo_root.to_path_buf(),
         project_name: project.to_string(),
         created_at: SystemTime::now(),
@@ -879,7 +837,7 @@ fn launch_spec_session(
     // start at pane 0.
     write_repo_discovery_file(
         &state.repo_path,
-        &tmux_session.name,
+        &session_name,
         &state.worktrees,
         layout.first_agent_index(),
     );
@@ -905,7 +863,8 @@ fn launch_spec_session(
         let cli_command =
             apply_approval_flags(&config::launch_command(cli, &config.clis), &agent_flags);
         gate_pane_or_fail_on_dialog(
-            &tmux_session.name,
+            &backend,
+            &session_name,
             pane_idx,
             cli,
             &cli_command,
@@ -925,7 +884,7 @@ fn launch_spec_session(
             &state.worktrees[idx].worktree_path,
         );
         let delay = resolve_submit_delay_ms(cli, &config.clis);
-        submit_prompt_to_pane(&tmux_session.name, pane_idx, &prompt, delay);
+        submit_prompt_to_pane(&backend, &session_name, pane_idx, &prompt, delay);
         if let Some(entry_point) = task_prompt.entry_point {
             pending_entry_points.push(crate::PendingEntryPoint {
                 pane_index: pane_idx,
@@ -938,9 +897,9 @@ fn launch_spec_session(
 
     // Every prompt is out; now submit the workflow entry points declared by
     // the spec formats that have one, each once its own pane goes idle.
-    crate::submit_entry_points(&tmux_session.name, pending_entry_points);
+    crate::submit_entry_points(&backend, &session_name, pending_entry_points);
 
-    attach_or_print_hint(&tmux_session.name)
+    attach_or_print_hint(&session_name)
 }
 
 /// Restarts a paused session: recreates the dashboard pane (re-spawning
@@ -973,6 +932,7 @@ pub(crate) fn restart_from_pause_detached(
     existing: &Session,
 ) -> Result<(), PawError> {
     tmux::ensure_tmux_installed()?;
+    let backend = TmuxBackend::new();
 
     let dashboard_index = SessionLayout::of(existing).dashboard_index_or_default();
 
@@ -1025,48 +985,25 @@ pub(crate) fn restart_from_pause_detached(
         // is the dashboard's problem to report, and must not break the resume.
         warn_if_broker_is_exposed(&config.broker);
 
-        let dashboard_command = dashboard_command();
-        let repo_str = repo_root.to_string_lossy().to_string();
-        // Anchor the new pane on the first agent pane (which still
-        // exists in the live session); -b places the dashboard before
-        // it, mirroring the original layout. The pane index in tmux is
-        // not directly addressable for spawn — tmux assigns the next
-        // available index — so this leaves the dashboard at whatever
-        // index tmux picks. The session-state field remains a hint for
-        // future restarts; we re-write it below to reflect reality.
-        let split_status = StdCommand::new("tmux")
-            .args([
-                "split-window",
-                "-h",
-                "-b",
-                "-t",
-                &format!("{}:0.{dashboard_index}", existing.session_name),
-                "-c",
-                &repo_str,
-            ])
-            .status()
-            .map_err(|e| PawError::TmuxError(format!("failed to spawn dashboard pane: {e}")))?;
-        if !split_status.success() {
-            return Err(PawError::TmuxError(
-                "failed to recreate dashboard pane".to_string(),
-            ));
-        }
-        // The new pane is the focused pane; target it via :0.{dashboard_index}.
-        let target = format!("{}:0.{dashboard_index}", existing.session_name);
-        // Title matches the per-pane labelling scheme: the pane's role only,
-        // rendered in the `pane-border-format` strip the session already has.
-        let _ = StdCommand::new("tmux")
-            .args(["select-pane", "-t", &target, "-T", "dashboard"])
-            .status();
-        let send_status = StdCommand::new("tmux")
-            .args(["send-keys", "-t", &target, &dashboard_command, "Enter"])
-            .status()
-            .map_err(|e| PawError::TmuxError(format!("failed to send dashboard command: {e}")))?;
-        if !send_status.success() {
-            return Err(PawError::TmuxError(
-                "failed to send dashboard command".to_string(),
-            ));
-        }
+        // Anchor the new surface on the recorded dashboard position (the
+        // first agent's, which still exists in the live session); it is
+        // inserted before that surface, mirroring the original layout. The
+        // backend does not let a caller choose the new surface's index —
+        // tmux assigns it — so this leaves the dashboard wherever the
+        // backend places it. The session-state field remains a hint for
+        // future restarts; we re-write it below to reflect reality. The
+        // surface's label matches the per-pane labelling scheme: its role.
+        backend.spawn_surface(
+            &existing.session_name,
+            &SurfaceSpec {
+                label: "dashboard".to_string(),
+                owner: repo_root.to_path_buf(),
+                launch_command: dashboard_command(),
+            },
+            &SurfacePlacement::Before(
+                backend.surface_at(&existing.session_name, dashboard_index as usize),
+            ),
+        )?;
     }
 
     // The dashboard pane is up (or there was never one to recreate), so the
@@ -1076,7 +1013,7 @@ pub(crate) fn restart_from_pause_detached(
     // session it believes is already active.
     updated.status = SessionStatus::Active;
 
-    submit_held_boot_prompts(&mut updated, &config);
+    submit_held_boot_prompts(&backend, &mut updated, &config);
 
     session::save_session(&updated)?;
 
@@ -1095,18 +1032,36 @@ pub(crate) fn restart_from_pause_detached(
             branch_id: git_paw::broker::messages::slugify_branch(&wt.branch),
             worktree_path: wt.worktree_path.clone(),
             cli: wt.cli.clone(),
-            pane_index: tmux::resolve_pane_index_for_worktree(
-                &updated.session_name,
-                &wt.worktree_path,
-            )
-            .ok()
-            .flatten()
-            .unwrap_or(offset + idx),
+            pane_index: position_owned_by(&backend, &updated.session_name, &wt.worktree_path)
+                .unwrap_or(offset + idx),
         })
         .collect();
     crate::write_repo_discovery_file_with_agents(repo_root, &updated.session_name, agents);
 
     Ok(())
+}
+
+/// The layout position of the live surface `worktree` owns in `session`, read
+/// through the terminal port and matched by the core owner rule
+/// ([`resolve_agent`]: exact canonical-path equality). `None` when no live
+/// surface is owned by it or the surfaces cannot be listed.
+fn position_owned_by(
+    backend: &dyn TerminalBackend,
+    session: &str,
+    worktree: &Path,
+) -> Option<usize> {
+    let roster = [("", worktree)];
+    backend
+        .list_surfaces(session)
+        .ok()?
+        .into_iter()
+        .find(|surface| {
+            surface
+                .owner
+                .as_deref()
+                .is_some_and(|owner| resolve_agent(owner, roster).is_some())
+        })
+        .map(|surface| surface.position)
 }
 
 /// Submit the boot prompts held for agents added while the session was paused
@@ -1136,7 +1091,11 @@ pub(crate) fn restart_from_pause_detached(
 ///
 /// Takes `&mut Session` because a submitted prompt is cleared from the
 /// session the caller then saves; a blocked pane's prompt stays on it.
-fn submit_held_boot_prompts(updated: &mut Session, config: &PawConfig) {
+fn submit_held_boot_prompts(
+    backend: &dyn TerminalBackend,
+    updated: &mut Session,
+    config: &PawConfig,
+) {
     if !updated
         .worktrees
         .iter()
@@ -1170,11 +1129,7 @@ fn submit_held_boot_prompts(updated: &mut Session, config: &PawConfig) {
         // pane that cannot be resolved keeps its prompt held and is reported,
         // never typed into at a guessed index where another agent's ready CLI
         // would take the prompt and its Enter.
-        let Some(pane_idx) =
-            tmux::resolve_pane_index_for_worktree(&session_name, &wt.worktree_path)
-                .ok()
-                .flatten()
-        else {
+        let Some(pane_idx) = position_owned_by(backend, &session_name, &wt.worktree_path) else {
             blocked.push(format!("  {}: pane not found", wt.branch));
             continue;
         };
@@ -1183,6 +1138,7 @@ fn submit_held_boot_prompts(updated: &mut Session, config: &PawConfig) {
             apply_approval_flags(&config::launch_command(&wt.cli, &config.clis), &agent_flags);
 
         match gate_pane_or_fail_on_dialog(
+            backend,
             &session_name,
             pane_idx,
             &wt.cli,
@@ -1192,7 +1148,7 @@ fn submit_held_boot_prompts(updated: &mut Session, config: &PawConfig) {
             Ok(()) => {
                 if let Some(pending) = wt.pending_boot_prompt.take() {
                     let delay = resolve_submit_delay_ms(&wt.cli, &config.clis);
-                    submit_prompt_to_pane(&session_name, pane_idx, &pending, delay);
+                    submit_prompt_to_pane(backend, &session_name, pane_idx, &pending, delay);
                     // Taken INSIDE this arm, against the pane index already
                     // resolved above: a prompt the gate blocked, or whose
                     // pane was not found, never reaches here, so its entry
@@ -1241,7 +1197,7 @@ fn submit_held_boot_prompts(updated: &mut Session, config: &PawConfig) {
 
     // After the blocked report, so a user reading stderr sees what was held
     // before the launch blocks waiting for the panes that were not.
-    crate::submit_entry_points(&session_name, pending_entry_points);
+    crate::submit_entry_points(backend, &session_name, pending_entry_points);
 }
 
 /// Appends `flags` to `command` with a single separating space, or returns

@@ -1,0 +1,55 @@
+[
+  {
+    "argv": [
+      "tmux",
+      "list-panes",
+      "-t",
+      "paw-proj",
+      "-F",
+      "#{pane_id} #{pane_current_path}"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "kill-pane",
+      "-t",
+      "%2"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.0",
+      "-y",
+      "50%"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.1",
+      "-y",
+      "50%"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "display-message",
+      "-p",
+      "-t",
+      "paw-proj:0",
+      "#{window_width}"
+    ],
+    "stdio": "captured"
+  }
+]

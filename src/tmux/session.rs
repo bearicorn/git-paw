@@ -15,6 +15,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::command_runner::{CommandRunner, RealCommandRunner};
 use crate::error::PawError;
+use crate::surface::resolve_agent;
 
 /// Maximum number of session name collision retries.
 const MAX_COLLISION_RETRIES: u32 = 10;
@@ -51,27 +52,11 @@ pub(crate) fn is_session_alive_with(
 
 /// Outcome of a session-liveness probe (design D3 of `session-bugfixes`).
 ///
-/// Distinguishes a genuinely-absent tmux session (`Stale`) from a session that
-/// exists but whose agent panes have all exited (`AgentsExited`), and both from
-/// a probe that could not be run at all (`Indeterminate`, e.g. the `tmux`
-/// binary is missing). Receipt-staleness detection SHALL NOT report `🔴 stale`
-/// on an `Indeterminate` probe — a missing tmux binary is not evidence the
-/// session died — and SHALL NOT report it on `AgentsExited` either: the tmux
-/// session is still running there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionLiveness {
-    /// `tmux has-session` returned exit 0 — the session exists.
-    Alive,
-    /// `tmux has-session` ran and returned non-zero — the session is gone.
-    Stale,
-    /// The tmux session exists and the launch grace period has passed, but no
-    /// agent pane runs a non-shell process — every agent's CLI has exited.
-    /// Only [`session_liveness_for`] can return this.
-    AgentsExited,
-    /// The probe could not be run (tmux binary absent/unreachable). The
-    /// caller SHALL preserve the receipt's current state.
-    Indeterminate,
-}
+/// Defined on the terminal port ([`crate::terminal::SessionLiveness`]); the
+/// tmux probes below answer it from `tmux has-session` (`Alive` / `Stale`, or
+/// `Indeterminate` when tmux cannot be run) and [`session_liveness_for`]'s
+/// per-pane check (`AgentsExited`).
+pub use crate::terminal::SessionLiveness;
 
 /// Pure mapping from a probe's raw outcome to a [`SessionLiveness`].
 ///
@@ -576,42 +561,11 @@ pub(crate) fn list_panes_with_indices_with(
     Ok(panes)
 }
 
-/// Resolve the tmux pane INDEX whose `pane_current_path` is `worktree_path` in
-/// `session_name`.
-///
-/// The index-valued sibling of [`resolve_pane_id_for_worktree`], for callers
-/// that must record an index (the per-repo discovery file). Paths are
-/// canonicalised before comparison, so a symlinked temp root (macOS `/var` →
-/// `/private/var`) does not defeat the match. Returns `Ok(None)` when no live
-/// pane sits at the worktree, so the caller can fall back to the layout's
-/// nominal offset.
-pub fn resolve_pane_index_for_worktree(
-    session_name: &str,
-    worktree_path: &Path,
-) -> Result<Option<usize>, PawError> {
-    resolve_pane_index_for_worktree_with(&RealCommandRunner, session_name, worktree_path)
-}
-
-/// [`resolve_pane_index_for_worktree`] against an injected runner.
-pub(crate) fn resolve_pane_index_for_worktree_with(
-    runner: &dyn CommandRunner,
-    session_name: &str,
-    worktree_path: &Path,
-) -> Result<Option<usize>, PawError> {
-    let want = canonical_or_self(worktree_path);
-    for (pane_index, path) in list_panes_with_indices_with(runner, session_name)? {
-        if canonical_or_self(Path::new(&path)) == want {
-            return Ok(Some(pane_index));
-        }
-    }
-    Ok(None)
-}
-
 /// Resolve the tmux pane id (`%N`) whose `pane_current_path` matches
 /// `worktree_path` in `session_name` (design D2, G2a).
 ///
-/// Both the queried `pane_current_path` and `worktree_path` are canonicalised
-/// before comparison so a symlinked temp root (e.g. macOS `/var` →
+/// The comparison is the core owner rule ([`resolve_agent`]): both the queried
+/// `pane_current_path` and `worktree_path` are canonicalised so a symlinked temp root (e.g. macOS `/var` →
 /// `/private/var`) does not defeat the match. Returns `Ok(None)` when no live
 /// pane maps to the worktree (the agent's pane is already gone), so the caller
 /// can treat removal as an idempotent no-op.
@@ -628,19 +582,13 @@ pub(crate) fn resolve_pane_id_for_worktree_with(
     session_name: &str,
     worktree_path: &Path,
 ) -> Result<Option<String>, PawError> {
-    let want = canonical_or_self(worktree_path);
+    let roster = [("", worktree_path)];
     for (pane_id, path) in list_panes_with_paths_with(runner, session_name)? {
-        if canonical_or_self(Path::new(&path)) == want {
+        if resolve_agent(Path::new(&path), roster).is_some() {
             return Ok(Some(pane_id));
         }
     }
     Ok(None)
-}
-
-/// Canonicalise `path`, falling back to the path itself when it cannot be
-/// resolved (e.g. a temp dir already removed). Keeps comparisons total.
-fn canonical_or_self(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Pure JSON↔tmux reconciliation (design D3, G2b): given the session-JSON
@@ -649,22 +597,20 @@ fn canonical_or_self(path: &Path) -> PathBuf {
 /// live pane.
 ///
 /// Split from [`reconcile_agents_to_panes`] so the divergence logic is unit
-/// testable without a live tmux server. Paths are canonicalised on both sides
-/// (with a self fallback) so the comparison is symlink-tolerant.
+/// testable without a live tmux server. Each comparison is the core owner rule
+/// ([`resolve_agent`]: exact canonical-path equality, symlink-tolerant).
 #[must_use]
 pub fn agents_without_live_pane(
     agents: &[(String, PathBuf)],
     live_pane_paths: &[PathBuf],
 ) -> Vec<String> {
-    let live: Vec<PathBuf> = live_pane_paths
-        .iter()
-        .map(|p| canonical_or_self(p))
-        .collect();
     agents
         .iter()
-        .filter(|(_, wt)| {
-            let want = canonical_or_self(wt);
-            !live.contains(&want)
+        .filter(|(branch, wt)| {
+            let roster = [(branch.as_str(), wt.as_path())];
+            !live_pane_paths
+                .iter()
+                .any(|live| resolve_agent(live, roster).is_some())
         })
         .map(|(branch, _)| branch.clone())
         .collect()

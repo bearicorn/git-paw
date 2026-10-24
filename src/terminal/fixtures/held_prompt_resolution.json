@@ -1,0 +1,13 @@
+[
+  {
+    "argv": [
+      "tmux",
+      "list-panes",
+      "-t",
+      "paw-proj:0",
+      "-F",
+      "#{pane_index} #{pane_current_path}"
+    ],
+    "stdio": "captured"
+  }
+]

@@ -348,17 +348,39 @@ impl SessionLayout {
     where
         I: IntoIterator<Item = (&'a str, &'a Path)>,
     {
-        let candidate = canonical_or_owned(Path::new(owner_path));
-        for (agent_id, worktree_root) in owners {
-            if paths_match(&candidate, worktree_root) {
-                return SurfaceRole::Coding(agent_id.to_string());
-            }
+        if let Some(agent_id) = resolve_agent(Path::new(owner_path), owners) {
+            return SurfaceRole::Coding(agent_id.to_string());
         }
         if self.dashboard_index() == Some(index) {
             return SurfaceRole::Dashboard;
         }
         SurfaceRole::Unknown
     }
+}
+
+/// The coding agent whose worktree root is exactly `owner`, if any.
+///
+/// The single owner rule for surfaces: a surface's owner is the worktree root
+/// its process started in, so an owner names an agent only by **exact
+/// canonical-path equality** — never by a path prefix (a surface owned by a
+/// directory below a worktree root is not that agent's) and never by basename
+/// (`/elsewhere/other-feat-a` is not `feat-a`'s). Both sides are canonicalised
+/// where possible, so a symlinked root (macOS `/var` → `/private/var`) still
+/// matches. The drive loop (via [`SessionLayout::resolve`]), `remove`, `add`'s
+/// reconciliation and restart-from-pause all resolve surfaces through it.
+///
+/// `roster` is the session's coding agents as `(agent_id, worktree root)`
+/// pairs; the first match wins.
+#[must_use]
+pub fn resolve_agent<'a, I>(owner: &Path, roster: I) -> Option<&'a str>
+where
+    I: IntoIterator<Item = (&'a str, &'a Path)>,
+{
+    let candidate = canonical_or_owned(owner);
+    roster
+        .into_iter()
+        .find(|(_, worktree_root)| paths_match(&candidate, worktree_root))
+        .map(|(agent_id, _)| agent_id)
 }
 
 /// Canonicalises `p`, falling back to the path as-given when it cannot be
@@ -572,6 +594,71 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- Core owner resolution (`resolve_agent`) -----------------------------
+
+    const FEAT_A_ROOT: &str = "/work/repo/.git-paw/worktrees/feat-a";
+
+    /// Spec scenario "A path below a worktree root is not an owner match".
+    #[test]
+    fn a_path_below_a_worktree_root_is_not_an_owner_match() {
+        let owned = owners(&[("feat-a", FEAT_A_ROOT)]);
+        let below = format!("{FEAT_A_ROOT}/src");
+        assert_eq!(resolve_agent(Path::new(&below), refs(&owned)), None);
+        assert_eq!(
+            supervised().resolve(3, &below, refs(&owned)),
+            SurfaceRole::Unknown
+        );
+    }
+
+    /// Spec scenario "A basename collision does not misattribute".
+    #[test]
+    fn a_basename_collision_does_not_misattribute() {
+        let owned = owners(&[("feat-a", FEAT_A_ROOT)]);
+        assert_eq!(
+            resolve_agent(Path::new(FEAT_A_ROOT), refs(&owned)),
+            Some("feat-a")
+        );
+        assert_eq!(
+            resolve_agent(Path::new("/elsewhere/other-feat-a"), refs(&owned)),
+            None
+        );
+        assert_eq!(
+            resolve_agent(Path::new("/elsewhere/feat-a"), refs(&owned)),
+            None,
+            "an equal basename under another root is not the owner"
+        );
+    }
+
+    #[test]
+    fn an_owner_equal_to_a_worktree_root_resolves_through_a_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("feat-a");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.path().join("link-a");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let roster = [("feat-a", real.as_path())];
+        assert_eq!(resolve_agent(&link, roster), Some("feat-a"));
+    }
+
+    /// Spec scenario "The dashboard is found by the layout record, not by its
+    /// owner": two surfaces share the repository root as owner; only the one
+    /// at the layout record's dashboard position is the dashboard.
+    #[test]
+    fn the_dashboard_is_found_by_the_layout_record_not_by_its_owner() {
+        let owned = owners(&[("feat-a", "/repo-feat-a")]);
+        let layout = bare_with_broker();
+        assert_eq!(
+            layout.resolve(0, "/repo", refs(&owned)),
+            SurfaceRole::Dashboard
+        );
+        assert_eq!(
+            layout.resolve(2, "/repo", refs(&owned)),
+            SurfaceRole::Unknown,
+            "a stray repo-root surface is never the dashboard nor a coding agent"
+        );
     }
 
     /// Only a coding surface names an agent a keystroke sender may act on.

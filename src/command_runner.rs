@@ -96,6 +96,18 @@ pub trait CommandRunner {
     fn run_inheriting_stdio(&self, program: &str, args: &[&str]) -> std::io::Result<CommandStatus>;
 }
 
+/// A borrowed runner runs like the runner it borrows, so a caller can lend a
+/// recording fake to an owner (the terminal backend) and still read it back.
+impl<R: CommandRunner + ?Sized> CommandRunner for &R {
+    fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
+        (**self).run(program, args)
+    }
+
+    fn run_inheriting_stdio(&self, program: &str, args: &[&str]) -> std::io::Result<CommandStatus> {
+        (**self).run_inheriting_stdio(program, args)
+    }
+}
+
 /// Production [`CommandRunner`] that spawns real processes.
 ///
 /// Behaviour-identical to the previous inline calls: `run` matches

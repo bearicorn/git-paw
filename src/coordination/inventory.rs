@@ -3,9 +3,10 @@
 //!
 //! The inventory is composed from two sources (design D1):
 //! - broker `GET /status` — `branch_id`, `status`, `last_seen`, `cli`;
-//! - `tmux list-panes` with `pane_current_path` — the live
-//!   `branch_id → pane_index` mapping (v0.5.0 doctrine: never assume pane
-//!   index ordering; resolve via the worktree path).
+//! - the session's surfaces and their owning worktrees, read through the
+//!   terminal port ([`crate::terminal::TerminalBackend::list_surfaces`]) —
+//!   the live `branch_id → pane_index` mapping (v0.5.0 doctrine: never assume
+//!   pane index ordering; resolve via the worktree path).
 //!
 //! The join, mode detection, target validation, and the freshness cache are
 //! all factored as library functions (design D6) so the v0.6.0 consumer (the
@@ -24,6 +25,8 @@ use serde::Deserialize;
 use crate::config::claude_prompt_profile;
 use crate::error::PawError;
 use crate::surface::SUPERVISOR_AGENT_ID;
+use crate::terminal::TerminalBackend;
+use crate::terminal::tmux::TmuxBackend;
 
 /// Best-effort detected interaction mode of an agent's CLI pane.
 ///
@@ -456,13 +459,32 @@ impl InventoryCache {
 /// gracefully: a pane listing that fails yields an empty mapping (all
 /// `pane_index` become `None`) rather than aborting the inventory.
 pub fn build_inventory(broker_url: &str, tmux_session: &str) -> Result<AgentInventory, PawError> {
+    build_inventory_with(&TmuxBackend::new(), broker_url, tmux_session)
+}
+
+/// [`build_inventory`] reading surfaces through `backend`: each surface's
+/// owner feeds the basename-suffix [`match_pane`] rule unchanged, and its
+/// label and screen feed [`detect_mode`].
+///
+/// # Errors
+/// As [`build_inventory`].
+pub fn build_inventory_with(
+    backend: &dyn TerminalBackend,
+    broker_url: &str,
+    tmux_session: &str,
+) -> Result<AgentInventory, PawError> {
     let body = fetch_status_body(broker_url)?;
     let agents = parse_status_agents(&body)?;
-    let pane_output = list_pane_paths(tmux_session).unwrap_or_default();
-    let pane_paths = parse_pane_paths(&pane_output);
+    let surfaces = backend.list_surfaces(tmux_session).unwrap_or_default();
+    let pane_paths: Vec<(usize, String)> = surfaces
+        .iter()
+        .filter_map(|s| Some((s.position, s.owner.as_ref()?.to_string_lossy().into_owned())))
+        .collect();
     let mut modes = HashMap::new();
-    for (idx, _) in &pane_paths {
-        modes.insert(*idx, detect_pane_mode(tmux_session, *idx));
+    for surface in &surfaces {
+        let title = backend.label_of(&surface.id).unwrap_or_default();
+        let capture = backend.capture_tail(&surface.id).unwrap_or_default();
+        modes.insert(surface.position, detect_mode(&title, &capture));
     }
     let entries = join_inventory(agents, &pane_paths, &modes);
     Ok(AgentInventory {
@@ -520,47 +542,6 @@ fn fetch_status_body(broker_url: &str) -> Result<String, PawError> {
         .map(|i| i + 4)
         .ok_or_else(|| PawError::SessionError("malformed broker /status response".to_string()))?;
     Ok(response[body_start..].to_string())
-}
-
-/// Runs `tmux list-panes` for the session, formatting each line as
-/// `<pane_index> <pane_current_path>`.
-fn list_pane_paths(session: &str) -> Result<String, PawError> {
-    let output = std::process::Command::new("tmux")
-        .args([
-            "list-panes",
-            "-t",
-            &format!("{session}:0"),
-            "-F",
-            "#{pane_index} #{pane_current_path}",
-        ])
-        .output()
-        .map_err(|e| PawError::SessionError(format!("tmux list-panes failed: {e}")))?;
-    if !output.status.success() {
-        return Err(PawError::SessionError(format!(
-            "tmux list-panes exited with {}",
-            output.status
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Captures a pane's title and recent content and detects its mode.
-fn detect_pane_mode(session: &str, pane_index: usize) -> Mode {
-    let title = std::process::Command::new("tmux")
-        .args([
-            "display-message",
-            "-t",
-            &format!("{session}:0.{pane_index}"),
-            "-p",
-            "#{pane_title}",
-        ])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
-    let capture =
-        crate::supervisor::permission_prompt::capture_pane(session, pane_index).unwrap_or_default();
-    detect_mode(&title, &capture)
 }
 
 #[cfg(test)]
@@ -947,11 +928,36 @@ mod tests {
     }
 
     #[test]
-    fn detect_pane_mode_helper_on_dead_session_is_unknown() {
-        // capture + title both fail for a nonexistent session/pane → Unknown.
-        assert_eq!(
-            detect_pane_mode("paw-nonexistent-xyz-123", 9),
-            Mode::Unknown
+    fn a_surface_whose_label_and_screen_cannot_be_read_is_unknown() {
+        // A surface listed with an owner but no readable label or screen
+        // still matches its agent (basename-suffix rule) and reports Unknown.
+        let backend = crate::terminal::fake::FakeBackend::new().with_surface(
+            "paw-x",
+            1,
+            Some(std::path::Path::new("/w/proj-feat-auth")),
         );
+        let url = spawn_status_server(STATUS_JSON);
+        let inv = build_inventory_with(&backend, &url, "paw-x").expect("inventory builds");
+        let row = inv.find("feat-auth").unwrap();
+        assert_eq!(row.pane_index, Some(1));
+        assert_eq!(row.mode, Mode::Unknown);
+    }
+
+    #[test]
+    fn inventory_owners_come_from_the_terminal_port_and_keep_the_basename_match() {
+        // Surfaces listed in an order unrelated to the roster; feat-api is
+        // matched by its worktree basename suffix, never by position, and
+        // `-feat-a`-style prefixes do not cross-match.
+        use crate::terminal::TerminalBackend;
+        let backend = crate::terminal::fake::FakeBackend::new()
+            .with_surface("paw-x", 2, Some(std::path::Path::new("/w/proj-feat-auth")))
+            .with_surface("paw-x", 1, Some(std::path::Path::new("/w/proj-feat-api")));
+        let auth = backend.surface_at("paw-x", 2);
+        backend.script_screens(&auth, &[Some("● Thinking…\n  esc to interrupt")]);
+        let url = spawn_status_server(STATUS_JSON);
+        let inv = build_inventory_with(&backend, &url, "paw-x").expect("inventory builds");
+        assert_eq!(inv.find("feat-auth").unwrap().pane_index, Some(2));
+        assert_eq!(inv.find("feat-api").unwrap().pane_index, Some(1));
+        assert_eq!(inv.find("supervisor").unwrap().pane_index, None);
     }
 }

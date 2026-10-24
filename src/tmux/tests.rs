@@ -3541,40 +3541,6 @@ fn list_panes_with_indices_skips_malformed_lines_and_degrades_when_gone() {
 }
 
 #[test]
-fn resolve_pane_index_matches_the_worktree_path_and_reports_none_otherwise() {
-    let tmp = tempfile::tempdir().unwrap();
-    let wt_a = tmp.path().join("wt-a");
-    let wt_b = tmp.path().join("wt-b");
-    let absent = tmp.path().join("wt-absent");
-    std::fs::create_dir(&wt_a).unwrap();
-    std::fs::create_dir(&wt_b).unwrap();
-    std::fs::create_dir(&absent).unwrap();
-
-    // Deliberately NOT in index order: a resume re-splits the dashboard pane,
-    // so agent indices are not a contiguous run from the layout offset.
-    let listing = format!("4 {}\n0 /elsewhere\n2 {}\n", wt_b.display(), wt_a.display());
-    let fake = FakeCommandRunner::scripted(move |_, _| Ok(ok_out(&listing)));
-    assert_eq!(
-        resolve_pane_index_for_worktree_with(&fake, "paw-proj", &wt_a).unwrap(),
-        Some(2)
-    );
-
-    let listing_b = format!("4 {}\n0 /elsewhere\n", wt_b.display());
-    let fake_b = FakeCommandRunner::scripted(move |_, _| Ok(ok_out(&listing_b)));
-    assert_eq!(
-        resolve_pane_index_for_worktree_with(&fake_b, "paw-proj", &wt_b).unwrap(),
-        Some(4)
-    );
-
-    let none = FakeCommandRunner::scripted(|_, _| Ok(ok_out("0 /elsewhere\n")));
-    assert_eq!(
-        resolve_pane_index_for_worktree_with(&none, "paw-proj", &absent).unwrap(),
-        None,
-        "no live pane at the worktree lets the caller fall back to the offset"
-    );
-}
-
-#[test]
 fn resolve_pane_id_matches_the_worktree_path_and_reports_none_otherwise() {
     let tmp = tempfile::tempdir().unwrap();
     let wt = tmp.path().join("wt-a");
@@ -3620,8 +3586,7 @@ fn relaunch_clears_the_input_line_before_sending_the_cli_command() {
     let fake = FakeCommandRunner::succeeding("");
     relaunch_cli_into_pane(
         &fake,
-        "paw-proj",
-        2,
+        "paw-proj:0.2",
         "claude --dangerously-skip-permissions",
     );
     assert_eq!(
@@ -3654,7 +3619,7 @@ fn relaunch_clears_the_input_line_before_sending_the_cli_command() {
 fn relaunch_swallows_tmux_failures_so_the_fallback_injection_proceeds() {
     let failing = FakeCommandRunner::failing("can't find pane");
     // Best-effort: no panic, and both sends are still attempted.
-    relaunch_cli_into_pane(&failing, "paw-proj", 9, "claude");
+    relaunch_cli_into_pane(&failing, "paw-proj:0.9", "claude");
     assert_eq!(failing.calls().len(), 2);
 }
 

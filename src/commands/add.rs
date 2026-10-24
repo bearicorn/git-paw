@@ -15,9 +15,14 @@ use git_paw::error::PawError;
 use git_paw::git;
 use git_paw::session::{self, SessionStatus};
 use git_paw::surface::SessionLayout;
+use git_paw::terminal::tmux::TmuxBackend;
+use git_paw::terminal::{GridGeometry, SurfacePlacement, TerminalBackend};
 use git_paw::tmux;
 
-use super::helpers::{agent_pane_offset, config_to_custom_defs, legacy_tiled_layout_unsupported};
+use super::helpers::{
+    agent_pane_offset, config_to_custom_defs, legacy_tiled_layout_unsupported,
+    session_has_live_agents,
+};
 use crate::{
     AttachContext, AttachedAgent, attach_agent, gate_pane_or_fail_on_dialog,
     resolve_submit_delay_ms, submit_prompt_to_pane, write_repo_discovery_file,
@@ -42,12 +47,7 @@ pub(crate) fn cmd_add(
         ));
     };
 
-    let effective = existing.effective_status(|n| {
-        matches!(
-            tmux::session_liveness_for(n, existing.created_at, existing.agent_pane_offset()),
-            tmux::SessionLiveness::Alive
-        )
-    });
+    let effective = existing.effective_status(|n| session_has_live_agents(n, &existing));
     let paused = match effective {
         SessionStatus::Active => false,
         SessionStatus::Paused => true,
@@ -177,7 +177,7 @@ pub(crate) fn cmd_add(
     // broker-less session (agents from pane 0, rows sharing the full height)
     // re-tiles to its own geometry rather than a dashboard-bearing one.
     let prev_agent_count = existing.worktrees.len();
-    let layout = git_paw::surface::layout_for(prev_agent_count + 1, session_layout.has_top_row())?;
+    git_paw::surface::layout_for(prev_agent_count + 1, session_layout.has_top_row())?;
 
     // 4.5 Take the advisory lock for the rest of the critical section.
     let _lock = git_paw::lock::SessionLock::acquire(&repo_root)?;
@@ -254,21 +254,31 @@ pub(crate) fn cmd_add(
     // 4.7 Recompute layout_for(N+1) and re-apply (splice the pane + re-tile).
     let offset = agent_pane_offset(&existing);
     let new_pane_idx = offset + prev_agent_count;
-    tmux::build_add_agent_commands(
+    let backend = TmuxBackend::new();
+    let grid = GridGeometry {
+        first_agent: offset,
+        agent_count: prev_agent_count,
+        has_top_row: session_layout.has_top_row(),
+    };
+    backend.spawn_surface(
         &existing.session_name,
         &pane,
-        offset,
-        prev_agent_count,
-        layout,
-        config.border_affordances_enabled(),
-    )
-    .execute()?;
+        &SurfacePlacement::AppendToGrid {
+            grid,
+            show_labels: config.border_affordances_enabled(),
+        },
+    )?;
 
     // Rebalance the (possibly newly-full) agent row to equal width on the live
     // window so the added grid matches a start-time grid width-for-width
     // (design D4, G3).
-    if let Err(e) = tmux::rebalance_agent_rows(&existing.session_name, offset, prev_agent_count + 1)
-    {
+    if let Err(e) = backend.layout(
+        &existing.session_name,
+        &GridGeometry {
+            agent_count: prev_agent_count + 1,
+            ..grid
+        },
+    ) {
         eprintln!("warning: could not rebalance agent-row widths: {e}");
     }
 
@@ -321,18 +331,26 @@ pub(crate) fn cmd_add(
         // interactive marker — relaunching a still-bare shell, falling back to
         // injection after the budget — instead of a blind fixed sleep.
         gate_pane_or_fail_on_dialog(
+            &backend,
             &updated.session_name,
             new_pane_idx,
             &agent_cli,
-            &pane.cli_command,
+            &pane.launch_command,
             &config.clis,
         )?;
         let delay = resolve_submit_delay_ms(&agent_cli, &config.clis);
-        submit_prompt_to_pane(&updated.session_name, new_pane_idx, &prompt, delay);
+        submit_prompt_to_pane(
+            &backend,
+            &updated.session_name,
+            new_pane_idx,
+            &prompt,
+            delay,
+        );
         // A declared workflow entry point follows as its own composer line,
         // once this pane goes idle — the same rule the start paths apply.
         if let Some(entry_point) = entry_point {
             crate::submit_entry_points(
+                &backend,
                 &updated.session_name,
                 vec![crate::PendingEntryPoint {
                     pane_index: new_pane_idx,

@@ -1,0 +1,113 @@
+[
+  {
+    "argv": [
+      "tmux",
+      "split-window",
+      "-h",
+      "-t",
+      "paw-proj:0.2",
+      "-c",
+      "/repo/.git-paw/worktrees/feat-c"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "select-pane",
+      "-t",
+      "paw-proj:0.3",
+      "-T",
+      "feat/c"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-option",
+      "-p",
+      "-t",
+      "paw-proj:0.3",
+      "@paw_role",
+      "feat/c"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.3",
+      "C-u"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.3",
+      "claude",
+      "Enter"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.0",
+      "-y",
+      "50%"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.1",
+      "-y",
+      "50%"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "display-message",
+      "-p",
+      "-t",
+      "paw-proj:0",
+      "#{window_width}"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.1",
+      "-x",
+      "159"
+    ],
+    "stdio": "inherited"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.2",
+      "-x",
+      "159"
+    ],
+    "stdio": "inherited"
+  }
+]

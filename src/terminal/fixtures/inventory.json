@@ -1,0 +1,34 @@
+[
+  {
+    "argv": [
+      "tmux",
+      "list-panes",
+      "-t",
+      "paw-proj:0",
+      "-F",
+      "#{pane_index} #{pane_current_path}"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "display-message",
+      "-t",
+      "paw-proj:0.1",
+      "-p",
+      "#{pane_title}"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "capture-pane",
+      "-p",
+      "-t",
+      "paw-proj:0.1"
+    ],
+    "stdio": "captured"
+  }
+]

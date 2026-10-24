@@ -1,0 +1,147 @@
+[
+  {
+    "argv": [
+      "tmux",
+      "split-window",
+      "-v",
+      "-f",
+      "-t",
+      "paw-proj:0.5",
+      "-c",
+      "/repo/.git-paw/worktrees/feat-f"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "select-pane",
+      "-t",
+      "paw-proj:0.6",
+      "-T",
+      "feat/f"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "set-option",
+      "-p",
+      "-t",
+      "paw-proj:0.6",
+      "@paw_role",
+      "feat/f"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.6",
+      "C-u"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "send-keys",
+      "-t",
+      "paw-proj:0.6",
+      "claude",
+      "Enter"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.0",
+      "-y",
+      "50%"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.1",
+      "-y",
+      "25%"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.6",
+      "-y",
+      "25%"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "display-message",
+      "-p",
+      "-t",
+      "paw-proj:0",
+      "#{window_width}"
+    ],
+    "stdio": "captured"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.1",
+      "-x",
+      "95"
+    ],
+    "stdio": "inherited"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.2",
+      "-x",
+      "95"
+    ],
+    "stdio": "inherited"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.3",
+      "-x",
+      "95"
+    ],
+    "stdio": "inherited"
+  },
+  {
+    "argv": [
+      "tmux",
+      "resize-pane",
+      "-t",
+      "paw-proj:0.4",
+      "-x",
+      "95"
+    ],
+    "stdio": "inherited"
+  }
+]
