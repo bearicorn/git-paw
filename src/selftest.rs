@@ -168,15 +168,56 @@ fn tmux_available() -> bool {
 /// returns a port not currently in use, so this is collision-proof at any
 /// concurrency — unlike a fixed or PID-derived port. This mirrors the canonical
 /// `tests/e2e_supervisor_stop.rs::pick_broker_port` helper.
+///
+/// Returns only once a connect to the port is refused (GP-76). Releasing the
+/// listener does not take effect at once: under load the kernel can still
+/// complete a handshake against the listener it is tearing down and then
+/// reset it, and the broker's pre-start probe — which runs a moment later —
+/// would meet that reset rather than a refusal. A port that keeps accepting
+/// past [`PORT_RELEASE_BUDGET`] is abandoned for a fresh one.
 fn pick_broker_port() -> Result<u16, PawError> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| PawError::SessionError(format!("could not bind an ephemeral port: {e}")))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| PawError::SessionError(format!("could not read local address: {e}")))?
-        .port();
-    // `listener` drops here, releasing the port for the broker to bind.
-    Ok(port)
+    for _ in 0..PICK_PORT_ATTEMPTS {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| {
+            PawError::SessionError(format!("could not bind an ephemeral port: {e}"))
+        })?;
+        let port = listener
+            .local_addr()
+            .map_err(|e| PawError::SessionError(format!("could not read local address: {e}")))?
+            .port();
+        // Release the port for the broker to bind.
+        drop(listener);
+        if wait_until_refused(port, PORT_RELEASE_BUDGET) {
+            return Ok(port);
+        }
+    }
+    Err(PawError::SessionError(format!(
+        "no ephemeral port was released within {PORT_RELEASE_BUDGET:?} after {PICK_PORT_ATTEMPTS} attempts"
+    )))
+}
+
+/// How many ephemeral ports [`pick_broker_port`] tries before giving up.
+const PICK_PORT_ATTEMPTS: usize = 5;
+
+/// How long [`pick_broker_port`] waits for a released port to refuse.
+const PORT_RELEASE_BUDGET: Duration = Duration::from_secs(2);
+
+/// Polls `127.0.0.1:port` until a connect is refused, or `budget` elapses.
+///
+/// Returns `true` once nothing accepts on the port, `false` when something
+/// still did at the deadline. A connect that succeeds — even one the peer then
+/// resets — means a listener is still there.
+fn wait_until_refused(port: u16, budget: Duration) -> bool {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let deadline = Instant::now() + budget;
+    loop {
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_err() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// Builds a step-named failure so the verdict names the failing step.
@@ -639,6 +680,44 @@ mod tests {
         assert!(
             rebound.is_ok(),
             "the returned port {port} should be immediately bindable"
+        );
+    }
+
+    /// GP-76: the picker's wait-until-refused rule. A released port refuses
+    /// at once; a port something still accepts on — including a listener
+    /// that accepts and immediately resets — is not reported refused.
+    #[test]
+    fn wait_until_refused_waits_out_a_listener_that_still_accepts() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                drop(stream);
+            }
+        });
+        assert!(
+            !wait_until_refused(port, Duration::from_millis(300)),
+            "a port whose listener accepts-then-resets must not count as released"
+        );
+
+        let released = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let free = released.local_addr().expect("addr").port();
+        drop(released);
+        assert!(
+            wait_until_refused(free, Duration::from_secs(2)),
+            "a released port must be reported refused"
+        );
+    }
+
+    /// The picked port refuses connections when it is handed back, so the
+    /// broker's pre-start probe meets a refusal rather than a reset.
+    #[test]
+    fn pick_broker_port_returns_a_port_that_refuses_connections() {
+        let port = pick_broker_port().expect("pick a port");
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        assert!(
+            std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_err(),
+            "the returned port {port} must refuse connections"
         );
     }
 

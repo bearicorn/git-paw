@@ -38,10 +38,10 @@ Archive position 13 of 20 for v0.18 (after `terminal-backend-seam`).
   with or without `$TMUX`. Killing the dashboard no longer affects the broker.
 - **Where the host runs:** a detached service surface of the session from the terminal port — on
   tmux a window named `broker` outside window 0's grid, so pane indices are untouched and
-  `kill-session` still delivers SIGHUP. `start` launches it right after `GIT_PAW_BROKER_URL` is set,
-  handing it the session name and per-session log path on argv (the receipt does not exist yet), waits
-  (bounded) for `/status`, then creates the dashboard and agent panes and registers each agent through
-  `/watch` (with its spec id) before its boot prompt. The receipt is still saved only after the panes
+  `kill-session` still delivers SIGHUP. `start` launches it as soon as the session is open (the
+  terminal port opens the session with its env, dashboard and agent panes in one step), handing it the
+  session name and per-session log path on argv (the receipt does not exist yet), waits (bounded) for
+  `/status`, then registers each agent through `/watch` (with its spec id) before its boot prompt. The receipt is still saved only after the panes
   exist, so a failed start leaves persisted session state untouched. Recovery recreates the host the
   same way; the host seeds from the saved receipt.
 - **Pause / stop / restart** keyed on the host: `pause` closes the `broker` surface and leaves the
@@ -148,7 +148,7 @@ v0.17.0 `classifier-retirement` deletes the attended auto-approve thread, `poll.
 ## Rebase note (2026-10-25): audit against released v0.17.0
 
 - Launch ordering (design call 3): a fresh launch saves its receipt only after the panes exist
-  (`start.rs:377/:790`, `supervisor.rs:848`), which released *A failed start preserves persisted session
+  (`cmd_start`, `launch_spec_session`, `cmd_supervisor`), which released *A failed start preserves persisted session
   state* requires, so a host started first found no receipt (log path fell back to `git-paw.broker.log`,
   no watch targets or `spec_id` seeding). The launcher now hands the host the session name and log path
   on argv and registers each agent through `/watch` (with its spec id) once its pane exists; the
@@ -164,3 +164,20 @@ v0.17.0 `classifier-retirement` deletes the attended auto-approve thread, `poll.
   as does `orchestrator-read-surface`'s cursor/wait reader (that change now archives first, position 3).
 - Three hidden subcommands exist (`__prompt-profile` too); task 4.1 names the moving test
   (`dashboard_aggregator_is_seeded_from_the_session_receipt`).
+
+## Rebase note (2026-10-28): audit against the wave-five integration branch
+
+- Launch ordering: the merged terminal port opens a session together with its dashboard and agent
+  surfaces (`open_session`, pinned by the launch argv fixtures), and a service surface can only join a
+  session that exists. The host therefore starts right after the session opens — not before the first
+  pane — and the launcher still waits for `/status` before any `/watch` registration, receipt save or
+  boot prompt. *Broker host lifecycle across start, recovery, pause, stop* and its "A launch that fails
+  after the host starts saves no receipt" scenario are amended accordingly.
+- `/status` lists only agents that have shown activity (the no-phantom-row rule), so the scenarios that
+  said a registered or recovered agent is listed now say it is listed once its worktree shows activity.
+- The host takes the broker port and bind from a saved session of its name when one records them, so a
+  recovered or resumed session binds the URL its agents were handed even after `[broker] port` changed.
+- `spawn_service` takes the service's working directory, and the port gains `service(session, name)` to
+  address a running host by name (pause, status).
+- GP-82's *Stale broker detection* sits at line 94 of the released spec, not 87.
+- Code references by line number were replaced with function names; the merges moved them.
