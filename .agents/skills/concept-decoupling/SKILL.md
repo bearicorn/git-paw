@@ -85,18 +85,21 @@ Most of git-paw's hard logic (approve? nudge? escalate? merged? exited cleanly?)
 interleaved with the calls that capture panes and send keys. Separate them:
 
 ```rust
-// core: pure
-pub fn decide_approval(tail: &str, profile: &CliProfile, policy: &Policy) -> ApprovalDecision;
+// core: pure — state + observation in, next state + effects out
+pub fn decide_prompt(state: &DedupWindow, obs: &SurfaceObservation, now: Instant)
+    -> (DedupWindow, Vec<DriveEffect>);
 
 // app: shell
-let tail = terminal.capture_tail(surface)?;
-match core::decide_approval(&tail, profile_for(agent), &policy) {
-    ApprovalDecision::Approve { option } => terminal.send_key(surface, option)?,
-    ApprovalDecision::Escalate(reason)   => broker.publish(escalation(agent, reason))?,
-    ApprovalDecision::CliUnavailable(l)  => return Ok(Outcome::CliUnavailable(l)),
-    ApprovalDecision::NotLive            => {}
+let capture = terminal.capture(surface);
+let (next, effects) = decide::decide_prompt(&dedup, &observation(&capture), clock.now());
+dedup = next;
+for effect in effects {
+    shell.apply(deps, effect); // through the ports, in order, logged with its outcome
 }
 ```
+
+A live permission prompt yields escalation effects only — no decision returns a keystroke that
+answers one (`src/supervisor/drive/decide.rs`).
 
 - Inputs are *observed facts* passed in (the captured tail, the refs, the roster) — never read
   inside the decision. Example: an exit summary must take "is this branch an ancestor of the
@@ -105,7 +108,8 @@ match core::decide_approval(&tail, profile_for(agent), &policy) {
 - Effects can be returned as data (`Vec<Effect>`) when a step has several; that also gives a
   dry-run and an audit trail for free.
 - Migrate one decision at a time, starting with the nearly pure ones. Precedents: the
-  live-prompt gate in `supervisor::permission_prompt`, and the dashboard's MVU `update`.
+  drive loop's decisions in `supervisor::drive::decide`, the live-prompt gate in
+  `supervisor::permission_prompt`, and the dashboard's MVU `update`.
 
 ## 4. Adapters — compile-time, in-tree, zero new dependencies
 

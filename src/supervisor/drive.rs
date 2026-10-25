@@ -48,6 +48,11 @@
 //! ([`crate::terminal::TerminalBackend`]), which implements the three seams;
 //! the production entry point [`run_drive_loop`] wires the tmux backend and
 //! the real implementations of the rest.
+//!
+//! The decisions themselves are pure functions in the `decide` child module
+//! (observe → decide → apply): this module is the shell that observes, calls
+//! them, and applies the [`DriveEffect`]s they return, so each decision is
+//! tested with data alone.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -78,6 +83,10 @@ use super::permission_prompt::{
     extract_path_from_file_prompt, is_idle_input_box_line, is_live_prompt, is_rule_line,
     strip_input_sigil,
 };
+
+mod decide;
+
+pub use decide::{AppliedEffect, DriveEffect, EffectOutcome, JudgmentCall};
 
 /// Poll cadence: the loop re-sweeps every pane on approximately this interval.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(15);
@@ -235,7 +244,7 @@ pub fn dedup_shape(captured: &str) -> String {
 
 /// Tracks `(agent_id, shape)` alert keys within a rolling window so a repeated
 /// prompt observed on every poll produces exactly one alert per window.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DedupWindow {
     window: Duration,
     seen: HashMap<String, Instant>,
@@ -344,11 +353,8 @@ impl WorkerPhase {
     /// [`WorkerPhase::Done`]. Delegates to the array for the same reason
     /// [`WorkerPhase::is_completed`] does.
     ///
-    /// No production caller while no orchestrator runs inside the session: the
-    /// headless hand-off (`orchestrator-escalation-handoff`) is what keys a
-    /// merge decision off it. Kept because `code-architecture` requires the
-    /// predicate on the enum.
-    #[cfg_attr(not(test), expect(dead_code))]
+    /// The message decision (`decide::decide_message`) notes a worker's
+    /// artifact at such a phase as a merge-decision judgment call.
     fn is_merge_candidate(self) -> bool {
         MERGE_CANDIDATE_STATUSES.contains(&self.as_status())
     }
@@ -463,7 +469,7 @@ fn bracketed_gate(error: &str, gate_tags: &[String]) -> Option<String> {
 }
 
 /// One branch's correction bookkeeping.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct BranchCorrection {
     /// Re-engagements actually sent to this branch's pane so far.
     cycles: u32,
@@ -480,7 +486,7 @@ struct BranchCorrection {
 /// Held in the loop's in-process state alongside the alert [`DedupWindow`] and
 /// deliberately NOT persisted: a supervisor restart resets every branch's
 /// budget, which is the intuitive behaviour for a within-session policy.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CorrectionState {
     branches: HashMap<String, BranchCorrection>,
 }
@@ -727,7 +733,7 @@ impl Escalation {
     ///
     /// A `"cli-unavailable"` verdict paraphrases its `command` instead of
     /// quoting it: the `cli-unavailable` verdict's `command` is the matched
-    /// banner LINE VERBATIM (`sweep_pane`), and a reader that echoes this text
+    /// banner LINE VERBATIM (`decide_prompt`), and a reader that echoes this text
     /// into a terminal git-paw scans must not plant a copy of the marker there
     /// (`cli-unavailable-detection-gaps`).
     #[must_use]
@@ -930,11 +936,11 @@ pub trait Clock {
     fn sleep(&self, dur: Duration);
 }
 
-/// Publishes approval-audit and escalation alerts to the broker.
+/// Publishes escalation alerts to the broker.
 pub trait AlertSink {
-    /// Records an auto-approval in the broker log BEFORE keystrokes are sent
-    /// (per `automatic-approval`), so a crash mid-action still leaves a trail.
-    /// Surfaces a risky/unknown prompt for later human review.
+    /// Surfaces an escalation — a live permission prompt, a CLI-unavailability
+    /// banner, a wedged nudge or a correction-loop signal — for later human
+    /// review.
     fn escalate(&mut self, escalation: &Escalation);
 }
 
@@ -957,7 +963,7 @@ pub trait LearningSink {
 /// Only a live permission prompt is a subject here. A CLI-unavailability
 /// banner, a wedged nudge and a correction-loop signal are escalations too,
 /// but none of them is a command awaiting a decision, so none reaches this
-/// sink — see [`sweep_pane`], which calls it from the permission-prompt arm
+/// sink — see `decide::decide_prompt`, which returns it from the permission-prompt arm
 /// alone.
 pub trait ManualDecisionSink {
     /// Records that `agent_id`'s pane, whose content is `captured`, is
@@ -1057,7 +1063,7 @@ pub struct DriveDeps<'a> {
     pub enumerator: &'a dyn PaneEnumerator,
     /// Captures pane content.
     pub capturer: &'a dyn PaneCapture,
-    /// Dispatches approval keystrokes.
+    /// Dispatches nudge and input-recovery keystrokes.
     pub dispatcher: &'a mut dyn KeyDispatcher,
     /// Fetches broker `/status`.
     pub status: &'a dyn StatusFetcher,
@@ -1248,15 +1254,19 @@ fn advance_resolved_phases(
 /// Each poll iteration:
 /// 1. Enumerates surfaces (one listing), resolving each to its agent by the
 ///    owner the terminal backend reports.
-/// 2. Captures each surface explicitly (one screen read per surface) and acts only
-///    when a LIVE prompt footer is in the tail.
-/// 3. Classifies the live prompt; safe prompts are approved (audit-logged
-///    first, then the option digit + `Enter` as separate keystrokes, gated on a
-///    fresh re-confirm and on holding the pane's exclusive claim under
-///    `repo_root`), risky/unknown prompts are escalated non-blocking and
-///    deduped on `(agent_id, shape)`.
-/// 4. Fetches `/status`; on completion the loop exits, otherwise it checks the
-///    heartbeat and sleeps for the poll interval.
+/// 2. Captures each coding surface explicitly (one screen read per surface)
+///    and applies what `decide::decide_prompt` returns: a live prompt is
+///    escalated non-blocking and deduped on `(agent_id, shape)`, never
+///    answered; an idle surface's stranded input is submitted under the
+///    surface's claim under `repo_root`.
+/// 3. Fetches `/status`, then applies the message decision
+///    (`decide::decide_message`) and the correction pass
+///    (`decide::decide_nudge`).
+/// 4. On completion the loop exits, otherwise it checks the heartbeat and
+///    sleeps for the poll interval.
+///
+/// Every effect is applied in order through the ports and recorded in the
+/// effect log [`drive_loop_logged`] returns.
 ///
 /// The pane sweep is **pane-keyed**: every pane returned by the enumerator is
 /// evaluated, including a pane that has booted but not yet published any
@@ -1268,7 +1278,8 @@ fn advance_resolved_phases(
 /// bound session instance is purged, stopped, or replaced by a newer
 /// same-named session, the loop exits immediately, without sweeping or
 /// sending any keystrokes to whatever now owns that session name.
-#[allow(clippy::too_many_lines)]
+///
+/// [`drive_loop_logged`] runs the same loop and also returns the effect log.
 pub fn drive_loop(
     session: &str,
     repo_root: &Path,
@@ -1277,6 +1288,29 @@ pub fn drive_loop(
     config: &DriveConfig,
     instance: &dyn SessionInstanceGuard,
 ) -> DriveSummary {
+    drive_loop_logged(session, repo_root, agents, deps, config, instance).summary
+}
+
+/// What one run of the drive loop produced: its exit summary and the ordered
+/// log of every effect the shell applied, with its outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriveRun {
+    /// The exit summary.
+    pub summary: DriveSummary,
+    /// Every effect applied this run, in application order. In memory only.
+    pub effect_log: Vec<AppliedEffect>,
+}
+
+/// Runs [`drive_loop`] and returns its summary together with the effect log.
+#[allow(clippy::too_many_lines)]
+pub fn drive_loop_logged(
+    session: &str,
+    repo_root: &Path,
+    agents: &[AgentPane],
+    deps: &mut DriveDeps<'_>,
+    config: &DriveConfig,
+    instance: &dyn SessionInstanceGuard,
+) -> DriveRun {
     let layout = config.layout;
     // The roster the loop drives, as last read. It starts as the one the
     // launch handed over and is refreshed from the session state at the top of
@@ -1287,9 +1321,7 @@ pub fn drive_loop(
     let mut agents: Vec<AgentPane> = agents.to_vec();
     let mut coding_ids: Vec<String> = agents.iter().map(|a| a.agent_id.clone()).collect();
     let mut dedup = DedupWindow::new(config.dedup_window);
-    let mut escalations: Vec<Escalation> = Vec::new();
     let mut correction = CorrectionState::new();
-    let mut exhausted: Vec<ExhaustedBranch> = Vec::new();
     // Highest-progressed `WorkerPhase` ever observed per agent (GP-05), so a
     // generic `working` heartbeat republished after a `verified`/`done`
     // artifact event can never regress the exit summary's resolved state.
@@ -1313,6 +1345,9 @@ pub fn drive_loop(
     // correction pass's pre-first-status handling.
     let mut status_for_sweep: Vec<AgentStatusRow> = Vec::new();
     let ctx = SweepContext { session, repo_root };
+    // Applies every effect the loop decides on, accumulating the published
+    // escalations, the exhausted branches and the effect log.
+    let mut shell = Shell::new(ctx);
 
     // The loop is an expression that breaks with the terminal `(outcome,
     // latest_status)`: every exit path assigns both, so there are no
@@ -1347,17 +1382,12 @@ pub fn drive_loop(
             };
             pane_by_agent.insert(agent_id.to_string(), pane.pane_index);
 
-            if let Some(escalation) = sweep_pane(
-                ctx,
-                &pane,
-                agent_id,
-                deps,
-                config,
-                &mut dedup,
-                &status_for_sweep,
-            ) {
-                escalations.push(escalation);
-            }
+            let view = TickView {
+                agents: &agents,
+                panes: &pane_by_agent,
+                status: &status_for_sweep,
+            };
+            sweep_surface(&mut shell, deps, &view, config, &mut dedup, &pane, &role);
         }
 
         // --- Fetch status once this tick, BEFORE dispatching any nudge -------
@@ -1383,27 +1413,36 @@ pub fn drive_loop(
         // breaks at the bottom of this same tick).
         let winding_down = detect_completion(&latest_status, &coding_ids).is_some();
 
-        // --- Observe newly published worker messages -------------------------
-        let merged_bases = observe_worker_messages(
-            &coding_ids,
-            deps,
-            &mut correction,
-            &config.correction.gate_tags,
+        // --- Observe newly published worker messages, decide, apply ----------
+        // A branch refresh runs only in reaction to a merge observed this
+        // sweep, never on a timer (design D4).
+        let messages = deps.messages.poll_new();
+        let (next, message_effects) = decide::decide_message(
+            &correction,
+            &messages,
+            &decide::MessagePolicy {
+                coding_ids: &coding_ids,
+                gate_tags: &config.correction.gate_tags,
+                winding_down,
+                branch_refresh_enabled: config.branch_refresh_enabled,
+            },
         );
+        correction = next;
 
-        // --- Branch refresh (post-merge, opt-in) ------------------------------
-        let refreshed_branches = trigger_branch_refresh(
-            config.branch_refresh_enabled,
-            ctx,
-            &agents,
-            &pane_by_agent,
-            &latest_status,
-            &merged_bases,
-            deps,
-        );
+        let view = TickView {
+            agents: &agents,
+            panes: &pane_by_agent,
+            status: &latest_status,
+        };
+        let mut refreshed_branches = Vec::new();
+        for effect in message_effects {
+            if let EffectOutcome::Refreshed(rebased) = shell.apply(deps, &view, effect) {
+                refreshed_branches.extend(rebased);
+            }
+        }
 
         if winding_down {
-            let outcome = if escalations.is_empty() {
+            let outcome = if shell.escalations.is_empty() {
                 DriveOutcome::Completed
             } else {
                 DriveOutcome::EscalatedForReview
@@ -1412,15 +1451,7 @@ pub fn drive_loop(
         }
 
         // --- Correction pass (auto-loopback) ---------------------------------
-        let mut pass = CorrectionPass {
-            ctx,
-            panes: &pane_by_agent,
-            status: &latest_status,
-            correction: &mut correction,
-            escalations: &mut escalations,
-            exhausted: &mut exhausted,
-        };
-        run_correction_pass(&mut pass, deps, config);
+        run_correction_pass(&mut shell, deps, &view, config, &mut correction);
 
         // --- Progress observation (unattended-heartbeat-progress) ------------
         // A failed tip read is no observation. A branch this loop rebased
@@ -1471,101 +1502,52 @@ pub fn drive_loop(
 
         deps.clock.sleep(config.poll_interval);
     };
-    let mut outcome = outcome;
-
     // --- Wedged nudges reach the summary (idle-pane-nudge-submission) -------
     // A nudge or stranded line still present after every recovery attempt was
     // escalated to the broker (deduped) as it happened; it now joins the exit
-    // summary's own escalation list, same as the `[unmerged]` entries appended
-    // just below — one list, so the summary is never silently shorter than
-    // what was actually escalated.
+    // summary's own escalation list, same as the `[unmerged]` entries
+    // `summarize` appends — one list, so the summary is never silently shorter
+    // than what was actually escalated.
+    let mut escalations = std::mem::take(&mut shell.escalations);
     escalations.append(&mut deps.wedged);
 
     // --- Ref-derived merge truth (drive-loop-exit-summary-truth, D1) --------
     // Merged-ness is answered by git, once per coding branch, never by loop
     // or phase state: a worker reaching `verified`/`done` says nothing about
-    // whether its branch ever reached the default branch. A comparison git
-    // cannot make (a deleted branch, a bad ref) counts as unmerged — the
-    // fail-safe direction (D2), because this summary is the input to a
-    // destructive `purge`.
+    // whether its branch ever reached the default branch. The shell observes
+    // it here and `summarize` takes it as an input.
     let merge_results: HashMap<String, Result<MergeState, PawError>> = agents
         .iter()
         .map(|a| (a.agent_id.clone(), deps.merge_check.merge_state(&a.branch)))
         .collect();
 
-    // A wave the loop reported finished (`Completed` / `EscalatedForReview` —
-    // the two outcomes the `winding_down` break above produces) is only ever
-    // `Completed` when every branch is actually merged (D3). An unmerged
-    // branch becomes a `[unmerged]` escalation entry, pushed directly onto
-    // `escalations` — never via `record_escalation`, both because the loop's
-    // sweep context no longer exists here and because nothing may be typed
-    // into a pane during wind-down (GP-16).
-    if matches!(
-        outcome,
-        DriveOutcome::Completed | DriveOutcome::EscalatedForReview
-    ) {
-        for agent in agents {
-            let detail = match merge_results.get(&agent.agent_id) {
-                Some(Ok(state)) if state.merged => None,
-                Some(Ok(state)) => Some(format!(
-                    "{}: {} commit(s) not in {} (tip {})",
-                    agent.branch, state.ahead, config.default_branch, state.tip
-                )),
-                Some(Err(e)) => Some(format!(
-                    "{}: could not compare against {}: {e}",
-                    agent.branch, config.default_branch
-                )),
-                None => None,
-            };
-            if let Some(command) = detail {
-                escalations.push(Escalation {
-                    agent_id: agent.agent_id.clone(),
-                    verdict: "unmerged".to_string(),
-                    command,
-                });
-            }
-        }
-        outcome = if escalations.is_empty() {
-            DriveOutcome::Completed
-        } else {
-            DriveOutcome::EscalatedForReview
-        };
-    }
-
+    let (summary, effects) = decide::summarize(
+        decide::LoopState {
+            outcome,
+            escalations,
+            exhausted: std::mem::take(&mut shell.exhausted),
+            agents: &agents,
+            latest_status: &latest_status,
+            resolved_phase: &resolved_phase,
+            default_branch: &config.default_branch,
+            broker_log_hint: config.broker_log_hint.clone(),
+            learnings_hint: config.learnings_hint.clone(),
+        },
+        &merge_results,
+    );
     // --- Wind-down synthesis learning (deduped against in-session friction) --
-    if !escalations.is_empty() {
-        deps.learnings.record(
-            LEARNING_CATEGORY,
-            "unattended wave wind-down synthesis",
-            &winddown_learning_body(outcome, &escalations),
-        );
+    let no_panes = HashMap::new();
+    let view = TickView {
+        agents: &agents,
+        panes: &no_panes,
+        status: &latest_status,
+    };
+    for effect in effects {
+        shell.apply(deps, &view, effect);
     }
-
-    // Wave-level "N/M branches merged" line: the ref-derived count, printed
-    // for every outcome with coding agents (not only `Completed`) — a
-    // `heartbeat` exit benefits from the same truth as a finished one.
-    let merged_summary = (!coding_ids.is_empty()).then(|| {
-        let merged = merge_results
-            .values()
-            .filter(|r| matches!(r, Ok(s) if s.merged))
-            .count();
-        format!("{merged}/{} branches merged", coding_ids.len())
-    });
-
-    DriveSummary {
-        outcome,
-        agent_states: resolved_agent_states(
-            &coding_ids,
-            &latest_status,
-            &resolved_phase,
-            &merge_results,
-            &config.default_branch,
-        ),
-        escalations,
-        exhausted,
-        broker_log_hint: config.broker_log_hint.clone(),
-        learnings_hint: config.learnings_hint.clone(),
-        merged_summary,
+    DriveRun {
+        summary,
+        effect_log: shell.log,
     }
 }
 
@@ -1580,91 +1562,6 @@ pub fn drive_loop(
 /// The authoritative definition of [`WorkerPhase::is_merge_candidate`]; decision
 /// sites read the phase predicate, never this array.
 const MERGE_CANDIDATE_STATUSES: &[&str] = &["committed", "done"];
-
-/// Reacts to the broker messages published since the previous sweep.
-///
-/// Only **`agent.feedback`** carrying a `[<gate>]` tag acts here: it is a
-/// FAILING gate verdict and marks the branch for the correction pass. (A
-/// passing gate publishes `agent.verified`, which the `/status` sweep handles
-/// instead.) The feedback arm filters on `coding_ids` FIRST, so the loop's own
-/// `supervisor` traffic never feeds back into itself.
-///
-/// A worker's **`agent.question`** and its **`agent.artifact`** at a
-/// `committed`/`done` status are judgment calls too, but no
-/// orchestrator runs inside the session: the worker's own broker message is
-/// the review item, and the loop neither copies it nor types it into any
-/// surface. A headless orchestrator invocation reads them from the broker
-/// (`orchestrator-escalation-handoff`).
-///
-/// Returns the default-branch name (`payload.base`) of every
-/// `agent.advanced-main` event observed this sweep, in publish order.
-///
-/// `AdvancedMain`'s sender identity is the payload's `from` field (typically
-/// `"supervisor"`), never a coding agent's id, so it is handled here as a
-/// dedicated match arm BEFORE the `coding_ids`-gated dispatch below — that
-/// gate exists to keep the loop's own escalations from feeding back into
-/// themselves (see the arm-by-arm doc above) and would otherwise silently
-/// drop every merge event. This is the drive loop's post-merge trigger for
-/// `supervisor-branch-refresh` (design D4): refresh is evaluated only in
-/// reaction to an observed merge, never on a timer.
-fn observe_worker_messages(
-    coding_ids: &[String],
-    deps: &mut DriveDeps<'_>,
-    correction: &mut CorrectionState,
-    gate_tags: &[String],
-) -> Vec<String> {
-    let mut merged_bases = Vec::new();
-    for msg in deps.messages.poll_new() {
-        if let BrokerMessage::AdvancedMain { payload } = &msg {
-            merged_bases.push(payload.base.clone());
-            continue;
-        }
-        let Some(agent_id) = coding_ids.iter().find(|id| *id == msg.agent_id()) else {
-            continue;
-        };
-        if let BrokerMessage::Feedback { payload, .. } = &msg
-            && let Some(gate) = gate_failure(payload, gate_tags)
-        {
-            correction.mark_gate_failure(
-                agent_id,
-                reengagement_text(&gate, &payload.errors.join("; ")),
-            );
-        }
-    }
-    merged_bases
-}
-
-/// Runs [`refresh_branches_after_merge`] once per merge event observed this
-/// sweep, but only when `enabled`. Factored out of [`drive_loop`] purely to
-/// keep that function's own body short; the enablement check and the
-/// no-timer guarantee (design D4 — `merged_bases` is non-empty only when an
-/// `agent.advanced-main` event was actually observed this sweep) live here.
-#[allow(clippy::too_many_arguments)]
-fn trigger_branch_refresh(
-    enabled: bool,
-    ctx: SweepContext<'_>,
-    agents: &[AgentPane],
-    pane_by_agent: &HashMap<String, usize>,
-    latest_status: &[AgentStatusRow],
-    merged_bases: &[String],
-    deps: &mut DriveDeps<'_>,
-) -> Vec<String> {
-    if !enabled {
-        return Vec::new();
-    }
-    let mut rebased = Vec::new();
-    for base in merged_bases {
-        rebased.extend(refresh_branches_after_merge(
-            ctx,
-            agents,
-            pane_by_agent,
-            latest_status,
-            base,
-            deps,
-        ));
-    }
-    rebased
-}
 
 /// Evaluates the `supervisor-branch-refresh` preconditions for every live
 /// worker branch after a successful merge onto `base`, and rebases +
@@ -1748,12 +1645,132 @@ struct SweepContext<'a> {
     repo_root: &'a Path,
 }
 
-/// Records `escalation` on the broker as a drainable review item — and only
-/// there. No orchestrator runs inside the session, so nothing is typed into
-/// any surface: an orchestrator outside the session reads the item from the
-/// broker.
-fn record_escalation(deps: &mut DriveDeps<'_>, escalation: &Escalation) {
-    deps.alerts.escalate(escalation);
+/// The effect-log outcome of a keystroke actuator's result.
+fn nudge_effect_outcome(result: Result<NudgeOutcome, PawError>) -> EffectOutcome {
+    match result {
+        Ok(NudgeOutcome::Skipped) => EffectOutcome::Skipped,
+        Ok(NudgeOutcome::Delivered) => EffectOutcome::Sent,
+        Ok(NudgeOutcome::Wedged) => EffectOutcome::Wedged,
+        Ok(NudgeOutcome::Deferred) => EffectOutcome::Deferred,
+        Err(e) => EffectOutcome::Failed(e.to_string()),
+    }
+}
+
+/// What the shell observed this tick that applying an effect may need: the
+/// roster as last read, the coding surfaces resolved so far and the latest
+/// `/status` snapshot.
+struct TickView<'t> {
+    /// The coding-agent roster as last read.
+    agents: &'t [AgentPane],
+    /// Pane index per agent id, resolved this sweep.
+    panes: &'t HashMap<String, usize>,
+    /// The `/status` snapshot the tick acts on.
+    status: &'t [AgentStatusRow],
+}
+
+/// The drive loop's imperative shell: applies each [`DriveEffect`] a decision
+/// returns through the ports, in order, and records it with its outcome.
+struct Shell<'r> {
+    /// tmux session + repository root for every keystroke effect.
+    ctx: SweepContext<'r>,
+    /// Escalations published this run, in order — the exit summary's list.
+    escalations: Vec<Escalation>,
+    /// Branches whose correction budget was spent, for the exit summary.
+    exhausted: Vec<ExhaustedBranch>,
+    /// Every applied effect with its outcome, in application order.
+    log: Vec<AppliedEffect>,
+}
+
+impl<'r> Shell<'r> {
+    /// A shell with nothing applied yet.
+    fn new(ctx: SweepContext<'r>) -> Self {
+        Self {
+            ctx,
+            escalations: Vec::new(),
+            exhausted: Vec::new(),
+            log: Vec::new(),
+        }
+    }
+
+    /// Applies `effect` through the ports, appends it to the effect log with
+    /// its outcome, and returns the outcome.
+    ///
+    /// An escalation is published on the broker as a drainable review item —
+    /// and only there. No orchestrator runs inside the session, so nothing is
+    /// typed into any surface for it. Keystroke effects run behind the
+    /// surface's claim inside their actuators, exactly as before.
+    fn apply(
+        &mut self,
+        deps: &mut DriveDeps<'_>,
+        view: &TickView<'_>,
+        effect: DriveEffect,
+    ) -> EffectOutcome {
+        let outcome = match &effect {
+            DriveEffect::RecordManualDecision { agent_id, captured } => {
+                deps.manual_decisions.record_forwarded(agent_id, captured);
+                EffectOutcome::Recorded
+            }
+            DriveEffect::PublishEscalation(escalation) => {
+                deps.alerts.escalate(escalation);
+                self.escalations.push(escalation.clone());
+                EffectOutcome::Published
+            }
+            DriveEffect::RecordLearning {
+                category,
+                title,
+                body,
+            } => {
+                deps.learnings.record(category, title, body);
+                EffectOutcome::Recorded
+            }
+            DriveEffect::SubmitBufferedInput {
+                agent_id,
+                pane_index,
+                settle_delay,
+            } => nudge_effect_outcome(submit_buffered_input(
+                deps,
+                self.ctx.repo_root,
+                self.ctx.session,
+                *pane_index,
+                agent_id,
+                *settle_delay,
+            )),
+            DriveEffect::Reengage {
+                agent_id,
+                pane_index,
+                text,
+                settle_delay,
+            } => nudge_effect_outcome(send_reengagement(
+                deps,
+                self.ctx.repo_root,
+                self.ctx.session,
+                *pane_index,
+                agent_id,
+                text,
+                *settle_delay,
+            )),
+            DriveEffect::RefreshBranches { base } => {
+                EffectOutcome::Refreshed(refresh_branches_after_merge(
+                    self.ctx,
+                    view.agents,
+                    view.panes,
+                    view.status,
+                    base,
+                    deps,
+                ))
+            }
+            DriveEffect::RecordExhausted(branch) => {
+                self.exhausted.push(branch.clone());
+                EffectOutcome::Recorded
+            }
+            DriveEffect::NoteJudgmentCall { .. } => EffectOutcome::Noted,
+        };
+        self.log.push(AppliedEffect {
+            effect,
+            outcome: outcome.clone(),
+        });
+        outcome
+    }
 }
 
 /// A CLI-unavailability marker found in a pane's capture.
@@ -1816,30 +1833,12 @@ fn cli_unavailable_dedup_key(agent_id: &str, marker: &str) -> String {
     format!("cli-unavailable|{agent_id}|{marker}")
 }
 
-/// Sweeps one coding-agent pane: captures it, and when a LIVE prompt is in the
-/// tail records a deduped escalation for a human decision without blocking
-/// the rest of the wave. Returns the escalation emitted this sweep, if any.
+/// Sweeps one coding-agent pane outside the loop — the test entry point to
+/// [`sweep_surface`]. Returns the escalation emitted this sweep, if any.
 ///
-/// The caller passes only a surface the layout resolved as
-/// [`SurfaceRole::Coding`] — `agent_id` is that surface's owner — so the
-/// dashboard and an unowned surface are never captured here.
-///
-/// It answers NO prompt, whatever the command text says. Whether the prompted
-/// command may run is decided by the agent CLI's own permission system or by
-/// the human — a decision git-paw cannot make reliably from pane text, and no
-/// longer tries to.
-///
-/// Before the live-prompt check, the pane's tail is also scanned for a
-/// CLI-unavailability marker (D4): a match becomes a deduped `cli-unavailable`
-/// escalation and the sweep continues driving the rest of the wave.
-///
-/// A pane with no live prompt and no CLI-unavailability marker — mere
-/// narration, or a resolved prompt scrolled into history — is left untouched.
-/// The one exception is an IDLE pane whose input box still holds an
-/// unsubmitted directive: that gets a follow-up `Enter` and, if the text
-/// survives, the same clear+re-type+`Enter` recovery the nudge path uses, via
-/// [`submit_buffered_input`] — because no other part of the loop can see a
-/// stall that never became a prompt.
+/// `agent_id` is the surface's owner, so the pane resolves as
+/// [`SurfaceRole::Coding`].
+#[cfg(test)]
 fn sweep_pane(
     ctx: SweepContext<'_>,
     pane: &PaneInfo,
@@ -1849,194 +1848,104 @@ fn sweep_pane(
     dedup: &mut DedupWindow,
     status: &[AgentStatusRow],
 ) -> Option<Escalation> {
-    let session = ctx.session;
-    let capture = deps.capturer.capture(session, pane.pane_index);
+    let mut shell = Shell::new(ctx);
+    let no_panes = HashMap::new();
+    let view = TickView {
+        agents: &[],
+        panes: &no_panes,
+        status,
+    };
+    let role = SurfaceRole::Coding(agent_id.to_string());
+    sweep_surface(&mut shell, deps, &view, config, dedup, pane, &role);
+    shell.escalations.into_iter().next()
+}
 
-    // The pane's own broker-reported CLI, consulted both to resolve its
-    // per-CLI `cli_unavailable_markers` override below and (further down) its
-    // nudge settle delay — an agent with no status row yet falls back to the
+/// One coding surface's sweep: captures it, asks
+/// `decide::decide_prompt` what to do, and applies the effects through
+/// `shell`. A surface that is not a coding agent's is never captured.
+fn sweep_surface(
+    shell: &mut Shell<'_>,
+    deps: &mut DriveDeps<'_>,
+    view: &TickView<'_>,
+    config: &DriveConfig,
+    dedup: &mut DedupWindow,
+    pane: &PaneInfo,
+    role: &SurfaceRole,
+) {
+    let Some(agent_id) = role.coding_agent() else {
+        return;
+    };
+    let capture = deps.capturer.capture(shell.ctx.session, pane.pane_index);
+
+    // The pane's own broker-reported CLI resolves both its per-CLI
+    // `cli_unavailable_markers` override and its nudge settle delay — an
+    // agent with no status row yet falls back to the
     // config-driven/embedded-default behaviour via an empty CLI name.
-    let cli = status
+    let cli = view
+        .status
         .iter()
         .find(|r| r.agent_id == agent_id)
         .map_or("", |r| r.cli.as_str());
-
-    let markers = &resolve_prompt_profile(cli, &config.clis).cli_unavailable_markers;
-    if let Some(m) = cli_unavailable_line(&capture, markers) {
-        // Non-blocking escalation, deduped on (agent_id, matched marker) —
-        // never on incidental transcript content, so a persistent marker does
-        // not re-fire every sweep and two distinct banners stay distinct
-        // (`cli-unavailable-detection-gaps`).
-        let key = cli_unavailable_dedup_key(agent_id, &m.marker);
-        if !dedup.should_emit(&key, deps.clock.now()) {
-            return None;
-        }
-        let escalation = Escalation {
-            agent_id: agent_id.to_string(),
-            verdict: "cli-unavailable".to_string(),
-            command: m.line,
-        };
-        record_escalation(deps, &escalation);
-        return Some(escalation);
-    }
-
-    if !is_live_prompt(&capture) {
-        let settle_delay = Duration::from_millis(resolve_submit_delay_ms(cli, &config.clis));
-        let _ = submit_buffered_input(
-            deps,
-            ctx.repo_root,
-            session,
-            pane.pane_index,
-            agent_id,
-            &capture,
-            settle_delay,
-        );
-        return None;
-    }
-
-    // A live prompt. git-paw answers NONE of them: whether the prompted
-    // command may run is the agent CLI's decision (through its own resolved
-    // permission mode and allow rules) or the human's. The loop's job is to
-    // get it in front of a human without stalling the rest of the wave.
-    //
-    // Non-blocking escalation, deduped on (agent_id, shape) — a prompt still
-    // unanswered after the window is escalated again as a reminder.
-    let key = approval_dedup_key(agent_id, &capture);
-    if !dedup.should_emit(&key, deps.clock.now()) {
-        return None;
-    }
-    let escalation = Escalation {
-        agent_id: agent_id.to_string(),
-        verdict: PERMISSION_PROMPT_VERDICT.to_string(),
-        command: dedup_shape(&capture),
+    let profile = resolve_prompt_profile(cli, &config.clis);
+    let observation = decide::SurfaceObservation {
+        role,
+        pane_index: pane.pane_index,
+        capture: &capture,
+        profile: &profile,
+        settle_delay: Duration::from_millis(resolve_submit_delay_ms(cli, &config.clis)),
     };
-    // Record the forwarded decision BEFORE the escalation goes out, and only
-    // on this arm. Sitting after `should_emit` means one emitted escalation
-    // produces exactly one log line — a prompt re-seen inside the dedup
-    // window returned above and never reaches here — and sitting on the
-    // permission-prompt arm alone keeps `cli-unavailable` banners, wedged
-    // nudges and correction-loop signals out of a log that `git paw
-    // approvals` reads as "commands that needed a human".
-    deps.manual_decisions.record_forwarded(agent_id, &capture);
-    record_escalation(deps, &escalation);
-    // Opportunistic learning: a prompt the CLI's own permission rules did not
-    // cover cost the wave a human round-trip.
-    deps.learnings.record(
-        LEARNING_CATEGORY,
-        "unattended loop escalated a prompt",
-        &friction_learning_body(&escalation),
-    );
-    Some(escalation)
-}
-
-/// The mutable slice of one sweep the correction pass operates on, bundled so
-/// [`run_correction_pass`] keeps a small signature.
-struct CorrectionPass<'a> {
-    /// tmux session + repository root for this sweep.
-    ctx: SweepContext<'a>,
-    /// Pane index per agent id, resolved during this sweep.
-    panes: &'a HashMap<String, usize>,
-    /// The `/status` snapshot taken this sweep (source of the worker CLI).
-    status: &'a [AgentStatusRow],
-    /// Per-branch correction bookkeeping.
-    correction: &'a mut CorrectionState,
-    /// Escalations accumulated for the exit summary.
-    escalations: &'a mut Vec<Escalation>,
-    /// Exhausted branches accumulated for the exit summary.
-    exhausted: &'a mut Vec<ExhaustedBranch>,
-}
-
-/// Drives one sweep of the correction loop: re-engages each branch marked by a
-/// failing gate verdict, bounded by `max_cycles`, applying `on_exhausted` once
-/// the budget is spent.
-///
-/// When `auto_loopback` is disabled (the default, and every config with no
-/// `[supervisor.correction]` table) the pass is inert: no keystrokes are sent,
-/// no cycle is counted, and no exhaustion policy fires — the gate feedback is
-/// published exactly as it was before this feature existed.
-///
-/// The exhaustion policy is applied when a gate failure arrives for a branch
-/// whose budget is ALREADY spent, not the instant the last re-engagement goes
-/// out: the final fix attempt is given its chance to pass first (a branch that
-/// passes clears its state and never exhausts).
-fn run_correction_pass(
-    pass: &mut CorrectionPass<'_>,
-    deps: &mut DriveDeps<'_>,
-    config: &DriveConfig,
-) {
-    if !config.correction.auto_loopback {
-        return;
+    let (next, effects) = decide::decide_prompt(dedup, &observation, deps.clock.now());
+    *dedup = next;
+    for effect in effects {
+        shell.apply(deps, view, effect);
     }
-    let policy = &config.correction;
-    for (agent_id, feedback) in pass.correction.pending() {
-        // Budget already spent: apply the exhaustion policy once, never
-        // re-engage again.
-        if pass.correction.cycles(&agent_id) >= policy.max_cycles {
-            if pass.correction.take_exhaustion(&agent_id) {
-                apply_exhaustion(pass, deps, config, &agent_id);
-            }
-            continue;
-        }
-        // No pane resolved this sweep (the agent's pane has not been
-        // enumerated yet): keep the correction pending and retry next sweep.
-        let Some(&pane_index) = pass.panes.get(&agent_id) else {
-            continue;
+}
+
+/// Drives one sweep of the correction loop: asks `decide::decide_nudge`
+/// what to do for each branch marked by a failing gate verdict and applies
+/// it. After a re-engagement actually reached the surface,
+/// [`decide::decide_reengaged`] spends the cycle and decides the early
+/// heads-up, whose effects are applied right behind it.
+///
+/// A re-engagement that did not go out — the worker moved on between the
+/// sweep and the send (TOCTOU), another approver held the surface's claim, or
+/// the dispatch failed — leaves the correction pending for the next sweep
+/// and spends no cycle.
+fn run_correction_pass(
+    shell: &mut Shell<'_>,
+    deps: &mut DriveDeps<'_>,
+    view: &TickView<'_>,
+    config: &DriveConfig,
+    correction: &mut CorrectionState,
+) {
+    let (next, effects) = decide::decide_nudge(
+        correction,
+        &decide::NudgeObservation {
+            panes: view.panes,
+            status: view.status,
+        },
+        &decide::NudgePolicy {
+            correction: &config.correction,
+            learnings_enabled: config.learnings_enabled,
+            clis: &config.clis,
+        },
+    );
+    *correction = next;
+    for effect in effects {
+        let reengaged = match &effect {
+            DriveEffect::Reengage { agent_id, .. } => Some(agent_id.clone()),
+            _ => None,
         };
-        // Finished-status gate: a finished worker is never nudged. The signal is
-        // the worker's BROKER status, never a pane-content diff — a finished
-        // worker's pane is just as unchanging as a stuck one's, so a diff cannot
-        // tell "idle because done" from "idle because stuck". Keeping the
-        // correction pending means a worker that leaves the finished state is
-        // re-engaged on a later sweep rather than losing the verdict.
-        if is_finished_worker(pass.status, &agent_id) {
-            continue;
-        }
-        // The worker's own broker-reported CLI resolves its nudge settle
-        // delay ([`resolve_submit_delay_ms`]) — an agent with no status row
-        // yet (booted but not published) falls back to the config-driven
-        // agnostic default via an empty CLI name.
-        let cli = pass
-            .status
-            .iter()
-            .find(|r| r.agent_id == agent_id)
-            .map_or("", |r| r.cli.as_str());
-        let settle_delay = Duration::from_millis(resolve_submit_delay_ms(cli, &config.clis));
-        let sent = match send_reengagement(
-            deps,
-            pass.ctx.repo_root,
-            pass.ctx.session,
-            pane_index,
-            &agent_id,
-            &feedback,
-            settle_delay,
-        ) {
-            Ok(outcome) => outcome.was_sent(),
-            Err(_) => false,
-        };
-        if !sent {
-            // The worker moved on between the sweep and the send (TOCTOU), the
-            // pane's claim was held by another approver, or the dispatch
-            // failed: leave the correction pending for the next sweep and do
-            // NOT spend a cycle.
-            continue;
-        }
-        let cycles = pass.correction.record_reengagement(&agent_id);
-        // One-time early heads-up for a slow-converging worker, emitted only
-        // when it lands strictly before the budget is spent.
-        if cycles == policy.escalate_after_cycles
-            && policy.escalate_after_cycles < policy.max_cycles
-            && pass.correction.take_early_flag(&agent_id)
+        let outcome = shell.apply(deps, view, effect);
+        if let Some(agent_id) = reengaged
+            && outcome.was_sent()
         {
-            let escalation = Escalation {
-                agent_id: agent_id.clone(),
-                verdict: CORRECTION_SLOW_VERDICT.to_string(),
-                command: format!(
-                    "correction cycle {cycles} of {} — worker is converging slowly",
-                    policy.max_cycles
-                ),
-            };
-            record_escalation(deps, &escalation);
-            pass.escalations.push(escalation);
+            let (next, follow_up) =
+                decide::decide_reengaged(correction, &agent_id, &config.correction);
+            *correction = next;
+            for effect in follow_up {
+                shell.apply(deps, view, effect);
+            }
         }
     }
 }
@@ -2057,45 +1966,6 @@ fn run_correction_pass(
 fn is_finished_worker(rows: &[AgentStatusRow], agent_id: &str) -> bool {
     rows.iter()
         .any(|r| r.agent_id == agent_id && WorkerPhase::from_status(&r.status).is_completed())
-}
-
-/// Applies the configured `on_exhausted` action to a branch whose correction
-/// budget is spent, and records it in the exit summary.
-///
-/// `escalate` flags the branch to the orchestrator/human through the loop's
-/// existing escalation path; `abandon` marks it failed without sending an
-/// escalation. Neither re-engages the branch again.
-fn apply_exhaustion(
-    pass: &mut CorrectionPass<'_>,
-    deps: &mut DriveDeps<'_>,
-    config: &DriveConfig,
-    agent_id: &str,
-) {
-    let cycles = pass.correction.cycles(agent_id);
-    let policy = config.correction.on_exhausted;
-    if policy == OnExhausted::Escalate {
-        let escalation = Escalation {
-            agent_id: agent_id.to_string(),
-            verdict: CORRECTION_EXHAUSTED_VERDICT.to_string(),
-            command: format!(
-                "branch is unrecoverable after {cycles} correction cycle(s); needs a human"
-            ),
-        };
-        record_escalation(deps, &escalation);
-        pass.escalations.push(escalation);
-    }
-    pass.exhausted.push(ExhaustedBranch {
-        agent_id: agent_id.to_string(),
-        cycles,
-        policy,
-    });
-    if config.learnings_enabled {
-        deps.learnings.record(
-            crate::broker::learnings::CATEGORY_CORRECTION_EXHAUSTED,
-            "correction budget exhausted",
-            &exhaustion_learning_body(agent_id, worker_cli(pass.status, agent_id), cycles),
-        );
-    }
 }
 
 /// Resolves the worker CLI for `agent_id` from the `/status` snapshot, falling
@@ -2129,17 +1999,9 @@ enum NudgeOutcome {
     /// Keystrokes went out but the text was still sitting on the input line
     /// after every recovery attempt; escalated to the broker for review.
     Wedged,
-}
-
-impl NudgeOutcome {
-    /// Whether any keystroke was actually dispatched to the pane — `true` for
-    /// both [`Self::Delivered`] and [`Self::Wedged`], since a caller tracking
-    /// "did we act on this pane" (e.g. the orchestration-nudge cadence timer,
-    /// or the correction loop's cycle count) cares about dispatch, not
-    /// confirmed submission.
-    fn was_sent(self) -> bool {
-        matches!(self, NudgeOutcome::Delivered | NudgeOutcome::Wedged)
-    }
+    /// A buffered-input submit's `Enter` went out, but another approver held
+    /// the pane's claim, so the recovery is left to the next sweep.
+    Deferred,
 }
 
 /// Re-engages a gate-failed worker by typing `text` into its pane, gated on a
@@ -2237,7 +2099,7 @@ fn send_nudge(
     deps.clock.sleep(settle_delay);
 
     let verify = deps.capturer.capture(session, pane_index);
-    if nudge_submitted(&verify, text) {
+    if decide::decide_recovery_step(&verify, text, 0) == decide::RecoveryStep::Delivered {
         return Ok(NudgeOutcome::Delivered);
     }
     recover_stale_input(deps, session, pane_index, agent_id, text, settle_delay)
@@ -2284,7 +2146,8 @@ fn recover_stale_input(
     text: &str,
     settle_delay: Duration,
 ) -> Result<NudgeOutcome, PawError> {
-    for _ in 0..NUDGE_RECOVERY_ATTEMPTS {
+    let mut attempts: u8 = 0;
+    loop {
         // Clear the stale line a prior step (this function's own earlier
         // iteration, or the caller's initial send/`Enter`) put there — never
         // agent-authored input another approver is mid-way through, since
@@ -2300,18 +2163,17 @@ fn recover_stale_input(
             .send_key(session, pane_index, "Enter")
             .map_err(|e| PawError::TmuxError(format!("send-keys Enter failed: {e}")))?;
         deps.clock.sleep(settle_delay);
+        attempts += 1;
 
         let verify = deps.capturer.capture(session, pane_index);
-        if nudge_submitted(&verify, text) {
-            return Ok(NudgeOutcome::Delivered);
+        match decide::decide_recovery_step(&verify, text, attempts) {
+            decide::RecoveryStep::Delivered => return Ok(NudgeOutcome::Delivered),
+            decide::RecoveryStep::Retry => {}
+            decide::RecoveryStep::Wedged => break,
         }
     }
 
-    let escalation = Escalation {
-        agent_id: agent_id.to_string(),
-        verdict: NUDGE_WEDGED_VERDICT.to_string(),
-        command: one_line_capped(text),
-    };
+    let escalation = decide::wedged_escalation(agent_id, text);
     // Escalate to the broker only the first time this exact line wedges —
     // deduped per `(agent_id, command)` — so a persistently stuck line is
     // reported once, not every ~15s sweep.
@@ -2445,12 +2307,12 @@ pub fn pane_is_idle_and_empty(capture: &str) -> bool {
 /// ([`recover_stale_input`]), re-typing the text read from the WHOLE input
 /// box (`idle-pane-nudge-submission`).
 ///
-/// Returns `Ok(true)` when any keystroke went out and `Ok(false)` when
-/// nothing was buffered. The shape is checked twice before the `Enter`: once
-/// on `swept`, the capture the sweep already took (so a pane with nothing
-/// buffered costs no extra `capture-pane`), and again on a fresh capture
-/// taken immediately before the send — the same TOCTOU discipline
-/// [`send_approval`] applies, so a pane that started responding or raised a
+/// Returns [`NudgeOutcome::Skipped`] when nothing was buffered, and otherwise
+/// whether the text was submitted, wedged, or its recovery deferred. The shape is checked twice before the `Enter`: once
+/// by the sweep's decision on the capture it already took (so a pane with
+/// nothing buffered costs no extra `capture-pane`), and again here on a fresh
+/// capture taken immediately before the send — the same TOCTOU discipline
+/// every keystroke sender applies, so a pane that started responding or raised a
 /// prompt in between receives no stray keystroke. The `Enter`-first step
 /// types no free text, so it runs without the pane's claim, preserving
 /// today's behaviour for the case it alone fixes (no free text is
@@ -2465,13 +2327,10 @@ fn submit_buffered_input(
     session: &str,
     pane_index: usize,
     agent_id: &str,
-    swept: &str,
     settle_delay: Duration,
-) -> Result<bool, PawError> {
-    if !pane_has_buffered_input(swept)
-        || !pane_has_buffered_input(&deps.capturer.capture(session, pane_index))
-    {
-        return Ok(false);
+) -> Result<NudgeOutcome, PawError> {
+    if !pane_has_buffered_input(&deps.capturer.capture(session, pane_index)) {
+        return Ok(NudgeOutcome::Skipped);
     }
     deps.dispatcher
         .send_key(session, pane_index, "Enter")
@@ -2480,28 +2339,24 @@ fn submit_buffered_input(
 
     let verify = deps.capturer.capture(session, pane_index);
     if !pane_has_buffered_input(&verify) {
-        return Ok(true); // the Enter alone submitted it
+        return Ok(NudgeOutcome::Delivered); // the Enter alone submitted it
     }
 
     let Some(_claim) = PaneClaim::try_acquire(repo_root, pane_index) else {
-        return Ok(true); // another approver owns this pane — retry next sweep
+        return Ok(NudgeOutcome::Deferred); // another approver owns this pane — retry next sweep
     };
     if input_box_shows_placeholder(&verify) {
-        let escalation = Escalation {
-            agent_id: agent_id.to_string(),
-            verdict: NUDGE_WEDGED_VERDICT.to_string(),
-            command: one_line_capped(&input_box_text(&verify).unwrap_or_default()),
-        };
+        let escalation =
+            decide::wedged_escalation(agent_id, &input_box_text(&verify).unwrap_or_default());
         if deps.record_wedged(escalation.clone()) {
             deps.alerts.escalate(&escalation);
         }
-        return Ok(true);
+        return Ok(NudgeOutcome::Wedged);
     }
     let Some(text) = input_box_text(&verify) else {
-        return Ok(true); // cleared between the check above and the claim
+        return Ok(NudgeOutcome::Delivered); // cleared between the check above and the claim
     };
     recover_stale_input(deps, session, pane_index, agent_id, &text, settle_delay)
-        .map(NudgeOutcome::was_sent)
 }
 
 /// Whether `capture` shows a pane mid-response — the CLI is mid-turn with its
@@ -2527,9 +2382,7 @@ fn pane_is_mid_response(capture: &str) -> bool {
 /// than submitting it (D6, memory `feedback_sendkeys_nudge_needs_followup_enter`).
 ///
 /// This encodes the follow-up-`Enter` discipline as a reusable unit so any
-/// nudge path obeys it by construction; the loop's approval path applies the
-/// same rule via [`approval_keystrokes`] (the option digit and its `Enter` are
-/// likewise separate keystrokes).
+/// nudge path obeys it by construction.
 ///
 /// The pair is `[body, submit]`. They are dispatched differently on purpose:
 /// `body` is free text and goes out literally via
@@ -2549,52 +2402,6 @@ fn duration_from_env_ms(key: &str, default: Duration) -> Duration {
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .map_or(default, Duration::from_millis)
-}
-
-/// Builds the per-agent final-state list, preferring each agent's resolved
-/// terminal phase over the final `/status` snapshot's literal status when the
-/// resolved phase outranks it (GP-05), and appending the ref-derived
-/// merged/unmerged annotation (`drive-loop-exit-summary-truth`, D3).
-///
-/// A `/status` snapshot alone can go stale: a generic `working` heartbeat
-/// republished after a `verified`/`done` artifact event overwrites the
-/// broker's on-record status for that agent, so reading only the latest
-/// snapshot can misreport a finished worker as still working. `resolved`
-/// tracks the best phase ever observed across the whole run, so it wins
-/// whenever it is more progressed than the literal snapshot row; otherwise the
-/// literal row's raw status string is kept verbatim (preserving any
-/// unrecognized/future status text). An agent absent from both falls back to
-/// `"unknown"`.
-fn resolved_agent_states(
-    coding_ids: &[String],
-    latest_status: &[AgentStatusRow],
-    resolved: &HashMap<String, WorkerPhase>,
-    merge_results: &HashMap<String, Result<MergeState, PawError>>,
-    default_branch: &str,
-) -> Vec<(String, String)> {
-    coding_ids
-        .iter()
-        .map(|id| {
-            let literal = latest_status.iter().find(|r| &r.agent_id == id);
-            let literal_rank = literal.map_or(0, |r| WorkerPhase::from_status(&r.status).rank());
-            let status = match resolved.get(id) {
-                Some(phase) if phase.rank() > literal_rank => phase.as_status().to_string(),
-                _ => literal.map_or_else(|| "unknown".to_string(), |r| r.status.clone()),
-            };
-            let merge_note = match merge_results.get(id) {
-                Some(Ok(state)) if state.merged => "merged".to_string(),
-                Some(Ok(state)) => format!(
-                    "unmerged ({} ahead of {default_branch}, tip {})",
-                    state.ahead, state.tip
-                ),
-                Some(Err(e)) => {
-                    format!("unmerged (could not compare against {default_branch}: {e})")
-                }
-                None => "unmerged (no merge check result)".to_string(),
-            };
-            (id.clone(), format!("{status} · {merge_note}"))
-        })
-        .collect()
 }
 
 /// JSON body for the opportunistic friction learning.
@@ -2622,19 +2429,6 @@ fn exhaustion_learning_body(agent_id: &str, cli: &str, cycles: u32) -> String {
         "branch": agent_id,
         "cli": cli,
         "cycles": cycles,
-    })
-    .to_string()
-}
-
-/// JSON body for the wind-down synthesis learning.
-fn winddown_learning_body(outcome: DriveOutcome, escalations: &[Escalation]) -> String {
-    serde_json::json!({
-        "observation": format!(
-            "unattended wave exited ({}) with {} prompt(s) escalated for human review",
-            outcome.label(),
-            escalations.len()
-        ),
-        "escalation_count": escalations.len(),
     })
     .to_string()
 }
@@ -9634,5 +9428,210 @@ mod tests {
 
         assert_text_then_separate_enter(&dispatcher, 2, "Supervisor gate 'testing' failed");
         assert_text_then_separate_enter(&dispatcher, 3, "Supervisor gate 'testing' failed");
+    }
+
+    // --- effect log (drive-loop-functional-core) ---------------------------
+
+    /// One journal shared by the three escalation ports, so a test can assert
+    /// the order in which the shell reached them.
+    #[derive(Clone, Default)]
+    struct PortJournal(std::rc::Rc<RefCell<Vec<&'static str>>>);
+    impl ManualDecisionSink for PortJournal {
+        fn record_forwarded(&mut self, _agent_id: &str, _captured: &str) {
+            self.0.borrow_mut().push("manual-decision");
+        }
+    }
+    impl AlertSink for PortJournal {
+        fn escalate(&mut self, _escalation: &Escalation) {
+            self.0.borrow_mut().push("escalation");
+        }
+    }
+    impl LearningSink for PortJournal {
+        fn record(&mut self, _category: &str, _title: &str, _body: &str) {
+            self.0.borrow_mut().push("learning");
+        }
+    }
+
+    /// Spec scenario "Effects are applied in order and logged": a sweep whose
+    /// prompt decision returns a manual-decision record, an escalation and a
+    /// friction learning reaches the ports in that order, and the effect log
+    /// lists the three in that order with their outcomes.
+    #[test]
+    fn effects_are_applied_in_order_and_logged() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
+        }];
+        let enumerator = FakeEnumerator {
+            panes: vec![PaneInfo {
+                pane_index: 1,
+                owner: "/repo-feat-a".to_string(),
+            }],
+        };
+        let capturer = FakeCapturer::new(&[(1, &live_safe_capture("ls -la"))]);
+        let mut dispatcher = RecordingDispatcher::default();
+        // The first fetch already shows the wave complete, so the run is one
+        // sweep and the wind-down.
+        let status = ScriptedStatus::new(vec![vec![row("feat-a", "verified")]]);
+        let clock = FakeClock::new();
+        let journal = PortJournal::default();
+        let mut alerts = journal.clone();
+        let mut learnings = journal.clone();
+        let mut manual_decisions = journal.clone();
+        let mut refresher = RecordingRefresher::default();
+        let messages = ScriptedMessages::none();
+        let merge_check = FakeMergeCheck::default();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            merge_check: &merge_check,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            manual_decisions: &mut manual_decisions,
+            refresher: &mut refresher,
+            wedged: Vec::new(),
+        };
+        let repo = tempfile::tempdir().expect("temp repo root");
+        let run = drive_loop_logged(
+            "paw-test",
+            repo.path(),
+            &agents,
+            &mut deps,
+            &DriveConfig::default(),
+            &AlwaysCurrentGuard,
+        );
+
+        assert_eq!(
+            journal.0.borrow()[..3],
+            ["manual-decision", "escalation", "learning"],
+            "manual decision before the escalation, the escalation before the learning"
+        );
+        let logged: Vec<(&str, &EffectOutcome)> = run
+            .effect_log
+            .iter()
+            .take(3)
+            .map(|applied| {
+                let kind = match &applied.effect {
+                    DriveEffect::RecordManualDecision { .. } => "manual-decision",
+                    DriveEffect::PublishEscalation(_) => "escalation",
+                    DriveEffect::RecordLearning { .. } => "learning",
+                    _ => "other",
+                };
+                (kind, &applied.outcome)
+            })
+            .collect();
+        assert_eq!(
+            logged,
+            vec![
+                ("manual-decision", &EffectOutcome::Recorded),
+                ("escalation", &EffectOutcome::Published),
+                ("learning", &EffectOutcome::Recorded),
+            ]
+        );
+        assert!(
+            dispatcher.events.is_empty(),
+            "no keystroke for a live prompt: {:?}",
+            dispatcher.events
+        );
+        assert_eq!(
+            run.summary,
+            drive_loop_in_tmp(
+                "paw-test",
+                &agents,
+                &mut DriveDeps {
+                    enumerator: &enumerator,
+                    capturer: &capturer,
+                    dispatcher: &mut RecordingDispatcher::default(),
+                    status: &ScriptedStatus::new(vec![vec![row("feat-a", "verified")]]),
+                    messages: &ScriptedMessages::none(),
+                    clock: &FakeClock::new(),
+                    merge_check: &FakeMergeCheck::default(),
+                    alerts: &mut RecordingAlerts::default(),
+                    learnings: &mut RecordingLearnings::default(),
+                    manual_decisions: &mut NoopManualDecisions,
+                    refresher: &mut RecordingRefresher::default(),
+                    wedged: Vec::new(),
+                },
+                &DriveConfig::default(),
+            ),
+            "drive_loop returns the same summary drive_loop_logged carries"
+        );
+    }
+
+    /// A worker's question noted as a judgment call lands in the effect log
+    /// with outcome `Noted`, and reaches no surface and no broker publish.
+    #[test]
+    fn a_judgment_call_is_noted_in_the_effect_log_only() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
+        }];
+        let enumerator = FakeEnumerator {
+            panes: vec![PaneInfo {
+                pane_index: 1,
+                owner: "/repo-feat-a".to_string(),
+            }],
+        };
+        let capturer = FakeCapturer::new(&[(1, "● Done.\n  ? for shortcuts")]);
+        let mut dispatcher = RecordingDispatcher::default();
+        let status = ScriptedStatus::new(vec![
+            vec![row("feat-a", "working")],
+            vec![row("feat-a", "verified")],
+        ]);
+        let messages = ScriptedMessages::new(vec![vec![BrokerMessage::Question {
+            agent_id: "feat-a".to_string(),
+            payload: crate::broker::messages::QuestionPayload {
+                question: "which config file?".to_string(),
+            },
+        }]]);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
+        let merge_check = FakeMergeCheck::default();
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            merge_check: &merge_check,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            manual_decisions: &mut NoopManualDecisions,
+            refresher: &mut refresher,
+            wedged: Vec::new(),
+        };
+        let repo = tempfile::tempdir().expect("temp repo root");
+        let run = drive_loop_logged(
+            "paw-test",
+            repo.path(),
+            &agents,
+            &mut deps,
+            &DriveConfig::default(),
+            &AlwaysCurrentGuard,
+        );
+
+        assert_eq!(
+            run.effect_log,
+            vec![AppliedEffect {
+                effect: DriveEffect::NoteJudgmentCall {
+                    agent_id: "feat-a".to_string(),
+                    call: JudgmentCall::Question {
+                        question: "which config file?".to_string(),
+                    },
+                },
+                outcome: EffectOutcome::Noted,
+            }]
+        );
+        assert!(dispatcher.events.is_empty(), "{:?}", dispatcher.events);
+        assert!(alerts.escalations.is_empty(), "{:?}", alerts.escalations);
     }
 }
