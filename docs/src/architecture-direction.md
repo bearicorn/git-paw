@@ -78,29 +78,36 @@ by an opaque id rather than a tmux pane number.
 Adapters are compiled into the binary and chosen at startup, not loaded as runtime plugins. Each
 one runs its tool the way git-paw already does, so no new dependencies are needed.
 
-## Example: approving a permission prompt
+## Example: escalating a permission prompt
 
-The names below are illustrative.
+git-paw answers no permission prompt. When a coding agent's screen shows one, the drive loop's job is
+to put it in front of a human without stalling the rest of the wave. The decision lives in
+`src/supervisor/drive/decide.rs`; the shell is `src/supervisor/drive.rs`.
 
 ```rust
-// core: pure — plain data in, plain data out
-pub enum ApprovalDecision { NotLive, Approve { option: u8 }, Escalate(Reason), CliUnavailable(String) }
+// core: pure — plain data in, the next state and effects out
+pub enum DriveEffect { RecordManualDecision { .. }, PublishEscalation(Escalation), RecordLearning { .. },
+                       SubmitBufferedInput { .. }, /* …no approval variant */ }
 
-pub fn decide_approval(tail: &str, profile: &CliProfile, policy: &Policy) -> ApprovalDecision { … }
+pub fn decide_prompt(state: &DedupWindow, obs: &SurfaceObservation, now: Instant)
+    -> (DedupWindow, Vec<DriveEffect>) { … }
+// CLI-unavailable banner      → one deduped PublishEscalation (cli-unavailable)
+// not live, text buffered     → SubmitBufferedInput
+// live prompt, new dedup key  → RecordManualDecision, PublishEscalation (permission-prompt), RecordLearning
+// anything else, or a repeat inside the dedup window → nothing
 
 // app: the shell — the only part that does I/O, and only through ports
-let tail = terminal.capture_tail(surface)?;
-match core::decide_approval(&tail, profile_for(agent), &policy) {
-    Approve { option } => terminal.send_key(surface, option)?,
-    Escalate(reason)   => broker.publish(escalation(agent, reason))?,
-    CliUnavailable(l)  => return Ok(Outcome::CliUnavailable(l)),
-    NotLive            => {}
+let capture = terminal.capture(surface);
+let (next, effects) = decide::decide_prompt(&dedup, &observation(&capture, profile_for(agent)), clock.now());
+dedup = next;
+for effect in effects {
+    shell.apply(deps, effect); // through the ports, in order; logged with its outcome
 }
 ```
 
-The decision is tested by passing in a captured screen and checking the result — no fake
-terminal and no fake clock. Supporting a different terminal means writing a new adapter; `core`
-and `app` do not change.
+The decision is tested by passing in a captured screen and a time and checking the effects — no fake
+terminal and no fake clock. No input makes it return a keystroke for a live prompt. Supporting a
+different terminal means writing a new adapter; `core` and `app` do not change.
 
 ## Behavior that differs per CLI or per spec format
 
@@ -149,7 +156,7 @@ This split applies only where a format is a contract, not to every struct in the
 | MCP server | Already layered one way (`query` → `tools` → `server`) and talks to the broker over HTTP |
 | Terminal | A port: `terminal::TerminalBackend`, in git-paw's terms and keyed by an opaque `SurfaceId`, with tmux (`terminal::tmux::TmuxBackend`) as its first adapter and a recording fake (`terminal::fake::FakeBackend`) for logic tests. The drive loop, the launch paths' session opening, logging and layout, `add`'s and `remove`'s surface changes, prompt and entry-point submission, the readiness gate and the agent inventory go through it; golden argv fixtures pin the adapter to the pre-port tmux behaviour, and a source audit keeps `tmux` spawns inside `src/tmux/` and the adapter. One owner rule (`surface::resolve_agent`, exact canonical path) resolves surfaces to agents. The lifecycle commands (`pause`, `stop`, `attach`, `status`, `doctor`) and a few launch-path helpers (session-name resolution, the attach hand-off, `add`'s pane reconciliation) still call `src/tmux/` helpers directly. Pane numbers remain the tmux adapter's encoding in session state |
 | Broker | Runs in its own host process (`git paw __broker`) in a detached service surface of the session; the dashboard is a thin HTTP client of it, like the MCP server and the drive loop, through the shared `BrokerClient` |
-| Drive loop | Its side effects are already behind traits; its decisions are not yet separated from them |
+| Drive loop | Observe → decide → apply. The shell (`supervisor/drive.rs`) observes through the ports and calls pure decisions in `supervisor/drive/decide.rs` (`decide_prompt`, `decide_message`, `decide_nudge` / `decide_reengaged` / `decide_recovery_step`, `summarize`), which return the next state and a list of `DriveEffect`s. The shell applies each effect in order and records it, with its outcome, in an in-memory effect log (`drive_loop_logged` returns `DriveRun { summary, effect_log }`). The heartbeat helpers `heartbeat_due` / `tick_made_progress` are pure functions the shell calls. The effect log is not persisted |
 | Commands (`start`, `stop`, `purge`, …) | Not yet callable as a library: they read the current directory and print directly |
 | Serialized formats | The session file, config file and broker messages use the same types as the internal model |
 
