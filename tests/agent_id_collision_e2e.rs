@@ -40,6 +40,8 @@ fn tmux_available() -> bool {
 /// address agents on the broker, so the duplicate-id check only runs when the
 /// broker does.
 fn write_config(repo: &Path, supervisor: bool, broker: bool) {
+    use std::fmt::Write as _;
+
     let paw_dir = repo.join(".git-paw");
     fs::create_dir_all(&paw_dir).expect("create .git-paw");
     // `[clis.cat]` registers `cat` as a known CLI identity; the spec-driven
@@ -49,8 +51,15 @@ fn write_config(repo: &Path, supervisor: bool, broker: bool) {
         toml.push_str("\n[supervisor]\nenabled = true\ncli = \"cat\"\n");
     }
     if broker {
-        // Port 0 lets the OS assign a free one, so concurrent tests never race.
-        toml.push_str("\n[broker]\nenabled = true\nport = 0\n");
+        // An OS-assigned free port, released for the launch to bind. Port 0
+        // itself cannot be used: the launcher waits for the broker host on the
+        // configured port, and agents are handed that port's URL.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind ephemeral port")
+            .local_addr()
+            .expect("local addr")
+            .port();
+        let _ = write!(toml, "\n[broker]\nenabled = true\nport = {port}\n");
     }
     fs::write(paw_dir.join("config.toml"), toml).expect("write config");
 }

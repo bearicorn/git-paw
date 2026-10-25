@@ -11,7 +11,7 @@ Add a `[broker]` section to your `.git-paw/config.toml`:
 enabled = true
 ```
 
-When you run `git paw start`, pane 0 becomes a dashboard instead of an agent pane and the agents start at pane 1. Supervisor mode keeps the same layout: the orchestrator runs outside the session (see [Supervisor § Session layout](supervisor.md#session-layout-the-orchestrator-runs-outside-the-session)). The dashboard hosts the broker and displays a live status table.
+When you run `git paw start`, pane 0 becomes a dashboard instead of an agent pane and the agents start at pane 1. Supervisor mode keeps the same layout: the orchestrator runs outside the session (see [Supervisor § Session layout](supervisor.md#session-layout-the-orchestrator-runs-outside-the-session)). The broker runs in its own process in a detached `broker` window; the dashboard is a client of it and displays a live status table.
 
 ## How Agents Discover the Broker
 

@@ -75,24 +75,33 @@ fn make_session_without_broker(suffix: &str) -> Session {
 }
 
 // ---------------------------------------------------------------------------
-// 10.5: __dashboard outside tmux returns error
+// 10.5: __dashboard has no $TMUX gate (broker-host-separation)
 // ---------------------------------------------------------------------------
 
+/// `broker-runtime` *Dashboard subcommand runs a thin broker client*: the
+/// dashboard SHALL NOT require `$TMUX`. Run outside tmux in a directory that
+/// is not a repository, it fails on the repository check — not on a refusal
+/// to run outside tmux.
 #[test]
 #[serial]
-fn dashboard_outside_tmux_returns_error() {
+fn dashboard_outside_tmux_is_not_refused() {
+    let dir = TempDir::new().unwrap();
     let output = assert_cmd::Command::cargo_bin("git-paw")
         .unwrap()
         .arg("__dashboard")
         .env_remove("TMUX")
+        .current_dir(dir.path())
         .output()
         .expect("run git-paw __dashboard");
 
-    assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("internal command"),
-        "error should mention 'internal command', got: {stderr}"
+        !stderr.contains("internal command") && !stderr.contains("inside tmux"),
+        "the dashboard must not refuse to run outside tmux, got: {stderr}"
+    );
+    assert!(
+        stderr.to_lowercase().contains("git repository"),
+        "outside a repository the dashboard fails on the repository check, got: {stderr}"
     );
 }
 
@@ -694,47 +703,14 @@ fn http_publish_and_poll_answer_targets_only_the_answered_agent() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
-fn dashboard_subcommand_with_tmux_env_does_not_return_internal_error() {
+fn dashboard_subcommand_parses_as_the_dashboard_variant() {
     use git_paw::cli::{Cli, Command};
 
-    // Verify that __dashboard parses to Command::Dashboard
     let cli = <Cli as clap::Parser>::try_parse_from(["git-paw", "__dashboard"])
         .expect("__dashboard should parse");
     assert!(
         matches!(cli.command, Some(Command::Dashboard)),
         "should parse as Dashboard variant"
-    );
-
-    // When TMUX is NOT set, the binary returns an error mentioning "internal command"
-    let output_no_tmux = assert_cmd::Command::cargo_bin("git-paw")
-        .unwrap()
-        .arg("__dashboard")
-        .env_remove("TMUX")
-        .output()
-        .expect("run __dashboard without TMUX");
-    assert!(!output_no_tmux.status.success(), "should fail without TMUX");
-    let stderr = String::from_utf8_lossy(&output_no_tmux.stderr);
-    assert!(
-        stderr.contains("internal command"),
-        "error should mention 'internal command', got: {stderr}"
-    );
-
-    // When TMUX IS set, the command should NOT produce the "internal command" error.
-    // It will still fail (no git repo in cwd, no config, etc.), but the error
-    // should be different — proving the TMUX guard passed.
-    let output_with_tmux = assert_cmd::Command::cargo_bin("git-paw")
-        .unwrap()
-        .arg("__dashboard")
-        .env("TMUX", "/tmp/tmux-test/default,12345,0")
-        .current_dir(std::env::temp_dir())
-        .output()
-        .expect("run __dashboard with TMUX");
-
-    let stderr_tmux = String::from_utf8_lossy(&output_with_tmux.stderr);
-    assert!(
-        !stderr_tmux.contains("internal command"),
-        "with TMUX set, should NOT get 'internal command' error, got: {stderr_tmux}"
     );
 }
 

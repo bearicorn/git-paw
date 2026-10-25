@@ -11,7 +11,7 @@ git-paw v0.5.0 ships three verbs for taking a session down:
 
 | Verb    | What it kills                       | What survives                          | Use when                                                    |
 |---------|-------------------------------------|----------------------------------------|-------------------------------------------------------------|
-| `pause` | Tmux client attach, broker process  | Tmux session, all CLI panes (in RAM)   | Short break — you'll resume in minutes/hours                |
+| `pause` | Tmux client attach, broker host     | Tmux session, dashboard, all CLI panes (in RAM) | Short break — you'll resume in minutes/hours                |
 | `stop`  | Tmux session, every CLI pane        | Worktrees and branches on disk         | Longer break — you want RAM back, OK with fresh CLIs later |
 | `purge` | Everything (tmux, worktrees, state) | Nothing                                | You're done with the project, or you want to start clean   |
 
@@ -21,11 +21,14 @@ When you run `git paw pause`:
 
 1. Every tmux client attached to the session is detached
    (`tmux detach-client -s <session>`).
-2. When the broker is enabled, the dashboard pane only is killed
-   (`tmux kill-pane -t :0.<idx>`),
-   which causes the `__dashboard` subprocess to exit, which drops
-   the `BrokerHandle`, which gracefully shuts down the broker and
-   flushes the session's `<session_name>.broker.log`.
+2. When the broker is enabled, the broker host's `broker` window is
+   closed, which delivers `SIGHUP` to the `__broker` process, which
+   drops the `BrokerHandle`, which gracefully shuts down the broker
+   and flushes the session's `<session_name>.broker.log`. The
+   dashboard pane stays and shows **⚠ broker unreachable** until you
+   resume. (A session started by a git-paw from before the broker
+   host split has no `broker` window — its dashboard pane *is* the
+   broker — so pause kills that pane instead, as it always did.)
 3. The session state file flips from `status: active` to
    `status: paused`.
 4. Every coding-agent CLI pane keeps running. Their in-memory
@@ -62,13 +65,16 @@ git paw start
 When `git paw start` detects a paused session that's still alive in
 tmux, it takes the restart-from-pause path:
 
-1. Re-creates the dashboard pane at its saved index.
-2. Sends the `git paw __dashboard` command to spawn the broker
-   subprocess again.
+1. Re-creates the broker host in its `broker` window and waits (up to
+   10 seconds) for it to answer.
+2. Re-creates the dashboard pane at its saved index only if none is
+   running — normally the paused dashboard is still there and simply
+   reconnects.
 3. Flips session status back to `active`.
 4. Re-attaches your tmux client.
 
-Cost: one tmux pane spawn + one broker boot. **No** worktree
+Cost: one broker boot (plus a dashboard pane only for a session paused
+before the broker host split). **No** worktree
 creation, **no** CLI process spawn, **no** boot-prompt injection
 (beyond submitting the held boot prompt of any agent added with
 `git paw add` while paused — and, when that agent's spec format

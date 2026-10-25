@@ -205,12 +205,18 @@ const PORT_RELEASE_BUDGET: Duration = Duration::from_secs(2);
 ///
 /// Returns `true` once nothing accepts on the port, `false` when something
 /// still did at the deadline. A connect that succeeds — even one the peer then
-/// resets — means a listener is still there.
+/// resets — means a listener is still there; one that times out proves
+/// nothing either way, so only a refusal ends the wait.
 fn wait_until_refused(port: u16, budget: Duration) -> bool {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let deadline = Instant::now() + budget;
     loop {
-        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_err() {
+        // Only a refusal proves the port released. A connect that times out
+        // (a loaded machine, a listener whose backlog is full) proves nothing,
+        // so it keeps waiting within the budget like an accepted connection.
+        if let Err(e) = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(100))
+            && is_refusal(&e)
+        {
             return true;
         }
         if Instant::now() >= deadline {
@@ -218,6 +224,12 @@ fn wait_until_refused(port: u16, budget: Duration) -> bool {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Whether a connect error means nothing is listening (as opposed to a
+/// timeout or another transient failure that says nothing about the port).
+fn is_refusal(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::ConnectionRefused
 }
 
 /// Builds a step-named failure so the verdict names the failing step.
@@ -590,8 +602,8 @@ impl Harness {
     fn cleanup(&self) {
         // Kill the whole private-socket server (covers the case where `stop`
         // never ran because an earlier step failed). tmux sends SIGHUP to each
-        // pane process; the broker lives in the dashboard pane and shuts down
-        // *gracefully* on SIGHUP — it drops its `BrokerHandle`, which does a
+        // pane process; the broker lives in its host's `broker` window and
+        // shuts down *gracefully* on SIGHUP — it drops its `BrokerHandle`, which does a
         // final learnings/log flush that writes back under the throwaway tree.
         let mut kill = Command::new("tmux");
         kill.arg("kill-server");
@@ -707,6 +719,17 @@ mod tests {
             wait_until_refused(free, Duration::from_secs(2)),
             "a released port must be reported refused"
         );
+    }
+
+    /// Only a refusal counts as released: a timed-out or otherwise failed
+    /// connect proves nothing about the port.
+    #[test]
+    fn only_a_refused_connection_counts_as_released() {
+        use std::io::{Error, ErrorKind};
+        assert!(is_refusal(&Error::from(ErrorKind::ConnectionRefused)));
+        for kind in [ErrorKind::TimedOut, ErrorKind::WouldBlock, ErrorKind::Other] {
+            assert!(!is_refusal(&Error::from(kind)), "{kind:?} must not count");
+        }
     }
 
     /// The picked port refuses connections when it is handed back, so the

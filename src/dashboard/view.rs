@@ -240,7 +240,7 @@ pub fn render(frame: &mut Frame, model: &Model) {
     draw_frame(
         frame,
         &model.rows,
-        &model.status_line,
+        &model.displayed_status_line(),
         &model.broker_log,
         model.panel_height,
     );

@@ -20,8 +20,8 @@ use crate::session::SessionMode;
 use crate::tmux as substrate;
 
 use super::{
-    GridGeometry, Key, SessionLiveness, SessionPlan, SurfaceId, SurfaceInfo, SurfacePlacement,
-    SurfaceSpec, TerminalBackend,
+    GridGeometry, Key, ServiceHandle, SessionLiveness, SessionPlan, SurfaceId, SurfaceInfo,
+    SurfacePlacement, SurfaceSpec, TerminalBackend,
 };
 
 /// The tmux [`TerminalBackend`]: production wires [`TmuxBackend::new`], tests
@@ -367,6 +367,88 @@ impl<R: CommandRunner> TerminalBackend for TmuxBackend<R> {
 
     fn detach_clients(&self, session: &str) -> Result<(), PawError> {
         substrate::detach_client_with(&self.runner, session)
+    }
+
+    /// A service is a detached window named after it, created at the
+    /// session's next free window index: window 0's panes — and so every
+    /// recorded position — are untouched, and `kill-session` hangs it up with
+    /// the rest of the session.
+    fn spawn_service(
+        &self,
+        session: &str,
+        name: &str,
+        command: &str,
+        owner: &Path,
+    ) -> Result<ServiceHandle, PawError> {
+        let target = format!("{session}:");
+        let owner = owner.to_string_lossy();
+        let out = self
+            .runner
+            .run(
+                "tmux",
+                &[
+                    "new-window",
+                    "-d",
+                    "-n",
+                    name,
+                    "-t",
+                    &target,
+                    "-c",
+                    &owner,
+                    command,
+                ],
+            )
+            .map_err(|e| PawError::TmuxError(format!("failed to start {name} service: {e}")))?;
+        if !out.success {
+            return Err(PawError::TmuxError(format!(
+                "failed to start {name} service: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(ServiceHandle::new(session, name))
+    }
+
+    fn service(&self, session: &str, name: &str) -> ServiceHandle {
+        ServiceHandle::new(session, name)
+    }
+
+    /// Kills the service's window, which hangs up its process. A failed kill
+    /// is an error only while the window is still there.
+    fn stop_service(&self, handle: &ServiceHandle) -> Result<(), PawError> {
+        let target = format!("{}:{}", handle.session(), handle.name());
+        let killed = self
+            .runner
+            .run("tmux", &["kill-window", "-t", &target])
+            .is_ok_and(|out| out.success);
+        if killed || !self.service_alive(handle)? {
+            Ok(())
+        } else {
+            Err(PawError::TmuxError(format!(
+                "failed to stop {} service",
+                handle.name()
+            )))
+        }
+    }
+
+    fn service_alive(&self, handle: &ServiceHandle) -> Result<bool, PawError> {
+        let out = self
+            .runner
+            .run(
+                "tmux",
+                &[
+                    "list-windows",
+                    "-t",
+                    handle.session(),
+                    "-F",
+                    "#{window_name}",
+                ],
+            )
+            .map_err(|e| PawError::TmuxError(format!("failed to run tmux: {e}")))?;
+        // A session that is gone lists nothing — its service is not running.
+        Ok(out.success
+            && String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .any(|line| line == handle.name()))
     }
 }
 

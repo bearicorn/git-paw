@@ -52,6 +52,38 @@ impl SurfaceId {
     }
 }
 
+/// Opaque handle to one service of a session: a non-interactive process the
+/// session hosts outside its agent grid, addressed by the session and the
+/// service's name.
+///
+/// Constructed only by a backend ([`TerminalBackend::spawn_service`] or
+/// [`TerminalBackend::service`]); callers pass it back, never inspect it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ServiceHandle {
+    session: String,
+    name: String,
+}
+
+impl ServiceHandle {
+    /// Names the service `name` of `session`. Private to the port's adapters.
+    pub(in crate::terminal) fn new(session: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            session: session.into(),
+            name: name.into(),
+        }
+    }
+
+    /// The session hosting the service.
+    pub(in crate::terminal) fn session(&self) -> &str {
+        &self.session
+    }
+
+    /// The service's name.
+    pub(in crate::terminal) fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 /// One surface of a live session, as a backend lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceInfo {
@@ -326,4 +358,37 @@ pub trait TerminalBackend {
     /// # Errors
     /// Returns [`PawError`] when the clients cannot be detached.
     fn detach_clients(&self, session: &str) -> Result<(), PawError>;
+
+    /// Runs `command` as a service named `name` inside `session`, started in
+    /// `owner`: a process the human does not watch, which occupies no surface
+    /// of the agent grid, so every surface keeps its position. Closing the
+    /// session ends the service as it ends every surface, with a hang-up.
+    ///
+    /// # Errors
+    /// Returns [`PawError`] when the service cannot be started.
+    fn spawn_service(
+        &self,
+        session: &str,
+        name: &str,
+        command: &str,
+        owner: &Path,
+    ) -> Result<ServiceHandle, PawError>;
+
+    /// The handle of the service `name` of `session`, whether or not it is
+    /// running — for a caller that did not spawn it (pause, status).
+    fn service(&self, session: &str, name: &str) -> ServiceHandle;
+
+    /// Stops a service, delivering it a hang-up. A service that is already
+    /// gone — or whose session is gone — is not an error.
+    ///
+    /// # Errors
+    /// Returns [`PawError`] when the service is running but cannot be stopped.
+    fn stop_service(&self, handle: &ServiceHandle) -> Result<(), PawError>;
+
+    /// Whether the service is running. A session that no longer exists has
+    /// no running service.
+    ///
+    /// # Errors
+    /// Returns [`PawError`] when the backend cannot be asked.
+    fn service_alive(&self, handle: &ServiceHandle) -> Result<bool, PawError>;
 }

@@ -226,10 +226,13 @@ open, `q` still quits the dashboard.
 
 ### Resilience across broker restarts
 
-The panel never clears its buffer when the broker watcher restarts mid-session.
-Historical messages stay visible across a transient outage, and new messages
-resume appearing at the top once the watcher comes back. A gap in the timestamp
-column is the only visible sign that messages briefly stopped flowing.
+The panel never clears its buffer when the broker is unreachable, paused or
+restarted. Historical messages stay visible across the outage, and new messages
+resume appearing at the top once the broker answers again. A restarted broker
+host numbers its log from 1 again; the dashboard notices from the host's uptime
+going down, re-reads the new log from the start, and appends each new entry
+once — nothing it already shows is duplicated. A gap in the timestamp column is
+the only visible sign that messages briefly stopped flowing.
 
 ### Legacy messages panel
 
@@ -239,16 +242,21 @@ config compatibility.
 
 ## Relationship to the Broker
 
-The dashboard and broker run in the same process (`git paw __dashboard`). The dashboard reads from shared state that the broker's HTTP handlers (and the watcher, conflict detector, and learnings aggregator subsystems) write to. There is no separate broker process to manage.
+The dashboard is a thin client of the broker. The broker runs in its own process, `git paw __broker`, in a detached tmux window named `broker` (outside the pane grid, so pane numbering is unchanged; switch to it to see the host's stderr). The dashboard (`git paw __dashboard`, pane 0) holds no broker state: it reads the broker URL from the saved session and polls `GET /status` and `GET /log?since=<seq>` on its idle cadence. Closing the dashboard pane has no effect on the broker, its watchers, conflict detection or learnings.
+
+### When the broker is unreachable
+
+If a poll cannot reach the broker — `git paw pause` stopped it, the host is restarting, or a fresh launch has not finished bringing it up — the status line shows **⚠ broker unreachable**, the agent table keeps the last snapshot, and the dashboard keeps polling. The indicator is independent of the stalled-wave indicator, and it clears on the first successful poll. An unreachable broker never makes the dashboard exit.
 
 ## Lifecycle and exit conditions
 
 The dashboard process is bound to its session: when the session ends, the dashboard exits on its own rather than lingering and busy-rendering to a dead terminal (a leaked `__dashboard` process pegging CPU). Its draw loop checks a single lifecycle gate on **every** iteration — including any error or degraded path, so no branch can bypass it — and exits when any of the following holds:
 
-- **Clean shutdown.** tmux delivers `SIGHUP` when it kills the session or pane; the signal handler sets a shutdown flag and the loop exits, flushing the broker log on the way out.
+- **Clean shutdown.** tmux delivers `SIGHUP` when it kills the session or pane, which ends the process.
 - **Orphaned to init.** On Unix, if the parent process is gone the dashboard has been reparented to init (`getppid() == 1`) — the tell-tale of a session torn down *without* `SIGHUP` (an abrupt `tmux kill-server`, a crash, or the machine sleeping). The loop notices the reparent and exits. On non-Unix platforms this check is inert and only the `SIGHUP` shutdown path applies.
 - **Controlling terminal gone.** If the pane's terminal hangs up, reading input (`event::poll`) errors, or a write to the terminal fails, the dashboard treats its controlling terminal as gone and exits. This catches the case where the pane was killed but the dashboard was reparented to a *lingering shell* (a live but unrelated parent), so the orphan-to-init check alone would miss it.
-- **Broker fails to bind.** If the in-process broker cannot bind its port — most often because a stale dashboard is still squatting it — the process emits a diagnostic to stderr and exits non-zero rather than entering a render/retry loop, so a bind failure can never spin up a second CPU-pegging dashboard.
+
+An unreachable broker is deliberately **not** on this list (see above). The broker host has its own lifecycle: it flushes the broker log and exits on `SIGHUP` (when `pause` closes its window or `stop` kills the session), when orphaned to init, or when its terminal hangs up, and it exits non-zero with a diagnostic naming the port if it cannot bind — it never retries in a loop.
 
 Because the dashboard is cheap to relaunch (`git paw start` re-attaches to the session), exiting eagerly on any of these signals is preferred over risking a leaked, busy-looping process.
 

@@ -21,7 +21,7 @@ use git_paw::broker;
 #[cfg(test)]
 use git_paw::broker::publish::build_status_message;
 use git_paw::cli::{Cli, Command, SpecsFormat};
-use git_paw::config::{self, SupervisorConfig, resolve_submit_delay_ms};
+use git_paw::config::{self, resolve_submit_delay_ms};
 use git_paw::error::PawError;
 use git_paw::git;
 use git_paw::interactive;
@@ -172,6 +172,9 @@ fn run(command: Command) -> Result<(), PawError> {
             undo,
         }),
         Command::Dashboard => cmd_dashboard(),
+        Command::Broker { session, log_path } => {
+            commands::broker_host::cmd_broker_host(&session, &log_path)
+        }
         Command::PromptProfile { cli, field } => cmd_prompt_profile(cli.as_deref(), &field),
         Command::Init => git_paw::init::run_init(),
         Command::Replay {
@@ -507,39 +510,6 @@ struct AttachedAgent {
 /// new branch) share one implementation — guaranteeing an added agent is
 /// byte-identical to a start-time agent and that future boot-prompt fixes only
 /// have to land here.
-/// Builds the dashboard's learnings aggregator, seeded from the persisted
-/// session.
-///
-/// `session` is the receipt `cmd_dashboard` loaded for this repository. When
-/// it is present, [`LearningsAggregator::seed_from_session`] registers every
-/// agent AND records the spec each was launched from — seeding the roster
-/// alone leaves the agent → spec mapping empty, which reports every forward
-/// conflict cross-spec even between two agents launched from the same spec.
-/// When no receipt is found there is nothing to seed, and classification
-/// falls back to cross-spec exactly as before.
-///
-/// Extracted from `cmd_dashboard` so the seeding is reachable from a test:
-/// the wiring is the whole point of `supervisor-boot-wiring`, and a correct
-/// helper nobody calls is the defect this change exists to fix.
-fn build_learnings_aggregator(
-    learnings_path: std::path::PathBuf,
-    supervisor: &SupervisorConfig,
-    session: Option<&Session>,
-    broker_enabled: bool,
-) -> broker::learnings::LearningsAggregator {
-    let mut aggregator = broker::learnings::LearningsAggregator::new(learnings_path);
-    aggregator.set_broker_publish(
-        supervisor
-            .learnings_config
-            .broker_publish
-            .resolve(broker_enabled),
-    );
-    if let Some(session) = session {
-        aggregator.seed_from_session(session);
-    }
-    aggregator
-}
-
 /// Assembles an agent pane's CLI invocation: the launch command, then its
 /// approval flags, then the resolved `session_id_args` — each appended only
 /// when non-empty, so a CLI with neither is invoked bare.
@@ -1310,226 +1280,52 @@ fn cmd_prompt_profile(cli: Option<&str>, field: &str) -> Result<(), PawError> {
 // Command: __dashboard
 // ---------------------------------------------------------------------------
 
-/// Runs the broker and dashboard in pane 0 (internal command).
-#[allow(clippy::too_many_lines)]
+/// Renders the dashboard in pane 0 as a thin client of the session's broker
+/// (internal command).
+///
+/// Holds no broker state and needs no `$TMUX`. The broker URL comes from the
+/// saved session's `broker_port` / `broker_bind` whatever its recorded status
+/// — restart from pause recreates this pane while the session is still
+/// `Paused` — and is re-resolved on every wake-up until a receipt exists,
+/// since a fresh launch saves it only after the panes are up.
 fn cmd_dashboard() -> Result<(), PawError> {
-    // This is an internal command that should only run inside tmux
-    if std::env::var("TMUX").is_err() {
-        return Err(PawError::DashboardError(
-            "this is an internal command that should only be run by git-paw inside tmux"
-                .to_string(),
-        ));
-    }
-
     let cwd = std::env::current_dir()
         .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
     let repo_root = git::validate_repo(&cwd)?;
-    let config = config::load_config(&repo_root, None)?;
-    let broker_config = config.broker.clone();
     // Broker log panel: ring-buffer cap + initial visibility from
-    // `[dashboard.broker_log]`. An absent `[dashboard]` section uses the
-    // documented defaults (cap 500, visible).
-    let broker_log_cfg = config
-        .dashboard
-        .as_ref()
-        .map(|d| d.broker_log.clone())
+    // `[dashboard.broker_log]`. A config that will not load uses the
+    // documented defaults (cap 500, visible) rather than leaving the pane
+    // blank.
+    let broker_log_cfg = config::load_config(&repo_root, None)
+        .ok()
+        .and_then(|c| c.dashboard.map(|d| d.broker_log))
         .unwrap_or_default();
 
-    // The conflict detector subsystem runs only when supervisor mode is
-    // enabled — its outputs flow through the supervisor inbox and are
-    // tagged for the supervisor agent's attention.
-    let conflict_cfg = config
-        .supervisor
-        .as_ref()
-        .filter(|s| s.enabled)
-        .map(|s| s.conflict.clone());
-
-    // Learnings flush cadence (seconds). The aggregator itself is attached
-    // separately to `broker_state` when `[supervisor] learnings = true`;
-    // here we just pass the interval into start_broker_with so the flush
-    // thread spawns with the user-configured cadence.
-    let learnings_interval_seconds = config
-        .supervisor
-        .as_ref()
-        .map_or(60, |s| s.learnings_config.flush_interval_seconds);
-
-    // Per-commit verification nudge: when an agent commits, the broker pings
-    // the supervisor to verify that commit immediately (default on; opt out
-    // with `[supervisor] verify_on_commit_nudge = false`). Resolves to `true`
-    // when no `[supervisor]` section is present.
-    let verify_on_commit_nudge = config
-        .supervisor
-        .as_ref()
-        .is_none_or(SupervisorConfig::verify_on_commit_nudge_enabled);
-
-    // Resolve the supervisor's CLI the same way the launcher did
-    // (`[supervisor].cli` > `default_cli`) and seed it authoritatively. The
-    // supervisor is not a filesystem watch target, so this is the only
-    // deterministic source for its dashboard CLI column — relying on the
-    // supervisor to self-report via `agent.status` is unreliable (W15-15).
-    let supervisor_cli = config
-        .supervisor
-        .as_ref()
-        .and_then(|s| s.cli.clone())
-        .or_else(|| config.default_cli.clone())
-        .unwrap_or_default();
-
-    // Look up the saved session once: needed for the per-session broker log
-    // name, the broker watcher target list, the learnings aggregator's
-    // agent -> spec mapping AND to discover the supervisor pane_map for the
-    // auto-approve thread.
-    //
-    // This read happens once, with no retry, and `cmd_supervisor` writes the
-    // receipt *after* spawning this pane (deliberately: a session that failed
-    // to start must not be recorded). This pane therefore races a receipt that
-    // is normally already on disk by the time the binary has started. The
-    // watcher targets have always depended on winning that race; the learnings
-    // seeding now does too, and losing it degrades silently — no receipt means
-    // no agent -> spec mapping, so every forward conflict reports cross-spec.
-    // If that degradation is ever observed, the fix is a bounded retry here,
-    // not reordering the write.
-    let saved_session = session::find_session_for_repo(&repo_root)?;
-
-    // One log per session, so two repositories never write — or purge — the
-    // same file. See `session::resolve_broker_log_path` for why the saved
-    // path wins over the derived one.
-    let log_path = session::resolve_broker_log_path(saved_session.as_ref())?;
-    let mut broker_state = broker::BrokerState::new(Some(log_path))
-        .with_repo_root(&repo_root)
-        .with_verify_on_commit_nudge(verify_on_commit_nudge)
-        .with_seeded_cli("supervisor", &supervisor_cli);
-
-    let watch_targets = saved_session
-        .as_ref()
-        .map(|sess| {
-            sess.worktrees
-                .iter()
-                .map(|wt| broker::WatchTarget {
-                    agent_id: broker::messages::slugify_branch(&wt.branch),
-                    cli: wt.cli.clone(),
-                    worktree_path: wt.worktree_path.clone(),
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    // Attach the opsx role-gating context. The guard is scoped to the OpenSpec
-    // spec engine: under speckit/markdown (or no spec source) `engine_is_openspec`
-    // is false and the guard stays inert regardless of the configured mode. The
-    // roster maps each coding agent's worktree plus the supervisor's repo root,
-    // so the guard can attribute a committing worktree and clear the supervisor's
-    // own archives.
-    {
-        let engine_is_openspec =
-            git_paw::specs::resolved_spec_type(&config, &repo_root).as_deref() == Some("openspec");
-        let mut roster: Vec<(String, std::path::PathBuf)> = watch_targets
-            .iter()
-            .map(|t| (t.agent_id.clone(), t.worktree_path.clone()))
-            .collect();
-        roster.push((
-            git_paw::opsx::SUPERVISOR_AGENT_ID.to_string(),
-            repo_root.clone(),
-        ));
-        broker_state = broker_state.with_role_gating(git_paw::opsx::RoleGatingContext {
-            mode: config.role_gating_mode(),
-            engine_is_openspec,
-            roster,
-        });
-    }
-
-    // Attach the learnings aggregator when supervisor mode + learnings are
-    // both enabled (mirrors the `should_attach` predicate pinned by the
-    // learnings unit test). The aggregator appends to
-    // `.git-paw/session-learnings.md` and — when broker publish resolves to
-    // active — additionally emits `agent.learning` records through the
-    // broker (the `agent-learning-variant` dual-output path).
-    if let Some(sup) = config
-        .supervisor
-        .as_ref()
-        .filter(|s| s.enabled && s.learnings)
-    {
-        let aggregator = build_learnings_aggregator(
-            repo_root.join(".git-paw").join("session-learnings.md"),
-            sup,
-            saved_session.as_ref(),
-            broker_config.enabled,
-        );
-        broker_state.attach_learnings(std::sync::Arc::new(std::sync::Mutex::new(aggregator)));
-    }
-
-    // Start the in-process broker. A bind/probe failure — most often a stale
-    // dashboard still squatting the port — is terminal: emit a diagnostic and
-    // exit non-zero rather than fall through to the render loop. A second
-    // dashboard busy-rendering against a contended port is exactly the
-    // CPU-pegging leak this guards against, so we never retry or loop here.
-    let handle = match broker::start_broker_with(
-        &broker_config,
-        broker_state,
-        watch_targets,
-        conflict_cfg,
-        learnings_interval_seconds,
-    ) {
-        Ok(handle) => handle,
-        Err(err) => {
-            eprintln!(
-                "git-paw dashboard: broker failed to start ({err}); exiting instead of busy-looping"
-            );
-            return Err(err.into());
-        }
+    let mut resolve = || match session::find_session_for_repo(&repo_root).ok().flatten() {
+        Some(sess) => dashboard_broker_url(&sess)
+            .map_or(git_paw::dashboard::BrokerSource::Disabled, |url| {
+                git_paw::dashboard::BrokerSource::Ready(broker::client::BrokerClient::new(url))
+            }),
+        None => git_paw::dashboard::BrokerSource::Pending,
     };
-    let state = std::sync::Arc::clone(&handle.state);
-
-    // Set up a flag that SIGHUP sets to signal the dashboard to exit gracefully.
-    // tmux sends SIGHUP to pane processes when killing sessions. Without this,
-    // the process would be terminated before BrokerHandle::drop runs, losing
-    // the final log flush.
-    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-    #[cfg(unix)]
-    {
-        use std::sync::atomic::AtomicPtr;
-
-        static SHUTDOWN_PTR: AtomicPtr<std::sync::atomic::AtomicBool> =
-            AtomicPtr::new(std::ptr::null_mut());
-
-        const SIGHUP: std::ffi::c_int = 1;
-
-        unsafe extern "C" {
-            fn signal(signum: std::ffi::c_int, handler: extern "C" fn(std::ffi::c_int)) -> usize;
-        }
-
-        extern "C" fn sighup_handler(_: std::ffi::c_int) {
-            let ptr = SHUTDOWN_PTR.load(std::sync::atomic::Ordering::Acquire);
-            if !ptr.is_null() {
-                unsafe {
-                    (*ptr).store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-        }
-
-        // Store the flag pointer so the signal handler can access it.
-        SHUTDOWN_PTR.store(
-            std::sync::Arc::as_ptr(&shutdown).cast_mut(),
-            std::sync::atomic::Ordering::Release,
-        );
-
-        // SAFETY: sighup_handler only sets an AtomicBool, which is
-        // async-signal-safe. The pointer is valid for the process lifetime.
-        unsafe {
-            signal(SIGHUP, sighup_handler);
-        }
-    }
-
+    let shutdown = std::sync::atomic::AtomicBool::new(false);
     git_paw::dashboard::run_dashboard_with_panes(
-        &state,
-        handle,
+        &mut resolve,
         &shutdown,
-        &std::collections::HashMap::new(),
-        None,
         broker_log_cfg.max_messages,
         broker_log_cfg.default_visible,
         broker_log_cfg.height_lines,
     )
+}
+
+/// The broker URL the dashboard of `session` polls: from its recorded
+/// `broker_port` / `broker_bind`, whatever the session's status. `None` for a
+/// session saved without a broker.
+fn dashboard_broker_url(session: &Session) -> Option<String> {
+    session
+        .broker_port
+        .zip(session.broker_bind.as_ref())
+        .map(|(port, bind)| format!("http://{bind}:{port}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -2191,113 +1987,6 @@ mod tests {
         assert_eq!(
             agent_cli_command("claude", "--dangerous", Some("")),
             "claude --dangerous"
-        );
-    }
-
-    /// A session receipt whose worktree entries carry the given
-    /// `(branch, spec_id)` pairs — the shape a spec-driven launch saves.
-    fn receipt_with(entries: &[(&str, Option<&str>)]) -> Session {
-        Session {
-            session_name: "paw-repo".to_string(),
-            repo_path: PathBuf::from("/repo"),
-            project_name: "repo".to_string(),
-            created_at: UNIX_EPOCH,
-            status: SessionStatus::Active,
-            worktrees: entries
-                .iter()
-                .map(|(branch, spec_id)| WorktreeEntry {
-                    branch: (*branch).to_string(),
-                    worktree_path: PathBuf::from(format!("/repo/wt/{branch}")),
-                    cli: "claude".to_string(),
-                    branch_created: false,
-                    base_branch: None,
-                    pending_boot_prompt: None,
-                    pending_entry_point: None,
-                    runtime_slot: None,
-                    cli_session_id: None,
-                    spec_id: spec_id.map(str::to_string),
-                })
-                .collect(),
-            broker_port: None,
-            broker_bind: None,
-            broker_log_path: None,
-            mode: git_paw::session::SessionMode::Bare,
-            dashboard_pane: None,
-            layout: None,
-        }
-    }
-
-    /// A `[conflict-detector]`-tagged forward-conflict feedback message
-    /// naming `from` and `other`, as the detector emits it.
-    fn forward_conflict(from: &str, other: &str) -> git_paw::broker::messages::BrokerMessage {
-        git_paw::broker::messages::BrokerMessage::Feedback {
-            agent_id: from.to_string(),
-            payload: git_paw::broker::messages::FeedbackPayload {
-                from: "conflict-detector".to_string(),
-                errors: vec![format!(
-                    "[conflict-detector] forward conflict with {other} on src/main.rs"
-                )],
-            },
-        }
-    }
-
-    /// `supervisor-learnings`' "The spec mapping is seeded from the persisted
-    /// session": attaching the aggregator for a session SHALL be the only call
-    /// needed for it to learn the mapping.
-    ///
-    /// This asserts the *wiring*, not the helper. `seed_from_session` has its
-    /// own unit tests, but those would stay green if `cmd_dashboard` never
-    /// called it — which is exactly the class of defect this change fixes.
-    #[test]
-    fn dashboard_aggregator_is_seeded_from_the_session_receipt() {
-        let tmp = TempDir::new().expect("tempdir");
-        let receipt = receipt_with(&[
-            ("feat/x", Some("003-user-list")),
-            ("feat/y", Some("003-user-list")),
-        ]);
-        let mut aggregator = build_learnings_aggregator(
-            tmp.path().join("session-learnings.md"),
-            &SupervisorConfig::default(),
-            Some(&receipt),
-            false,
-        );
-
-        aggregator.record_detector_message(&forward_conflict("feat-x", "feat-y"));
-        aggregator.record_detector_message(&forward_conflict("feat-y", "feat-x"));
-        aggregator.flush().expect("flush learnings");
-
-        let md = std::fs::read_to_string(aggregator.file_path()).expect("learnings file written");
-        assert!(
-            md.contains("forward-conflict-intra-spec"),
-            "the dashboard must seed the agent -> spec mapping from the receipt, so a \
-             same-spec forward conflict classifies intra-spec; got:\n{md}"
-        );
-        assert!(
-            md.contains("003-user-list"),
-            "the flushed bullet must name the spec both agents were launched from; got:\n{md}"
-        );
-    }
-
-    /// No receipt means nothing to seed: the aggregator is still built and
-    /// still classifies, falling back to cross-spec as it did before.
-    #[test]
-    fn dashboard_aggregator_without_a_receipt_falls_back_to_cross_spec() {
-        let tmp = TempDir::new().expect("tempdir");
-        let mut aggregator = build_learnings_aggregator(
-            tmp.path().join("session-learnings.md"),
-            &SupervisorConfig::default(),
-            None,
-            false,
-        );
-
-        aggregator.record_detector_message(&forward_conflict("feat-x", "feat-y"));
-        aggregator.record_detector_message(&forward_conflict("feat-y", "feat-x"));
-        aggregator.flush().expect("flush learnings");
-
-        let md = std::fs::read_to_string(aggregator.file_path()).expect("learnings file written");
-        assert!(
-            !md.contains("forward-conflict-intra-spec"),
-            "with no receipt there is no mapping, so nothing may classify intra-spec; got:\n{md}"
         );
     }
 

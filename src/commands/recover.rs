@@ -17,7 +17,9 @@ use git_paw::terminal::tmux::TmuxBackend;
 use git_paw::terminal::{SessionPlan, SurfaceSpec, TerminalBackend};
 use git_paw::tmux;
 
-use super::helpers::{dashboard_command, launch_session, warn_if_broker_is_exposed};
+use super::helpers::{
+    dashboard_command, launch_session, start_broker_host, warn_if_broker_is_exposed,
+};
 use crate::attach_or_print_hint;
 
 /// Builds the recovery-time CLI launch command for `entry`: the command
@@ -190,22 +192,45 @@ pub(crate) fn recover_session_detached(
     if updated.broker_port.is_some() {
         updated.broker_log_path = Some(session::broker_log_path(&updated.session_name)?);
     }
-    // Save BEFORE the dashboard pane starts. The dashboard resolves its log
-    // path from the saved session, so launching first would let it read the
-    // pre-re-stamp path and write there — the orphaned log this re-stamp
-    // exists to prevent.
+    // Save BEFORE the broker host starts: the host seeds its agents from the
+    // saved receipt, and the dashboard resolves the broker URL from it.
     session::save_session(&updated)?;
 
     // A recovery rebuilds the session, broker and all, so it is a launch for
     // the purposes of the exposure warning — and it is the common path after a
-    // reboot or a tmux crash. The dashboard pane's own copy is hidden by the
-    // alternate screen, so warn here, immediately before the pane that starts
-    // the broker comes up.
-    warn_if_broker_is_exposed(&config.broker);
+    // reboot or a tmux crash. The broker host's own copy lands in its detached
+    // service surface, where nobody reads it, so warn here, before the host
+    // comes up.
+    // Judged on the address the host will bind — the saved one — not the
+    // current config's.
+    warn_if_broker_is_exposed(&recovery_broker_config);
 
     // Rebuild the session and even each agent row's width, as a fresh start
     // does (design D4). Recovery attaches no session logging.
     launch_session(&backend, &plan, &layout, None)?;
+
+    // Recreate the broker host in its service surface, with the session name
+    // and the re-stamped log path; it seeds its watch targets and agent ->
+    // spec mapping from the receipt saved above.
+    if let (true, Some(log_path)) = (
+        recovery_broker_config.enabled,
+        updated.broker_log_path.as_ref(),
+    ) {
+        // A host that fails leaves no live session recorded `Active` with no
+        // broker: close what was rebuilt and restore the receipt as it was,
+        // so the next `git paw start` recovers again.
+        if let Err(e) = start_broker_host(
+            &backend,
+            &plan.name,
+            repo_root,
+            &recovery_broker_config,
+            log_path,
+        ) {
+            let _ = backend.close_session(&plan.name);
+            session::save_session(existing)?;
+            return Err(e);
+        }
+    }
 
     // Rewrite the per-repo discovery file `sweep.sh` reads. Recovery REBUILDS
     // the layout, so a file written by the original launch records pane

@@ -28,12 +28,12 @@ use git_paw::supervisor::drive;
 use git_paw::supervisor::loop_binding::{self, BindMode, DriveLoopBinding};
 use git_paw::surface::SessionLayout;
 use git_paw::terminal::tmux::TmuxBackend;
-use git_paw::terminal::{SessionPlan, SurfaceSpec};
+use git_paw::terminal::{SessionPlan, SurfaceSpec, TerminalBackend};
 use git_paw::tmux;
 
 use super::helpers::{
-    config_to_custom_defs, dashboard_command, launch_session, session_has_live_agents,
-    to_interactive_cli, warn_if_broker_is_exposed,
+    config_to_custom_defs, dashboard_command, launch_session, register_agents_with_host,
+    session_has_live_agents, start_broker_host, to_interactive_cli, warn_if_broker_is_exposed,
 };
 use super::recover::{recover_session, recover_session_detached};
 use super::start::{restart_from_pause, restart_from_pause_detached};
@@ -762,6 +762,27 @@ pub(crate) fn cmd_supervisor(
     // coding agents start at the layout's first agent index — and even the
     // grid's columns.
     launch_session(&backend, &plan, &session_layout, Some((config, repo_root)))?;
+
+    // Bring the broker host up in its detached service surface, wait for it
+    // to answer as this repository's broker, and register every agent with
+    // it — before the receipt is saved, so a host that never answers fails the
+    // launch with persisted session state untouched, and before any boot
+    // prompt is injected.
+    if broker_config.enabled {
+        // A host that fails takes the half-launched session down with it: no
+        // receipt names that session, so nothing else could stop it.
+        if let Err(e) = start_broker_host(
+            &backend,
+            &session_name,
+            repo_root,
+            &broker_config,
+            &session::broker_log_path(&session_name)?,
+        ) {
+            let _ = backend.close_session(&session_name);
+            return Err(e);
+        }
+        register_agents_with_host(&broker_config.url(), &worktree_entries);
+    }
     let agent_commands: Vec<String> = plan
         .surfaces
         .iter()

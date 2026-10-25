@@ -66,12 +66,12 @@ It describes the code as it is today. For the structure the code is moving towar
 
 | Module | File | Purpose |
 |--------|------|---------|
-| **Entry point** | `src/main.rs`, `src/lib.rs` | `main.rs` parses arguments and dispatches each subcommand to its handler; it still holds the `purge` handler and the hidden `__dashboard` / `__prompt-profile` subcommands. `lib.rs` is the library target the binary and the integration tests share — internal, not a stable API. |
-| **Commands** | `src/commands/` | One handler module per subcommand: `start.rs` (fresh launch, reattach, restart-from-pause, spec-driven launch), `supervisor.rs` (`cmd_supervisor` and the unattended drive-loop wiring), `recover.rs`, `add.rs`, `remove.rs`, `pause.rs`, `stop.rs`, `status.rs`, `attach.rs`, `approvals.rs`, `replay.rs`, `clis.rs` (`list-clis` / `add-cli` / `remove-cli`), `setup_cli.rs` (`setup-cli`: resolves the CLI identity, plans an apply or an undo, then applies it; the module never prompts or reads stdin — `main.rs` prints the plan and asks), `completions.rs`, plus shared `helpers.rs`. |
+| **Entry point** | `src/main.rs`, `src/lib.rs` | `main.rs` parses arguments and dispatches each subcommand to its handler; it still holds the `purge` handler and the hidden `__dashboard` (the thin dashboard client) / `__prompt-profile` subcommands; the hidden `__broker` host lives in `src/commands/broker_host.rs`. `lib.rs` is the library target the binary and the integration tests share — internal, not a stable API. |
+| **Commands** | `src/commands/` | One handler module per subcommand: `start.rs` (fresh launch, reattach, restart-from-pause, spec-driven launch), `supervisor.rs` (`cmd_supervisor` and the unattended drive-loop wiring), `recover.rs`, `add.rs`, `remove.rs`, `pause.rs`, `stop.rs`, `status.rs`, `attach.rs`, `approvals.rs`, `replay.rs`, `clis.rs` (`list-clis` / `add-cli` / `remove-cli`), `setup_cli.rs` (`setup-cli`: resolves the CLI identity, plans an apply or an undo, then applies it; the module never prompts or reads stdin — `main.rs` prints the plan and asks), `completions.rs`, `broker_host.rs` (the hidden `__broker` host: builds the broker state, starts the broker, and blocks until SIGHUP / orphaned / terminal hang-up), plus shared `helpers.rs` (including `start_broker_host`, which spawns the host's service surface and waits for `/status`). |
 | **CLI** | `src/cli.rs` | Argument parsing with clap v4 derive macros. Defines all subcommands, flags (`--from-all-specs`, `--specs`, `--specs-format`, `--supervisor`, `--no-supervisor`, `--force`, ...), and help text. |
 | **Detection** | `src/detect.rs` | Scans `PATH` for known AI CLI binaries (`KNOWN_CLIS`). Resolves custom CLIs from config. Merges and deduplicates. |
 | **Git** | `src/git.rs` | Validates git repos, lists branches (local + remote, deduplicated), creates/removes worktrees, derives safe directory names. |
-| **Terminal** | `src/terminal/` | The terminal port. `mod.rs` defines `TerminalBackend` — every orchestration-path terminal operation (open/close a session from a `SessionPlan`, spawn/kill/label a surface, list surfaces with their owning worktree, send text and named keys as separate operations, read a screen tail and a surface's foreground process, relaunch a surface's CLI or answer its first-run dialog, stream output to a log, grid layout, attach/detach) in git-paw's terms, keyed by an opaque `SurfaceId`. `tmux.rs` is the tmux adapter (`TmuxBackend`) over the `src/tmux/` builders and the `CommandRunner` seam; it alone converts a layout position to a tmux target, and `fixtures/` pins its argv to the pre-port behaviour. `fake.rs` (`FakeBackend`) records operations and answers scripted screens, owners and processes for logic tests. |
+| **Terminal** | `src/terminal/` | The terminal port. `mod.rs` defines `TerminalBackend` — every orchestration-path terminal operation (open/close a session from a `SessionPlan`, spawn/kill/label a surface, list surfaces with their owning worktree, send text and named keys as separate operations, read a screen tail and a surface's foreground process, relaunch a surface's CLI or answer its first-run dialog, stream output to a log, grid layout, attach/detach, and run / stop / query a detached **service** outside the agent grid — the broker host) in git-paw's terms, keyed by an opaque `SurfaceId`. `tmux.rs` is the tmux adapter (`TmuxBackend`) over the `src/tmux/` builders and the `CommandRunner` seam; it alone converts a layout position to a tmux target, implements a service as a detached named window (`new-window -d -n <name>`), and `fixtures/` pins its argv to the pre-port behaviour. `fake.rs` (`FakeBackend`) records operations and answers scripted screens, owners and processes for logic tests. |
 | **Tmux** | `src/tmux/` | Tmux orchestration. `command.rs` holds the `TmuxSessionBuilder` plus the supervisor-session, add-agent, and remove-retile command builders (pure argv assembly, pane titles, the agent grid every session uses); `layout.rs` the equal-width agent-row rebalance; `readiness.rs` the launch-readiness gate; `session.rs` runtime operations on live sessions (liveness probes, session-name resolution, attach/detach, pane and session teardown, pane-to-worktree reconciliation). |
 | **Session** | `src/session.rs` | Persists session state to JSON files under `~/.local/share/git-paw/sessions/`. Atomic writes, crash recovery. Also writes the per-repo discovery file (see below). |
 | **Surface** | `src/surface.rs` | The session's pane-layout record and the role each surface plays. `SessionLayout` — derived from a saved session or from a launch plan, never persisted — owns every reserved-index fact: which index holds the dashboard, where coding agents start, and what each launch records. No surface runs the supervisor: the orchestrator drives the session from outside it. `SurfaceRole` (`Dashboard` / `Coding(agent id)` / `Unknown`) is produced by the single resolver `SessionLayout::resolve`, which matches a surface's owning worktree path through the core owner rule `resolve_agent` (exact canonical path) before consulting the dashboard's reserved index; a pre-relocation session's old supervisor pane resolves as `Unknown`. Decision code matches on the role instead of comparing a pane index to a literal or an agent id to `"supervisor"`; the supervisor's broker wire identity is defined here once. The supervisor-window grid geometry (`SupervisorLayout`, `supervisor_layout`, `layout_for`, `SUPERVISOR_PANE_OFFSET`) lives here too so `src/tmux/` depends on core rather than on `src/supervisor/`. |
@@ -93,7 +93,7 @@ It describes the code as it is today. For the structure the code is moving towar
 | **Lock** | `src/lock.rs` | Advisory `<repo>/.git-paw/.add-remove.lock` taken by `git paw add` and `git paw remove` so two concurrent pane splices cannot interleave. |
 | **Random** | `src/random.rs` | Version-4 UUIDs built from OS randomness (no `uuid` dependency), used for CLI session ids. |
 | **Static regex** | `src/static_regex.rs` | The single audited compiler for regex patterns fixed at build time. `static_regex(pattern: &'static str)` carries the only `#[allow(clippy::expect_used)]` in non-test code; every pattern routed through it is compiled by a unit test, so an invalid static pattern fails `cargo test` instead of panicking at run time. Patterns that arrive at run time are compiled by their caller with the error propagated. |
-| **Dashboard** | `src/dashboard.rs`, `src/dashboard/` | The `git paw __dashboard` TUI (status table + Broker log panel). Detail below. |
+| **Dashboard** | `src/dashboard.rs`, `src/dashboard/` | The `git paw __dashboard` TUI (status table + Broker log panel), a thin HTTP client of the broker. Detail below. |
 | **Broker** | `src/broker/` | HTTP coordination server (axum) with watcher + conflict detector + learnings subsystems. Detail below. |
 | **Supervisor** | `src/supervisor/` | Supervisor-mode subsystems (unattended drive loop and its one-loop-per-session binding, permission-prompt detection, the live-prompt gate and per-pane claim, keystroke dispatch, manual-decision log, branch refresh). Detail below. |
 | **Specs** | `src/specs/` | Spec scanning. Four backends (`openspec`, `markdown`, `speckit`, `superpowers`); `mod.rs` holds the dispatch entry point and `resolve.rs` resolves `--specs` names. |
@@ -109,15 +109,17 @@ It describes the code as it is today. For the structure the code is moving towar
 | `src/broker/mod.rs` | Public surface (start/stop entry points, shared state types). |
 | `src/broker/server.rs` | `axum` HTTP server: `/publish`, `/watch`, `/messages/:agent_id`, `/status`, `/log`. Validates each incoming `/publish` body (message schema, `agent_id` pattern, unfilled-placeholder rejection) before handing it to delivery. |
 | `src/broker/messages.rs` | `BrokerMessage` enum + payload types + slug validation. Source of truth for the wire format used in user-facing examples. |
-| `src/broker/publish.rs` | Client-side helpers for callers outside the broker process: build `BrokerMessage` values and publish them over HTTP, register a live `/watch` target, fetch `/log` (by cursor, optionally long-polling), and fetch the wave-progress object from `/status`. Shared by `cmd_supervisor`, `git paw status`, and the MCP query and publish tools. |
+| `src/broker/client.rs` | `BrokerClient`: the one HTTP client every process other than the broker host uses — bounded-timeout `GET /status`, `GET /log?since=&wait=`, `POST /publish`, `POST /watch` (with an optional spec id), and the repository-scoped stale-broker probe. The dashboard, the launcher, `add`, `status`, the drive loop and the MCP server all go through it. |
+| `src/broker/publish.rs` | Client-side helpers for callers outside the broker process (thin wrappers over `BrokerClient`): build `BrokerMessage` values and publish them over HTTP, register a live `/watch` target, fetch `/log` (by cursor, optionally long-polling), and fetch the wave-progress object from `/status`. Shared by `cmd_supervisor`, `git paw status`, and the MCP query and publish tools. |
 | `src/broker/delivery.rs` | Delivery layer: assigns each message its sequence number, updates the sender's record, appends it to the message log, and routes it into inboxes (broadcast, supervisor inbox, targeted delivery). Also cursor-based polling, the dashboard snapshot, and the broker-log flush loop. |
 | `src/broker/watcher.rs` | Git-status polling watcher: one task per worktree runs `git status --porcelain` every 2 s and publishes `agent.status` (with `modified_files`) when the reported path set changes; reads `git rev-parse HEAD` on the same tick and marks wave progress when the branch tip moves (the first observation is a baseline); prunes a worktree that has vanished. |
 | `src/broker/conflict.rs` | Forward / in-flight / ownership conflict detection. Auto-emits `[conflict-detector]`-tagged `agent.feedback` and escalates via `agent.question`. |
 | `src/broker/learnings.rs` | Opt-in learnings subsystem. Aggregates the deterministic signals (stuck durations, recovery cycles, conflict events, permission patterns) plus published qualitative `agent.learning` records, and flushes them to `.git-paw/session-learnings.md`. |
 
 `src/dashboard.rs` (top-level, not inside `src/broker/`) renders the dashboard
-pane — the live status table and the optional message-log panel — by reading
-the shared broker state. The dashboard pane sits at pane index 0 whenever the
+pane — the live status table and the optional message-log panel — by polling
+the broker over HTTP (`GET /status`, `GET /log?since=<seq>`). It holds no
+broker state. The dashboard pane sits at pane index 0 whenever the
 session has one — in supervisor mode (see the layout diagram below) and in
 non-supervisor broker mode alike.
 
@@ -125,7 +127,7 @@ The dashboard is structured as **Model-View-Update**:
 
 | File | Purpose |
 |------|---------|
-| `src/dashboard.rs` | The **Model** (`Model` — the redraw state: derived agent rows, footer status line, Broker log buffer, quit flag) and the **Update** (`Msg` + a pure `update(&mut Model, Msg)`), plus what MVU cannot own: terminal setup/teardown, the SIGHUP/`poll_tty` FFI, the `getppid() == 1` orphan-exit gate, and the event loop. |
+| `src/dashboard.rs` | The **Model** (`Model` — the redraw state: derived agent rows, footer status line, Broker log buffer, quit flag) and the **Update** (`Msg` + a pure `update(&mut Model, Msg)`), plus what MVU cannot own: terminal setup/teardown, the `poll_tty` FFI, the `getppid() == 1` orphan-exit gate, the broker poll, and the event loop. A failed poll sets the Model's broker-unreachable flag (rendered in the status line, last snapshot kept); a lower `/status` `uptime_seconds` than last seen is a restarted host, which rewinds the log cursor. |
 | `src/dashboard/view.rs` | The **View** — a pure function of the `Model` producing the rendered frame (`render`, `render_dashboard`, `draw_frame`, and the `status_symbol` / `format_age` / `format_agent_rows` / `arrange_with_supervisor_pinned` / `format_status_line` helpers). No I/O, so frames are asserted against a `TestBackend` without a live pty. |
 | `src/dashboard/broker_log.rs` | The Broker log panel: ring buffer, filter chips, selection/overlay state, key handling, and its own rendering. |
 
@@ -268,10 +270,22 @@ git paw start
 │                                                          │
 │  With the broker on, the tmux session environment        │
 │  carries GIT_PAW_BROKER_URL into every pane, and the     │
-│  dashboard pane:                                         │
-│   ├─ Starts the axum HTTP broker on the configured       │
-│   │  bind address and port                               │
-│   └─ Renders the ratatui status table                    │
+│  dashboard pane renders the status table as a client     │
+│  of the broker host started next.                        │
+└──────────────────────────────────────────────────────────┘
+     │
+     ▼
+┌─ Start the broker host (broker on) ──────────────────────┐
+│  helpers::start_broker_host()                            │
+│  → detached window `broker` (outside window 0's grid)    │
+│    running `git paw __broker --session <name>            │
+│                              --log-path <log>`           │
+│  → wait ≤10s for GET /status (git_paw + repo_root);      │
+│    a host that exits or never answers fails the launch   │
+│    naming the port, before any receipt is saved          │
+│  helpers::register_agents_with_host()                    │
+│  → POST /watch per agent (agent id, worktree, CLI,       │
+│    spec id)                                              │
 └──────────────────────────────────────────────────────────┘
      │
      ▼
@@ -339,18 +353,19 @@ reads `agents` and `session_name` by name — ignores it.
 
 ## Broker Architecture
 
-When `[broker] enabled = true`, the dashboard pane runs `git paw __dashboard`. This single process hosts both the HTTP broker and the dashboard TUI. The dashboard pane sits at pane 0 in supervisor mode and in non-supervisor broker mode alike.
+When `[broker] enabled = true`, the broker runs in its own process, `git paw __broker`, in a detached service surface of the session — on tmux, a window named `broker`, outside window 0's pane grid, so pane indices are untouched. The launcher hands it the session name and the per-session log path on argv (a fresh launch saves its receipt only after the panes exist); when a saved receipt with that name exists (recovery, restart from pause) the host seeds its watch targets, the agent → spec mapping, and the broker port and bind from it. On a fresh launch the agents arrive through `POST /watch` instead, each with its spec id. The dashboard pane runs `git paw __dashboard`, a thin client that polls the host over HTTP; closing it never affects the broker.
 
 ```
-Dashboard pane process (git paw __dashboard):
+Broker host process (git paw __broker, window `broker`):
 ├── tokio runtime (background threads)
 │   ├── axum HTTP server on 127.0.0.1:9119 (default [broker] bind / port)
 │   │   ├── POST /publish
-│   │   ├── POST /watch   (register a hot-added worktree as a live watch target)
+│   │   ├── POST /watch   (register a worktree as a live watch target,
+│   │   │                  optionally with the agent's spec id)
 │   │   ├── GET /messages/:agent_id?since=N
 │   │   ├── GET /status
 │   │   └── GET /log?since=N[&wait=S]   (full message log, cursor-paged and
-│   │       long-pollable; read by cmd_supervisor and the MCP server)
+│   │       long-pollable; read by the dashboard, the drive loop and the MCP server)
 │   ├── Worktree watchers (src/broker/watcher.rs), one task per worktree
 │   │   └── `git status --porcelain` + `git rev-parse HEAD` every 2s; publishes
 │   │       agent.status on change; marks wave progress on a moved branch tip;
@@ -363,10 +378,16 @@ Dashboard pane process (git paw __dashboard):
 │   └── Flushes the aggregator (src/broker/learnings.rs), fed on every publish,
 │       to .git-paw/session-learnings.md (default every 60s, plus once at shutdown)
 └── Main thread
-    └── ratatui dashboard (800ms idle tick; a keystroke wakes it immediately)
+    └── waits for SIGHUP, reparent-to-init, or its terminal hanging up
+
+Dashboard pane process (git paw __dashboard, pane 0):
+└── ratatui dashboard (800ms idle tick; a keystroke wakes it immediately)
+    └── each tick: GET /status + GET /log?since=<cursor> through BrokerClient
 ```
 
-The main-thread render loop is bound to the session's lifecycle: it checks a single exit gate every iteration (on all paths, including error/degraded branches) and terminates on a clean `SIGHUP`, on reparent-to-init (`getppid() == 1`, Unix only), or when the controlling terminal is gone (a poll error or a failed terminal write — catching reparent-to-a-lingering-shell). If the in-process broker fails to bind its port at startup, the process emits a diagnostic and exits non-zero instead of busy-looping. Together these keep an orphaned `__dashboard` from lingering and pegging CPU. See the [Dashboard chapter](user-guide/dashboard.md#lifecycle-and-exit-conditions) for the user-facing description.
+The host renders nothing and needs no `$TMUX`. It exits — dropping `BrokerHandle`, so the final broker-log flush and the learnings flush run — on `SIGHUP` (tmux kills its window on `pause` and every window on `stop`), on reparent-to-init (`getppid() == 1`, Unix only), or when a terminal it was given hangs up. It ignores `SIGINT`, sends no keystrokes to any surface, and a bind or probe failure exits non-zero with a diagnostic naming the port rather than retrying.
+
+The dashboard's render loop is bound to the session's lifecycle the same way: a single exit gate checked every iteration (on all paths, including the degraded branch) terminates it on reparent-to-init or when the controlling terminal is gone (a poll error or a failed terminal write — catching reparent-to-a-lingering-shell). An unreachable broker is never an exit condition: the dashboard keeps the last snapshot, shows "broker unreachable" in its status line, and reconnects on its own. See the [Dashboard chapter](user-guide/dashboard.md#lifecycle-and-exit-conditions) for the user-facing description.
 
 ### Broker state
 
@@ -375,10 +396,10 @@ The broker state is an `Arc<BrokerState>` defined in `src/broker/mod.rs`: an
 lock-free `AtomicU64` sequence counter. Lock guards are never held across an
 `.await` (the `clippy::await_holding_lock` lint is set to deny). The state is
 shared between the axum server handlers, the watchers, the conflict detector,
-the learnings aggregator, and the ratatui dashboard render loop. The server
+and the learnings aggregator, all inside the broker host. The server
 validates incoming messages (`src/broker/server.rs`) and hands them to
 `src/broker/delivery.rs`, which sequences, logs, and routes them; the dashboard
-reads the latest snapshot each tick.
+reads the latest snapshot over `GET /status` each tick.
 
 The log flush thread periodically appends new messages to the session's broker
 log in the session-state directory

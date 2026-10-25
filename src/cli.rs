@@ -623,15 +623,38 @@ pub enum Command {
     )]
     Init,
 
-    /// Internal: run the broker and dashboard in pane 0
+    /// Internal: render the dashboard in pane 0 as a client of the broker
     #[command(
         hide = true,
         name = "__dashboard",
-        about = "Internal: run the broker and dashboard in pane 0",
-        long_about = "Internal subcommand used by git-paw to run the broker and dashboard TUI \
-                      in pane 0 of a tmux session. Not intended for direct invocation."
+        about = "Internal: render the dashboard as a client of the broker",
+        long_about = "Internal subcommand used by git-paw to render the dashboard TUI in pane 0 \
+                      of a session. It holds no broker state: it reads the broker URL from the \
+                      saved session and polls the broker over HTTP, showing a 'broker \
+                      unreachable' state while the broker is down. Not intended for direct \
+                      invocation."
     )]
     Dashboard,
+
+    /// Internal: host the session's broker in its detached service surface
+    #[command(
+        hide = true,
+        name = "__broker",
+        about = "Internal: host the session's broker",
+        long_about = "Internal subcommand used by git-paw to host a session's broker in a \
+                      detached service surface (on tmux, a window named `broker`). It serves \
+                      the broker until SIGHUP, until it is orphaned, or until its terminal hangs \
+                      up, then flushes the broker log. Not intended for direct invocation."
+    )]
+    Broker {
+        /// Name of the session whose broker this process hosts.
+        #[arg(long, value_name = "NAME", help = "Session whose broker to host")]
+        session: String,
+
+        /// Path of the session's broker log.
+        #[arg(long, value_name = "PATH", help = "Path of the session's broker log")]
+        log_path: std::path::PathBuf,
+    },
 
     /// Internal: print one resolved CLI prompt-shape profile field
     #[command(
@@ -1791,7 +1814,7 @@ mod tests {
         let help = Cli::try_parse_from(["git-paw", "--help"])
             .unwrap_err()
             .to_string();
-        for hidden in ["__dashboard", "__prompt-profile", "selftest"] {
+        for hidden in ["__dashboard", "__broker", "__prompt-profile", "selftest"] {
             assert!(
                 !help.contains(hidden),
                 "root --help must not surface internal subcommand {hidden:?}; got: {help}"
@@ -1812,6 +1835,13 @@ mod tests {
         for args in [
             vec!["selftest"],
             vec!["__dashboard"],
+            vec![
+                "__broker",
+                "--session",
+                "paw-x",
+                "--log-path",
+                "/tmp/x.broker.log",
+            ],
             vec!["__prompt-profile", "--field", "approval_markers"],
         ] {
             assert!(
@@ -1950,6 +1980,31 @@ mod tests {
     fn dashboard_parses() {
         let cli = parse(&["__dashboard"]);
         assert!(matches!(cli.command.unwrap(), Command::Dashboard));
+    }
+
+    // -- __broker subcommand --
+
+    /// `cli-parsing` "__broker subcommand parses": the host takes the session
+    /// name and its log path on argv.
+    #[test]
+    fn broker_parses_with_session_and_log_path() {
+        let cli = parse(&[
+            "__broker",
+            "--session",
+            "paw-demo",
+            "--log-path",
+            "/state/paw-demo.broker.log",
+        ]);
+        match cli.command.unwrap() {
+            Command::Broker { session, log_path } => {
+                assert_eq!(session, "paw-demo");
+                assert_eq!(
+                    log_path,
+                    std::path::PathBuf::from("/state/paw-demo.broker.log")
+                );
+            }
+            other => panic!("expected Command::Broker, got {other:?}"),
+        }
     }
 
     // -- Approvals subcommand --

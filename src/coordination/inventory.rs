@@ -16,8 +16,6 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -495,59 +493,23 @@ pub fn build_inventory_with(
 
 /// Fetches and parses the broker `GET /status` agent list over HTTP.
 ///
-/// Used by callers outside the dashboard process (e.g. the MCP server) that
+/// Used by callers outside the broker host process (e.g. the MCP server) that
 /// want a live per-agent snapshot. Returns an error when the broker is
 /// unreachable so the caller can degrade gracefully.
 pub fn fetch_status_agents_over_http(broker_url: &str) -> Result<Vec<StatusAgent>, PawError> {
     parse_status_agents(&fetch_status_body(broker_url)?)
 }
 
-/// Fetches the raw `GET /status` JSON body over a minimal HTTP/1.1 request.
+/// Fetches the raw `GET /status` JSON body through the shared broker client.
 fn fetch_status_body(broker_url: &str) -> Result<String, PawError> {
-    let addr = broker_url.strip_prefix("http://").unwrap_or(broker_url);
-    let socket_addr = if let Ok(a) = addr.parse() {
-        a
-    } else {
-        use std::net::ToSocketAddrs;
-        addr.to_socket_addrs()
-            .map_err(|e| PawError::SessionError(format!("invalid broker address {addr}: {e}")))?
-            .next()
-            .ok_or_else(|| {
-                PawError::SessionError(format!("broker address {addr} resolved to no addrs"))
-            })?
-    };
-
-    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(500))
-        .map_err(|e| PawError::SessionError(format!("failed to connect to broker: {e}")))?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
-
-    let request = format!("GET /status HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|e| PawError::SessionError(format!("failed to write status request: {e}")))?;
-
-    let mut response = String::new();
-    let _ = stream.read_to_string(&mut response);
-
-    if !(response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200")) {
-        return Err(PawError::SessionError(format!(
-            "broker /status returned non-200: {}",
-            response.lines().next().unwrap_or("<empty>")
-        )));
-    }
-
-    let body_start = response
-        .find("\r\n\r\n")
-        .map(|i| i + 4)
-        .ok_or_else(|| PawError::SessionError("malformed broker /status response".to_string()))?;
-    Ok(response[body_start..].to_string())
+    crate::broker::client::BrokerClient::new(broker_url).status_body()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::io::{Read, Write};
 
     const STATUS_JSON: &str = r#"{
         "git_paw": true,

@@ -10,6 +10,7 @@
 pub mod add;
 pub mod approvals;
 pub mod attach;
+pub mod broker_host;
 pub mod clis;
 pub mod completions;
 pub mod helpers;

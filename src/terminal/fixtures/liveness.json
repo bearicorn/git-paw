@@ -13,7 +13,7 @@
       "tmux",
       "list-panes",
       "-t",
-      "paw-proj",
+      "paw-proj:0",
       "-F",
       "#{pane_index}|#{pane_current_command}|#{@paw_role}"
     ],

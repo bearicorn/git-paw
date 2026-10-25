@@ -1,0 +1,13 @@
+[
+  {
+    "argv": [
+      "tmux",
+      "list-windows",
+      "-t",
+      "paw-proj",
+      "-F",
+      "#{window_name}"
+    ],
+    "stdio": "captured"
+  }
+]

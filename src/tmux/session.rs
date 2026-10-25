@@ -203,7 +203,8 @@ const NON_AGENT_PANE_ROLES: &[&str] = &["dashboard", "supervisor"];
 ///
 /// Roles are preferred over pane indices because `pane_index` is
 /// **positional**: killing a pane renumbers every pane after it. `git paw
-/// pause` kills the dashboard pane, so a paused session's surviving agent
+/// pause` of a session started before the broker host split kills the
+/// dashboard pane, so a paused session's surviving agent
 /// slides down into the dashboard's old index — and a purely positional probe
 /// would then look past it and wrongly conclude that every agent had exited,
 /// which makes `git paw start` tear down a session whose agents are alive.
@@ -224,7 +225,12 @@ pub(crate) fn has_live_agent_pane_with(
         &[
             "list-panes",
             "-t",
-            session_name,
+            // Window 0 explicitly: a bare session target lists only the
+            // CURRENT window, and the broker host's `broker` window can be
+            // current (one click on the status bar). Seeing only the host's
+            // pane would read as "every agent exited" and recover — kill —
+            // a live session.
+            &format!("{session_name}:0"),
             "-F",
             // Role last: a branch name may contain the separator, a pane index
             // and a command name cannot, so the role takes the remainder.
@@ -354,9 +360,9 @@ pub(crate) fn detach_client_with(
 ///
 /// Wraps `tmux kill-pane -t <session>:0.<index>`. Returns `Ok(())` if
 /// the pane was killed OR if tmux reports the pane does not exist
-/// (idempotent no-op on missing panes). Used by the pause flow to take
-/// down the dashboard pane (which owns the broker subprocess) without
-/// killing the rest of the session.
+/// (idempotent no-op on missing panes). Used by the pause flow's fallback
+/// for a session started before the broker host split, whose dashboard pane
+/// owns the broker, to take it down without killing the rest of the session.
 pub fn kill_pane(session_name: &str, pane_index: u32) -> Result<(), PawError> {
     kill_pane_with(&RealCommandRunner, session_name, pane_index)
 }
@@ -466,7 +472,9 @@ pub(crate) fn list_panes_with_paths_with(
             &[
                 "list-panes",
                 "-t",
-                session_name,
+                // Window 0, not whichever window is current: the `broker`
+                // window holds no agent surface.
+                &format!("{session_name}:0"),
                 "-F",
                 "#{pane_id} #{pane_current_path}",
             ],

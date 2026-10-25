@@ -1,0 +1,17 @@
+[
+  {
+    "argv": [
+      "tmux",
+      "new-window",
+      "-d",
+      "-n",
+      "broker",
+      "-t",
+      "paw-proj:",
+      "-c",
+      "/repo",
+      "'/opt/bin/git-paw' __broker --session paw-proj"
+    ],
+    "stdio": "captured"
+  }
+]

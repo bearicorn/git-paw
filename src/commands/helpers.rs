@@ -157,12 +157,159 @@ pub(crate) fn dashboard_command_for(exe: &std::path::Path) -> String {
     )
 }
 
+/// The name of the session's detached service surface that hosts the broker.
+pub(crate) const BROKER_SERVICE: &str = "broker";
+
+/// How long a launch waits for a freshly started broker host to answer
+/// `GET /status` before it fails, naming the port.
+pub(crate) const BROKER_HOST_READY_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long a launch waits for a broker that already answers for this
+/// repository — a host stopped a moment ago — to release the port.
+const PREVIOUS_HOST_RELEASE_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The command that runs the broker host for `session` in its service
+/// surface, logging to `log_path`.
+///
+/// Every value is shell-quoted for the same reason as
+/// [`dashboard_command`]: the surface's shell parses the command.
+pub(crate) fn broker_host_command(session: &str, log_path: &std::path::Path) -> String {
+    broker_host_command_for(
+        &std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("git-paw")),
+        session,
+        log_path,
+    )
+}
+
+/// [`broker_host_command`] for an explicit executable path.
+pub(crate) fn broker_host_command_for(
+    exe: &std::path::Path,
+    session: &str,
+    log_path: &std::path::Path,
+) -> String {
+    use git_paw::domain::shell_quote;
+    format!(
+        "{} __broker --session {} --log-path {}",
+        shell_quote(&exe.display().to_string()),
+        shell_quote(session),
+        shell_quote(&log_path.display().to_string()),
+    )
+}
+
+/// Starts the broker host for `session` in its detached service surface and
+/// waits — bounded by [`BROKER_HOST_READY_BUDGET`] — for it to answer
+/// `GET /status` as this repository's broker.
+///
+/// The host is handed the session name and log path on argv because a fresh
+/// launch saves its receipt only after the surfaces exist.
+///
+/// # Errors
+/// Returns an error naming the broker port when the surface cannot be
+/// created, or the host exits or does not answer within the budget. The
+/// caller saves no receipt then, so persisted session state is untouched.
+pub(crate) fn start_broker_host(
+    backend: &dyn git_paw::terminal::TerminalBackend,
+    session: &str,
+    repo_root: &std::path::Path,
+    broker: &git_paw::config::BrokerConfig,
+    log_path: &std::path::Path,
+) -> Result<(), PawError> {
+    // A broker for this repository already answering belongs to another
+    // process — most often a host stopped a moment ago that is still
+    // flushing. Give it a bounded moment to let go of the port; if it still
+    // answers, starting a host beside it would leave the launcher talking to
+    // a broker nothing in this session can stop.
+    let client = git_paw::broker::client::BrokerClient::new(broker.url());
+    let deadline = std::time::Instant::now() + PREVIOUS_HOST_RELEASE_BUDGET;
+    while client.probe(Some(repo_root)) == git_paw::broker::ProbeResult::LiveBroker {
+        if std::time::Instant::now() >= deadline {
+            return Err(PawError::SessionError(format!(
+                "a broker for this repository already serves port {} outside this session; \
+                 stop it (`git paw stop`) and run `git paw start` again",
+                broker.port
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    let handle = backend.spawn_service(
+        session,
+        BROKER_SERVICE,
+        &broker_host_command(session, log_path),
+        repo_root,
+    )?;
+    wait_for_broker_host(
+        &broker.url(),
+        broker.port,
+        repo_root,
+        BROKER_HOST_READY_BUDGET,
+        || backend.service_alive(&handle).unwrap_or(true),
+    )
+}
+
+/// Polls `url` until it answers as `repo_root`'s broker, failing once
+/// `budget` elapses or `host_alive` reports the host gone.
+///
+/// # Errors
+/// Returns [`PawError::SessionError`] naming `port` when the broker does not
+/// answer in time or its host exits first.
+pub(crate) fn wait_for_broker_host(
+    url: &str,
+    port: u16,
+    repo_root: &std::path::Path,
+    budget: std::time::Duration,
+    mut host_alive: impl FnMut() -> bool,
+) -> Result<(), PawError> {
+    let client = git_paw::broker::client::BrokerClient::new(url);
+    let started = std::time::Instant::now();
+    loop {
+        if client.probe(Some(repo_root)) == git_paw::broker::ProbeResult::LiveBroker {
+            return Ok(());
+        }
+        if !host_alive() {
+            return Err(PawError::SessionError(format!(
+                "the broker host exited before answering on port {port}; check that the port \
+                 is free (`git paw doctor`) and run `git paw start` again"
+            )));
+        }
+        if started.elapsed() >= budget {
+            return Err(PawError::SessionError(format!(
+                "the broker host did not answer on port {port} within {}s; check that the \
+                 port is free (`git paw doctor`) and run `git paw start` again",
+                budget.as_secs()
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Registers every agent of a launch with the broker host through
+/// `POST /watch`, carrying each agent's spec id when it was launched from a
+/// spec — the path `git paw add` uses.
+///
+/// Best-effort per agent, like `add`: a failed registration is reported and
+/// the agent still self-registers through its boot block.
+pub(crate) fn register_agents_with_host(
+    broker_url: &str,
+    worktrees: &[git_paw::session::WorktreeEntry],
+) {
+    let client = git_paw::broker::client::BrokerClient::new(broker_url);
+    for wt in worktrees {
+        let agent_id = git_paw::broker::messages::slugify_branch(&wt.branch);
+        if let Err(e) = client.watch(&agent_id, &wt.worktree_path, &wt.cli, wt.spec_id.as_deref()) {
+            eprintln!(
+                "warning: could not register '{}' with the broker: {e}",
+                wt.branch
+            );
+        }
+    }
+}
+
 /// The exposure warning a launch command must print before it creates the
 /// session, or `None` when the broker is disabled or bound to loopback.
 ///
-/// The broker process prints the same warning, but into the dashboard pane,
-/// which switches to tmux's alternate screen moments later — so that copy is
-/// effectively invisible. Every path that launches a session calls this and
+/// The broker host prints the same warning, but into its detached `broker`
+/// window, where nobody is looking — so that copy is effectively invisible. Every path that launches a session calls this and
 /// prints the result on stderr *before* the session exists, while the
 /// operator is still looking at their own terminal.
 pub(crate) fn broker_exposure_warning(broker: &git_paw::config::BrokerConfig) -> Option<String> {
@@ -198,6 +345,114 @@ pub(crate) fn legacy_tiled_layout_unsupported(session_name: &str, verb: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The host command shell-quotes the binary, the session name and the log
+    /// path, so a space in any of them cannot word-split in the surface's
+    /// shell.
+    #[test]
+    fn broker_host_command_shell_quotes_every_value() {
+        let cmd = broker_host_command_for(
+            std::path::Path::new("/Users/My User/bin/git-paw"),
+            "paw-demo",
+            std::path::Path::new("/state dir/paw-demo.broker.log"),
+        );
+        assert_eq!(
+            cmd,
+            "'/Users/My User/bin/git-paw' __broker --session 'paw-demo' \
+             --log-path '/state dir/paw-demo.broker.log'"
+        );
+    }
+
+    /// A broker that is not answering fails the wait with the port named, and
+    /// a host that exits fails it at once rather than after the budget.
+    #[test]
+    fn a_host_that_exits_fails_the_wait_naming_the_port_without_waiting_out_the_budget() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let started = std::time::Instant::now();
+        let err = wait_for_broker_host(
+            &format!("http://127.0.0.1:{port}"),
+            port,
+            std::path::Path::new("/repo"),
+            std::time::Duration::from_secs(10),
+            || false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(&port.to_string()), "got {err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+
+        let err = wait_for_broker_host(
+            &format!("http://127.0.0.1:{port}"),
+            port,
+            std::path::Path::new("/repo"),
+            std::time::Duration::from_millis(300),
+            || true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(&port.to_string()), "got {err}");
+    }
+
+    /// `broker-runtime` "A fresh launch registers its agents with the host":
+    /// each agent's `POST /watch` carries its spec id when it has one.
+    #[test]
+    fn launch_registrations_carry_each_agents_spec_id() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = vec![0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                bodies.push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let _ = stream.write_all(
+                    b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+            bodies
+        });
+
+        let entry = |branch: &str, spec_id: Option<&str>| git_paw::session::WorktreeEntry {
+            branch: branch.to_string(),
+            worktree_path: std::path::PathBuf::from(format!("/repo/wt/{branch}")),
+            cli: "claude".to_string(),
+            branch_created: false,
+            base_branch: None,
+            pending_boot_prompt: None,
+            pending_entry_point: None,
+            runtime_slot: None,
+            cli_session_id: None,
+            spec_id: spec_id.map(str::to_string),
+        };
+        register_agents_with_host(
+            &format!("http://{addr}"),
+            &[
+                entry("feat/x", Some("003-user-list")),
+                entry("feat/y", None),
+            ],
+        );
+
+        let bodies = server.join().unwrap();
+        assert!(bodies[0].starts_with("POST /watch"), "got {}", bodies[0]);
+        assert!(
+            bodies[0].contains(r#""agent_id":"feat-x""#)
+                && bodies[0].contains(r#""spec_id":"003-user-list""#),
+            "got {}",
+            bodies[0]
+        );
+        assert!(
+            bodies[1].contains(r#""agent_id":"feat-y""#) && !bodies[1].contains("spec_id"),
+            "an agent with no spec registers without one; got {}",
+            bodies[1]
+        );
+    }
 
     // Spec: safe-process-invocation — "Commands sent via send-keys are sent
     // literally or shell-quoted".

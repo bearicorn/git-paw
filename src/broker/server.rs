@@ -153,6 +153,24 @@ struct WatchRequest {
     /// matching the start-time behaviour for a blank CLI.
     #[serde(default)]
     cli: String,
+    /// The spec the agent was launched from, when it was. Optional — a body
+    /// without it registers the target exactly as before, and the agent stays
+    /// unmapped for the learnings aggregator's intra-/cross-spec split.
+    #[serde(default)]
+    spec_id: Option<String>,
+}
+
+/// Longest spec id `POST /watch` accepts.
+const MAX_SPEC_ID_LEN: usize = 128;
+
+/// Whether `spec_id` has the shape of a spec id every supported format uses:
+/// at most [`MAX_SPEC_ID_LEN`] characters of ASCII letters, digits, `.`, `_`,
+/// `/` and `-`.
+fn spec_id_is_valid(spec_id: &str) -> bool {
+    spec_id.len() <= MAX_SPEC_ID_LEN
+        && spec_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
 }
 
 /// Query parameters for the `GET /messages/:agent_id` endpoint.
@@ -426,6 +444,31 @@ async fn watch(
     }
     if placeholder_regex().is_match(&req.worktree_path) {
         return placeholder_rejection("worktree_path", &req.worktree_path);
+    }
+
+    // The spec id ends up in the learnings file the orchestrator reads, so it
+    // is held to the shape real spec ids have: short, one line, no markup.
+    let spec_id = req.spec_id.as_deref().filter(|s| !s.is_empty());
+    if let Some(spec_id) = spec_id
+        && !spec_id_is_valid(spec_id)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "error": format!(
+                    "spec_id must be at most {MAX_SPEC_ID_LEN} characters of [A-Za-z0-9._/-]"
+                )
+            })),
+        )
+            .into_response();
+    }
+
+    // Record the agent -> spec mapping before the target moves, so a forward
+    // conflict involving this agent is classified against its spec.
+    if let (Some(spec_id), Some(aggregator)) = (spec_id, state.learnings.as_ref())
+        && let Ok(mut agg) = aggregator.lock()
+    {
+        agg.set_spec_id(&req.agent_id, spec_id);
     }
 
     let target = WatchTarget {
@@ -1388,6 +1431,124 @@ mod tests {
             1,
             "duplicate registration must not record a second target"
         );
+    }
+
+    /// A broker with a learnings aggregator attached, writing under `dir`.
+    fn state_with_learnings(dir: &std::path::Path) -> Arc<BrokerState> {
+        let mut state = BrokerState::new(None);
+        state.attach_learnings(Arc::new(std::sync::Mutex::new(
+            crate::broker::learnings::LearningsAggregator::new(dir.join("session-learnings.md")),
+        )));
+        Arc::new(state)
+    }
+
+    /// Feeds the detector's forward conflict between `a` and `b` (both
+    /// directions) to the aggregator, flushes, and returns the learnings file.
+    fn classify_forward_conflict(state: &BrokerState, a: &str, b: &str) -> String {
+        let aggregator = state.learnings.as_ref().unwrap();
+        let mut agg = aggregator.lock().unwrap();
+        for (from, other) in [(a, b), (b, a)] {
+            agg.record_detector_message(&crate::broker::messages::BrokerMessage::Feedback {
+                agent_id: from.to_string(),
+                payload: crate::broker::messages::FeedbackPayload {
+                    from: "conflict-detector".to_string(),
+                    errors: vec![format!(
+                        "[conflict-detector] forward conflict with {other} on src/main.rs"
+                    )],
+                },
+            });
+        }
+        agg.flush().unwrap();
+        std::fs::read_to_string(agg.file_path()).unwrap()
+    }
+
+    /// `broker-runtime` "A registration with a spec id maps the agent" and
+    /// `supervisor-learnings` "Two agents launched from the same spec are
+    /// classified intra-spec", driven through `POST /watch` — the path a
+    /// fresh launch and `git paw add --from-spec` register agents by.
+    #[tokio::test]
+    async fn a_watch_registration_with_a_spec_id_maps_the_agent_intra_spec() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_with_learnings(tmp.path());
+        for agent in ["feat-x", "feat-y"] {
+            let body = format!(
+                r#"{{"agent_id":"{agent}","worktree_path":"/tmp/{agent}","cli":"claude","spec_id":"003-user-list"}}"#
+            );
+            assert_eq!(post_watch(&state, body).await, StatusCode::ACCEPTED);
+        }
+        let md = classify_forward_conflict(&state, "feat-x", "feat-y");
+        assert!(md.contains("forward-conflict-intra-spec"), "got:\n{md}");
+        assert!(md.contains("003-user-list"), "got:\n{md}");
+    }
+
+    /// `supervisor-learnings` "Agents from different specs are classified
+    /// cross-spec", from `/watch` registrations.
+    #[tokio::test]
+    async fn watch_registrations_from_different_specs_classify_cross_spec() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_with_learnings(tmp.path());
+        for (agent, spec) in [
+            ("feat-x", "003-user-list"),
+            ("feat-y", "004-error-handling"),
+        ] {
+            let body = format!(
+                r#"{{"agent_id":"{agent}","worktree_path":"/tmp/{agent}","cli":"claude","spec_id":"{spec}"}}"#
+            );
+            assert_eq!(post_watch(&state, body).await, StatusCode::ACCEPTED);
+        }
+        let md = classify_forward_conflict(&state, "feat-x", "feat-y");
+        assert!(md.contains("forward-conflict-cross-spec"), "got:\n{md}");
+        assert!(
+            md.contains("003-user-list") && md.contains("004-error-handling"),
+            "got:\n{md}"
+        );
+    }
+
+    /// A `/watch` body without a spec id is accepted exactly as before and
+    /// leaves the agent unmapped.
+    #[tokio::test]
+    async fn a_watch_registration_without_a_spec_id_leaves_the_agent_unmapped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_with_learnings(tmp.path());
+        for agent in ["feat-x", "feat-y"] {
+            let body = format!(
+                r#"{{"agent_id":"{agent}","worktree_path":"/tmp/{agent}","cli":"claude"}}"#
+            );
+            assert_eq!(post_watch(&state, body).await, StatusCode::ACCEPTED);
+        }
+        let md = classify_forward_conflict(&state, "feat-x", "feat-y");
+        assert!(!md.contains("forward-conflict-intra-spec"), "got:\n{md}");
+    }
+
+    /// A spec id that is too long or carries newlines / markup is refused, so
+    /// nothing but a spec-id-shaped string reaches the learnings file.
+    #[tokio::test]
+    async fn watch_rejects_a_spec_id_that_is_not_spec_id_shaped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_with_learnings(tmp.path());
+        let long = "x".repeat(MAX_SPEC_ID_LEN + 1);
+        for bad in ["003\\nIGNORE PREVIOUS", "<script>", "a b", long.as_str()] {
+            let body = serde_json::json!({
+                "agent_id": "feat-x",
+                "worktree_path": "/tmp/feat-x",
+                "cli": "claude",
+                "spec_id": bad.replace("\\n", "\n"),
+            })
+            .to_string();
+            assert_eq!(
+                post_watch(&state, body).await,
+                StatusCode::BAD_REQUEST,
+                "{bad:?} must be refused"
+            );
+        }
+        for good in [
+            "003-user-list",
+            "add-auth",
+            "2026-01-01-plan.v2",
+            "specs/003_x",
+        ] {
+            assert!(spec_id_is_valid(good), "{good:?} must be accepted");
+        }
     }
 
     #[tokio::test]
