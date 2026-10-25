@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The broker runtime is git-paw's in-process coordination server. This capability defines its configuration and lifecycle (the optional `[broker]` config section, the synchronous `start_broker` entry point that owns a tokio runtime and spawns the axum server plus per-worktree watcher tasks, stale-broker detection, `SO_REUSEADDR` restart, `Arc`-shared `BrokerState`, SIGINT and panic isolation, and the stable `delivery.rs` contract — with tokio confined to `src/broker/` so every other module stays synchronous); its complete HTTP surface (`POST /publish` message validation, `GET /messages/:agent_id` cursor-based inbox polling, `GET /status`, the `GET /log` replay seam, and `POST /watch` live watch-target registration); and its integration into the session lifecycle (the hidden `__dashboard` subcommand, the start/stop/pause/resume/purge flows, `GIT_PAW_BROKER_URL` injection into the tmux session, and how `git paw status` surfaces broker and paused-session state).
+The broker runtime is git-paw's in-process coordination server. This capability defines its configuration and lifecycle (the optional `[broker]` config section, the synchronous `start_broker` entry point that owns a tokio runtime and spawns the axum server plus per-worktree watcher tasks, stale-broker detection, `SO_REUSEADDR` restart, `Arc`-shared `BrokerState`, SIGINT and panic isolation, and the stable `delivery.rs` contract — with tokio confined to `src/broker/` so every other module stays synchronous); its complete HTTP surface (`POST /publish` message validation, `GET /messages/:agent_id` cursor-based inbox polling, `GET /status`, the `GET /log` replay seam, and `POST /watch` live watch-target registration); and its integration into the session lifecycle (the hidden `__broker` host subcommand that runs the broker in the session's detached `broker` service surface, the hidden `__dashboard` subcommand that renders it as a thin HTTP client, the start/stop/pause/resume/purge flows that launch, stop and recreate the host, `GIT_PAW_BROKER_URL` injection into the tmux session, and how `git paw status` surfaces broker and paused-session state).
 ## Requirements
 ### Requirement: Broker configuration schema
 
@@ -96,11 +96,12 @@ The function MUST be callable from synchronous Rust code without any surrounding
 Before binding, the system SHALL probe `GET <config.url()>/status` with a timeout of at most 500 milliseconds and SHALL act on the result as follows:
 
 - **No connection / connection refused** → bind and start a new broker
+- **Connection reset, broken pipe, or EOF before any response byte** → the listener is going away, not answering slowly: re-probe once after a brief pause; if the re-probe is refused or resets again, treat the port as having no live broker and bind and start a new broker. A re-probe that receives a response is classified by that response
 - **HTTP 200 with a response body containing the marker field `"git_paw": true` AND a `repo_root` equal to the caller's repository** → return a `BrokerHandle` that reattaches to the existing broker without binding
 - **HTTP 200 with the marker field but a different `repo_root`** → return an error stating that the port is held by another repository's git-paw broker, naming that repository and the port, and telling the user to set a distinct `[broker] port` for one of them. The system SHALL NOT reattach, because reattaching would route this repository's agents into the other repository's broker while this repository's dashboard renders an empty, unwatched state
 - **HTTP 200 with the marker field and no `repo_root`** (a broker from a git-paw version that does not report it) → treat the owner as unknown and return the same error, naming the port; the system SHALL NOT assume the broker belongs to the caller
 - **HTTP response without the marker field** → return `Err(BrokerError::PortInUse { .. })` indicating the port is occupied by a foreign process
-- **Timeout** → return `Err(BrokerError::ProbeTimeout { .. })` so the user can investigate
+- **Timeout** (the listener accepted but sent nothing within the read timeout) → return `Err(BrokerError::ProbeTimeout { .. })` so the user can investigate. A reset or EOF SHALL NOT be classified as a timeout
 
 Any local process can bind the port and answer the probe, so a reported `repo_root` is untrusted input. Before it is reproduced in an error message the system SHALL strip control characters from it and SHALL cap its length, and the probe SHALL bound how much of the response it reads.
 
@@ -146,6 +147,20 @@ Any local process can bind the port and answer the probe, so a reported `repo_ro
 - **THEN** the rendered message SHALL contain no control characters
 - **AND** an over-long reported repository SHALL be truncated rather than printed in full
 
+#### Scenario: A listener that resets mid-handshake is not a live broker
+
+- **GIVEN** a listener on the broker port that accepts each connection and closes it before sending any response byte
+- **WHEN** the stale-broker probe runs against the port
+- **THEN** it SHALL re-probe once
+- **AND** when the re-probe also resets or is refused, it SHALL report no live broker rather than a probe timeout
+
+#### Scenario: A silent listener is a probe timeout
+
+- **GIVEN** a listener on the broker port that accepts a connection and never answers
+- **WHEN** the stale-broker probe runs against the port
+- **THEN** it SHALL report a probe timeout
+- **AND** `start_broker` SHALL return `Err(BrokerError::ProbeTimeout { .. })`
+
 ### Requirement: Port reuse on restart
 
 The broker SHALL bind its TCP listener with `SO_REUSEADDR` enabled so that a restart immediately following a crash succeeds even when the previous socket is held in `TIME_WAIT`.
@@ -179,16 +194,16 @@ The system SHALL define `BrokerState` as a value type whose lifetime is managed 
 
 ### Requirement: Signal handling
 
-The broker process SHALL install a `SIGINT` handler that prevents accidental Ctrl+C in pane 0 from terminating the broker or the dashboard process. The handler SHALL NOT call `std::process::exit` and SHALL NOT trigger broker shutdown. Clean shutdown of the broker SHALL only occur via:
+The broker host process SHALL install a `SIGINT` handler that prevents an accidental Ctrl+C from terminating the broker. The handler SHALL NOT call `std::process::exit` and SHALL NOT trigger broker shutdown. Clean shutdown of the broker SHALL only occur via:
 
 - The `BrokerHandle` being dropped
-- An explicit dashboard quit keybind
+- `SIGHUP` delivered to the host (its service surface closed)
 - `SIGTERM` or `SIGKILL` from outside the process (e.g. `git paw stop` killing tmux)
 
 #### Scenario: SIGINT does not terminate the broker
 
-- **GIVEN** a running broker
-- **WHEN** `SIGINT` is delivered to the broker process
+- **GIVEN** a running broker host
+- **WHEN** `SIGINT` is delivered to it
 - **THEN** the broker continues to respond to HTTP requests
 - **AND** the process does not exit
 
@@ -200,7 +215,7 @@ The broker process SHALL install a `SIGINT` handler that prevents accidental Ctr
 
 ### Requirement: Panic isolation
 
-A panic in any single HTTP request handler or background tokio task MUST NOT terminate the broker runtime or the dashboard process. The system SHALL rely on axum's default panic-catching for handlers and SHALL spawn any background broker tasks via `tokio::spawn` so panics remain isolated to a single task.
+A panic in any single HTTP request handler or background tokio task MUST NOT terminate the broker runtime or the broker host process. The system SHALL rely on axum's default panic-catching for handlers and SHALL spawn any background broker tasks via `tokio::spawn` so panics remain isolated to a single task.
 
 #### Scenario: Panic in a request handler returns 500 and broker keeps serving
 
@@ -508,85 +523,33 @@ The listener guard runs before routing, so a request it refuses receives `403` r
 
 ### Requirement: Live watch-target registration endpoint
 
-The broker SHALL expose `POST /watch` accepting a JSON body with an
-agent id, worktree path, and cli label, and SHALL add that path to its
-live filesystem-watch-target set so the watcher begins surfacing the
-worktree's activity without a broker restart. The endpoint SHALL be
-idempotent: registering an already-watched path SHALL NOT create a
-duplicate target. It SHALL bind to loopback only, consistent with the
-other broker endpoints.
+The broker SHALL expose `POST /watch` accepting a JSON body with an agent id, worktree path, cli label, and an optional spec id, and SHALL add that path to its live filesystem-watch-target set so the watcher begins surfacing the worktree's activity without a broker restart. When a spec id is present and the learnings aggregator is attached, the broker SHALL record the agent → spec mapping for conflict classification. A spec id longer than 128 characters or containing anything but ASCII letters, digits, `.`, `_`, `/` and `-` SHALL be rejected with 400, since it is written into the learnings file the orchestrator reads. The endpoint SHALL be idempotent: registering an already-watched path SHALL NOT create a duplicate target. It SHALL bind to loopback only, consistent with the other broker endpoints. A body without a spec id SHALL be accepted exactly as before.
 
-A hot-added agent (via `git paw add`) registered through `POST /watch`
-SHALL appear in `/status` from worktree activity on the same terms as
-an agent seeded at `git paw start`, independent of whether its CLI has
-self-published a status.
+A coding agent registered through `POST /watch` — hot-added via `git paw add`, or registered by the launcher of a fresh `git paw start` once its pane exists — SHALL appear in `/status` from worktree activity on the same terms as an agent seeded from the saved session, independent of whether its CLI has self-published a status.
 
 #### Scenario: Registering a target surfaces the worktree via the watcher
 
-- **GIVEN** a running broker and a worktree not among its start-time
-  watch targets
-- **WHEN** a client `POST`s the worktree (agent id + path + cli) to
-  `/watch`
+- **GIVEN** a running broker and a worktree not among its start-time watch targets
+- **WHEN** a client `POST`s the worktree (agent id + path + cli) to `/watch`
 - **AND** that worktree subsequently has uncommitted changes
-- **THEN** the watcher SHALL surface the agent in `/status` without a
-  broker restart and without requiring the agent's CLI to have
-  self-published
+- **THEN** the watcher SHALL surface the agent in `/status` without a broker restart and without requiring the agent's CLI to have self-published
 
 #### Scenario: Registration is idempotent
 
 - **GIVEN** a worktree already registered as a watch target
 - **WHEN** the same path is `POST`ed to `/watch` again
-- **THEN** the broker SHALL NOT create a duplicate target and SHALL
-  return success
+- **THEN** the broker SHALL NOT create a duplicate target and SHALL return success
 
 #### Scenario: Endpoint binds to loopback only
 
 - **WHEN** the broker starts with `/watch` enabled
-- **THEN** the endpoint SHALL be reachable only on the loopback
-  interface, consistent with `/publish`, `/status`, and `/messages`
+- **THEN** the endpoint SHALL be reachable only on the loopback interface, consistent with `/publish`, `/status`, and `/messages`
 
-### Requirement: Dashboard subcommand starts broker and dashboard
+#### Scenario: A registration with a spec id maps the agent
 
-The system SHALL handle the hidden `__dashboard` subcommand by:
-
-1. Loading `BrokerConfig` from `.git-paw/config.toml`
-2. Constructing a `BrokerState` with `log_path` resolved as follows — one log per session, so two repositories never write to the same file:
-   - when the saved session records a `broker_log_path`, that path, because it is the exact path `purge` deletes and writing anywhere else would orphan a log (this is what keeps a session saved by a git-paw that used a single shared `broker.log` consistent);
-   - otherwise `<session_state_dir>/<session_name>.broker.log`;
-   - when no saved session is found at all, `<session_state_dir>/git-paw.broker.log`, which keeps the dashboard clear of any real session's log.
-
-   The `BrokerState` SHALL also carry the canonical root of the repository the broker serves, plumbed from the launch path rather than re-derived inside the broker.
-3. Calling `start_broker(config, state.clone())` to obtain a `BrokerHandle`
-4. Calling `run_dashboard(state, handle)` which blocks until the user presses `q`
-5. Returning `Ok(())` on clean exit
-
-The subcommand SHALL refuse to run if the `$TMUX` environment variable is not set, returning an error indicating it is an internal command intended to run inside tmux.
-
-#### Scenario: Dashboard subcommand starts broker and blocks
-
-- **GIVEN** `$TMUX` is set and `[broker]` config is valid
-- **WHEN** `git paw __dashboard` is executed
-- **THEN** a broker starts listening on the configured port
-- **AND** the dashboard renders in the terminal
-
-#### Scenario: Dashboard subcommand refuses outside tmux
-
-- **GIVEN** `$TMUX` is not set
-- **WHEN** `git paw __dashboard` is executed
-- **THEN** it returns an error mentioning "internal command" and "tmux"
-
-#### Scenario: Two repositories keep separate broker logs
-
-- **GIVEN** broker-enabled sessions for two repositories, each on its own port
-- **WHEN** both brokers record messages
-- **THEN** each SHALL write to its own `<session_name>.broker.log`
-
-#### Scenario: A session saved under the old shared log name keeps it
-
-- **GIVEN** a saved session whose `broker_log_path` is the shared `<session_state_dir>/broker.log` written by an earlier git-paw
-- **WHEN** `git paw __dashboard` starts its broker for that session
-- **THEN** the broker SHALL write to the recorded path, not to a newly-derived `<session_name>.broker.log`
-- **AND** the path the broker writes SHALL be the path `purge` deletes, so no log is orphaned
+- **GIVEN** a running broker with the learnings aggregator attached
+- **WHEN** a client `POST`s `/watch` for agent `feat-x` with spec id `003-user-list`
+- **THEN** a later forward conflict between `feat-x` and another agent mapped to `003-user-list` SHALL be classified `forward-conflict-intra-spec`
 
 ### Requirement: Start flow conditionally creates dashboard pane
 
@@ -650,7 +613,7 @@ All panes in the session SHALL inherit this environment variable automatically v
 
 ### Requirement: Stop flow shuts down broker via pane 0 exit
 
-The `stop` flow SHALL kill the tmux session via `tmux::kill_session`. Killing the session kills every pane including the dashboard pane, which causes `run_dashboard` to exit, which drops `BrokerHandle`, which triggers graceful broker shutdown including the final log flush.
+The `stop` flow SHALL kill the tmux session via `tmux::kill_session`. Killing the session terminates the broker host's service surface (the `broker` window), which delivers `SIGHUP` to `git paw __broker`, which drops `BrokerHandle`, which triggers graceful broker shutdown including the final log flush. For a session started before the host split, killing the session kills the dashboard pane that hosts the broker, with the same effect.
 
 The stop flow SHALL NOT render a confirmation prompt, in any context. Stopping is recoverable: worktrees and session state survive, and `git paw start` recovers the session. When the session's recorded status is `Paused`, stopping SHALL kill the still-running CLI processes as for any other session.
 
@@ -714,12 +677,13 @@ Because the log is named per session, purging one repository's session SHALL NOT
 
 When a session is active and has broker fields in its state, `git paw status` SHALL display broker information including the configured URL. The system SHALL probe `GET /status` against the broker URL **with the session's repository**, so a broker on the port that serves a different repository is never reported as this session's broker, and SHALL act on the result as follows:
 
-- If the probe finds a git-paw broker for this session's repository: display the broker URL, agent count, and uptime from the response.
+- If the probe finds a git-paw broker for this session's repository AND the session's broker host is alive — its `broker` service surface exists, as the terminal backend reports; for a session with no such surface (one started before the host split; a host that died while its terminal session lives is indistinguishable and is judged the same way, the probe still deciding whether anything answers), its terminal session is alive: display the broker URL, agent count, and uptime from the response.
+- If the probe finds a git-paw broker for this session's repository but the session's broker host is not alive (for example after `git paw stop`, while a process that outlived the session still answers on the port): display the broker URL noting that a leftover broker answers with no live session host. The system SHALL NOT display it as running.
 - If the probe finds a git-paw broker for a different — or unreported — repository: display the broker URL noting it is held by another repository's git-paw broker. The system SHALL NOT display it as running.
 - If the probe fails AND the session's effective status is `Paused`: display the broker URL with `(paused — run 'git paw start' to resume)`.
 - If the probe fails AND the session's effective status is `Active` or `Stopped`: display the broker URL with `(not responding)`.
 
-`git paw status` SHALL render the three session statuses with distinguishable visual treatment (e.g. different emoji / labels for `active`, `paused`, `stopped`). The paused row SHALL include a one-line restart hint pointing at `git paw start`.
+The broker's state SHALL be taken from the probe and the host's liveness, never from the session receipt alone. `git paw status` SHALL render the three session statuses with distinguishable visual treatment (e.g. different emoji / labels for `active`, `paused`, `stopped`). The paused row SHALL include a one-line restart hint pointing at `git paw start`.
 
 #### Scenario: Status shows running broker with agents
 
@@ -737,9 +701,15 @@ When a session is active and has broker fields in its state, `git paw status` SH
 
 #### Scenario: Status shows broker not responding for crashed active session
 
-- **GIVEN** a session state with `status == Active` and broker fields but the dashboard pane has crashed
+- **GIVEN** a session state with `status == Active` and broker fields but the broker host has crashed
 - **WHEN** `git paw status` is executed
 - **THEN** the output SHALL contain the broker URL and `not responding`
+
+#### Scenario: Status after stop does not report the broker running
+
+- **GIVEN** a session stopped with `git paw stop`
+- **WHEN** `git paw status` is executed right afterwards, whether or not a leftover process still answers on the broker port
+- **THEN** the broker line SHALL NOT report the broker as running
 
 #### Scenario: Status shows no broker info when disabled
 
@@ -759,12 +729,10 @@ When a session is active and has broker fields in its state, `git paw status` SH
 `git paw pause` SHALL perform a soft-stop that:
 
 1. Detaches every client currently attached to the session by running `tmux detach-client -s <session-name>`. With no clients attached, the command SHALL be a no-op and SHALL NOT error.
-2. Stops the broker by killing the dashboard pane only (`tmux kill-pane -t <session-name>:0.<dashboard-pane-index>`). The dashboard subprocess receives SIGHUP, the `BrokerHandle` drop runs, the broker shuts down gracefully, and the session's broker log flushes.
-3. Updates the on-disk session state's `status` field from `Active` to `Paused` (see the session-state delta in this change).
-4. Leaves the tmux session and every coding-agent CLI pane running.
+2. Stops the broker by closing the broker host's service surface (the `broker` window). The host receives `SIGHUP`, the `BrokerHandle` drop runs, the broker shuts down gracefully, and the session's broker log flushes. When the session has no `broker` surface (started before the host split), pause SHALL instead kill the dashboard pane at the recorded `dashboard_pane` (default `0`).
+3. Updates the on-disk session state's `status` field from `Active` to `Paused`.
+4. Leaves the tmux session, the dashboard pane, and every coding-agent CLI pane running.
 5. Prints a one-line confirmation: `"Session '<name>' paused. <N> CLI pane(s) still running. Run 'git paw start' to resume."`
-
-The dashboard pane index SHALL be read from the saved session's `dashboard_pane` field (see the session-state delta). For sessions saved by v0.4.0 (where the field is absent and defaults to `None`), the index SHALL default to `0` (the bare-start dashboard location).
 
 The pause flow SHALL NOT call `tmux::kill_session` at any point.
 
@@ -773,21 +741,22 @@ The pause flow SHALL NOT call `tmux::kill_session` at any point.
 - **GIVEN** an active session with a tmux client attached
 - **WHEN** `git paw pause` is executed
 - **THEN** `tmux list-clients -t <session>` SHALL return no clients
-- **AND** the tmux session SHALL still be alive (`tmux has-session -t <session>` exits 0)
+- **AND** the tmux session SHALL still be alive
 
 #### Scenario: Pause stops the broker
 
 - **GIVEN** an active session with broker enabled and listening on port P
 - **WHEN** `git paw pause` is executed
-- **THEN** within 5 seconds, port P SHALL be free (no listener)
+- **THEN** within 5 seconds, port P SHALL be free
 - **AND** the session's broker log SHALL contain a final flush of all messages
 
-#### Scenario: Pause leaves coding-agent panes alive
+#### Scenario: Pause leaves coding-agent panes and the dashboard alive
 
-- **GIVEN** an active session with 3 coding-agent panes
+- **GIVEN** an active session with 3 coding-agent panes and a dashboard
 - **WHEN** `git paw pause` is executed
-- **THEN** the tmux session SHALL still report 3 panes (dashboard pane removed)
-- **AND** each coding-agent CLI process SHALL still be running (PID alive)
+- **THEN** window 0 SHALL still report 4 panes (dashboard + 3 agents)
+- **AND** each coding-agent CLI process SHALL still be running
+- **AND** the dashboard SHALL render its broker-unreachable state
 
 #### Scenario: Pause updates session state to paused
 
@@ -832,34 +801,41 @@ Running `git paw pause` against a session that is already in `Paused` state (no 
 
 When `git paw start` is invoked against a session whose effective status is `Paused` (recorded `Paused` AND tmux alive), the start flow SHALL:
 
-1. Recreate the dashboard pane at the saved `dashboard_pane` index (or `0` if absent — v0.4 fallback) by running `tmux split-window` / `tmux new-window` / equivalent layout-restore tmux invocation appropriate to the original pane arrangement.
-2. Send the `git paw __dashboard` command into the new dashboard pane via `tmux send-keys`.
+1. Recreate the broker host in its detached service surface (`broker` window), handing it the session name and the re-stamped log path, and wait, bounded by 10 seconds, for `GET /status` to answer.
+2. Recreate the dashboard pane at the saved `dashboard_pane` index (or `0` if absent) ONLY when no pane is currently running `git paw __dashboard`; an existing dashboard pane SHALL be left alone and SHALL reconnect on its own.
 3. Update the session state's `status` field from `Paused` to `Active`.
 4. Attach to the tmux session via `tmux attach -t <session-name>`.
 
-The restart-from-pause flow SHALL NOT create worktrees, SHALL NOT spawn coding-agent CLI processes, and SHALL NOT inject boot prompts. Coding-agent panes are already running and retain their in-memory conversation state.
+The restart-from-pause flow SHALL NOT create worktrees, SHALL NOT spawn coding-agent CLI processes, and SHALL NOT inject boot prompts other than prompts held for agents added while paused.
 
 #### Scenario: Start against paused session reattaches and restarts broker
 
 - **GIVEN** a session with `status == Paused` and tmux alive
 - **WHEN** `git paw start` is executed
-- **THEN** the broker SHALL be listening on its configured port within 5 seconds
+- **THEN** the broker SHALL be listening on its configured port within 10 seconds
 - **AND** the user's tmux client SHALL be attached to the session
 - **AND** the session state SHALL be `status == Active`
+
+#### Scenario: Existing dashboard pane is reused
+
+- **GIVEN** a paused session whose dashboard pane is still running
+- **WHEN** `git paw start` is executed
+- **THEN** no second dashboard pane SHALL be created
+- **AND** the existing dashboard SHALL render live data within 5 seconds of the broker answering
 
 #### Scenario: Start against paused session does not respawn CLIs
 
 - **GIVEN** a paused session whose coding-agent CLI processes have PIDs P1..Pn
 - **WHEN** `git paw start` is executed
 - **THEN** the coding-agent panes SHALL still hold processes with PIDs P1..Pn
-- **AND** no `tmux send-keys` SHALL be issued to the coding-agent panes during the restart
+- **AND** no keystrokes SHALL be sent to the coding-agent panes during the restart other than a held boot prompt
 
 #### Scenario: Start against paused-but-tmux-dead falls through to recover
 
 - **GIVEN** a session with recorded `status == Paused` but `tmux has-session` exits non-zero
 - **WHEN** `git paw start` is executed
 - **THEN** `effective_status` SHALL evaluate to `Stopped`
-- **AND** the start flow SHALL run the existing cold-recovery path (fresh CLI spawn), NOT the restart-from-pause path
+- **AND** the start flow SHALL run the existing cold-recovery path
 
 ### Requirement: Launch refuses a port held by another repository before creating anything
 
@@ -1229,4 +1205,142 @@ When the session's broker reports `stalled = true`, `git paw status` SHALL print
 - **GIVEN** an active session whose broker reports `stalled = false`
 - **WHEN** `git paw status` is executed
 - **THEN** the output SHALL NOT contain a stalled-wave line
+
+### Requirement: Broker host subcommand
+
+The system SHALL provide a hidden `git paw __broker` subcommand that hosts the broker for the current repository's session. The launcher SHALL hand it the session name and the per-session broker log path (`<session_state_dir>/<session_name>.broker.log`) as command-line arguments — neither is secret — because on a fresh launch the session receipt is saved only after the panes exist. It SHALL load `BrokerConfig` — falling back to the defaults with a warning when the repository config cannot be loaded, as a resume does, so a config broken since launch cannot keep a resumed session's broker down — taking the port and bind address from the saved session of that name when one records them (its agents were handed that URL, which can differ from the current config); construct the `BrokerState` with that log path (one log per session), the verify-on-commit nudge setting, the seeded orchestrator CLI, the opsx role-gating context, and the learnings aggregator when enabled; when a saved `Session` with that name exists for this repository (recovery, restart from pause; a same-named receipt of another repository SHALL be ignored), seed the watch targets and the agent → spec mapping from it, while on a fresh launch the agents arrive through `POST /watch`; start the broker — with the stale-broker probe that reattaches only to this repository's own broker — using those watch targets and the conflict-detector configuration; and block until shutdown. It SHALL exit — dropping `BrokerHandle` so the final broker-log flush and the learnings flush run — on `SIGHUP`, when reparented to init, or when a controlling terminal it was given hangs up. It SHALL ignore `SIGINT`. It SHALL NOT render a TUI, SHALL NOT enter the alternate screen, and SHALL NOT require `$TMUX`. A bind or probe failure SHALL exit non-zero with a diagnostic rather than retry, and so SHALL finding this repository's broker already served by another process: the host SHALL NOT idle beside a broker it cannot flush or stop. It SHALL be hidden from `git paw --help`.
+
+#### Scenario: Host serves the broker
+
+- **GIVEN** a saved session with the broker enabled on a free port
+- **WHEN** `git paw __broker` is started in the repository with that session's name and log path
+- **THEN** `GET <url>/status` SHALL answer with the `git_paw` marker and this repository's `repo_root` within 5 seconds
+- **AND** the process SHALL still be running
+
+#### Scenario: Host of a fresh launch writes the per-session log
+
+- **GIVEN** a fresh launch whose session receipt has not been saved yet
+- **WHEN** the host, handed session name `paw-demo` and its log path, accepts a published message
+- **THEN** the message SHALL be flushed to `<session_state_dir>/paw-demo.broker.log`
+- **AND** nothing SHALL be written to the `git-paw.broker.log` fallback
+
+#### Scenario: SIGHUP shuts the host down with a final flush
+
+- **GIVEN** a running `__broker` that has accepted at least one message
+- **WHEN** `SIGHUP` is delivered to it
+- **THEN** the port SHALL be free within 5 seconds
+- **AND** the session's broker log SHALL contain every accepted message
+
+#### Scenario: Host renders nothing
+
+- **WHEN** `git paw __broker` runs for 2 seconds attached to a pseudo-terminal
+- **THEN** it SHALL write no alternate-screen or cursor-addressing escape sequences to that terminal
+
+#### Scenario: Bind failure exits instead of looping
+
+- **GIVEN** a foreign HTTP server bound to the configured port
+- **WHEN** `git paw __broker` starts
+- **THEN** it SHALL exit non-zero with a diagnostic naming the port
+- **AND** SHALL NOT remain running
+
+#### Scenario: Host runs outside tmux
+
+- **GIVEN** a shell with `$TMUX` unset
+- **WHEN** `git paw __broker` is started for a session
+- **THEN** it SHALL start and serve `/status`
+
+### Requirement: Dashboard subcommand runs a thin broker client
+
+The hidden `git paw __dashboard` subcommand SHALL hold no `BrokerState`, SHALL start no broker, watcher, conflict detector or learnings aggregator, and SHALL NOT require `$TMUX`. It SHALL resolve the broker URL from the saved session's `broker_port` and `broker_bind` whatever the session's recorded status — unlike the MCP server, which resolves a URL only for an `Active` session, because restart from pause recreates the dashboard while the session is still recorded `Paused` — and, while no session is saved yet (a fresh launch saves its receipt after the panes exist), SHALL retry the resolution on its poll cadence in the degraded state. A saved session that records no broker (a supervised launch with the broker disabled) SHALL render a "broker disabled" state rather than the unreachable indicator. It SHALL render from `GET /status` and `GET /log?since=<seq>`, and continue running in a degraded state when the broker is unreachable. Killing the dashboard SHALL NOT affect the broker.
+
+#### Scenario: Dashboard holds no broker
+
+- **GIVEN** a running session
+- **WHEN** the dashboard pane is killed
+- **THEN** `GET /status` SHALL continue to answer
+- **AND** watcher, conflict-detector and learnings behavior SHALL be unchanged
+
+#### Scenario: Dashboard runs outside tmux
+
+- **GIVEN** a shell with `$TMUX` unset and a saved session with a live broker
+- **WHEN** `git paw __dashboard` is started
+- **THEN** it SHALL render the agent table from `/status`
+
+#### Scenario: Dashboard with no live broker renders degraded
+
+- **GIVEN** a saved session whose broker is not running
+- **WHEN** `git paw __dashboard` is started
+- **THEN** it SHALL render with a "broker unreachable" indicator rather than exiting or busy-looping
+- **AND** pressing `q` SHALL exit with status 0
+
+#### Scenario: Dashboard of a session still recorded paused connects
+
+- **GIVEN** a session recorded `Paused` whose broker host is answering
+- **WHEN** `git paw __dashboard` is started before the session is recorded `Active`
+- **THEN** it SHALL render the agent table from `/status` without being restarted
+
+#### Scenario: Dashboard started before the receipt connects once it is saved
+
+- **GIVEN** a fresh launch whose dashboard pane starts before the session receipt is saved
+- **WHEN** the launcher saves the receipt
+- **THEN** the dashboard SHALL resolve the broker URL on a later poll and render live data
+
+### Requirement: Broker host lifecycle across start, recovery, pause, stop
+
+When the broker is enabled, the `start` flow (bare, spec-driven and supervised) SHALL launch the broker host in a detached service surface of the session provided by the terminal backend — on tmux, a window named `broker` that is not part of window 0's pane grid — as soon as the session exists: the backend opens the session with `GIT_PAW_BROKER_URL` in its environment and the dashboard pane at pane 0 and the coding-agent panes in one step, and a service surface can only be added to a session that exists. The launcher SHALL hand the host the session name and the per-session log path, and SHALL wait, bounded by 10 seconds, for `GET /status` to answer with the `git_paw` marker and this repository's `repo_root` before it registers any agent, saves the receipt, or injects any boot prompt. The dashboard pane resolves the broker URL on its own poll cadence and renders degraded until the host answers. Once the host answers, and before any boot prompt is injected, the launcher SHALL register every coding agent with the host through `POST /watch`, carrying the agent's spec id when it was launched from a spec — the path `git paw add` uses. The launcher SHALL save the session receipt only after the panes exist and the host has answered, so a launch that fails — including a host that never answers — leaves the persisted session state unchanged (*A failed start preserves persisted session state*); a fresh launch whose host fails SHALL close the session it opened, since no receipt names it, and a recovery whose host fails SHALL close the rebuilt session and restore the receipt it had saved, so the next `git paw start` recovers again. Before starting a host the launcher SHALL wait, bounded, for a broker of this repository that still answers (a host stopped a moment ago) to release the port, and SHALL fail naming the port if it does not. Recovery of a stopped session SHALL recreate the broker host the same way; the host seeds its agents from the saved receipt. `stop` SHALL kill the session, which terminates the host's surface and triggers the graceful flush. `pause` SHALL stop the host by closing its service surface and SHALL leave the dashboard pane running. When a session started before this change (no `broker` surface) is paused, `pause` SHALL fall back to killing the dashboard pane at the recorded `dashboard_pane`. Window 0's pane indices SHALL be unaffected by the host in every flow.
+
+#### Scenario: Start launches the host before the first boot prompt
+
+- **GIVEN** `[broker] enabled = true`
+- **WHEN** `git paw start` launches a session
+- **THEN** a tmux window named `broker` SHALL exist in the session running `git paw __broker`
+- **AND** `GET /status` SHALL have answered with the `git_paw` marker before the first injection into a coding-agent pane
+
+#### Scenario: A fresh launch registers its agents with the host
+
+- **GIVEN** `[broker] enabled = true`, learnings enabled, and a spec-driven launch of agent `feat-x` from spec `003-user-list`
+- **WHEN** `git paw start --from-specs` launches the session
+- **THEN** the host SHALL have accepted a `POST /watch` for `feat-x` carrying spec id `003-user-list` before `feat-x`'s boot prompt was injected
+- **AND** `/status` SHALL list `feat-x` once its worktree shows activity, on the same terms as an agent seeded from a saved session
+
+#### Scenario: A launch that fails after the host starts saves no receipt
+
+- **GIVEN** a repository with no saved session
+- **WHEN** a fresh `git paw start` starts its broker host and the host never answers `/status`
+- **THEN** no session receipt SHALL have been saved for the repository
+- **AND** the terminal session the launch opened SHALL be closed
+
+#### Scenario: Pane indices are unaffected by the host
+
+- **GIVEN** a supervised launch with 3 agents
+- **WHEN** the session is built
+- **THEN** window 0 SHALL contain exactly 4 panes (dashboard + 3 agents) with the dashboard at index 0
+
+#### Scenario: Host that never answers fails the launch clearly
+
+- **GIVEN** a broker host that cannot start (port held by a foreign process)
+- **WHEN** `git paw start` waits for `/status`
+- **THEN** the launch SHALL fail within the bound with an error naming the broker port
+- **AND** the persisted session state SHALL be preserved for recovery
+
+#### Scenario: Recovery recreates the host
+
+- **GIVEN** a stopped session with `broker_port = Some(P)`
+- **WHEN** `git paw start` recovers it
+- **THEN** a `broker` window running `git paw __broker` SHALL exist
+- **AND** `GET http://127.0.0.1:P/status` SHALL answer
+- **AND** the host SHALL watch every agent's worktree of the saved session, so each appears in `/status` once its worktree shows activity
+
+#### Scenario: Pause stops the host and keeps the dashboard
+
+- **GIVEN** an active session with a `broker` window and a dashboard at pane 0
+- **WHEN** `git paw pause` runs
+- **THEN** the `broker` window SHALL be gone and the broker port free within 5 seconds
+- **AND** pane 0 SHALL still be running `git paw __dashboard`
+
+#### Scenario: Pause of a session started before the split falls back
+
+- **GIVEN** an active session with no `broker` window whose dashboard pane hosts the broker
+- **WHEN** `git paw pause` runs
+- **THEN** it SHALL kill the dashboard pane at the recorded `dashboard_pane` so the broker stops as before
 

@@ -428,3 +428,100 @@ fn a_screen_that_is_not_valid_utf8_is_a_failed_read() {
     let b = TmuxBackend::with_runner(InvalidUtf8);
     assert_eq!(b.capture_tail(&b.surface_at(SESSION, 1)), None);
 }
+
+/// The service operations are new with `broker-host-separation`, so their
+/// fixtures pin the argv they were introduced with: a detached window named
+/// after the service at the session's next free index (window 0 untouched),
+/// killed and listed by that name.
+#[test]
+fn service_spawn_argv_is_a_detached_named_window() {
+    assert_matches_fixture("service_spawn", |b| {
+        let handle = b
+            .spawn_service(
+                SESSION,
+                "broker",
+                "'/opt/bin/git-paw' __broker --session paw-proj",
+                Path::new("/repo"),
+            )
+            .unwrap();
+        assert_eq!(handle, b.service(SESSION, "broker"));
+    });
+}
+
+#[test]
+fn service_stop_argv_kills_the_named_window() {
+    assert_matches_fixture("service_stop", |b| {
+        b.stop_service(&b.service(SESSION, "broker")).unwrap();
+    });
+}
+
+#[test]
+fn service_alive_argv_lists_window_names() {
+    assert_matches_fixture("service_alive", |b| {
+        assert!(!b.service_alive(&b.service(SESSION, "broker")).unwrap());
+    });
+}
+
+/// A runner whose `kill-window` fails and whose `list-windows` answers
+/// `windows` (or fails, for a dead session, when `None`).
+struct ServiceRunner {
+    windows: Option<&'static str>,
+}
+
+impl CommandRunner for ServiceRunner {
+    fn run(&self, _: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
+        let listing = args.first() == Some(&"list-windows");
+        let (success, stdout) = match (listing, self.windows) {
+            (true, Some(w)) => (true, w.as_bytes().to_vec()),
+            _ => (false, Vec::new()),
+        };
+        Ok(CommandOutput {
+            success,
+            code: Some(i32::from(!success)),
+            stdout,
+            stderr: Vec::new(),
+        })
+    }
+    fn run_inheriting_stdio(&self, _: &str, _: &[&str]) -> std::io::Result<CommandStatus> {
+        Ok(CommandStatus {
+            success: true,
+            code: Some(0),
+        })
+    }
+}
+
+#[test]
+fn service_alive_matches_the_window_name_exactly() {
+    let b = TmuxBackend::with_runner(ServiceRunner {
+        windows: Some("paw\nbroker-old\nbroker\n"),
+    });
+    assert!(b.service_alive(&b.service(SESSION, "broker")).unwrap());
+    let b = TmuxBackend::with_runner(ServiceRunner {
+        windows: Some("paw\nbroker-old\n"),
+    });
+    assert!(!b.service_alive(&b.service(SESSION, "broker")).unwrap());
+}
+
+#[test]
+fn a_dead_session_has_no_running_service() {
+    let b = TmuxBackend::with_runner(ServiceRunner { windows: None });
+    assert!(!b.service_alive(&b.service(SESSION, "broker")).unwrap());
+}
+
+#[test]
+fn stopping_a_service_that_is_already_gone_is_not_an_error() {
+    let b = TmuxBackend::with_runner(ServiceRunner {
+        windows: Some("paw\n"),
+    });
+    assert!(b.stop_service(&b.service(SESSION, "broker")).is_ok());
+    let b = TmuxBackend::with_runner(ServiceRunner { windows: None });
+    assert!(b.stop_service(&b.service(SESSION, "broker")).is_ok());
+}
+
+#[test]
+fn a_service_that_survives_its_kill_is_an_error() {
+    let b = TmuxBackend::with_runner(ServiceRunner {
+        windows: Some("broker\n"),
+    });
+    assert!(b.stop_service(&b.service(SESSION, "broker")).is_err());
+}

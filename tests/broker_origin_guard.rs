@@ -390,6 +390,13 @@ fn loopback_bind_does_not_warn() {
 /// and must carry the warning — is now `recover_session_detached` /
 /// `restart_from_pause_detached`, which the attaching wrappers delegate to.
 ///
+/// Each resume/recovery site warns on the address its host will bind (the
+/// saved one), not the current config's. Each site's trigger is
+/// `start_broker_host(`: since `broker-host-separation`
+/// the broker is raised by starting its host process in the session's
+/// detached service surface, not by the dashboard pane. A path that raises
+/// the broker without that call does not raise it at all.
+///
 /// Matching is by function scope rather than a byte window: the window would
 /// both miss a warning placed further away and risk slicing a multi-byte
 /// character (these files are full of em dashes).
@@ -409,32 +416,32 @@ fn every_launch_path_warns_about_an_exposed_bind() {
         Site {
             file: "src/commands/start.rs",
             function: "pub(crate) fn cmd_start(",
-            trigger: "launch_session(",
+            trigger: "start_broker_host(",
             warning: "warn_if_broker_is_exposed(&broker_config)",
         },
         Site {
             file: "src/commands/start.rs",
             function: "fn launch_spec_session(",
-            trigger: "launch_session(",
+            trigger: "start_broker_host(",
             warning: "warn_if_broker_is_exposed(&broker_config)",
         },
         Site {
             file: "src/commands/start.rs",
             function: "pub(crate) fn restart_from_pause_detached(",
-            trigger: "spawn_surface(",
-            warning: "warn_if_broker_is_exposed(&config.broker)",
+            trigger: "start_broker_host(",
+            warning: "warn_if_broker_is_exposed(&recorded)",
         },
         Site {
             file: "src/commands/supervisor.rs",
             function: "pub(crate) fn cmd_supervisor(",
-            trigger: "launch_session(",
+            trigger: "start_broker_host(",
             warning: "warn_if_broker_is_exposed(&broker_config)",
         },
         Site {
             file: "src/commands/recover.rs",
             function: "pub(crate) fn recover_session_detached(",
-            trigger: "launch_session(",
-            warning: "warn_if_broker_is_exposed(&config.broker)",
+            trigger: "start_broker_host(",
+            warning: "warn_if_broker_is_exposed(&recovery_broker_config)",
         },
     ];
     assert_eq!(
@@ -442,6 +449,23 @@ fn every_launch_path_warns_about_an_exposed_bind() {
         5,
         "the five broker-raising paths: start, start --from-specs, supervisor, recover_session, \
          restart_from_pause_detached"
+    );
+
+    // Every place that starts a broker host must be one of the sites above,
+    // so a sixth broker-raising path cannot slip in without a warning check.
+    let mut raising = 0;
+    for entry in fs::read_dir(repo_root().join("src/commands")).expect("read src/commands") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().is_some_and(|e| e == "rs") {
+            let text = fs::read_to_string(&path).expect("read command module");
+            raising += text.matches("start_broker_host(").count()
+                - text.matches("fn start_broker_host(").count();
+        }
+    }
+    assert_eq!(
+        raising,
+        sites.len(),
+        "every `start_broker_host(` call must be a guarded launch path listed above"
     );
 
     for site in &sites {
@@ -632,6 +656,7 @@ fn in_tree_rust_clients_are_unaffected() {
         "feat-guard-client",
         tmp.path(),
         "claude",
+        Some("003-guard"),
     )
     .expect("register_watch_target_http must pass the guard");
 
@@ -704,9 +729,18 @@ fn rust_clients_derive_the_host_header_from_the_broker_url() {
             );
         }
     }
+    // `broker-host-separation` consolidated the hand-rolled clients into
+    // `BrokerClient`, so the census is small; what matters is that the shared
+    // client is among those checked.
     assert!(
-        checked >= 5,
+        checked >= 3,
         "expected to find the in-tree raw-HTTP clients, found {checked} Host headers"
+    );
+    let client = fs::read_to_string(repo_root().join("src/broker/client.rs"))
+        .expect("read the shared broker client");
+    assert!(
+        client.contains("Host: {addr}"),
+        "the shared BrokerClient must derive its Host header from the broker URL"
     );
 }
 

@@ -12,6 +12,7 @@
 //! `read()` / `write()` methods to obtain guards inside synchronous closures
 //! only.
 
+pub mod client;
 pub mod conflict;
 pub mod delivery;
 pub mod learnings;
@@ -620,6 +621,13 @@ pub struct BrokerHandle {
 }
 
 impl BrokerHandle {
+    /// Whether this handle reattached to a broker another process already
+    /// runs for this repository, rather than starting one of its own.
+    #[must_use]
+    pub fn is_reattached(&self) -> bool {
+        self.runtime.is_none()
+    }
+
     /// Creates a handle that reattaches to an existing broker (no owned runtime).
     fn reattached(url: String, state: Arc<BrokerState>) -> Self {
         Self {
@@ -899,7 +907,7 @@ fn probe_attempt(socket_addr: &std::net::SocketAddr, addr: &str) -> ProbeAttempt
 /// Checks, before a session launches, that the configured broker port is not
 /// held by another repository's git-paw broker.
 ///
-/// The dashboard pane performs the same check when it starts the broker, but
+/// The broker host performs the same check when it starts the broker, but
 /// that happens *after* the tmux session exists and the agent panes are up —
 /// and every agent pane already has `GIT_PAW_BROKER_URL` pointing at the
 /// shared port, so by then this repository's agents are publishing into the
@@ -907,8 +915,8 @@ fn probe_attempt(socket_addr: &std::net::SocketAddr, addr: &str) -> ProbeAttempt
 /// caught while nothing has been started yet.
 ///
 /// A disabled broker is a no-op. Only the other-repository verdict fails the
-/// launch; a foreign listener or a probe timeout is left to the dashboard's
-/// own start-up path, which reports them with their own errors.
+/// launch; a foreign listener or a probe timeout is left to the broker
+/// host's own start-up path, which reports them with their own errors.
 ///
 /// # Errors
 ///
@@ -1054,8 +1062,8 @@ pub fn start_broker_with(
     let bind_is_loopback = origin::is_loopback_bind(&config.bind);
     if !bind_is_loopback {
         // The launch command prints this too, and that is the copy an operator
-        // reads — this process is the dashboard pane, which switches to tmux's
-        // alternate screen moments later.
+        // reads — this process is the broker host, whose output lands in its
+        // detached `broker` window where nobody is looking.
         eprintln!("{}", origin::non_loopback_bind_warning(&config.bind));
     }
     let router = server::router(Arc::clone(&state), bind_is_loopback);
@@ -1069,8 +1077,8 @@ pub fn start_broker_with(
         socket.listen(1024).map_err(BrokerError::BindFailed)
     })?;
 
-    // Install SIGINT handler so the broker does not die on Ctrl+C.
-    // The dashboard process is responsible for user-facing Ctrl+C handling.
+    // Install SIGINT handler so the broker does not die on Ctrl+C. The broker
+    // host also ignores SIGINT for the whole process.
     runtime.spawn(async {
         let _ = tokio::signal::ctrl_c().await;
     });

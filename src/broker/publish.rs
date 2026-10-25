@@ -5,11 +5,10 @@
 //! process (e.g. `cmd_supervisor` self-registration) can publish messages
 //! using the same wire format and error handling.
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
 use crate::broker::WaveStatus;
+use crate::broker::client::BrokerClient;
 use crate::broker::messages::{
     ArtifactPayload, BlockedPayload, BrokerMessage, QuestionPayload, StatusPayload,
 };
@@ -92,65 +91,29 @@ pub fn build_question_message(agent_id: &str, question: &str) -> BrokerMessage {
     }
 }
 
-/// POSTs a [`BrokerMessage`] to the broker's `/publish` endpoint over a raw
-/// TCP HTTP/1.1 request.
+/// POSTs a [`BrokerMessage`] to the broker's `/publish` endpoint through
+/// [`BrokerClient`].
 ///
 /// Used to publish status updates from a process other than the broker host
-/// (the broker runs in the dashboard pane). Uses a manual TCP write instead
-/// of an external `curl` invocation to avoid shelling out and the associated
-/// permission prompt overhead.
+/// (the broker runs in its own host process, `git paw __broker`). Uses the
+/// in-process client instead of an external `curl` invocation to avoid
+/// shelling out and the associated permission prompt overhead.
 ///
 /// Errors are returned but not fatal at most call sites — the caller decides
 /// whether to fail or continue.
 pub fn publish_to_broker_http(broker_url: &str, msg: &BrokerMessage) -> Result<(), PawError> {
-    let body = serde_json::to_string(msg)
-        .map_err(|e| PawError::SessionError(format!("failed to serialize broker message: {e}")))?;
-
-    let addr = broker_url.strip_prefix("http://").unwrap_or(broker_url);
-    let socket_addr = if let Ok(a) = addr.parse() {
-        a
-    } else {
-        use std::net::ToSocketAddrs;
-        addr.to_socket_addrs()
-            .map_err(|e| PawError::SessionError(format!("invalid broker address {addr}: {e}")))?
-            .next()
-            .ok_or_else(|| {
-                PawError::SessionError(format!("broker address {addr} resolved to no addrs"))
-            })?
-    };
-
-    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(500))
-        .map_err(|e| PawError::SessionError(format!("failed to connect to broker: {e}")))?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
-
-    let request = format!(
-        "POST /publish HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|e| PawError::SessionError(format!("failed to write broker request: {e}")))?;
-
-    let mut response = String::new();
-    let _ = stream.read_to_string(&mut response);
-    if !(response.starts_with("HTTP/1.1 202") || response.starts_with("HTTP/1.0 202")) {
-        return Err(PawError::SessionError(format!(
-            "broker rejected publish: {}",
-            response.lines().next().unwrap_or("<empty>")
-        )));
-    }
-    Ok(())
+    BrokerClient::new(broker_url).publish(msg)
 }
 
 /// Registers a live filesystem watch target on the running broker via
-/// `POST /watch` over a raw TCP HTTP/1.1 request.
+/// `POST /watch` through [`BrokerClient`], with the spec the agent was
+/// launched from when there is one.
 ///
 /// Used by `git paw add` to give a hot-added worktree the same watcher
 /// coverage a start-time agent has, so it surfaces in `/status` from worktree
 /// activity even before its CLI self-publishes (capability
-/// `broker-live-watch-registration`). Mirrors [`publish_to_broker_http`]'s
-/// manual TCP write to avoid shelling out to `curl`.
+/// `broker-live-watch-registration`). The launcher of a fresh launch
+/// registers every agent the same way once its surface exists.
 ///
 /// Errors are returned but intended to be non-fatal at the call site: a broker
 /// that is down or predates the endpoint simply leaves the agent to
@@ -160,49 +123,9 @@ pub fn register_watch_target_http(
     agent_id: &str,
     worktree_path: &std::path::Path,
     cli: &str,
+    spec_id: Option<&str>,
 ) -> Result<(), PawError> {
-    let body = serde_json::json!({
-        "agent_id": agent_id,
-        "worktree_path": worktree_path.to_string_lossy(),
-        "cli": cli,
-    })
-    .to_string();
-
-    let addr = broker_url.strip_prefix("http://").unwrap_or(broker_url);
-    let socket_addr = if let Ok(a) = addr.parse() {
-        a
-    } else {
-        use std::net::ToSocketAddrs;
-        addr.to_socket_addrs()
-            .map_err(|e| PawError::SessionError(format!("invalid broker address {addr}: {e}")))?
-            .next()
-            .ok_or_else(|| {
-                PawError::SessionError(format!("broker address {addr} resolved to no addrs"))
-            })?
-    };
-
-    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(500))
-        .map_err(|e| PawError::SessionError(format!("failed to connect to broker: {e}")))?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
-
-    let request = format!(
-        "POST /watch HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|e| PawError::SessionError(format!("failed to write broker request: {e}")))?;
-
-    let mut response = String::new();
-    let _ = stream.read_to_string(&mut response);
-    if !(response.starts_with("HTTP/1.1 202") || response.starts_with("HTTP/1.0 202")) {
-        return Err(PawError::SessionError(format!(
-            "broker rejected watch registration: {}",
-            response.lines().next().unwrap_or("<empty>")
-        )));
-    }
-    Ok(())
+    BrokerClient::new(broker_url).watch(agent_id, worktree_path, cli, spec_id)
 }
 
 /// A `GET /log` answer: the entries, and the epoch of the broker that
@@ -319,96 +242,7 @@ pub fn fetch_log_page_over_http(
     since: u64,
     wait: Option<Duration>,
 ) -> Result<BrokerLogPage, PawError> {
-    let addr = broker_url.strip_prefix("http://").unwrap_or(broker_url);
-    let socket_addr = if let Ok(a) = addr.parse() {
-        a
-    } else {
-        use std::net::ToSocketAddrs;
-        addr.to_socket_addrs()
-            .map_err(|e| PawError::SessionError(format!("invalid broker address {addr}: {e}")))?
-            .next()
-            .ok_or_else(|| {
-                PawError::SessionError(format!("broker address {addr} resolved to no addrs"))
-            })?
-    };
-
-    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(500))
-        .map_err(|e| PawError::SessionError(format!("failed to connect to broker: {e}")))?;
-    // Leave the broker room to hold a long-poll for its full wait before the
-    // client calls the read dead.
-    let read_timeout = Duration::from_secs(2) + wait.unwrap_or(Duration::ZERO);
-    stream.set_read_timeout(Some(read_timeout)).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
-
-    let query = match wait {
-        Some(w) => format!("?since={since}&wait={}", w.as_secs()),
-        None => format!("?since={since}"),
-    };
-    let request = format!(
-        "GET /log{query} HTTP/1.1\r\nHost: {addr}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
-    );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|e| PawError::SessionError(format!("failed to write broker request: {e}")))?;
-
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|e| PawError::SessionError(format!("failed to read broker response: {e}")))?;
-
-    if !(response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200")) {
-        return Err(PawError::SessionError(format!(
-            "broker /log returned non-200: {}",
-            response.lines().next().unwrap_or("<empty>")
-        )));
-    }
-
-    // Split off headers — the JSON body follows the first blank line.
-    let body = response
-        .split_once("\r\n\r\n")
-        .map(|(_, b)| b)
-        .ok_or_else(|| {
-            PawError::SessionError("broker /log response missing body separator".to_string())
-        })?;
-
-    let parsed: serde_json::Value = serde_json::from_str(body)
-        .map_err(|e| PawError::SessionError(format!("broker /log returned invalid JSON: {e}")))?;
-
-    let entries = parsed
-        .get("entries")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| {
-            PawError::SessionError("broker /log response missing entries array".to_string())
-        })?;
-
-    let mut out = Vec::with_capacity(entries.len());
-    for entry in entries {
-        if let Some(msg_value) = entry.get("message")
-            && let Ok(msg) = serde_json::from_value::<BrokerMessage>(msg_value.clone())
-        {
-            out.push(BrokerLogEntry {
-                seq: entry
-                    .get("seq")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0),
-                timestamp_unix_secs: entry
-                    .get("timestamp_unix_secs")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0),
-                message: msg,
-            });
-        }
-    }
-    Ok(BrokerLogPage {
-        entries: out,
-        // A broker predating the field reports no epoch. `0` is then
-        // constant across its responses, so a reader simply never sees a
-        // change and keeps its cursor — the pre-epoch behaviour.
-        epoch: parsed
-            .get("epoch")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
-    })
+    BrokerClient::new(broker_url).log_page(since, wait)
 }
 
 /// Fetches the broker's wave-progress object over HTTP via `GET /status`.
@@ -418,63 +252,14 @@ pub fn fetch_log_page_over_http(
 /// answers with something unparseable. Callers treat both as "no wave to
 /// report" and print nothing extra.
 pub fn fetch_wave_over_http(broker_url: &str) -> Result<Option<WaveStatus>, PawError> {
-    let addr = broker_url.strip_prefix("http://").unwrap_or(broker_url);
-    let socket_addr = if let Ok(a) = addr.parse() {
-        a
-    } else {
-        use std::net::ToSocketAddrs;
-        addr.to_socket_addrs()
-            .map_err(|e| PawError::SessionError(format!("invalid broker address {addr}: {e}")))?
-            .next()
-            .ok_or_else(|| {
-                PawError::SessionError(format!("broker address {addr} resolved to no addrs"))
-            })?
-    };
-
-    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(500))
-        .map_err(|e| PawError::SessionError(format!("failed to connect to broker: {e}")))?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
-
-    let request = format!(
-        "GET /status HTTP/1.1\r\nHost: {addr}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
-    );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|e| PawError::SessionError(format!("failed to write broker request: {e}")))?;
-
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|e| PawError::SessionError(format!("failed to read broker response: {e}")))?;
-
-    if !(response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200")) {
-        return Err(PawError::SessionError(format!(
-            "broker /status returned non-200: {}",
-            response.lines().next().unwrap_or("<empty>")
-        )));
-    }
-
-    let body = response
-        .split_once("\r\n\r\n")
-        .map(|(_, b)| b)
-        .ok_or_else(|| {
-            PawError::SessionError("broker /status response missing body separator".to_string())
-        })?;
-    let parsed: serde_json::Value = serde_json::from_str(body).map_err(|e| {
-        PawError::SessionError(format!("broker /status returned invalid JSON: {e}"))
-    })?;
-
-    Ok(parsed
-        .get("wave")
-        .and_then(|w| serde_json::from_value::<WaveStatus>(w.clone()).ok()))
+    Ok(BrokerClient::new(broker_url).status()?.wave)
 }
 
 /// Fetches the broker's full message log over HTTP via `GET /log`.
 ///
 /// Returns the parsed `BrokerMessage` entries in chronological order
 /// (oldest first). Useful for any code that needs to read broker state
-/// from outside the dashboard process.
+/// from outside the broker host process.
 ///
 /// Errors are returned; the caller decides whether to fail or fall back
 /// to an empty log.
@@ -488,6 +273,7 @@ pub fn fetch_log_over_http(broker_url: &str) -> Result<Vec<BrokerMessage>, PawEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
 
     /// `mcp-agent-publish` scenario "Rejected message does not corrupt the
     /// protocol stream": a broker that responds with a non-202 status (the
@@ -656,7 +442,7 @@ mod tests {
         };
 
         // Register the hot-added worktree over HTTP via the new endpoint.
-        register_watch_target_http(&config.url(), "feat-hot", tmp.path(), "claude")
+        register_watch_target_http(&config.url(), "feat-hot", tmp.path(), "claude", None)
             .expect("broker must accept the live watch registration");
 
         // Dirty the worktree so the watcher has activity to surface.

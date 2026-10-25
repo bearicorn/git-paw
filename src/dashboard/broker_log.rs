@@ -243,8 +243,28 @@ impl BrokerLog {
                 continue;
             }
             self.last_seq = entry.0;
+            // After a rewind the new log is re-read from 0, so an entry may
+            // already be held: one is identified by its sequence number and
+            // publish time together, since sequence numbers alone repeat
+            // across a broker restart.
+            if self
+                .buffer
+                .iter()
+                .any(|held| held.0 == entry.0 && held.1 == entry.1)
+            {
+                continue;
+            }
             self.push(entry);
         }
+    }
+
+    /// Rewinds the poll cursor to 0 without clearing the buffer.
+    ///
+    /// Called when the broker host restarted: its log numbers from 1 again,
+    /// so the old cursor would skip every new entry. History stays visible,
+    /// and [`BrokerLog::ingest`] skips any entry the buffer already holds.
+    pub fn rewind_cursor(&mut self) {
+        self.last_seq = 0;
     }
 
     /// The poll cursor: the highest sequence number ingested so far. The

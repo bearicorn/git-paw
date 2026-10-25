@@ -5,11 +5,16 @@ use git_paw::error::PawError;
 use git_paw::git;
 use git_paw::session::{self, SessionStatus};
 use git_paw::surface::SessionLayout;
+use git_paw::terminal::TerminalBackend;
+use git_paw::terminal::tmux::TmuxBackend;
 use git_paw::tmux;
 
+use super::helpers::BROKER_SERVICE;
+
 /// Pauses the session: detaches the user's tmux client, stops the broker
-/// (by killing the dashboard pane only), and updates session status to
-/// `Paused`. CLI panes keep running and retain their in-memory state.
+/// (by closing its host's service surface), and updates session status to
+/// `Paused`. The dashboard and the CLI panes keep running; the CLIs retain
+/// their in-memory state.
 ///
 /// Idempotent: pausing an already-paused or already-stopped session is
 /// a no-op with a friendly message.
@@ -47,13 +52,21 @@ pub(crate) fn cmd_pause() -> Result<(), PawError> {
     // Detach the user's tmux client. Idempotent in detach_client.
     tmux::detach_client(&existing.session_name)?;
 
-    // Kill the dashboard pane only (which hosts the broker subprocess);
-    // the BrokerHandle drop runs and broker shuts down gracefully. Only
-    // applies when broker was enabled — without a broker there's no
-    // dashboard pane to kill.
+    // Stop the broker by closing its host's service surface: the host gets
+    // SIGHUP, drops its BrokerHandle, and the broker shuts down gracefully
+    // with a final log flush. The dashboard stays, showing the broker as
+    // unreachable until `git paw start` brings the host back. A session
+    // started before the host split has no such surface — its dashboard pane
+    // IS the broker — so it falls back to killing that pane as before.
     if existing.broker_port.is_some() {
-        let pane_idx = SessionLayout::of(&existing).dashboard_index_or_default();
-        tmux::kill_pane(&existing.session_name, pane_idx)?;
+        let backend = TmuxBackend::new();
+        let host = backend.service(&existing.session_name, BROKER_SERVICE);
+        if backend.service_alive(&host)? {
+            backend.stop_service(&host)?;
+        } else {
+            let pane_idx = SessionLayout::of(&existing).dashboard_index_or_default();
+            tmux::kill_pane(&existing.session_name, pane_idx)?;
+        }
     }
 
     let cli_pane_count = existing.worktrees.len();

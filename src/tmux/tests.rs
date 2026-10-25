@@ -3407,7 +3407,9 @@ fn list_panes_requests_the_id_path_format_and_parses_the_pairs() {
             vec![
                 "list-panes".to_string(),
                 "-t".to_string(),
-                "paw-proj".to_string(),
+                // The agent window, not the current one (the broker host has
+                // its own window).
+                "paw-proj:0".to_string(),
                 "-F".to_string(),
                 "#{pane_id} #{pane_current_path}".to_string(),
             ]

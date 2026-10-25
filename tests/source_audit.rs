@@ -468,3 +468,74 @@ fn no_launch_or_drive_path_invokes_the_setup_use_case() {
         );
     }
 }
+
+/// `broker-host-separation`: a session has a second window (the broker
+/// host's `broker` window), and `tmux list-panes -t <session>` lists only the
+/// CURRENT window. Every pane listing in production code must therefore name
+/// the agent window (`<session>:0`) — a bare session target sees only the
+/// host's pane once someone selects that window, which reads as "every agent
+/// exited" and recovers (kills) a live session.
+///
+/// Rust: the argument after `"-t"` that follows each `"list-panes"` outside
+/// test modules must name window 0. Shell: every `tmux list-panes -t` in the
+/// bundled scripts must target `:0`.
+#[test]
+fn pane_listings_name_the_agent_window_not_the_bare_session() {
+    let mut offenders = Vec::new();
+    for (path, body) in src_files() {
+        if path.ends_with("tests.rs") {
+            continue;
+        }
+        // Production code only: stop at the file's test module.
+        let production = body.split("#[cfg(test)]").next().unwrap_or(&body);
+        let mut rest = production;
+        while let Some(at) = rest.find("\"list-panes\"") {
+            let after = &rest[at..];
+            let window: String = after.chars().take(800).collect();
+            if let Some(t) = window.find("\"-t\"") {
+                let target_line = window[t + 4..]
+                    .trim_start_matches([',', ' ', '\n'])
+                    .lines()
+                    .find(|l| !l.trim().starts_with("//"))
+                    .unwrap_or("");
+                if !target_line.contains(":0") {
+                    offenders.push(format!("{path}: list-panes -t {}", target_line.trim()));
+                }
+            }
+            rest = &after["\"list-panes\"".len()..];
+        }
+    }
+
+    let scripts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts");
+    for entry in std::fs::read_dir(&scripts)
+        .expect("read assets/scripts")
+        .flatten()
+    {
+        let path = entry.path();
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for (n, line) in body.lines().enumerate() {
+            let code = line.trim_start();
+            if code.starts_with('#') {
+                continue;
+            }
+            if let Some(at) = code.find("tmux list-panes -t ") {
+                let target = code[at + "tmux list-panes -t ".len()..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                if !target.contains(":0") {
+                    offenders.push(format!("{}:{}: {}", path.display(), n + 1, code));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "pane listings must target the agent window `<session>:0`, not the bare \
+         session (which lists only the current window):\n{}",
+        offenders.join("\n")
+    );
+}

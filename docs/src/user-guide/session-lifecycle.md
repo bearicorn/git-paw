@@ -155,6 +155,26 @@ If you're debugging a launch and want to know whether the rebase
 modified anything, `git rev-parse <branch>` from the main repo before
 and after `git paw start` will show the SHA change (or lack thereof).
 
+## The broker host
+
+When the broker is enabled, every launch path — `git paw start`, the
+spec-driven launch, the supervised launch, cold recovery and resume from
+pause — runs the broker in its own process, `git paw __broker`, in a
+detached tmux window named `broker`. The window sits outside the pane grid,
+so pane numbering is unchanged; switch to it to see the host's output.
+
+A launch opens the session, starts the host, and waits up to 10 seconds for
+it to answer before it registers the agents with it, saves the session, or
+sends any boot prompt. If the host exits or never answers — most often
+because another process holds the broker port — the launch fails with an
+error naming the port and saves no session, so nothing half-launched is
+recorded. The dashboard in pane 0 is a client of the host: it shows
+**⚠ broker unreachable** while the host is down and reconnects on its own.
+
+`git paw pause` closes the `broker` window (the dashboard stays);
+`git paw stop` ends the whole session, host included. Both flush the
+session's broker log on the way out.
+
 ## Cold recovery resumes worker context
 
 When `git paw start` recovers a stopped session — including a paused

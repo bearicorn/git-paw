@@ -50,8 +50,6 @@
 //! the real implementations of the rest.
 
 use std::collections::HashMap;
-use std::io::{Read as _, Write as _};
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -3198,45 +3196,13 @@ pub struct AgentStatusRow {
 
 /// Fetches the broker `/status` endpoint and returns the agent summary.
 ///
-/// Used by the drive loop because the broker state lives in the dashboard
-/// process, not in the loop's own. Errors are surfaced so the caller can
+/// Used by the drive loop because the broker state lives in the broker host
+/// process (`git paw __broker`), not in the loop's own. Errors are surfaced so the caller can
 /// decide whether to retry. Still `pub` because
 /// `tests/unattended_drive_e2e.rs` drives the broker through it.
 pub fn fetch_status_over_http(broker_url: &str) -> Result<Vec<AgentStatusRow>, PawError> {
-    let addr = broker_url.strip_prefix("http://").unwrap_or(broker_url);
-    let socket_addr = if let Ok(a) = addr.parse() {
-        a
-    } else {
-        use std::net::ToSocketAddrs;
-        addr.to_socket_addrs()
-            .map_err(|e| PawError::SessionError(format!("invalid broker address {addr}: {e}")))?
-            .next()
-            .ok_or_else(|| {
-                PawError::SessionError(format!("broker address {addr} resolved to no addrs"))
-            })?
-    };
-
-    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(500))
-        .map_err(|e| PawError::SessionError(format!("failed to connect to broker: {e}")))?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
-
-    let request = format!("GET /status HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|e| PawError::SessionError(format!("failed to write status request: {e}")))?;
-
-    let mut response = String::new();
-    let _ = stream.read_to_string(&mut response);
-
-    // Find the JSON body (first `{` after the headers).
-    let body_start = response
-        .find("\r\n\r\n")
-        .map(|i| i + 4)
-        .ok_or_else(|| PawError::SessionError("malformed broker response".to_string()))?;
-    let body = &response[body_start..];
-
-    let parsed: StatusResponse = serde_json::from_str(body)
+    let body = crate::broker::client::BrokerClient::new(broker_url).status_body()?;
+    let parsed: StatusResponse = serde_json::from_str(&body)
         .map_err(|e| PawError::SessionError(format!("broker /status parse error: {e}")))?;
     Ok(parsed.agents)
 }

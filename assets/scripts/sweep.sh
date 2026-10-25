@@ -384,7 +384,9 @@ fi
 #   - supervisor pane (title "supervisor")
 discover_coding_panes() {
   [[ -z "${SESSION}" ]] && return
-  tmux list-panes -t "${SESSION}" -F "#{pane_index} #{pane_current_command} #{pane_title}" 2>/dev/null \
+  # Window 0 explicitly: a bare session target lists only the CURRENT window,
+  # and the broker host lives in its own `broker` window.
+  tmux list-panes -t "${SESSION}:0" -F "#{pane_index} #{pane_current_command} #{pane_title}" 2>/dev/null \
     | while read -r idx cmd title; do
         case "${cmd}" in
           git-paw|git-paw-dashboard) continue ;;

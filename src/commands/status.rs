@@ -5,7 +5,11 @@ use git_paw::broker;
 use git_paw::error::PawError;
 use git_paw::git;
 use git_paw::session;
+use git_paw::terminal::TerminalBackend;
+use git_paw::terminal::tmux::TmuxBackend;
 use git_paw::tmux;
+
+use super::helpers::BROKER_SERVICE;
 
 /// Builds the `--json` body.
 ///
@@ -44,29 +48,67 @@ fn status_json(
     obj
 }
 
+/// What `git paw status` knows about the session's broker: the
+/// repository-scoped probe verdict, whether the session's broker host is
+/// alive, and — from this repository's own broker — its `/status` answer.
+struct BrokerView {
+    probe: broker::ProbeResult,
+    host_alive: bool,
+    status: Option<broker::client::BrokerStatus>,
+}
+
+/// Formats an uptime for the `Broker:` line: `45s`, `12m`, `3h5m`.
+fn uptime_human(seconds: u64) -> String {
+    broker::WaveStatus {
+        last_progress_unix_secs: 0,
+        idle_seconds: seconds,
+        stall_threshold_seconds: 0,
+        stalled: false,
+    }
+    .idle_human()
+}
+
+/// The `Broker:` line for `url`.
+///
+/// The broker is "running" only when the probe finds this repository's
+/// broker AND the session's broker host is alive: a process still answering
+/// on the port after `git paw stop` is a leftover, not this session's broker
+/// (PP-27). A broker serving a *different* repository is reported as such.
+fn broker_line(url: &str, view: &BrokerView, display: session::DisplayStatus) -> String {
+    match &view.probe {
+        broker::ProbeResult::LiveBroker if view.host_alive => {
+            let detail = view.status.as_ref().map_or_else(String::new, |st| {
+                format!(
+                    ", {} agents, up {}",
+                    st.agents.len(),
+                    uptime_human(st.uptime_seconds)
+                )
+            });
+            format!("Broker:  {url} (running{detail})")
+        }
+        broker::ProbeResult::LiveBroker => format!(
+            "Broker:  {url} (leftover broker answering with no live session host \u{2014} \
+             not this session's broker)"
+        ),
+        broker::ProbeResult::OtherRepoBroker { .. } => {
+            format!("Broker:  {url} (held by another repository's git-paw broker)")
+        }
+        _ if display == session::DisplayStatus::Paused => {
+            format!("Broker:  {url} (paused \u{2014} run 'git paw start' to resume)")
+        }
+        _ => format!("Broker:  {url} (not responding)"),
+    }
+}
+
 /// Prints the `Broker:` line for `url`, plus the stalled-wave line when the
 /// session's own broker reports the wave stalled.
-///
-/// `probe` is the single repository-scoped probe `cmd_status` already took,
-/// so a broker on the port serving a *different* repository is reported as
-/// such — and `wave`, which the caller only reads from a confirmed own
-/// broker, is never attributed to this session by mistake.
 fn print_broker_block(
     url: &str,
-    probe: &broker::ProbeResult,
+    view: &BrokerView,
     display: session::DisplayStatus,
     wave: Option<broker::WaveStatus>,
 ) {
-    match probe {
-        broker::ProbeResult::LiveBroker => println!("Broker:  {url} (running)"),
-        broker::ProbeResult::OtherRepoBroker { .. } => {
-            println!("Broker:  {url} (held by another repository's git-paw broker)");
-        }
-        _ if display == session::DisplayStatus::Paused => {
-            println!("Broker:  {url} (paused \u{2014} run 'git paw start' to resume)");
-        }
-        _ => println!("Broker:  {url} (not responding)"),
-    }
+    println!("{}", broker_line(url, view, display));
     // A roster of `working` agents can hide a wave that has not moved in
     // days, so say so explicitly rather than leaving the reader to infer it
     // from per-agent rows.
@@ -135,16 +177,21 @@ pub(crate) fn cmd_status(json: bool) -> Result<(), PawError> {
         .as_deref()
         .map(|url| broker::probe_broker_for_repo(url, &existing.repo_path));
 
-    // Wave staleness: whether *anything* in the session has progressed
-    // recently. Only read from a broker that has confirmed it serves THIS
-    // repository. A broker that predates the field yields `None`, and
-    // nothing extra is shown.
-    let wave = match (&broker_endpoint, &broker_probe) {
+    // `/status` (agents, uptime, wave) is only read from a broker that has
+    // confirmed it serves THIS repository.
+    let broker_status = match (&broker_endpoint, &broker_probe) {
         (Some(url), Some(broker::ProbeResult::LiveBroker)) => {
-            broker::publish::fetch_wave_over_http(url).ok().flatten()
+            broker::client::BrokerClient::new(url.as_str())
+                .status()
+                .ok()
         }
         _ => None,
     };
+
+    // Wave staleness: whether *anything* in the session has progressed
+    // recently. A broker that predates the field yields `None`, and nothing
+    // extra is shown.
+    let wave = broker_status.as_ref().and_then(|st| st.wave);
 
     if json {
         println!("{}", status_json(&existing, display, tmux_running, wave));
@@ -178,8 +225,22 @@ pub(crate) fn cmd_status(json: bool) -> Result<(), PawError> {
     );
     println!();
 
-    if let (Some(url), Some(probe)) = (&broker_endpoint, &broker_probe) {
-        print_broker_block(url, probe, display, wave);
+    if let (Some(url), Some(probe)) = (&broker_endpoint, broker_probe) {
+        // The session's broker host is alive when its `broker` service
+        // surface is; a session started before the host split has no such
+        // surface, so its terminal session's liveness stands in. Either way a
+        // dead terminal session means no live host.
+        let backend = TmuxBackend::new();
+        let host_alive = backend
+            .service_alive(&backend.service(&existing.session_name, BROKER_SERVICE))
+            .unwrap_or(false)
+            || tmux_running;
+        let view = BrokerView {
+            probe,
+            host_alive,
+            status: broker_status,
+        };
+        print_broker_block(url, &view, display, wave);
     }
 
     if existing.worktrees.is_empty() {
@@ -196,4 +257,114 @@ pub(crate) fn cmd_status(json: bool) -> Result<(), PawError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const URL: &str = "http://127.0.0.1:9119";
+
+    fn status_with(agents: usize, uptime_seconds: u64) -> broker::client::BrokerStatus {
+        broker::client::BrokerStatus {
+            git_paw: true,
+            uptime_seconds,
+            repo_root: "/repo".to_string(),
+            agents: (0..agents)
+                .map(|i| broker::client::StatusAgentRow {
+                    agent_id: format!("feat-{i}"),
+                    cli: "claude".to_string(),
+                    status: "working".to_string(),
+                    last_seen_seconds: 0,
+                    phase: None,
+                    modified_files: Vec::new(),
+                })
+                .collect(),
+            wave: None,
+        }
+    }
+
+    /// "Status shows running broker with agents".
+    #[test]
+    fn a_live_host_with_three_agents_reports_running_and_the_agent_count() {
+        let view = BrokerView {
+            probe: broker::ProbeResult::LiveBroker,
+            host_alive: true,
+            status: Some(status_with(3, 125)),
+        };
+        let line = broker_line(URL, &view, session::DisplayStatus::Active);
+        assert!(line.contains(URL), "got {line}");
+        assert!(line.contains("running"), "got {line}");
+        assert!(line.contains("3 agents"), "got {line}");
+        assert!(line.contains("up 2m"), "got {line}");
+    }
+
+    /// "Status after stop does not report the broker running" (PP-27): a
+    /// process still answering on the port with no live session host is a
+    /// leftover, never this session's running broker.
+    #[test]
+    fn an_answering_broker_with_no_live_host_is_not_reported_running() {
+        let view = BrokerView {
+            probe: broker::ProbeResult::LiveBroker,
+            host_alive: false,
+            status: Some(status_with(3, 125)),
+        };
+        let line = broker_line(URL, &view, session::DisplayStatus::Stopped);
+        assert!(!line.contains("(running"), "got {line}");
+        assert!(line.contains("leftover"), "got {line}");
+    }
+
+    /// The same after stop when nothing answers at all.
+    #[test]
+    fn a_stopped_session_with_no_broker_reports_not_responding() {
+        let view = BrokerView {
+            probe: broker::ProbeResult::NoListener,
+            host_alive: false,
+            status: None,
+        };
+        let line = broker_line(URL, &view, session::DisplayStatus::Stopped);
+        assert!(!line.contains("running"), "got {line}");
+        assert!(line.contains("not responding"), "got {line}");
+    }
+
+    /// "Status shows paused session with broker offline".
+    #[test]
+    fn a_paused_session_reports_the_broker_paused_not_in_error_terms() {
+        let view = BrokerView {
+            probe: broker::ProbeResult::NoListener,
+            host_alive: true,
+            status: None,
+        };
+        let line = broker_line(URL, &view, session::DisplayStatus::Paused);
+        assert!(line.contains("paused"), "got {line}");
+        assert!(line.contains("git paw start"), "got {line}");
+        assert!(!line.contains("not responding"), "got {line}");
+    }
+
+    /// "Status shows broker not responding for crashed active session".
+    #[test]
+    fn a_crashed_host_of_an_active_session_reports_not_responding() {
+        let view = BrokerView {
+            probe: broker::ProbeResult::NoListener,
+            host_alive: false,
+            status: None,
+        };
+        let line = broker_line(URL, &view, session::DisplayStatus::Active);
+        assert!(line.contains("not responding"), "got {line}");
+    }
+
+    /// "Status reports a port held by another repository".
+    #[test]
+    fn another_repositorys_broker_is_never_reported_running() {
+        let view = BrokerView {
+            probe: broker::ProbeResult::OtherRepoBroker {
+                repo_root: Some("/elsewhere".to_string()),
+            },
+            host_alive: true,
+            status: None,
+        };
+        let line = broker_line(URL, &view, session::DisplayStatus::Active);
+        assert!(line.contains("another repository"), "got {line}");
+        assert!(!line.contains("running"), "got {line}");
+    }
 }

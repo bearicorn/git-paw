@@ -409,7 +409,7 @@ git paw purge --stale --all-repos   # every repository on the machine
 
 ## `git paw status`
 
-Displays the current session status, branches, CLIs, and worktree paths for the repository in the current directory. When the session was launched with the broker, also shows the broker URL and whether it is running, paused, not responding, or held by another repository's git-paw broker (see [Multi-repo port assignment](configuration/README.md#multi-repo-port-assignment)).
+Displays the current session status, branches, CLIs, and worktree paths for the repository in the current directory. When the session was launched with the broker, also shows the broker URL and whether it is running (with its agent count and uptime), paused, not responding, or held by another repository's git-paw broker (see [Multi-repo port assignment](configuration/README.md#multi-repo-port-assignment)). The broker is reported **running** only when this repository's broker answers *and* the session's broker host is alive; a process still answering on the port after `git paw stop` is reported as a leftover broker with no live session host, never as running.
 
 ```
 Usage: git-paw status [OPTIONS]
@@ -873,3 +873,16 @@ transitions.
 | 0 | Success |
 | 1 | Error (git, tmux, config, or other failure) |
 | 2 | User cancelled (Ctrl+C or empty selection) |
+
+## Internal subcommands
+
+git-paw also has hidden subcommands that it runs itself; they are not listed in
+`git paw --help` and are not meant to be invoked by hand:
+
+- `__broker --session <name> --log-path <path>` — hosts a session's broker in
+  its detached `broker` tmux window. `start`, recovery and resume launch it;
+  `pause` closes its window and `stop` ends it with the session.
+- `__dashboard` — renders the dashboard in pane 0 as a thin client of that
+  broker.
+- `__prompt-profile` — prints one resolved prompt-shape profile field for the
+  bundled `sweep.sh` helper.

@@ -307,6 +307,8 @@ pub(crate) fn cmd_add(
     // `broker-live-watch-registration`). Best-effort: a broker that is down
     // or predates `/watch` leaves the agent to self-register via its boot
     // block, exactly as in v0.6.0, so a failure here is logged, not fatal.
+    // An agent added `--from-spec` carries its spec id, so the learnings
+    // aggregator classifies its conflicts intra- or cross-spec.
     if broker_config.enabled {
         let agent_id = broker::messages::slugify_branch(&branch);
         if let Err(e) = broker::publish::register_watch_target_http(
@@ -314,6 +316,7 @@ pub(crate) fn cmd_add(
             &agent_id,
             &new_worktree_path,
             &agent_cli,
+            spec_entry.as_ref().map(|s| s.id.as_str()),
         ) {
             eprintln!("warning: could not register '{branch}' with the broker watcher: {e}");
         }

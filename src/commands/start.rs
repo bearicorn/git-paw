@@ -27,7 +27,8 @@ use git_paw::tmux;
 
 use super::helpers::{
     agent_pane_offset, config_to_custom_defs, dashboard_command, launch_session,
-    session_has_live_agents, to_interactive_cli, warn_if_broker_is_exposed,
+    register_agents_with_host, session_has_live_agents, start_broker_host, to_interactive_cli,
+    warn_if_broker_is_exposed,
 };
 use super::recover::recover_session;
 use super::supervisor::cmd_supervisor;
@@ -352,6 +353,27 @@ pub(crate) fn cmd_start(
     // Open the session, attach session logging (no-op unless `[logging]
     // enabled`) at the layout's agent offset, and even the grid's columns.
     launch_session(&backend, &plan, &layout, Some((&config, &repo_root)))?;
+
+    // Bring the broker host up in its detached service surface, wait for it
+    // to answer as this repository's broker, and register every agent with
+    // it — before the receipt is saved, so a host that never answers fails the
+    // launch with persisted session state untouched, and before any boot
+    // prompt is injected.
+    if broker_config.enabled {
+        // A host that fails takes the half-launched session down with it: no
+        // receipt names that session, so nothing else could stop it.
+        if let Err(e) = start_broker_host(
+            &backend,
+            &session_name,
+            &repo_root,
+            &broker_config,
+            &session::broker_log_path(&session_name)?,
+        ) {
+            let _ = backend.close_session(&session_name);
+            return Err(e);
+        }
+        register_agents_with_host(&broker_config.url(), &worktree_entries);
+    }
 
     // Save session state and write the per-repo discovery file BEFORE
     // gating/injecting — matching the supervisor path's order (save, then
@@ -799,6 +821,27 @@ fn launch_spec_session(
     // pane 0), and even the grid's columns.
     launch_session(&backend, &plan, &layout, Some((config, repo_root)))?;
 
+    // Bring the broker host up in its detached service surface, wait for it
+    // to answer as this repository's broker, and register every agent with
+    // it — before the receipt is saved, so a host that never answers fails the
+    // launch with persisted session state untouched, and before any boot
+    // prompt is injected.
+    if broker_config.enabled {
+        // A host that fails takes the half-launched session down with it: no
+        // receipt names that session, so nothing else could stop it.
+        if let Err(e) = start_broker_host(
+            &backend,
+            &session_name,
+            repo_root,
+            &broker_config,
+            &session::broker_log_path(&session_name)?,
+        ) {
+            let _ = backend.close_session(&session_name);
+            return Err(e);
+        }
+        register_agents_with_host(&broker_config.url(), &worktree_entries);
+    }
+
     // Save session state and write the per-repo discovery file BEFORE
     // gating/injecting — matching the supervisor path's order (save, then
     // gate). A stuck dialog fails the gate-and-submit step below with `?`,
@@ -902,9 +945,17 @@ fn launch_spec_session(
     attach_or_print_hint(&session_name)
 }
 
-/// Restarts a paused session: recreates the dashboard pane (re-spawning
-/// the broker), updates status to `Active`, and re-attaches the user's
-/// client. Skips worktree creation, CLI spawning, and boot-prompt
+/// Whether a surface's foreground `process` name is this git-paw binary.
+fn runs_git_paw(process: &str) -> bool {
+    let own = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.file_name().map(|n| n.to_string_lossy().into_owned()));
+    process == "git-paw" || own.is_some_and(|name| name == process)
+}
+
+/// Restarts a paused session: recreates the broker host (and the dashboard
+/// pane, only when none is running), updates status to `Active`, and
+/// re-attaches the user's client. Skips worktree creation, CLI spawning, and boot-prompt
 /// injection — coding-agent panes are already running and retain their
 /// in-memory conversation state.
 pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result<(), PawError> {
@@ -941,17 +992,14 @@ pub(crate) fn restart_from_pause_detached(
     // used a single shared `broker.log` resumes onto the per-session name
     // instead of leaving the old file behind for purge to miss.
     //
-    // This is saved BEFORE the dashboard pane starts below, because the
-    // dashboard resolves its log path from the saved session: starting it
-    // first would let it read the pre-re-stamp path and write there — the
-    // orphaned log this re-stamp exists to prevent.
+    // The host is handed this path on argv; it is saved here too so the
+    // receipt names the file the host writes and purge deletes.
     //
-    // `status` deliberately stays `Paused` for this write. Only the log path
-    // is safe to publish before the dashboard exists; recording `Active` here
-    // would mean a failure in the `split-window`/`send-keys` below left a
-    // session marked active with tmux still alive, which the next
-    // `git paw start` would reattach to instead of restarting the broker. The
-    // flip to `Active` happens once the pane is up.
+    // `status` deliberately stays `Paused` for this write. Recording `Active`
+    // here would mean a failure starting the host below left a session marked
+    // active with tmux still alive, which the next `git paw start` would
+    // reattach to instead of restarting the broker. The flip to `Active`
+    // happens once the host answers.
     if updated.broker_port.is_some() {
         updated.broker_log_path = Some(session::broker_log_path(&updated.session_name)?);
         session::save_session(&updated)?;
@@ -974,36 +1022,67 @@ pub(crate) fn restart_from_pause_detached(
         PawConfig::default()
     });
 
-    // Recreate the dashboard pane only when the original session had a
-    // broker enabled. Without a broker there is no dashboard pane to
-    // recreate; pause+resume on a no-broker session is purely the tmux
-    // detach/attach cycle.
-    if existing.broker_port.is_some() {
-        // Resuming re-spawns the broker, so the exposure warning belongs here
-        // too — the dashboard pane's own copy is hidden by the alternate
-        // screen. Best-effort, like the load above: a config that will not load
-        // is the dashboard's problem to report, and must not break the resume.
-        warn_if_broker_is_exposed(&config.broker);
+    // Recreate the broker host only when the original session had a broker
+    // enabled. Without a broker there is no host and no dashboard to recreate;
+    // pause+resume on a no-broker session is purely the detach/attach cycle.
+    if let (Some(port), Some(bind), Some(log_path)) = (
+        existing.broker_port,
+        existing.broker_bind.as_ref(),
+        updated.broker_log_path.as_ref(),
+    ) {
+        // The host binds the address the session's agents were handed, which
+        // is the saved one, not necessarily the current config's.
+        let recorded = config::BrokerConfig {
+            enabled: true,
+            port,
+            bind: bind.clone(),
+            ..config.broker.clone()
+        };
 
-        // Anchor the new surface on the recorded dashboard position (the
-        // first agent's, which still exists in the live session); it is
-        // inserted before that surface, mirroring the original layout. The
-        // backend does not let a caller choose the new surface's index —
-        // tmux assigns it — so this leaves the dashboard wherever the
-        // backend places it. The session-state field remains a hint for
-        // future restarts; we re-write it below to reflect reality. The
-        // surface's label matches the per-pane labelling scheme: its role.
-        backend.spawn_surface(
+        // Resuming re-spawns the broker, so the exposure warning belongs here
+        // too — the host's own copy lands in its detached service surface.
+        // It is judged on the address the host will bind: a session saved on
+        // `0.0.0.0` resumes onto every interface even if the config has since
+        // gone back to loopback.
+        warn_if_broker_is_exposed(&recorded);
+        start_broker_host(
+            &backend,
             &existing.session_name,
-            &SurfaceSpec {
-                label: "dashboard".to_string(),
-                owner: repo_root.to_path_buf(),
-                launch_command: dashboard_command(),
-            },
-            &SurfacePlacement::Before(
-                backend.surface_at(&existing.session_name, dashboard_index as usize),
-            ),
+            repo_root,
+            &recorded,
+            log_path,
         )?;
+
+        // Pause leaves the dashboard running; it reconnects on its own once
+        // the host answers. Only a session paused before the host split —
+        // whose pause killed the dashboard pane, since that pane was the
+        // broker — has none, and gets it recreated.
+        let anchor = backend.surface_at(&existing.session_name, dashboard_index as usize);
+        // The label alone is not enough: a pane whose dashboard quit keeps
+        // its `dashboard` title while a shell runs in it. Only a pane still
+        // running git-paw under that label counts.
+        let dashboard_running = backend
+            .label_of(&anchor)
+            .is_some_and(|label| label.trim() == "dashboard")
+            && backend
+                .foreground_process(&anchor)
+                .is_some_and(|process| runs_git_paw(&process));
+        if !dashboard_running {
+            // Anchor the new surface on the recorded dashboard position (the
+            // first agent's, which still exists in the live session); it is
+            // inserted before that surface, mirroring the original layout.
+            // The surface's label matches the per-pane labelling scheme: its
+            // role.
+            backend.spawn_surface(
+                &existing.session_name,
+                &SurfaceSpec {
+                    label: "dashboard".to_string(),
+                    owner: repo_root.to_path_buf(),
+                    launch_command: dashboard_command(),
+                },
+                &SurfacePlacement::Before(anchor),
+            )?;
+        }
     }
 
     // The dashboard pane is up (or there was never one to recreate), so the

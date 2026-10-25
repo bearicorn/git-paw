@@ -136,11 +136,10 @@ pub fn is_loopback_bind(bind: &str) -> bool {
 /// The warning printed on stderr when the broker is bound to a non-loopback
 /// address.
 ///
-/// Shared so the dashboard process (which hosts the broker) and the command
-/// that launches the session print the same text. The launch command is the
-/// one an operator actually reads: the dashboard pane switches to tmux's
-/// alternate screen almost immediately, so anything it writes to stderr
-/// scrolls away unseen.
+/// Shared so the broker host process and the command that launches the
+/// session print the same text. The launch command is the one an operator
+/// actually reads: the host runs in a detached `broker` window, so anything
+/// it writes to stderr goes unseen.
 #[must_use]
 pub fn non_loopback_bind_warning(bind: &str) -> String {
     format!(

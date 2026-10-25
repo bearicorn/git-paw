@@ -1,0 +1,11 @@
+[
+  {
+    "argv": [
+      "tmux",
+      "kill-window",
+      "-t",
+      "paw-proj:broker"
+    ],
+    "stdio": "captured"
+  }
+]

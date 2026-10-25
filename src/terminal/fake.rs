@@ -11,15 +11,15 @@
 //! own unit tests drive it too. Production never constructs one.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::error::PawError;
 
 use super::{
-    GridGeometry, Key, SessionLiveness, SessionPlan, SurfaceId, SurfaceInfo, SurfacePlacement,
-    SurfaceSpec, TerminalBackend,
+    GridGeometry, Key, ServiceHandle, SessionLiveness, SessionPlan, SurfaceId, SurfaceInfo,
+    SurfacePlacement, SurfaceSpec, TerminalBackend,
 };
 
 /// One operation the fake received, in the order it arrived.
@@ -122,6 +122,19 @@ pub enum Operation {
     Attach(String),
     /// [`TerminalBackend::detach_clients`].
     DetachClients(String),
+    /// [`TerminalBackend::spawn_service`].
+    SpawnService {
+        /// Session.
+        session: String,
+        /// Service name.
+        name: String,
+        /// Command the service runs.
+        command: String,
+        /// Working tree it starts in.
+        owner: PathBuf,
+    },
+    /// [`TerminalBackend::stop_service`].
+    StopService(ServiceHandle),
 }
 
 impl Operation {
@@ -167,6 +180,8 @@ struct State {
     processes: HashMap<SurfaceId, Option<String>>,
     alive: HashMap<String, bool>,
     liveness: HashMap<String, SessionLiveness>,
+    /// Running services, as `(session, name)`.
+    services: HashSet<(String, String)>,
 }
 
 /// The default foreground process of a surface with none scripted: an agent
@@ -231,6 +246,18 @@ impl FakeBackend {
         state.liveness.insert(session.to_string(), liveness);
     }
 
+    /// Scripts whether the service `name` of `session` is running, as if
+    /// another process had started (or lost) it.
+    pub fn script_service(&self, session: &str, name: &str, alive: bool) {
+        let key = (session.to_string(), name.to_string());
+        let mut state = self.state.borrow_mut();
+        if alive {
+            state.services.insert(key);
+        } else {
+            state.services.remove(&key);
+        }
+    }
+
     /// Every operation received so far, in order.
     #[must_use]
     pub fn operations(&self) -> Vec<Operation> {
@@ -281,6 +308,7 @@ impl TerminalBackend for FakeBackend {
         let mut state = self.state.borrow_mut();
         state.alive.insert(session.to_string(), false);
         state.surfaces.remove(session);
+        state.services.retain(|(s, _)| s != session);
         Ok(())
     }
 
@@ -478,6 +506,41 @@ impl TerminalBackend for FakeBackend {
         self.record(Operation::DetachClients(session.to_string()));
         Ok(())
     }
+
+    fn spawn_service(
+        &self,
+        session: &str,
+        name: &str,
+        command: &str,
+        owner: &Path,
+    ) -> Result<ServiceHandle, PawError> {
+        self.record(Operation::SpawnService {
+            session: session.to_string(),
+            name: name.to_string(),
+            command: command.to_string(),
+            owner: owner.to_path_buf(),
+        });
+        self.script_service(session, name, true);
+        Ok(ServiceHandle::new(session, name))
+    }
+
+    fn service(&self, session: &str, name: &str) -> ServiceHandle {
+        ServiceHandle::new(session, name)
+    }
+
+    fn stop_service(&self, handle: &ServiceHandle) -> Result<(), PawError> {
+        self.record(Operation::StopService(handle.clone()));
+        self.script_service(handle.session(), handle.name(), false);
+        Ok(())
+    }
+
+    fn service_alive(&self, handle: &ServiceHandle) -> Result<bool, PawError> {
+        Ok(self
+            .state
+            .borrow()
+            .services
+            .contains(&(handle.session().to_string(), handle.name().to_string())))
+    }
 }
 
 #[cfg(test)]
@@ -516,6 +579,50 @@ mod tests {
             fake.surface_owned_by("paw-x", Path::new("/wt/a")).unwrap(),
             Some(fake.surface_at("paw-x", 1))
         );
+    }
+
+    /// `code-architecture`, "Fake backend records services".
+    #[test]
+    fn fake_backend_records_services() {
+        let fake = FakeBackend::new();
+        let handle = fake
+            .spawn_service("paw-x", "broker", "'git-paw' __broker", Path::new("/repo"))
+            .unwrap();
+        let spawned: Vec<Operation> = fake
+            .operations()
+            .into_iter()
+            .filter(|op| matches!(op, Operation::SpawnService { .. }))
+            .collect();
+        assert_eq!(
+            spawned,
+            vec![Operation::SpawnService {
+                session: "paw-x".into(),
+                name: "broker".into(),
+                command: "'git-paw' __broker".into(),
+                owner: PathBuf::from("/repo"),
+            }]
+        );
+        assert!(fake.service_alive(&handle).unwrap());
+        assert_eq!(fake.service("paw-x", "broker"), handle);
+
+        fake.stop_service(&handle).unwrap();
+        assert!(
+            fake.operations()
+                .contains(&Operation::StopService(handle.clone()))
+        );
+        assert!(!fake.service_alive(&handle).unwrap());
+        // A service already gone stops without error.
+        fake.stop_service(&handle).unwrap();
+    }
+
+    #[test]
+    fn a_closed_session_has_no_running_service() {
+        let fake = FakeBackend::new();
+        let handle = fake
+            .spawn_service("paw-x", "broker", "cmd", Path::new("/repo"))
+            .unwrap();
+        fake.close_session("paw-x").unwrap();
+        assert!(!fake.service_alive(&handle).unwrap());
     }
 
     #[test]

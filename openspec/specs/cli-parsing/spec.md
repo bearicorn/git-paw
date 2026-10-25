@@ -6,7 +6,7 @@ Define the command-line interface for git-paw using clap v4. Declares all subcom
 
 The system SHALL treat no arguments as equivalent to `start` with no flags.
 
-The system SHALL also accept a hidden `__dashboard` subcommand that does not appear in `--help` output. This subcommand is used internally by pane 0 to run the broker and dashboard.
+The system SHALL also accept the hidden internal subcommands `__broker`, which hosts the session's broker in its detached service surface; `__dashboard`, which renders the dashboard as a thin client of that broker in pane 0; and `__prompt-profile`, which prints one resolved CLI prompt-shape profile field for the bundled helper. None of them SHALL appear in `--help` output.
 
 #### Scenario: No arguments yields None command
 - **GIVEN** no arguments are passed
@@ -18,10 +18,15 @@ The system SHALL also accept a hidden `__dashboard` subcommand that does not app
 - **WHEN** the CLI is parsed
 - **THEN** the command SHALL be `Command::Dashboard`
 
-#### Scenario: __dashboard does not appear in help
+#### Scenario: __broker subcommand parses
+- **GIVEN** `__broker` is passed
+- **WHEN** the CLI is parsed
+- **THEN** the command SHALL be `Command::Broker`
+
+#### Scenario: Hidden subcommands do not appear in help
 - **GIVEN** `--help` is passed
 - **WHEN** the help text is rendered
-- **THEN** the output SHALL NOT contain `__dashboard`
+- **THEN** the output SHALL NOT contain `__dashboard`, `__broker` or `__prompt-profile`
 
 ### Requirement: Start subcommand with optional flags
 
