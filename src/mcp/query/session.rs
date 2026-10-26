@@ -182,4 +182,40 @@ mod tests {
         };
         assert!(session_status(&ctx).is_none());
     }
+
+    /// broker-runtime "Status surfaces carry no credential": the MCP
+    /// `get_session_status` snapshot of a session that holds a credential
+    /// does not carry it.
+    #[test]
+    fn session_status_snapshot_carries_no_authority_credential() {
+        let repo = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let canonical = repo.path().canonicalize().unwrap();
+        let credential = "5ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7";
+        std::fs::write(
+            sessions.path().join("paw-cred.json"),
+            serde_json::json!({
+                "session_name": "paw-cred",
+                "repo_path": canonical.to_string_lossy(),
+                "project_name": "cred",
+                "created_at": "2026-05-01T00:00:00Z",
+                "status": "active",
+                "worktrees": [],
+                "broker_authority": credential,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let ctx = RepoContext {
+            root: canonical,
+            git_paw_dir: None,
+            broker_url: None,
+            server_name: "git-paw".to_string(),
+        };
+        let snapshot = session_status_in(&ctx, sessions.path()).expect("the session resolves");
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(!json.contains(credential), "{json}");
+        assert!(!json.contains("broker_authority"), "{json}");
+    }
 }

@@ -267,6 +267,26 @@ pub struct BrokerState {
     /// poll. Reporting the epoch on every `/log` response lets a reader
     /// notice the change and reset its cursor.
     epoch: u64,
+    /// The session's authority credential. `/publish` accepts a verdict
+    /// message only with this value in the `X-Paw-Authority` header; `None`
+    /// fails closed (no verdict accepted). Threaded in via
+    /// [`BrokerState::with_authority`].
+    authority: Option<AuthorityCredential>,
+}
+
+/// The broker authority credential, with a `Debug` that never prints it.
+struct AuthorityCredential(String);
+
+impl std::fmt::Debug for AuthorityCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AuthorityCredential(<redacted>)")
+    }
+}
+
+/// Byte-wise equality whose running time does not depend on where the first
+/// differing byte is.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Returns the current wall-clock time in seconds since the Unix epoch, or
@@ -316,6 +336,30 @@ impl BrokerState {
                 crate::config::BrokerConfig::DEFAULT_WAVE_STALL_MINUTES * 60,
             ),
             epoch: now_unix_millis(),
+            authority: None,
+        }
+    }
+
+    /// Sets the session's authority credential, which `/publish` requires on
+    /// every verdict message. Without one the broker accepts no verdict.
+    #[must_use]
+    pub fn with_authority(mut self, credential: Option<String>) -> Self {
+        // An empty credential would match an empty header: treat it as none.
+        self.authority = credential
+            .filter(|c| !c.is_empty())
+            .map(AuthorityCredential);
+        self
+    }
+
+    /// Whether `presented` (the request's `X-Paw-Authority` value) matches
+    /// the session's credential, compared in constant time. Always `false`
+    /// when the broker has no credential or nothing was presented.
+    pub fn authorizes(&self, presented: Option<&str>) -> bool {
+        match (&self.authority, presented) {
+            (Some(AuthorityCredential(expected)), Some(presented)) => {
+                constant_time_eq(expected.as_bytes(), presented.as_bytes())
+            }
+            _ => false,
         }
     }
 

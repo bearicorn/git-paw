@@ -480,6 +480,45 @@ publish() {
   paw_publish "${BROKER}" "$1"
 }
 
+# Publish a verdict message (agent.verified, or agent.feedback from
+# supervisor), which the broker accepts only with the session authority
+# credential in the X-Paw-Authority header. The credential comes from
+# `git paw __authority` (root checkout only; never read from a file here) and
+# reaches curl as a header on STDIN (`-H @-`), so it is never on any argv,
+# never in the JSON body, and never printed. A missing credential or a
+# rejected publish exits non-zero.
+publish_verdict() {
+  local payload=$1 authority body status rc
+  if ! authority=$(git paw __authority); then
+    echo "sweep.sh: cannot read the broker authority credential; run this from the" \
+         "repository root of a running session" >&2
+    return 1
+  fi
+  body=$(mktemp "${TMPDIR:-/tmp}/paw-publish.XXXXXX") || {
+    echo "sweep.sh: cannot create a temporary file for the publish response" >&2
+    return 1
+  }
+  status=$(printf 'X-Paw-Authority: %s\n' "${authority}" | \
+    curl -sS -o "${body}" -w '%{http_code}' -X POST "${BROKER}/publish" \
+      -H "Content-Type: application/json" -H @- \
+      -d "${payload}" 2>>"${body}")
+  rc=$?
+  if [[ ${rc} -ne 0 || -z "${status}" || "${status}" == "000" ]]; then
+    echo "sweep.sh: publish to ${BROKER}/publish failed — no response from the broker" >&2
+    cat "${body}" >&2
+    rm -f "${body}"
+    return 1
+  fi
+  if [[ "${status}" != 2* ]]; then
+    echo "sweep.sh: broker rejected the publish (HTTP ${status})" >&2
+    cat "${body}" >&2
+    rm -f "${body}"
+    return 1
+  fi
+  cat "${body}"
+  rm -f "${body}"
+}
+
 cmd_snapshot() {
   require_session
   if [[ ${PANE_COUNT} -eq 0 ]]; then
@@ -852,7 +891,7 @@ print(json.dumps({
 }))
 PY
 )
-  publish "${payload}" >/dev/null || exit 1
+  publish_verdict "${payload}" >/dev/null || exit 1
   echo "feedback (${gate}) -> ${target}"
 }
 
@@ -875,7 +914,7 @@ print(json.dumps({
 }))
 PY
 )
-  publish "${payload}" >/dev/null || exit 1
+  publish_verdict "${payload}" >/dev/null || exit 1
   echo "verified: ${target}"
 }
 
@@ -922,7 +961,7 @@ PY
     # Both acks must land: the pair only stops re-escalating when each agent
     # has been told. A publish the broker rejects exits non-zero here rather
     # than letting the success line claim a delivery that did not happen.
-    publish "${payload}" >/dev/null || exit 1
+    publish_verdict "${payload}" >/dev/null || exit 1
   done
   echo "conflict-ack: ${a} + ${b} on ${file}"
 }

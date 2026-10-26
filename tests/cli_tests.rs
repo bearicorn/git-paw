@@ -302,6 +302,7 @@ fn make_session_with_worktree(
         mode: SessionMode::Bare,
         dashboard_pane: None,
         layout: None,
+        broker_authority: None,
     };
     (session, wt.path)
 }

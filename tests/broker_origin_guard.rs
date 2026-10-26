@@ -547,14 +547,15 @@ fn bundled_shell_clients_are_unaffected() {
 
     // Seed a real message into the fixture's inbox before polling. Without
     // this, a refused read is indistinguishable from an accepted empty one:
-    // `broker.sh poll` prints "(no messages)" and exits 0 either way.
+    // `broker.sh poll` prints "(no messages)" and exits 0 either way. The
+    // sender is not the root identity, so no authority credential is needed.
     let (status, _) = raw_req(
         port,
         "POST",
         "/publish",
         &format!("127.0.0.1:{port}"),
         None,
-        r#"{"type":"agent.feedback","agent_id":"feat-guard-fixture","payload":{"from":"supervisor","errors":["guard-probe-marker"]}}"#,
+        r#"{"type":"agent.feedback","agent_id":"feat-guard-fixture","payload":{"from":"guard-probe","errors":["guard-probe-marker"]}}"#,
     );
     assert_eq!(status, 202, "seeding the inbox must be accepted");
 

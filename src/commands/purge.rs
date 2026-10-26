@@ -855,6 +855,7 @@ mod tests {
             mode: crate::session::SessionMode::Bare,
             dashboard_pane: None,
             layout: None,
+            broker_authority: None,
         };
         session::save_session_in(&session, &sessions_dir).expect("save session");
 
@@ -938,6 +939,7 @@ mod tests {
             mode: crate::session::SessionMode::Bare,
             dashboard_pane: None,
             layout: None,
+            broker_authority: None,
         };
         session::save_session_in(&session, &sessions_dir).expect("save session");
 

@@ -164,10 +164,36 @@ impl BrokerClient {
     /// Returns [`PawError::SessionError`] when the broker cannot be reached or
     /// does not accept the message.
     pub fn publish(&self, msg: &BrokerMessage) -> Result<(), PawError> {
+        self.publish_with_authority(msg, None)
+    }
+
+    /// `POST /publish` of one message, carrying the session's authority
+    /// credential in the `X-Paw-Authority` header when given — required for
+    /// a verdict (`agent.verified`, or `agent.feedback` from `supervisor`).
+    ///
+    /// # Errors
+    /// Returns [`PawError::SessionError`] when the credential is not a single
+    /// header line, the broker cannot be reached, or it does not accept the
+    /// message (a verdict without a valid credential is refused with 403).
+    pub fn publish_with_authority(
+        &self,
+        msg: &BrokerMessage,
+        authority: Option<&str>,
+    ) -> Result<(), PawError> {
         let body = serde_json::to_string(msg).map_err(|e| {
             PawError::SessionError(format!("failed to serialize broker message: {e}"))
         })?;
-        let (code, _) = self.request("POST", "/publish", Some(&body), Duration::ZERO)?;
+        let header = match authority {
+            Some(value) if value.contains(['\r', '\n']) => {
+                return Err(PawError::SessionError(
+                    "broker authority credential is not a single header line".to_string(),
+                ));
+            }
+            Some(value) => format!("X-Paw-Authority: {value}\r\n"),
+            None => String::new(),
+        };
+        let (code, _) =
+            self.request_with("POST", "/publish", Some(&body), &header, Duration::ZERO)?;
         if code != 202 {
             return Err(PawError::SessionError(format!(
                 "broker rejected publish: {code}"
@@ -245,6 +271,19 @@ impl BrokerClient {
         body: Option<&str>,
         extra_wait: Duration,
     ) -> Result<(u16, String), PawError> {
+        self.request_with(method, path, body, "", extra_wait)
+    }
+
+    /// [`Self::request`] with `extra_headers` — complete `Name: value\r\n`
+    /// lines — added to the request head.
+    fn request_with(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        extra_headers: &str,
+        extra_wait: Duration,
+    ) -> Result<(u16, String), PawError> {
         let (socket_addr, addr) = self.socket_addr()?;
         let mut stream = TcpStream::connect_timeout(&socket_addr, CONNECT_TIMEOUT)
             .map_err(|e| PawError::SessionError(format!("failed to connect to broker: {e}")))?;
@@ -252,11 +291,11 @@ impl BrokerClient {
 
         let request = match body {
             Some(body) => format!(
-                "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra_headers}Connection: close\r\n\r\n{body}",
                 body.len()
             ),
             None => format!(
-                "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+                "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nAccept: application/json\r\n{extra_headers}Connection: close\r\n\r\n"
             ),
         };
         stream

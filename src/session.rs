@@ -325,6 +325,15 @@ pub struct Session {
     /// [`Session::mode`] alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<PaneLayout>,
+
+    /// Per-session broker authority credential (hex). The broker accepts a
+    /// verdict message (`agent.verified`, or `agent.feedback` from
+    /// `supervisor`) only with this value in the `X-Paw-Authority` header.
+    /// Lives only in this user-data file (written `0600`), never in the
+    /// per-repo discovery file. `None` on sessions saved before it existed
+    /// and on sessions without a broker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_authority: Option<String>,
 }
 
 impl Session {
@@ -439,13 +448,38 @@ pub fn save_session_in(session: &Session, dir: &Path) -> Result<(), PawError> {
     let final_path = dir.join(format!("{}.json", session.session_name));
     let tmp_path = dir.join(format!("{}.tmp", session.session_name));
 
-    fs::write(&tmp_path, json.as_bytes())
+    write_owner_only(&tmp_path, json.as_bytes())
         .map_err(|e| PawError::SessionError(format!("failed to write temp file: {e}")))?;
 
     fs::rename(&tmp_path, &final_path)
         .map_err(|e| PawError::SessionError(format!("failed to rename temp file: {e}")))?;
 
     Ok(())
+}
+
+/// Writes `bytes` to a fresh file at `path` with owner-only permissions
+/// (`0600`) on Unix — the session file and the hand-off carry the broker
+/// authority credential.
+///
+/// Whatever is at `path` is removed first (a symlink is unlinked, never
+/// followed), then the file is created exclusively (`O_CREAT|O_EXCL`), which
+/// refuses to follow a symlink planted in between — so the credential can
+/// never be written through a link to another file, nor inherit a wider mode.
+fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    opts.open(path)?.write_all(bytes)
 }
 
 /// Loads a session by name from the given directory.
@@ -621,6 +655,9 @@ pub fn load_all_sessions_in(dir: &Path) -> Result<Vec<Session>, PawError> {
 
 /// Deletes a session file by name from the given directory.
 pub fn delete_session_in(session_name: &str, dir: &Path) -> Result<(), PawError> {
+    // The session's authority hand-off and back-fill lock go with it.
+    let _ = fs::remove_file(authority_handoff_path_in(session_name, dir));
+    let _ = fs::remove_file(dir.join(format!("{session_name}.authority.lock")));
     let path = dir.join(format!("{session_name}.json"));
 
     match fs::remove_file(&path) {
@@ -628,6 +665,126 @@ pub fn delete_session_in(session_name: &str, dir: &Path) -> Result<(), PawError>
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
         Err(e) => Err(PawError::SessionError(format!(
             "failed to delete session file: {e}"
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Broker authority credential
+// ---------------------------------------------------------------------------
+
+/// Bytes of OS randomness in a broker authority credential (hex-encoded to
+/// twice as many characters).
+pub const AUTHORITY_BYTES: usize = 32;
+
+/// Mints a fresh broker authority credential: [`AUTHORITY_BYTES`] bytes of
+/// OS randomness, lowercase hex.
+///
+/// # Errors
+/// Returns an error when the OS randomness source cannot be read.
+pub fn mint_authority() -> Result<String, PawError> {
+    crate::random::generate_hex_token(AUTHORITY_BYTES)
+}
+
+/// The authority credential of the session whose repository is EXACTLY
+/// `repo_path`, when that session has one.
+///
+/// The one lookup every root-side verdict publisher uses (the drive loop,
+/// `git paw __authority`, root-session MCP tools).
+///
+/// # Errors
+/// Returns an error when the sessions directory cannot be read.
+pub fn authority_for_repo(repo_path: &Path) -> Result<Option<String>, PawError> {
+    Ok(find_session_for_repo(repo_path)?.and_then(|s| s.broker_authority))
+}
+
+/// Path of the one-shot hand-off file through which a launcher gives the
+/// broker host its credential: `<dir>/<session_name>.authority`.
+fn authority_handoff_path_in(session_name: &str, dir: &Path) -> PathBuf {
+    dir.join(format!("{session_name}.authority"))
+}
+
+/// Writes the one-shot authority hand-off file for `session_name` into the
+/// user-data sessions directory, owner-only (`0600`).
+///
+/// The broker host runs in a detached service surface whose command line and
+/// environment other processes can read, so the credential travels in this
+/// file instead; the host removes it once read.
+///
+/// # Errors
+/// Returns an error when the sessions directory or the file cannot be written.
+pub fn write_authority_handoff(session_name: &str, credential: &str) -> Result<(), PawError> {
+    write_authority_handoff_in(session_name, credential, &sessions_dir()?)
+}
+
+/// [`write_authority_handoff`] into an explicit directory.
+///
+/// # Errors
+/// Returns an error when the directory or the file cannot be written.
+pub fn write_authority_handoff_in(
+    session_name: &str,
+    credential: &str,
+    dir: &Path,
+) -> Result<(), PawError> {
+    fs::create_dir_all(dir)
+        .map_err(|e| PawError::SessionError(format!("failed to create sessions dir: {e}")))?;
+    write_owner_only(
+        &authority_handoff_path_in(session_name, dir),
+        credential.as_bytes(),
+    )
+    .map_err(|e| PawError::SessionError(format!("failed to write authority hand-off: {e}")))
+}
+
+/// Reads and removes the authority hand-off file for `session_name`, when
+/// there is one.
+///
+/// # Errors
+/// Returns an error when the file exists but cannot be read or removed.
+pub fn take_authority_handoff(session_name: &str) -> Result<Option<String>, PawError> {
+    take_authority_handoff_in(session_name, &sessions_dir()?)
+}
+
+/// [`take_authority_handoff`] from an explicit directory.
+///
+/// # Errors
+/// Returns an error when the file exists but cannot be read or removed.
+pub fn take_authority_handoff_in(
+    session_name: &str,
+    dir: &Path,
+) -> Result<Option<String>, PawError> {
+    let path = authority_handoff_path_in(session_name, dir);
+    let credential = match fs::read_to_string(&path) {
+        Ok(s) => s.trim().to_string(),
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(PawError::SessionError(format!(
+                "failed to read authority hand-off: {e}"
+            )));
+        }
+    };
+    discard_authority_handoff_in(session_name, dir)?;
+    Ok(Some(credential).filter(|c| !c.is_empty()))
+}
+
+/// Removes the authority hand-off file for `session_name` if it is still
+/// there — the launcher's cleanup when the host failed to start.
+///
+/// # Errors
+/// Returns an error when the file exists but cannot be removed.
+pub fn discard_authority_handoff(session_name: &str) -> Result<(), PawError> {
+    discard_authority_handoff_in(session_name, &sessions_dir()?)
+}
+
+/// [`discard_authority_handoff`] in an explicit directory.
+///
+/// # Errors
+/// Returns an error when the file exists but cannot be removed.
+pub fn discard_authority_handoff_in(session_name: &str, dir: &Path) -> Result<(), PawError> {
+    match fs::remove_file(authority_handoff_path_in(session_name, dir)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(PawError::SessionError(format!(
+            "failed to remove authority hand-off: {e}"
         ))),
     }
 }
@@ -1027,6 +1184,7 @@ mod tests {
             mode: SessionMode::Bare,
             dashboard_pane: None,
             layout: None,
+            broker_authority: None,
         }
     }
 
@@ -2267,5 +2425,131 @@ mod tests {
         let repo = TempDir::new().expect("repo");
         let result = read_repo_session_file(repo.path(), "paw-missing").expect("no error");
         assert!(result.is_none());
+    }
+
+    // -- broker-verdict-authority: session-state "Session file records the
+    //    authority credential" --
+
+    /// Scenario: Credential round-trips.
+    #[test]
+    fn broker_authority_round_trips_through_save_and_load() {
+        let dir = TempDir::new().unwrap();
+        let mut session = sample_session();
+        session.broker_authority = Some("ab".repeat(32));
+        save_session_in(&session, dir.path()).unwrap();
+
+        let loaded = load_session_from("paw-my-project", dir.path())
+            .unwrap()
+            .expect("session should exist");
+        assert_eq!(loaded.broker_authority, Some("ab".repeat(32)));
+    }
+
+    /// Scenario: Older session files load with None — and a session without
+    /// a credential serializes no `broker_authority` key.
+    #[test]
+    fn session_file_without_broker_authority_loads_as_none() {
+        let dir = TempDir::new().unwrap();
+        save_session_in(&sample_session(), dir.path()).unwrap();
+        let raw = fs::read_to_string(dir.path().join("paw-my-project.json")).unwrap();
+        assert!(!raw.contains("broker_authority"), "{raw}");
+
+        let loaded = load_session_from("paw-my-project", dir.path())
+            .unwrap()
+            .expect("an earlier-shaped file must load");
+        assert_eq!(loaded.broker_authority, None);
+    }
+
+    /// Scenario: Session file is owner-only — also when an earlier, wider
+    /// file is replaced.
+    #[cfg(unix)]
+    #[test]
+    fn saved_session_file_is_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("paw-my-project.json");
+        fs::write(&path, "{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(dir.path().join("paw-my-project.tmp"), "").unwrap();
+        fs::set_permissions(
+            dir.path().join("paw-my-project.tmp"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+
+        save_session_in(&sample_session(), dir.path()).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "session file mode was {mode:o}");
+    }
+
+    /// Scenario: Discovery file never carries the credential.
+    #[test]
+    fn discovery_file_carries_no_broker_authority() {
+        let repo = TempDir::new().expect("repo");
+        write_repo_session_file(repo.path(), &sample_repo_file()).expect("write");
+        let raw =
+            fs::read_to_string(repo_session_path(repo.path(), "paw-my-project")).expect("read");
+        assert!(!raw.contains("broker_authority"), "{raw}");
+    }
+
+    /// The hand-off file is owner-only, read once, and gone after it is read.
+    #[cfg(unix)]
+    #[test]
+    fn authority_handoff_is_owner_only_and_consumed_on_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        write_authority_handoff_in("paw-x", "cafe", dir.path()).unwrap();
+        let path = dir.path().join("paw-x.authority");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        assert_eq!(
+            take_authority_handoff_in("paw-x", dir.path()).unwrap(),
+            Some("cafe".to_string())
+        );
+        assert!(!path.exists(), "the hand-off must be removed once read");
+        assert_eq!(
+            take_authority_handoff_in("paw-x", dir.path()).unwrap(),
+            None
+        );
+    }
+
+    /// A symlink planted at the hand-off path is replaced, never followed:
+    /// its target is untouched and the credential lands in a fresh `0600`
+    /// file.
+    #[cfg(unix)]
+    #[test]
+    fn authority_handoff_never_writes_through_a_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("elsewhere.txt");
+        fs::write(&target, "original").unwrap();
+        let link = dir.path().join("paw-x.authority");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_authority_handoff_in("paw-x", "cafe", dir.path()).unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "original");
+        let meta = fs::symlink_metadata(&link).unwrap();
+        assert!(
+            meta.file_type().is_file(),
+            "the link was replaced by a file"
+        );
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read_to_string(&link).unwrap(), "cafe");
+    }
+
+    /// A discarded hand-off is gone; discarding a missing one is a no-op.
+    #[test]
+    fn discard_authority_handoff_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        discard_authority_handoff_in("paw-x", dir.path()).unwrap();
+        write_authority_handoff_in("paw-x", "cafe", dir.path()).unwrap();
+        discard_authority_handoff_in("paw-x", dir.path()).unwrap();
+        assert_eq!(
+            take_authority_handoff_in("paw-x", dir.path()).unwrap(),
+            None
+        );
     }
 }

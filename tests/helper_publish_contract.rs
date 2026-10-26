@@ -83,7 +83,8 @@ fn spawn_broker() -> (git_paw::broker::BrokerHandle, u16) {
             bind: "127.0.0.1".to_string(),
             ..Default::default()
         };
-        let state = git_paw::broker::BrokerState::new(None);
+        let state = git_paw::broker::BrokerState::new(None)
+            .with_authority(Some(TEST_AUTHORITY.to_string()));
         match git_paw::broker::start_broker(&config, state, Vec::new()) {
             Ok(handle) => return (handle, port),
             Err(_) if attempts < 10 => attempts += 1,
@@ -93,13 +94,62 @@ fn spawn_broker() -> (git_paw::broker::BrokerHandle, u16) {
 }
 
 fn run(script: &Path, repo: &Path, args: &[&str]) -> Output {
-    StdCommand::new("bash")
-        .arg(script)
+    let mut cmd = StdCommand::new("bash");
+    cmd.arg(script)
         .args(args)
         .current_dir(repo)
-        .env_remove("TMUX")
-        .output()
-        .expect("run helper")
+        .env_remove("TMUX");
+    let _home = with_root_session(&mut cmd, repo);
+    cmd.output().expect("run helper")
+}
+
+/// The authority credential the test session holds. `sweep.sh`'s verdict
+/// verbs (`verified`, `feedback-gate`, `conflict-ack`) fetch it through
+/// `git paw __authority` and send it as `X-Paw-Authority`.
+const TEST_AUTHORITY: &str = "test-authority";
+
+/// Points `cmd` at a temp `HOME` holding a session for `repo` with
+/// [`TEST_AUTHORITY`], with the built binary first on `PATH` so `git paw`
+/// resolves to it. The returned dir must outlive the command.
+fn with_root_session(cmd: &mut StdCommand, repo: &Path) -> TempDir {
+    let home = TempDir::new().expect("home");
+    let sessions = if cfg!(target_os = "macos") {
+        home.path()
+            .join("Library/Application Support/git-paw/sessions")
+    } else {
+        home.path().join(".local/share/git-paw/sessions")
+    };
+    let session = git_paw::session::Session {
+        session_name: "paw-helper-test".to_string(),
+        repo_path: git_paw::git::validate_repo(repo).expect("validate repo"),
+        project_name: "helper-test".to_string(),
+        created_at: std::time::SystemTime::UNIX_EPOCH,
+        status: git_paw::session::SessionStatus::Active,
+        worktrees: Vec::new(),
+        broker_port: None,
+        broker_bind: None,
+        broker_log_path: None,
+        mode: git_paw::session::SessionMode::Bare,
+        dashboard_pane: None,
+        layout: None,
+        broker_authority: Some(TEST_AUTHORITY.to_string()),
+    };
+    git_paw::session::save_session_in(&session, &sessions).expect("save session");
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_git-paw"))
+        .parent()
+        .expect("binary dir")
+        .to_path_buf();
+    cmd.env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+    home
 }
 
 /// Fetches `GET /log?since=0` from the broker over raw TCP and returns the

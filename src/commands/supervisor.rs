@@ -767,6 +767,15 @@ pub fn supervisor(
     // the index record for the window those panes land in.)
     let session_layout = SessionLayout::planned(SessionMode::Supervisor, broker_config.enabled);
 
+    // The per-session broker authority credential, minted before anything
+    // is launched; the host gets it through the one-shot hand-off file and
+    // the receipt saved below persists the same value.
+    let authority = if broker_config.enabled {
+        Some(session::mint_authority()?)
+    } else {
+        None
+    };
+
     // Open the session, attach session logging (no-op unless `[logging]
     // enabled`) — the supervised layout reserves pane 0 for the dashboard, so
     // coding agents start at the layout's first agent index — and even the
@@ -793,6 +802,7 @@ pub fn supervisor(
             repo_root,
             &broker_config,
             &session::broker_log_path(&session_name)?,
+            authority.as_deref(),
         ) {
             let _ = backend.close_session(&session_name);
             return Err(e);
@@ -822,6 +832,7 @@ pub fn supervisor(
         // binary" (design D6).
         dashboard_pane: session_layout.recorded_dashboard_pane(),
         layout: session_layout.recorded_pane_layout(),
+        broker_authority: authority,
     };
     if broker_config.enabled {
         state.broker_port = Some(broker_config.port);

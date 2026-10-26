@@ -487,41 +487,37 @@ The embedded `supervisor.md` skill SHALL include explicit guidance for the super
 
 ### Requirement: Supervisor skill — corrected agent.verified curl example
 
-The embedded `supervisor.md` skill's `curl` example for publishing `agent.verified` SHALL use payload field names that match the wire format defined in `broker-messages`. Specifically, the example SHALL include the substrings `verified_by` and `message` in the payload, and SHALL NOT include the substrings `target`, `result`, or `notes` (the v0.4.0 mistakes that did not match the validated wire format).
+The embedded orchestrator skill SHALL show `agent.verified` being published through the bundled helper — `.git-paw/scripts/sweep.sh verified <agent-id> <message>` — and SHALL NOT show a raw `curl … /publish` for `agent.verified`, because the broker refuses a verdict that lacks the root-session authority credential the helper attaches. The prose SHALL state that the top-level `agent_id` (the helper's first argument) is the *recipient* — the agent being verified — not the sender, and that the payload the helper builds carries `verified_by` and `message`. It SHALL NOT describe payload fields named `target`, `result`, or `notes`.
 
-The `agent_id` field at the top level of the example SHALL be the *recipient* (the agent being verified), per the existing v0.4 convention for supervisor-originated messages. The skill text SHALL clarify this so users do not put `"supervisor"` in `agent_id` (which would route the verification to the supervisor's own inbox).
+#### Scenario: Verified example uses the helper
 
-#### Scenario: Supervisor skill verified example contains correct payload fields
+- **WHEN** the embedded skill is inspected
+- **THEN** its `agent.verified` example SHALL contain `sweep.sh verified`
+- **AND** SHALL NOT contain a `curl` invocation that posts an `agent.verified` body
 
-- **WHEN** the embedded `supervisor.md` skill is inspected
-- **THEN** the `agent.verified` `curl` example contains the substring `verified_by`
-- **AND** the example contains the substring `message`
-- **AND** the example does NOT contain the substrings `target`, `result`, or `notes` as payload field names
+#### Scenario: Verified prose names the wire fields and the recipient semantics
 
-#### Scenario: Supervisor skill verified example clarifies agent_id semantics
-
-- **WHEN** the embedded `supervisor.md` skill is inspected
-- **THEN** the surrounding text or comment indicates that the top-level `agent_id` is the recipient (the agent being verified), not the sender
+- **WHEN** the embedded skill's verification section is inspected
+- **THEN** it SHALL mention `verified_by` and `message` as the payload fields the helper sends
+- **AND** SHALL state that the agent id argument is the recipient being verified
+- **AND** SHALL NOT name `target`, `result`, or `notes` as payload fields
 
 ### Requirement: Supervisor skill — corrected agent.feedback curl example
 
-The embedded `supervisor.md` skill's `curl` example for publishing `agent.feedback` SHALL use payload field names that match the wire format defined in `broker-messages`. Specifically, the example SHALL include the substrings `from` and `errors` in the payload, with `errors` shown as a JSON array of strings, and SHALL NOT include the substrings `target` or `message` as payload field names (the v0.4.0 mistakes).
+The embedded orchestrator skill SHALL show `agent.feedback` being published through the bundled helper — `.git-paw/scripts/sweep.sh feedback-gate <agent-id> <gate> <message>` — and SHALL NOT show a raw `curl … /publish` for `agent.feedback`, because the broker refuses feedback that lacks the root-session authority credential the helper attaches. The prose SHALL state that the agent id argument is the *recipient* receiving feedback, and that the payload the helper builds carries `from` and an `errors` array. It SHALL NOT describe payload fields named `target` or `message` for feedback.
 
-The `agent_id` field at the top level of the example SHALL be the *recipient* (the agent receiving feedback), per the existing v0.4 convention for `agent.feedback` delivery. The skill text SHALL clarify this so users do not put `"supervisor"` in `agent_id`.
+#### Scenario: Feedback example uses the helper
 
-#### Scenario: Supervisor skill feedback example contains correct payload fields
+- **WHEN** the embedded skill is inspected
+- **THEN** its `agent.feedback` example SHALL contain `sweep.sh feedback-gate`
+- **AND** SHALL NOT contain a `curl` invocation that posts an `agent.feedback` body
 
-- **WHEN** the embedded `supervisor.md` skill is inspected
-- **THEN** the `agent.feedback` `curl` example contains the substring `from`
-- **AND** the example contains the substring `errors`
-- **AND** the example shows `errors` as a JSON array (contains `[` and `]` brackets within the example body)
-- **AND** the example does NOT contain the substring `target` as a payload field name
-- **AND** the `agent.feedback` example does NOT contain `message` as a payload field name (it's a Verified-payload field, not Feedback)
+#### Scenario: Feedback prose names the wire fields and the recipient semantics
 
-#### Scenario: Supervisor skill feedback example clarifies agent_id semantics
-
-- **WHEN** the embedded `supervisor.md` skill is inspected
-- **THEN** the surrounding text or comment indicates that the top-level `agent_id` for `agent.feedback` is the recipient (the agent receiving feedback), not the sender
+- **WHEN** the embedded skill's feedback section is inspected
+- **THEN** it SHALL mention `from` and `errors` as the payload fields the helper sends
+- **AND** SHALL state that the agent id argument is the recipient receiving feedback
+- **AND** SHALL NOT name `target` or `message` as feedback payload fields
 
 ### Requirement: Supervisor skill prose references correct field names
 

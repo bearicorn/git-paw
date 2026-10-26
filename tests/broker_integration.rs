@@ -43,6 +43,7 @@ fn make_session_with_broker(suffix: &str) -> Session {
         mode: SessionMode::Bare,
         dashboard_pane: Some(0),
         layout: Some(git_paw::session::PaneLayout::Grid),
+        broker_authority: None,
     }
 }
 
@@ -71,6 +72,7 @@ fn make_session_without_broker(suffix: &str) -> Session {
         mode: SessionMode::Bare,
         dashboard_pane: None,
         layout: Some(git_paw::session::PaneLayout::Grid),
+        broker_authority: None,
     }
 }
 
@@ -558,7 +560,9 @@ fn full_orchestration_publish_poll_status_via_http() {
 #[test]
 #[serial]
 fn http_publish_and_poll_verified_and_feedback() {
-    let (handle, url) = spawn_test_broker_with(|| git_paw::broker::BrokerState::new(None));
+    let (handle, url) = spawn_test_broker_with(|| {
+        git_paw::broker::BrokerState::new(None).with_authority(Some("test-authority".to_string()))
+    });
 
     // Register three agents via agent.status so their inboxes exist.
     for agent in ["feat-errors", "feat-detect", "supervisor"] {
@@ -575,12 +579,17 @@ fn http_publish_and_poll_verified_and_feedback() {
         assert_eq!(status, 202);
     }
 
-    // Publish agent.verified from supervisor for feat-errors.
+    // Publish agent.verified from supervisor for feat-errors, carrying the
+    // session's authority credential (broker-protocol "Verified with the
+    // credential is accepted": 202 and broadcast exactly as before).
     let (status, _) = http_req(
         &url,
         "POST",
         "/publish",
-        &[("Content-Type", "application/json")],
+        &[
+            ("Content-Type", "application/json"),
+            ("X-Paw-Authority", "test-authority"),
+        ],
         r#"{"type":"agent.verified","agent_id":"feat-errors","payload":{"verified_by":"supervisor","message":"all tests pass"}}"#,
     );
     assert_eq!(status, 202, "verified publish should return 202");
@@ -590,7 +599,10 @@ fn http_publish_and_poll_verified_and_feedback() {
         &url,
         "POST",
         "/publish",
-        &[("Content-Type", "application/json")],
+        &[
+            ("Content-Type", "application/json"),
+            ("X-Paw-Authority", "test-authority"),
+        ],
         r#"{"type":"agent.feedback","agent_id":"feat-errors","payload":{"from":"supervisor","errors":["missing doc comment"]}}"#,
     );
     assert_eq!(status, 202, "feedback publish should return 202");

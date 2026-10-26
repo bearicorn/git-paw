@@ -26,6 +26,11 @@ fn pick_broker_port() -> u16 {
         .port()
 }
 
+/// The test broker's authority credential. Every request below carries it,
+/// as a root-side publisher would: the `[conflict-ack]` acknowledgement is
+/// `agent.feedback` from `supervisor`, a verdict.
+const TEST_AUTHORITY: &str = "test-authority";
+
 fn spawn_test_broker(conflict: Option<&ConflictConfig>) -> (broker::BrokerHandle, String) {
     let mut port = pick_broker_port();
     let mut attempts = 0;
@@ -38,7 +43,7 @@ fn spawn_test_broker(conflict: Option<&ConflictConfig>) -> (broker::BrokerHandle
         };
         match broker::start_broker_with(
             &config,
-            BrokerState::new(None),
+            BrokerState::new(None).with_authority(Some(TEST_AUTHORITY.to_string())),
             Vec::new(),
             conflict.cloned(),
             60,
@@ -65,7 +70,9 @@ fn http_request(url: &str, method: &str, path: &str, body: &str) -> (u16, String
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
-    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
+    let mut request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nX-Paw-Authority: {TEST_AUTHORITY}\r\n"
+    );
     if !body.is_empty() {
         let _ = write!(
             request,

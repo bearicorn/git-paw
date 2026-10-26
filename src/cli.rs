@@ -656,6 +656,19 @@ pub enum Command {
         log_path: std::path::PathBuf,
     },
 
+    /// Internal: print the root session's broker authority credential
+    #[command(
+        hide = true,
+        name = "__authority",
+        about = "Internal: print the session's broker authority credential",
+        long_about = "Internal subcommand used by the bundled sweep.sh helper to read the \
+                      broker authority credential that verdict messages (agent.verified, and \
+                      agent.feedback from supervisor) must carry. Prints the credential of \
+                      this repository's session; refuses from a linked worktree. Not intended \
+                      for direct invocation."
+    )]
+    Authority,
+
     /// Internal: print one resolved CLI prompt-shape profile field
     #[command(
         hide = true,
@@ -1814,7 +1827,13 @@ mod tests {
         let help = Cli::try_parse_from(["git-paw", "--help"])
             .unwrap_err()
             .to_string();
-        for hidden in ["__dashboard", "__broker", "__prompt-profile", "selftest"] {
+        for hidden in [
+            "__dashboard",
+            "__broker",
+            "__authority",
+            "__prompt-profile",
+            "selftest",
+        ] {
             assert!(
                 !help.contains(hidden),
                 "root --help must not surface internal subcommand {hidden:?}; got: {help}"
@@ -1843,6 +1862,7 @@ mod tests {
                 "/tmp/x.broker.log",
             ],
             vec!["__prompt-profile", "--field", "approval_markers"],
+            vec!["__authority"],
         ] {
             assert!(
                 Cli::try_parse_from(std::iter::once("git-paw").chain(args.iter().copied())).is_ok(),

@@ -156,7 +156,10 @@ The supervisor pane's cwd is the repo root, so use the bundled helper. The
 helper wraps the underlying `agent.verified` broker message — the top-level
 `agent_id` is the **recipient** (the agent being verified) and the payload's
 `verified_by` field names the **sender** (you, `"supervisor"`). The wire
-payload uses the `verified_by` and `message` fields exactly:
+payload uses the `verified_by` and `message` fields exactly. Never publish it
+with a raw `curl …/publish`: the broker refuses a verdict (`403 authority
+required`) unless it carries the root-session authority credential, which the
+helper attaches for you:
 
 ```bash
 .git-paw/scripts/sweep.sh verified __FILL_IN_AGENT_ID__ __FILL_IN_MESSAGE__
@@ -176,7 +179,9 @@ JSON array for the messages — the top-level `agent_id` names the
 **recipient**. Each `errors[]` entry SHALL begin with a bracketed
 gate-name prefix (`[testing]`, `[regression]`, `[spec audit]`,
 `[doc audit]`, `[security audit]`, `[scope]`, `[directive]`); the helper
-inserts the brackets for you:
+inserts the brackets for you. As with `agent.verified`, never use a raw
+`curl …/publish` — feedback from `"supervisor"` is a verdict the broker refuses
+without the root-session authority credential the helper attaches:
 
 ```bash
 .git-paw/scripts/sweep.sh feedback-gate __FILL_IN_AGENT_ID__ __FILL_IN_GATE__ __FILL_IN_MESSAGE__

@@ -68,6 +68,71 @@ fn saved_session_for(
         .filter(|sess| session::session_belongs_to_repo(sess, repo_root)))
 }
 
+/// The authority credential the host enforces, resolved in order: the
+/// launcher's one-shot hand-off file (consumed), the saved session's
+/// `broker_authority`, or — only for a saved session that predates the
+/// credential — a freshly minted one, persisted into that session before the
+/// host serves. `None` (no hand-off, no saved session) fails closed.
+fn resolve_authority(
+    session_name: &str,
+    saved: Option<&mut Session>,
+    dir: &Path,
+) -> Result<Option<String>, PawError> {
+    if let Some(handed) = session::take_authority_handoff_in(session_name, dir)? {
+        return Ok(Some(handed));
+    }
+    let Some(saved) = saved else {
+        return Ok(None);
+    };
+    // An empty value (a hand-edited or truncated receipt) is no credential.
+    if saved.broker_authority.as_deref().is_none_or(str::is_empty) {
+        // Two hosts revived together for the same older session would each
+        // mint, and the one that binds the port could enforce a value the
+        // receipt no longer holds. Serialize the back-fill and re-read the
+        // receipt under the lock, adopting what another host already saved.
+        let _guard = backfill_lock(session_name, dir)?;
+        let on_disk = session::load_session_from(session_name, dir)?
+            .and_then(|s| s.broker_authority)
+            .filter(|c| !c.is_empty());
+        if let Some(credential) = on_disk {
+            saved.broker_authority = Some(credential);
+        } else {
+            saved.broker_authority = Some(session::mint_authority()?);
+            session::save_session_in(saved, dir)?;
+        }
+    }
+    Ok(saved.broker_authority.clone())
+}
+
+/// Takes the exclusive per-session lock that serializes a credential
+/// back-fill: `<dir>/<session_name>.authority.lock`, held until the returned
+/// file drops and released by the OS if the host dies. The file holds
+/// nothing.
+fn backfill_lock(session_name: &str, dir: &Path) -> Result<std::fs::File, PawError> {
+    let path = dir.join(format!("{session_name}.authority.lock"));
+    std::fs::create_dir_all(dir)
+        .map_err(|e| PawError::SessionError(format!("failed to create sessions dir: {e}")))?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| {
+            PawError::SessionError(format!(
+                "cannot open the authority lock {}: {e}",
+                path.display()
+            ))
+        })?;
+    file.lock().map_err(|e| {
+        PawError::SessionError(format!(
+            "cannot take the authority lock {}: {e}",
+            path.display()
+        ))
+    })?;
+    Ok(file)
+}
+
 /// The watch targets of a saved session: one per worktree entry.
 fn watch_targets_of(session: Option<&Session>) -> Vec<broker::WatchTarget> {
     session
@@ -146,7 +211,11 @@ pub fn cmd_broker_host(session_name: &str, log_path: &Path) -> Result<(), PawErr
     // A saved receipt under this name exists on recovery and restart from
     // pause; a fresh launch saves its receipt only after the surfaces exist,
     // and registers its agents through `POST /watch` instead.
-    let saved_session = saved_session_for(session_name, &repo_root, &session::sessions_dir()?)?;
+    let sessions_dir = session::sessions_dir()?;
+    let mut saved_session = saved_session_for(session_name, &repo_root, &sessions_dir)?;
+    // Resolved before the broker serves, so a back-filled credential is
+    // already in the receipt when the first request can arrive.
+    let authority = resolve_authority(session_name, saved_session.as_mut(), &sessions_dir)?;
     let watch_targets = watch_targets_of(saved_session.as_ref());
 
     // A saved session's broker address wins over the current config: its
@@ -164,7 +233,8 @@ pub fn cmd_broker_host(session_name: &str, log_path: &Path) -> Result<(), PawErr
     let mut broker_state = broker::BrokerState::new(Some(log_path.to_path_buf()))
         .with_repo_root(&repo_root)
         .with_verify_on_commit_nudge(verify_on_commit_nudge)
-        .with_seeded_cli("supervisor", &supervisor_cli);
+        .with_seeded_cli("supervisor", &supervisor_cli)
+        .with_authority(authority);
 
     // The opsx role-gating context, scoped to the OpenSpec engine. The roster
     // maps each known coding worktree plus the supervisor's repo root; an
@@ -357,6 +427,7 @@ mod tests {
             mode: crate::session::SessionMode::Bare,
             dashboard_pane: None,
             layout: None,
+            broker_authority: None,
         }
     }
 
@@ -465,5 +536,105 @@ mod tests {
         let ids: Vec<&str> = targets.iter().map(|t| t.agent_id.as_str()).collect();
         assert_eq!(ids, ["feat-x", "feat-y"]);
         assert!(watch_targets_of(None).is_empty());
+    }
+
+    /// broker-runtime "Host enforces the launcher's credential": the hand-off
+    /// wins, and it is consumed.
+    #[test]
+    fn host_takes_the_handoff_credential_and_consumes_it() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut saved = receipt_with(&[]);
+        saved.broker_authority = Some("old".to_string());
+        session::write_authority_handoff_in("paw-repo", "handed", dir.path()).unwrap();
+
+        let got = resolve_authority("paw-repo", Some(&mut saved), dir.path()).unwrap();
+        assert_eq!(got.as_deref(), Some("handed"));
+        assert_eq!(
+            session::take_authority_handoff_in("paw-repo", dir.path()).unwrap(),
+            None,
+            "the hand-off must be gone once the host has read it"
+        );
+    }
+
+    /// With no hand-off, the host enforces the saved session's credential
+    /// and does not mint or re-save.
+    #[test]
+    fn host_loads_the_saved_credential_without_backfilling() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut saved = receipt_with(&[]);
+        saved.broker_authority = Some("saved".to_string());
+
+        let got = resolve_authority("paw-repo", Some(&mut saved), dir.path()).unwrap();
+        assert_eq!(got.as_deref(), Some("saved"));
+        assert!(
+            session::load_session_from("paw-repo", dir.path())
+                .unwrap()
+                .is_none(),
+            "a session that already has a credential is not re-saved"
+        );
+    }
+
+    /// broker-runtime "A session without a credential gains one": minted,
+    /// persisted (owner-only) before serving, and enforced.
+    #[test]
+    fn host_backfills_a_session_saved_without_a_credential() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut saved = receipt_with(&[]);
+        session::save_session_in(&saved, dir.path()).unwrap();
+
+        let got = resolve_authority("paw-repo", Some(&mut saved), dir.path())
+            .unwrap()
+            .expect("a back-filled credential");
+        assert_eq!(got.len(), 64);
+        let reloaded = session::load_session_from("paw-repo", dir.path())
+            .unwrap()
+            .expect("receipt");
+        assert_eq!(reloaded.broker_authority.as_deref(), Some(got.as_str()));
+    }
+
+    /// No hand-off and no saved session: no credential, so the broker fails
+    /// closed — and nothing is minted.
+    #[test]
+    fn host_without_handoff_or_session_has_no_credential() {
+        let dir = TempDir::new().expect("tempdir");
+        assert_eq!(
+            resolve_authority("paw-repo", None, dir.path()).unwrap(),
+            None
+        );
+        assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    /// A receipt holding an empty credential is back-filled like one with
+    /// none.
+    #[test]
+    fn host_backfills_an_empty_saved_credential() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut saved = receipt_with(&[]);
+        saved.broker_authority = Some(String::new());
+        let got = resolve_authority("paw-repo", Some(&mut saved), dir.path())
+            .unwrap()
+            .expect("a back-filled credential");
+        assert_eq!(got.len(), 64);
+    }
+
+    /// A back-fill racing another host's adopts the credential that host
+    /// already saved instead of minting a second one, so the host and the
+    /// receipt agree.
+    #[test]
+    fn backfill_adopts_a_credential_another_host_saved() {
+        let dir = TempDir::new().expect("tempdir");
+        // What this host loaded before the other host back-filled.
+        let mut stale = receipt_with(&[]);
+        // The receipt on disk after the other host's back-fill.
+        let mut other = receipt_with(&[]);
+        other.broker_authority = Some("other-host".to_string());
+        session::save_session_in(&other, dir.path()).unwrap();
+
+        let got = resolve_authority("paw-repo", Some(&mut stale), dir.path()).unwrap();
+        assert_eq!(got.as_deref(), Some("other-host"));
+        let on_disk = session::load_session_from("paw-repo", dir.path())
+            .unwrap()
+            .expect("receipt");
+        assert_eq!(on_disk.broker_authority.as_deref(), Some("other-host"));
     }
 }

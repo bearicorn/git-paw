@@ -45,6 +45,7 @@ fn make_session_with_broker(suffix: &str) -> Session {
         mode: SessionMode::Bare,
         dashboard_pane: Some(0),
         layout: Some(git_paw::session::PaneLayout::Grid),
+        broker_authority: None,
     }
 }
 

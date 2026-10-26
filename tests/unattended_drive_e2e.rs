@@ -599,6 +599,47 @@ fn publish_terminal(url: &str, agent: &str, status: &str) {
     let _ = publish_to_broker_http(url, &msg);
 }
 
+/// Marks `agent` verified the way only the root may: reads the session's
+/// authority credential with `git paw __authority` at the repository root
+/// (the path `sweep.sh verified` uses), under the test's isolated `HOME`, and
+/// publishes the `verified` artifact carrying it. The broker refuses that
+/// status without the credential, and `agent.verified` alone does not move
+/// the agent's roster row, which is what the drive loop's completion reads.
+fn publish_verified_as_root(url: &str, repo: &Path, home: &Path, agent: &str) {
+    // The receipt is saved once the launch's panes exist; allow for it.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let credential = loop {
+        let out = StdCommand::new(BIN)
+            .current_dir(repo)
+            .arg("__authority")
+            .env("HOME", home)
+            .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .output()
+            .expect("run git paw __authority");
+        if out.status.success() {
+            break String::from_utf8_lossy(&out.stdout).trim().to_string();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "git paw __authority found no credential: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let msg = BrokerMessage::Artifact {
+        agent_id: agent.to_string(),
+        payload: ArtifactPayload {
+            status: "verified".to_string(),
+            exports: Vec::new(),
+            modified_files: Vec::new(),
+        },
+    };
+    git_paw::broker::client::BrokerClient::new(url)
+        .publish_with_authority(&msg, Some(&credential))
+        .expect("the root's verified status is accepted");
+}
+
 /// Waits up to `budget` for `child` to exit, returning its status (or `None` on
 /// timeout, after killing it).
 fn wait_child(child: &mut Child, budget: Duration) -> Option<ExitStatus> {
@@ -1948,7 +1989,7 @@ fn unattended_records_the_escalation_on_the_broker_and_types_nothing() {
         &["question:", "feat-alpha is waiting on", "ls -la"],
         Duration::from_secs(25),
     );
-    publish_terminal(&url, "feat-alpha", "verified");
+    publish_verified_as_root(&url, tr.path(), home.path(), "feat-alpha");
 
     let status = wait_child(&mut child, Duration::from_secs(30));
     let stdout = read_to_string(&stdout_path);
@@ -2158,7 +2199,7 @@ fn unattended_escalates_a_rate_limited_worker_and_keeps_going() {
         &["question:", "feat-alpha"],
         Duration::from_secs(25),
     );
-    publish_terminal(&url, "feat-alpha", "verified");
+    publish_verified_as_root(&url, tr.path(), home.path(), "feat-alpha");
 
     let status = wait_child(&mut child, Duration::from_secs(30));
     let stdout = read_to_string(&stdout_path);

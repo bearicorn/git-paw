@@ -242,6 +242,7 @@ pub(crate) fn recover_session_detached(
             repo_root,
             &recovery_broker_config,
             log_path,
+            updated.broker_authority.as_deref(),
         ) {
             let _ = backend.close_session(&plan.name);
             session::save_session(existing)?;
@@ -527,6 +528,7 @@ mod tests {
             mode: SessionMode::Bare,
             dashboard_pane: Some(0),
             layout: None,
+            broker_authority: None,
         };
         let clis = HashMap::new();
         let (plan, layout) = recover_bare_session(

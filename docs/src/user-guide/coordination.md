@@ -46,6 +46,18 @@ none of them is affected. See
 for the threat model, the non-loopback-bind exception, and the reverse-proxy
 migration.
 
+A **verdict** message is refused on its own terms, after those checks:
+
+| Status | Body | Cause |
+|---|---|---|
+| `403` | `{"error":"authority required"}` | The message is an `agent.verified`, or an `agent.feedback` whose `from` is `supervisor`, and the request's `X-Paw-Authority` header is missing or does not match the session's authority credential. Nothing is delivered or logged. |
+
+Feedback from any other sender — the post-commit `branch-guard` hook, the
+in-process `conflict-detector`, a person — is not a verdict and needs no
+header. Root-side helpers (`sweep.sh verified`, `feedback-gate`,
+`conflict-ack`) attach the credential for you; see
+[Security Posture](./security-posture.md#broker-verdict-authority).
+
 ## Broker helper
 
 `git paw init` installs a bundled agent-side helper at
@@ -444,10 +456,18 @@ A supervisor (or the broker's auto-emitted `[conflict-detector]` voice) sends
 a list of error messages to a target agent. The target agent_id field on the
 envelope is the *receiver*; `from` inside the payload is the *sender*.
 
+Feedback from `supervisor` is a verdict: the broker refuses it without the
+session's authority credential (`403 {"error":"authority required"}`), so the
+supervisor publishes it through the helper, which attaches the credential:
+
 ```bash
-curl -s -X POST "$GIT_PAW_BROKER_URL/publish" \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.feedback","agent_id":"feat-auth","payload":{"from":"supervisor","errors":["missing rustdoc on AuthClient::new","test for HS256 path is failing"]}}'
+.git-paw/scripts/sweep.sh feedback-gate feat-auth testing "test for HS256 path is failing"
+```
+
+The wire body it sends:
+
+```json
+{"type":"agent.feedback","agent_id":"feat-auth","payload":{"from":"supervisor","errors":["[testing] test for HS256 path is failing"]}}
 ```
 
 ### Answer
@@ -471,12 +491,17 @@ curl -s -X POST "$GIT_PAW_BROKER_URL/publish" \
 
 A supervisor confirms that an agent's work has passed every verification gate.
 The `agent_id` is the agent whose work was verified; `verified_by` names the
-verifier.
+verifier. Every `agent.verified` is a verdict, refused without the session's
+authority credential, so it is published through the root-side helper:
 
 ```bash
-curl -s -X POST "$GIT_PAW_BROKER_URL/publish" \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.verified","agent_id":"feat-auth","payload":{"verified_by":"supervisor","message":"all five gates pass"}}'
+.git-paw/scripts/sweep.sh verified feat-auth "all five gates pass"
+```
+
+The wire body it sends:
+
+```json
+{"type":"agent.verified","agent_id":"feat-auth","payload":{"verified_by":"supervisor","message":"all five gates pass"}}
 ```
 
 ### Advanced Main
