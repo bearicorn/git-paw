@@ -90,17 +90,17 @@ Test: `tmux::tests::session_name_override_replaces_default`
 
 ### Requirement: Dynamic pane count matches input
 
-The number of panes in the session SHALL match the number of `PaneSpec` entries added via the builder. When broker is enabled, the builder SHALL receive an additional `PaneSpec` for the dashboard in pane 0, increasing the total pane count by one.
+The number of panes in the session's window 0 SHALL match the number of `PaneSpec` entries added via the builder. When broker is enabled, the builder SHALL receive an additional `PaneSpec` for the dashboard in pane 0, increasing the total pane count by one. A detached service window (the broker host's `broker` window) is not part of this count.
 
 #### Scenario: Two agent panes plus dashboard created
 - **GIVEN** broker is enabled and 2 agent pane specs are added
 - **WHEN** the session is built
-- **THEN** exactly 3 panes SHALL exist: pane 0 (dashboard) + panes 1-2 (agents)
+- **THEN** exactly 3 panes SHALL exist in window 0: pane 0 (dashboard) + panes 1-2 (agents)
 
 #### Scenario: Two panes without broker
 - **GIVEN** broker is disabled and 2 pane specs are added
 - **WHEN** the session is built
-- **THEN** exactly 2 panes SHALL exist (same as v0.2.0)
+- **THEN** exactly 2 panes SHALL exist in window 0 (same as v0.2.0)
 
 ### Requirement: Correct commands sent to each pane
 

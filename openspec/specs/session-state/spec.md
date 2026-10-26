@@ -611,19 +611,19 @@ of the receipt-staleness check.
 
 ### Requirement: Recovery rebuilds exactly the session's panes
 
-Recovering a stopped session SHALL rebuild exactly the panes the session defines — in a supervised session, the dashboard pane plus one pane per recorded worktree (`N + 1`). The recovery SHALL NOT create more panes than the session defines and SHALL NOT create an orchestrator pane, including when the stopped session was saved with an earlier layout.
+Recovering a stopped session SHALL rebuild in window 0 exactly the panes the session defines — in a supervised session, the dashboard pane plus one pane per recorded worktree (`N + 1`). The recovery SHALL NOT create more panes than the session defines and SHALL NOT create an orchestrator pane, including when the stopped session was saved with an earlier layout. The detached `broker` service window is recreated separately (`broker-runtime`) and is not counted.
 
 #### Scenario: Recovery of an N-worktree supervised session creates N+1 panes
 
 - **GIVEN** a stopped supervised session with 3 recorded worktrees
 - **WHEN** `git paw start` recovers it
-- **THEN** the rebuilt tmux session SHALL have exactly 4 panes (dashboard + 3 agents)
+- **THEN** window 0 of the rebuilt tmux session SHALL have exactly 4 panes (dashboard + 3 agents)
 
 #### Scenario: Recovery of a pre-relocation session rebuilds the new layout
 
 - **GIVEN** a stopped supervised session saved with `dashboard_pane = Some(1)` and 2 recorded worktrees
 - **WHEN** `git paw start` recovers it
-- **THEN** the rebuilt session SHALL have exactly 3 panes with the dashboard at pane 0
+- **THEN** window 0 of the rebuilt session SHALL have exactly 3 panes with the dashboard at pane 0
 - **AND** the re-saved session SHALL record `dashboard_pane = Some(0)`
 
 #### Scenario: Recovery that cannot fit fails cleanly
