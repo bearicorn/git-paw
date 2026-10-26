@@ -87,6 +87,7 @@ fn session_with_worktree(repo: &Path, branch: &str, wt_path: &Path) -> Session {
         mode: SessionMode::Bare,
         dashboard_pane: None,
         layout: None,
+        broker_authority: None,
     }
 }
 

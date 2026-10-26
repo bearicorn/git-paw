@@ -1121,6 +1121,23 @@ at once at its discretion. The one legitimate reason to defer a verification
 is a genuine dependency (one agent's work needs another's merge in place
 first), which the supervisor states explicitly when it defers.
 
+### Verdicts go through the helper
+
+The verdict messages — `agent.verified`, and `agent.feedback` from `supervisor`
+— need the session's authority credential, so the supervisor publishes them
+only through the root-side `sweep.sh` verbs, which fetch it with
+`git paw __authority` and send it as `X-Paw-Authority`:
+
+```bash
+.git-paw/scripts/sweep.sh verified <agent-id> "<summary>"
+.git-paw/scripts/sweep.sh feedback-gate <agent-id> <gate> "<message>"
+.git-paw/scripts/sweep.sh conflict-ack <agent-a> <agent-b> <file> ["<note>"]
+```
+
+A raw `curl …/publish` of either message gets `403 {"error":"authority required"}`,
+and so does the same verb run from inside a worktree (`__authority` refuses
+there). See [Security Posture](./security-posture.md#broker-verdict-authority).
+
 ## Recovery from API stream timeouts
 
 The supervisor's own model stream can time out mid-sweep — most often

@@ -357,6 +357,18 @@ async fn publish(
             if let Some(rejection) = check_placeholder_fields(&msg) {
                 return rejection;
             }
+            // A verdict — `agent.verified`, or `agent.feedback` claiming the
+            // root identity — needs the session's authority credential. The
+            // check runs before routing, so a refusal changes no state.
+            if is_verdict(&msg)
+                && !state.authorizes(headers.get(AUTHORITY_HEADER).and_then(|v| v.to_str().ok()))
+            {
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(serde_json::json!({"error": "authority required"})),
+                )
+                    .into_response();
+            }
             // `publish_message` is synchronous and, on the role-gating path,
             // spawns a blocking `git` subprocess. Run it on tokio's blocking
             // pool so a burst of `committed` artifacts cannot occupy every
@@ -380,6 +392,33 @@ async fn publish(
             axum::Json(serde_json::json!({"error": e.to_string()})),
         )
             .into_response(),
+    }
+}
+
+/// Request header carrying the session's broker authority credential.
+pub const AUTHORITY_HEADER: &str = "x-paw-authority";
+
+/// Whether `msg` carries the root session's authority: every
+/// `agent.verified`, `agent.feedback` whose sender is the root identity
+/// `supervisor`, and an `agent.status` or `agent.artifact` that claims the
+/// `verified` status for an agent other than `supervisor` — the roster copies
+/// that status straight into the agent's row, so it would mark the branch
+/// verified as surely as `agent.verified` does. Feedback from any other
+/// sender (the branch-guard hook, a person) and every other status are not
+/// verdicts.
+fn is_verdict(msg: &BrokerMessage) -> bool {
+    let claims_verified = |agent_id: &str, status: &str| {
+        agent_id != crate::surface::SUPERVISOR_AGENT_ID
+            && status.trim().eq_ignore_ascii_case("verified")
+    };
+    match msg {
+        BrokerMessage::Verified { .. } => true,
+        BrokerMessage::Feedback { payload, .. } => {
+            payload.from == crate::surface::SUPERVISOR_AGENT_ID
+        }
+        BrokerMessage::Status { agent_id, payload } => claims_verified(agent_id, &payload.status),
+        BrokerMessage::Artifact { agent_id, payload } => claims_verified(agent_id, &payload.status),
+        _ => false,
     }
 }
 
@@ -2479,5 +2518,270 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::FORBIDDEN, "host {host}");
             assert_eq!(body_text(resp).await, r#"{"error":"forbidden host"}"#);
         }
+    }
+
+    // -- broker-verdict-authority: broker-protocol "Verdict messages require
+    //    the root-session credential at /publish" --
+
+    const AUTHORITY: &str = "c0ffee";
+
+    /// A broker state holding [`AUTHORITY`], shared so a test can inspect the
+    /// inboxes and log after a request.
+    fn authority_state() -> Arc<BrokerState> {
+        Arc::new(BrokerState::new(None).with_authority(Some(AUTHORITY.to_string())))
+    }
+
+    /// POSTs `body` to `/publish` with an optional `X-Paw-Authority`, returning
+    /// the status and body text.
+    async fn post_authority(
+        state: &Arc<BrokerState>,
+        body: &str,
+        authority: Option<&str>,
+    ) -> (StatusCode, String) {
+        let mut req = loopback_request()
+            .method("POST")
+            .uri("/publish")
+            .header("content-type", "application/json");
+        if let Some(value) = authority {
+            req = req.header("X-Paw-Authority", value);
+        }
+        let resp = router(Arc::clone(state), true)
+            .oneshot(req.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Registers `agent` so it has an inbox a broadcast would reach.
+    async fn register(state: &Arc<BrokerState>, agent: &str) {
+        let body = format!(
+            r#"{{"type":"agent.status","agent_id":"{agent}","payload":{{"status":"working","modified_files":[]}}}}"#
+        );
+        assert_eq!(
+            post_authority(state, &body, None).await.0,
+            StatusCode::ACCEPTED
+        );
+    }
+
+    /// The number of logged messages, and of messages in `agent`'s inbox.
+    fn log_and_inbox_len(state: &BrokerState, agent: &str) -> (usize, usize) {
+        let inner = state.read();
+        (
+            inner.message_log.len(),
+            inner.queues.get(agent).map_or(0, Vec::len),
+        )
+    }
+
+    const VERIFIED: &str = r#"{"type":"agent.verified","agent_id":"feat-xx","payload":{"verified_by":"supervisor","message":"ok"}}"#;
+    const SUPERVISOR_FEEDBACK: &str = r#"{"type":"agent.feedback","agent_id":"feat-xx","payload":{"from":"supervisor","errors":["[test] failing"]}}"#;
+
+    /// Scenario: Verified without the header is refused — 403, the shape,
+    /// and no inbox or log change.
+    #[tokio::test]
+    async fn verified_without_authority_header_is_refused_and_changes_nothing() {
+        let state = authority_state();
+        register(&state, "feat-xx").await;
+        let before = log_and_inbox_len(&state, "feat-xx");
+
+        let (status, body) = post_authority(&state, VERIFIED, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json, serde_json::json!({"error": "authority required"}));
+        assert_eq!(log_and_inbox_len(&state, "feat-xx"), before);
+    }
+
+    /// Scenario: Supervisor feedback with a wrong credential is refused.
+    #[tokio::test]
+    async fn supervisor_feedback_with_wrong_credential_is_refused() {
+        let state = authority_state();
+        register(&state, "feat-xx").await;
+        let before = log_and_inbox_len(&state, "feat-xx");
+
+        let (status, body) =
+            post_authority(&state, SUPERVISOR_FEEDBACK, Some("not-the-credential")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body.contains("authority required"), "{body}");
+        assert_eq!(log_and_inbox_len(&state, "feat-xx"), before);
+    }
+
+    /// Scenario: Verified with the credential is accepted — and broadcast to
+    /// every registered agent, as before.
+    #[tokio::test]
+    async fn verified_with_credential_is_accepted_and_broadcast() {
+        let state = authority_state();
+        register(&state, "feat-xx").await;
+        register(&state, "feat-yy").await;
+
+        let (status, _) = post_authority(&state, VERIFIED, Some(AUTHORITY)).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let inner = state.read();
+        for agent in ["feat-xx", "feat-yy"] {
+            assert!(
+                inner.queues.get(agent).is_some_and(|q| q
+                    .iter()
+                    .any(|(_, m)| matches!(m, BrokerMessage::Verified { .. }))),
+                "{agent} must receive the broadcast verified"
+            );
+        }
+    }
+
+    /// Scenario: Branch-guard feedback from a worktree is still accepted.
+    #[tokio::test]
+    async fn branch_guard_feedback_without_header_is_accepted() {
+        let state = authority_state();
+        let body = r#"{"type":"agent.feedback","agent_id":"feat-xx","payload":{"from":"branch-guard","errors":["commit landed on main"]}}"#;
+        assert_eq!(
+            post_authority(&state, body, None).await.0,
+            StatusCode::ACCEPTED
+        );
+    }
+
+    /// Scenario: Non-verdict verbs are unaffected — including a status that
+    /// claims the root identity, which stays ungated.
+    #[tokio::test]
+    async fn non_verdict_verbs_need_no_authority() {
+        let state = authority_state();
+        for body in [
+            r#"{"type":"agent.status","agent_id":"feat-xx","payload":{"status":"working","modified_files":[]}}"#,
+            r#"{"type":"agent.status","agent_id":"supervisor","payload":{"status":"done","modified_files":[]}}"#,
+            r#"{"type":"agent.artifact","agent_id":"feat-xx","payload":{"status":"done","exports":[],"modified_files":[]}}"#,
+            r#"{"type":"agent.blocked","agent_id":"feat-xx","payload":{"needs":"api","from":"feat-yy"}}"#,
+            r#"{"type":"agent.question","agent_id":"feat-xx","payload":{"question":"which port?"}}"#,
+            r#"{"type":"agent.intent","agent_id":"feat-xx","payload":{"files":["src/a.rs"],"summary":"edit","valid_for_seconds":900}}"#,
+        ] {
+            let (status, resp) = post_authority(&state, body, None).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body} -> {resp}");
+        }
+    }
+
+    /// Scenario: A worker cannot self-verify — its own `agent_id`,
+    /// `verified_by = "supervisor"`, no valid header.
+    #[tokio::test]
+    async fn worker_cannot_self_verify() {
+        let state = authority_state();
+        register(&state, "feat-xx").await;
+        let (status, _) = post_authority(&state, VERIFIED, Some("")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            !state
+                .read()
+                .message_log
+                .iter()
+                .any(|(_, _, m)| matches!(m, BrokerMessage::Verified { .. })),
+            "the branch must not be marked verified"
+        );
+    }
+
+    /// Scenario: A worker cannot forge a gate failure — refused, so the drive
+    /// loop, which reads the log, has no gate-tagged feedback to start a
+    /// correction cycle from.
+    #[tokio::test]
+    async fn worker_cannot_forge_a_gate_failure() {
+        let state = authority_state();
+        let (status, _) = post_authority(&state, SUPERVISOR_FEEDBACK, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let gate_tags = vec!["test".to_string()];
+        assert!(
+            !state.read().message_log.iter().any(|(_, _, m)| match m {
+                BrokerMessage::Feedback { payload, .. } =>
+                    crate::supervisor::drive::gate_failure(payload, &gate_tags).is_some(),
+                _ => false,
+            }),
+            "no gate failure may reach the log"
+        );
+    }
+
+    /// broker-protocol "A worker cannot self-verify", through the roster: an
+    /// `agent.artifact` or `agent.status` claiming `verified` (any case or
+    /// padding) is a verdict — refused without the credential, roster row
+    /// unchanged — and accepted with it.
+    #[tokio::test]
+    async fn status_or_artifact_claiming_verified_needs_the_credential() {
+        for body in [
+            r#"{"type":"agent.artifact","agent_id":"feat-xx","payload":{"status":"verified","exports":[],"modified_files":[]}}"#,
+            r#"{"type":"agent.status","agent_id":"feat-xx","payload":{"status":" Verified ","modified_files":[]}}"#,
+        ] {
+            let state = authority_state();
+            register(&state, "feat-xx").await;
+            let row =
+                |state: &BrokerState| state.read().agents.get("feat-xx").map(|a| a.status.clone());
+            let before = row(&state);
+            let before_log = log_and_inbox_len(&state, "feat-xx");
+
+            let (status, resp) = post_authority(&state, body, None).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert!(resp.contains("authority required"), "{resp}");
+            assert_eq!(row(&state), before, "the roster row is unchanged");
+            assert_eq!(log_and_inbox_len(&state, "feat-xx"), before_log);
+
+            let (status, _) = post_authority(&state, body, Some(AUTHORITY)).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        }
+    }
+
+    /// Ordinary worker statuses stay ungated, as does a status the root
+    /// identity publishes about itself.
+    #[tokio::test]
+    async fn ordinary_statuses_and_artifacts_need_no_credential() {
+        let state = authority_state();
+        for body in [
+            r#"{"type":"agent.status","agent_id":"feat-xx","payload":{"status":"done","modified_files":[]}}"#,
+            r#"{"type":"agent.status","agent_id":"feat-xx","payload":{"status":"working","modified_files":[]}}"#,
+            r#"{"type":"agent.artifact","agent_id":"feat-xx","payload":{"status":"committed","exports":[],"modified_files":["a.rs"]}}"#,
+            r#"{"type":"agent.artifact","agent_id":"feat-xx","payload":{"status":"done","exports":[],"modified_files":[]}}"#,
+            r#"{"type":"agent.status","agent_id":"supervisor","payload":{"status":"verified","modified_files":[]}}"#,
+        ] {
+            let (status, resp) = post_authority(&state, body, None).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body} -> {resp}");
+        }
+    }
+
+    /// A broker with no credential fails closed: even a header is refused.
+    #[tokio::test]
+    async fn broker_without_credential_accepts_no_verdict() {
+        let state = Arc::new(BrokerState::new(None));
+        assert_eq!(
+            post_authority(&state, VERIFIED, Some("anything")).await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            post_authority(&state, SUPERVISOR_FEEDBACK, None).await.0,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    /// An empty credential is no credential: an empty header never matches.
+    #[tokio::test]
+    async fn empty_credential_accepts_no_verdict() {
+        let state = Arc::new(BrokerState::new(None).with_authority(Some(String::new())));
+        assert_eq!(
+            post_authority(&state, VERIFIED, Some("")).await.0,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    /// Scenario: In-process publishers are not gated.
+    #[test]
+    fn in_process_supervisor_feedback_is_delivered() {
+        let state = authority_state();
+        let status = BrokerMessage::from_json(
+            r#"{"type":"agent.status","agent_id":"feat-xx","payload":{"status":"working","modified_files":[]}}"#,
+        )
+        .unwrap();
+        delivery::publish_message(&state, &status);
+        let msg = BrokerMessage::from_json(SUPERVISOR_FEEDBACK).unwrap();
+        delivery::publish_message(&state, &msg);
+        assert!(
+            state
+                .read()
+                .queues
+                .get("feat-xx")
+                .is_some_and(|q| !q.is_empty()),
+            "an in-process publish must be delivered"
+        );
     }
 }

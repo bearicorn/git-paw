@@ -1693,6 +1693,7 @@ mod tests {
             mode: crate::session::SessionMode::Bare,
             dashboard_pane: None,
             layout: None,
+            broker_authority: None,
         }
     }
 

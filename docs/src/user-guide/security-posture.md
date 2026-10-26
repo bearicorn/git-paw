@@ -305,6 +305,65 @@ A reverse proxy that forwards the original external `Host` to the broker gets
 directly. Tunnels and port-forwards need no change — they already present a
 loopback `Host`.
 
+## Broker verdict authority
+
+Two broker messages carry the root session's authority: `agent.verified`, which
+authorises a branch to merge, and `agent.feedback` whose `from` is the root
+identity `supervisor`, which the drive loop's correction loop treats as a gate
+verdict. The broker accepts these **only** with the per-session authority
+credential that only the root session holds, sent in the `X-Paw-Authority`
+request header. Without it — or with a wrong value — `POST /publish` answers
+`403 {"error":"authority required"}` and changes no broker state. An
+`agent.status` or `agent.artifact` that claims the `verified` status for a worker
+is treated as a verdict too, since the roster would otherwise mark the branch
+verified from it. The comparison
+is constant-time, and the message body (the wire envelope) is unchanged: the
+credential travels only in the header.
+
+**Where the credential lives.** A broker-enabled `git paw start` mints 32 bytes
+of OS randomness (64 hex characters) per session and stores them in the
+user-data session file — under the platform data directory, **outside the
+repository** and so outside every worktree — which git-paw writes owner-only
+(`0600`). The launcher hands the same value to the broker host through a
+one-shot `0600` file next to it, which the host removes once read. It is never
+on a command line, in the environment, in a pane, or in a log, and it never
+appears in the per-repo discovery file, `GET /status`, `GET /log`,
+`git paw status --json`, MCP `get_session_status`, or the broker log. A session
+saved by an earlier git-paw gains a credential the first time recovery or a
+restart from pause starts its broker host.
+
+**Who carries it.** Only root-side publishers:
+
+- the unattended drive loop, for its own branch-refresh notification;
+- the `sweep.sh` verdict verbs `verified`, `feedback-gate` and `conflict-ack`,
+  which fetch it through the hidden `git paw __authority` subcommand — which
+  refuses to run from a linked worktree.
+
+No MCP tool publishes a verdict today; root-session MCP verdict tools, when they
+land, will read the same session file.
+
+The worker-side `broker.sh` has no credential-bearing verb.
+
+**Threat model.** The rule stops a mistaken or skill-misled worker — one
+following a stale example, or an LLM that decides its own work is verified —
+and a rogue worker sandboxed with home-directory **reads** denied: the
+[sandbox](./sandbox.md)'s Tier 2 (deny `$HOME`), or a Tier 1 blocklist that
+covers git-paw's data directory (`~/Library/Application Support/git-paw` on
+macOS, `$XDG_DATA_HOME/git-paw` — by default `~/.local/share/git-paw` — on
+Linux). The default sandbox profile confines writes only, so it does not hide
+the credential. A worker with home-directory read access is out of this rule's
+threat model, whether it runs unsandboxed or under the default profile: it can
+read the credential, and keeping it out is the job of the sandbox's
+read-confinement tiers.
+
+**What stays ungated.** Every non-verdict message is accepted without the
+credential, as before — including **`agent.status`, even one that claims the
+`supervisor` identity**, which can wind down the drive loop's wave early.
+Feedback from any other sender (the post-commit branch-guard hook, a person) is
+not a verdict and stays ungated, and so does one agent publishing a non-verdict
+message as another. Messages the broker's own subsystems publish in-process
+(the conflict detector, the role guard) never cross HTTP and are not gated.
+
 ## The bottom line
 
 - Treat every agent as capable of running arbitrary code as you.

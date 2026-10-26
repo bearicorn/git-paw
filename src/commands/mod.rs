@@ -33,6 +33,7 @@ use crate::error::PawError;
 pub mod add;
 pub mod approvals;
 pub mod attach;
+pub mod authority;
 pub mod broker_host;
 pub mod clis;
 pub mod completions;

@@ -202,7 +202,11 @@ pub(crate) fn broker_host_command_for(
 /// `GET /status` as this repository's broker.
 ///
 /// The host is handed the session name and log path on argv because a fresh
-/// launch saves its receipt only after the surfaces exist.
+/// launch saves its receipt only after the surfaces exist. `authority`, when
+/// given, is the session's broker authority credential: it goes to the host
+/// through the one-shot `0600` hand-off file in the user-data sessions
+/// directory — never on argv, in the environment or in the surface — and the
+/// file is removed again when the host fails to start.
 ///
 /// # Errors
 /// Returns an error naming the broker port when the surface cannot be
@@ -214,6 +218,60 @@ pub(crate) fn start_broker_host(
     repo_root: &std::path::Path,
     broker: &crate::config::BrokerConfig,
     log_path: &std::path::Path,
+    authority: Option<&str>,
+) -> Result<(), PawError> {
+    start_broker_host_in(
+        backend,
+        session,
+        repo_root,
+        broker,
+        log_path,
+        authority,
+        &crate::session::sessions_dir()?,
+        BROKER_HOST_READY_BUDGET,
+    )
+}
+
+/// [`start_broker_host`] with the hand-off file in `handoff_dir`, waiting
+/// at most `ready_budget` for the host to answer.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_broker_host_in(
+    backend: &dyn crate::terminal::TerminalBackend,
+    session: &str,
+    repo_root: &std::path::Path,
+    broker: &crate::config::BrokerConfig,
+    log_path: &std::path::Path,
+    authority: Option<&str>,
+    handoff_dir: &std::path::Path,
+    ready_budget: std::time::Duration,
+) -> Result<(), PawError> {
+    let started = spawn_broker_host(
+        backend,
+        session,
+        repo_root,
+        broker,
+        log_path,
+        authority,
+        handoff_dir,
+        ready_budget,
+    );
+    if started.is_err() && authority.is_some() {
+        let _ = crate::session::discard_authority_handoff_in(session, handoff_dir);
+    }
+    started
+}
+
+/// [`start_broker_host_in`]'s body, without the hand-off cleanup on failure.
+#[allow(clippy::too_many_arguments)]
+fn spawn_broker_host(
+    backend: &dyn crate::terminal::TerminalBackend,
+    session: &str,
+    repo_root: &std::path::Path,
+    broker: &crate::config::BrokerConfig,
+    log_path: &std::path::Path,
+    authority: Option<&str>,
+    handoff_dir: &std::path::Path,
+    ready_budget: std::time::Duration,
 ) -> Result<(), PawError> {
     // A broker for this repository already answering belongs to another
     // process — most often a host stopped a moment ago that is still
@@ -233,19 +291,24 @@ pub(crate) fn start_broker_host(
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
+    // With no credential to hand over, a hand-off left by a launcher killed
+    // mid-start must not be taken for this one: the host would enforce a
+    // value no receipt records instead of back-filling one.
+    match authority {
+        Some(credential) => {
+            crate::session::write_authority_handoff_in(session, credential, handoff_dir)?;
+        }
+        None => crate::session::discard_authority_handoff_in(session, handoff_dir)?,
+    }
     let handle = backend.spawn_service(
         session,
         BROKER_SERVICE,
         &broker_host_command(session, log_path),
         repo_root,
     )?;
-    wait_for_broker_host(
-        &broker.url(),
-        broker.port,
-        repo_root,
-        BROKER_HOST_READY_BUDGET,
-        || backend.service_alive(&handle).unwrap_or(true),
-    )
+    wait_for_broker_host(&broker.url(), broker.port, repo_root, ready_budget, || {
+        backend.service_alive(&handle).unwrap_or(true)
+    })
 }
 
 /// Polls `url` until it answers as `repo_root`'s broker, failing once
@@ -709,5 +772,79 @@ mod tests {
             matches!(fake.operations().last(), Some(Operation::Layout { .. })),
             "the grid is evened after the streams start"
         );
+    }
+
+    /// broker-runtime "A failed start persists no credential", the launcher
+    /// side: the hand-off is kept out of the host's command line and removed
+    /// by the launcher when the host never answers.
+    #[test]
+    fn a_host_that_fails_to_start_leaves_no_handoff() {
+        use crate::terminal::fake::{FakeBackend, Operation};
+
+        let repo = tempfile::TempDir::new().unwrap();
+        let handoff = tempfile::TempDir::new().unwrap();
+        let fake = FakeBackend::new();
+
+        let result = start_broker_host_in(
+            &fake,
+            "paw-x",
+            repo.path(),
+            &unanswered_broker(),
+            std::path::Path::new("/tmp/paw-x.broker.log"),
+            Some("launch-cred"),
+            handoff.path(),
+            std::time::Duration::from_millis(200),
+        );
+
+        assert!(result.is_err(), "a host that never answers fails the start");
+        assert!(
+            !handoff.path().join("paw-x.authority").exists(),
+            "the launcher removes the hand-off after a failed start"
+        );
+        let command = fake
+            .operations()
+            .into_iter()
+            .find_map(|op| match op {
+                Operation::SpawnService { command, .. } => Some(command),
+                _ => None,
+            })
+            .expect("the host was spawned");
+        assert!(!command.contains("launch-cred"), "{command}");
+    }
+
+    /// Starting a host with no credential removes a stale hand-off a killed
+    /// launcher left, so the host back-fills instead of enforcing it.
+    #[test]
+    fn a_host_started_without_a_credential_discards_a_stale_handoff() {
+        let repo = tempfile::TempDir::new().unwrap();
+        let handoff = tempfile::TempDir::new().unwrap();
+        crate::session::write_authority_handoff_in("paw-x", "stale", handoff.path()).unwrap();
+
+        let _ = start_broker_host_in(
+            &crate::terminal::fake::FakeBackend::new(),
+            "paw-x",
+            repo.path(),
+            &unanswered_broker(),
+            std::path::Path::new("/tmp/paw-x.broker.log"),
+            None,
+            handoff.path(),
+            std::time::Duration::from_millis(200),
+        );
+        assert!(!handoff.path().join("paw-x.authority").exists());
+    }
+
+    /// A broker config on a free loopback port nothing answers.
+    fn unanswered_broker() -> crate::config::BrokerConfig {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        crate::config::BrokerConfig {
+            enabled: true,
+            port,
+            bind: "127.0.0.1".to_string(),
+            ..Default::default()
+        }
     }
 }

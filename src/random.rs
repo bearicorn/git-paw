@@ -26,6 +26,29 @@ pub fn generate_uuid_v4() -> Result<String, PawError> {
     generate_uuid_v4_from(Path::new("/dev/urandom"))
 }
 
+/// Generates a hex-encoded token from `bytes` bytes of OS-provided randomness
+/// (`2 * bytes` lowercase hex characters).
+///
+/// Used for the per-session broker authority credential. Returns `Err`
+/// rather than panicking when `/dev/urandom` cannot be read, as
+/// [`generate_uuid_v4`] does.
+pub fn generate_hex_token(bytes: usize) -> Result<String, PawError> {
+    generate_hex_token_from(Path::new("/dev/urandom"), bytes)
+}
+
+/// [`generate_hex_token`] parameterised on the randomness source.
+fn generate_hex_token_from(source: &Path, bytes: usize) -> Result<String, PawError> {
+    use std::fmt::Write;
+    let mut buf = vec![0u8; bytes];
+    std::fs::File::open(source)?.read_exact(&mut buf)?;
+    Ok(buf
+        .iter()
+        .fold(String::with_capacity(bytes * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        }))
+}
+
 /// [`generate_uuid_v4`]'s implementation, parameterised on the randomness
 /// source so the unreadable-source path is unit-testable without touching
 /// the real `/dev/urandom`.
@@ -60,7 +83,9 @@ fn generate_uuid_v4_from(source: &Path) -> Result<String, PawError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{generate_uuid_v4, generate_uuid_v4_from};
+    use super::{
+        generate_hex_token, generate_hex_token_from, generate_uuid_v4, generate_uuid_v4_from,
+    };
     use std::path::Path;
 
     /// Spec scenario groundwork: the id must match the v4 UUID shape
@@ -115,6 +140,28 @@ mod tests {
         assert!(
             result.is_err(),
             "an unreadable source must return Err, not panic or succeed"
+        );
+    }
+
+    /// A 32-byte token is 64 lowercase hex characters, and two draws differ.
+    #[test]
+    fn hex_token_is_lowercase_hex_of_twice_the_byte_count_and_distinct() {
+        let a = generate_hex_token(32).expect("/dev/urandom is readable");
+        let b = generate_hex_token(32).expect("/dev/urandom is readable");
+        assert_eq!(a.len(), 64, "{a}");
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "{a}"
+        );
+        assert_ne!(a, b);
+    }
+
+    /// An unreadable source yields a handled `Err` for the token too.
+    #[test]
+    fn hex_token_from_unreadable_source_returns_error() {
+        assert!(
+            generate_hex_token_from(Path::new("/nonexistent/git-paw-random-test"), 32).is_err()
         );
     }
 }

@@ -303,3 +303,38 @@ fn chapters_are_linked_in_summary() {
         "SUMMARY.md must link the FS-Scoped Sandbox chapter"
     );
 }
+
+// Scenario (broker-verdict-authority): Posture chapter names the rule and its
+// limits — verdicts need the root-session credential, the credential lives
+// outside the repository, an unsandboxed home-reading worker is out of the
+// threat model (the sandbox's job), and `agent.status` — even one claiming
+// `supervisor` — stays ungated.
+#[test]
+fn posture_chapter_names_verdict_authority_rule_and_limits() {
+    let posture = read("docs/src/user-guide/security-posture.md");
+    let start = posture
+        .find("## Broker verdict authority")
+        .expect("security-posture.md needs a `## Broker verdict authority` section");
+    let rest = &posture[start..];
+    let end = rest[3..].find("\n## ").map_or(rest.len(), |i| i + 3);
+    let section: String = rest[..end].split_whitespace().collect::<Vec<_>>().join(" ");
+
+    let missing = contains_all(
+        &section,
+        &[
+            "`agent.verified`",
+            "`agent.feedback` whose `from` is the root identity `supervisor`",
+            "per-session authority credential",
+            "X-Paw-Authority",
+            "outside the repository",
+            "unsandboxed",
+            "home-directory read access is out of this rule's threat model",
+            "sandbox",
+            "`agent.status`, even one that claims the `supervisor` identity",
+        ],
+    );
+    assert!(
+        missing.is_empty(),
+        "verdict-authority section is missing: {missing:?}"
+    );
+}

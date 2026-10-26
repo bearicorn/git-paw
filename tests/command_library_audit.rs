@@ -227,9 +227,16 @@ fn main_rs_holds_no_command_body() {
     let code = production_code(&source);
 
     // The entry-layer functions allowed by name: the hidden `__prompt-profile`
-    // helper, the `setup-cli` plan print and confirmation, and the thin
-    // `__dashboard` client.
-    let allowed = ["cmd_prompt_profile", "cmd_setup_cli", "cmd_dashboard"];
+    // helper, the `setup-cli` plan print and confirmation, the thin
+    // `__dashboard` client, and the hidden `__authority` print — its lookup
+    // is `git_paw::commands::authority`; only the print of the credential
+    // stays here, deliberately outside the command `Output` sink.
+    let allowed = [
+        "cmd_prompt_profile",
+        "cmd_setup_cli",
+        "cmd_dashboard",
+        "cmd_authority",
+    ];
     let cmd_fn = Regex::new(r"\bfn (cmd_\w+)").expect("valid pattern");
     let extra: Vec<&str> = cmd_fn
         .captures_iter(&code)

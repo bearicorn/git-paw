@@ -76,6 +76,7 @@ fn receipt(
         mode: SessionMode::Bare,
         dashboard_pane: None,
         layout: None,
+        broker_authority: None,
     }
 }
 

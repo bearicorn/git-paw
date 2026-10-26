@@ -251,6 +251,7 @@ fn run(command: Command) -> Result<(), PawError> {
         Command::Broker { session, log_path } => {
             commands::broker_host::cmd_broker_host(&session, &log_path)
         }
+        Command::Authority => cmd_authority(),
         Command::PromptProfile { cli, field } => cmd_prompt_profile(cli.as_deref(), &field),
         Command::Init => git_paw::init::run_init(),
         Command::Replay {
@@ -314,6 +315,17 @@ impl Output for CliOutput {
     fn warn(&mut self, text: &str) {
         eprintln!("{text}");
     }
+}
+
+/// `git paw __authority`: prints the session's broker authority credential
+/// to stdout — the only place it is ever printed.
+fn cmd_authority() -> Result<(), PawError> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
+    let credential =
+        commands::authority::authority(&git_paw::command_runner::RealCommandRunner, &cwd)?;
+    println!("{credential}");
+    Ok(())
 }
 
 /// Resolves the repository the command runs against from the current working

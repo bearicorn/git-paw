@@ -371,6 +371,15 @@ pub fn start(
     // boot-block pane targets — comes from this one layout record.
     let layout = SessionLayout::planned(SessionMode::Bare, broker_config.enabled);
 
+    // The per-session broker authority credential, minted before anything
+    // is launched; the host gets it through the one-shot hand-off file and
+    // the receipt saved below persists the same value.
+    let authority = if broker_config.enabled {
+        Some(session::mint_authority()?)
+    } else {
+        None
+    };
+
     // Open the session, attach session logging (no-op unless `[logging]
     // enabled`) at the layout's agent offset, and even the grid's columns.
     launch_session(&backend, &plan, &layout, Some((&config, &repo_root)), out)?;
@@ -389,6 +398,7 @@ pub fn start(
             &repo_root,
             &broker_config,
             &session::broker_log_path(&session_name)?,
+            authority.as_deref(),
         ) {
             let _ = backend.close_session(&session_name);
             return Err(e);
@@ -418,6 +428,7 @@ pub fn start(
         // needs no broker guard of its own.
         dashboard_pane: layout.recorded_dashboard_pane(),
         layout: layout.recorded_pane_layout(),
+        broker_authority: authority,
     };
 
     if broker_config.enabled {
@@ -860,6 +871,15 @@ fn launch_spec_session(
     // prompt targets — comes from this one layout record.
     let layout = SessionLayout::planned(SessionMode::Bare, broker_config.enabled);
 
+    // The per-session broker authority credential, minted before anything
+    // is launched; the host gets it through the one-shot hand-off file and
+    // the receipt saved below persists the same value.
+    let authority = if broker_config.enabled {
+        Some(session::mint_authority()?)
+    } else {
+        None
+    };
+
     // Open the session, attach session logging (no-op unless `[logging]
     // enabled`; agent indices shift by 1 when the broker's dashboard occupies
     // pane 0), and even the grid's columns.
@@ -879,6 +899,7 @@ fn launch_spec_session(
             repo_root,
             &broker_config,
             &session::broker_log_path(&session_name)?,
+            authority.as_deref(),
         ) {
             let _ = backend.close_session(&session_name);
             return Err(e);
@@ -908,6 +929,7 @@ fn launch_spec_session(
         // needs no broker guard of its own.
         dashboard_pane: layout.recorded_dashboard_pane(),
         layout: layout.recorded_pane_layout(),
+        broker_authority: authority,
     };
 
     if broker_config.enabled {
@@ -1125,7 +1147,20 @@ pub(crate) fn restart_from_pause_detached(
             repo_root,
             &recorded,
             log_path,
+            existing.broker_authority.as_deref(),
         )?;
+        // A session saved before the authority credential existed has none:
+        // the host just minted one and saved it into the receipt before
+        // serving. Keep it, rather than writing the pre-host copy back below.
+        if updated
+            .broker_authority
+            .as_deref()
+            .is_none_or(str::is_empty)
+        {
+            updated.broker_authority =
+                session::load_session_from(&existing.session_name, &session::sessions_dir()?)?
+                    .and_then(|saved| saved.broker_authority);
+        }
 
         // Pause leaves the dashboard running; it reconnects on its own once
         // the host answers. Only a session paused before the host split —

@@ -248,3 +248,90 @@ fn discovery_file_fixtures_never_use_the_global_session_shape() {
          `branch_id` / `worktree_path` / `cli` / `pane_index` instead: {offenders:?}"
     );
 }
+
+/// Reads a bundled script under `assets/scripts/`.
+fn bundled_script(name: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("scripts")
+        .join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// `broker-agent-helper` "Root-side helper verbs carry the authority
+/// credential": every verdict verb publishes through `publish_verdict`, which
+/// takes the credential from `git paw __authority` and sends it as the
+/// `X-Paw-Authority` header on curl's stdin — never on argv, never in the JSON
+/// body, never read from the session file by the script itself.
+#[test]
+fn verdict_verbs_carry_the_authority_header() {
+    let body = bundled_script("sweep.sh");
+    let helper = extract_function(&body, "publish_verdict");
+    assert!(
+        helper.contains("git paw __authority"),
+        "publish_verdict must fetch the credential via `git paw __authority`:\n{helper}"
+    );
+    assert!(
+        helper.contains("X-Paw-Authority"),
+        "publish_verdict must send the X-Paw-Authority header:\n{helper}"
+    );
+    assert!(
+        helper.contains("-H @-"),
+        "the header must reach curl on stdin, not argv:\n{helper}"
+    );
+    for verb in ["cmd_verified", "cmd_feedback_gate", "cmd_conflict_ack"] {
+        let func = extract_function(&body, verb);
+        assert!(
+            func.contains("publish_verdict \"${payload}\""),
+            "{verb} must publish through publish_verdict:\n{func}"
+        );
+        assert!(
+            !func.contains("authority"),
+            "{verb} must not handle the credential itself:\n{func}"
+        );
+    }
+    assert!(
+        !body.contains("broker_authority"),
+        "sweep.sh must not read the session file's credential directly"
+    );
+}
+
+/// `broker-agent-helper` "broker.sh has no credential verb": the worker-side
+/// helper offers no `verified` / `feedback` subcommand and references no
+/// authority credential.
+#[test]
+fn broker_sh_has_no_credential_verb() {
+    let body = bundled_script("broker.sh");
+    let lower = body.to_lowercase();
+    assert!(
+        !lower.contains("authority"),
+        "broker.sh must reference no authority credential"
+    );
+    for verb in ["verified)", "feedback)", "feedback-gate)"] {
+        assert!(
+            !body.contains(verb),
+            "broker.sh must not dispatch a `{verb}` subcommand"
+        );
+    }
+    let out = std::process::Command::new("bash")
+        // Relative, so the usage line's `$0` carries no checkout path.
+        .arg("broker.sh")
+        .arg("--help")
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts"))
+        .output()
+        .expect("run broker.sh --help");
+    // The help names the resolved project root; drop the checkout path so a
+    // worktree directory name cannot read as a verb.
+    let help = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+    .replace(env!("CARGO_MANIFEST_DIR"), "<checkout>");
+    for word in ["verified", "feedback", "authority"] {
+        assert!(
+            !help.to_lowercase().contains(word),
+            "broker.sh --help must list no `{word}` verb: {help}"
+        );
+    }
+}

@@ -76,6 +76,7 @@ fn receipt(session_name: &str, repo_path: &Path, status: SessionStatus) -> Sessi
         mode: SessionMode::Bare,
         dashboard_pane: None,
         layout: None,
+        broker_authority: None,
     }
 }
 

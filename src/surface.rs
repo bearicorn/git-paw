@@ -788,6 +788,7 @@ mod tests {
             mode: SessionMode::Bare,
             dashboard_pane: None,
             layout: Some(PaneLayout::Grid),
+            broker_authority: None,
         };
 
         let supervised_session = Session {
@@ -850,6 +851,7 @@ mod tests {
             mode: SessionMode::Bare,
             dashboard_pane: Some(0),
             layout: None,
+            broker_authority: None,
         };
 
         // mode, recorded layout, is_legacy_tiled

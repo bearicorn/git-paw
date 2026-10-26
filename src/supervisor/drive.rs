@@ -2714,6 +2714,26 @@ impl ManualDecisionSink for RecorderManualDecisionSink {
 struct GitBranchRefresher {
     repo_root: PathBuf,
     broker_url: Option<String>,
+    /// The session's broker authority credential, attached to the
+    /// notification (a verdict: `agent.feedback` from `supervisor`).
+    authority: Option<String>,
+}
+
+impl GitBranchRefresher {
+    /// The production refresher for the session of `repo_root`, carrying
+    /// that session's authority credential from the receipts in
+    /// `sessions_dir`. The loop starts after the receipt is saved, so the
+    /// credential is already there.
+    fn for_session(repo_root: &Path, broker_url: Option<String>, sessions_dir: &Path) -> Self {
+        Self {
+            repo_root: repo_root.to_path_buf(),
+            broker_url,
+            authority: crate::session::find_session_for_repo_in(repo_root, sessions_dir)
+                .ok()
+                .flatten()
+                .and_then(|s| s.broker_authority),
+        }
+    }
 }
 
 impl BranchRefresher for GitBranchRefresher {
@@ -2758,7 +2778,11 @@ impl BranchRefresher for GitBranchRefresher {
                 )],
             },
         };
-        if let Err(e) = crate::broker::publish::publish_to_broker_http(url, &msg) {
+        // Feedback from `supervisor` is a verdict: it carries the session's
+        // authority credential.
+        if let Err(e) = crate::broker::client::BrokerClient::new(url)
+            .publish_with_authority(&msg, self.authority.as_deref())
+        {
             eprintln!("drive: failed to publish branch-refresh notification for {agent_id}: {e}");
         }
     }
@@ -2910,10 +2934,14 @@ pub fn run_drive_loop(
         repo_root: repo_root.to_path_buf(),
         seen: std::collections::HashSet::new(),
     };
-    let mut refresher = GitBranchRefresher {
-        repo_root: repo_root.to_path_buf(),
+    // No resolvable data directory leaves the refresher without a
+    // credential (its notification is then refused) rather than failing the
+    // whole loop.
+    let mut refresher = GitBranchRefresher::for_session(
+        repo_root,
         broker_url,
-    };
+        &crate::session::sessions_dir().unwrap_or_default(),
+    );
 
     let config = DriveConfig {
         // Poll cadence and heartbeat default to the production constants but
@@ -8208,6 +8236,7 @@ mod tests {
             mode: crate::session::SessionMode::Supervisor,
             dashboard_pane: Some(1),
             layout: None,
+            broker_authority: None,
         };
         let trace = trace_one_sweep(
             SessionLayout::of(&legacy),
@@ -9119,6 +9148,7 @@ mod tests {
         let mut refresher = GitBranchRefresher {
             repo_root: repo_root.clone(),
             broker_url: None,
+            authority: None,
         };
         let mut deps = DriveDeps {
             enumerator: &enumerator,
@@ -9149,6 +9179,86 @@ mod tests {
         assert_eq!(
             main_head, feat_head,
             "feat/example must be rebased onto main's latest commit"
+        );
+    }
+
+    /// broker-runtime "The drive loop's branch-refresh notification is
+    /// accepted": the refresher's `agent.feedback` from `supervisor` carries
+    /// the session credential, so a broker enforcing it accepts the
+    /// notification and delivers it — and without the credential it would not.
+    #[test]
+    fn branch_refresh_notification_carries_the_authority_credential() {
+        use crate::broker::{BrokerState, start_broker};
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let config = crate::config::BrokerConfig {
+            enabled: true,
+            port,
+            bind: "127.0.0.1".to_string(),
+            ..Default::default()
+        };
+        let handle = start_broker(
+            &config,
+            BrokerState::new(None).with_authority(Some("drive-cred".to_string())),
+            Vec::new(),
+        )
+        .expect("start broker");
+
+        let delivered = |authority: Option<&str>| {
+            let before = handle.state.read().message_log.len();
+            let mut refresher = GitBranchRefresher {
+                repo_root: PathBuf::from("/repo"),
+                broker_url: Some(handle.url.clone()),
+                authority: authority.map(str::to_string),
+            };
+            refresher.notify("feat-a", "main");
+            handle.state.read().message_log.len() > before
+        };
+        assert!(
+            !delivered(None),
+            "without the credential the notification is refused"
+        );
+        assert!(
+            delivered(Some("drive-cred")),
+            "with the credential the notification is accepted"
+        );
+    }
+
+    /// The loop's production refresher carries the credential the session
+    /// receipt for its repository records, and none when there is no receipt.
+    #[test]
+    fn production_refresher_reads_the_session_credential() {
+        let sessions = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let mut receipt = crate::session::Session {
+            session_name: "paw-drive".to_string(),
+            repo_path: repo.path().to_path_buf(),
+            project_name: "drive".to_string(),
+            created_at: std::time::UNIX_EPOCH,
+            status: crate::session::SessionStatus::Active,
+            worktrees: Vec::new(),
+            broker_port: None,
+            broker_bind: None,
+            broker_log_path: None,
+            mode: crate::session::SessionMode::Supervisor,
+            dashboard_pane: None,
+            layout: None,
+            broker_authority: None,
+        };
+        assert_eq!(
+            GitBranchRefresher::for_session(repo.path(), None, sessions.path()).authority,
+            None
+        );
+        receipt.broker_authority = Some("drive-cred".to_string());
+        crate::session::save_session_in(&receipt, sessions.path()).unwrap();
+        assert_eq!(
+            GitBranchRefresher::for_session(repo.path(), None, sessions.path())
+                .authority
+                .as_deref(),
+            Some("drive-cred")
         );
     }
 
@@ -9200,6 +9310,7 @@ mod tests {
         let mut refresher = GitBranchRefresher {
             repo_root: repo_root.clone(),
             broker_url: None,
+            authority: None,
         };
         let mut deps = DriveDeps {
             enumerator: &enumerator,
