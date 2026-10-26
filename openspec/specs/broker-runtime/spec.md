@@ -562,17 +562,19 @@ When `[broker] enabled = false` (or absent), the start flow SHALL behave identic
 
 The dashboard pane is in both cases a non-interactive TUI process; it does NOT receive a `tmux send-keys` boot block injection, and it sends no keystrokes to any other pane.
 
+The panes above are the panes of the session's window 0. When the broker is enabled the session also has a detached `broker` service window holding the broker host; it holds no agent and is not counted among the session's panes.
+
 #### Scenario: Broker enabled in bare-start mode adds dashboard as pane 0
 
 - **GIVEN** `[broker]\nenabled = true` in config and no supervisor mode
 - **WHEN** `git paw start` launches a session with 3 branches
-- **THEN** the tmux session has 4 panes: pane 0 running `git paw __dashboard`, panes 1-3 running coding CLIs
+- **THEN** window 0 of the tmux session has 4 panes: pane 0 running `git paw __dashboard`, panes 1-3 running coding CLIs
 
 #### Scenario: Broker enabled in supervised mode also places dashboard at pane 0
 
 - **GIVEN** `[broker]\nenabled = true` and `[supervisor]\nenabled = true` in config
 - **WHEN** `git paw start --supervisor` launches a session with 3 branches
-- **THEN** the tmux session has 4 panes
+- **THEN** window 0 of the tmux session has 4 panes
 - **AND** pane 0 SHALL be the dashboard (`git paw __dashboard`)
 - **AND** panes 1-3 SHALL be the coding CLIs
 
@@ -580,7 +582,7 @@ The dashboard pane is in both cases a non-interactive TUI process; it does NOT r
 
 - **GIVEN** no `[broker]` section in config (or `enabled = false`)
 - **WHEN** `git paw start` launches a session with 3 branches
-- **THEN** the tmux session has 3 panes, all running coding CLIs (same as v0.2.0)
+- **THEN** window 0 of the tmux session has 3 panes, all running coding CLIs (same as v0.2.0)
 
 #### Scenario: Dashboard pane title
 
