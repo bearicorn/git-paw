@@ -1,11 +1,33 @@
 //! `git paw approvals` — reports the manually-approved command patterns for a
-//! session. Extracted verbatim from `main.rs` (code-analysis-refactor R2b).
+//! session.
 
 use std::path::Path;
 
-use git_paw::error::PawError;
-use git_paw::git;
-use git_paw::session;
+use crate::error::PawError;
+use crate::git;
+use crate::session;
+
+use super::{CommandContext, Output};
+
+/// Options for [`approvals`]: the `git paw approvals` flags.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApprovalsOptions {
+    /// `--session`: the session to report on, else the repository's.
+    pub session: Option<String>,
+    /// `--limit`: report at most this many patterns.
+    pub limit: Option<usize>,
+    /// `--json`: render JSON instead of the text table.
+    pub json: bool,
+}
+
+/// What [`approvals`] reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalsOutcome {
+    /// The session reported on.
+    pub session_name: String,
+    /// How many patterns were reported.
+    pub patterns: usize,
+}
 
 /// Resolves which session's manual-approval log to read.
 ///
@@ -34,16 +56,24 @@ fn resolve_approvals_session(
 /// applies the promotion-target heuristic, sorts by descending count, and
 /// renders either a text table (default) or JSON (`--json`). An empty/missing
 /// log produces an empty result without error.
-pub(crate) fn cmd_approvals(
-    session_flag: Option<&str>,
-    limit: Option<usize>,
-    json: bool,
-) -> Result<(), PawError> {
-    use git_paw::supervisor::manual_approvals::{self, AggregatedApproval, Suggestion};
+///
+/// # Errors
+///
+/// Returns an error when no session can be named or the log cannot be read.
+pub fn approvals(
+    ctx: &CommandContext,
+    opts: ApprovalsOptions,
+    out: &mut dyn Output,
+) -> Result<ApprovalsOutcome, PawError> {
+    use crate::supervisor::manual_approvals::{self, AggregatedApproval, Suggestion};
 
-    let cwd = std::env::current_dir()
-        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
-    let repo_root = git::validate_repo(&cwd)?;
+    let ApprovalsOptions {
+        session: session_flag,
+        limit,
+        json,
+    } = opts;
+    let session_flag = session_flag.as_deref();
+    let repo_root = ctx.repo_root().to_path_buf();
     let session_name = resolve_approvals_session(&repo_root, session_flag)?;
     let project_name = git::project_name(&repo_root);
 
@@ -64,6 +94,10 @@ pub(crate) fn cmd_approvals(
             (r, s)
         })
         .collect();
+    let outcome = ApprovalsOutcome {
+        session_name: session_name.clone(),
+        patterns: classified.len(),
+    };
 
     if json {
         let approvals: Vec<serde_json::Value> = classified
@@ -78,21 +112,22 @@ pub(crate) fn cmd_approvals(
                 })
             })
             .collect();
-        let out = serde_json::json!({
+        let body = serde_json::json!({
             "session": session_name,
             "approvals": approvals,
         });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out)
-                .map_err(|e| PawError::SessionError(format!("failed to serialize JSON: {e}")))?
+        out.line(
+            &serde_json::to_string_pretty(&body)
+                .map_err(|e| PawError::SessionError(format!("failed to serialize JSON: {e}")))?,
         );
-        return Ok(());
+        return Ok(outcome);
     }
 
     if classified.is_empty() {
-        println!("no manual approvals recorded for session '{session_name}'");
-        return Ok(());
+        out.line(&format!(
+            "no manual approvals recorded for session '{session_name}'"
+        ));
+        return Ok(outcome);
     }
 
     // Text table: PATTERN / COUNT / SUGGEST, columns sized to content.
@@ -109,14 +144,17 @@ pub(crate) fn cmd_approvals(
         .unwrap_or(0)
         .max("COUNT".len());
 
-    println!("{:<pattern_w$}  {:>count_w$}  SUGGEST", "PATTERN", "COUNT");
+    out.line(&format!(
+        "{:<pattern_w$}  {:>count_w$}  SUGGEST",
+        "PATTERN", "COUNT"
+    ));
     for (r, s) in &classified {
-        println!(
+        out.line(&format!(
             "{:<pattern_w$}  {:>count_w$}  {}",
             r.pattern,
             r.count,
             s.label()
-        );
+        ));
     }
-    Ok(())
+    Ok(outcome)
 }

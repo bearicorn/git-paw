@@ -1675,8 +1675,8 @@ fn supervisor_submit_argv_pair_preserves_prompt_with_newlines_and_quotes() {
 }
 
 // Maps to scenario `Launch flow sends exactly one Enter per pane`
-// (cmd_supervisor invariant) from prompt-submit-fix. The
-// `submit_prompt_to_pane` helper in main.rs sends prompt + one Enter
+// (supervised-launch invariant) from prompt-submit-fix. The
+// `submit_prompt_to_pane` helper in commands/launch.rs sends prompt + one Enter
 // per pane and is shaped identically to the FIRST argv returned by
 // `build_supervisor_submit_argv_pair`. We count Enter tokens across
 // the first-argv portion of N=3 invocations to lock in the
@@ -2052,7 +2052,7 @@ fn supervisor_sets_default_size_after_new_session() {
 // (test-coverage-v0-5-0 task 12.1)
 #[test]
 fn bare_start_with_broker_places_dashboard_at_pane_0() {
-    // Mirror cmd_start with broker enabled: dashboard first, then agents.
+    // Mirror commands::start::start with broker enabled: dashboard first, then agents.
     let session = TmuxSessionBuilder::new("proj")
         .dashboard(make_pane("dashboard", "/repo", "git-paw __dashboard"))
         .add_pane(make_pane("feat/a", "/tmp/wt-a", "claude"))

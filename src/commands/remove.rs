@@ -1,35 +1,71 @@
 //! `git paw remove <branch>` — detach a single agent from a running
-//! grid session (bare or supervised). Extracted verbatim from `main.rs`
-//! (code-analysis-refactor R2c).
-//!
-//! `detach_worktree` (shared with the purge cluster, relocated in R2b) and
-//! `write_repo_discovery_file` remain in `main.rs` and are referenced through
-//! the crate root.
+//! grid session (bare or supervised), tearing its worktree down through the
+//! same `detach_worktree` purge uses.
 
-use git_paw::agents;
-use git_paw::error::PawError;
-use git_paw::git;
-use git_paw::session;
-use git_paw::surface::SessionLayout;
-use git_paw::terminal::tmux::TmuxBackend;
-use git_paw::terminal::{GridGeometry, TerminalBackend};
-use git_paw::tmux;
+use crate::agents;
+use crate::error::PawError;
+use crate::git;
+use crate::session;
+use crate::surface::SessionLayout;
+use crate::terminal::tmux::TmuxBackend;
+use crate::terminal::{GridGeometry, TerminalBackend};
+use crate::tmux;
 
 use super::helpers::{agent_pane_offset, legacy_tiled_layout_unsupported};
-use crate::{detach_worktree, write_repo_discovery_file};
+use super::launch::write_repo_discovery_file;
+use super::purge::BranchFate;
+use super::purge::detach_worktree;
+use super::{CommandContext, Output};
+
+/// Options for [`remove`]: the `git paw remove` arguments.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoveOptions {
+    /// The agent's branch.
+    pub branch: String,
+    /// `--keep-worktree`: detach the pane, leave the worktree on disk.
+    pub keep_worktree: bool,
+    /// `--force`: remove despite uncommitted changes.
+    pub force: bool,
+}
+
+/// What [`remove`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveOutcome {
+    /// The session the agent left.
+    pub session_name: String,
+    /// The branch removed.
+    pub branch: String,
+    /// The fate of the branch when git-paw created it and the worktree was
+    /// removed; `None` with `--keep-worktree` or for a pre-existing branch.
+    pub branch_fate: Option<BranchFate>,
+}
 
 /// `git paw remove <branch>` — detach a single agent from a running session
 /// (capability `remove-branch`).
+///
+/// # Errors
+///
+/// Returns an error when the branch is the supervisor or not an agent, the
+/// worktree has uncommitted changes (without `force` / `keep_worktree`), or a
+/// tmux or session-state operation fails.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Result<(), PawError> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
-    let repo_root = git::validate_repo(&cwd)?;
+pub fn remove(
+    ctx: &CommandContext,
+    opts: RemoveOptions,
+    out: &mut dyn Output,
+) -> Result<RemoveOutcome, PawError> {
+    let RemoveOptions {
+        branch,
+        keep_worktree,
+        force,
+    } = opts;
+    let branch = branch.as_str();
+    let repo_root = ctx.repo_root().to_path_buf();
 
     // 5.2 Refuse `git paw remove supervisor` with a pointer to `git paw stop`.
     // Wire identity: this names the CLI argument the user typed, not the role
     // of a session surface.
-    if branch == git_paw::surface::SUPERVISOR_AGENT_ID {
+    if branch == crate::surface::SUPERVISOR_AGENT_ID {
         return Err(PawError::SessionError(
             "refusing to remove the supervisor. To end the whole session, run `git paw stop` \
              (or `git paw purge` to also remove worktrees)."
@@ -44,7 +80,7 @@ pub(crate) fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Resu
         ));
     };
 
-    // As in `cmd_add`: every grid session is hot-attachable, and only a live
+    // As in `add`: every grid session is hot-attachable, and only a live
     // session built with the earlier tiled layout is refused — before the
     // pane is killed, the worktree detached or the session JSON rewritten.
     let session_layout = SessionLayout::of(&existing);
@@ -104,7 +140,7 @@ pub(crate) fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Resu
     tmux::ensure_tmux_installed()?;
 
     // 5.4 Take the advisory lock for the mutate-the-session section.
-    let _lock = git_paw::lock::SessionLock::acquire(&repo_root)?;
+    let _lock = crate::lock::SessionLock::acquire(&repo_root)?;
 
     let offset = agent_pane_offset(&existing);
     let backend = TmuxBackend::new();
@@ -139,7 +175,9 @@ pub(crate) fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Resu
         // (design D4, G3): tmux renumbered the survivors after the kill, so the
         // contiguous rows are resized to even columns for the new count.
         if let Err(e) = backend.layout(&existing.session_name, &grid) {
-            eprintln!("warning: could not rebalance agent-row widths: {e}");
+            out.warn(&format!(
+                "warning: could not rebalance agent-row widths: {e}"
+            ));
         }
     }
 
@@ -147,22 +185,16 @@ pub(crate) fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Resu
     // helper runs the consumer's `on_remove` hook before deleting the directory;
     // `--keep-worktree` skips both, since the worktree — and so whatever the
     // hook would tear down — is deliberately being left in place.
-    if keep_worktree {
-        println!(
+    let branch_fate = if keep_worktree {
+        out.line(&format!(
             "Keeping worktree on disk: {}",
             target.worktree_path.display()
-        );
+        ));
+        None
     } else {
-        let worktree_runtime = git_paw::config::load_config(&repo_root, None)
-            .unwrap_or_default()
-            .worktree_runtime();
-        detach_worktree(
-            &repo_root,
-            &target,
-            worktree_runtime.on_remove_hook(),
-            &mut std::io::stderr(),
-        );
-    }
+        let worktree_runtime = ctx.config_or_default().worktree_runtime();
+        detach_worktree(&repo_root, &target, worktree_runtime.on_remove_hook(), out)
+    };
 
     // 5.8 Drop the branch/pane entry from the session JSON. This also releases
     // the agent's runtime port block: the slot lives on the entry, and
@@ -178,11 +210,16 @@ pub(crate) fn cmd_remove(branch: &str, keep_worktree: bool, force: bool) -> Resu
         &updated.session_name,
         &updated.worktrees,
         offset,
+        out,
     );
 
-    println!(
+    out.line(&format!(
         "Removed '{branch}' from session '{}'.",
         updated.session_name
-    );
-    Ok(())
+    ));
+    Ok(RemoveOutcome {
+        session_name: updated.session_name,
+        branch: branch.to_string(),
+        branch_fate,
+    })
 }

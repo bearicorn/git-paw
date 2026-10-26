@@ -34,6 +34,7 @@ pub mod broker;
 pub mod cli;
 pub mod cli_setup;
 pub mod command_runner;
+pub mod commands;
 pub mod config;
 pub mod coordination;
 pub mod dashboard;

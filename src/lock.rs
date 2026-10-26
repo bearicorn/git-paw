@@ -35,7 +35,7 @@ pub fn lock_path(repo_root: &Path) -> PathBuf {
 ///
 /// Acquired with [`SessionLock::acquire`]; the lock file is removed when the
 /// guard drops. Hold it for the entire mutate-the-session critical section of
-/// `cmd_add` / `cmd_remove`.
+/// `commands::add::add` / `commands::remove::remove`.
 #[derive(Debug)]
 pub struct SessionLock {
     path: PathBuf,

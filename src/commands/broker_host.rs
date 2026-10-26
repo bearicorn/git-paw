@@ -14,11 +14,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use git_paw::broker;
-use git_paw::config::{self, SupervisorConfig};
-use git_paw::error::PawError;
-use git_paw::git;
-use git_paw::session::{self, Session};
+use crate::broker;
+use crate::config::{self, SupervisorConfig};
+use crate::error::PawError;
+use crate::git;
+use crate::session::{self, Session};
 
 /// How long one wait for a terminal hang-up lasts before the shutdown and
 /// orphan checks run again.
@@ -96,7 +96,7 @@ fn watch_targets_of(session: Option<&Session>) -> Vec<broker::WatchTarget> {
 /// broker cannot bind or probe its port — the host exits non-zero then
 /// instead of retrying.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn cmd_broker_host(session_name: &str, log_path: &Path) -> Result<(), PawError> {
+pub fn cmd_broker_host(session_name: &str, log_path: &Path) -> Result<(), PawError> {
     let cwd = std::env::current_dir()
         .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
     let repo_root = git::validate_repo(&cwd)?;
@@ -172,16 +172,16 @@ pub(crate) fn cmd_broker_host(session_name: &str, log_path: &Path) -> Result<(),
     // treats exactly as a matched coding worktree.
     {
         let engine_is_openspec =
-            git_paw::specs::resolved_spec_type(&config, &repo_root).as_deref() == Some("openspec");
+            crate::specs::resolved_spec_type(&config, &repo_root).as_deref() == Some("openspec");
         let mut roster: Vec<(String, PathBuf)> = watch_targets
             .iter()
             .map(|t| (t.agent_id.clone(), t.worktree_path.clone()))
             .collect();
         roster.push((
-            git_paw::opsx::SUPERVISOR_AGENT_ID.to_string(),
+            crate::opsx::SUPERVISOR_AGENT_ID.to_string(),
             repo_root.clone(),
         ));
-        broker_state = broker_state.with_role_gating(git_paw::opsx::RoleGatingContext {
+        broker_state = broker_state.with_role_gating(crate::opsx::RoleGatingContext {
             mode: config.role_gating_mode(),
             engine_is_openspec,
             roster,
@@ -289,8 +289,8 @@ pub(crate) fn cmd_broker_host(session_name: &str, log_path: &Path) -> Result<(),
     // Block until shutdown: SIGHUP, reparented to init, or a controlling
     // terminal it was given hanging up. Each wait is bounded, so every
     // condition is re-checked at least once per tick.
-    while !(shutdown.load(Ordering::Relaxed) || git_paw::dashboard::orphaned()) {
-        if git_paw::dashboard::terminal_hung_up(LIFECYCLE_TICK) {
+    while !(shutdown.load(Ordering::Relaxed) || crate::dashboard::orphaned()) {
+        if crate::dashboard::terminal_hung_up(LIFECYCLE_TICK) {
             break;
         }
     }
@@ -323,7 +323,7 @@ fn ignore_sigint() {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use git_paw::session::{SessionStatus, WorktreeEntry};
+    use crate::session::{SessionStatus, WorktreeEntry};
     use std::time::UNIX_EPOCH;
     use tempfile::TempDir;
 
@@ -354,7 +354,7 @@ mod tests {
             broker_port: None,
             broker_bind: None,
             broker_log_path: None,
-            mode: git_paw::session::SessionMode::Bare,
+            mode: crate::session::SessionMode::Bare,
             dashboard_pane: None,
             layout: None,
         }

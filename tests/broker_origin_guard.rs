@@ -415,33 +415,33 @@ fn every_launch_path_warns_about_an_exposed_bind() {
     let sites = [
         Site {
             file: "src/commands/start.rs",
-            function: "pub(crate) fn cmd_start(",
+            function: "pub fn start(",
             trigger: "start_broker_host(",
-            warning: "warn_if_broker_is_exposed(&broker_config)",
+            warning: "warn_if_broker_is_exposed(&broker_config, out)",
         },
         Site {
             file: "src/commands/start.rs",
             function: "fn launch_spec_session(",
             trigger: "start_broker_host(",
-            warning: "warn_if_broker_is_exposed(&broker_config)",
+            warning: "warn_if_broker_is_exposed(&broker_config, out)",
         },
         Site {
             file: "src/commands/start.rs",
             function: "pub(crate) fn restart_from_pause_detached(",
             trigger: "start_broker_host(",
-            warning: "warn_if_broker_is_exposed(&recorded)",
+            warning: "warn_if_broker_is_exposed(&recorded, out)",
         },
         Site {
             file: "src/commands/supervisor.rs",
-            function: "pub(crate) fn cmd_supervisor(",
+            function: "pub fn supervisor(",
             trigger: "start_broker_host(",
-            warning: "warn_if_broker_is_exposed(&broker_config)",
+            warning: "warn_if_broker_is_exposed(&broker_config, out)",
         },
         Site {
             file: "src/commands/recover.rs",
             function: "pub(crate) fn recover_session_detached(",
             trigger: "start_broker_host(",
-            warning: "warn_if_broker_is_exposed(&recovery_broker_config)",
+            warning: "warn_if_broker_is_exposed(&recovery_broker_config, out)",
         },
     ];
     assert_eq!(

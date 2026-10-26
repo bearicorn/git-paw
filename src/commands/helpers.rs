@@ -1,13 +1,11 @@
-//! Small, pure leaf helpers shared across the command handlers.
-//!
-//! Extracted verbatim from `main.rs` (code-analysis-refactor R2a); behaviour is
-//! unchanged.
+//! Small leaf helpers shared across the command families.
 
-use git_paw::config::PawConfig;
-use git_paw::detect;
-use git_paw::error::PawError;
-use git_paw::interactive;
-use git_paw::session::Session;
+use super::Output;
+use crate::config::PawConfig;
+use crate::detect;
+use crate::error::PawError;
+use crate::interactive;
+use crate::session::Session;
 
 /// Convert the config's `[clis.*]` table into the detector's custom-CLI
 /// definitions so a configured CLI is resolvable on `PATH` at launch time.
@@ -44,12 +42,12 @@ pub(crate) fn agent_pane_offset(session: &Session) -> usize {
 /// and supervisor. A no-op when `[logging]` is disabled.
 ///
 /// Must be called after the session is opened
-/// ([`TerminalBackend::open_session`](git_paw::terminal::TerminalBackend::open_session)),
+/// ([`TerminalBackend::open_session`](crate::terminal::TerminalBackend::open_session)),
 /// so the surfaces exist. `first_agent` is the layout position of the first
 /// coding agent (see [`agent_pane_offset`]); branch `i` is the surface at
 /// `first_agent + i`.
 pub(crate) fn attach_session_logging(
-    backend: &dyn git_paw::terminal::TerminalBackend,
+    backend: &dyn crate::terminal::TerminalBackend,
     session_name: &str,
     config: &PawConfig,
     repo_root: &std::path::Path,
@@ -59,9 +57,9 @@ pub(crate) fn attach_session_logging(
     if !config.logging.as_ref().is_some_and(|l| l.enabled) {
         return Ok(());
     }
-    git_paw::logging::ensure_log_dir(repo_root, session_name)?;
+    crate::logging::ensure_log_dir(repo_root, session_name)?;
     for (i, branch) in branches.iter().enumerate() {
-        let log_path = git_paw::logging::log_file_path(repo_root, session_name, branch);
+        let log_path = crate::logging::log_file_path(repo_root, session_name, branch);
         backend.stream_to(
             &backend.surface_at(session_name, first_agent + i),
             &log_path,
@@ -82,10 +80,11 @@ pub(crate) fn attach_session_logging(
 /// Returns [`PawError`] when the session cannot be opened or a log stream
 /// cannot be started.
 pub(crate) fn launch_session(
-    backend: &dyn git_paw::terminal::TerminalBackend,
-    plan: &git_paw::terminal::SessionPlan,
-    layout: &git_paw::surface::SessionLayout,
+    backend: &dyn crate::terminal::TerminalBackend,
+    plan: &crate::terminal::SessionPlan,
+    layout: &crate::surface::SessionLayout,
     logging: Option<(&PawConfig, &std::path::Path)>,
+    out: &mut dyn Output,
 ) -> Result<(), PawError> {
     backend.open_session(plan)?;
     if let Some((config, repo_root)) = logging {
@@ -104,13 +103,15 @@ pub(crate) fn launch_session(
     // column-precise resize evens it out now that the surfaces exist.
     if let Err(e) = backend.layout(
         &plan.name,
-        &git_paw::terminal::GridGeometry {
+        &crate::terminal::GridGeometry {
             first_agent: layout.first_agent_index(),
             agent_count: plan.surfaces.len(),
             has_top_row: layout.has_top_row(),
         },
     ) {
-        eprintln!("warning: could not rebalance agent-row widths: {e}");
+        out.warn(&format!(
+            "warning: could not rebalance agent-row widths: {e}"
+        ));
     }
     Ok(())
 }
@@ -119,14 +120,14 @@ pub(crate) fn launch_session(
 /// still running, probed through the terminal port — the liveness check the
 /// launch paths make before deciding to reattach, revive or recover.
 pub(crate) fn session_has_live_agents(name: &str, existing: &Session) -> bool {
-    use git_paw::terminal::TerminalBackend;
+    use crate::terminal::TerminalBackend;
     matches!(
-        git_paw::terminal::tmux::TmuxBackend::new().liveness(
+        crate::terminal::tmux::TmuxBackend::new().liveness(
             name,
             existing.created_at,
             existing.agent_pane_offset()
         ),
-        git_paw::terminal::SessionLiveness::Alive
+        crate::terminal::SessionLiveness::Alive
     )
 }
 
@@ -135,7 +136,7 @@ pub(crate) fn session_has_live_agents(name: &str, existing: &Session) -> bool {
 /// `tmux send-keys` types this into the pane, and the pane's **shell** parses
 /// what it receives — so the installed-binary path from
 /// [`std::env::current_exe`] is shell-quoted
-/// ([`shell_quote`](git_paw::domain::shell_quote)). An unquoted path containing
+/// ([`shell_quote`](crate::domain::shell_quote)). An unquoted path containing
 /// a space word-splits and the shell tries to run the first fragment, so the
 /// dashboard never starts; `send-keys -l` cannot help, because the splitting
 /// happens in the shell rather than in tmux's key parsing.
@@ -153,7 +154,7 @@ pub(crate) fn dashboard_command() -> String {
 pub(crate) fn dashboard_command_for(exe: &std::path::Path) -> String {
     format!(
         "{} __dashboard",
-        git_paw::domain::shell_quote(&exe.display().to_string())
+        crate::domain::shell_quote(&exe.display().to_string())
     )
 }
 
@@ -187,7 +188,7 @@ pub(crate) fn broker_host_command_for(
     session: &str,
     log_path: &std::path::Path,
 ) -> String {
-    use git_paw::domain::shell_quote;
+    use crate::domain::shell_quote;
     format!(
         "{} __broker --session {} --log-path {}",
         shell_quote(&exe.display().to_string()),
@@ -208,10 +209,10 @@ pub(crate) fn broker_host_command_for(
 /// created, or the host exits or does not answer within the budget. The
 /// caller saves no receipt then, so persisted session state is untouched.
 pub(crate) fn start_broker_host(
-    backend: &dyn git_paw::terminal::TerminalBackend,
+    backend: &dyn crate::terminal::TerminalBackend,
     session: &str,
     repo_root: &std::path::Path,
-    broker: &git_paw::config::BrokerConfig,
+    broker: &crate::config::BrokerConfig,
     log_path: &std::path::Path,
 ) -> Result<(), PawError> {
     // A broker for this repository already answering belongs to another
@@ -219,9 +220,9 @@ pub(crate) fn start_broker_host(
     // flushing. Give it a bounded moment to let go of the port; if it still
     // answers, starting a host beside it would leave the launcher talking to
     // a broker nothing in this session can stop.
-    let client = git_paw::broker::client::BrokerClient::new(broker.url());
+    let client = crate::broker::client::BrokerClient::new(broker.url());
     let deadline = std::time::Instant::now() + PREVIOUS_HOST_RELEASE_BUDGET;
-    while client.probe(Some(repo_root)) == git_paw::broker::ProbeResult::LiveBroker {
+    while client.probe(Some(repo_root)) == crate::broker::ProbeResult::LiveBroker {
         if std::time::Instant::now() >= deadline {
             return Err(PawError::SessionError(format!(
                 "a broker for this repository already serves port {} outside this session; \
@@ -260,10 +261,10 @@ pub(crate) fn wait_for_broker_host(
     budget: std::time::Duration,
     mut host_alive: impl FnMut() -> bool,
 ) -> Result<(), PawError> {
-    let client = git_paw::broker::client::BrokerClient::new(url);
+    let client = crate::broker::client::BrokerClient::new(url);
     let started = std::time::Instant::now();
     loop {
-        if client.probe(Some(repo_root)) == git_paw::broker::ProbeResult::LiveBroker {
+        if client.probe(Some(repo_root)) == crate::broker::ProbeResult::LiveBroker {
             return Ok(());
         }
         if !host_alive() {
@@ -291,16 +292,17 @@ pub(crate) fn wait_for_broker_host(
 /// the agent still self-registers through its boot block.
 pub(crate) fn register_agents_with_host(
     broker_url: &str,
-    worktrees: &[git_paw::session::WorktreeEntry],
+    worktrees: &[crate::session::WorktreeEntry],
+    out: &mut dyn Output,
 ) {
-    let client = git_paw::broker::client::BrokerClient::new(broker_url);
+    let client = crate::broker::client::BrokerClient::new(broker_url);
     for wt in worktrees {
-        let agent_id = git_paw::broker::messages::slugify_branch(&wt.branch);
+        let agent_id = crate::broker::messages::slugify_branch(&wt.branch);
         if let Err(e) = client.watch(&agent_id, &wt.worktree_path, &wt.cli, wt.spec_id.as_deref()) {
-            eprintln!(
+            out.warn(&format!(
                 "warning: could not register '{}' with the broker: {e}",
                 wt.branch
-            );
+            ));
         }
     }
 }
@@ -312,15 +314,18 @@ pub(crate) fn register_agents_with_host(
 /// window, where nobody is looking — so that copy is effectively invisible. Every path that launches a session calls this and
 /// prints the result on stderr *before* the session exists, while the
 /// operator is still looking at their own terminal.
-pub(crate) fn broker_exposure_warning(broker: &git_paw::config::BrokerConfig) -> Option<String> {
-    (broker.enabled && !git_paw::broker::origin::is_loopback_bind(&broker.bind))
-        .then(|| git_paw::broker::origin::non_loopback_bind_warning(&broker.bind))
+pub(crate) fn broker_exposure_warning(broker: &crate::config::BrokerConfig) -> Option<String> {
+    (broker.enabled && !crate::broker::origin::is_loopback_bind(&broker.bind))
+        .then(|| crate::broker::origin::non_loopback_bind_warning(&broker.bind))
 }
 
 /// Prints [`broker_exposure_warning`] on stderr when there is one.
-pub(crate) fn warn_if_broker_is_exposed(broker: &git_paw::config::BrokerConfig) {
+pub(crate) fn warn_if_broker_is_exposed(
+    broker: &crate::config::BrokerConfig,
+    out: &mut dyn Output,
+) {
     if let Some(warning) = broker_exposure_warning(broker) {
-        eprintln!("{warning}");
+        out.warn(&warning);
     }
 }
 
@@ -419,7 +424,7 @@ mod tests {
             bodies
         });
 
-        let entry = |branch: &str, spec_id: Option<&str>| git_paw::session::WorktreeEntry {
+        let entry = |branch: &str, spec_id: Option<&str>| crate::session::WorktreeEntry {
             branch: branch.to_string(),
             worktree_path: std::path::PathBuf::from(format!("/repo/wt/{branch}")),
             cli: "claude".to_string(),
@@ -437,6 +442,7 @@ mod tests {
                 entry("feat/x", Some("003-user-list")),
                 entry("feat/y", None),
             ],
+            &mut crate::commands::CaptureOutput::default(),
         );
 
         let bodies = server.join().unwrap();
@@ -603,8 +609,8 @@ mod tests {
     // pane just before it switches to the alternate screen, so the launch
     // command must print it too — before the session is created.
 
-    fn broker(enabled: bool, bind: &str) -> git_paw::config::BrokerConfig {
-        git_paw::config::BrokerConfig {
+    fn broker(enabled: bool, bind: &str) -> crate::config::BrokerConfig {
+        crate::config::BrokerConfig {
             enabled,
             bind: bind.to_string(),
             ..Default::default()
@@ -645,10 +651,10 @@ mod tests {
     /// agent position) streams to its branch's log, before the grid is evened.
     #[test]
     fn launch_session_streams_each_coding_surface_to_its_log_before_the_layout() {
-        use git_paw::session::SessionMode;
-        use git_paw::surface::SessionLayout;
-        use git_paw::terminal::fake::{FakeBackend, Operation};
-        use git_paw::terminal::{SessionPlan, SurfaceSpec, TerminalBackend};
+        use crate::session::SessionMode;
+        use crate::surface::SessionLayout;
+        use crate::terminal::fake::{FakeBackend, Operation};
+        use crate::terminal::{SessionPlan, SurfaceSpec, TerminalBackend};
 
         let repo = tempfile::TempDir::new().unwrap();
         let spec = |x: &str| SurfaceSpec {
@@ -670,11 +676,18 @@ mod tests {
             show_labels: false,
         };
         let mut config = PawConfig::default();
-        config.logging = Some(git_paw::config::LoggingConfig { enabled: true });
+        config.logging = Some(crate::config::LoggingConfig { enabled: true });
         let layout = SessionLayout::planned(SessionMode::Bare, true);
 
         let fake = FakeBackend::new();
-        launch_session(&fake, &plan, &layout, Some((&config, repo.path()))).unwrap();
+        launch_session(
+            &fake,
+            &plan,
+            &layout,
+            Some((&config, repo.path())),
+            &mut crate::commands::CaptureOutput::default(),
+        )
+        .unwrap();
 
         let streamed: Vec<_> = fake
             .operations()
@@ -684,7 +697,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let log = |branch: &str| git_paw::logging::log_file_path(repo.path(), "paw-proj", branch);
+        let log = |branch: &str| crate::logging::log_file_path(repo.path(), "paw-proj", branch);
         assert_eq!(
             streamed,
             vec![

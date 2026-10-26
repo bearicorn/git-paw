@@ -298,7 +298,7 @@ mid-flight discovery costs a blocked round-trip). Two enums carry this hazard:
     entry point the launch submits as its own composer line. This is the
     only match for task-prompt purposes; three consumers read it rather
     than keeping their own, so a new variant is decided once:
-    - `src/main.rs` — `build_task_prompt` renders both templates.
+    - `src/commands/launch.rs` — `build_task_prompt` renders both templates.
     - `src/doctor.rs` — `instructed_workflow_command` delegates to
       `task_prompts::workflow_command`, so the command the spec-workflow
       check probes for reachability is by construction the command the
@@ -318,6 +318,14 @@ mid-flight discovery costs a blocked round-trip). Two enums carry this hazard:
 
 Grep the variant name across `src/` before finishing to catch every site — but
 the point is to list them in Impact so the work is *scoped*, not *discovered*.
+
+**The same ripple applies to struct fields (GP-40).** Adding a field to a
+widely constructed struct breaks every struct-literal construction site, just
+as a new variant breaks every exhaustive `match` — including the literals a
+concurrent branch adds after you rebase (as `Session::layout` and
+`WorktreeEntry::pending_entry_point` did in v0.18). Grep the struct's literal
+sites (`StructName {`) across `src/` and `tests/` and list them in the
+proposal's Impact section up front, alongside any enum sites.
 
 ## Spec-Driven Development
 

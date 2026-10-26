@@ -4,7 +4,7 @@
 //! permission prompt the `--unattended` drive loop escalates for a human
 //! decision is appended to a per-session JSONL log at
 //! `.git-paw/sessions/<session>.manual-approvals.jsonl`. The
-//! `git paw approvals` subcommand (see `cmd_approvals` in `main.rs`) reads the
+//! `git paw approvals` subcommand (see `commands::approvals::approvals`) reads the
 //! log, aggregates by pattern, and suggests a promotion target so the user can
 //! decide which patterns deserve an allow rule in their agent CLI's own
 //! settings — git-paw has no allowlist of its own to promote into.
