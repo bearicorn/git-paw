@@ -1,26 +1,24 @@
 //! `git paw start` recovery path — rebuilds the tmux session from saved
-//! `session.json` state when the session is stopped or stale. Extracted
-//! verbatim from `main.rs` (code-analysis-refactor R2c).
-//!
-//! `attach_or_print_hint` remains in `main.rs` and is referenced here across
-//! module boundaries.
+//! `session.json` state when the session is stopped or stale. Recovery never
+//! attaches the terminal; the caller does, from the launch outcome.
 
 use std::collections::HashMap;
 use std::path::Path;
 
-use git_paw::broker;
-use git_paw::config::{self, ApprovalLevel, CustomCli, PawConfig, SupervisorConfig};
-use git_paw::error::PawError;
-use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry};
-use git_paw::surface::SessionLayout;
-use git_paw::terminal::tmux::TmuxBackend;
-use git_paw::terminal::{SessionPlan, SurfaceSpec, TerminalBackend};
-use git_paw::tmux;
+use crate::broker;
+use crate::config::{self, ApprovalLevel, CustomCli, PawConfig, SupervisorConfig};
+use crate::error::PawError;
+use crate::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry};
+use crate::surface::SessionLayout;
+use crate::terminal::tmux::TmuxBackend;
+use crate::terminal::{SessionPlan, SurfaceSpec, TerminalBackend};
+use crate::tmux;
 
 use super::helpers::{
     dashboard_command, launch_session, start_broker_host, warn_if_broker_is_exposed,
 };
-use crate::attach_or_print_hint;
+use super::launch::LaunchOutcome;
+use super::{CommandContext, Output};
 
 /// Builds the recovery-time CLI launch command for `entry`: the command
 /// configured for the entry's CLI identity ([`config::launch_command`] —
@@ -59,19 +57,37 @@ fn cli_command_for_recovery<S: std::hash::BuildHasher>(
     cli_command
 }
 
-/// Recovers a stopped/stale session by recreating the tmux session from saved state.
-pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<(), PawError> {
-    let session_name = recover_session_detached(repo_root, existing)?;
-    attach_or_print_hint(&session_name)
+/// Options for [`recover`].
+#[derive(Debug, Clone)]
+pub struct RecoverOptions {
+    /// The stopped session's receipt.
+    pub session: Session,
 }
 
-/// Recovers a stopped session exactly as [`recover_session`] does, but returns
-/// the rebuilt session's name once it is up instead of attaching the terminal.
+/// Recovers the repository's stopped session from its saved receipt. Never
+/// attaches: the outcome names the rebuilt session for the caller to attach
+/// to.
 ///
-/// The detached half an unattended re-attach reuses, for the same reason as
-/// [`crate::commands::start::restart_from_pause_detached`]: the loop, not the
-/// terminal, takes the session over, and the recovery itself must stay one
-/// implementation.
+/// # Errors
+///
+/// Returns an error when tmux is missing, the config cannot be loaded, the
+/// recorded broker port is held by another repository, or the session cannot
+/// be rebuilt or saved.
+pub fn recover(
+    ctx: &CommandContext,
+    opts: RecoverOptions,
+    out: &mut dyn Output,
+) -> Result<LaunchOutcome, PawError> {
+    let RecoverOptions { session } = opts;
+    let session_name = recover_session_detached(ctx.repo_root(), &session, out)?;
+    Ok(LaunchOutcome::Attach { session_name })
+}
+
+/// Recovers a stopped/stale session by recreating the tmux session from saved
+/// state, and returns the rebuilt session's name once it is up. It never
+/// attaches the terminal: `git paw start` attaches from the launch outcome,
+/// and an unattended re-attach binds a drive loop to the session instead —
+/// the recovery itself stays one implementation.
 ///
 /// # Errors
 ///
@@ -80,6 +96,7 @@ pub(crate) fn recover_session(repo_root: &Path, existing: &Session) -> Result<()
 pub(crate) fn recover_session_detached(
     repo_root: &Path,
     existing: &Session,
+    out: &mut dyn Output,
 ) -> Result<String, PawError> {
     tmux::ensure_tmux_installed()?;
     let config = config::load_config(repo_root, None)?;
@@ -92,11 +109,11 @@ pub(crate) fn recover_session_detached(
     let mode = if existing.mode == SessionMode::Supervisor {
         SessionMode::Supervisor
     } else if supervisor_enabled_in_config {
-        eprintln!(
+        out.warn(&format!(
             "warning: session '{}' was created with a v0.4 layout but [supervisor] is enabled \
              in current config — rebuilding with v0.5 supervisor-as-pane layout.",
             existing.session_name
-        );
+        ));
         SessionMode::Supervisor
     } else {
         SessionMode::Bare
@@ -111,7 +128,7 @@ pub(crate) fn recover_session_detached(
     // the SAVED broker fields, which can differ from the current config when
     // `[broker] port` changed since the session was saved. Probe the port the
     // agents will actually be handed, not the configured one — checking the
-    // wrong port would let the clash `cmd_start` refuses up front slip
+    // wrong port would let the clash `start` refuses up front slip
     // through here.
     let recovery_broker_config = match (existing.broker_port, existing.broker_bind.as_ref()) {
         (Some(port), Some(bind)) => config::BrokerConfig {
@@ -141,16 +158,16 @@ pub(crate) fn recover_session_detached(
         .unwrap_or(false)
         && let Err(e) = backend.close_session(&existing.session_name)
     {
-        eprintln!(
+        out.warn(&format!(
             "warning: could not tear down stale tmux session '{}' before recovery: {e}",
             existing.session_name
-        );
+        ));
     }
 
     // No `[supervisor]` section is required for this to apply — a bare
     // (non-supervisor) recovery has none at all, so the level falls back to
     // `SupervisorConfig`'s default (`agent_approval = "auto"`), exactly as
-    // `cmd_start` and `cmd_add` do.
+    // `start` and `add` do.
     let default_sup = SupervisorConfig::default();
     let bare_approval = config
         .supervisor
@@ -203,11 +220,11 @@ pub(crate) fn recover_session_detached(
     // comes up.
     // Judged on the address the host will bind — the saved one — not the
     // current config's.
-    warn_if_broker_is_exposed(&recovery_broker_config);
+    warn_if_broker_is_exposed(&recovery_broker_config, out);
 
     // Rebuild the session and even each agent row's width, as a fresh start
     // does (design D4). Recovery attaches no session logging.
-    launch_session(&backend, &plan, &layout, None)?;
+    launch_session(&backend, &plan, &layout, None, out)?;
 
     // Recreate the broker host in its service surface, with the session name
     // and the re-stamped log path; it seeds its watch targets and agent ->
@@ -238,11 +255,12 @@ pub(crate) fn recover_session_detached(
     // after the file was removed has none at all) — `session-state` requires
     // every path that creates or rebuilds the session's panes to (re)write it.
     // The offsets come from the layout just rebuilt above.
-    crate::write_repo_discovery_file(
+    super::launch::write_repo_discovery_file(
         repo_root,
         &plan.name,
         &updated.worktrees,
         layout.first_agent_index(),
+        out,
     );
 
     Ok(plan.name)
@@ -252,7 +270,7 @@ pub(crate) fn recover_session_detached(
 /// broker enabled), coding agents at pane 1+.
 ///
 /// Returns the built session together with the layout record of what it
-/// rebuilt, so [`recover_session`] can re-save the session and rewrite the
+/// rebuilt, so [`recover_session_detached`] can re-save the session and rewrite the
 /// per-repo discovery file against the layout it actually produced.
 fn recover_bare_session<S: std::hash::BuildHasher>(
     repo_root: &Path,
@@ -295,7 +313,7 @@ fn recover_bare_session<S: std::hash::BuildHasher>(
             "cannot create a session with no panes".to_owned(),
         ));
     }
-    git_paw::surface::layout_for(plan.surfaces.len(), plan.dashboard.is_some())?;
+    crate::surface::layout_for(plan.surfaces.len(), plan.dashboard.is_some())?;
 
     // The dashboard occupies pane 0 when the broker is enabled, so coding
     // agents start at pane 1; without it they start at pane 0.
@@ -309,7 +327,7 @@ fn recover_bare_session<S: std::hash::BuildHasher>(
 /// orchestrator CLI is needed.
 ///
 /// Returns the built session together with the layout record of what it
-/// rebuilt, so [`recover_session`] can re-save `dashboard_pane` and rewrite
+/// rebuilt, so [`recover_session_detached`] can re-save `dashboard_pane` and rewrite
 /// the per-repo discovery file against the layout it actually produced.
 fn recover_supervisor_session(
     repo_root: &Path,
@@ -329,7 +347,7 @@ fn recover_supervisor_session(
 
     // Reject more agents than the grid holds before the caller re-saves the
     // session as active.
-    git_paw::surface::supervisor_layout(existing.worktrees.len(), true)?;
+    crate::surface::supervisor_layout(existing.worktrees.len(), true)?;
 
     let dashboard_pane = SurfaceSpec {
         label: "dashboard".to_string(),
@@ -485,9 +503,10 @@ mod tests {
     /// backend, records one dashboard surface and two coding surfaces with
     /// their labels, owners and launch commands, then evens the agent grid.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn launch_plan_is_asserted_without_tmux() {
-        use git_paw::terminal::fake::{FakeBackend, Operation};
-        use git_paw::terminal::{GridGeometry, TerminalBackend};
+        use crate::terminal::fake::{FakeBackend, Operation};
+        use crate::terminal::{GridGeometry, TerminalBackend};
 
         let mut a = entry("claude", None);
         a.branch = "feat/a".to_string();
@@ -522,7 +541,14 @@ mod tests {
         .expect("a two-agent plan builds");
 
         let fake = FakeBackend::new();
-        launch_session(&fake, &plan, &layout, None).expect("the fake opens it");
+        launch_session(
+            &fake,
+            &plan,
+            &layout,
+            None,
+            &mut crate::commands::CaptureOutput::default(),
+        )
+        .expect("the fake opens it");
 
         let ops = fake.operations();
         let Operation::OpenSession(opened) = &ops[0] else {

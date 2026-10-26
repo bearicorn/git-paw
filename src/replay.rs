@@ -245,12 +245,16 @@ fn replay_colored_with_path(
     Ok(())
 }
 
-/// Enumerates all sessions and their branches, printing a formatted list.
-pub fn display_list(repo_root: &Path) -> Result<(), PawError> {
+/// Enumerates all sessions and their branches, writing a formatted list to
+/// `out`.
+pub fn display_list(
+    repo_root: &Path,
+    out: &mut dyn crate::commands::Output,
+) -> Result<(), PawError> {
     let sessions = logging::list_log_sessions(repo_root)?;
 
     if sessions.is_empty() {
-        println!("No log sessions found. Start a session with logging enabled to capture output.");
+        out.line("No log sessions found. Start a session with logging enabled to capture output.");
         return Ok(());
     }
 
@@ -261,10 +265,10 @@ pub fn display_list(repo_root: &Path) -> Result<(), PawError> {
         } else {
             "branches"
         };
-        println!("{session} ({} {label})", entries.len());
+        out.line(&format!("{session} ({} {label})", entries.len()));
         for entry in &entries {
             let filename = entry.path.file_name().unwrap_or_default().to_string_lossy();
-            println!("  {filename}  \u{2192}  {}", entry.branch);
+            out.line(&format!("  {filename}  \u{2192}  {}", entry.branch));
         }
     }
 
@@ -479,14 +483,22 @@ mod tests {
     #[test]
     fn display_list_no_sessions() {
         let tmp = TempDir::new().unwrap();
-        assert!(display_list(tmp.path()).is_ok());
+        let mut out = crate::commands::CaptureOutput::default();
+        assert!(display_list(tmp.path(), &mut out).is_ok());
+        assert_eq!(
+            out.lines,
+            ["No log sessions found. Start a session with logging enabled to capture output."]
+        );
     }
 
     #[test]
     fn display_list_with_sessions() {
         let tmp = TempDir::new().unwrap();
         setup_log_dir(tmp.path(), "paw-proj", &["main.log", "feat--x.log"]);
-        assert!(display_list(tmp.path()).is_ok());
+        let mut out = crate::commands::CaptureOutput::default();
+        assert!(display_list(tmp.path(), &mut out).is_ok());
+        assert_eq!(out.lines[0], "paw-proj (2 branches)");
+        assert_eq!(out.lines.len(), 3, "{:?}", out.lines);
     }
 
     // -- replay_stripped --

@@ -1,56 +1,89 @@
 //! `git paw start` and `git paw start --from-specs` — the session-launch
-//! orchestration: fresh launch, reattach, recover, restart-from-pause, and the
-//! spec-driven launch path. Extracted verbatim from `main.rs`
-//! (code-analysis-refactor R2c).
+//! orchestration: fresh launch, recover, restart-from-pause, and the
+//! spec-driven launch path.
 //!
-//! `cmd_supervisor` lives in [`super::supervisor`] (the supervisor cluster,
-//! R2d). The remaining shared helpers — `apply_spec_mode`,
-//! `attach_or_print_hint`, `invalidate_if_stale` (purge cluster, R2b),
-//! `resolve_submit_delay_ms`, `submit_prompt_to_pane`,
-//! `write_repo_discovery_file`, and the `SpecMode` dispatch enum — remain in
-//! `main.rs` and are referenced through the crate root.
+//! `supervisor` lives in [`super::supervisor`]. A launch never attaches
+//! the terminal: it returns a [`LaunchOutcome`] and the caller attaches,
+//! prints the detached hint, or reattaches-or-refuses.
 
 use std::path::Path;
 use std::time::SystemTime;
 
-use git_paw::broker;
-use git_paw::config::{self, PawConfig, SupervisorConfig};
-use git_paw::detect;
-use git_paw::error::PawError;
-use git_paw::git;
-use git_paw::interactive;
-use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry};
-use git_paw::surface::{SessionLayout, resolve_agent};
-use git_paw::terminal::tmux::TmuxBackend;
-use git_paw::terminal::{SessionPlan, SurfacePlacement, SurfaceSpec, TerminalBackend};
-use git_paw::tmux;
+use crate::broker;
+use crate::config::{self, PawConfig, SupervisorConfig};
+use crate::detect;
+use crate::error::PawError;
+use crate::git;
+use crate::interactive;
+use crate::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry};
+use crate::surface::{SessionLayout, resolve_agent};
+use crate::terminal::tmux::TmuxBackend;
+use crate::terminal::{SessionPlan, SurfacePlacement, SurfaceSpec, TerminalBackend};
+use crate::tmux;
 
+use super::CommandContext;
+use super::Output;
+use super::entry_points::{PendingEntryPoint, submit_entry_points};
 use super::helpers::{
     agent_pane_offset, config_to_custom_defs, dashboard_command, launch_session,
     register_agents_with_host, session_has_live_agents, start_broker_host, to_interactive_cli,
     warn_if_broker_is_exposed,
 };
-use super::recover::recover_session;
-use super::supervisor::cmd_supervisor;
-use crate::{
-    SpecMode, apply_spec_mode, attach_or_print_hint, build_task_prompt, compose_launch_prompt,
-    gate_pane_or_fail_on_dialog, invalidate_if_stale, reattach_active_session_or_refuse,
-    resolve_submit_delay_ms, submit_prompt_to_pane, write_repo_discovery_file,
+use super::launch::{
+    LaunchOutcome, build_task_prompt, compose_launch_prompt, gate_pane_or_fail_on_dialog,
+    submit_prompt_to_pane, write_repo_discovery_file, write_repo_discovery_file_with_agents,
 };
+use super::purge::{created_branch_base, invalidate_if_stale};
+use super::recover::recover_session_detached;
+use super::spec_mode::{SpecMode, apply_spec_mode};
+use super::supervisor::{SupervisorOptions, supervisor};
+use crate::config::resolve_submit_delay_ms;
 
-/// Smart start: reattach if active, recover if stale, launch fresh if new.
+/// Options for [`start`]: the `git paw start` flags, plus the picker the
+/// branch and CLI selection runs through when the flags leave it open.
+pub struct StartOptions<'a> {
+    /// `--cli`.
+    pub cli: Option<String>,
+    /// `--branches`.
+    pub branches: Option<Vec<String>>,
+    /// `--dry-run`: print the plan, create nothing.
+    pub dry_run: bool,
+    /// `--preset`.
+    pub preset: Option<String>,
+    /// `--no-supervisor`: skip the config-driven supervisor handoff.
+    pub no_supervisor: bool,
+    /// `--no-rebase`.
+    pub no_rebase: bool,
+    /// The caller's branch / CLI picker. The command never prompts itself.
+    pub prompter: &'a dyn interactive::Prompter,
+}
+
+/// Smart start: revive an existing session (restart if paused, recover if
+/// stopped, report one already running), or launch fresh. Never attaches:
+/// the returned [`LaunchOutcome`] says what the caller owes the terminal.
+///
+/// # Errors
+///
+/// Returns an error when no CLI or branch can be resolved, the config cannot
+/// be loaded, the broker port is held by another repository, or any launch
+/// step fails.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn cmd_start(
-    cli_flag: Option<String>,
-    branches_flag: Option<Vec<String>>,
-    dry_run: bool,
-    preset: Option<&str>,
-    no_supervisor: bool,
-    no_rebase: bool,
-) -> Result<(), PawError> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
-    let repo_root = git::validate_repo(&cwd)?;
+pub fn start(
+    ctx: &CommandContext,
+    opts: StartOptions<'_>,
+    out: &mut dyn Output,
+) -> Result<LaunchOutcome, PawError> {
+    let StartOptions {
+        cli: cli_flag,
+        branches: branches_flag,
+        dry_run,
+        preset,
+        no_supervisor,
+        no_rebase,
+        prompter,
+    } = opts;
+    let preset = preset.as_deref();
+    let repo_root = ctx.repo_root().to_path_buf();
 
     // Check for existing session (skip reattach/recovery during dry-run).
     // Before deciding reattach-vs-recover, probe the receipt for staleness:
@@ -59,30 +92,15 @@ pub(crate) fn cmd_start(
     let existing_session = session::find_session_for_repo(&repo_root)?;
     if !dry_run
         && let Some(existing) = &existing_session
-        && !invalidate_if_stale(&repo_root, existing)?
+        && !invalidate_if_stale(&repo_root, existing, out)?
     {
         let effective = existing.effective_status(|name| session_has_live_agents(name, existing));
-        match effective {
-            SessionStatus::Paused => {
-                println!(
-                    "Restarting paused session '{}' (broker + reattach)...",
-                    existing.session_name
-                );
-                return restart_from_pause(&repo_root, existing);
-            }
-            SessionStatus::Active => {
-                return reattach_active_session_or_refuse(&existing.session_name);
-            }
-            SessionStatus::Stopped => {
-                println!("Recovering session '{}'...", existing.session_name);
-                return recover_session(&repo_root, existing);
-            }
-        }
+        return revive_existing(&repo_root, existing, &effective, out);
     }
 
     // Fresh launch (or dry-run preview)
     tmux::ensure_tmux_installed()?;
-    let config = config::load_config(&repo_root, None)?;
+    let config = ctx.config()?.clone();
 
     // Refuse a port held by another repository's broker as soon as the config
     // is known — before the branch and CLI pickers, so the user is never asked
@@ -101,19 +119,23 @@ pub(crate) fn cmd_start(
     if !no_supervisor && config.supervisor.as_ref().is_some_and(|s| s.enabled) {
         // This config-driven handoff is only reachable when `--unattended` was
         // NOT passed: `--unattended` resolves supervisor mode active in the
-        // dispatch, which routes straight to `cmd_supervisor` and never falls
-        // through to `cmd_start`. So the drive loop is off (`unattended: false`)
+        // dispatch, which routes straight to `supervisor` and never falls
+        // through to `start`. So the drive loop is off (`unattended: false`)
         // on this path.
-        return cmd_supervisor(
-            &repo_root,
-            &config,
-            cli_flag.as_deref(),
-            branches_flag.as_deref(),
-            &SpecMode::None,
-            None,
-            dry_run,
-            no_rebase,
-            false,
+        return supervisor(
+            ctx,
+            SupervisorOptions {
+                cli: cli_flag,
+                branches: branches_flag,
+                spec_mode: SpecMode::None,
+                specs_format: None,
+                dry_run,
+                no_rebase,
+                unattended: false,
+                prompter,
+                interactive: false,
+            },
+            out,
         );
     }
 
@@ -141,9 +163,8 @@ pub(crate) fn cmd_start(
     // Interactive selection (or skip via flags)
     let interactive_clis: Vec<interactive::CliInfo> =
         detected.iter().map(to_interactive_cli).collect();
-    let prompter = interactive::TerminalPrompter;
     let selection = interactive::run_selection(
-        &prompter,
+        prompter,
         &all_branches,
         &interactive_clis,
         resolved_cli.as_deref(),
@@ -179,20 +200,20 @@ pub(crate) fn cmd_start(
 
     if dry_run {
         if let Some(ref existing) = existing_session {
-            eprintln!(
+            out.warn(&format!(
                 "warning: session '{}' already exists — purge it before starting a new one\n",
                 existing.session_name
-            );
+            ));
         }
-        println!("Dry run — session plan:\n");
-        println!("  Session:  {session_name}");
-        println!("  Mouse:    {}", if mouse { "on" } else { "off" });
-        println!();
+        out.line("Dry run — session plan:\n");
+        out.line(&format!("  Session:  {session_name}"));
+        out.line(&format!("  Mouse:    {}", if mouse { "on" } else { "off" }));
+        out.line("");
         for (branch, cli) in &selection.mappings {
             let wt = git::worktree_display_path(&repo_root, branch, config.worktree_placement())?;
-            println!("  {branch} \u{2192} {cli} ({wt})");
+            out.line(&format!("  {branch} \u{2192} {cli} ({wt})"));
         }
-        return Ok(());
+        return Ok(LaunchOutcome::Done);
     }
 
     // Create worktrees and build tmux session
@@ -202,13 +223,13 @@ pub(crate) fn cmd_start(
     let broker_config = config.broker.clone();
     // Warn before the session exists: the dashboard pane prints the same
     // warning but immediately switches to the alternate screen.
-    warn_if_broker_is_exposed(&broker_config);
+    warn_if_broker_is_exposed(&broker_config, out);
 
-    // Enforce the agent cap BEFORE creating any worktree, as `cmd_supervisor`
-    // and `cmd_add` do. The grid builder rejects the same count at build time,
+    // Enforce the agent cap BEFORE creating any worktree, as `supervisor`
+    // and `add` do. The grid builder rejects the same count at build time,
     // but that is after the loop below has created and provisioned a worktree
     // per branch — so the user would be left with N worktrees and no session.
-    git_paw::surface::layout_for(selection.mappings.len(), broker_config.enabled)?;
+    crate::surface::layout_for(selection.mappings.len(), broker_config.enabled)?;
 
     let backend = TmuxBackend::new();
     // Broker: a dashboard surface and the broker URL in the session env.
@@ -224,7 +245,7 @@ pub(crate) fn cmd_start(
 
     // Resolve coordination skill once if broker is enabled
     let skill_content = if broker_config.enabled {
-        let template = git_paw::skills::resolve("coordination")?;
+        let template = crate::skills::resolve("coordination")?;
         Some(template)
     } else {
         None
@@ -236,7 +257,7 @@ pub(crate) fn cmd_start(
     // approval flags apply on every worker-launch path, bare `start` included).
     // No `[supervisor]` section is required for this to apply — a bare launch
     // has no supervisor at all, so the level falls back to `SupervisorConfig`'s
-    // default (`agent_approval = "auto"`) exactly as `cmd_add` does.
+    // default (`agent_approval = "auto"`) exactly as `add` does.
     let default_sup = SupervisorConfig::default();
     let approval = &config
         .supervisor
@@ -252,8 +273,8 @@ pub(crate) fn cmd_start(
         // pane is built, so the agent's CLI starts against a fully provisioned
         // checkout. Each agent takes the lowest slot no already-created peer
         // holds.
-        let slot = git_paw::worktree_provision::allocate_slot(&worktree_entries);
-        let provisioned = git_paw::worktree_provision::provision_worktree(
+        let slot = crate::worktree_provision::allocate_slot(&worktree_entries);
+        let provisioned = crate::worktree_provision::provision_worktree(
             &repo_root,
             &wt.path,
             branch,
@@ -261,10 +282,10 @@ pub(crate) fn cmd_start(
             slot,
         )?;
         for warning in &provisioned.warnings {
-            eprintln!("warning: {branch}: {warning}");
+            out.warn(&format!("warning: {branch}: {warning}"));
         }
         if let Some(summary) = provisioned.hook_summary() {
-            println!("  {branch}: {summary}");
+            out.line(&format!("  {branch}: {summary}"));
         }
 
         // Provision the bundled helper scripts the agent's boot block invokes
@@ -274,7 +295,7 @@ pub(crate) fn cmd_start(
         // fresh worktree checkout has none (the directory is gitignored), so
         // without this the agent's relative `.git-paw/scripts/broker.sh` call
         // fails until it hand-copies from `assets/`.
-        git_paw::init::provision_worktree_helpers(
+        crate::init::provision_worktree_helpers(
             &wt.path,
             broker_config.enabled,
             config.docs_base_url.is_some(),
@@ -286,16 +307,16 @@ pub(crate) fn cmd_start(
         // coordination skill does not reference the placeholder today,
         // but keeping the call shape uniform avoids future drift.
         let rendered_skill = skill_content.as_ref().map(|tmpl| {
-            git_paw::skills::render(
+            crate::skills::render(
                 tmpl,
                 branch,
                 &broker_config.url(),
                 &project,
-                &git_paw::skills::GateCommands::default(),
+                &crate::skills::GateCommands::default(),
                 &[],
             )
         });
-        let assignment = git_paw::agents::WorktreeAssignment {
+        let assignment = crate::agents::WorktreeAssignment {
             branch: branch.clone(),
             cli: cli.clone(),
             spec_content: None,
@@ -303,15 +324,15 @@ pub(crate) fn cmd_start(
             skill_content: rendered_skill,
             inter_agent_rules: None,
         };
-        git_paw::agents::setup_worktree_agents_md(&repo_root, &wt.path, &assignment)?;
+        crate::agents::setup_worktree_agents_md(&repo_root, &wt.path, &assignment)?;
 
         if broker_config.enabled {
-            let agent_id = git_paw::broker::messages::slugify_branch(branch);
+            let agent_id = crate::broker::messages::slugify_branch(branch);
             let strict_guard = config
                 .supervisor
                 .as_ref()
                 .is_none_or(SupervisorConfig::strict_branch_guard);
-            git_paw::agents::install_git_hooks(
+            crate::agents::install_git_hooks(
                 &wt.path,
                 &broker_config.url(),
                 &agent_id,
@@ -335,7 +356,7 @@ pub(crate) fn cmd_start(
             worktree_path: wt.path,
             cli: cli.clone(),
             branch_created: wt.branch_created,
-            base_branch: crate::created_branch_base(&repo_root, wt.branch_created),
+            base_branch: created_branch_base(&repo_root, wt.branch_created),
             pending_boot_prompt: None,
             pending_entry_point: None,
             runtime_slot: provisioned.runtime_slot,
@@ -352,7 +373,7 @@ pub(crate) fn cmd_start(
 
     // Open the session, attach session logging (no-op unless `[logging]
     // enabled`) at the layout's agent offset, and even the grid's columns.
-    launch_session(&backend, &plan, &layout, Some((&config, &repo_root)))?;
+    launch_session(&backend, &plan, &layout, Some((&config, &repo_root)), out)?;
 
     // Bring the broker host up in its detached service surface, wait for it
     // to answer as this repository's broker, and register every agent with
@@ -372,7 +393,7 @@ pub(crate) fn cmd_start(
             let _ = backend.close_session(&session_name);
             return Err(e);
         }
-        register_agents_with_host(&broker_config.url(), &worktree_entries);
+        register_agents_with_host(&broker_config.url(), &worktree_entries, out);
     }
 
     // Save session state and write the per-repo discovery file BEFORE
@@ -415,6 +436,7 @@ pub(crate) fn cmd_start(
         &session_name,
         &state.worktrees,
         layout.first_agent_index(),
+        out,
     );
 
     // Pre-fill the boot block for manual broker mode (without supervisor).
@@ -447,10 +469,10 @@ pub(crate) fn cmd_start(
                 &cli_command,
                 &config.clis,
             )?;
-            let boot_block = git_paw::skills::build_boot_block(
+            let boot_block = crate::skills::build_boot_block(
                 branch,
                 &broker_config.url(),
-                git_paw::skills::cli_speaks_mcp(cli, &config.clis),
+                crate::skills::cli_speaks_mcp(cli, &config.clis),
             );
             let prefill =
                 compose_launch_prompt(Some(&boot_block), None, &state.worktrees[idx].worktree_path);
@@ -459,8 +481,8 @@ pub(crate) fn cmd_start(
         }
     }
 
-    // Attach (or print hint when stdin is non-TTY).
-    attach_or_print_hint(&session_name)
+    // The caller attaches (or prints the hint when stdin is non-TTY).
+    Ok(LaunchOutcome::Attach { session_name })
 }
 
 /// The bare launch plan before any agent surface is added: a dashboard
@@ -493,18 +515,58 @@ fn bare_plan(
     }
 }
 
-/// Launches sessions from spec files instead of interactive branch selection.
-pub(crate) fn cmd_start_with_specs(
-    cli_flag: Option<&str>,
-    spec_mode: &SpecMode,
-    specs_format_override: Option<&str>,
-    dry_run: bool,
-    force: bool,
-    no_rebase: bool,
-) -> Result<(), PawError> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
-    let repo_root = git::validate_repo(&cwd)?;
+/// Options for [`start_with_specs`]: the `git paw start --specs` /
+/// `--from-all-specs` flags, plus the caller's picker and whether it can ask.
+///
+/// The booleans mirror command-line flags one for one; re-encoding them as
+/// enums would only hide which flag a branch reacts to.
+#[allow(clippy::struct_excessive_bools)]
+pub struct StartWithSpecsOptions<'a> {
+    /// `--cli`.
+    pub cli: Option<String>,
+    /// Which discovered specs to launch.
+    pub spec_mode: SpecMode,
+    /// `--specs-format`.
+    pub specs_format: Option<String>,
+    /// `--dry-run`: print the plan, create nothing.
+    pub dry_run: bool,
+    /// `--force`: launch despite uncommitted spec changes.
+    pub force: bool,
+    /// `--no-rebase`.
+    pub no_rebase: bool,
+    /// The caller's spec / CLI picker. The command never prompts itself.
+    pub prompter: &'a dyn interactive::Prompter,
+    /// Whether the caller can ask at all (an interactive terminal). The bare
+    /// `--specs` picker is refused without one.
+    pub interactive: bool,
+}
+
+/// Launches a session from spec files instead of interactive branch
+/// selection — or revives an existing session, as [`start`] does.
+///
+/// # Errors
+///
+/// Returns an error when the config cannot be loaded, the specs cannot be
+/// scanned or resolved, or any launch step fails.
+pub fn start_with_specs(
+    ctx: &CommandContext,
+    opts: StartWithSpecsOptions<'_>,
+    out: &mut dyn Output,
+) -> Result<LaunchOutcome, PawError> {
+    let StartWithSpecsOptions {
+        cli,
+        spec_mode,
+        specs_format,
+        dry_run,
+        force,
+        no_rebase,
+        prompter,
+        interactive,
+    } = opts;
+    let cli_flag = cli.as_deref();
+    let spec_mode = &spec_mode;
+    let specs_format_override = specs_format.as_deref();
+    let repo_root = ctx.repo_root().to_path_buf();
 
     // Check for existing session (skip reattach/recovery during dry-run).
     // Before deciding reattach-vs-recover, probe the receipt for staleness:
@@ -513,55 +575,40 @@ pub(crate) fn cmd_start_with_specs(
     let existing_session = session::find_session_for_repo(&repo_root)?;
     if !dry_run
         && let Some(existing) = &existing_session
-        && !invalidate_if_stale(&repo_root, existing)?
+        && !invalidate_if_stale(&repo_root, existing, out)?
     {
         let effective = existing.effective_status(|name| session_has_live_agents(name, existing));
-        match effective {
-            SessionStatus::Paused => {
-                println!(
-                    "Restarting paused session '{}' (broker + reattach)...",
-                    existing.session_name
-                );
-                return restart_from_pause(&repo_root, existing);
-            }
-            SessionStatus::Active => {
-                return reattach_active_session_or_refuse(&existing.session_name);
-            }
-            SessionStatus::Stopped => {
-                println!("Recovering session '{}'...", existing.session_name);
-                return recover_session(&repo_root, existing);
-            }
-        }
+        return revive_existing(&repo_root, existing, &effective, out);
     }
 
     // Fresh launch from specs (or dry-run preview)
     tmux::ensure_tmux_installed()?;
-    let config = config::load_config(&repo_root, None)?;
+    let config = ctx.config()?.clone();
 
     // Scan for pending specs (honouring `--specs-format` override), then
     // apply the spec-mode filter (Picker / Narrow). For SpecMode::All, the
     // filter is the identity transform.
     let discovered =
-        git_paw::specs::scan_specs_with_override(&config, &repo_root, specs_format_override)?;
+        crate::specs::scan_specs_with_override(&config, &repo_root, specs_format_override)?;
     if discovered.is_empty() {
-        println!("No pending specs found.");
-        return Ok(());
+        out.line("No pending specs found.");
+        return Ok(LaunchOutcome::Done);
     }
-    let specs = apply_spec_mode(spec_mode, discovered, &interactive::TerminalPrompter)?;
+    let specs = apply_spec_mode(spec_mode, discovered, prompter, interactive)?;
     if specs.is_empty() {
-        println!("No pending specs found.");
-        return Ok(());
+        out.line("No pending specs found.");
+        return Ok(LaunchOutcome::Done);
     }
 
     // Check for uncommitted spec changes unless force flag is used
     let uncommitted_specs = git::check_uncommitted_specs(&repo_root, &specs)?;
     if !uncommitted_specs.is_empty() && !force {
-        eprintln!(
+        out.warn(&format!(
             "warning: Uncommitted spec changes detected in: {}\n       Commit your changes or use --force to proceed",
             uncommitted_specs.join(", ")
-        );
+        ));
     } else if !uncommitted_specs.is_empty() && force {
-        eprintln!("Proceeding with --force flag (uncommitted spec changes ignored)");
+        out.warn("Proceeding with --force flag (uncommitted spec changes ignored)");
     }
 
     // Detect available CLIs
@@ -574,17 +621,11 @@ pub(crate) fn cmd_start_with_specs(
     // Resolve CLI assignments for specs
     let interactive_clis: Vec<interactive::CliInfo> =
         detected.iter().map(to_interactive_cli).collect();
-    let prompter = interactive::TerminalPrompter;
-    let mappings = interactive::resolve_cli_for_specs(
-        &specs,
-        cli_flag,
-        &config,
-        &interactive_clis,
-        &prompter,
-    )?;
+    let mappings =
+        interactive::resolve_cli_for_specs(&specs, cli_flag, &config, &interactive_clis, prompter)?;
 
     // Build a lookup from branch to spec for prompt/owned_files
-    let spec_by_branch: std::collections::HashMap<&str, &git_paw::specs::SpecEntry> =
+    let spec_by_branch: std::collections::HashMap<&str, &crate::specs::SpecEntry> =
         specs.iter().map(|s| (s.branch.as_str(), s)).collect();
 
     let project = git::project_name(&repo_root);
@@ -594,20 +635,20 @@ pub(crate) fn cmd_start_with_specs(
     // Dry run — print plan and exit
     if dry_run {
         if let Some(ref existing) = existing_session {
-            eprintln!(
+            out.warn(&format!(
                 "warning: session '{}' already exists — purge it before starting a new one\n",
                 existing.session_name
-            );
+            ));
         }
-        println!("Dry run — session plan (from specs):\n");
-        println!("  Session:  {session_name}");
-        println!("  Mouse:    {}", if mouse { "on" } else { "off" });
-        println!();
+        out.line("Dry run — session plan (from specs):\n");
+        out.line(&format!("  Session:  {session_name}"));
+        out.line(&format!("  Mouse:    {}", if mouse { "on" } else { "off" }));
+        out.line("");
         for (branch, cli) in &mappings {
             let wt = git::worktree_display_path(&repo_root, branch, config.worktree_placement())?;
-            println!("  {branch} \u{2192} {cli} ({wt})");
+            out.line(&format!("  {branch} \u{2192} {cli} ({wt})"));
         }
-        return Ok(());
+        return Ok(LaunchOutcome::Done);
     }
 
     launch_spec_session(
@@ -618,25 +659,28 @@ pub(crate) fn cmd_start_with_specs(
         &project,
         mouse,
         no_rebase,
+        out,
     )
 }
 
-/// Creates worktrees, sets up AGENTS.md, builds the tmux session, and attaches.
-#[allow(clippy::too_many_lines)]
+/// Creates worktrees, sets up AGENTS.md and builds the tmux session; the
+/// caller attaches from the returned outcome.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn launch_spec_session(
     repo_root: &std::path::Path,
     config: &PawConfig,
     mappings: &[(String, String)],
-    spec_by_branch: &std::collections::HashMap<&str, &git_paw::specs::SpecEntry>,
+    spec_by_branch: &std::collections::HashMap<&str, &crate::specs::SpecEntry>,
     project: &str,
     mouse: bool,
     no_rebase: bool,
-) -> Result<(), PawError> {
+    out: &mut dyn Output,
+) -> Result<LaunchOutcome, PawError> {
     let session_name = tmux::resolve_session_name(project)?;
 
     // Refuse before anything is created when two of the session's branches
     // derive the same broker agent id — they would share one inbox. Gated on
-    // the broker being enabled for the reason given in `cmd_start`.
+    // the broker being enabled for the reason given in `start`.
     if config.broker.enabled {
         let session_branches: Vec<&str> =
             mappings.iter().map(|(branch, _)| branch.as_str()).collect();
@@ -651,13 +695,13 @@ fn launch_spec_session(
     let broker_config = config.broker.clone();
     // Warn before the session exists: the dashboard pane prints the same
     // warning but immediately switches to the alternate screen.
-    warn_if_broker_is_exposed(&broker_config);
+    warn_if_broker_is_exposed(&broker_config, out);
 
-    // See `cmd_start`: the port clash has to be caught before any pane exists.
+    // See `start`: the port clash has to be caught before any pane exists.
     broker::ensure_port_free_for_repo(&broker_config, repo_root)?;
 
-    // And, as in `cmd_start`, the agent cap before any worktree is created.
-    git_paw::surface::layout_for(mappings.len(), broker_config.enabled)?;
+    // And, as in `start`, the agent cap before any worktree is created.
+    crate::surface::layout_for(mappings.len(), broker_config.enabled)?;
 
     let backend = TmuxBackend::new();
     // Broker: a dashboard surface and the broker URL in the session env.
@@ -671,7 +715,7 @@ fn launch_spec_session(
 
     // Resolve coordination skill once if broker is enabled
     let skill_template = if broker_config.enabled {
-        Some(git_paw::skills::resolve("coordination")?)
+        Some(crate::skills::resolve("coordination")?)
     } else {
         None
     };
@@ -682,8 +726,8 @@ fn launch_spec_session(
     // coordination renders embed the right `{{SPEC_PATH_DOCTRINE}}` if
     // they ever start referencing it. Today coordination.md does not,
     // but plumbing the value avoids a future drift.
-    let session_backends: Vec<git_paw::specs::SpecBackendKind> = {
-        let mut seen: Vec<git_paw::specs::SpecBackendKind> = Vec::new();
+    let session_backends: Vec<crate::specs::SpecBackendKind> = {
+        let mut seen: Vec<crate::specs::SpecBackendKind> = Vec::new();
         for entry in spec_by_branch.values() {
             if !seen.contains(&entry.backend) {
                 seen.push(entry.backend);
@@ -699,7 +743,7 @@ fn launch_spec_session(
     // included). No `[supervisor]` section is required — a spec-driven
     // launch without `--supervisor` has none at all, so the level falls back
     // to `SupervisorConfig`'s default (`agent_approval = "auto"`), exactly
-    // as `cmd_add` does.
+    // as `add` does.
     let default_sup = SupervisorConfig::default();
     let approval = &config
         .supervisor
@@ -710,10 +754,10 @@ fn launch_spec_session(
     for (branch, cli) in mappings {
         let wt = git::create_worktree(repo_root, branch, !no_rebase, config.worktree_placement())?;
 
-        // Same seam as `cmd_start`: provision after create, before the pane is
+        // Same seam as `start`: provision after create, before the pane is
         // built, taking the lowest slot no already-created peer holds.
-        let slot = git_paw::worktree_provision::allocate_slot(&worktree_entries);
-        let provisioned = git_paw::worktree_provision::provision_worktree(
+        let slot = crate::worktree_provision::allocate_slot(&worktree_entries);
+        let provisioned = crate::worktree_provision::provision_worktree(
             repo_root,
             &wt.path,
             branch,
@@ -721,17 +765,17 @@ fn launch_spec_session(
             slot,
         )?;
         for warning in &provisioned.warnings {
-            eprintln!("warning: {branch}: {warning}");
+            out.warn(&format!("warning: {branch}: {warning}"));
         }
         if let Some(summary) = provisioned.hook_summary() {
-            println!("  {branch}: {summary}");
+            out.line(&format!("  {branch}: {summary}"));
         }
 
-        // Same seam as `cmd_start` / `attach_agent`: provision the bundled
+        // Same seam as `start` / `attach_agent`: provision the bundled
         // helper scripts the agent's boot block invokes into this worktree's
         // `.git-paw/scripts/`, gated on the broker being enabled (`broker.sh`)
         // and `docs_base_url` being configured (`docs-fetch.sh`).
-        git_paw::init::provision_worktree_helpers(
+        crate::init::provision_worktree_helpers(
             &wt.path,
             broker_config.enabled,
             config.docs_base_url.is_some(),
@@ -739,7 +783,7 @@ fn launch_spec_session(
 
         // Set up AGENTS.md with spec + skill content
         let rendered_skill = skill_template.as_ref().map(|tmpl| {
-            git_paw::skills::render(
+            crate::skills::render(
                 tmpl,
                 branch,
                 &broker_config.url(),
@@ -760,7 +804,7 @@ fn launch_spec_session(
             .get(branch.as_str())
             .and_then(|s| s.owned_files.clone());
 
-        let assignment = git_paw::agents::WorktreeAssignment {
+        let assignment = crate::agents::WorktreeAssignment {
             branch: branch.clone(),
             cli: cli.clone(),
             spec_content,
@@ -768,15 +812,15 @@ fn launch_spec_session(
             skill_content: rendered_skill,
             inter_agent_rules: None,
         };
-        git_paw::agents::setup_worktree_agents_md(repo_root, &wt.path, &assignment)?;
+        crate::agents::setup_worktree_agents_md(repo_root, &wt.path, &assignment)?;
 
         if broker_config.enabled {
-            let agent_id = git_paw::broker::messages::slugify_branch(branch);
+            let agent_id = crate::broker::messages::slugify_branch(branch);
             let strict_guard = config
                 .supervisor
                 .as_ref()
                 .is_none_or(SupervisorConfig::strict_branch_guard);
-            git_paw::agents::install_git_hooks(
+            crate::agents::install_git_hooks(
                 &wt.path,
                 &broker_config.url(),
                 &agent_id,
@@ -800,7 +844,7 @@ fn launch_spec_session(
             worktree_path: wt.path,
             cli: cli.clone(),
             branch_created: wt.branch_created,
-            base_branch: crate::created_branch_base(repo_root, wt.branch_created),
+            base_branch: created_branch_base(repo_root, wt.branch_created),
             pending_boot_prompt: None,
             pending_entry_point: None,
             runtime_slot: provisioned.runtime_slot,
@@ -819,7 +863,7 @@ fn launch_spec_session(
     // Open the session, attach session logging (no-op unless `[logging]
     // enabled`; agent indices shift by 1 when the broker's dashboard occupies
     // pane 0), and even the grid's columns.
-    launch_session(&backend, &plan, &layout, Some((config, repo_root)))?;
+    launch_session(&backend, &plan, &layout, Some((config, repo_root)), out)?;
 
     // Bring the broker host up in its detached service surface, wait for it
     // to answer as this repository's broker, and register every agent with
@@ -839,7 +883,7 @@ fn launch_spec_session(
             let _ = backend.close_session(&session_name);
             return Err(e);
         }
-        register_agents_with_host(&broker_config.url(), &worktree_entries);
+        register_agents_with_host(&broker_config.url(), &worktree_entries, out);
     }
 
     // Save session state and write the per-repo discovery file BEFORE
@@ -874,7 +918,7 @@ fn launch_spec_session(
 
     session::save_session(&state)?;
 
-    // Write the per-repo discovery file sweep.sh reads. Mirrors `cmd_start`:
+    // Write the per-repo discovery file sweep.sh reads. Mirrors `start`:
     // in the bare layout the dashboard occupies pane 0 when the broker is
     // enabled, so coding agents start at pane 1; without the broker they
     // start at pane 0.
@@ -883,12 +927,13 @@ fn launch_spec_session(
         &session_name,
         &state.worktrees,
         layout.first_agent_index(),
+        out,
     );
 
     // Inject and submit each agent's prompt: the broker boot block (when
     // enabled), the task prompt's prose naming its spec assignment, and the
     // worktree rule — byte-identical to what the supervisor path builds for
-    // the same spec (`compose_launch_prompt`). Unlike the bare `cmd_start`
+    // the same spec (`compose_launch_prompt`). Unlike the bare `start`
     // pre-fill (no human types a spec-driven task, so leaving it unsubmitted
     // would strand the agent), this submits via the same split-send +
     // settle-delay mechanism the supervisor path uses, and runs even when the
@@ -899,7 +944,7 @@ fn launch_spec_session(
     // each agent pane: this path now sends a real `Enter` (unlike the bare
     // pre-fill above), so a blind submit into a pane still showing an
     // unanswered first-run trust/bypass dialog could accidentally accept it.
-    let mut pending_entry_points: Vec<crate::PendingEntryPoint> = Vec::new();
+    let mut pending_entry_points: Vec<PendingEntryPoint> = Vec::new();
     for (idx, (branch, cli)) in mappings.iter().enumerate() {
         let pane_idx = layout.agent_index(idx);
         let agent_flags = config::resolve_approval_flags(cli, approval, &config.clis);
@@ -915,10 +960,10 @@ fn launch_spec_session(
         )?;
         let task_prompt = build_task_prompt(spec_by_branch.get(branch.as_str()).copied());
         let boot_block = broker_config.enabled.then(|| {
-            git_paw::skills::build_boot_block(
+            crate::skills::build_boot_block(
                 branch,
                 &broker_config.url(),
-                git_paw::skills::cli_speaks_mcp(cli, &config.clis),
+                crate::skills::cli_speaks_mcp(cli, &config.clis),
             )
         });
         let prompt = compose_launch_prompt(
@@ -929,9 +974,9 @@ fn launch_spec_session(
         let delay = resolve_submit_delay_ms(cli, &config.clis);
         submit_prompt_to_pane(&backend, &session_name, pane_idx, &prompt, delay);
         if let Some(entry_point) = task_prompt.entry_point {
-            pending_entry_points.push(crate::PendingEntryPoint {
+            pending_entry_points.push(PendingEntryPoint {
                 pane_index: pane_idx,
-                agent_id: git_paw::broker::messages::slugify_branch(branch),
+                agent_id: crate::broker::messages::slugify_branch(branch),
                 entry_point,
                 settle_delay_ms: delay,
             });
@@ -940,9 +985,9 @@ fn launch_spec_session(
 
     // Every prompt is out; now submit the workflow entry points declared by
     // the spec formats that have one, each once its own pane goes idle.
-    crate::submit_entry_points(&backend, &session_name, pending_entry_points);
+    submit_entry_points(&backend, &session_name, pending_entry_points, out);
 
-    attach_or_print_hint(&session_name)
+    Ok(LaunchOutcome::Attach { session_name })
 }
 
 /// Whether a surface's foreground `process` name is this git-paw binary.
@@ -953,24 +998,52 @@ fn runs_git_paw(process: &str) -> bool {
     process == "git-paw" || own.is_some_and(|name| name == process)
 }
 
-/// Restarts a paused session: recreates the broker host (and the dashboard
-/// pane, only when none is running), updates status to `Active`, and
-/// re-attaches the user's client. Skips worktree creation, CLI spawning, and boot-prompt
-/// injection — coding-agent panes are already running and retain their
-/// in-memory conversation state.
-pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result<(), PawError> {
-    restart_from_pause_detached(repo_root, existing)?;
-    attach_or_print_hint(&existing.session_name)
+/// Brings an existing session back for a `git paw start` that found one:
+/// restarts a paused session, recovers a stopped one, and leaves an active
+/// one alone. The outcome tells the caller what to do with the terminal —
+/// attach to the revived session, or reattach-or-refuse for one that was
+/// already running.
+pub(crate) fn revive_existing(
+    repo_root: &Path,
+    existing: &Session,
+    effective: &SessionStatus,
+    out: &mut dyn Output,
+) -> Result<LaunchOutcome, PawError> {
+    match effective {
+        SessionStatus::Paused => {
+            out.line(&format!(
+                "Restarting paused session '{}' (broker + reattach)...",
+                existing.session_name
+            ));
+            restart_from_pause_detached(repo_root, existing, out)?;
+            Ok(LaunchOutcome::Attach {
+                session_name: existing.session_name.clone(),
+            })
+        }
+        SessionStatus::Active => Ok(LaunchOutcome::AlreadyRunning {
+            session_name: existing.session_name.clone(),
+        }),
+        SessionStatus::Stopped => {
+            out.line(&format!(
+                "Recovering session '{}'...",
+                existing.session_name
+            ));
+            let session_name = recover_session_detached(repo_root, existing, out)?;
+            Ok(LaunchOutcome::Attach { session_name })
+        }
+    }
 }
 
-/// Revives a paused session exactly as [`restart_from_pause`] does, but
-/// returns once it is up instead of attaching the terminal.
+/// Restarts a paused session: recreates the broker host (and the dashboard
+/// pane, only when none is running) and updates status to `Active`. Skips
+/// worktree creation, CLI spawning, and boot-prompt injection — coding-agent
+/// panes are already running and retain their in-memory conversation state.
 ///
-/// This is the half an unattended re-attach reuses: it binds a drive loop to
-/// the revived session rather than handing the terminal over, and a fresh
-/// `--unattended` launch does not attach either. Keeping the revive itself
-/// shared is the point — a second revive path would be a second place for the
-/// pending-prompt submit and the broker restart to drift.
+/// Returns once the session is up; it never attaches the terminal. The caller
+/// attaches (`git paw start`) or binds a drive loop to the revived session
+/// (an unattended re-attach). Keeping the revive itself shared is the point —
+/// a second revive path would be a second place for the pending-prompt submit
+/// and the broker restart to drift.
 ///
 /// # Errors
 ///
@@ -981,6 +1054,7 @@ pub(crate) fn restart_from_pause(repo_root: &Path, existing: &Session) -> Result
 pub(crate) fn restart_from_pause_detached(
     repo_root: &Path,
     existing: &Session,
+    out: &mut dyn Output,
 ) -> Result<(), PawError> {
     tmux::ensure_tmux_installed()?;
     let backend = TmuxBackend::new();
@@ -1014,11 +1088,11 @@ pub(crate) fn restart_from_pause_detached(
     // fallback (no warning, the built-in submit delay, no orchestrator entry),
     // so defaults are strictly better than an error here.
     let config = config::load_config(repo_root, None).unwrap_or_else(|e| {
-        eprintln!(
+        out.warn(&format!(
             "warning: could not load config while resuming '{}' ({e}); \
              continuing with defaults for submit delays and the discovery file",
             updated.session_name
-        );
+        ));
         PawConfig::default()
     });
 
@@ -1044,7 +1118,7 @@ pub(crate) fn restart_from_pause_detached(
         // It is judged on the address the host will bind: a session saved on
         // `0.0.0.0` resumes onto every interface even if the config has since
         // gone back to loopback.
-        warn_if_broker_is_exposed(&recorded);
+        warn_if_broker_is_exposed(&recorded, out);
         start_broker_host(
             &backend,
             &existing.session_name,
@@ -1092,7 +1166,7 @@ pub(crate) fn restart_from_pause_detached(
     // session it believes is already active.
     updated.status = SessionStatus::Active;
 
-    submit_held_boot_prompts(&backend, &mut updated, &config);
+    submit_held_boot_prompts(&backend, &mut updated, &config, out);
 
     session::save_session(&updated)?;
 
@@ -1108,14 +1182,14 @@ pub(crate) fn restart_from_pause_detached(
         .iter()
         .enumerate()
         .map(|(idx, wt)| session::RepoAgentEntry {
-            branch_id: git_paw::broker::messages::slugify_branch(&wt.branch),
+            branch_id: crate::broker::messages::slugify_branch(&wt.branch),
             worktree_path: wt.worktree_path.clone(),
             cli: wt.cli.clone(),
             pane_index: position_owned_by(&backend, &updated.session_name, &wt.worktree_path)
                 .unwrap_or(offset + idx),
         })
         .collect();
-    crate::write_repo_discovery_file_with_agents(repo_root, &updated.session_name, agents);
+    write_repo_discovery_file_with_agents(repo_root, &updated.session_name, agents, out);
 
     Ok(())
 }
@@ -1174,6 +1248,7 @@ fn submit_held_boot_prompts(
     backend: &dyn TerminalBackend,
     updated: &mut Session,
     config: &PawConfig,
+    out: &mut dyn Output,
 ) {
     if !updated
         .worktrees
@@ -1187,7 +1262,7 @@ fn submit_held_boot_prompts(
     let dashboard = updated.dashboard_pane;
     // The approval level a relaunch would need, resolved as the recovery path
     // resolves it: a session with no `[supervisor]` section falls back to the
-    // default, exactly as `cmd_start` and `cmd_add` do.
+    // default, exactly as `start` and `add` do.
     let default_sup = SupervisorConfig::default();
     let approval = config
         .supervisor
@@ -1195,7 +1270,7 @@ fn submit_held_boot_prompts(
         .unwrap_or(&default_sup)
         .agent_approval;
     let mut blocked: Vec<String> = Vec::new();
-    let mut pending_entry_points: Vec<crate::PendingEntryPoint> = Vec::new();
+    let mut pending_entry_points: Vec<PendingEntryPoint> = Vec::new();
 
     for wt in &mut updated.worktrees {
         if wt.pending_boot_prompt.is_none() {
@@ -1241,16 +1316,16 @@ fn submit_held_boot_prompts(
                         if dashboard
                             .is_some_and(|d| usize::try_from(d).is_ok_and(|d| d == pane_idx))
                         {
-                            eprintln!(
+                            out.warn(&format!(
                                 "warning: '{}' resolved to the dashboard pane, so its workflow \
                                  command was not submitted; once the agent is idle, submit: \
                                  {entry_point}",
                                 wt.branch
-                            );
+                            ));
                         } else {
-                            pending_entry_points.push(crate::PendingEntryPoint {
+                            pending_entry_points.push(PendingEntryPoint {
                                 pane_index: pane_idx,
-                                agent_id: git_paw::broker::messages::slugify_branch(&wt.branch),
+                                agent_id: crate::broker::messages::slugify_branch(&wt.branch),
                                 entry_point,
                                 settle_delay_ms: delay,
                             });
@@ -1263,7 +1338,7 @@ fn submit_held_boot_prompts(
     }
 
     if !blocked.is_empty() {
-        eprintln!(
+        out.warn(&format!(
             "warning: {} pane(s) were blocked on an unanswered first-run dialog or could \
              not be found, so their held boot prompts were NOT submitted and stay held; \
              they are retried the next time the session is resumed from pause \
@@ -1271,12 +1346,12 @@ fn submit_held_boot_prompts(
              The rest of the session has restarted.",
             blocked.len(),
             blocked.join("\n")
-        );
+        ));
     }
 
     // After the blocked report, so a user reading stderr sees what was held
     // before the launch blocks waiting for the panes that were not.
-    crate::submit_entry_points(backend, &session_name, pending_entry_points);
+    submit_entry_points(backend, &session_name, pending_entry_points, out);
 }
 
 /// Appends `flags` to `command` with a single separating space, or returns

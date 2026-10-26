@@ -595,7 +595,7 @@ impl TmuxSessionBuilder {
 /// `Enter` key.
 ///
 /// Pulled out as a free function so the manual-mode boot-block injection in
-/// `cmd_start` and tests share a single source of truth: the call must be
+/// `commands::start::start` and tests share a single source of truth: the call must be
 /// `send-keys -l -t <target> <text>` (the `-l` flag must come *before* `-t`,
 /// otherwise tmux parses it as a key spec rather than the literal flag).
 pub fn build_boot_inject_args(session_name: &str, pane_index: usize, text: &str) -> Vec<String> {

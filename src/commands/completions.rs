@@ -3,8 +3,8 @@
 use clap::CommandFactory;
 use clap_complete::{Shell, generate};
 
-use git_paw::cli::Cli;
-use git_paw::error::PawError;
+use crate::cli::Cli;
+use crate::error::PawError;
 
 /// Prints a shell completion script for `shell` to stdout, generated from
 /// the clap command definition.
@@ -14,7 +14,7 @@ use git_paw::error::PawError;
 /// this always returns `Ok`. The `Result` return type is kept anyway so
 /// every dispatch arm in `main::run` shares one signature.
 #[allow(clippy::unnecessary_wraps)]
-pub(crate) fn cmd_completions(shell: Shell) -> Result<(), PawError> {
+pub fn cmd_completions(shell: Shell) -> Result<(), PawError> {
     let mut command = Cli::command();
     let bin_name = command.get_name().to_string();
     generate(shell, &mut command, bin_name, &mut std::io::stdout());

@@ -8,18 +8,18 @@
 
 use std::path::Path;
 
-use git_paw::cli_setup::facts::{self, CliSetupFacts, SetupItem};
-use git_paw::cli_setup::plan::{PlanOutcome, SetupPlan, Snapshots, plan};
-use git_paw::cli_setup::record::SetupRecord;
-use git_paw::cli_setup::shell::{self, ApplyOutcome, RepoLayout, UndoOutcome};
-use git_paw::cli_setup::undo::{UndoPlan, plan_undo};
-use git_paw::command_runner::CommandRunner;
-use git_paw::config::PawConfig;
-use git_paw::error::PawError;
+use crate::cli_setup::facts::{self, CliSetupFacts, SetupItem};
+use crate::cli_setup::plan::{PlanOutcome, SetupPlan, Snapshots, plan};
+use crate::cli_setup::record::SetupRecord;
+use crate::cli_setup::shell::{self, ApplyOutcome, RepoLayout, UndoOutcome};
+use crate::cli_setup::undo::{UndoPlan, plan_undo};
+use crate::command_runner::CommandRunner;
+use crate::config::PawConfig;
+use crate::error::PawError;
 
 /// What the caller asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SetupRequest {
+pub struct SetupRequest {
     /// The CLI identity named on the command line.
     pub cli: String,
     /// The items named by flags, in flag order.
@@ -30,7 +30,7 @@ pub(crate) struct SetupRequest {
 
 /// A prepared run: everything decided, nothing written yet.
 #[derive(Debug)]
-pub(crate) enum Prepared {
+pub enum Prepared {
     /// One or more requested items are not declared for this CLI.
     Unsupported {
         /// The CLI identity.
@@ -62,7 +62,7 @@ pub(crate) enum Prepared {
 ///
 /// Returns [`PawError::CliNotFound`] for an identity git-paw does not know, a
 /// refusal for an unsafe target, or an I/O failure.
-pub(crate) fn prepare(
+pub fn prepare(
     runner: &dyn CommandRunner,
     cwd: &Path,
     config: &PawConfig,
@@ -94,7 +94,7 @@ pub(crate) fn prepare(
 /// # Errors
 ///
 /// Returns a [`PawError`] when the world cannot be read or a target is unsafe.
-pub(crate) fn prepare_with_row(
+pub fn prepare_with_row(
     runner: &dyn CommandRunner,
     layout: &RepoLayout,
     row: &CliSetupFacts,
@@ -128,7 +128,7 @@ pub(crate) fn prepare_with_row(
 ///
 /// Returns a [`PawError`] when a target changed since the plan was made or a
 /// file cannot be written.
-pub(crate) fn apply_setup(
+pub fn apply_setup(
     plan: &SetupPlan,
     snapshots: &Snapshots,
     now: &str,
@@ -142,7 +142,7 @@ pub(crate) fn apply_setup(
 ///
 /// Returns a [`PawError`] when a target changed since the plan was made or a
 /// file cannot be written.
-pub(crate) fn apply_undo(
+pub fn apply_undo(
     plan: &UndoPlan,
     record: &SetupRecord,
     snapshots: &Snapshots,
@@ -152,5 +152,5 @@ pub(crate) fn apply_undo(
 
 /// Returns whether git-paw knows `identity` at all.
 fn is_known_identity(config: &PawConfig, identity: &str) -> bool {
-    config.clis.contains_key(identity) || git_paw::detect::is_known_cli(identity)
+    config.clis.contains_key(identity) || crate::detect::is_known_cli(identity)
 }

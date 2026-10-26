@@ -571,7 +571,7 @@ async fn await_log_entries(
 /// `GET /log?since=N&wait=S` — returns the broker's message log filtered to
 /// `seq > since`, optionally long-polling for up to `wait` seconds.
 ///
-/// Used by `cmd_supervisor` to reconstruct broker state from outside the
+/// Used by `commands::supervisor::supervisor` to reconstruct broker state from outside the
 /// dashboard process so it can build the dependency graph for merge ordering
 /// and write a real session summary instead of an empty one, and by the
 /// orchestrator read surface (`wait_for_events`, `sweep.sh events`, the drive

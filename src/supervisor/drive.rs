@@ -1,6 +1,6 @@
 //! The `--unattended` drive loop (`unattended-operation` capability).
 //!
-//! `cmd_supervisor` runs this loop in-process (in the foreground
+//! `commands::supervisor::supervisor` runs this loop in-process (in the foreground
 //! `git paw start --unattended` process) after the tmux session is built. The
 //! loop keeps a multi-agent supervised wave moving with no human in the seat:
 //! it polls on a ~15-second cadence, sweeps every coding-agent surface,
@@ -1170,7 +1170,7 @@ impl Default for DriveConfig {
             branch_refresh_enabled: false,
             clis: HashMap::new(),
             default_branch: String::new(),
-            // The loop runs only under `cmd_supervisor`, so the supervised
+            // The loop runs only under `commands::supervisor::supervisor`, so the supervised
             // layout (dashboard 0, agents 1+) is the default.
             layout: SessionLayout::planned(crate::session::SessionMode::Supervisor, true),
             roster: None,
@@ -2801,7 +2801,7 @@ impl MergeCheck for GitMergeCheck {
 
 /// Inputs for [`run_drive_loop`] beyond the session name, repo root, and agent
 /// roster — bundled so the production entry point stays under the
-/// argument-count lint and so `cmd_supervisor` builds them in one place.
+/// argument-count lint and so `commands::supervisor::supervisor` builds them in one place.
 pub struct DriveRunOptions {
     /// Broker `/status` + publish endpoint, or `None` when the broker is off.
     pub broker_url: Option<String>,
@@ -2846,7 +2846,7 @@ pub struct DriveRunOptions {
 /// Runs the unattended drive loop with production dependencies, prints the exit
 /// summary, and returns.
 ///
-/// This is the step-15 entry `cmd_supervisor` calls when `--unattended` is set.
+/// This is the step-15 entry `commands::supervisor::supervisor` calls when `--unattended` is set.
 /// It blocks (in the foreground process) until a completion or heartbeat exit
 /// condition is reached; it does NOT require an attached interactive terminal.
 ///
@@ -3012,7 +3012,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::sync::{Arc, Mutex};
 
-    /// The layout the loop runs under in production: `cmd_supervisor` is its
+    /// The layout the loop runs under in production: `commands::supervisor::supervisor` is its
     /// only caller, so the dashboard sits at 0 and coding agents from 1.
     fn supervised_layout() -> SessionLayout {
         SessionLayout::planned(crate::session::SessionMode::Supervisor, true)

@@ -530,7 +530,7 @@ pub fn recent_messages(
 /// first), filtered to messages with `seq > since`. `since == 0` returns
 /// every message.
 ///
-/// Used by `cmd_supervisor` to reconstruct broker state from outside the
+/// Used by `commands::supervisor::supervisor` to reconstruct broker state from outside the
 /// broker host process: the supervisor runs in a different process from the
 /// broker, so it cannot read [`BrokerState`] directly. Fetching the full
 /// log over HTTP lets the supervisor rebuild a state-equivalent view for

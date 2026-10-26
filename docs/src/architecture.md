@@ -8,8 +8,8 @@ It describes the code as it is today. For the structure the code is moving towar
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
-│                    main.rs  (entry point, dispatch)                   │
-│                  commands/  (per-subcommand handlers)                 │
+│        main.rs  (entry layer: parse, resolve, prompt, attach)         │
+│       commands/  (library use cases: context + options → outcome)     │
 ├──────────┬──────────────┬──────────────┬─────────────┬────────────────┤
 │  cli.rs  │ interactive/ │   config/    │   error.rs  │    dirs.rs     │
 │  (clap)  │  (prompts,   │    (TOML)    │  (PawError) │     (XDG)      │
@@ -66,8 +66,8 @@ It describes the code as it is today. For the structure the code is moving towar
 
 | Module | File | Purpose |
 |--------|------|---------|
-| **Entry point** | `src/main.rs`, `src/lib.rs` | `main.rs` parses arguments and dispatches each subcommand to its handler; it still holds the `purge` handler and the hidden `__dashboard` (the thin dashboard client) / `__prompt-profile` subcommands; the hidden `__broker` host lives in `src/commands/broker_host.rs`. `lib.rs` is the library target the binary and the integration tests share — internal, not a stable API. |
-| **Commands** | `src/commands/` | One handler module per subcommand: `start.rs` (fresh launch, reattach, restart-from-pause, spec-driven launch), `supervisor.rs` (`cmd_supervisor` and the unattended drive-loop wiring), `recover.rs`, `add.rs`, `remove.rs`, `pause.rs`, `stop.rs`, `status.rs`, `attach.rs`, `approvals.rs`, `replay.rs`, `clis.rs` (`list-clis` / `add-cli` / `remove-cli`), `setup_cli.rs` (`setup-cli`: resolves the CLI identity, plans an apply or an undo, then applies it; the module never prompts or reads stdin — `main.rs` prints the plan and asks), `completions.rs`, `broker_host.rs` (the hidden `__broker` host: builds the broker state, starts the broker, and blocks until SIGHUP / orphaned / terminal hang-up), plus shared `helpers.rs` (including `start_broker_host`, which spawns the host's service surface and waits for `/status`). |
+| **Entry point** | `src/main.rs`, `src/lib.rs` | `main.rs` is the entry layer only: it parses arguments, resolves the inputs (current directory, config, and the interactive prompts — the "Start in supervisor mode?" question, the purge confirmation, the `setup-cli` confirmation, and the branch/spec pickers handed to the commands as an injected `interactive::Prompter`), dispatches into `git_paw::commands`, renders the outcome, and performs the terminal steps a command's `LaunchOutcome` asks for: attach (or print the detached hint), reattach-or-refuse an already-running session, or take the drive-loop binding and run the unattended loop. The only other functions it holds are allowed by name: `cmd_prompt_profile` (hidden `__prompt-profile`), `cmd_setup_cli` / `confirm_setup` (plan print, terminal check, confirmation) and `cmd_dashboard` (the thin `__dashboard` client). `lib.rs` is the library target the binary, the MCP server and the integration tests share — internal, not a stable API. |
+| **Commands** | `src/commands/` | The command use cases, in the **library** as `git_paw::commands` (internal API, not covered by semver). Each family takes a `CommandContext` (the repository root and its config — handed in loaded, or loaded on first use so error ordering is unchanged), an options struct and an injected `Output` sink, and returns a typed outcome; it never reads the current directory or stdin, prompts, prints, attaches, or runs the drive loop. `output.rs` (the `Output` port — `line` / `warn` — and `CaptureOutput`, which collects lines for in-process callers; the terminal adapter that writes stdout/stderr lives in the entry layer, `main.rs`), `start.rs` (fresh launch, restart-from-pause, spec-driven launch), `supervisor.rs` (`supervisor`, plus the drive-loop binding and run wiring the entry layer drives), `recover.rs`, `add.rs`, `remove.rs`, `pause.rs`, `stop.rs`, `status.rs`, `attach.rs`, `approvals.rs`, `replay.rs`, `clis.rs` (`list-clis` / `add-cli` / `remove-cli`), `setup_cli.rs` (`setup-cli`: `prepare` resolves the CLI identity and plans an apply or an undo, writing nothing; only `apply_setup` / `apply_undo` write, and `main.rs` calls them after printing the plan and getting the confirmation or `--yes`), `purge.rs` (`purge`, stale-receipt purge and invalidation, and the shared per-worktree teardown `detach_worktree` with its branch-retirement rules), `launch.rs` (`attach_agent` / `AttachContext`, prompt composition, `LaunchOutcome`, the per-repo discovery file), `entry_points.rs` (submitting a spec format's workflow entry point once a pane is idle), `spec_mode.rs` (`SpecMode` and `apply_spec_mode`), plus shared `helpers.rs` (including `start_broker_host`, which spawns the host's service surface and waits for `/status`). Two modules are entry-layer or host code and exempt by name: `completions.rs` (writes the generated completion script to stdout) and `broker_host.rs` (the hidden `__broker` host: builds the broker state, starts the broker, and blocks until SIGHUP / orphaned / terminal hang-up). |
 | **CLI** | `src/cli.rs` | Argument parsing with clap v4 derive macros. Defines all subcommands, flags (`--from-all-specs`, `--specs`, `--specs-format`, `--supervisor`, `--no-supervisor`, `--force`, ...), and help text. |
 | **Detection** | `src/detect.rs` | Scans `PATH` for known AI CLI binaries (`KNOWN_CLIS`). Resolves custom CLIs from config. Merges and deduplicates. |
 | **Git** | `src/git.rs` | Validates git repos, lists branches (local + remote, deduplicated), creates/removes worktrees, derives safe directory names. |
@@ -110,7 +110,7 @@ It describes the code as it is today. For the structure the code is moving towar
 | `src/broker/server.rs` | `axum` HTTP server: `/publish`, `/watch`, `/messages/:agent_id`, `/status`, `/log`. Validates each incoming `/publish` body (message schema, `agent_id` pattern, unfilled-placeholder rejection) before handing it to delivery. |
 | `src/broker/messages.rs` | `BrokerMessage` enum + payload types + slug validation. Source of truth for the wire format used in user-facing examples. |
 | `src/broker/client.rs` | `BrokerClient`: the one HTTP client every process other than the broker host uses — bounded-timeout `GET /status`, `GET /log?since=&wait=`, `POST /publish`, `POST /watch` (with an optional spec id), and the repository-scoped stale-broker probe. The dashboard, the launcher, `add`, `status`, the drive loop and the MCP server all go through it. |
-| `src/broker/publish.rs` | Client-side helpers for callers outside the broker process (thin wrappers over `BrokerClient`): build `BrokerMessage` values and publish them over HTTP, register a live `/watch` target, fetch `/log` (by cursor, optionally long-polling), and fetch the wave-progress object from `/status`. Shared by `cmd_supervisor`, `git paw status`, and the MCP query and publish tools. |
+| `src/broker/publish.rs` | Client-side helpers for callers outside the broker process (thin wrappers over `BrokerClient`): build `BrokerMessage` values and publish them over HTTP, register a live `/watch` target, fetch `/log` (by cursor, optionally long-polling), and fetch the wave-progress object from `/status`. Shared by `commands::supervisor::supervisor`, `git paw status`, and the MCP query and publish tools. |
 | `src/broker/delivery.rs` | Delivery layer: assigns each message its sequence number, updates the sender's record, appends it to the message log, and routes it into inboxes (broadcast, supervisor inbox, targeted delivery). Also cursor-based polling, the dashboard snapshot, and the broker-log flush loop. |
 | `src/broker/watcher.rs` | Git-status polling watcher: one task per worktree runs `git status --porcelain` every 2 s and publishes `agent.status` (with `modified_files`) when the reported path set changes; reads `git rev-parse HEAD` on the same tick and marks wave progress when the branch tip moves (the first observation is a baseline); prunes a worktree that has vanished. |
 | `src/broker/conflict.rs` | Forward / in-flight / ownership conflict detection. Auto-emits `[conflict-detector]`-tagged `agent.feedback` and escalates via `agent.question`. |
@@ -141,11 +141,11 @@ format_agent_rows, …}` resolving from the parent module.
 
 | File | Purpose |
 |------|---------|
-| `src/supervisor/mod.rs` | Module root declaring the submodules below. The supervisor launch itself (`cmd_supervisor`) lives in `src/commands/supervisor.rs`. |
+| `src/supervisor/mod.rs` | Module root declaring the submodules below. The supervisor launch itself (`commands::supervisor::supervisor`) lives in `src/commands/supervisor.rs`. |
 | `src/supervisor/approval_gate.rs` | The shared live-prompt gate (`live_prompt_in_tail`) and the escalation dedup key. |
 | `src/supervisor/branch_refresh.rs` | Pure precondition check for the opt-in post-merge branch refresh (`[supervisor] branch_refresh`): a branch is rebased only when every gate passes. The drive loop resolves the inputs. |
 | `src/supervisor/claim.rs` | Exclusive per-pane keystroke claim. Every sender — the drive loop's nudge and buffered-input recovery, and the bundled `sweep.sh approve` in its own process — atomically creates `<repo>/.git-paw/tmp/approve-pane-<N>.claim` before sending a keystroke, so two can never both type into one pane. Non-blocking (a held pane is skipped, not waited on), released by RAII, and stealable once untouched past a 10s TTL so a hard-killed sender cannot wedge a pane. |
-| `src/supervisor/drive.rs` | The `--unattended` drive loop, run in-process by `cmd_supervisor`: ~15 s sweeps of every coding-agent pane, non-blocking escalation of every live permission prompt as a broker review item (nothing is typed for it), buffered-input recovery, the optional correction loop and branch refresh, completion detection, and the exit summary. It sends no approval keystroke. |
+| `src/supervisor/drive.rs` | The `--unattended` drive loop, run in-process by the binary's entry layer once `commands::supervisor::supervisor` returns (or reports an existing session) and the drive-loop binding is taken: ~15 s sweeps of every coding-agent pane, non-blocking escalation of every live permission prompt as a broker review item (nothing is typed for it), buffered-input recovery, the optional correction loop and branch refresh, completion detection, and the exit summary. It sends no approval keystroke. |
 | `src/supervisor/drive/decide.rs` | The drive loop's functional core. The loop runs observe → decide → apply: the shell in `drive.rs` observes (surfaces and their owners through the terminal port, screen captures, `/status`, new broker messages by cursor, merge states from git, the clock) and passes those facts to the pure decisions here — `decide_prompt`, `decide_message`, `decide_nudge` with `decide_reengaged` and `decide_recovery_step`, and `summarize`. Each returns the next state and an ordered list of `DriveEffect`s (record a manual decision, publish an escalation, record a learning, submit buffered input, re-engage a worker, refresh branches, record an exhausted branch, note a judgment call; there is no approval effect). The shell applies each effect in order through the existing ports and appends it, with its `EffectOutcome`, to an in-memory effect log: `drive_loop_logged` returns `DriveRun { summary, effect_log }` and `drive_loop` returns only the summary. No decision reads a port, the clock, git or the broker. |
 | `src/supervisor/keys.rs` | The `KeyDispatcher` seam, implemented by every terminal backend (`src/terminal/`), used by the drive loop's nudge and input-recovery paths. |
 | `src/supervisor/loop_binding.rs` | The drive-loop binding: a refreshed lease file (`.git-paw/tmp/drive-loop.binding`) that keeps at most one drive loop on a session instance, so a re-attach never runs a second loop beside a live one. |
@@ -187,14 +187,16 @@ nothing about MCP, `tools` knows about MCP and `query`, and `server` only wires
 
 ## Start Flow
 
-The `start` command is the primary flow. `main.rs` dispatches it to one of three
-handlers in `src/commands/`: `supervisor::cmd_supervisor` when supervisor mode
+The `start` command is the primary flow. `main.rs` resolves supervisor mode and
+dispatches it to one of three use cases in `git_paw::commands`: `supervisor::supervisor` when supervisor mode
 resolves on (`--supervisor` or `--unattended`, else `[supervisor] enabled`, else
 an interactive prompt when no `[supervisor]` section exists; `--no-supervisor`
-always wins), `start::cmd_start_with_specs` for a spec-driven launch
-(`--from-all-specs` / `--specs`) without a supervisor, and `start::cmd_start`
-otherwise. All three run the same existing-session check first. Here's what
-`cmd_start` does step by step:
+always wins), `start::start_with_specs` for a spec-driven launch
+(`--from-all-specs` / `--specs`) without a supervisor, and `start::start`
+otherwise. All three run the same existing-session check first, and all three
+return a `LaunchOutcome` instead of touching the terminal — `main.rs` attaches,
+reattaches or refuses, or runs the unattended drive loop from it. Here's what
+`start::start` does step by step:
 
 ```
 git paw start
@@ -222,7 +224,7 @@ git paw start
      ▼ (fresh start)
 ┌─ Load config ────────────────────────────────────────────┐
 │  config::load_config() → merged PawConfig                │
-│  ([supervisor] enabled → hand off to cmd_supervisor)     │
+│  ([supervisor] enabled → hand off to supervisor())       │
 └──────────────────────────────────────────────────────────┘
      │
      ▼
@@ -262,7 +264,7 @@ git paw start
 ┌─ Pane layout by mode ────────────────────────────────────┐
 │  supervisor   → Pane 0 = `git paw __dashboard`           │
 │                 Pane 1..N = per-agent CLIs               │
-│                 (cmd_supervisor builds it with           │
+│                 (supervisor() builds it with             │
 │                  tmux::build_supervisor_session; the     │
 │                  orchestrator runs outside the session)  │
 │  broker-only  → Pane 0 = `git paw __dashboard`           │
@@ -296,7 +298,7 @@ git paw start
 └──────────────────────────────────────────────────────────┘
      │
      ▼
-┌─ Attach ─────────────────────────────────────────────────┐
+┌─ Attach (entry layer, from LaunchOutcome::Attach) ───────┐
 │  attach_or_print_hint() → user enters tmux session       │
 │  (prints an attach hint when stdin is not a TTY)         │
 └──────────────────────────────────────────────────────────┘

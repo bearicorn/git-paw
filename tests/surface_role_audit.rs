@@ -48,6 +48,9 @@ fn scanned_files() -> Vec<(String, String)> {
     paths.extend(rust_files(&root.join("src/supervisor")));
     paths.extend(rust_files(&root.join("src/coordination")));
     paths.extend(rust_files(&root.join("src/commands")));
+    // The binary's entry layer: it attaches and binds the drive loop from a
+    // command's outcome, so it is held to the same rules as the commands.
+    paths.push(root.join("src/main.rs"));
     paths.push(root.join("src/session.rs"));
     paths
         .into_iter()
@@ -146,7 +149,7 @@ const ALLOWED_WIRE_IDENTITY_SITES: &[(&str, &str)] = &[
     ("src/coordination/inventory.rs", "normalize_id"),
     // `git paw remove supervisor` is refused by name — a CLI argument, not a
     // surface role.
-    ("src/commands/remove.rs", "cmd_remove"),
+    ("src/commands/remove.rs", "remove"),
 ];
 
 /// The audit is only as good as what it reads. `src/commands/supervisor.rs`
@@ -165,9 +168,9 @@ fn stripping_test_modules_keeps_the_production_code_the_rules_govern() {
         .expect("src/commands/supervisor.rs is scanned");
 
     for marker in [
-        "pub(crate) fn cmd_supervisor(", // the supervised launch path
-        "fn drive_unattended_loop(",     // the drive-loop wiring
-        "recorded_dashboard_pane()",     // a recorded index, however it is written
+        "pub fn supervisor(",        // the supervised launch path
+        "fn unattended_drive_run(",  // the drive-loop wiring
+        "recorded_dashboard_pane()", // a recorded index, however it is written
     ] {
         assert!(
             supervisor.contains(marker),

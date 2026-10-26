@@ -1,44 +1,76 @@
 //! `git paw add <branch>` — hot-attach a worktree + agent pane to a running
-//! grid session (bare or supervised). Extracted verbatim from `main.rs`
-//! (code-analysis-refactor R2c).
-//!
-//! The shared attach primitives (`attach_agent`, `AttachContext`,
-//! `AttachedAgent`) and the launch helpers (`resolve_submit_delay_ms`,
-//! `submit_prompt_to_pane`, `write_repo_discovery_file`) remain in `main.rs`
-//! (relocated with the supervisor cluster in R2d) and are referenced through
-//! the crate root.
+//! grid session (bare or supervised), through the same attach primitives
+//! ([`super::launch`]) a start-time agent uses.
 
-use git_paw::broker;
-use git_paw::config::{self, SupervisorConfig};
-use git_paw::detect;
-use git_paw::error::PawError;
-use git_paw::git;
-use git_paw::session::{self, SessionStatus};
-use git_paw::surface::SessionLayout;
-use git_paw::terminal::tmux::TmuxBackend;
-use git_paw::terminal::{GridGeometry, SurfacePlacement, TerminalBackend};
-use git_paw::tmux;
+use crate::broker;
+use crate::config::{self, SupervisorConfig};
+use crate::detect;
+use crate::error::PawError;
+use crate::git;
+use crate::session::{self, SessionStatus};
+use crate::surface::SessionLayout;
+use crate::terminal::tmux::TmuxBackend;
+use crate::terminal::{GridGeometry, SurfacePlacement, TerminalBackend};
+use crate::tmux;
 
+use super::entry_points::{PendingEntryPoint, submit_entry_points};
 use super::helpers::{
     agent_pane_offset, config_to_custom_defs, legacy_tiled_layout_unsupported,
     session_has_live_agents,
 };
-use crate::{
-    AttachContext, AttachedAgent, attach_agent, gate_pane_or_fail_on_dialog,
-    resolve_submit_delay_ms, submit_prompt_to_pane, write_repo_discovery_file,
+use super::launch::{
+    AttachContext, AttachedAgent, attach_agent, gate_pane_or_fail_on_dialog, submit_prompt_to_pane,
+    write_repo_discovery_file,
 };
+use super::{CommandContext, Output};
+use crate::config::resolve_submit_delay_ms;
+
+/// Options for [`add`]: the `git paw add` arguments.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AddOptions {
+    /// The branch to attach (required unless `from_spec` is given).
+    pub branch: Option<String>,
+    /// `--cli`.
+    pub cli: Option<String>,
+    /// `--from-spec`: attach the branch of this spec.
+    pub from_spec: Option<String>,
+}
+
+/// What [`add`] attached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddOutcome {
+    /// The session the agent joined.
+    pub session_name: String,
+    /// The branch attached.
+    pub branch: String,
+    /// The new agent's pane index.
+    pub pane_index: usize,
+    /// Whether the session is paused (the agent starts on `git paw start`).
+    pub paused: bool,
+}
 
 /// `git paw add <branch>` — hot-attach a worktree + agent pane to a running
 /// session (capability `add-branch`).
+///
+/// # Errors
+///
+/// Returns an error when the repository has no running session, the branch
+/// is already an agent, no CLI can be resolved, or a launch step fails.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn cmd_add(
-    branch_arg: Option<&str>,
-    cli_flag: Option<&str>,
-    from_spec: Option<&str>,
-) -> Result<(), PawError> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
-    let repo_root = git::validate_repo(&cwd)?;
+pub fn add(
+    ctx: &CommandContext,
+    opts: AddOptions,
+    out: &mut dyn Output,
+) -> Result<AddOutcome, PawError> {
+    let AddOptions {
+        branch: branch_arg,
+        cli: cli_flag,
+        from_spec,
+    } = opts;
+    let branch_arg = branch_arg.as_deref();
+    let cli_flag = cli_flag.as_deref();
+    let from_spec = from_spec.as_deref();
+    let repo_root = ctx.repo_root().to_path_buf();
 
     // 4.1 Resolve the active session; error cleanly when none.
     let Some(existing) = session::find_session_for_repo(&repo_root)? else {
@@ -77,7 +109,7 @@ pub(crate) fn cmd_add(
     }
 
     tmux::ensure_tmux_installed()?;
-    let config = config::load_config(&repo_root, None)?;
+    let config = ctx.config()?.clone();
     let broker_config = config.broker.clone();
     let project = git::project_name(&repo_root);
 
@@ -85,13 +117,13 @@ pub(crate) fn cmd_add(
     let (branch, resolved_cli, spec_entry): (
         String,
         Option<String>,
-        Option<git_paw::specs::SpecEntry>,
+        Option<crate::specs::SpecEntry>,
     ) = if let Some(spec_name) = from_spec {
-        let discovered = git_paw::specs::scan_specs(&config, &repo_root)?;
+        let discovered = crate::specs::scan_specs(&config, &repo_root)?;
         // resolve_specs errors with the discovered candidate list on an
         // unknown name — exactly the UX `--specs NAME` gives.
         let mut resolved =
-            git_paw::specs::resolve::resolve_specs(&discovered, &[spec_name.to_string()])?;
+            crate::specs::resolve::resolve_specs(&discovered, &[spec_name.to_string()])?;
         let spec = resolved.drain(..).next().ok_or_else(|| {
             PawError::SpecError(format!("spec '{spec_name}' resolved to no entries"))
         })?;
@@ -177,12 +209,12 @@ pub(crate) fn cmd_add(
     // broker-less session (agents from pane 0, rows sharing the full height)
     // re-tiles to its own geometry rather than a dashboard-bearing one.
     let prev_agent_count = existing.worktrees.len();
-    git_paw::surface::layout_for(prev_agent_count + 1, session_layout.has_top_row())?;
+    crate::surface::layout_for(prev_agent_count + 1, session_layout.has_top_row())?;
 
     // 4.5 Take the advisory lock for the rest of the critical section.
-    let _lock = git_paw::lock::SessionLock::acquire(&repo_root)?;
+    let _lock = crate::lock::SessionLock::acquire(&repo_root)?;
 
-    // Build the shared attach context (mirrors cmd_supervisor's loop setup).
+    // Build the shared attach context (mirrors supervisor's loop setup).
     let default_sup = SupervisorConfig::default();
     let supervisor_cfg = config.supervisor.as_ref().unwrap_or(&default_sup);
     let approval = &supervisor_cfg.agent_approval;
@@ -193,18 +225,18 @@ pub(crate) fn cmd_add(
         .is_none_or(SupervisorConfig::strict_branch_guard);
     let gate_commands = supervisor_cfg.gate_commands();
     let coordination_template = if broker_config.enabled {
-        Some(git_paw::skills::resolve("coordination")?)
+        Some(crate::skills::resolve("coordination")?)
     } else {
         None
     };
-    // Gated on explicit `docs_base_url` (see cmd_supervisor) so an added agent
+    // Gated on explicit `docs_base_url` (see supervisor) so an added agent
     // is byte-identical to a start-time one.
     let docs_fetch_template = if config.docs_base_url.is_some() {
-        Some(git_paw::skills::resolve("docs-fetch")?)
+        Some(crate::skills::resolve("docs-fetch")?)
     } else {
         None
     };
-    let session_backends: Vec<git_paw::specs::SpecBackendKind> = spec_entry
+    let session_backends: Vec<crate::specs::SpecBackendKind> = spec_entry
         .as_ref()
         .map(|s| vec![s.backend])
         .unwrap_or_default();
@@ -240,13 +272,13 @@ pub(crate) fn cmd_add(
     // 4.6 Reuse create_worktree + attach_agent to build the new pane's setup.
     // The new agent takes the lowest port slot no live agent holds, so a slot
     // freed by an earlier `git paw remove` is reused instead of climbing.
-    let slot = git_paw::worktree_provision::allocate_slot(&existing.worktrees);
+    let slot = crate::worktree_provision::allocate_slot(&existing.worktrees);
     let AttachedAgent {
         pane,
         prompt,
         entry_point,
         mut entry,
-    } = attach_agent(&attach_ctx, &branch, spec_entry.as_ref(), slot)?;
+    } = attach_agent(&attach_ctx, &branch, spec_entry.as_ref(), slot, out)?;
     // Capture the new worktree's path before `entry` is moved into the
     // session, so we can register it as a live broker watch target below.
     let new_worktree_path = entry.worktree_path.clone();
@@ -279,7 +311,9 @@ pub(crate) fn cmd_add(
             ..grid
         },
     ) {
-        eprintln!("warning: could not rebalance agent-row widths: {e}");
+        out.warn(&format!(
+            "warning: could not rebalance agent-row widths: {e}"
+        ));
     }
 
     // 4.8 Append the branch/pane entry to the session JSON.
@@ -299,6 +333,7 @@ pub(crate) fn cmd_add(
         &updated.session_name,
         &updated.worktrees,
         offset,
+        out,
     );
 
     // Register the new worktree as a live broker watch target so the watcher
@@ -318,16 +353,18 @@ pub(crate) fn cmd_add(
             &agent_cli,
             spec_entry.as_ref().map(|s| s.id.as_str()),
         ) {
-            eprintln!("warning: could not register '{branch}' with the broker watcher: {e}");
+            out.warn(&format!(
+                "warning: could not register '{branch}' with the broker watcher: {e}"
+            ));
         }
     }
 
     if paused {
-        println!(
+        out.line(&format!(
             "Added '{branch}' to paused session '{}' (pane {new_pane_idx}); it will start on \
              `git paw start`.",
             updated.session_name
-        );
+        ));
     } else {
         // Gate boot-block injection on observed CLI readiness, matching the
         // start path (design D1, G1): poll the new pane for its CLI's
@@ -352,21 +389,22 @@ pub(crate) fn cmd_add(
         // A declared workflow entry point follows as its own composer line,
         // once this pane goes idle — the same rule the start paths apply.
         if let Some(entry_point) = entry_point {
-            crate::submit_entry_points(
+            submit_entry_points(
                 &backend,
                 &updated.session_name,
-                vec![crate::PendingEntryPoint {
+                vec![PendingEntryPoint {
                     pane_index: new_pane_idx,
                     agent_id: broker::messages::slugify_branch(&branch),
                     entry_point,
                     settle_delay_ms: delay,
                 }],
+                out,
             );
         }
-        println!(
+        out.line(&format!(
             "Added '{branch}' to session '{}' (pane {new_pane_idx}).",
             updated.session_name
-        );
+        ));
     }
 
     // Reconcile the session JSON against the live panes after the re-tile and
@@ -380,14 +418,19 @@ pub(crate) fn cmd_add(
     if let Ok(missing) = tmux::reconcile_agents_to_panes(&updated.session_name, &reconcile_agents)
         && !missing.is_empty()
     {
-        eprintln!(
+        out.warn(&format!(
             "warning: {} agent(s) in the session JSON have no live tmux pane \
              (JSON↔tmux desync): {}. Recover with `git paw remove <branch>` then \
              `git paw add <branch>`.",
             missing.len(),
             missing.join(", ")
-        );
+        ));
     }
 
-    Ok(())
+    Ok(AddOutcome {
+        session_name: updated.session_name,
+        branch,
+        pane_index: new_pane_idx,
+        paused,
+    })
 }

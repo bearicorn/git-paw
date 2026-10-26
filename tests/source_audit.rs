@@ -10,6 +10,7 @@
 //! `dashboard-mvu` frozen-surface scenario.
 
 const SUPERVISOR_RS: &str = include_str!("../src/commands/supervisor.rs");
+const MAIN_RS: &str = include_str!("../src/main.rs");
 const DASHBOARD_RS: &str = include_str!("../src/dashboard.rs");
 const DASHBOARD_VIEW_RS: &str = include_str!("../src/dashboard/view.rs");
 
@@ -59,7 +60,7 @@ fn dashboard_body(name: &str) -> &'static str {
 // Rust-side `run_merge_loop`. (test-coverage-v0-5-0 task 12.9)
 #[test]
 fn cmd_supervisor_does_not_reference_run_merge_loop() {
-    let body = function_body("cmd_supervisor");
+    let body = function_body("supervisor");
     assert!(
         !body.contains("run_merge_loop"),
         "cmd_supervisor body must not reference the removed `run_merge_loop` symbol"
@@ -128,18 +129,39 @@ fn src_files() -> Vec<(String, String)> {
 // eliminated. v0-5-0-audit-cleanup task 5.4.
 #[test]
 fn cmd_supervisor_does_not_publish_supervisor_status() {
-    let body = function_body("cmd_supervisor");
+    assert_no_supervisor_self_publish("src/commands/supervisor.rs", function_body("supervisor"));
+}
 
-    // The two substrings — `publish_to_broker_http(` (the HTTP publish
-    // call) and `build_status_message("supervisor"` (the supervisor-
-    // targeted status builder) — must not co-occur inside
-    // cmd_supervisor's body. Either alone is fine elsewhere; their
-    // pairing inside cmd_supervisor is the regression shape.
+/// The same rule for the half of the supervised launch that runs in the
+/// binary's entry layer: the launch-outcome handling and the drive-loop
+/// binding and run (`finish_launch`, `drive_fresh`, `drive_existing`,
+/// `run_drive_loop` in `src/main.rs`), which were part of `cmd_supervisor`
+/// before the command moved into the library.
+#[test]
+fn the_entry_layer_launch_steps_do_not_publish_supervisor_status() {
+    for name in [
+        "finish_launch",
+        "drive_fresh",
+        "drive_existing",
+        "run_drive_loop",
+    ] {
+        assert_no_supervisor_self_publish(
+            "src/main.rs",
+            function_body_in(MAIN_RS, "src/main.rs", name),
+        );
+    }
+}
+
+/// The two substrings — `publish_to_broker_http(` (the HTTP publish call)
+/// and `build_status_message("supervisor"` (the supervisor-targeted status
+/// builder) — must not co-occur inside one launch-path body. Either alone is
+/// fine elsewhere; their pairing is the regression shape.
+fn assert_no_supervisor_self_publish(path: &str, body: &str) {
     let has_publish = body.contains("publish_to_broker_http(");
     let has_supervisor_status = body.contains("build_status_message(\"supervisor\"");
     assert!(
         !(has_publish && has_supervisor_status),
-        "cmd_supervisor body must not pair `publish_to_broker_http(` with \
+        "a supervised-launch body in {path} must not pair `publish_to_broker_http(` with \
          `build_status_message(\"supervisor\"`; the supervisor pane self-registers"
     );
 }

@@ -1,20 +1,43 @@
 //! `git paw status` — shows session state for the current repo (human or
-//! `--json`). Extracted verbatim from `main.rs` (code-analysis-refactor R2b).
+//! `--json`).
 
-use git_paw::broker;
-use git_paw::error::PawError;
-use git_paw::git;
-use git_paw::session;
-use git_paw::terminal::TerminalBackend;
-use git_paw::terminal::tmux::TmuxBackend;
-use git_paw::tmux;
+use crate::broker;
+use crate::error::PawError;
+use crate::session;
+use crate::terminal::TerminalBackend;
+use crate::terminal::tmux::TmuxBackend;
+use crate::tmux;
 
 use super::helpers::BROKER_SERVICE;
+use super::{CommandContext, Output};
+
+/// Options for [`status`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StatusOptions {
+    /// Render the machine-readable JSON body instead of the human report.
+    pub json: bool,
+}
+
+/// What [`status`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusOutcome {
+    /// The repository has no session.
+    NoSession,
+    /// The session's state, as reported.
+    Session {
+        /// The session.
+        session_name: String,
+        /// Its displayed status.
+        status: session::DisplayStatus,
+        /// Whether its tmux session is running.
+        tmux_running: bool,
+    },
+}
 
 /// Builds the `--json` body.
 ///
 /// `wave` is present only when the session's own broker answered (see
-/// [`cmd_status`]), so the key is simply absent otherwise rather than a
+/// [`status`]), so the key is simply absent otherwise rather than a
 /// zeroed object a script could mistake for "idle since the epoch".
 fn status_json(
     existing: &session::Session,
@@ -107,35 +130,41 @@ fn print_broker_block(
     view: &BrokerView,
     display: session::DisplayStatus,
     wave: Option<broker::WaveStatus>,
+    out: &mut dyn Output,
 ) {
-    println!("{}", broker_line(url, view, display));
+    out.line(&broker_line(url, view, display));
     // A roster of `working` agents can hide a wave that has not moved in
     // days, so say so explicitly rather than leaving the reader to infer it
     // from per-agent rows.
     if let Some(wave) = wave
         && wave.stalled
     {
-        println!(
+        out.line(&format!(
             "  \u{21b3} wave stalled \u{2014} no progress for {}",
             wave.idle_human()
-        );
+        ));
     }
-    println!();
+    out.line("");
 }
 
-/// Shows session state for the current repo.
-pub(crate) fn cmd_status(json: bool) -> Result<(), PawError> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
-    let repo_root = git::validate_repo(&cwd)?;
-
-    let Some(existing) = session::find_session_for_repo(&repo_root)? else {
+/// Shows session state for the repository.
+///
+/// # Errors
+///
+/// Returns an error when the session state cannot be read.
+pub fn status(
+    ctx: &CommandContext,
+    opts: StatusOptions,
+    out: &mut dyn Output,
+) -> Result<StatusOutcome, PawError> {
+    let json = opts.json;
+    let Some(existing) = session::find_session_for_repo(ctx.repo_root())? else {
         if json {
-            println!("{}", serde_json::json!({ "session": null }));
+            out.line(&serde_json::json!({ "session": null }).to_string());
         } else {
-            println!("No session for this repo.");
+            out.line("No session for this repo.");
         }
-        return Ok(());
+        return Ok(StatusOutcome::NoSession);
     };
 
     // Liveness probe (spec: "Liveness probe is cheap"). The probe
@@ -194,36 +223,40 @@ pub(crate) fn cmd_status(json: bool) -> Result<(), PawError> {
     let wave = broker_status.as_ref().and_then(|st| st.wave);
 
     if json {
-        println!("{}", status_json(&existing, display, tmux_running, wave));
-        return Ok(());
+        out.line(&status_json(&existing, display, tmux_running, wave).to_string());
+        return Ok(StatusOutcome::Session {
+            session_name: existing.session_name,
+            status: display,
+            tmux_running,
+        });
     }
 
-    println!("Session: {}", existing.session_name);
-    println!("Status:  {} {display}", display.icon());
+    out.line(&format!("Session: {}", existing.session_name));
+    out.line(&format!("Status:  {} {display}", display.icon()));
     match display {
         session::DisplayStatus::Paused => {
-            println!("  \u{21b3} run 'git paw start' to resume");
+            out.line("  \u{21b3} run 'git paw start' to resume");
         }
         session::DisplayStatus::Stale => {
-            println!(
+            out.line(
                 "  \u{21b3} tmux session no longer exists — run 'git paw start' to \
-                 self-heal, or 'git paw purge --stale' to clear it"
+                 self-heal, or 'git paw purge --stale' to clear it",
             );
         }
         _ => {}
     }
     if matches!(liveness, tmux::SessionLiveness::AgentsExited) {
-        println!("  \u{21b3} agent panes exited — run 'git paw start' to recover them");
+        out.line("  \u{21b3} agent panes exited — run 'git paw start' to recover them");
     }
-    println!(
+    out.line(&format!(
         "Tmux:    {}",
         if tmux_running {
             "running"
         } else {
             "not running"
         }
-    );
-    println!();
+    ));
+    out.line("");
 
     if let (Some(url), Some(probe)) = (&broker_endpoint, broker_probe) {
         // The session's broker host is alive when its `broker` service
@@ -240,23 +273,27 @@ pub(crate) fn cmd_status(json: bool) -> Result<(), PawError> {
             host_alive,
             status: broker_status,
         };
-        print_broker_block(url, &view, display, wave);
+        print_broker_block(url, &view, display, wave, out);
     }
 
     if existing.worktrees.is_empty() {
-        println!("  (no worktrees)");
+        out.line("  (no worktrees)");
     } else {
         for entry in &existing.worktrees {
-            println!(
+            out.line(&format!(
                 "  {} \u{2192} {} ({})",
                 entry.branch,
                 entry.cli,
                 entry.worktree_path.display()
-            );
+            ));
         }
     }
 
-    Ok(())
+    Ok(StatusOutcome::Session {
+        session_name: existing.session_name,
+        status: display,
+        tmux_running,
+    })
 }
 
 #[cfg(test)]

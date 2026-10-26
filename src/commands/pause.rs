@@ -1,15 +1,43 @@
 //! `git paw pause` — detach and pause the session while leaving CLI panes
-//! running. Extracted verbatim from `main.rs` (code-analysis-refactor R2b).
+//! running.
 
-use git_paw::error::PawError;
-use git_paw::git;
-use git_paw::session::{self, SessionStatus};
-use git_paw::surface::SessionLayout;
-use git_paw::terminal::TerminalBackend;
-use git_paw::terminal::tmux::TmuxBackend;
-use git_paw::tmux;
+use crate::error::PawError;
+use crate::session::{self, SessionStatus};
+use crate::surface::SessionLayout;
+use crate::terminal::TerminalBackend;
+use crate::terminal::tmux::TmuxBackend;
+use crate::tmux;
 
 use super::helpers::BROKER_SERVICE;
+use super::{CommandContext, Output};
+
+/// Options for [`pause`]. `git paw pause` takes none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PauseOptions {}
+
+/// What [`pause`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PauseOutcome {
+    /// The repository has no session.
+    NoSession,
+    /// The session was already paused; nothing changed.
+    AlreadyPaused {
+        /// The session.
+        session_name: String,
+    },
+    /// The session is stopped, so there is nothing to pause.
+    AlreadyStopped {
+        /// The session.
+        session_name: String,
+    },
+    /// The session was paused.
+    Paused {
+        /// The session.
+        session_name: String,
+        /// How many coding-agent panes are still running.
+        cli_panes: usize,
+    },
+}
 
 /// Pauses the session: detaches the user's tmux client, stops the broker
 /// (by closing its host's service surface), and updates session status to
@@ -18,20 +46,30 @@ use super::helpers::BROKER_SERVICE;
 ///
 /// Idempotent: pausing an already-paused or already-stopped session is
 /// a no-op with a friendly message.
-pub(crate) fn cmd_pause() -> Result<(), PawError> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| PawError::SessionError(format!("cannot read current directory: {e}")))?;
-    let repo_root = git::validate_repo(&cwd)?;
-
-    let Some(existing) = session::find_session_for_repo(&repo_root)? else {
-        println!("No active session for this repo.");
-        return Ok(());
+///
+/// # Errors
+///
+/// Returns an error when the session state cannot be read or saved, or a
+/// tmux operation fails.
+pub fn pause(
+    ctx: &CommandContext,
+    _opts: PauseOptions,
+    out: &mut dyn Output,
+) -> Result<PauseOutcome, PawError> {
+    let Some(existing) = session::find_session_for_repo(ctx.repo_root())? else {
+        out.line("No active session for this repo.");
+        return Ok(PauseOutcome::NoSession);
     };
 
     // Idempotency: already paused.
     if existing.status == SessionStatus::Paused {
-        println!("Session '{}' is already paused.", existing.session_name);
-        return Ok(());
+        out.line(&format!(
+            "Session '{}' is already paused.",
+            existing.session_name
+        ));
+        return Ok(PauseOutcome::AlreadyPaused {
+            session_name: existing.session_name,
+        });
     }
 
     // Effective status check: stopped sessions can't be paused.
@@ -42,11 +80,13 @@ pub(crate) fn cmd_pause() -> Result<(), PawError> {
         )
     });
     if effective == SessionStatus::Stopped {
-        println!(
+        out.line(&format!(
             "Session '{}' is already stopped; pause has no effect.",
             existing.session_name
-        );
-        return Ok(());
+        ));
+        return Ok(PauseOutcome::AlreadyStopped {
+            session_name: existing.session_name,
+        });
     }
 
     // Detach the user's tmux client. Idempotent in detach_client.
@@ -76,9 +116,12 @@ pub(crate) fn cmd_pause() -> Result<(), PawError> {
     updated.status = SessionStatus::Paused;
     session::save_session(&updated)?;
 
-    println!(
+    out.line(&format!(
         "Session '{session_name}' paused. {cli_pane_count} CLI pane(s) still running. \
          Run 'git paw start' to resume."
-    );
-    Ok(())
+    ));
+    Ok(PauseOutcome::Paused {
+        session_name,
+        cli_panes: cli_pane_count,
+    })
 }

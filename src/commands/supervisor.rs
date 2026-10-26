@@ -1,103 +1,64 @@
-//! `git paw` supervisor mode — the auto-start flow (`cmd_supervisor`), the
-//! in-process unattended drive loop and its manual-decision log wiring, and
-//! supervisor-mode resolution. Extracted verbatim from `main.rs`
-//! (code-analysis-refactor R2d).
+//! `git paw` supervisor mode — the auto-start flow (`supervisor`), the
+//! unattended drive loop's binding and run wiring (with its manual-decision
+//! log), and the pure supervisor-mode resolution.
 //!
-//! The shared agent-attach primitives (`attach_agent`, `AttachContext`) and
-//! launch helpers (`submit_prompt_to_pane`, `resolve_submit_delay_ms`,
-//! `write_repo_discovery_file`), plus the `SpecMode` dispatch enum and
-//! `apply_spec_mode`, remain in `main.rs` and are referenced through the crate
-//! root.
+//! The launch never attaches the terminal and never runs the drive loop
+//! itself: it returns a [`LaunchOutcome`], and the caller attaches, or takes
+//! the drive-loop binding ([`bind_drive_loop`]) and runs the loop that
+//! [`unattended_drive_run`] prepares.
 
-use std::io::IsTerminal;
 use std::path::Path;
 use std::time::SystemTime;
 
-use dialoguer::Confirm;
+use crate::broker;
+use crate::broker::messages::BrokerMessage;
+use crate::broker::publish::publish_to_broker_http;
+use crate::config::{self, PawConfig, SupervisorConfig};
+use crate::detect;
+use crate::error::PawError;
+use crate::git;
+use crate::interactive;
+use crate::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry};
+use crate::supervisor::drive;
+use crate::supervisor::loop_binding::{self, BindMode, DriveLoopBinding};
+use crate::surface::SessionLayout;
+use crate::terminal::tmux::TmuxBackend;
+use crate::terminal::{SessionPlan, SurfaceSpec, TerminalBackend};
+use crate::tmux;
 
-use git_paw::broker;
-use git_paw::broker::messages::BrokerMessage;
-use git_paw::broker::publish::publish_to_broker_http;
-use git_paw::config::{self, PawConfig, SupervisorConfig};
-use git_paw::detect;
-use git_paw::error::PawError;
-use git_paw::git;
-use git_paw::interactive;
-use git_paw::session::{self, Session, SessionMode, SessionStatus, WorktreeEntry};
-use git_paw::supervisor::drive;
-use git_paw::supervisor::loop_binding::{self, BindMode, DriveLoopBinding};
-use git_paw::surface::SessionLayout;
-use git_paw::terminal::tmux::TmuxBackend;
-use git_paw::terminal::{SessionPlan, SurfaceSpec, TerminalBackend};
-use git_paw::tmux;
-
+use super::entry_points::{PendingEntryPoint, submit_entry_points};
 use super::helpers::{
     config_to_custom_defs, dashboard_command, launch_session, register_agents_with_host,
     session_has_live_agents, start_broker_host, to_interactive_cli, warn_if_broker_is_exposed,
 };
-use super::recover::{recover_session, recover_session_detached};
-use super::start::{restart_from_pause, restart_from_pause_detached};
-use crate::{
-    AttachContext, SpecMode, apply_spec_mode, attach_agent, gate_pane_or_fail_on_dialog,
-    invalidate_if_stale, reattach_active_session_or_refuse, resolve_submit_delay_ms,
-    submit_prompt_to_pane, write_repo_discovery_file,
+use super::launch::{
+    AttachContext, LaunchOutcome, attach_agent, gate_pane_or_fail_on_dialog, submit_prompt_to_pane,
+    write_repo_discovery_file,
 };
+use super::purge::invalidate_if_stale;
+use super::recover::recover_session_detached;
+use super::spec_mode::{SpecMode, apply_spec_mode};
+use super::start::{restart_from_pause_detached, revive_existing};
+use super::{CommandContext, Output};
+use crate::config::resolve_submit_delay_ms;
 
-/// Loads the repo config from the current working directory and resolves
-/// whether supervisor mode should be entered for this session.
-pub(crate) fn resolve_supervisor_mode_from_cwd(
-    no_supervisor_flag: bool,
-    supervisor_flag: bool,
-    dry_run: bool,
-) -> Result<bool, PawError> {
-    if no_supervisor_flag {
-        return Ok(false);
-    }
-    if supervisor_flag {
-        return Ok(true);
-    }
-    // Config lookup may fail outside a git repo; if we can't find a repo or
-    // config, fall back to the default (no supervisor) and let downstream
-    // commands produce the real error.
-    let Ok(cwd) = std::env::current_dir() else {
-        return Ok(false);
-    };
-    let Ok(repo_root) = git::validate_repo(&cwd) else {
-        return Ok(false);
-    };
-    let config = config::load_config(&repo_root, None).unwrap_or_default();
-    resolve_supervisor_mode(
-        no_supervisor_flag,
-        supervisor_flag,
-        dry_run,
-        &config,
-        &mut TerminalSupervisorPrompt,
-    )
-}
-
-/// Abstraction over the "Start in supervisor mode?" prompt so the resolution
-/// logic can be unit-tested without touching stdin.
-pub(crate) trait SupervisorPrompt {
+/// The "Start in supervisor mode?" question, as a port: the caller supplies
+/// the terminal prompt, so the resolution chain stays free of stdin.
+pub trait SupervisorPrompt {
+    /// Asks the question and returns the answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the prompt itself fails.
     fn ask(&mut self) -> Result<bool, PawError>;
 }
 
-struct TerminalSupervisorPrompt;
-
-impl SupervisorPrompt for TerminalSupervisorPrompt {
-    fn ask(&mut self) -> Result<bool, PawError> {
-        if !std::io::stdin().is_terminal() {
-            return Ok(false);
-        }
-        Confirm::new()
-            .with_prompt("Start in supervisor mode?")
-            .default(false)
-            .interact()
-            .map_err(|e| PawError::SessionError(format!("supervisor prompt failed: {e}")))
-    }
-}
-
 /// Pure resolution of the supervisor mode chain. See `supervisor-cli` spec.
-pub(crate) fn resolve_supervisor_mode(
+///
+/// # Errors
+///
+/// Returns an error only when `prompt` is asked and fails.
+pub fn resolve_supervisor_mode(
     no_supervisor_flag: bool,
     supervisor_flag: bool,
     dry_run: bool,
@@ -147,7 +108,7 @@ pub(crate) fn resolve_supervisor_mode(
 fn publish_supervisor_question(question: &str, broker_url: &str) -> Result<(), PawError> {
     let msg = BrokerMessage::Question {
         agent_id: "supervisor".to_string(),
-        payload: git_paw::broker::messages::QuestionPayload {
+        payload: crate::broker::messages::QuestionPayload {
             question: question.to_string(),
         },
     };
@@ -190,9 +151,9 @@ mod interactive_cli_selection_tests {
 
     use std::cell::RefCell;
 
-    use git_paw::error::PawError;
-    use git_paw::interactive::{CliInfo, CliMode, Prompter};
-    use git_paw::specs::SpecEntry;
+    use crate::error::PawError;
+    use crate::interactive::{CliInfo, CliMode, Prompter};
+    use crate::specs::SpecEntry;
 
     use super::interactive_branch_cli_selection;
 
@@ -335,21 +296,77 @@ mod interactive_cli_selection_tests {
     }
 }
 
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-pub(crate) fn cmd_supervisor(
-    repo_root: &Path,
-    config: &PawConfig,
-    cli_flag: Option<&str>,
-    branches_flag: Option<&[String]>,
-    spec_mode: &SpecMode,
-    specs_format_override: Option<&str>,
-    dry_run: bool,
-    no_rebase: bool,
-    unattended: bool,
-) -> Result<(), PawError> {
+/// Options for [`supervisor`]: the supervised `git paw start` flags, plus the
+/// caller's picker and whether it can ask.
+///
+/// The booleans mirror command-line flags one for one; re-encoding them as
+/// enums would only hide which flag a branch reacts to.
+#[allow(clippy::struct_excessive_bools)]
+pub struct SupervisorOptions<'a> {
+    /// `--cli`: the coding agents' CLI.
+    pub cli: Option<String>,
+    /// `--branches`.
+    pub branches: Option<Vec<String>>,
+    /// Which discovered specs to launch (`SpecMode::None` for the branch
+    /// picker / `--branches` flow).
+    pub spec_mode: SpecMode,
+    /// `--specs-format`.
+    pub specs_format: Option<String>,
+    /// `--dry-run`: print the plan, create nothing.
+    pub dry_run: bool,
+    /// `--no-rebase`.
+    pub no_rebase: bool,
+    /// `--unattended`: hand the session to the drive loop instead of the
+    /// terminal ([`LaunchOutcome::DriveFresh`] / [`LaunchOutcome::DriveExisting`]).
+    pub unattended: bool,
+    /// The caller's branch / spec / CLI picker. The command never prompts
+    /// itself.
+    pub prompter: &'a dyn interactive::Prompter,
+    /// Whether the caller can ask at all (an interactive terminal). The bare
+    /// `--specs` picker is refused without one.
+    pub interactive: bool,
+}
+
+/// `git paw start` in supervisor mode: reads the supervisor config, resolves
+/// branches (from `--branches`, specs, or interactive selection), creates
+/// worktrees, renders each agent's `AGENTS.md`, builds the session with the
+/// dashboard at pane 0 and the coding agents after it, starts the broker
+/// host, and injects each agent's first prompt once its pane is ready.
+///
+/// An existing session is revived instead (or, with `unattended`, handed back
+/// untouched for the caller to drive). The returned [`LaunchOutcome`] says
+/// what the caller owes the terminal.
+///
+/// # Errors
+///
+/// Returns an error when no branch or CLI can be resolved, the broker port is
+/// held by another repository, or any launch step fails.
+#[allow(clippy::too_many_lines)]
+pub fn supervisor(
+    ctx: &CommandContext,
+    opts: SupervisorOptions<'_>,
+    out: &mut dyn Output,
+) -> Result<LaunchOutcome, PawError> {
+    let repo_root = ctx.repo_root();
+    let config = ctx.config()?;
+    let SupervisorOptions {
+        cli,
+        branches,
+        spec_mode,
+        specs_format,
+        dry_run,
+        no_rebase,
+        unattended,
+        prompter,
+        interactive,
+    } = opts;
+    let cli_flag = cli.as_deref();
+    let branches_flag = branches.as_deref();
+    let spec_mode = &spec_mode;
+    let specs_format_override = specs_format.as_deref();
     // Reattach guard (GP-13): a supervisor-enabled repo's `git paw start`
     // dispatches straight here (see `resolve_dispatch_target`), bypassing
-    // `cmd_start`'s own existing-session check entirely. Without this, a
+    // `start`'s own existing-session check entirely. Without this, a
     // re-invocation against a repository that already has a live session
     // fell straight through to `resolve_session_name`, which — finding the
     // base name already alive — forked a `-N`-suffixed parallel session
@@ -357,33 +374,25 @@ pub(crate) fn cmd_supervisor(
     let existing_session = session::find_session_for_repo(repo_root)?;
     if !dry_run
         && let Some(existing) = &existing_session
-        && !invalidate_if_stale(repo_root, existing)?
+        && !invalidate_if_stale(repo_root, existing, out)?
     {
         let effective = existing.effective_status(|name| session_has_live_agents(name, existing));
         if unattended {
-            return reattach_drive_loop(repo_root, config, existing, &effective);
+            // Nothing is touched here: the caller refuses a bare session and
+            // takes the drive-loop binding BEFORE any revive or recovery.
+            return Ok(LaunchOutcome::DriveExisting {
+                repo_root: repo_root.to_path_buf(),
+                config: Box::new(config.clone()),
+                existing: Box::new(existing.clone()),
+                status: effective,
+            });
         }
-        match effective {
-            SessionStatus::Paused => {
-                println!(
-                    "Restarting paused session '{}' (broker + reattach)...",
-                    existing.session_name
-                );
-                return restart_from_pause(repo_root, existing);
-            }
-            SessionStatus::Active => {
-                return reattach_active_session_or_refuse(&existing.session_name);
-            }
-            SessionStatus::Stopped => {
-                println!("Recovering session '{}'...", existing.session_name);
-                return recover_session(repo_root, existing);
-            }
-        }
+        return revive_existing(repo_root, existing, &effective, out);
     }
 
     // Refuse a port held by another repository's broker before the branch and
     // CLI pickers below, so the user is never asked to make choices for a
-    // launch that cannot proceed. See `cmd_start` for why this cannot wait
+    // launch that cannot proceed. See `start` for why this cannot wait
     // for the dashboard's own broker start-up. A dry run creates nothing, so
     // it never probes; the reattach and recover paths returned above and do
     // their own checks.
@@ -424,7 +433,7 @@ pub(crate) fn cmd_supervisor(
     //   3. `SpecMode::{All,Picker,Narrow}` — scan specs, then apply the same
     //      subset filter the non-supervisor `--specs` path uses so the named
     //      subset / picker selection is honoured (the v0.6.0 dogfood fix).
-    let mut spec_by_branch: std::collections::HashMap<String, git_paw::specs::SpecEntry> =
+    let mut spec_by_branch: std::collections::HashMap<String, crate::specs::SpecEntry> =
         std::collections::HashMap::new();
     // Per-branch CLI resolved via the spec-driven 5-level priority chain
     // (GP-10): populated only for spec-driven branches, so `--supervisor
@@ -444,9 +453,8 @@ pub(crate) fn cmd_supervisor(
         let all_branches = git::list_branches(repo_root)?;
         let interactive_clis: Vec<interactive::CliInfo> =
             detected.iter().map(to_interactive_cli).collect();
-        let prompter = interactive::TerminalPrompter;
         let (picked_branches, picked_clis) = interactive_branch_cli_selection(
-            &prompter,
+            prompter,
             &all_branches,
             &interactive_clis,
             cli_flag,
@@ -456,13 +464,13 @@ pub(crate) fn cmd_supervisor(
         picked_branches
     } else {
         let discovered =
-            git_paw::specs::scan_specs_with_override(config, repo_root, specs_format_override)?;
+            crate::specs::scan_specs_with_override(config, repo_root, specs_format_override)?;
         if discovered.is_empty() {
             return Err(PawError::ConfigError(
                 "supervisor mode found no branches: pass --branches or define specs".to_string(),
             ));
         }
-        let specs = apply_spec_mode(spec_mode, discovered, &interactive::TerminalPrompter)?;
+        let specs = apply_spec_mode(spec_mode, discovered, prompter, interactive)?;
         if specs.is_empty() {
             return Err(PawError::ConfigError(
                 "supervisor mode found no branches: pass --branches or define specs".to_string(),
@@ -470,7 +478,7 @@ pub(crate) fn cmd_supervisor(
         }
 
         // Resolve the CLI per spec branch through the exact same chain
-        // `cmd_start_with_specs` uses (`interactive::resolve_cli_for_specs`):
+        // `start_with_specs` uses (`interactive::resolve_cli_for_specs`):
         // `--cli` > per-spec `paw_cli` > `default_spec_cli` > `default_cli`
         // (picker) > full picker. Previously `--supervisor --specs` ignored
         // this entirely and launched every worker with the single
@@ -483,22 +491,21 @@ pub(crate) fn cmd_supervisor(
         }
         let interactive_clis: Vec<interactive::CliInfo> =
             detected.iter().map(to_interactive_cli).collect();
-        let prompter = interactive::TerminalPrompter;
         let cli_mappings = interactive::resolve_cli_for_specs(
             &specs,
             cli_flag,
             config,
             &interactive_clis,
-            &prompter,
+            prompter,
         )?;
         spec_cli_overrides.extend(cli_mappings);
 
-        let mut out = Vec::with_capacity(specs.len());
+        let mut spec_branches = Vec::with_capacity(specs.len());
         for spec in specs {
-            out.push(spec.branch.clone());
+            spec_branches.push(spec.branch.clone());
             spec_by_branch.insert(spec.branch.clone(), spec);
         }
-        out
+        spec_branches
     };
 
     // A branch without a per-branch CLI (the `--branches` path) launches with
@@ -535,7 +542,7 @@ pub(crate) fn cmd_supervisor(
     let broker_config = config.broker.clone();
     // Warn before the session exists: the dashboard pane prints the same
     // warning but immediately switches to the alternate screen.
-    warn_if_broker_is_exposed(&broker_config);
+    warn_if_broker_is_exposed(&broker_config, out);
     // Coding agents resolve their flags from `agent_approval` alone.
     // `[supervisor].approval` is the orchestrator's own level and no pane runs
     // an orchestrator, so it shapes no command here.
@@ -556,24 +563,27 @@ pub(crate) fn cmd_supervisor(
     // Dry-run: print the plan and exit without touching the filesystem.
     if dry_run {
         if let Some(existing) = &existing_session {
-            eprintln!(
+            out.warn(&format!(
                 "warning: session '{}' already exists — purge it before starting a new one\n",
                 existing.session_name
-            );
+            ));
         }
-        println!("Dry run — supervisor session plan:\n");
-        println!("  Session:    {session_name}");
+        out.line("Dry run — supervisor session plan:\n");
+        out.line(&format!("  Session:    {session_name}"));
         if spec_cli_overrides.values().any(|cli| cli != &agent_cli) {
-            println!("  Agent CLI:  (resolved per branch, see below)");
+            out.line("  Agent CLI:  (resolved per branch, see below)");
         } else {
-            println!("  Agent CLI:  {agent_cli}");
+            out.line(&format!("  Agent CLI:  {agent_cli}"));
         }
-        println!("  Approval:   {agent_approval:?}");
-        println!("  Mouse:      {}", if mouse { "on" } else { "off" });
+        out.line(&format!("  Approval:   {agent_approval:?}"));
+        out.line(&format!(
+            "  Mouse:      {}",
+            if mouse { "on" } else { "off" }
+        ));
         if broker_config.enabled {
-            println!("  Broker URL: {}", broker_config.url());
+            out.line(&format!("  Broker URL: {}", broker_config.url()));
         }
-        println!();
+        out.line("");
         for branch in &branches {
             let wt = git::worktree_display_path(repo_root, branch, config.worktree_placement())?;
             let cli = effective_agent_cli(branch);
@@ -583,16 +593,16 @@ pub(crate) fn cmd_supervisor(
             } else {
                 format!("{cli} {flags}")
             };
-            println!("  {branch} \u{2192} {cmd} ({wt})");
+            out.line(&format!("  {branch} \u{2192} {cmd} ({wt})"));
         }
-        return Ok(());
+        return Ok(LaunchOutcome::Done);
     }
 
     // Hard cap (D4): 25 agents per session for v0.5.0. Configurable layout
     // arrives in v1.0.0 (issue #17).
     // A supervised launch always builds the dashboard as the full-width top
     // row, broker or not, so the grid always has one.
-    git_paw::surface::supervisor_layout(branches.len(), true)?;
+    crate::surface::supervisor_layout(branches.len(), true)?;
 
     // Real launch.
     git::prune_worktrees(repo_root)?;
@@ -601,8 +611,8 @@ pub(crate) fn cmd_supervisor(
     // supervisor skill can render `{{SPEC_PATH_DOCTRINE}}` per backend.
     // Empty when branches came from `--branches` (no spec scan) — the
     // doctrine placeholder then renders the no-backend sentinel.
-    let session_backends: Vec<git_paw::specs::SpecBackendKind> = {
-        let mut seen: Vec<git_paw::specs::SpecBackendKind> = Vec::new();
+    let session_backends: Vec<crate::specs::SpecBackendKind> = {
+        let mut seen: Vec<crate::specs::SpecBackendKind> = Vec::new();
         for entry in spec_by_branch.values() {
             if !seen.contains(&entry.backend) {
                 seen.push(entry.backend);
@@ -615,15 +625,15 @@ pub(crate) fn cmd_supervisor(
     // (`.git-paw/AGENTS.local.md`). No pane reads it: the orchestrator drives
     // the session from outside tmux — the operator's own agent session — and
     // the launch prints the sidecar path so the operator can point it there.
-    let supervisor_skill_template = git_paw::skills::resolve("supervisor")?;
-    let supervisor_md = git_paw::skills::render_for_supervisor(
+    let supervisor_skill_template = crate::skills::resolve("supervisor")?;
+    let supervisor_md = crate::skills::render_for_supervisor(
         &supervisor_skill_template,
         &broker_config.url(),
         &project,
         &supervisor_cfg.gate_commands(),
         &session_backends,
     );
-    let supervisor_assignment = git_paw::agents::WorktreeAssignment {
+    let supervisor_assignment = crate::agents::WorktreeAssignment {
         branch: "supervisor".to_string(),
         // The configured orchestrator CLI, else the CLI the coding agents run.
         cli: orchestrator_cli
@@ -637,18 +647,18 @@ pub(crate) fn cmd_supervisor(
         // `## Governance documents` section so a configured `[governance]`
         // table reaches the orchestrator context (boot-block: governance
         // follows the supervisor skill content).
-        skill_content: Some(git_paw::skills::supervisor_boot_context(
+        skill_content: Some(crate::skills::supervisor_boot_context(
             &supervisor_md,
             unattended,
             &config.governance,
         )),
         inter_agent_rules: None,
     };
-    git_paw::agents::setup_worktree_agents_md(repo_root, repo_root, &supervisor_assignment)?;
+    crate::agents::setup_worktree_agents_md(repo_root, repo_root, &supervisor_assignment)?;
 
     // Resolve the coordination skill once for all agent panes.
     let coordination_template = if broker_config.enabled {
-        Some(git_paw::skills::resolve("coordination")?)
+        Some(crate::skills::resolve("coordination")?)
     } else {
         None
     };
@@ -658,7 +668,7 @@ pub(crate) fn cmd_supervisor(
     // the skill is not injected — a consumer only gets it once they have
     // pointed git-paw at their own docs, keeping the exported skill agnostic.
     let docs_fetch_template = if config.docs_base_url.is_some() {
-        Some(git_paw::skills::resolve("docs-fetch")?)
+        Some(crate::skills::resolve("docs-fetch")?)
     } else {
         None
     };
@@ -726,8 +736,8 @@ pub(crate) fn cmd_supervisor(
 
         // Each agent takes the lowest slot not held by an already-attached
         // peer, so the port blocks in this session never overlap.
-        let slot = git_paw::worktree_provision::allocate_slot(&worktree_entries);
-        let attached = attach_agent(&attach_ctx, branch, spec_by_branch.get(branch), slot)?;
+        let slot = crate::worktree_provision::allocate_slot(&worktree_entries);
+        let attached = attach_agent(&attach_ctx, branch, spec_by_branch.get(branch), slot, out)?;
         agent_panes.push(attached.pane);
         agent_prompts.push(attached.prompt);
         agent_entry_points.push(attached.entry_point);
@@ -761,7 +771,13 @@ pub(crate) fn cmd_supervisor(
     // enabled`) — the supervised layout reserves pane 0 for the dashboard, so
     // coding agents start at the layout's first agent index — and even the
     // grid's columns.
-    launch_session(&backend, &plan, &session_layout, Some((config, repo_root)))?;
+    launch_session(
+        &backend,
+        &plan,
+        &session_layout,
+        Some((config, repo_root)),
+        out,
+    )?;
 
     // Bring the broker host up in its detached service surface, wait for it
     // to answer as this repository's broker, and register every agent with
@@ -781,7 +797,7 @@ pub(crate) fn cmd_supervisor(
             let _ = backend.close_session(&session_name);
             return Err(e);
         }
-        register_agents_with_host(&broker_config.url(), &worktree_entries);
+        register_agents_with_host(&broker_config.url(), &worktree_entries, out);
     }
     let agent_commands: Vec<String> = plan
         .surfaces
@@ -822,6 +838,7 @@ pub(crate) fn cmd_supervisor(
         &session_name,
         &state.worktrees,
         session_layout.first_agent_index(),
+        out,
     );
 
     // Inject the initial prompt into each coding agent pane (indices 1..N).
@@ -841,7 +858,7 @@ pub(crate) fn cmd_supervisor(
     // paste-buffer-recovery section) recovers. Sending more than one Enter at
     // launch risks accidentally accepting a follow-on permission prompt on
     // fast CLIs and is intentionally avoided.
-    let mut pending_entry_points: Vec<crate::PendingEntryPoint> = Vec::new();
+    let mut pending_entry_points: Vec<PendingEntryPoint> = Vec::new();
     for (idx, prompt) in agent_prompts.iter().enumerate() {
         // Per-branch delay: a spec-driven session can resolve a distinct CLI
         // per branch (GP-10), and each CLI's configured settle delay differs.
@@ -858,9 +875,9 @@ pub(crate) fn cmd_supervisor(
         )?;
         submit_prompt_to_pane(&backend, &session_name, pane_idx, prompt, agent_delay);
         if let Some(entry_point) = agent_entry_points[idx].clone() {
-            pending_entry_points.push(crate::PendingEntryPoint {
+            pending_entry_points.push(PendingEntryPoint {
                 pane_index: pane_idx,
-                agent_id: git_paw::broker::messages::slugify_branch(&branches[idx]),
+                agent_id: crate::broker::messages::slugify_branch(&branches[idx]),
                 entry_point,
                 settle_delay_ms: agent_delay,
             });
@@ -871,7 +888,7 @@ pub(crate) fn cmd_supervisor(
     // own composer lines, each once its pane goes idle. The second `Enter`
     // this sends is the only other standalone `Enter` the launch emits, and
     // only into a pane re-checked idle immediately before.
-    crate::submit_entry_points(&backend, &session_name, pending_entry_points);
+    submit_entry_points(&backend, &session_name, pending_entry_points, out);
 
     // The orchestrator's roster row appears only when the external
     // orchestrator publishes its own `agent.status`. The launcher does not
@@ -884,20 +901,20 @@ pub(crate) fn cmd_supervisor(
     // share it. Prints exactly when opted in and is silent otherwise so a
     // non-learnings session's output is unchanged.
     if let Some(notice) = learnings_disclosure_notice(config.supervisor.as_ref()) {
-        println!("{notice}");
+        out.line(&notice);
     }
 
-    println!(
+    out.line(&format!(
         "Supervisor session '{}' launched with {} coding agent(s).",
         session_name,
         branches.len()
-    );
+    ));
     // The orchestrator runs outside the session: point the operator's own
     // agent session at the context rendered for it.
-    println!(
+    out.line(&format!(
         "Orchestrator context: {} (point your orchestrating agent session at it)",
-        git_paw::agents::SIDECAR_REL_PATH
-    );
+        crate::agents::SIDECAR_REL_PATH
+    ));
 
     // Step 15 (supervisor-launch): branch on `--unattended`.
     //
@@ -908,62 +925,32 @@ pub(crate) fn cmd_supervisor(
     // returns — it does NOT replace the foreground terminal with an
     // interactive supervisor CLI and does NOT require an attached terminal.
     if unattended {
-        // The binding is taken after the session is saved (so the instance
-        // token is the one on disk) and before the loop runs. A fresh launch
-        // just created this instance, so nothing may already be driving it:
-        // `Fresh` refuses rather than displacing a holder.
-        let created_at = recorded_created_at(repo_root, state.created_at);
-        let binding = bind_drive_loop(repo_root, &session_name, created_at, BindMode::Fresh)?;
-        return drive_unattended_loop(
-            repo_root,
-            supervisor_cfg,
-            &broker_config,
-            &session_name,
-            &state,
-            created_at,
-            binding,
-        );
+        // The caller takes the binding — after the session is saved (so the
+        // instance token is the one on disk) and before the loop runs.
+        return Ok(LaunchOutcome::DriveFresh {
+            repo_root: repo_root.to_path_buf(),
+            config: Box::new(config.clone()),
+            session: Box::new(state),
+        });
     }
 
-    println!("Attach with:  tmux attach -t {session_name}");
-    Ok(())
+    out.line(&format!("Attach with:  tmux attach -t {session_name}"));
+    Ok(LaunchOutcome::Done)
 }
 
-/// Binds a new drive loop to the repository's live supervised session and
-/// runs it (`supervisor-unattended-operation`, *A drive loop can be bound to
-/// a live supervised session*).
+/// Refuses to drive a session launched without supervisor mode
+/// (`supervisor-unattended-operation`, *A drive loop can be bound to a live
+/// supervised session*).
 ///
-/// This is what `git paw start --unattended` does instead of attaching or
-/// refusing when the repository already has a live session — the remedy after
-/// a loop exits on its heartbeat or is interrupted, and the actuator an
-/// external orchestrator restarts. The loop that runs here is the same loop a
-/// fresh launch runs, with the same cadence, escalation, correction and exit
-/// summary; like that loop, it approves nothing.
-///
-/// The order matters and is the whole safety argument: the bare-session
-/// refusal and the binding both come BEFORE any revive or recovery, so a
-/// refused caller leaves every session, pane and worktree exactly as it found
-/// them.
-///
-/// The terminal is never attached, even on a TTY — a fresh `--unattended`
-/// launch does not attach either, so the loop, not the operator's terminal,
-/// is what takes the session over.
+/// A bare session pre-fills its boot prompts and deliberately leaves them for
+/// the human to submit; the loop submits an idle pane's buffered input, so
+/// driving one would send exactly what the human was meant to review. Decided
+/// on the recorded mode, before anything is touched.
 ///
 /// # Errors
 ///
-/// Returns an error when the session is bare, when another drive loop already
-/// drives this instance, or when the revive or recovery fails — in which case
-/// no loop runs.
-fn reattach_drive_loop(
-    repo_root: &Path,
-    config: &PawConfig,
-    existing: &Session,
-    effective: &SessionStatus,
-) -> Result<(), PawError> {
-    // A bare session pre-fills its boot prompts and deliberately leaves them
-    // for the human to submit; the loop submits an idle pane's buffered
-    // input, so driving one would send exactly what the human was meant to
-    // review. Refused on the recorded mode, before anything is touched.
+/// Returns an error naming the session when it is bare.
+pub fn ensure_drivable(existing: &Session) -> Result<(), PawError> {
     if existing.mode != SessionMode::Supervisor {
         return Err(PawError::SessionError(format!(
             "session '{}' was launched without supervisor mode, so it cannot be driven \
@@ -972,34 +959,66 @@ fn reattach_drive_loop(
             existing.session_name
         )));
     }
+    Ok(())
+}
 
-    // Recovery supersedes any binding left for this instance: the loop of a
-    // stopped instance is already required to stop acting, so its binding is
-    // not evidence of a live driver of the recovered session.
-    let mode = if *effective == SessionStatus::Stopped {
+/// The binding mode a re-attach takes for a session whose effective status is
+/// `effective`. Recovery supersedes any binding left for this instance: the
+/// loop of a stopped instance is already required to stop acting, so its
+/// binding is not evidence of a live driver of the recovered session.
+#[must_use]
+pub fn reattach_bind_mode(effective: &SessionStatus) -> BindMode {
+    if *effective == SessionStatus::Stopped {
         BindMode::Supersede
     } else {
         BindMode::Fresh
-    };
-    let created_at = recorded_created_at(repo_root, existing.created_at);
-    let binding = bind_drive_loop(repo_root, &existing.session_name, created_at, mode)?;
+    }
+}
 
+/// Brings an existing supervised session up for an unattended re-attach, after
+/// the caller has taken the drive-loop binding, and returns the session as it
+/// now stands together with the broker config the loop must use.
+///
+/// This is what `git paw start --unattended` does instead of attaching or
+/// refusing when the repository already has a live session — the remedy after
+/// a loop exits on its heartbeat or is interrupted, and the actuator an
+/// external orchestrator restarts. The order is the whole safety argument: the
+/// caller refuses a bare session ([`ensure_drivable`]) and binds BEFORE this
+/// revives or recovers anything, so a refused caller leaves every session,
+/// pane and worktree exactly as it found them.
+///
+/// The terminal is never attached, even on a TTY — a fresh `--unattended`
+/// launch does not attach either, so the loop, not the operator's terminal,
+/// is what takes the session over.
+///
+/// # Errors
+///
+/// Returns an error when the revive or recovery fails — in which case no loop
+/// may run, and dropping the caller's binding releases it.
+pub fn revive_for_drive(
+    repo_root: &Path,
+    config: &PawConfig,
+    existing: &Session,
+    effective: &SessionStatus,
+    out: &mut dyn Output,
+) -> Result<(Session, crate::config::BrokerConfig), PawError> {
     // Bring the session up where it is not already. Both paths are the ones
-    // `git paw start` uses, minus the terminal attach; a failure here fails
-    // the command with no loop run, and dropping `binding` on the way out
-    // releases it.
+    // `git paw start` uses, minus the terminal attach.
     match effective {
         SessionStatus::Active => {}
         SessionStatus::Paused => {
-            println!(
+            out.line(&format!(
                 "Restarting paused session '{}' (broker + drive loop)...",
                 existing.session_name
-            );
-            restart_from_pause_detached(repo_root, existing)?;
+            ));
+            restart_from_pause_detached(repo_root, existing, out)?;
         }
         SessionStatus::Stopped => {
-            println!("Recovering session '{}'...", existing.session_name);
-            recover_session_detached(repo_root, existing)?;
+            out.line(&format!(
+                "Recovering session '{}'...",
+                existing.session_name
+            ));
+            recover_session_detached(repo_root, existing, out)?;
         }
     }
 
@@ -1013,37 +1032,26 @@ fn reattach_drive_loop(
     // `[broker] port` edited since launch would otherwise point the loop at
     // no broker at all, or at another repository's.
     let broker_config = match (state.broker_port, state.broker_bind.as_ref()) {
-        (Some(port), Some(bind)) => git_paw::config::BrokerConfig {
+        (Some(port), Some(bind)) => crate::config::BrokerConfig {
             enabled: true,
             port,
             bind: bind.clone(),
             ..config.broker.clone()
         },
         // A session saved with no broker fields has no broker to reach.
-        _ => git_paw::config::BrokerConfig {
+        _ => crate::config::BrokerConfig {
             enabled: false,
             ..config.broker.clone()
         },
     };
 
-    let default_supervisor_cfg = SupervisorConfig::default();
-    let supervisor_cfg = config
-        .supervisor
-        .as_ref()
-        .unwrap_or(&default_supervisor_cfg);
+    out.line(&format!(
+        "Driving session '{}' unattended.",
+        state.session_name
+    ));
+    out.line("Attach from another terminal with:  git paw attach");
 
-    println!("Driving session '{}' unattended.", state.session_name);
-    println!("Attach from another terminal with:  git paw attach");
-
-    drive_unattended_loop(
-        repo_root,
-        supervisor_cfg,
-        &broker_config,
-        &state.session_name,
-        &state,
-        created_at,
-        binding,
-    )
+    Ok((state, broker_config))
 }
 
 /// Reads the session receipt's `created_at` back from disk — the durable
@@ -1055,7 +1063,8 @@ fn reattach_drive_loop(
 /// the in-memory `SystemTime::now()` value would almost never equal the
 /// truncated value read back, and the loop would see its own session as torn
 /// down on its very first tick. `fallback` covers an unreadable receipt.
-fn recorded_created_at(repo_root: &Path, fallback: SystemTime) -> SystemTime {
+#[must_use]
+pub fn recorded_created_at(repo_root: &Path, fallback: SystemTime) -> SystemTime {
     session::find_session_for_repo(repo_root)
         .ok()
         .flatten()
@@ -1073,7 +1082,7 @@ fn recorded_created_at(repo_root: &Path, fallback: SystemTime) -> SystemTime {
 ///
 /// Returns an error naming the session, the holding process and the binding
 /// file when another drive loop is already driving this instance.
-fn bind_drive_loop(
+pub fn bind_drive_loop(
     repo_root: &Path,
     session_name: &str,
     created_at: SystemTime,
@@ -1088,29 +1097,41 @@ fn bind_drive_loop(
     )
 }
 
-/// Runs the in-process unattended drive loop for a freshly-launched supervisor
-/// session (supervisor-launch step 15, `unattended-operation`).
+/// Everything the unattended drive loop runs with: the session it drives,
+/// its coding-agent roster, and the run options (binding included). The
+/// caller hands these to [`drive::run_drive_loop`].
+pub struct UnattendedRun {
+    /// The repository the session belongs to.
+    pub repo_root: std::path::PathBuf,
+    /// The session the loop drives.
+    pub session_name: String,
+    /// The coding-agent roster, each pane resolved by `worktree_path`.
+    pub agents: Vec<drive::AgentPane>,
+    /// The loop's options, carrying the drive-loop binding.
+    pub options: drive::DriveRunOptions,
+}
+
+/// Prepares the in-process unattended drive loop for a supervised session
+/// (supervisor-launch step 15, `unattended-operation`).
 ///
 /// Builds the coding-agent roster from the saved session (each pane resolved by
-/// `worktree_path`, per D2), wires the manual-decision log, points the summary
-/// at the broker log and the learnings file, then drives the loop to an exit
-/// condition and prints the summary. Blocks in the foreground process; requires
-/// no attached interactive terminal.
+/// `worktree_path`, per D2), wires the manual-decision log, and points the
+/// summary at the broker log and the learnings file. The caller runs the loop.
 ///
 /// `session_created_at` is the instance token read back from disk
 /// ([`recorded_created_at`]) and `binding` the drive-loop binding the caller
 /// already took for that instance — both resolved before this is called,
 /// because a re-attach has to bind *before* it revives or recovers anything.
-fn drive_unattended_loop(
+#[must_use]
+pub fn unattended_drive_run(
     repo_root: &Path,
     supervisor_cfg: &SupervisorConfig,
-    broker_config: &git_paw::config::BrokerConfig,
-    session_name: &str,
+    broker_config: &crate::config::BrokerConfig,
     state: &Session,
     session_created_at: SystemTime,
     binding: DriveLoopBinding,
-) -> Result<(), PawError> {
-    use git_paw::supervisor::drive::{self, AgentPane, DriveRunOptions};
+) -> UnattendedRun {
+    use crate::supervisor::drive::{AgentPane, DriveRunOptions};
 
     let agents: Vec<AgentPane> = state
         .worktrees
@@ -1128,6 +1149,7 @@ fn drive_unattended_loop(
     let loaded_config = config::load_config(repo_root, None).unwrap_or_default();
 
     let broker_url = broker_config.enabled.then(|| broker_config.url());
+    let session_name = state.session_name.clone();
 
     // The manual-decision log: every permission prompt the loop escalates is
     // recorded so `git paw approvals` can tell the user which commands keep
@@ -1135,8 +1157,8 @@ fn drive_unattended_loop(
     // on); the first sighting of a pattern also emits a `permission_pattern`
     // learning, gated separately on `[supervisor] learnings`. This is the
     // only caller, so the resolution is inlined here (design D6).
-    let recorder = git_paw::supervisor::manual_approvals::ManualDecisionRecorder::new(
-        git_paw::supervisor::manual_approvals::log_path(repo_root, session_name),
+    let recorder = crate::supervisor::manual_approvals::ManualDecisionRecorder::new(
+        crate::supervisor::manual_approvals::log_path(repo_root, &session_name),
         supervisor_cfg.manual_approvals_log_enabled(),
         supervisor_cfg.learnings,
         state.project_name.clone(),
@@ -1148,7 +1170,7 @@ fn drive_unattended_loop(
 
     let options = DriveRunOptions {
         broker_url: broker_url.clone(),
-        manual_decisions: Box::new(git_paw::supervisor::drive::RecorderManualDecisionSink::new(
+        manual_decisions: Box::new(crate::supervisor::drive::RecorderManualDecisionSink::new(
             recorder, broker_url,
         )),
         correction: supervisor_cfg.correction.clone(),
@@ -1167,18 +1189,22 @@ fn drive_unattended_loop(
         branch_refresh_enabled: supervisor_cfg.branch_refresh_enabled(),
         session_created_at,
         clis: loaded_config.clis.clone(),
-        layout: git_paw::surface::SessionLayout::of(state),
+        layout: crate::surface::SessionLayout::of(state),
         binding: Some(binding),
     };
 
-    drive::run_drive_loop(session_name, repo_root, &agents, options)?;
-    Ok(())
+    UnattendedRun {
+        repo_root: repo_root.to_path_buf(),
+        session_name,
+        agents,
+        options,
+    }
 }
 
 /// Canonical GitHub issues URL for optional learnings sharing. Tracks the
 /// `repository` field in `Cargo.toml` and the README links so the disclosure
 /// notice never drifts to a stale repo location.
-pub(crate) const GIT_PAW_ISSUES_URL: &str = "https://github.com/bearicorn/git-paw/issues";
+pub const GIT_PAW_ISSUES_URL: &str = "https://github.com/bearicorn/git-paw/issues";
 
 /// Build the session-start learnings privacy disclosure notice.
 ///
@@ -1194,7 +1220,7 @@ pub(crate) const GIT_PAW_ISSUES_URL: &str = "https://github.com/bearicorn/git-pa
 /// caveat. git-paw never scrubs the file itself — only the user knows what is
 /// repo-sensitive — so the guidance is advisory.
 #[must_use]
-pub(crate) fn learnings_disclosure_notice(supervisor: Option<&SupervisorConfig>) -> Option<String> {
+pub fn learnings_disclosure_notice(supervisor: Option<&SupervisorConfig>) -> Option<String> {
     supervisor.filter(|s| s.enabled && s.learnings)?;
     Some(format!(
         "Learnings mode is on. Friction signals are written locally to \
@@ -1224,9 +1250,9 @@ mod supervisor_question_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU16, Ordering};
 
-    use git_paw::broker::messages::BrokerMessage;
-    use git_paw::broker::{self, BrokerState, delivery};
-    use git_paw::config::BrokerConfig;
+    use crate::broker::messages::BrokerMessage;
+    use crate::broker::{self, BrokerState, delivery};
+    use crate::config::BrokerConfig;
 
     use super::publish_supervisor_question;
 

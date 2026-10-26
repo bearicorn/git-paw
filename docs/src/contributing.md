@@ -90,6 +90,18 @@ Every pattern passed to it is compiled by a unit test, so an invalid static patt
 `cargo test` rather than panicking at run time. Patterns that arrive at run time (configuration or
 other input) are compiled directly, with the error propagated.
 
+## The library boundary
+
+Command bodies live in the library, in `git_paw::commands`, so the CLI, the MCP server and the
+tests drive the same use cases. A command takes a `CommandContext` (repository root and config), an
+options struct and an injected `Output` sink, and returns a typed outcome. It never reads the
+current directory or stdin, prompts, prints — no `print!`-family macro and no
+`std::io::stdout()` / `std::io::stderr()` handle, not even one passed to a helper — attaches a
+terminal client, or runs the unattended drive loop. It writes through `Output` and returns; `main.rs`
+does the rest. A source audit (`tests/command_library_audit.rs`) enforces this over
+`src/commands/`, exempting only `completions.rs` and `broker_host.rs` by name, and a `main.rs`
+guard keeps command bodies from creeping back into the entry layer.
+
 ## Where agent-facing text lives
 
 Instructions, rules, directives, framing text and task-prompt scaffolding that an agent reads —

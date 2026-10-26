@@ -2,7 +2,7 @@
 //! running broker over HTTP.
 //!
 //! These helpers live in the library so any caller outside the broker
-//! process (e.g. `cmd_supervisor` self-registration) can publish messages
+//! process (e.g. `commands::supervisor::supervisor` self-registration) can publish messages
 //! using the same wire format and error handling.
 
 use std::time::Duration;

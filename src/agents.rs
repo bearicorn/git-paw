@@ -800,7 +800,7 @@ pub fn remove_git_paw_section(content: &str) -> String {
 /// with no markers is a no-op and the original content is preserved
 /// byte-for-byte.
 ///
-/// v0-5-0-audit-cleanup Bug E — `cmd_stop` and `cmd_purge` invoke this
+/// v0-5-0-audit-cleanup Bug E — `commands::stop::stop` and `commands::purge::purge` invoke this
 /// against the repo-root `AGENTS.md` after teardown so the supervisor-
 /// pane boot block does not accumulate across sessions.
 pub fn remove_session_boot_block(repo_root: &Path) -> Result<(), PawError> {
@@ -867,7 +867,7 @@ mod tests {
              tail of skill_content therefore CANNOT precede task content"
         );
 
-        // The supervisor's assignment shape (see `cmd_supervisor`): no spec,
+        // The supervisor's assignment shape (see `commands::supervisor::supervisor`): no spec,
         // no owned files, so the governance tail is last and the requirement
         // holds vacuously.
         let supervisor = generate_worktree_section(&WorktreeAssignment {
