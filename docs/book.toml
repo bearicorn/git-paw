@@ -15,3 +15,6 @@ edit-url-template = "https://github.com/bearicorn/git-paw/edit/main/docs/{path}"
 [output.html.search]
 enable = true
 limit-results = 20
+
+[output.html.redirect]
+"/quick-start-supervisor.html" = "quick-start-orchestrator.html"

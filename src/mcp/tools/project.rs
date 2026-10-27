@@ -204,8 +204,16 @@ impl GitPawMcpServer {
                     security_audit_command: None,
                     doc_tool_command: None,
                 };
-                let content =
-                    skills::render(&template, &branch, &broker_url, &project, &gates, &backends);
+                // The orchestrator skill (or its `supervisor` alias) is served
+                // exactly as `git paw init` exports it: the standardized
+                // `SKILL.md`, rendered with the configured gate commands and no
+                // session value.
+                let content = if template.name == skills::ORCHESTRATOR_SKILL {
+                    let supervisor = cfg.supervisor.clone().unwrap_or_default();
+                    skills::render_standardized(&template, &supervisor.gate_commands(), &backends)
+                } else {
+                    skills::render(&template, &branch, &broker_url, &project, &gates, &backends)
+                };
                 let source = match template.source {
                     Source::Embedded => "embedded",
                     Source::AgentsStandard => "standard",
@@ -253,6 +261,35 @@ mod tests {
     /// `skill-agent` / Requirement: Embedded cli-setup skill, scenario
     /// "The skill resolves and is served" — the MCP half: `get_skill` serves
     /// `cli-setup` with the embedded content and source `embedded`.
+    #[test]
+    fn get_skill_serves_the_orchestrator_skill_as_exported_under_both_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = server_for(tmp.path().to_path_buf());
+        let config = crate::config::PawConfig::default();
+        let exported = crate::skills::render_standardized(
+            &crate::skills::resolve(crate::skills::ORCHESTRATOR_SKILL).unwrap(),
+            &config
+                .supervisor
+                .clone()
+                .unwrap_or_default()
+                .gate_commands(),
+            &[],
+        );
+
+        for name in ["orchestrator", "supervisor"] {
+            let resp = server.get_skill(Parameters(GetSkillParams {
+                name: name.to_string(),
+            }));
+            let skill = resp.0.skill.expect("the orchestrator skill is served");
+            assert_eq!(skill.name, "orchestrator");
+            assert_eq!(
+                skill.content, exported,
+                "{name} serves the exported SKILL.md"
+            );
+            assert!(!skill.content.contains("http://"));
+        }
+    }
+
     #[test]
     fn get_skill_serves_the_embedded_cli_setup_skill() {
         let tmp = tempfile::tempdir().unwrap();

@@ -3,7 +3,7 @@
 //!
 //! These are WHEN-the-skill-is-read / THEN-the-prose-SHALL-state requirements
 //! that pin the `/agents` + `/tell` "Routing through the supervisor" section
-//! into the bundled `assets/agent-skills/supervisor.md` so a future edit can't
+//! into the bundled `assets/agent-skills/orchestrator.md` so a future edit can't
 //! silently drop the routing conventions (tasks 4, 5, 6, 7.1, 8). The
 //! executable behaviour is unit-tested in `git_paw::coordination`; these
 //! scenarios cover the prose-only requirements that have no other asserting
@@ -13,14 +13,14 @@
 //! pane→agent resolution requirement: the section SHALL resolve a pane's
 //! `pane_current_path` through the `agents` roster recorded in
 //! `.git-paw/sessions/<session>.json`, SHALL NOT teach a basename-shape rule,
-//! and SHALL state the cached map is re-resolved after `git paw add` /
+//! and SHALL state the roster is re-read after `git paw add` /
 //! `git paw remove`.
 
 use std::fs;
 
 fn supervisor_skill() -> String {
-    fs::read_to_string("assets/agent-skills/supervisor.md")
-        .expect("supervisor.md is at the expected path")
+    fs::read_to_string("assets/agent-skills/orchestrator.md")
+        .expect("orchestrator.md is at the expected path")
 }
 
 /// The routing section, lower-cased, for case-insensitive substring scans.
@@ -82,13 +82,14 @@ fn inventory_row_shape_includes_supervisor_and_fields() {
     }
 }
 
-// Task — inventory sourcing names both broker /status and pane_current_path.
+// Task — inventory sourcing names the broker status read (through the
+// helper, orchestrator-skill-export PP-31) and pane_current_path.
 #[test]
 fn inventory_sourcing_named() {
     let section = routing_section();
     assert!(
-        section.contains("/status"),
-        "must source from broker /status"
+        section.contains("sweep.sh status"),
+        "must source from the broker status read via `sweep.sh status`"
     );
     assert!(
         section.contains("pane_current_path"),
@@ -287,8 +288,8 @@ fn pane_resolution_re_resolves_after_add_or_remove() {
          `git paw add` / `git paw remove`, got:\n{section}"
     );
     assert!(
-        section.contains("re-resolve"),
-        "pane-resolution section must name the re-resolution explicitly, got:\n{section}"
+        section.contains("re-read it after"),
+        "pane-resolution section must state the roster is re-read, got:\n{section}"
     );
 }
 

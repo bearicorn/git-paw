@@ -18,8 +18,8 @@
 use std::fs;
 
 fn supervisor_md() -> String {
-    fs::read_to_string("assets/agent-skills/supervisor.md")
-        .expect("supervisor.md is at the expected path")
+    fs::read_to_string("assets/agent-skills/orchestrator.md")
+        .expect("orchestrator.md is at the expected path")
 }
 
 fn coordination_md() -> String {

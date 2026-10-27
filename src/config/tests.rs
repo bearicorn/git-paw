@@ -870,6 +870,22 @@ fn generated_template_documents_the_added_sections() {
     }
 }
 
+/// `orchestrator-skill-export` task 2.10: the `[supervisor.tell]` routing
+/// comment places `/tell` and `/agents` in the orchestrator's own session,
+/// not a supervisor pane the session no longer has.
+#[test]
+fn generated_template_routes_directives_through_the_orchestrators_session() {
+    let template = generate_default_config();
+    assert!(
+        !template.contains("supervisor pane"),
+        "the init config must not tell the user to type in a supervisor pane"
+    );
+    assert!(
+        template.contains("types them in the orchestrator's own agent session"),
+        "the routing comment must name the orchestrator's own session"
+    );
+}
+
 #[test]
 fn generated_template_covers_every_documented_config_section() {
     // Parity guard: every TOML table documented in the configuration

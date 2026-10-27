@@ -2,7 +2,7 @@
 //!
 //! Requirement *`docs/src/user-guide/supervisor.md` SHALL consolidate the
 //! supervisor surfaces*: the chapter is the single place a user reads to
-//! understand supervisor mode, so each of its seven required subsections is
+//! understand supervisor mode, so each of its eight required subsections is
 //! pinned here — the Gate-4 doc audit expressed as a standing test.
 //!
 //! Each assertion is scoped to the relevant section rather than the whole
@@ -179,10 +179,11 @@ fn guide_cross_links_the_learnings_chapter() {
 }
 
 /// Scenario: Supervisor user-guide mirrors "When the user types in your
-/// pane" — all three input categories.
+/// session" — all three input categories, and the pane-bound heading is gone.
 #[test]
-fn guide_mirrors_when_the_user_types_in_your_pane() {
-    let sec = section(&guide(), "## When the user types in your pane");
+fn guide_mirrors_when_the_user_types_in_your_session() {
+    let doc = guide();
+    let sec = section(&doc, "## When the user types in your session");
     let lower = sec.to_lowercase();
     for category in ["status question", "directive", "judgment-call"] {
         assert!(
@@ -190,9 +191,15 @@ fn guide_mirrors_when_the_user_types_in_your_pane() {
             "the section must describe the {category:?} input category"
         );
     }
+    assert!(
+        !doc.contains("When the user types in your pane"),
+        "the pane-bound heading must be gone: the orchestrator has no pane"
+    );
 }
 
-/// Scenario: Supervisor user-guide mirrors "Merge orchestration".
+/// Scenario: Supervisor user-guide mirrors "Merge orchestration" —
+/// including the unattended rule (merge without asking first, escalate only
+/// on a conflict, an exhausted correction cycle or a regression).
 #[test]
 fn guide_mirrors_merge_orchestration() {
     let sec = section(&guide(), "## Merge orchestration");
@@ -200,5 +207,43 @@ fn guide_mirrors_merge_orchestration() {
     assert!(
         missing.is_empty(),
         "the section must cover the topological order and the per-branch merge command; missing: {missing:?}"
+    );
+
+    let lower = sec.to_lowercase();
+    assert!(
+        lower.contains("unattended") && lower.contains("without asking"),
+        "the section must state that an unattended run merges without asking first"
+    );
+    let missing = missing_from(
+        &sec,
+        &["conflict", "exhausted correction cycle", "regression"],
+    );
+    assert!(
+        missing.is_empty(),
+        "the section must name the only escalations; missing: {missing:?}"
+    );
+    assert!(
+        !lower.contains("curl"),
+        "merge orchestration reads and publishes through helpers or MCP, never a raw curl"
+    );
+}
+
+/// Scenario: Supervisor user-guide documents driving from an external agent.
+#[test]
+fn guide_documents_driving_from_your_own_agent() {
+    let sec = section(&guide(), "## Driving the session from your own agent");
+    let missing = missing_from(
+        &sec,
+        &[
+            ".git-paw/skills/orchestrator/SKILL.md",
+            ".git-paw/AGENTS.local.md",
+            "git-paw-orchestrator:start",
+            "sweep.sh verified",
+            "--unattended",
+        ],
+    );
+    assert!(
+        missing.is_empty(),
+        "the section must name the skill, the session context, the pointer, the verdict path and the unattended pairing; missing: {missing:?}"
     );
 }

@@ -1093,9 +1093,9 @@ worktree_placement = "child"
 # context_bloat_threshold_k = 250             # flag context-bloat when the CLI hints at clearing >= this many k tokens
 # blocked_on_supervisor_window_seconds = 900  # flag a supervisor-targeted block unanswered past ~15 min
 #
-# Routing through the supervisor (the /tell and /agents commands). The user
-# types in the supervisor pane and the supervisor routes the prompt to the
-# named agent. `mode` selects the default delivery channel:
+# Routing through the orchestrator (the /tell and /agents commands). The user
+# types them in the orchestrator's own agent session and the orchestrator
+# routes the prompt to the named agent. `mode` selects the default delivery channel:
 #   "feedback"  (default) — queue an agent.feedback; the agent picks it up on
 #                           its next inbox poll. Safe for mixed-mode sessions.
 #   "send-keys"           — inject the prompt directly into the target pane;

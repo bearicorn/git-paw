@@ -2,8 +2,8 @@
 # Supervisor-sweep helpers for a paw-* tmux session.
 #
 # Generalized helper installed by `git paw init` into
-# `<repo>/.git-paw/scripts/sweep.sh`. The supervisor pane invokes this
-# script via relative path; it discovers everything it needs at runtime:
+# `<repo>/.git-paw/scripts/sweep.sh`. The orchestrator invokes this
+# script via relative path from the repo root; it discovers everything it needs at runtime:
 #
 #   - session name from <repo>/.git-paw/sessions/*.json (most recently
 #     modified file's session_name field),
@@ -312,7 +312,8 @@ unset _option_line_digit
 # is_idle_input_box_line in src/supervisor/permission_prompt.rs. Gate-review safety
 # finding: a real live modal REPLACES the input box while it is up, so an idle
 # input-box line appearing below a shape-gated footer match (e.g. the
-# supervisor's own pane echoing another pane's modal via `sweep.sh capture`,
+# orchestrator's own terminal (or, in a legacy session, a supervisor pane)
+# echoing another pane's modal via `sweep.sh capture`,
 # with its own idle composer below) means the footer is quoted/historical
 # content, not an active modal.
 #
@@ -381,7 +382,8 @@ fi
 
 # Discover coding-agent pane indices for the session. Excludes:
 #   - dashboard pane (pane_current_command == "git-paw", or title "dashboard")
-#   - supervisor pane (title "supervisor")
+#   - supervisor pane (title "supervisor"), present only in legacy sessions
+#     launched before the orchestrator moved outside the session
 discover_coding_panes() {
   [[ -z "${SESSION}" ]] && return
   # Window 0 explicitly: a bare session target lists only the CURRENT window,
@@ -437,6 +439,12 @@ usage: $0 <subcommand> [args]
                                       detector keeps tracking the overlap. Both
                                       agents are told; a default note explains
                                       there is nothing to fix if none is given
+  answer <agent> <text> [re]          publish agent.answer from supervisor to <agent>
+                                      (the asking agent); [re] names the question
+  advanced-main <merged-branch> <summary…>
+                                      publish agent.advanced-main after a merge; run on
+                                      the branch merged into — base, the 12-char HEAD
+                                      SHA and the UTC time are resolved here
   status-publish [--phase <p>] [--detail '<obj>'] <msg…>
                                       publish an agent.status from agent_id="supervisor";
                                       --phase adds a phase label, --detail a JSON-object detail
@@ -964,6 +972,72 @@ PY
     publish_verdict "${payload}" >/dev/null || exit 1
   done
   echo "conflict-ack: ${a} + ${b} on ${file}"
+}
+
+# Publish an agent.answer from the supervisor to the agent that asked.
+#
+# The top-level agent_id is the RECIPIENT (the asking agent); the sender is
+# the payload from field, as for agent.feedback. An answer is authoritative
+# guidance, so this verb is root-side only and never granted to workers.
+cmd_answer() {
+  local target=${1:-} text=${2:-} re=${3:-}
+  if [[ -z "${target}" || -z "${text}" ]]; then
+    echo "usage: $0 answer <agent-id> <text> [re]" >&2
+    exit 2
+  fi
+  local payload
+  payload=$("${PY}" - "${target}" "${text}" "${re}" <<'PY'
+import json, sys
+target, text, re = sys.argv[1:4]
+body = {"from": "supervisor", "answer": text}
+if re:
+    body["re"] = re
+print(json.dumps({"type": "agent.answer", "agent_id": target, "payload": body}))
+PY
+)
+  publish "${payload}" >/dev/null || exit 1
+  echo "answer -> ${target}"
+}
+
+# Publish an agent.advanced-main after a merge to the default branch.
+#
+# Run it on the branch just merged into: the helper resolves base (the
+# checked-out branch name, never a hard-coded literal), new_main_sha (the
+# 12-character abbreviation of HEAD) and merged_at (ISO-8601 UTC) itself.
+# The wire shape is flat: the payload fields sit beside the type field.
+cmd_advanced_main() {
+  local merged=${1:-}
+  shift || true
+  local summary=$*
+  if [[ -z "${merged}" || -z "${summary}" ]]; then
+    echo "usage: $0 advanced-main <merged-branch> <summary>" >&2
+    exit 2
+  fi
+  local base sha merged_at
+  base=$(git -C "${PROJECT_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null) || base=""
+  sha=$(git -C "${PROJECT_ROOT}" rev-parse --short=12 HEAD 2>/dev/null) || sha=""
+  if [[ -z "${base}" || "${base}" == "HEAD" || -z "${sha}" ]]; then
+    echo "sweep.sh: advanced-main: cannot resolve the checked-out branch and HEAD at ${PROJECT_ROOT}" >&2
+    exit 2
+  fi
+  merged_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local payload
+  payload=$("${PY}" - "${merged}" "${summary}" "${base}" "${sha}" "${merged_at}" <<'PY'
+import json, sys
+merged, summary, base, sha, merged_at = sys.argv[1:6]
+print(json.dumps({
+    "type": "agent.advanced-main",
+    "from": "supervisor",
+    "merged_branch": merged,
+    "new_main_sha": sha,
+    "base": base,
+    "merged_at": merged_at,
+    "summary": summary,
+}))
+PY
+)
+  publish "${payload}" >/dev/null || exit 1
+  echo "advanced-main: ${base} -> ${sha} (${merged})"
 }
 
 cmd_status_publish() {
@@ -1730,8 +1804,8 @@ cmd_stuck_eval() {
 # admitting that would misread a resolved prompt as live.
 #
 # Gate-review safety finding: even the shape check above can be fooled by a
-# FULL modal copied verbatim into tool output (e.g. the supervisor's own pane
-# running `sweep.sh capture 2`, echoing another pane's footer + option lines
+# FULL modal copied verbatim into tool output (e.g. a pane -- in a legacy
+# session, the supervisor's own -- running `sweep.sh capture 2`, echoing another pane's footer + option lines
 # quoted behind the tool-output glyph). So beyond the narrow tail, a match is
 # rejected outright when an INPUT_BOX_LINE_REGEX line (the CLI's idle
 # composer, not an option line) sits anywhere between the matched footer and
@@ -1848,6 +1922,8 @@ main() {
     feedback-gate) cmd_feedback_gate "$@" ;;
     verified) cmd_verified "$@" ;;
     conflict-ack) cmd_conflict_ack "$@" ;;
+    answer) cmd_answer "$@" ;;
+    advanced-main) cmd_advanced_main "$@" ;;
     status-publish) cmd_status_publish "$@" ;;
     learn) cmd_learn "$@" ;;
     -h|--help|help|"") usage; [[ -z "${sub}" ]] && exit 2 || exit 0 ;;

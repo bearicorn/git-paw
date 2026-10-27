@@ -227,7 +227,7 @@ fn audit_passes_for_coordination_skill() {
 #[test]
 fn no_meta_commentary_names_a_stack() {
     use std::fs;
-    let supervisor = fs::read_to_string("assets/agent-skills/supervisor.md")
+    let supervisor = fs::read_to_string("assets/agent-skills/orchestrator.md")
         .expect("supervisor.md is at the expected path");
     let coordination = fs::read_to_string("assets/agent-skills/coordination.md")
         .expect("coordination.md is at the expected path");
@@ -288,7 +288,7 @@ fn agent_feedback_examples_cover_three_failure_shapes() {
 fn bundled_skills_contain_no_exit_probe_guidance_and_rationale() {
     use std::fs;
     for (path, label) in [
-        ("assets/agent-skills/supervisor.md", "supervisor"),
+        ("assets/agent-skills/orchestrator.md", "supervisor"),
         ("assets/agent-skills/coordination.md", "coordination"),
     ] {
         let body = fs::read_to_string(path).expect("skill file is at the expected path");
@@ -484,7 +484,7 @@ fn audit_excludes_allowlist_prose_via_sentinel() {
 #[test]
 fn no_dev_allowlist_placeholder_remains() {
     let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/agent-skills");
-    for name in ["supervisor.md", "coordination.md"] {
+    for name in ["orchestrator.md", "coordination.md"] {
         let raw = std::fs::read_to_string(assets.join(name))
             .unwrap_or_else(|e| panic!("{name} is readable: {e}"));
         assert!(
@@ -702,4 +702,107 @@ fn allowed_span_permits_the_paste_buffer_cli_enumeration() {
         "supervisor skill should still name Claude Code inside its allowed CLI enumeration"
     );
     assert_no_forbidden_tokens(&rendered, "supervisor-paste-buffer-enumeration");
+}
+
+// ---------------------------------------------------------------------------
+// orchestrator-skill-export: the exported SKILL.md files and the AGENTS.md
+// pointer asset pass the same no-leak audit (core-lang-agnostic, *Exported
+// skills and the AGENTS.md pointer pass the no-leak audit*).
+// ---------------------------------------------------------------------------
+
+/// The orchestrator skill rendered exactly as `git paw init` exports it —
+/// frontmatter included — for `backends`.
+fn exported_orchestrator_for(backends: &[SpecBackendKind]) -> String {
+    let tmpl = resolve("orchestrator").expect("orchestrator skill resolves");
+    git_paw::skills::render_standardized(&tmpl, &GateCommands::default(), backends)
+}
+
+/// The `cli-setup` skill as `git paw init` exports it.
+fn exported_cli_setup() -> String {
+    git_paw::skills::to_skill_md(&resolve("cli-setup").expect("cli-setup resolves"))
+}
+
+const POINTER_ASSET: &str = "assets/agents-md-orchestrator-section.md";
+
+/// Every backend case the export can render: each spec format and none.
+fn every_export_backend() -> Vec<(&'static str, Vec<SpecBackendKind>)> {
+    vec![
+        ("openspec", vec![SpecBackendKind::OpenSpec]),
+        ("speckit", vec![SpecBackendKind::SpecKit]),
+        ("markdown", vec![SpecBackendKind::Markdown]),
+        ("superpowers", vec![SpecBackendKind::Superpowers]),
+        ("no-backend", vec![]),
+    ]
+}
+
+// Scenario: Rendered SKILL.md passes the audit for every backend
+#[test]
+fn exported_orchestrator_skill_passes_the_audit_for_every_backend() {
+    for (label, backends) in every_export_backend() {
+        let md = exported_orchestrator_for(&backends);
+        assert!(
+            md.starts_with("---\nname: orchestrator\n"),
+            "{label}: frontmatter"
+        );
+        assert_no_forbidden_tokens(&md, label);
+        assert_no_commit_convention(&md, label);
+    }
+}
+
+// Scenario: Exported cli-setup SKILL.md passes the audit
+#[test]
+fn exported_cli_setup_skill_passes_the_audit() {
+    let md = exported_cli_setup();
+    assert_no_forbidden_tokens(&md, "exported-cli-setup");
+    assert_no_commit_convention(&md, "exported-cli-setup");
+}
+
+// Scenario: Pointer asset passes the audit (and the per-session context
+// template, the sidecar's prose, alongside it)
+#[test]
+fn pointer_asset_passes_the_audit() {
+    for path in [POINTER_ASSET, "assets/orchestrator-session-context.md"] {
+        let content = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        assert_no_forbidden_tokens(&content, path);
+        assert_no_commit_convention(&content, path);
+        assert!(!content.contains("http://"), "{path} carries no broker URL");
+    }
+}
+
+// Scenario: A vendor path regression is caught
+#[test]
+fn audit_catches_a_vendor_path_in_the_pointer_asset() {
+    let pointer = std::fs::read_to_string(POINTER_ASSET).expect("pointer asset");
+    let with_leak = format!("{pointer}\nCopy the skill into .claude/skills/ to load it.\n");
+    let result = std::panic::catch_unwind(|| {
+        assert_no_forbidden_tokens(&with_leak, "pointer-regression");
+    });
+    let message = result
+        .expect_err("the audit must fail on a vendor path in the pointer asset")
+        .downcast::<String>()
+        .map(|s| *s)
+        .unwrap_or_default();
+    assert!(
+        message.contains(".claude/"),
+        "the failure names the token: {message}"
+    );
+}
+
+// skill-agent / Scenario: The rendered orchestrator skill contains no curl —
+// and no session value — in its exported form, for every backend.
+#[test]
+fn exported_orchestrator_skill_carries_no_curl_or_session_value() {
+    for (label, backends) in every_export_backend() {
+        let md = exported_orchestrator_for(&backends);
+        assert!(!md.to_lowercase().contains("curl"), "{label}: curl");
+        assert!(!md.contains("http://"), "{label}: broker URL");
+        assert!(
+            !md.contains("{{GIT_PAW_BROKER_URL}}"),
+            "{label}: URL placeholder"
+        );
+        assert!(
+            !md.contains("paw-{{PROJECT_NAME}}"),
+            "{label}: session name"
+        );
+    }
 }

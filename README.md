@@ -145,7 +145,7 @@ git paw
 
 Result: a tmux session where `feat/auth` runs Claude and `feat/api` runs Codex, side by side.
 
-## Quick Start: Supervisor Mode
+## Quick Start: Orchestrator Mode
 
 Launch the worker agents under a dashboard and orchestrate them from your own agent session:
 
@@ -164,7 +164,7 @@ git paw start --unattended --from-all-specs
 git paw start --unattended --branches feat/auth,feat/api
 ```
 
-The session holds the dashboard at pane 0 (a full-width top row) and one coding agent per pane from pane 1; no orchestrator runs inside it. The launch writes the orchestrator's context — the bundled orchestrator skill plus your gate commands and governance documents — to `.git-paw/AGENTS.local.md` and prints that path with the attach hint. Point your own agent session, at the repository root and outside tmux, at that file: the orchestrator follows each worker's progress and artifacts through the broker, runs the configured test command between merges, and publishes a final summary status when work completes. Use this mode when you want to leave a multi-branch session running without continually steering each agent yourself.
+The session holds the dashboard at pane 0 (a full-width top row) and one coding agent per pane from pane 1; no orchestrator runs inside it. `git paw init` exports the orchestrator skill, rendered with your gate commands, to `.git-paw/skills/orchestrator/SKILL.md` and adds a pointer section to your root `AGENTS.md`; each launch refreshes the skill, writes the session context (session name, broker URL, governance documents) to `.git-paw/AGENTS.local.md`, and prints both paths with the attach hint. Load the skill in your own agent session, at the repository root and outside tmux: the orchestrator follows each worker's progress and artifacts through the broker, runs the configured test command between merges, and publishes a final summary status when work completes. Use this mode when you want to leave a multi-branch session running without continually steering each agent yourself. See [Quick Start: Orchestrator Mode](docs/src/quick-start-orchestrator.md) for the full walkthrough and [Remote control](docs/src/user-guide/remote-control.md) for driving it from a phone.
 
 By default `git paw start --supervisor` builds the session and returns. Add **`--unattended`** to fold the *driving* half of the operator loop into the tool: it engages supervisor mode and drives an in-process loop that sweeps every coding-agent pane on a ~15-second cadence, escalates every live permission prompt for a human decision without blocking the wave, and exits with a summary on completion or a heartbeat after ~25 minutes without progress. It needs no attached terminal, and once the loop has exited, re-running the same command binds a new loop to the still-live session — reviving or recovering it first if needed — rather than forking a parallel one (only one drive loop may drive a session at a time).
 

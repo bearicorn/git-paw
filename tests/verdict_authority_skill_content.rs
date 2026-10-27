@@ -10,8 +10,8 @@
 use std::fs;
 
 fn supervisor_skill() -> String {
-    fs::read_to_string("assets/agent-skills/supervisor.md")
-        .expect("supervisor.md is at the expected path")
+    fs::read_to_string("assets/agent-skills/orchestrator.md")
+        .expect("orchestrator.md is at the expected path")
 }
 
 /// The `### ` section opened by `heading`, up to the next `### ` heading.
@@ -19,7 +19,7 @@ fn section(heading: &str) -> String {
     let skill = supervisor_skill();
     let start = skill
         .find(heading)
-        .unwrap_or_else(|| panic!("supervisor.md has a `{heading}` section"));
+        .unwrap_or_else(|| panic!("orchestrator.md has a `{heading}` section"));
     let rest = &skill[start..];
     let end = rest[1..].find("\n### ").map_or(rest.len(), |idx| idx + 1);
     rest[..end].to_string()

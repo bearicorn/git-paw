@@ -30,6 +30,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 
@@ -41,8 +42,9 @@ use crate::config::CustomCli;
 /// and a corresponding match arm in [`embedded_default`].
 const COORDINATION_DEFAULT: &str = include_str!("../assets/agent-skills/coordination.md");
 
-/// The embedded supervisor skill, compiled into the binary.
-const SUPERVISOR_DEFAULT: &str = include_str!("../assets/agent-skills/supervisor.md");
+/// The embedded orchestrator skill, compiled into the binary. Also served
+/// under its legacy name `supervisor` (see [`skill_name_candidates`]).
+const ORCHESTRATOR_DEFAULT: &str = include_str!("../assets/agent-skills/orchestrator.md");
 
 /// The embedded docs-fetch skill, compiled into the binary.
 const DOCS_FETCH_DEFAULT: &str = include_str!("../assets/agent-skills/docs-fetch.md");
@@ -167,16 +169,39 @@ pub enum SkillError {
 fn embedded_default(skill_name: &str) -> Option<&'static str> {
     match skill_name {
         "coordination" => Some(COORDINATION_DEFAULT),
-        "supervisor" => Some(SUPERVISOR_DEFAULT),
+        "orchestrator" => Some(ORCHESTRATOR_DEFAULT),
         "docs-fetch" => Some(DOCS_FETCH_DEFAULT),
         "cli-setup" => Some(CLI_SETUP_DEFAULT),
         _ => None,
     }
 }
 
+/// The canonical name of the orchestrator skill.
+pub const ORCHESTRATOR_SKILL: &str = "orchestrator";
+
+/// The legacy name of the orchestrator skill, kept as an alias so scripts,
+/// MCP calls and override directories written for it keep working.
+pub const SUPERVISOR_SKILL_ALIAS: &str = "supervisor";
+
+/// The names under which `skill_name` is looked up, in precedence order.
+///
+/// `orchestrator` and its alias `supervisor` share one candidate list, so an
+/// override directory at either name applies to both and an `orchestrator`
+/// directory wins over a `supervisor` one. Every other skill is looked up
+/// under its own name only.
+fn skill_name_candidates(skill_name: &str) -> Vec<&str> {
+    if skill_name == ORCHESTRATOR_SKILL || skill_name == SUPERVISOR_SKILL_ALIAS {
+        vec![ORCHESTRATOR_SKILL, SUPERVISOR_SKILL_ALIAS]
+    } else {
+        vec![skill_name]
+    }
+}
+
 /// Resolves a skill template by name.
 ///
 /// Checks for a user override first, then falls back to the embedded default.
+/// `supervisor` is an alias of `orchestrator`: both names resolve to the same
+/// template, and the returned template is named `orchestrator`.
 /// Returns [`SkillError::UnknownSkill`] if neither source has the skill.
 pub fn resolve(skill_name: &str) -> Result<SkillTemplate, SkillError> {
     resolve_with_config_dir(skill_name, None)
@@ -206,15 +231,15 @@ fn try_load_user_override(
     skill_name: &str,
     config_dir: &Path,
 ) -> Result<Option<SkillTemplate>, SkillError> {
-    let skill_dir = config_dir
-        .join("git-paw")
-        .join("agent-skills")
-        .join(skill_name);
+    let canonical = skill_name_candidates(skill_name)[0];
+    for candidate in skill_name_candidates(skill_name) {
+        let skill_dir = config_dir
+            .join("git-paw")
+            .join("agent-skills")
+            .join(candidate);
 
-    if skill_dir.is_dir() {
-        let skill_md_path = skill_dir.join("SKILL.md");
-        if skill_md_path.exists() {
-            return load_skill_from_directory(&skill_dir, skill_name, Source::User);
+        if skill_dir.is_dir() && skill_dir.join("SKILL.md").exists() {
+            return load_skill_from_directory(&skill_dir, canonical, Source::User);
         }
     }
 
@@ -227,14 +252,14 @@ fn try_load_from_agents_dir(skill_name: &str) -> Result<Option<SkillTemplate>, S
         return Ok(None);
     };
 
+    let canonical = skill_name_candidates(skill_name)[0];
     for _ in 0..5 {
         // Limit to 5 levels up to prevent infinite loops
-        let agents_dir = current_dir.join(".agents").join("skills").join(skill_name);
+        for candidate in skill_name_candidates(skill_name) {
+            let agents_dir = current_dir.join(".agents").join("skills").join(candidate);
 
-        if agents_dir.is_dir() {
-            let skill_md_path = agents_dir.join("SKILL.md");
-            if skill_md_path.exists() {
-                return load_skill_from_directory(&agents_dir, skill_name, Source::AgentsStandard);
+            if agents_dir.is_dir() && agents_dir.join("SKILL.md").exists() {
+                return load_skill_from_directory(&agents_dir, canonical, Source::AgentsStandard);
             }
         }
 
@@ -381,6 +406,7 @@ fn resolve_with_config_dir(
     }
 
     // Try embedded default (now also uses standardized format)
+    let skill_name = skill_name_candidates(skill_name)[0];
     if let Some(content) = embedded_default(skill_name) {
         // Parse embedded content as standardized format
         let (metadata, content_without_frontmatter) = parse_standardized_metadata(content)?;
@@ -941,6 +967,164 @@ pub fn governance_section_paths(
     out
 }
 
+/// The bundled session-context template written to the repo-root sidecar
+/// `.git-paw/AGENTS.local.md` by [`orchestrator_session_context`].
+const ORCHESTRATOR_SESSION_CONTEXT: &str =
+    include_str!("../assets/orchestrator-session-context.md");
+
+/// Fallback `description` for an exported orchestrator skill whose resolved
+/// template carries no frontmatter (an override written without one).
+const ORCHESTRATOR_FALLBACK_DESCRIPTION: &str =
+    "Orchestrate a git-paw session from your own agent session";
+
+/// Renders the orchestrator skill as a standardized `SKILL.md`: a frontmatter
+/// block carrying `name` and `description`, then the rendered body.
+///
+/// The rendering uses only session-independent inputs, so `git paw init` (no
+/// session) and `git paw start` produce the same bytes for the same config
+/// and binary: the `[supervisor]` gate commands, and `{{SPEC_PATH_DOCTRINE}}`
+/// plus the OpenSpec-only regions from `backends` (the repository's
+/// configured spec format, or none for the no-backend sentinel).
+/// `{{CHANGE_ID}}` survives verbatim. The drive-loop directive region is
+/// stripped: whether a drive loop runs is a session value, carried by the
+/// session context ([`orchestrator_session_context`]) instead.
+#[must_use]
+pub fn render_standardized(
+    template: &SkillTemplate,
+    gates: &GateCommands<'_>,
+    backends: &[crate::specs::SpecBackendKind],
+) -> String {
+    let body = render_for_agent_id(
+        template,
+        crate::surface::SUPERVISOR_AGENT_ID,
+        "",
+        "",
+        gates,
+        backends,
+    );
+    let body = with_drive_loop_directive(&body, false);
+    let description = template
+        .metadata
+        .as_ref()
+        .map_or(ORCHESTRATOR_FALLBACK_DESCRIPTION, |m| {
+            m.description.as_str()
+        });
+    format!(
+        "---\nname: {ORCHESTRATOR_SKILL}\ndescription: {description}\n---\n\n{}",
+        body.trim_start_matches('\n')
+    )
+}
+
+/// Renders a resolved skill as a standardized `SKILL.md`: a frontmatter
+/// block carrying its `name` and `description` (plus `license` and
+/// `compatibility` when set), then its content unchanged. Used to export a
+/// skill that needs no rendering, such as `cli-setup`.
+#[must_use]
+pub fn to_skill_md(template: &SkillTemplate) -> String {
+    let mut out = String::from("---\n");
+    let _ = writeln!(out, "name: {}", template.name);
+    if let Some(m) = &template.metadata {
+        let _ = writeln!(out, "description: {}", m.description);
+        if let Some(license) = &m.license {
+            let _ = writeln!(out, "license: {license}");
+        }
+        if let Some(compatibility) = &m.compatibility {
+            let _ = writeln!(out, "compatibility: {compatibility}");
+        }
+    }
+    out.push_str("---\n");
+    out.push_str(&template.content);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Returns the body of the drive-loop directive region in `skill`, without
+/// its markers, or `None` when the skill carries no such region.
+fn drive_loop_directive_region(skill: &str) -> Option<String> {
+    let start = skill.find(DRIVE_LOOP_REGION_BEGIN)? + DRIVE_LOOP_REGION_BEGIN.len();
+    let end = start + skill[start..].find(DRIVE_LOOP_REGION_END)?;
+    Some(skill[start..end].trim_matches('\n').to_string())
+}
+
+/// Assembles the orchestrator's session context — the repo-root sidecar
+/// `.git-paw/AGENTS.local.md` — and the only place the running session's
+/// values are written.
+///
+/// It names the session, the broker URL, the bundled helpers and the roster
+/// file, and points at the exported skill
+/// (`.git-paw/skills/orchestrator/SKILL.md`) for the procedure rather than
+/// duplicating it. When `unattended`, the drive-loop directive region of the
+/// resolved orchestrator `template` follows; then the `## Governance
+/// documents` section when `[governance]` configures a path (see
+/// [`supervisor_boot_context`]).
+#[must_use]
+pub fn orchestrator_session_context(
+    template: &SkillTemplate,
+    session_name: &str,
+    broker_url: &str,
+    unattended: bool,
+    governance: &crate::config::GovernanceConfig,
+) -> String {
+    let mut context = ORCHESTRATOR_SESSION_CONTEXT
+        .replace("{{SESSION_NAME}}", session_name)
+        .replace("{{GIT_PAW_BROKER_URL}}", broker_url);
+    if unattended && let Some(directive) = drive_loop_directive_region(&template.content) {
+        if !context.ends_with('\n') {
+            context.push('\n');
+        }
+        context.push('\n');
+        context.push_str(&directive);
+        context.push('\n');
+    }
+    supervisor_boot_context(&context, unattended, governance)
+}
+
+/// Validates a skill directory against the agentskills.io standardized
+/// format, strictly.
+///
+/// Unlike the lenient loader behind [`resolve`] — which accepts a `SKILL.md`
+/// with no frontmatter and loads it with no metadata — this requires the
+/// frontmatter block, non-empty `name` and `description` fields, and `name`
+/// equal to the directory's name. Each failure is a
+/// [`SkillError::ValidationError`] naming the offending field. Used to check
+/// the skills `git paw init` exports under `.git-paw/skills/`.
+///
+/// # Errors
+///
+/// Returns [`SkillError::DirectoryReadError`] when `<dir>/SKILL.md` cannot be
+/// read, and [`SkillError::ValidationError`] when it does not conform.
+pub fn validate_skill_dir(dir: &Path) -> Result<StandardizedSkillMetadata, SkillError> {
+    let dir_name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let content = std::fs::read_to_string(dir.join("SKILL.md")).map_err(|source| {
+        SkillError::DirectoryReadError {
+            path: dir.to_path_buf(),
+            source,
+        }
+    })?;
+    let (metadata, _) = parse_standardized_metadata(&content)?;
+    let Some(metadata) = metadata else {
+        return Err(SkillError::ValidationError {
+            name: dir_name,
+            reason: "missing frontmatter block: required 'name' field not found".to_string(),
+        });
+    };
+    if metadata.name != dir_name {
+        return Err(SkillError::ValidationError {
+            name: metadata.name.clone(),
+            reason: format!(
+                "frontmatter 'name' field '{}' does not match the directory name '{dir_name}'",
+                metadata.name
+            ),
+        });
+    }
+    Ok(metadata)
+}
+
 /// Assembles the supervisor's boot context: the rendered supervisor skill
 /// with the drive-loop directive resolved, followed by the
 /// `## Governance documents` section when `[governance]` configures at
@@ -1377,27 +1561,26 @@ mod tests {
             tmpl.content.contains("### Answer a peer agent's question"),
             "supervisor skill must carry an answer-a-question section"
         );
-        let example_start = tmpl
+        // The answer is published through the helper, which shapes the
+        // `from` / `answer` / `re` payload (orchestrator-skill-export, PP-31).
+        let section_start = tmpl
             .content
-            .find("\"type\":\"agent.answer\"")
-            .expect("supervisor skill should contain an agent.answer curl example");
-        let example_end = tmpl.content[example_start..]
-            .find("}}'")
-            .map(|i| example_start + i)
-            .expect("agent.answer curl example should terminate with the closing payload `}}'`");
-        let example = &tmpl.content[example_start..example_end];
+            .find("### Answer a peer agent's question")
+            .unwrap();
+        let section_end = tmpl.content[section_start + 1..]
+            .find("\n### ")
+            .map_or(tmpl.content.len(), |i| section_start + 1 + i);
+        let section = &tmpl.content[section_start..section_end];
         assert!(
-            example.contains("\"from\":\"supervisor\""),
-            "agent.answer example must use the `from` payload field: {example}"
+            section.contains(".git-paw/scripts/sweep.sh answer __FILL_IN_AGENT_ID__"),
+            "agent.answer must be published via `sweep.sh answer`: {section}"
         );
-        assert!(
-            example.contains("\"answer\":"),
-            "agent.answer example must use the `answer` payload field: {example}"
-        );
-        assert!(
-            example.contains("\"re\":"),
-            "agent.answer example must show the optional `re` payload field: {example}"
-        );
+        for field in ["`from`", "`answer`", "`re`"] {
+            assert!(
+                section.contains(field),
+                "the answer section must name the {field} payload field: {section}"
+            );
+        }
         assert!(
             tmpl.content
                 .to_lowercase()
@@ -1756,7 +1939,7 @@ mod tests {
         );
         assert!(
             tmpl.content
-                .contains("Relay each one to the human, naming the agent and the pending command"),
+                .contains("Relay each one to the human in your session, naming the agent and the pending command"),
             "the unattended directive must relay each escalated prompt to the human"
         );
         assert!(
@@ -1978,10 +2161,16 @@ mod tests {
             merge_section.contains("agent.advanced-main"),
             "the merge section must teach publishing an agent.advanced-main event"
         );
-        // A concrete curl-to-/publish example for the variant.
+        // A concrete helper example for the variant (broker-watcher-and-state
+        // *Supervisor publishes on merge to main*): no raw `/publish` request.
         assert!(
-            merge_section.contains("/publish") && merge_section.contains("new_main_sha"),
-            "the merge section must include a concrete curl /publish example carrying new_main_sha"
+            merge_section.contains(".git-paw/scripts/sweep.sh advanced-main feat/")
+                && merge_section.contains("new_main_sha"),
+            "the merge section must include a concrete `sweep.sh advanced-main` example"
+        );
+        assert!(
+            !merge_section.contains("/publish"),
+            "the merge section must not contain a request to /publish"
         );
         // The publish fires after a successful merge + passing tests.
         let lowered = merge_section.to_lowercase();
@@ -1991,9 +2180,8 @@ mod tests {
         );
         // `base` is the resolved default-branch value, not hardcoded "main".
         assert!(
-            merge_section.contains("$MAIN_BRANCH")
-                && merge_section.contains("resolved default-branch"),
-            "the example must source `base` from the resolved default branch, not a hardcoded literal"
+            merge_section.contains("resolved default-branch"),
+            "the prose must document `base` as the resolved default branch, not a hardcoded literal"
         );
         assert!(
             !merge_section.contains("\"base\":\"main\"")
@@ -2267,6 +2455,204 @@ mod tests {
         std::env::set_current_dir(original_dir).unwrap();
     }
 
+    #[test]
+    fn supervisor_is_an_alias_of_orchestrator() {
+        let supervisor = resolve("supervisor").expect("supervisor resolves");
+        let orchestrator = resolve("orchestrator").expect("orchestrator resolves");
+        assert_eq!(supervisor.source, Source::Embedded);
+        assert_eq!(orchestrator.source, Source::Embedded);
+        assert_eq!(supervisor.content, orchestrator.content);
+        assert_eq!(
+            orchestrator.metadata.as_ref().map(|m| m.name.as_str()),
+            Some("orchestrator")
+        );
+    }
+
+    /// The embedded orchestrator skill rendered as `SKILL.md` for `backends`
+    /// with `test_command = "make test"` and every other gate unset.
+    fn standardized_for(backends: &[crate::specs::SpecBackendKind]) -> String {
+        let tmpl = resolve(ORCHESTRATOR_SKILL).unwrap();
+        render_standardized(
+            &tmpl,
+            &GateCommands {
+                test_command: Some("make test"),
+                ..Default::default()
+            },
+            backends,
+        )
+    }
+
+    // core-init / Scenario: Init installs the skill in a fresh repo (the
+    // frontmatter half) + Skill renders configured gate commands
+    #[test]
+    fn standardized_skill_opens_with_orchestrator_frontmatter_and_renders_gates() {
+        let md = standardized_for(&[]);
+        assert!(md.starts_with("---\nname: orchestrator\ndescription: "));
+        assert!(md.contains("make test"));
+        assert!(md.contains("(not configured)"));
+    }
+
+    // core-init / Scenario: Init renders without a session
+    #[test]
+    fn standardized_skill_renders_without_session_values() {
+        let md = standardized_for(&[crate::specs::SpecBackendKind::OpenSpec]);
+        assert!(md.contains(SPEC_DOCTRINE_OPENSPEC.trim()));
+        assert!(!md.contains("{{GIT_PAW_BROKER_URL}}"));
+        assert!(!md.contains("http://"));
+        assert!(!md.contains("paw-"));
+        assert!(md.contains("{{CHANGE_ID}}"));
+        let leftover: Vec<&str> = md
+            .match_indices("{{")
+            .map(|(i, _)| &md[i..md[i..].find("}}").map_or(md.len(), |e| i + e + 2)])
+            .filter(|p| *p != "{{CHANGE_ID}}")
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "unsubstituted placeholders: {leftover:?}"
+        );
+        // Whether a drive loop runs is a session value: the export never
+        // carries the directive region.
+        assert!(!md.contains("## Unattended: a drive loop is running"));
+    }
+
+    // core-init / Scenario: No spec system renders the doctrine sentinel
+    #[test]
+    fn standardized_skill_without_spec_system_renders_the_sentinel() {
+        assert!(standardized_for(&[]).contains(SPEC_DOCTRINE_NO_BACKEND_SENTINEL));
+    }
+
+    // core-init / Scenario: Start re-renders the same bytes for an unchanged
+    // config (the renderer half: same inputs, same bytes).
+    #[test]
+    fn standardized_skill_is_deterministic() {
+        let backends = [crate::specs::SpecBackendKind::Markdown];
+        assert_eq!(standardized_for(&backends), standardized_for(&backends));
+    }
+
+    /// Writes `content` as `<parent>/<dir_name>/SKILL.md` and returns the dir.
+    fn skill_dir_with(parent: &Path, dir_name: &str, content: &str) -> PathBuf {
+        let dir = parent.join(dir_name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), content).unwrap();
+        dir
+    }
+
+    // skill-standardized / Scenario: Exported skill passes standardized
+    // validation (both exports, rendered the way init writes them)
+    #[test]
+    fn validator_accepts_both_exported_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        let orchestrator = skill_dir_with(tmp.path(), "orchestrator", &standardized_for(&[]));
+        assert_eq!(
+            validate_skill_dir(&orchestrator).unwrap().name,
+            "orchestrator"
+        );
+        let cli_setup = skill_dir_with(
+            tmp.path(),
+            "cli-setup",
+            &to_skill_md(&resolve("cli-setup").unwrap()),
+        );
+        assert_eq!(validate_skill_dir(&cli_setup).unwrap().name, "cli-setup");
+    }
+
+    // skill-standardized / Scenario: Missing frontmatter is rejected by the
+    // validator
+    #[test]
+    fn validator_rejects_a_skill_without_frontmatter_naming_the_name_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let md = standardized_for(&[]);
+        let body = md.splitn(3, "---\n").nth(2).unwrap();
+        let dir = skill_dir_with(tmp.path(), "orchestrator", body);
+        // The lenient loader still accepts it.
+        assert!(
+            load_skill_from_directory(&dir, "orchestrator", Source::AgentsStandard)
+                .unwrap()
+                .is_some()
+        );
+        let err = validate_skill_dir(&dir).unwrap_err();
+        assert!(
+            matches!(&err, SkillError::ValidationError { reason, .. } if reason.contains("'name'")),
+            "{err}"
+        );
+    }
+
+    // skill-standardized / Scenario: A name that differs from the directory
+    // is rejected
+    #[test]
+    fn validator_rejects_a_name_that_differs_from_the_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = skill_dir_with(tmp.path(), "supervisor", &standardized_for(&[]));
+        let err = validate_skill_dir(&dir).unwrap_err();
+        let SkillError::ValidationError { reason, .. } = &err else {
+            panic!("expected a validation error, got {err}");
+        };
+        assert!(
+            reason.contains("'name'") && reason.contains("'supervisor'"),
+            "{reason}"
+        );
+    }
+
+    // A frontmatter block missing `description` is rejected naming it.
+    #[test]
+    fn validator_rejects_a_missing_description() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = skill_dir_with(
+            tmp.path(),
+            "orchestrator",
+            "---\nname: orchestrator\n---\nbody",
+        );
+        let err = validate_skill_dir(&dir).unwrap_err();
+        assert!(err.to_string().contains("'description'"), "{err}");
+    }
+
+    // supervisor-launch / Scenario: Session context is rendered to the
+    // repo-root sidecar (the content half)
+    #[test]
+    fn session_context_names_the_session_values_and_points_at_the_skill() {
+        let tmpl = resolve(ORCHESTRATOR_SKILL).unwrap();
+        let ctx = orchestrator_session_context(
+            &tmpl,
+            "paw-demo",
+            "http://127.0.0.1:9311",
+            false,
+            &crate::config::GovernanceConfig::default(),
+        );
+        assert!(ctx.contains("`paw-demo`"));
+        assert!(ctx.contains("http://127.0.0.1:9311"));
+        assert!(ctx.contains(".git-paw/skills/orchestrator/SKILL.md"));
+        assert!(ctx.contains(".git-paw/sessions/paw-demo.json"));
+        // Short: the procedure lives in the skill, not duplicated here.
+        assert!(!ctx.contains("## Supervisor Skills"));
+        assert!(!ctx.contains("Drain the loop's escalations first"));
+        assert!(!ctx.contains("{{"));
+    }
+
+    // supervisor-launch / Scenario: Unattended context carries the
+    // drive-loop directive
+    #[test]
+    fn unattended_session_context_carries_the_drive_loop_directive() {
+        let tmpl = resolve(ORCHESTRATOR_SKILL).unwrap();
+        let ctx = orchestrator_session_context(
+            &tmpl,
+            "paw-demo",
+            "http://127.0.0.1:9311",
+            true,
+            &crate::config::GovernanceConfig {
+                dod: Some(PathBuf::from("docs/dod.md")),
+                ..Default::default()
+            },
+        );
+        let directive = ctx
+            .find("## Unattended: a drive loop is running")
+            .expect("directive present");
+        assert!(ctx.contains("Drain the loop's escalations first"));
+        assert!(!ctx.contains(DRIVE_LOOP_REGION_BEGIN));
+        let governance = ctx
+            .find("\n## Governance documents\n")
+            .expect("governance follows");
+        assert!(governance > directive);
+    }
+
     // 9.9: Unknown skill name returns error
     #[test]
     fn unknown_skill_returns_error() {
@@ -2467,11 +2853,12 @@ mod tests {
         assert!(tmpl.content.contains("do NOT write code"));
     }
 
-    // Supervisor skill contains broker status endpoint
+    // Supervisor skill reads broker status through the helper, not a URL
     #[test]
     fn supervisor_skill_contains_broker_status() {
         let tmpl = resolve("supervisor").unwrap();
-        assert!(tmpl.content.contains("{{GIT_PAW_BROKER_URL}}/status"));
+        assert!(tmpl.content.contains(".git-paw/scripts/sweep.sh status"));
+        assert!(!tmpl.content.contains("{{GIT_PAW_BROKER_URL}}"));
     }
 
     // Supervisor skill contains verified and feedback message types
@@ -2622,7 +3009,9 @@ mod tests {
         let tmpl = resolve("supervisor").unwrap();
         assert!(tmpl.content.contains("tmux capture-pane"));
         assert!(tmpl.content.contains("tmux send-keys"));
-        assert!(tmpl.content.contains("paw-{{PROJECT_NAME}}"));
+        // Every tmux target names window 0 of the session the sidecar records.
+        assert!(tmpl.content.contains("<session>:0"));
+        assert!(!tmpl.content.contains("paw-{{PROJECT_NAME}}"));
     }
 
     #[test]
@@ -3164,13 +3553,13 @@ mod tests {
         let tmpl = resolve("supervisor").unwrap();
         let section = stream_timeout_section(&tmpl.content);
         assert!(
-            section.contains("/messages/"),
-            "replay subsection must show polling the target's /messages/ stream"
+            section.contains("sweep.sh events"),
+            "replay subsection must read the broker log through `sweep.sh events`"
         );
         let lowered = section.to_lowercase();
         assert!(
-            lowered.contains("since=") || lowered.contains("checkpoint timestamp"),
-            "replay subsection must poll since the checkpoint timestamp"
+            lowered.contains("when you published the checkpoint"),
+            "replay subsection must read from the cursor held at the checkpoint"
         );
         assert!(
             lowered.contains("re-publish"),
@@ -4611,7 +5000,7 @@ The loop is the pump; you are the brain. You drive the session from outside it, 
 \n\
 Your role this session is escalation-driven, in this order each cycle:\n\
 \n\
-1. **Drain the loop's escalations first.** Read each escalated permission prompt from the broker. Relay each one to the human, naming the agent and the pending command, and run `.git-paw/scripts/sweep.sh approve <pane>` only when the human explicitly tells you to. For any other escalation, reason about it and publish feedback or an answer — before anything else, so blocked agents unblock fastest.\n\
+1. **Drain the loop's escalations first.** Read each escalated permission prompt from the broker. Relay each one to the human in your session, naming the agent and the pending command, and run `.git-paw/scripts/sweep.sh approve <pane>` only when the human explicitly tells you to. For any other escalation, reason about it and publish feedback or an answer — before anything else, so blocked agents unblock fastest.\n\
 2. **Then run your normal sweep** — verification, merge, conflict handling, detect-stuck, and status — as usual. Do not wait for prompts to clear on their own; nothing will clear them but the human's decision.";
 
         let tmpl = resolve("supervisor").unwrap();
@@ -5345,8 +5734,12 @@ Your role this session is escalation-driven, in this order each cycle:\n\
     fn supervisor_skill_has_user_input_section() {
         let tmpl = resolve("supervisor").unwrap();
         assert!(
-            tmpl.content.contains("When the user types in your pane"),
-            "supervisor skill should include the 'When the user types in your pane' section"
+            tmpl.content.contains("When the user types in your session"),
+            "orchestrator skill should include the 'When the user types in your session' section"
+        );
+        assert!(
+            !tmpl.content.contains("When the user types in your pane"),
+            "the pane-bound heading must be gone"
         );
     }
 
@@ -5356,7 +5749,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         let tmpl = resolve("supervisor").unwrap();
         let start = tmpl
             .content
-            .find("When the user types in your pane")
+            .find("When the user types in your session")
             .expect("user-input section heading present");
         let window = &tmpl.content[start..];
         assert!(
@@ -5371,7 +5764,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         let tmpl = resolve("supervisor").unwrap();
         let start = tmpl
             .content
-            .find("When the user types in your pane")
+            .find("When the user types in your session")
             .expect("user-input section heading present");
         let window = &tmpl.content[start..];
         assert!(
@@ -5386,7 +5779,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
         let tmpl = resolve("supervisor").unwrap();
         let start = tmpl
             .content
-            .find("When the user types in your pane")
+            .find("When the user types in your session")
             .expect("user-input section heading present");
         let window = &tmpl.content[start..];
         assert!(
@@ -5534,14 +5927,14 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             "section should mention agent.intent"
         );
         assert!(
-            window.contains("\"supervisor\""),
-            "section should show agent_id = \"supervisor\" in the example"
+            window.contains(".git-paw/scripts/broker.sh --agent supervisor intent"),
+            "section should publish the intent through `broker.sh --agent supervisor intent`"
         );
         assert!(
-            window.contains("\"files\"")
-                && window.contains("\"summary\"")
-                && window.contains("\"valid_for_seconds\""),
-            "section should include a curl example with files, summary, valid_for_seconds"
+            window.contains("`files`")
+                && window.contains("`summary`")
+                && window.contains("`valid_for_seconds`"),
+            "section should name the files, summary and valid_for_seconds the helper sends"
         );
     }
 
@@ -5982,12 +6375,12 @@ Your role this session is escalation-driven, in this order each cycle:\n\
             .map_or(rendered.len(), |p| start + p);
         let section = &rendered[start..end];
         let lower = section.to_lowercase();
+        // GP-33: the Watch step blocks on the event cursor; an attended
+        // session runs `detect-stuck` each time a read returns.
         assert!(
-            lower.contains("every iteration")
-                || lower.contains("every monitoring")
-                || lower.contains("each monitoring")
-                || lower.contains("each iteration"),
-            "Watch section must mention per-iteration sweeping; got:\n{section}"
+            section.contains("sweep.sh events")
+                && lower.contains("each time your event read returns"),
+            "Watch section must follow the event cursor and sweep for prompts on each read; got:\n{section}"
         );
     }
 

@@ -306,7 +306,9 @@ only reads broker state.
 
 `source` is one of `standard` (`.agents/skills/`), `user_override`, or
 `embedded`. An unknown skill returns `skill: null` with a `message` — not an
-error.
+error. The orchestrator skill is served under the name `orchestrator`
+(`supervisor` is an alias returning the same content) — the same procedure
+`git paw init` exports to `.git-paw/skills/orchestrator/SKILL.md`.
 
 ### Session state
 

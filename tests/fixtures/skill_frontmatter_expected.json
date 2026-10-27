@@ -20,12 +20,12 @@
     },
     {
       "compatibility": "git-paw v0.3.0+",
-      "description": "Supervisor skills for monitoring and verifying peer agents in git-paw sessions",
-      "id": "assets/agent-skills/supervisor.md",
+      "description": "Orchestrate a git-paw session from your own agent session - monitor the coding agents, verify their work through the five gates, and merge their branches",
+      "id": "assets/agent-skills/orchestrator.md",
       "license": "MIT",
       "metadata": null,
-      "name": "supervisor",
-      "source": "assets/agent-skills/supervisor.md"
+      "name": "orchestrator",
+      "source": "assets/agent-skills/orchestrator.md"
     },
     {
       "compatibility": "git-paw (Rust, cargo, tmux)",

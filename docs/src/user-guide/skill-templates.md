@@ -15,7 +15,7 @@ my-project/
         │   ├── scripts/          # Optional: Executable scripts
         │   ├── references/       # Optional: Documentation
         │   └── assets/           # Optional: Templates/resources
-        └── supervisor/
+        └── orchestrator/
             ├── SKILL.md
             └── scripts/
 ```
@@ -28,7 +28,7 @@ of your own:
 | Skill | What it carries |
 |---|---|
 | `coordination` | How an agent publishes status, intents and questions through the broker. |
-| `supervisor` | The orchestrator's role: sweeps, the five verification gates, merge orchestration. |
+| `orchestrator` (alias `supervisor`) | The orchestrator's role: following the session, the five verification gates, merge orchestration. |
 | `docs-fetch` | How to look things up through the bundled docs helper. |
 | `cli-setup` | The consent rules for [`git paw setup-cli`](cli-setup.md) — when an agent may and may not run the command that writes an agent CLI's own settings. |
 
@@ -198,6 +198,30 @@ git-paw searches for skills in this order:
 2. Embedded defaults (compiled into git-paw binary)
 
 The first match wins. If no skill is found, resolution fails with an error.
+
+`supervisor` is an alias of `orchestrator`: both names resolve to the same
+skill, and an override directory under either name applies to both. When
+`.agents/skills/orchestrator/` and `.agents/skills/supervisor/` both exist, the
+`orchestrator` one wins, so an override written under the old name keeps
+working until you rename it.
+
+## Exported skills
+
+`git paw init` (and every `git paw start`) also writes two bundled skills into
+the main checkout for the agent that drives the session, in the same
+standardized layout:
+
+- `.git-paw/skills/orchestrator/SKILL.md` — the orchestrator skill, rendered
+  with your `[supervisor]` gate commands and configured spec format. It holds
+  no session value (no broker URL, no session name); those live in the session
+  context `.git-paw/AGENTS.local.md`.
+- `.git-paw/skills/cli-setup/SKILL.md` — the `cli-setup` skill, as embedded.
+
+Each opens with `name` / `description` frontmatter whose `name` equals its
+directory name, so a skill-aware agent CLI can load the directory directly.
+`.git-paw/skills/` is gitignored and binary-managed: a re-run overwrites it,
+and an override under `.agents/skills/` is what the export renders from. See
+[Supervisor → Driving the session from your own agent](supervisor.md#driving-the-session-from-your-own-agent).
 
 ## Validation
 

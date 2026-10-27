@@ -83,6 +83,30 @@ Content between these markers is replaced on each launch. Content outside the
 markers is preserved. If no markers exist, the section is appended to the end
 of the file.
 
+## Orchestrator pointer section
+
+Separately from the per-session sidecar, `git paw init` injects one short,
+permanent section into your **root** `AGENTS.md` (creating the file when it
+is absent), between its own markers:
+
+```markdown
+<!-- git-paw-orchestrator:start -->
+
+(when a git-paw session is active, you are its orchestrator: read
+ .git-paw/skills/orchestrator/SKILL.md and .git-paw/AGENTS.local.md)
+
+<!-- git-paw-orchestrator:end -->
+```
+
+It is how the agent you drive the session with discovers the orchestrator
+skill: `AGENTS.md` is the cross-CLI file that agent already reads. The prose
+comes from a bundled, project-agnostic asset and carries no broker URL, secret,
+toolchain or vendor name. Re-running `git paw init` replaces the section in
+place, leaving everything outside the markers byte-identical. Unlike the
+per-session `<!-- git-paw:start -->` block, it is configuration, not session
+state: `git paw stop` and `git paw purge` leave it alone. Delete the section by
+hand if you do not want it; `init` reports what it wrote.
+
 ## Sidecar Content
 
 Each worktree's `.git-paw/AGENTS.local.md` sidecar includes:

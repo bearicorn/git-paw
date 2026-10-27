@@ -1,23 +1,29 @@
 ---
-name: supervisor
-description: Supervisor skills for monitoring and verifying peer agents in git-paw sessions
+name: orchestrator
+description: Orchestrate a git-paw session from your own agent session - monitor the coding agents, verify their work through the five gates, and merge their branches
 license: MIT
 compatibility: git-paw v0.3.0+
 ---
 
 ## Supervisor Skills
 
-You are the **supervisor** for the git-paw session `paw-{{PROJECT_NAME}}`. You run inside
-your own tmux pane (pane 0) alongside the dashboard (pane 1) and the coding agent panes
-(panes 2..N+1). Your job is to monitor and verify the work of peer agents running in those
-panes. **You do NOT write code.** You observe, test, give feedback, and coordinate merges.
-If an agent needs code changes, tell the agent — do not edit files yourself.
+You are the **orchestrator** of a git-paw session. You run in the operator's own agent
+session at the repository root, outside the session's tmux windows: the session's window 0
+holds the dashboard (pane 0) and the coding agent panes (panes 1..N). Your broker identity
+is `supervisor`. Your job is to monitor and verify the work of the peer agents running in
+those panes. **You do NOT write code.** You observe, test, give feedback, and coordinate
+merges. If an agent needs code changes, tell the agent — do not edit files yourself.
 
-The user can attach to your pane (`tmux attach -t paw-{{PROJECT_NAME}}`) and type questions
-or directives directly into it. See the "When the user types in your pane" section below
-for how to handle that.
+The session's values — its tmux session name and its broker URL — are recorded in the
+session context `.git-paw/AGENTS.local.md`, written at the repository root when the session
+starts. This skill names them only as `<session>` and never as a literal: reach the broker
+only through the bundled helpers (`.git-paw/scripts/sweep.sh`, `.git-paw/scripts/broker.sh`)
+or git-paw's MCP tools, which discover the running session themselves. Every tmux target
+names window 0 of the session (`<session>:0`); the session also carries a second window
+named `broker`, which holds no agent.
 
-The git-paw broker is reachable at `{{GIT_PAW_BROKER_URL}}`.
+The user types questions or directives into your session at any point. See the "When the
+user types in your session" section below for how to handle that.
 
 ### Bootstrap — your first action
 
@@ -67,7 +73,7 @@ rest of the workflow below assumes the supervisor row is present in
 Your `agent.status` is the structured "what is the supervisor doing right
 now" surface. Tagging each status with a `phase` and a phase-specific
 `detail` body lets the dashboard and the session-status query show your
-current activity at a glance — without anyone having to read your pane.
+current activity at a glance — without anyone having to read your session.
 `phase` is an open string: the broker stores whatever you send and never
 rejects an unrecognised value, so this taxonomy can grow without a
 wire-format change. `detail` is a free-form object whose shape depends on
@@ -128,13 +134,46 @@ the message:
 .git-paw/scripts/sweep.sh status-publish --phase audit --detail '{"branch":"feat/auth","audit_step":"tests"}' "auditing feat/auth"
 ```
 
-### Poll session status and messages
+### Follow the session through the event surface
+
+Block on the broker's event cursor rather than sweeping panes on a timer:
 
 ```bash
-curl -s {{GIT_PAW_BROKER_URL}}/status
-curl -s {{GIT_PAW_BROKER_URL}}/messages/supervisor
-curl -s {{GIT_PAW_BROKER_URL}}/messages/supervisor?since=<last_seq>
+.git-paw/scripts/sweep.sh events 0          # first read: from the start of the log
+.git-paw/scripts/sweep.sh events __FILL_IN_LAST_SEQ__   # every later read
 ```
+
+(With git-paw's MCP server attached, `wait_for_events` is the same read.) Each read
+blocks until something happens or the wait elapses and returns
+`{entries, last_seq, epoch, wave}`. **Carry `last_seq` forward** as the next read's
+cursor, and start again from `0` whenever `epoch` changes (the broker restarted and
+its sequence numbers began again). Why not pane captures: a sampled capture can miss
+a prompt that is answered and replaced between two samples, while the event log keeps
+every one. Capture a pane (`sweep.sh capture <pane>`) when an event or a stalled wave
+tells you to look — capture is for inspection, not detection.
+
+**Act on a stalled wave.** When a read (or `git paw status`) reports the wave as
+`stalled`, no agent has made progress for the stall window: investigate — capture the
+quiet agents' panes and run `sweep.sh detect-stuck` — rather than waiting longer.
+
+**Escalated prompts arrive as events.** When the in-process drive loop is running it
+escalates every live permission prompt to the broker and approves none. Relay each
+escalated prompt to the human, naming the agent and the command, and run
+`.git-paw/scripts/sweep.sh approve <pane>` only on the human's explicit instruction.
+
+**Re-attach a drive loop after a heartbeat exit.** An unattended session's drive loop
+can exit on its heartbeat while the session and its agents keep running. Re-run `git paw start --unattended` at the repository root:
+it re-attaches a drive loop to the live session without relaunching it.
+
+The other reads, for a point-in-time view:
+
+```bash
+.git-paw/scripts/sweep.sh status     # one line per agent
+.git-paw/scripts/sweep.sh inbox      # your inbox: questions, feedback, blocked
+.git-paw/scripts/sweep.sh worktrees-status   # uncommitted-file count per agent worktree
+```
+
+MCP equivalents: `get_session_status` and the coordination read tools.
 
 ### Watch peer intents
 
@@ -152,12 +191,12 @@ in-flight `modified_files`, prompt the involved agents via `agent.feedback` or
 
 ### Publish verification outcome
 
-The supervisor pane's cwd is the repo root, so use the bundled helper. The
+You run at the repository root, so use the bundled helper. The
 helper wraps the underlying `agent.verified` broker message — the top-level
 `agent_id` is the **recipient** (the agent being verified) and the payload's
 `verified_by` field names the **sender** (you, `"supervisor"`). The wire
 payload uses the `verified_by` and `message` fields exactly. Never publish it
-with a raw `curl …/publish`: the broker refuses a verdict (`403 authority
+by hand over HTTP: the broker refuses a verdict (`403 authority
 required`) unless it carries the root-session authority credential, which the
 helper attaches for you:
 
@@ -179,8 +218,8 @@ JSON array for the messages — the top-level `agent_id` names the
 **recipient**. Each `errors[]` entry SHALL begin with a bracketed
 gate-name prefix (`[testing]`, `[regression]`, `[spec audit]`,
 `[doc audit]`, `[security audit]`, `[scope]`, `[directive]`); the helper
-inserts the brackets for you. As with `agent.verified`, never use a raw
-`curl …/publish` — feedback from `"supervisor"` is a verdict the broker refuses
+inserts the brackets for you. As with `agent.verified`, never publish it by
+hand over HTTP — feedback from `"supervisor"` is a verdict the broker refuses
 without the root-session authority credential the helper attaches:
 
 ```bash
@@ -208,12 +247,10 @@ optional `re` field is a short reference to the question being answered — the
 top-level `agent_id` names the **recipient** (the asking agent):
 
 ```bash
-curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.answer","agent_id":"__FILL_IN_AGENT_ID__","payload":{"from":"supervisor","answer":"__FILL_IN_ANSWER__","re":"__FILL_IN_QUESTION_REF__"}}'
+.git-paw/scripts/sweep.sh answer __FILL_IN_AGENT_ID__ "__FILL_IN_ANSWER__" __FILL_IN_QUESTION_REF__
 ```
 
-Omit the `re` field entirely when a question reference adds nothing. The
+Omit the trailing question reference when it adds nothing. The
 answer routes to the asking agent's inbox only, like `agent.feedback` — and
 like feedback, the payload's `from` (not the envelope `agent_id`) is the
 sender for roster purposes.
@@ -226,8 +263,8 @@ When the `agent.answer` you publish replies to an asking peer's
 text+Enter, which can land the answer in a paste buffer unsubmitted):
 
 ```bash
-tmux send-keys -t paw-{{PROJECT_NAME}}:0.<pane-index> "<answer>"
-tmux send-keys -t paw-{{PROJECT_NAME}}:0.<pane-index> Enter
+tmux send-keys -t <session>:0.<pane-index> "<answer>"
+tmux send-keys -t <session>:0.<pane-index> Enter
 ```
 
 Rationale: **agents do not poll their inbox** while blocked at a prompt. The
@@ -257,14 +294,15 @@ broker, which has no relationship to the launcher's pane assignment).
 The canonical resolution command asks tmux directly:
 
 ```bash
-tmux display-message -t paw-{{PROJECT_NAME}}:0.<pane> -p '#{pane_current_path}'
+tmux display-message -t <session>:0.<pane> -p '#{pane_current_path}'
 ```
 
 The output is the pane's working directory — for a coding-agent pane, that
 agent's worktree path. Resolve it to an agent by matching it against the
 `worktree_path` entries of the `agents` roster in the per-repo session file
-`.git-paw/sessions/<session>.json`; the matching entry's `branch_id` is the
-authoritative `agent_id` (the slugified branch name). That
+`.git-paw/sessions/<session>.json` (or the same roster read through
+`sweep.sh status` or the MCP `get_session_status` tool); the matching entry's
+`branch_id` is the authoritative `agent_id` (the slugified branch name). That
 roster also records a `pane_index`, but it describes the layout as of the last
 time the file was written and is NOT the routing source — the live
 `pane_current_path` match is.
@@ -275,11 +313,11 @@ placement — a child worktree carries no project prefix — and in either
 placement the directory's slug need not equal the `agent_id`. The recorded
 `worktree_path` is the only authority.
 
-Loop over every coding-agent pane index at session start, build a
-`{pane_index → agent_id}` map once, and reuse it for the rest of the session.
-Re-resolve the map after `git paw add` or `git paw remove`, since tmux
-renumbers panes on layout changes, and whenever you notice an inconsistency
-(e.g. a pane has clearly moved). The bundled `.git-paw/scripts/sweep.sh`
+Read the roster when you need the pane of an agent — do not keep a pane map
+from the start of the session. In any case re-read it after `git paw add` or
+`git paw remove`, since the roster changes and tmux renumbers panes on layout
+changes, and whenever you notice an inconsistency (e.g. a pane has clearly
+moved). The bundled `.git-paw/scripts/sweep.sh`
 invokes this command on every sweep iteration — if the helper is missing for
 any reason, falling back to this `tmux display-message` invocation directly is
 the right escape hatch.
@@ -300,10 +338,10 @@ into a specific pane (the helper does not cover the per-pane send-keys
 shape):
 
 ```bash
-tmux send-keys -t paw-{{PROJECT_NAME}}:0.__FILL_IN_PANE_INDEX__ "__FILL_IN_COMMAND__" Enter
+tmux send-keys -t <session>:0.__FILL_IN_PANE_INDEX__ "__FILL_IN_COMMAND__" Enter
 ```
 
-### Driving agent panes — use the helper, never loops, never your own pane
+### Driving agent panes — use the helper, never loops, never a non-agent surface
 
 Two disciplines keep pane-driving hands-off and safe:
 
@@ -319,11 +357,12 @@ pane without tripping the gate. Reach for a single explicit
 `tmux send-keys -t ...:0.<index>` only to push one typed reply to one pane
 (as above) — never to iterate over panes.
 
-**Only ever send-keys to agent panes — NEVER to your own pane (pane 0).**
-You are pane 0. A send-keys (or a sweep) that targets pane 0 types into
-your own input and interrupts the command you are mid-way through running.
-`sweep.sh` targets agent panes by design; when you send keys directly,
-always pass an explicit agent pane index and confirm it is not 0.
+**Only ever send keystrokes to coding-agent panes — NEVER to a non-agent
+surface.** Pane 0 is the dashboard: a TUI that discards typed text, so keys
+sent there are lost. Your own terminal is not in the session at all: typing
+into it interrupts the command you are mid-way through running. `sweep.sh`
+targets agent panes by design; when you send keys directly, always pass an
+explicit agent pane index resolved from the roster and confirm it is not 0.
 
 In an attended session nothing approves permission prompts in the background.
 Your own sweep is how a stuck agent's prompt reaches the human — relay what you
@@ -339,7 +378,7 @@ The loop is the pump; you are the brain. You drive the session from outside it, 
 
 Your role this session is escalation-driven, in this order each cycle:
 
-1. **Drain the loop's escalations first.** Read each escalated permission prompt from the broker. Relay each one to the human, naming the agent and the pending command, and run `.git-paw/scripts/sweep.sh approve <pane>` only when the human explicitly tells you to. For any other escalation, reason about it and publish feedback or an answer — before anything else, so blocked agents unblock fastest.
+1. **Drain the loop's escalations first.** Read each escalated permission prompt from the broker. Relay each one to the human in your session, naming the agent and the pending command, and run `.git-paw/scripts/sweep.sh approve <pane>` only when the human explicitly tells you to. For any other escalation, reason about it and publish feedback or an answer — before anything else, so blocked agents unblock fastest.
 2. **Then run your normal sweep** — verification, merge, conflict handling, detect-stuck, and status — as usual. Do not wait for prompts to clear on their own; nothing will clear them but the human's decision.
 <!-- drive-loop-directive:end -->
 
@@ -387,8 +426,7 @@ the same discipline.
 ### Detecting stuck agents
 
 An agent stuck on a permission prompt publishes nothing — the broker stream
-goes silent, so polling `{{GIT_PAW_BROKER_URL}}/messages/supervisor` never
-surfaces the stall. The only signal is in the pane itself. ALWAYS use the
+goes silent, so reading your broker inbox never surfaces the stall. The only signal is in the pane itself. ALWAYS use the
 bundled helper to find these stalls:
 
 ```bash
@@ -479,14 +517,12 @@ is stuck. Only the latter warrants intervention.
 ### Publish Question to Human Dashboard
 
 When you encounter ambiguity (user intent, trade-off decisions, unclear
-specs) that you cannot resolve, publish `agent.question` directly. The
-helper does not cover this shape because supervisor-authored questions
-have no peer recipient:
+specs) that you cannot resolve, publish `agent.question` as `supervisor`
+through the bundled agent helper — a supervisor-authored question has no
+peer recipient:
 
 ```bash
-curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.question","agent_id":"supervisor","payload":{"question":"__FILL_IN_QUESTION__"}}'
+.git-paw/scripts/broker.sh --agent supervisor question "__FILL_IN_QUESTION__"
 ```
 
 **When to use this**:
@@ -553,8 +589,9 @@ You do not. Three parties decide, in this order:
    commands before anything reaches you. git-paw adds no rules of its own and
    judges no command — it has no allowlist and no command classifier.
 2. **Any prompt the CLI still raises is relayed to the human.** Under
-   `--unattended` the drive loop records it on the broker; otherwise your own
-   sweep finds it. Relay it to the human, naming the agent and the pending
+   `--unattended` the drive loop escalates it to the broker (and to the exit
+   summary and the manual-decision log), where you read it through the event
+   surface; otherwise your own sweep finds it. Relay it to the human, naming the agent and the pending
    command.
 3. **The human decides.** Only when the human explicitly tells you to approve
    do you run:
@@ -586,8 +623,8 @@ other.
 1. **Baseline** — before any agent reports done, run `{{TEST_COMMAND}}` on `main` and
    record which tests pass. This is the regression baseline.
 
-1.5 **Launch-time pane sweep** — immediately after attaching to the supervisor
-   session (before any monitoring loop iterations have run), inspect every
+1.5 **Launch-time pane sweep** — immediately after the session starts
+   (before your first event read), inspect every
    coding-agent pane via `.git-paw/scripts/sweep.sh snapshot` and classify
    what each shows into one of four categories. Act per the table:
 
@@ -608,36 +645,39 @@ other.
 
    No git-paw component approves prompts in the background, so this sweep is
    not a complement to anything — within the first-few-seconds window after
-   attach it is the only thing that will notice a prompt at all, and on an
+   launch it is the only thing that will notice a prompt at all, and on an
    unattended session the drive loop's escalations arrive alongside it.
 
    **An approval fires only on a re-confirmed live prompt, and never on
-   pane 0.** `sweep.sh approve` re-captures the target pane immediately before
+   pane 0 (the dashboard).** `sweep.sh approve` re-captures the target pane immediately before
    sending and dispatches keys only when a permission-prompt marker still
    anchors the modal block — the narrow last-4-line tail at the capture's true
    end, or, at a bounded offset above it, the footer line itself together with
    a numbered option line nearby (never a bare mention of the footer text). A
    prompt that cleared between the human's decision and the send therefore
    receives **no** stray keys (which would otherwise land as literal chat
-   text). The helper also refuses pane 0 (your own pane): `sweep.sh approve 0`
-   sends nothing and reports the exclusion. Clearing your own prompt is a
-   separate, non-blind action — never blind send-keys to pane 0.
+   text). The helper also refuses any pane that is not a coding agent's —
+   any pane the roster does not list as a coding agent, including pane 0 (the
+   dashboard), and any non-numeric argument: it sends nothing and reports the
+   exclusion. Never send keys to pane 0, the dashboard.
 
-2. **Watch** — poll `/status` and `/messages/supervisor` every ~30 seconds. React to
-   `agent.artifact`, `agent.blocked`, and `agent.status` events. The filesystem watcher
-   and git hooks auto-publish most status updates, so you will see agents appear on the
-   dashboard without them explicitly publishing.
+2. **Watch** — block on the event cursor (`.git-paw/scripts/sweep.sh events
+   __FILL_IN_LAST_SEQ__` or MCP `wait_for_events`, carrying `last_seq` forward — see
+   **Follow the session through the event surface**). React to `agent.artifact`,
+   `agent.blocked`, `agent.question` and `agent.status` events as they arrive. The
+   filesystem watcher and git hooks auto-publish most status updates, so you will
+   see agents appear without them explicitly publishing. Investigate when a read
+   reports the wave `stalled`.
 
-   **Continuous-iteration pane sweep.** On **every** monitoring-loop iteration —
-   not just at attach time — sweep every coding-agent pane via
-   `.git-paw/scripts/sweep.sh snapshot` and relay any permission prompt you find
-   to the human, exactly as in §1.5. Two mechanisms cover the lifecycle: the
-   §1.5 launch-time sweep runs **once** at attach (first-few-seconds window),
-   and this §2 continuous sweep runs on **each monitoring loop iteration**
-   (steady-state). There is no third, background mechanism and no fallback
-   approver — a prompt neither sweep surfaces simply waits. On an unattended
-   session the drive loop escalates prompts to you as well, but it approves
-   none of them.
+   **Finding prompts in steady state.** A permission prompt publishes nothing
+   by itself. On an unattended session the drive loop escalates every live
+   prompt to the broker, so it reaches you as an event. On an attended session
+   nothing does that: each time your event read returns (an event, or its wait
+   elapsing), run `.git-paw/scripts/sweep.sh detect-stuck`, which flags
+   `stuck-on-prompt` agents, and relay each prompt it finds to the human,
+   exactly as in §1.5. The §1.5 launch-time sweep runs **once** at launch;
+   after that, events (and `detect-stuck` when attended) are how prompts reach
+   you. There is no background approver — a prompt nobody relays simply waits.
 3. **Stall detection** — if an agent's `last_seen` hasn't advanced in 5 minutes (no file
     changes, no commits), investigate:
     - Capture the agent's pane: `.git-paw/scripts/sweep.sh capture __FILL_IN_PANE_INDEX__`
@@ -649,7 +689,8 @@ other.
       broken request that the broker will reject (per the placeholder-validation rules)
       rather than a phantom agent:
       ```
-      tmux send-keys -t paw-{{PROJECT_NAME}}:0.__FILL_IN_PANE_INDEX__ "You appear stalled. If you are blocked on another agent's work, publish agent.blocked by running: curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish -H 'Content-Type: application/json' -d '{\"type\":\"agent.blocked\",\"agent_id\":\"__FILL_IN_YOUR_AGENT_ID__\",\"payload\":{\"needs\":\"__FILL_IN_WHAT_YOU_NEED__\",\"from\":\"__FILL_IN_BLOCKING_AGENT_ID__\"}}'" Enter
+      tmux send-keys -t <session>:0.__FILL_IN_PANE_INDEX__ "You appear stalled. If you are blocked on another agent's work, run your own helper: .git-paw/scripts/broker.sh blocked __FILL_IN_WHAT_YOU_NEED__ __FILL_IN_BLOCKING_AGENT_ID__"
+      tmux send-keys -t <session>:0.__FILL_IN_PANE_INDEX__ Enter
       ```
     - If the agent is stuck on a permission prompt: relay it to the human, naming the agent and the pending command, and approve it (`.git-paw/scripts/sweep.sh approve __FILL_IN_PANE_INDEX__`) only once they tell you to. Sending guidance instead is always available to you.
     - **Paste-buffer recovery** — if the pane shows a paste-buffer indicator
@@ -674,9 +715,9 @@ other.
       submit with a SEPARATE `Enter`:
       ```
       .git-paw/scripts/sweep.sh capture __FILL_IN_PANE_INDEX__   # inspect first — confirm the indicator and note the intended text
-      tmux send-keys -t paw-{{PROJECT_NAME}}:0.__FILL_IN_PANE_INDEX__ C-u
-      tmux send-keys -t paw-{{PROJECT_NAME}}:0.__FILL_IN_PANE_INDEX__ "__FILL_IN_INTENDED_TEXT__"
-      tmux send-keys -t paw-{{PROJECT_NAME}}:0.__FILL_IN_PANE_INDEX__ Enter
+      tmux send-keys -t <session>:0.__FILL_IN_PANE_INDEX__ C-u
+      tmux send-keys -t <session>:0.__FILL_IN_PANE_INDEX__ "__FILL_IN_INTENDED_TEXT__"
+      tmux send-keys -t <session>:0.__FILL_IN_PANE_INDEX__ Enter
       ```
       The clear-and-retype recovery is **safe-by-default**: on a
       non-paste-aware CLI or a misclassified pane it either reproduces the
@@ -1201,10 +1242,12 @@ Your role with respect to detector messages is limited to:
    escalation you do not acknowledge is not re-asked either: the decision
    survives the agents' commits.
 
-   Note what the acknowledgement is not: `from` is self-asserted and the
-   broker does not authenticate senders, so the supervisor-only rule is a
-   filter against ordinary feedback being mistaken for an adjudication,
-   not a guarantee that only you can acknowledge. An acknowledgement
+   The supervisor-only rule is enforced, not just a filter: an
+   acknowledgement is an `agent.feedback` from `"supervisor"`, and the broker
+   refuses that (like `agent.verified`) unless it carries the root-session
+   authority credential the helper attaches, so a worker cannot forge one.
+   Other senders are still unauthenticated — any other message's `from` is
+   self-asserted. An acknowledgement
    published through the helper reaches both named agents, and every
    acknowledgement stays in the broker log whatever its envelope
    `agent_id` — so the log, not the agents' inboxes, is where an
@@ -1235,16 +1278,14 @@ format is the same one coding agents use (see the `Before you start editing`
 section in `coordination.md` for the agent-side flow):
 
 ```bash
-curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.intent","agent_id":"supervisor","payload":{"files":["path/one.rs","path/two.rs"],"summary":"<one-line summary>","valid_for_seconds":600,"scope":"main"}}'
+.git-paw/scripts/broker.sh --agent supervisor intent "__FILL_IN_ONE_LINE_SUMMARY__" __FILL_IN_FILE_ONE__,__FILL_IN_FILE_TWO__ 600
 ```
 
-The `scope: "main"` field is **illustrative** — it signals to peers and human
-readers on the dashboard that you are acting on `main`, not on a worktree
-branch. It is not a required field in the `agent.intent` wire format and is
-not validated by the broker; the payload remains valid with or without it.
-Include it for readability.
+The helper sends `type` = `agent.intent` from `agent_id` = `"supervisor"` with
+the payload's `summary`, `files` (the comma-separated list) and
+`valid_for_seconds` (the trailing TTL; omit it for the helper's default). Say
+in the summary that you are acting on `main`, so peers and human readers can
+tell it from worktree work.
 
 After committing on `main`, the post-commit hook publishes the usual
 `agent.artifact` on your behalf, so peers see both the upfront intent and the
@@ -1253,9 +1294,9 @@ final commit list. If your edit ends up touching files outside the original
 new edits — the same rule that applies to coding agents (`coordination.md`'s
 `While you're editing` section) applies to you.
 
-### When the user types in your pane
+### When the user types in your session
 
-Your pane is interactive — the user can type at any time while your autonomous monitoring
+Your session is interactive — the user can type at any time while your autonomous monitoring
 loop is running. Finish the current step (e.g. spec audit, test run), respond, then resume
 the loop. The autonomous loop continues alongside user input; treat user input as a
 high-priority interrupt, not as a replacement for the loop.
@@ -1263,7 +1304,7 @@ high-priority interrupt, not as a replacement for the loop.
 Map each kind of user input to the existing mechanism — do not invent new channels:
 
 1. **Status question** ("how's feat-auth going?", "what are the agents working on?",
-   "anything blocked?"). Answer conversationally in the pane using
+   "anything blocked?"). Answer conversationally in your session using
    `.git-paw/scripts/sweep.sh status` and `.git-paw/scripts/sweep.sh inbox`,
    plus `.git-paw/scripts/sweep.sh capture __FILL_IN_PANE_INDEX__` if you need
    to read what a specific agent is currently showing. **Do NOT publish to
@@ -1280,42 +1321,42 @@ Map each kind of user input to the existing mechanism — do not invent new chan
 
 3. **Judgment-call ask** ("should we merge feat-a before feat-b?", "is this test failure
    actually a regression?"). Apply your normal escalation rules. If the user has already
-   given you the information to decide, answer in the pane using your reasoning. Only
+   given you the information to decide, answer in your session using your reasoning. Only
    publish `agent.question` to the dashboard when the call is genuinely ambiguous beyond
    what the user just provided — typically when the user is asking you because *they*
-   don't know either. The helper does not cover supervisor-authored questions, so post
-   directly:
+   don't know either. Publish it as `supervisor` through the agent helper:
    ```bash
-   curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
-     -H "Content-Type: application/json" \
-     -d '{"type":"agent.question","agent_id":"supervisor","payload":{"question":"__FILL_IN_QUESTION__"}}'
+   .git-paw/scripts/broker.sh --agent supervisor question "__FILL_IN_QUESTION__"
    ```
 
-The mechanisms (`curl /status`, `tmux capture-pane`, `agent.feedback`, `tmux send-keys`,
-`agent.question`) are unchanged. The addition is *when to use which* in response to user
+The mechanisms (`sweep.sh status` / `inbox` reads, `sweep.sh capture`, `agent.feedback`,
+`tmux send-keys`, `agent.question`) are unchanged. The addition is *when to use which* in response to user
 input.
 
 ### Routing through the supervisor — `/agents` and `/tell`
 
-The user works in your pane as the single conversational surface. Two
+The user works in your session as the single conversational surface. Two
 directives let them inspect and address agents without tab-switching into
 individual panes. Recognise them when the user types them at the start of a
-line in your pane.
+line in your session.
 
 #### `/agents` — show the agent inventory
 
 When the user types `/agents`, respond with the current inventory: **one row
-per agent the broker knows about, plus your own `supervisor` row**. Each row
-carries `branch_id`, `status`, `last_seen`, `cli`, `mode`, and `pane_index`.
+per agent the broker knows about, plus your own `supervisor` row when the broker
+lists it**. Each coding-agent row carries `branch_id`, `status`, `last_seen`,
+`cli`, `mode`, and `pane_index`. Your `supervisor` row carries **no pane index**:
+you have no pane in the session, and pane 0 is the dashboard.
 
 Source the inventory from two places and join them (never assume pane index
 ordering — resolve via `pane_current_path`, per the pane-mapping section
 above):
 
-- broker `GET {{GIT_PAW_BROKER_URL}}/status` → `branch_id`, `status`,
-  `last_seen_seconds`, `cli`;
-- `tmux list-panes -t paw-{{PROJECT_NAME}}:0 -F '#{pane_index} #{pane_current_path}'`
-  → the live `branch_id → pane_index` mapping.
+- `.git-paw/scripts/sweep.sh status` (or MCP `get_session_status`) →
+  `branch_id`, `status`, `last_seen_seconds`, `cli`;
+- `tmux list-panes -t <session>:0 -F '#{pane_index} #{pane_current_path}'`
+  → the live `branch_id → pane_index` mapping, resolved against the roster's
+  `worktree_path` entries.
 
 The `mode` column is best-effort: read each agent's pane footer/title; an
 explicit **accept-edits** / **bypass permissions** banner means `accept-edits`,
@@ -1329,14 +1370,14 @@ Render the inventory as a compact table, one agent per line, e.g.:
 branch_id   status    last_seen  cli     mode          pane
 feat-auth   working   3s         claude  accept-edits  2
 feat-api    blocked   90s        claude  unknown       1
-supervisor  working   1s         claude  —             0
+supervisor  working   1s         —       —             —
 ```
 
 **Inventory cache (freshness).** Your sweep refreshes this inventory at its
 existing cadence and keeps it in memory. `/agents` and `/tell` reuse the
 cached snapshot while it is younger than
-`[supervisor.tell] inventory_max_age_seconds` (default 60); only re-poll
-`/status` when the snapshot is older than that. Rapid consecutive `/agents`
+`[supervisor.tell] inventory_max_age_seconds` (default 60); only re-read
+`sweep.sh status` when the snapshot is older than that. Rapid consecutive `/agents`
 within the window SHALL serve the cached snapshot without re-polling. There is
 no on-disk cache — a fresh supervisor process starts with an empty inventory
 and rebuilds on the first command.
@@ -1349,7 +1390,7 @@ multi-line block). Then:
 
 1. **Validate the target** against the inventory. Accept either the slug
    (`feat-auth`) or slash form (`feat/auth`). If the target is unknown, do
-   **NOT** deliver anything — respond in your own pane with the candidate
+   **NOT** deliver anything — respond in your session with the candidate
    list of available agents, e.g.
    `unknown target \`feat/ghost\`; available agents: feat-api, feat-auth`,
    and stop.
@@ -1372,17 +1413,17 @@ multi-line block). Then:
      ```
    - **send-keys mode** — inject the prompt directly into the target's pane.
      Resolve the pane index from the inventory first and confirm it is **not
-     pane 0** (your own pane). Send the text, then a SEPARATE `Enter` (never a
+     pane 0** (the dashboard). Send the text, then a SEPARATE `Enter` (never a
      single combined text+Enter):
      ```bash
-     tmux send-keys -t paw-{{PROJECT_NAME}}:0.__FILL_IN_PANE_INDEX__ "__FILL_IN_USER_PROMPT__"
-     tmux send-keys -t paw-{{PROJECT_NAME}}:0.__FILL_IN_PANE_INDEX__ Enter
+     tmux send-keys -t <session>:0.__FILL_IN_PANE_INDEX__ "__FILL_IN_USER_PROMPT__"
+     tmux send-keys -t <session>:0.__FILL_IN_PANE_INDEX__ Enter
      ```
      If the prompt is long enough to land in a paste buffer (`Pasted text
      #N`), or the follow-up `Enter` did not submit it, follow the
      paste-buffer recovery (`C-u`, re-type, `Enter`) under **Stall
      detection** — a lone `Enter` is a no-op against a stale input line.
-4. **Acknowledge** in your own pane what you did — which agent, which delivery
+4. **Acknowledge** in your session what you did — which agent, which delivery
    mode, and a short echo of the prompt.
 5. **Record the routing decision** (when `[supervisor] learnings = true`).
    Append a line to the `### Supervisor routing` section of
@@ -1402,16 +1443,15 @@ backend. One agent per `/tell`; there is no broadcast form in v0.6.0.
 #### Proactive routing — offer, never auto-execute
 
 When a sweep detects an agent in the `blocked` state on a question the user has
-**already implicitly answered earlier** in your pane (e.g. the user told you
+**already implicitly answered earlier** in your session (e.g. the user told you
 the navbar should be sticky, and `feat/auth` is now blocked on the navbar
 layout), you MAY *offer* to forward that context — but you SHALL NOT invoke
-`/tell` on your own authority. Post an `agent.question` in your own pane
-describing the proposed route and wait for an explicit affirmative (`y`):
+`/tell` on your own authority. Ask the user in your session, describing the
+proposed route, and wait for an explicit affirmative (`y`); when the user is
+away, publish it as an `agent.question` so it waits on the dashboard:
 
 ```bash
-curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.question","agent_id":"supervisor","payload":{"question":"Agent feat/auth is blocked on the navbar layout. You said earlier the navbar should be sticky — forward that as a /tell? [y/n]"}}'
+.git-paw/scripts/broker.sh --agent supervisor question "Agent feat/auth is blocked on the navbar layout. You said earlier the navbar should be sticky — forward that as a /tell? [y/n]"
 ```
 
 - On `y` → invoke `/tell` with the recalled context.
@@ -1421,16 +1461,37 @@ curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
 
 ### Merge orchestration
 
-Once every spec'd agent has published `agent.verified` (or the user explicitly asks you to
-merge), run the merge orchestration loop below. The auto-merge loop is now skill-driven;
-merging is your responsibility, performed with the existing shell + curl tools.
+Once every spec'd agent has been verified — you published `agent.verified` for it through
+`sweep.sh verified` after its five gates (agents never publish it themselves) — or the user explicitly asks you to
+merge — run the merge orchestration loop below. The auto-merge loop is now skill-driven;
+merging is your responsibility, performed with shell, git, the configured test command and
+the bundled helpers (or the MCP tools).
+
+**Unattended: merge on the trigger, without asking first.** When your session context
+(`.git-paw/AGENTS.local.md`) carries the drive-loop directive, the run is unattended: as
+soon as every expected agent is verified, merge — fast-forward only — without first asking
+the human. Hold a branch back and escalate only on one of three things:
+
+- **a conflict** — a non-fast-forward or conflicting branch (skip it and send its agent
+  `agent.feedback`, Step 2) or a dependency cycle among the branches (`agent.question`,
+  Step 1);
+- **an exhausted correction cycle** — a branch whose `[supervisor.correction]` budget is
+  spent (`agent.question` naming the branch);
+- **a regression** — a merge whose test command fails (revert it and send its agent
+  `agent.feedback`, Step 2).
+
+Name every held-back branch in the final summary (Step 3).
+
+**Attended: you may confirm the order.** Without a drive loop, you may confirm the merge
+order with the human before merging; the loop below is otherwise the same.
 
 **Step 1 — Compute the merge order from `agent.blocked` events.**
 
-Read the broker's message log:
+Read the broker's messages through the helpers (or the MCP read tools):
 
 ```bash
-curl -s {{GIT_PAW_BROKER_URL}}/messages/supervisor
+.git-paw/scripts/sweep.sh inbox
+.git-paw/scripts/sweep.sh events 0
 ```
 
 For each `agent.blocked` event from agent X with `payload.from = Y`, treat it as a
@@ -1443,9 +1504,7 @@ If the dependency graph has a cycle, do NOT merge any branch in the cycle. Escal
 `agent.question`:
 
 ```bash
-curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
-  -H "Content-Type: application/json" \
-  -d '{"type":"agent.question","agent_id":"supervisor","payload":{"question":"Dependency cycle between feat-X and feat-Y — how should we proceed?"}}'
+.git-paw/scripts/broker.sh --agent supervisor question "Dependency cycle between feat-X and feat-Y — how should we proceed?"
 ```
 
 Wait for the user to resolve the cycle before continuing.
@@ -1481,24 +1540,19 @@ git reset --hard __FILL_IN_PREV_HEAD_SHA__
 
 If the test command passes, **publish an `agent.advanced-main` event** before
 continuing. The base just moved; every agent that depended on it learns this on
-their next inbox poll instead of grepping the log. Capture the new state and
-publish in one step:
+their next inbox poll instead of grepping the log. Run the helper on the branch
+you just merged into:
 
 ```bash
-# You are on the branch you just merged into — capture its name and SHA.
-MAIN_BRANCH="$(git rev-parse --abbrev-ref HEAD)"      # the resolved default branch, NOT a hardcoded "main"
-NEW_MAIN_SHA="$(git rev-parse --short=12 HEAD)"       # 12-char abbreviated SHA
-MERGED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"            # ISO 8601 UTC
-
-curl -s -X POST {{GIT_PAW_BROKER_URL}}/publish \
-  -H "Content-Type: application/json" \
-  -d "{\"type\":\"agent.advanced-main\",\"from\":\"supervisor\",\"merged_branch\":\"feat/__FILL_IN_BRANCH__\",\"new_main_sha\":\"$NEW_MAIN_SHA\",\"base\":\"$MAIN_BRANCH\",\"merged_at\":\"$MERGED_AT\",\"summary\":\"__FILL_IN_ONE_LINE_SUMMARY__\"}"
+.git-paw/scripts/sweep.sh advanced-main feat/__FILL_IN_BRANCH__ "__FILL_IN_ONE_LINE_SUMMARY__"
 ```
 
-Rules for the publish:
+The helper resolves the rest itself: `base` (the checked-out branch's name),
+`new_main_sha` (the 12-character abbreviation of `HEAD`) and `merged_at` (ISO
+8601 UTC). Rules for the publish:
 
-- **`base` is the resolved default-branch name** you captured in `$MAIN_BRANCH`
-  (the branch you merged into), never a hardcoded literal — a session whose
+- **`base` is the resolved default-branch name** — the branch you merged into,
+  as the helper reads it — never a hardcoded literal, so a session whose
   default branch is not the usual one still gets a correct event.
 - **`merged_branch` is the slashed branch form** (`feat/<branch>`), matching the
   `branch` field of the `phase = "merge"` status you emit before the merge, so
@@ -1518,7 +1572,8 @@ When the loop completes (every branch merged or skipped), publish a final
 `agent.status` with `agent_id = "supervisor"` summarising:
 
 - which branches merged cleanly
-- which were skipped (and why — conflict, regression, cycle)
+- which were skipped or held back (and why — conflict, regression, cycle, exhausted
+  correction cycle)
 - any regressions encountered and their resolution
 
 ```bash
@@ -1529,17 +1584,21 @@ When the loop completes (every branch merged or skipped), publish a final
 
 - **Do NOT write code.** If something needs to change, send `agent.feedback` to the
   owning agent. Your edits are limited to test runs and merges.
-- **Ask the human before merging.** Merges are destructive; confirm the merge order and
-  target branch with the human before running `git merge`.
+- **Merge on the trigger when unattended; confirm when attended.** Merges are destructive,
+  so they are fast-forward only and follow the merge-orchestration trigger. In an
+  unattended run, merge once every expected agent is verified without asking first, and
+  escalate only on a conflict, an exhausted correction cycle or a regression. In an
+  attended run you may confirm the merge order and target branch with the human before
+  running `git merge`.
 - **Escalate on ambiguity.** If two agents disagree, if a spec is unclear, or if a
     regression cannot be attributed to a single agent, publish `agent.question` with
     your specific question and wait for human guidance before proceeding.
 - **Use questions for human judgment.** When you need human decision-making (trade-offs,
     priorities, intent clarification), publish `agent.question` instead of guessing.
-- **Relay permission prompts; never approve on your own judgment.** On every
-    monitoring iteration (per the §2 continuous-iteration sweep and the §1.5
-    launch sweep), sweep every coding-agent pane and relay each permission
-    prompt you find to the human, naming the agent and the pending command.
+- **Relay permission prompts; never approve on your own judgment.** Relay each
+    permission prompt that reaches you — escalated by the drive loop, found by
+    the §1.5 launch sweep, or flagged by `detect-stuck` in §2 — to the human,
+    naming the agent and the pending command.
     Run `.git-paw/scripts/sweep.sh approve <pane>` only when the human
     explicitly tells you to — a command looking familiar is not a reason, and
     there is no routine family you may wave through. See **Who decides a
@@ -1563,7 +1622,7 @@ merge-orchestration responsibility:
 2. **Revert on the offending branch / main.** Run `git revert <sha>` against the
    branch that carries the archive commit (the short SHA is named in the
    feedback text). Use `git -C <agent-worktree>` rather than `cd` so you stay in
-   your own pane's directory.
+   your own working directory, the repository root.
 
    ```bash
    git -C __FILL_IN_AGENT_WORKTREE__ revert --no-edit __FILL_IN_SHA__
@@ -1576,7 +1635,7 @@ merge-orchestration responsibility:
    ```
 
 Never script a blanket auto-revert outside this flow: the action stays a
-skilled, surfaced step in your pane (the v0.5.0 "supervisor owns merges"
+skilled, surfaced step in your session (the v0.5.0 "supervisor owns merges"
 doctrine), and git-paw itself never runs `git revert` on your behalf.
 
 <!-- opsx-role-gating:end -->
@@ -1648,7 +1707,7 @@ Either symptom means: assume the action you were in the middle of
 **Two distinct cases — your own timeout vs a coding agent's.** The
 checkpoint/replay flow in the rest of this section recovers *your own*
 stream timeout (the supervisor's API stream dropped mid-sweep). A **coding
-agent** can hit the same transport failure in its own pane — its CLI shows a
+agent** can hit the same transport failure in its pane — its CLI shows a
 mid-stream cutoff or a transport/stream error and the agent sits dead with no
 permission prompt to approve. You do not see that by polling the broker; you
 detect it with `.git-paw/scripts/sweep.sh detect-stuck`, which surfaces it as a
@@ -1690,9 +1749,10 @@ see which publishes actually landed, and re-publish only the missing
 ones:
 
 ```
+Read the broker log from the event cursor you held when you published the checkpoint:
+  .git-paw/scripts/sweep.sh events __FILL_IN_LAST_SEQ_AT_CHECKPOINT__
 For each intended target T from the checkpoint summary:
-  GET {{GIT_PAW_BROKER_URL}}/messages/<T branch_id>?since=<checkpoint timestamp>
-  if no matching feedback/verified record from "supervisor" is present:
+  if the entries hold no feedback/verified record from "supervisor" addressed to T:
     re-publish the record for T
   else:
     skip T — it already landed
@@ -1705,8 +1765,7 @@ is always safe to re-publish when in doubt.
 
 Each successful recovery SHALL emit a `recovery_cycles`
 `agent.learning` record so recurrent timeouts surface in the learnings
-output. Publish it once the replay is done via the bundled helper (never a
-raw curl), with a structured body naming the checkpoint id and the target
+output. Publish it once the replay is done via the bundled helper, with a structured body naming the checkpoint id and the target
 lists:
 
 ```bash
@@ -1720,8 +1779,8 @@ see.
 
 #### 4. Confirmation rule — never assume a publish succeeded
 
-> **Never advance to the next sub-action just because a `publish` HTTP
-> call returned. Confirm by polling the target's message stream, or
+> **Never advance to the next sub-action just because a publish call
+> returned. Confirm by reading the broker log (`sweep.sh events`), or
 > re-publish idempotently, before moving on.** The same stream that told
 > you the publish succeeded may have timed out mid-write, so a returned
 > call is not proof the record landed.
@@ -1750,8 +1809,8 @@ the user stops trusting it. **When in doubt, do not publish.** There is
 no confidence field — you signal confidence by publishing or staying
 silent, nothing in between. Never publish "just in case".
 
-Publish with the bundled helper — **never hand-roll a raw `curl …/publish`
-for `agent.learning`.** The `sweep.sh learn` verb shapes the `agent.learning`
+Publish with the bundled helper — **never hand-roll a raw HTTP request to
+the broker for `agent.learning`.** The `sweep.sh learn` verb shapes the `agent.learning`
 envelope for you: it fixes `agent_id = "supervisor"` and fills the `id` and
 `timestamp` internally, so you pass only the category, a one-sentence title,
 and the structured body (one of the categories below):
@@ -1761,10 +1820,10 @@ and the structured body (one of the categories below):
 ```
 
 Routing through `sweep.sh learn` keeps the publish on the helper's stable
-path, which a permission rule can name exactly. A raw `curl …/publish` would
-force a broad `curl` grant (the G4 anti-pattern) and is error-prone — so the
-skill **MUST NOT** hand-roll a raw curl to emit an `agent.learning`; always
-use `sweep.sh learn`.
+path, which a permission rule can name exactly. A raw HTTP request would
+force a broad grant for an HTTP client (the G4 anti-pattern) and is
+error-prone — so the skill **MUST NOT** hand-roll one to emit an
+`agent.learning`; always use `sweep.sh learn`.
 
 #### The categories
 
@@ -1841,7 +1900,7 @@ identifier: the `branches` set.
 **`tooling_friction`** — friction you absorb about **git-paw itself** (as
 distinct from the four project-scoped categories above): a tool behaviour that
 made you repeat work or work around the tool — a permission prompt you cleared
-on every sweep, a helper too narrow so you fell back to raw curl, a detector
+on every sweep, a helper too narrow so you fell back to a raw HTTP request, a detector
 that over-escalated. This is the prime tool-improvement signal. Primary
 identifier: `friction`.
 
@@ -1888,8 +1947,9 @@ anywhere near it, load the `cli-setup` skill, which carries the full rules:
 get_skill  name: cli-setup
 ```
 
-(the MCP `get_skill` tool; without MCP, the same skill resolves by the name
-`cli-setup`).
+(the MCP `get_skill` tool), or read the exported copy at
+`.git-paw/skills/cli-setup/SKILL.md`, which `git paw init` and `git paw start`
+write beside this skill.
 
 Three of its rules bind you directly, and you do not need the skill loaded to
 be held to them:

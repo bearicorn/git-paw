@@ -38,8 +38,8 @@ const STACK_SPECIFIC_TOKENS: &[&str] = &[
 ];
 
 fn supervisor_skill() -> String {
-    fs::read_to_string("assets/agent-skills/supervisor.md")
-        .expect("supervisor.md is at the expected path")
+    fs::read_to_string("assets/agent-skills/orchestrator.md")
+        .expect("orchestrator.md is at the expected path")
 }
 
 /// The judgment-call section, whitespace-collapsed and lower-cased so substring

@@ -21,8 +21,8 @@ fn coordination_skill() -> String {
 }
 
 fn supervisor_skill() -> String {
-    fs::read_to_string("assets/agent-skills/supervisor.md")
-        .expect("supervisor.md is at the expected path")
+    fs::read_to_string("assets/agent-skills/orchestrator.md")
+        .expect("orchestrator.md is at the expected path")
 }
 
 /// Extract the section starting at `heading` and running until the next
