@@ -162,6 +162,8 @@ mod tests {
             git_paw_dir: None,
             broker_url: None,
             server_name: "git-paw".to_string(),
+            is_main_worktree: false,
+            authority: None,
         };
         let snapshot = session_status_in(&ctx, sessions.path()).expect("the session resolves");
 
@@ -179,6 +181,8 @@ mod tests {
             git_paw_dir: None,
             broker_url: None,
             server_name: "git-paw".to_string(),
+            is_main_worktree: false,
+            authority: None,
         };
         assert!(session_status(&ctx).is_none());
     }
@@ -212,6 +216,8 @@ mod tests {
             git_paw_dir: None,
             broker_url: None,
             server_name: "git-paw".to_string(),
+            is_main_worktree: false,
+            authority: None,
         };
         let snapshot = session_status_in(&ctx, sessions.path()).expect("the session resolves");
         let json = serde_json::to_string(&snapshot).unwrap();
