@@ -763,9 +763,9 @@ pub enum Command {
         json: bool,
     },
 
-    /// Run a read-only Model Context Protocol (MCP) server over stdio
+    /// Run a Model Context Protocol (MCP) server over stdio
     #[command(
-        about = "Run a read-only Model Context Protocol (MCP) server over stdio",
+        about = "Run a Model Context Protocol (MCP) server over stdio",
         long_about = "Starts a Model Context Protocol (MCP) server on stdin/stdout so any \
                       MCP-aware client (Claude Desktop, Cursor, ChatGPT Desktop, Windsurf, \
                       VS Code MCP) can query this repository's read-only state: agent \
@@ -773,6 +773,12 @@ pub enum Command {
                       session status and learnings, agent skills, git context, source \
                       browsing (list_files, read_file, search_code over the local working \
                       tree), and the repository's own README and documentation.\n\n\
+                      The write surface is bounded: four publish tools for an agent's boot \
+                      events, publishing as the calling session only; and, for a server started \
+                      in the repository's main working tree only, the session lifecycle tools \
+                      (start_session, pause_session, stop_session, purge_session) and the verdict \
+                      tools (publish_verified, publish_feedback). A server in an agent's worktree \
+                      neither lists nor runs those.\n\n\
                       The server is client-spawned and one-shot: the MCP client owns the \
                       process lifecycle and the server exits when stdin is closed. It runs \
                       standalone — no tmux session, broker, or supervisor is required. When a \

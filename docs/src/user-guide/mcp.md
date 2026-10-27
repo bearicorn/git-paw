@@ -5,8 +5,10 @@
 ChatGPT Desktop, Windsurf, VS Code MCP extensions — can query a repository's
 state without an active git-paw session.
 
-It exposes the same information git-paw already tracks, as deterministic,
-read-only tools:
+It exposes the same information git-paw already tracks as deterministic,
+read-only tools, beside a bounded write surface (publish tools, and session
+lifecycle and verdict tools for a root session only — see below). The
+read-only tools cover:
 
 - **Coordination** — active agent intents and detected conflicts
 - **Governance** — your configured ADRs, test strategy, security checklist,
@@ -19,8 +21,11 @@ read-only tools:
 - **Source/Files** — browse the local working tree, read a file, and search
   code contents (gitignored paths excluded; reads confined to the repo root)
 
-Alongside those, the server exposes exactly one **write** category — see
-[Publish tools](#publish-tools) below.
+Alongside those, the server exposes a bounded **write** surface: the
+[Publish tools](#publish-tools) for every session, and — for a **root session**
+only (a server started in the repository's main working tree) — the
+[Session lifecycle](#session-lifecycle-root-session-only) tools and the two
+verdict publish tools.
 
 The server is **standalone**: it does not need a tmux session, broker, or
 supervisor for the read-only categories (the publish tools do need a reachable
@@ -28,17 +33,21 @@ broker — see below). When a data source is unavailable (no broker, no
 session, no governance config) read tools return well-formed empty/null
 results rather than errors — so the client always gets an unambiguous answer.
 
-> **Read/write boundary.** Every tool category except **Publish tools** is
-> read-only, deterministically sourced from files, git, and broker state —
-> there is no file write, git mutation, or config write anywhere on this
-> server, in any category. Publish tools are the sole exception: a bounded,
-> agent-scoped set of exactly four tools (the same four events the bundled
-> `broker.sh` helper covers), each publishing only as the calling agent. There
-> is no generic "publish anything" tool, and the supervisor authority verbs
-> (`agent.verified`, `agent.feedback`) are not exposed — see
-> [Publish tools](#publish-tools) for why. The server also **never invokes an
-> agent CLI** (`claude`, `codex`, …) as an inference backend; every result
-> comes from files, git, and broker state.
+> **Read/write boundary.** Every tool category except **Publish tools** and
+> **Session lifecycle** is read-only, deterministically sourced from files, git,
+> and broker state. The write surface is a fixed set of tools: the four worker
+> publish tools (the same four events the bundled `broker.sh` helper covers),
+> each publishing only as the calling session; and, for a root session only,
+> the session lifecycle tools (exactly what `git paw start` / `pause` / `stop` /
+> `purge` do) and the two verdict tools (`publish_verified`,
+> `publish_feedback`, exactly what `sweep.sh verified` / `feedback-gate` do).
+> There is no tool that writes a caller-named file, runs a caller-supplied git
+> or shell command, or writes configuration, and no generic "publish anything"
+> tool. A server in an agent's worktree never lists or runs the root-only tools,
+> so a coding agent cannot verify its own work through MCP — see
+> [Publish tools](#publish-tools). The server also **never invokes an agent
+> CLI** (`claude`, `codex`, …) as an inference backend; every result comes from
+> files, git, and broker state.
 
 ## How it works
 
@@ -234,7 +243,8 @@ VS Code (1.102+) supports MCP servers. It is workspace-aware, so bare
 
 ## Tool reference
 
-Every category below is read-only except **Publish tools**. For the
+Every category below is read-only except **Publish tools** and **Session
+lifecycle**. For the
 read-only categories, collection results are empty (`[]`) and single-record
 results are `null` when the underlying data is unavailable. Governance tools
 return a protocol error only when a **configured** document path exists but
@@ -368,10 +378,11 @@ pre-v0.7.0 surface. `list_docs` walks the `docs` directory recursively for
 
 ### Publish tools
 
-The only write category. Four tools, one per agent boot event, each
-publishing the same message the bundled [`broker.sh`
-helper](coordination.md#broker-helper) does — this is the [MCP tool form of
-the boot block](coordination.md#mcp-tool-form) for a CLI that speaks MCP.
+Four worker tools, one per agent boot event, each publishing the same message
+the bundled [`broker.sh` helper](coordination.md#broker-helper) does — this is
+the [MCP tool form of the boot block](coordination.md#mcp-tool-form) for a CLI
+that speaks MCP — plus two verdict tools for a root session only, each
+publishing the same message `sweep.sh verified` / `feedback-gate` does.
 
 | Tool | Input | Result |
 |------|-------|--------|
@@ -379,38 +390,82 @@ the boot block](coordination.md#mcp-tool-form) for a CLI that speaks MCP.
 | `publish_artifact` | `{ exports?, modified_files? }` | `{ published: true }` — `agent.artifact` (`status:"done"`) — the code-less DONE fallback; a task that produces a commit reports via the post-commit hook instead |
 | `publish_blocked` | `{ needs, from }` | `{ published: true }` — `agent.blocked` with dependency info |
 | `publish_question` | `{ question }` | `{ published: true }` — `agent.question`, routed to the supervisor inbox |
+| `publish_verified` *(root session only)* | `{ agent, message }` | `{ published: true }` — `agent.verified` for `agent`, `verified_by:"supervisor"` |
+| `publish_feedback` *(root session only)* | `{ agent, gate?, errors }` | `{ published: true }` — `agent.feedback` to `agent` from `supervisor`; with `gate`, each error is tagged `[<gate>] ` |
 
 There is no inbox or poll tool: an agent reads its broker inbox with
 `.git-paw/scripts/broker.sh poll`, whichever form its boot block uses.
 
 Three properties are structural, not incidental:
 
-- **Bounded, not generic.** These are four distinct tool definitions, not one
+- **Bounded, not generic.** These are distinct tool definitions, not one
   `publish(type, payload)` tool. A message type is never an accepted
   parameter, so the set of things a client can publish cannot grow by passing
   a new string — it can only grow by this server shipping a new tool.
-- **Agent-scoped identity.** No publish tool accepts an `agent_id` parameter.
-  Each derives the publishing agent id from the calling session's own
-  resolved worktree branch (the same conversion the `broker.sh poll`/`status`
-  path uses), so a session can only ever publish as itself — it cannot
-  attribute a message to a different agent. A server resolved to the
-  repository's **main working tree** rather than a linked worktree has no
-  agent to be: publishing there would mint a phantom agent named after the
-  default branch, so each publish tool returns an MCP-level error saying the
-  operation needs an agent's worktree session, publishes nothing, and the
-  server keeps running. This mirrors the bundled `broker.sh` helper, which
-  likewise refuses to derive an id in the main working tree.
-- **The supervisor authority verbs are absent, deliberately.**
-  `agent.verified` is what authorises a branch to be merged; `agent.feedback`
-  is the supervisor's corrective channel. Neither is exposed here, and neither
-  ever will be as a "just one more tool" addition — a coding agent able to
-  call `publish_verified`-shaped tool could self-verify its own work and
-  bypass the five-gate framework entirely, which is the single most valuable
-  thing an agent could do to escape supervision. Keeping this off the surface
-  is the point, not an oversight to eventually fill in.
+- **Session-scoped identity.** No publish tool accepts an `agent_id` or
+  publisher parameter. In an agent's worktree, each derives the publishing id
+  from the worktree's branch (the same conversion the `broker.sh poll`/`status`
+  path uses), so a session can only ever publish as itself. In the repository's
+  **main working tree** — the orchestrator's — every publish tool publishes as
+  the root identity `supervisor`, never as an agent named after the default
+  branch. The verdict tools take the *target* agent as `agent`, as the helpers
+  do, and set the verifier / sender to `supervisor` themselves.
+- **Verdicts belong to the root session only.** `agent.verified` is what
+  authorises a branch to be merged; `agent.feedback` from the supervisor is its
+  corrective channel. The broker accepts either only with the session's
+  authority credential, which lives outside the repository. `publish_verified`
+  and `publish_feedback` are registered only for a server started in the main
+  working tree, which attaches the credential itself (it is never a tool
+  parameter and never appears in a result or an error). A server in an agent's
+  worktree does not list them, and a by-name call returns an MCP-level error
+  naming the restriction, so a coding agent cannot self-verify through MCP.
 
 Publish tools need a **reachable broker** — unlike the read-only categories,
 there is no meaningful "empty" result for a publish that did not happen. When
 no session is active, or the broker is unreachable, or it rejects the
 message, the tool returns an MCP-level error and the server keeps running;
-nothing is ever written to stdout outside the JSON-RPC protocol stream.
+nothing is ever written to stdout outside the JSON-RPC protocol stream. The
+verdict tools read the session's broker and credential when they run, so a root
+server that started the session itself (`start_session`) can publish verdicts
+without restarting.
+
+### Session lifecycle (root session only)
+
+Offered only to a server started in the repository's main working tree (as git
+reports it, so a `--separate-git-dir` checkout counts); a server in an agent's
+worktree does not list them, and a by-name call returns an MCP-level error.
+Each does exactly what the equivalent `git paw` command does, in-process, and
+returns structured JSON with the command's output lines and warnings.
+
+| Tool | Input | Result |
+|------|-------|--------|
+| `start_session` | `{ cli?, branches?, specs?, from_all_specs?, supervisor?, dry_run? }` | `{ outcome, session_name, attach_command, orchestrator_context, output, warnings }` |
+| `pause_session` | `{}` | `{ no_session, session_name, outcome, output, warnings }` |
+| `stop_session` | `{}` | `{ no_session, session_name, outcome, output, warnings }` |
+| `purge_session` | `{ confirm }` | `{ no_session, session_name, deleted, retained, output, warnings }` |
+
+- **`start_session` is detached and never prompts.** It launches (or revives —
+  restarts from pause, recovers a stopped session) the repository's session
+  without attaching a terminal, and returns once the launch's readiness gates
+  have run, with the session name, the command a person runs to attach, and the
+  orchestrator-context file (`.git-paw/AGENTS.local.md`). It has **no
+  `unattended` parameter**: run `git paw start --unattended` yourself for an
+  unattended wave. Nothing is asked interactively — pass `branches` or a spec
+  selection, and `cli` unless the repository sets `default_cli`; a choice the
+  command would otherwise put to a picker is refused with the parameter to
+  pass. `supervisor` absent means the repository's `[supervisor]` config
+  decides, as a non-interactive `git paw start` does. `dry_run` reports the plan
+  and creates nothing.
+- **`stop_session` takes no confirmation.** Stopping is recoverable (the
+  worktrees, branches and state stay; `start_session` recovers it), as with
+  `git paw stop`.
+- **`purge_session` requires `confirm: true`** and is annotated destructive
+  (`destructiveHint`). It removes the tmux session, every worktree (including
+  uncommitted changes in them) and the session state, as a confirmed
+  `git paw purge` does. Branches git-paw created are deleted only when merged;
+  a branch with unmerged commits is kept and listed in `retained` with its tip.
+- With no session, `pause_session`, `stop_session` and `purge_session` return
+  `{ "no_session": true }` rather than an error.
+
+Authoring specs over MCP is not part of this surface; those tools are
+documented with the spec-authoring tools when they ship.

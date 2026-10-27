@@ -1,14 +1,17 @@
 //! Publish tools: `publish_status`, `publish_artifact`, `publish_blocked`,
-//! `publish_question`.
+//! `publish_question` for every session, and `publish_verified`,
+//! `publish_feedback` for a root session only.
 //!
-//! The MCP server's only write surface (capability `mcp-agent-publish`):
-//! exactly the four agent boot events the bundled `broker.sh` helper covers,
-//! nothing else. Each tool derives the publishing `agent_id` from this
-//! session's resolved worktree branch (design D3) — no tool schema here
-//! accepts an `agent_id` parameter, so an agent cannot publish as a peer.
-//! The supervisor authority verbs (`agent.verified`, `agent.feedback`) are
-//! deliberately absent: exposing them would let a coding agent self-verify
-//! and bypass the five-gate framework (design D1).
+//! Capability `mcp-agent-publish`: the four agent boot events the bundled
+//! `broker.sh` helper covers, plus the two verdict events `sweep.sh verified`
+//! / `feedback-gate` cover, nothing else. Each tool derives the publishing
+//! identity from the session (design D3): a worktree session publishes as its
+//! branch slug, a root session as `supervisor`. No tool schema here accepts
+//! an `agent_id` or publisher parameter, so a session cannot publish as a
+//! peer. The verdict tools are registered only for a root session (they are
+//! absent from a worktree server, so a coding agent cannot self-verify), and
+//! they attach the session's authority credential, which the broker requires
+//! for a verdict.
 //!
 //! Every tool publishes the same `BrokerMessage` shape the shell helper does
 //! (design D5) via the shared builders in [`crate::broker::publish`], and
@@ -20,14 +23,16 @@ use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{ErrorData, schemars, tool, tool_router};
 use serde::Deserialize;
 
-use crate::broker::messages::slugify_branch;
+use crate::broker::client::BrokerClient;
+use crate::broker::messages::{BrokerMessage, FeedbackPayload, VerifiedPayload, slugify_branch};
 use crate::broker::publish::{
     build_artifact_message, build_blocked_message, build_question_message, build_status_message,
     publish_to_broker_http,
 };
 use crate::error::PawError;
-use crate::mcp::RepoContext;
 use crate::mcp::server::GitPawMcpServer;
+use crate::mcp::{RepoContext, SessionAuthority};
+use crate::surface::SUPERVISOR_AGENT_ID;
 
 /// Maps an internal error to an MCP protocol error. Takes the error by value
 /// so it composes directly with `Result::map_err`.
@@ -36,32 +41,23 @@ fn to_err(e: PawError) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
 }
 
-/// Resolves the publishing `agent_id` from the session's worktree branch
-/// (design D3) — the caller never supplies one.
+/// Resolves the publishing identity (design D3) — the caller never supplies
+/// one.
 ///
-/// Refuses in the repository's main working tree. A publish tool acts as the
-/// calling agent, and agents run in linked worktrees; the main working tree is
-/// the orchestrator's, where deriving from the branch would name an agent
-/// after the default branch (`main` → `agent-main`) and publish as a phantom
-/// the broker accepts. The caller turns this into an MCP-level error, so the
-/// server keeps running and nothing is published.
+/// A root session (the repository's main working tree) publishes as the root
+/// identity `supervisor`: the main working tree is the orchestrator's, and
+/// deriving from its branch would name an agent after the default branch
+/// (`main` → `agent-main`). A worktree session publishes as its slugified
+/// branch.
 ///
-/// Root detection is git's own answer, through the same
-/// [`RepoLayout::is_linked_worktree`] check `git paw setup-cli` makes: this
-/// checkout's git directory versus the common one, which stays correct under
-/// `--separate-git-dir`.
+/// Root detection is decided once, when the server starts
+/// ([`RepoContext::for_root`]), through the same
+/// [`RepoLayout::is_linked_worktree`] check `git paw setup-cli` makes.
 ///
 /// [`RepoLayout::is_linked_worktree`]: crate::cli_setup::shell::RepoLayout::is_linked_worktree
 fn resolve_agent_id(ctx: &RepoContext) -> Result<String, PawError> {
-    let runner = crate::command_runner::RealCommandRunner;
-    let layout = crate::cli_setup::shell::resolve_layout(&runner, &ctx.root)?;
-    if !layout.is_linked_worktree() {
-        return Err(PawError::McpError(format!(
-            "publishing acts as the calling agent, and this server is resolved to the \
-             repository's main working tree ({}) rather than an agent's worktree — start a \
-             git-paw session and publish from the agent's own worktree",
-            layout.main_checkout.display()
-        )));
+    if ctx.is_main_worktree {
+        return Ok(SUPERVISOR_AGENT_ID.to_string());
     }
     let branch = crate::git::current_branch(&ctx.root)?;
     Ok(slugify_branch(&branch))
@@ -77,6 +73,33 @@ fn broker_url(ctx: &RepoContext) -> Result<&str, PawError> {
                 .to_string(),
         )
     })
+}
+
+/// Where a verdict goes and the credential it carries: the root session's
+/// broker URL and authority credential.
+///
+/// Read from the session receipt at call time, because a root session may
+/// have started (or restarted) the session after this server did — through
+/// `start_session` itself — and the receipt is what names the live broker and
+/// its credential. Falls back to what the server resolved at startup. The
+/// verdict tools exist only in a root session, so this never runs for a
+/// worktree. The errors never quote the credential.
+fn verdict_endpoint(ctx: &RepoContext) -> Result<(String, SessionAuthority), PawError> {
+    if let Some(session) = crate::session::find_session_for_repo(&ctx.root)?
+        && let Some(url) = crate::mcp::broker_url_from_session(&session)
+        && let Some(credential) = session.broker_authority.filter(|c| !c.is_empty())
+    {
+        return Ok((url, SessionAuthority::new(credential)));
+    }
+    let url = broker_url(ctx)?.to_string();
+    let authority = ctx.authority.clone().ok_or_else(|| {
+        PawError::McpError(
+            "no session authority credential for this repository — start a git-paw session \
+             with the broker enabled from the main working tree before publishing a verdict"
+                .to_string(),
+        )
+    })?;
+    Ok((url, authority))
 }
 
 /// Parameters for [`GitPawMcpServer::publish_status`].
@@ -197,6 +220,121 @@ impl GitPawMcpServer {
         let url = broker_url(&self.ctx).map_err(to_err)?;
         let msg = build_question_message(&agent_id, &p.question);
         publish_to_broker_http(url, &msg).map_err(to_err)?;
+        Ok(Json(PublishResponse { published: true }))
+    }
+}
+
+/// Parameters for [`GitPawMcpServer::publish_verified`].
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PublishVerifiedParams {
+    /// The agent whose work passed verification (its `agent_id`, e.g.
+    /// `feat-x`).
+    pub agent: String,
+    /// Human-readable summary of the verification result.
+    pub message: String,
+}
+
+/// Parameters for [`GitPawMcpServer::publish_feedback`].
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PublishFeedbackParams {
+    /// The agent the feedback is for (its `agent_id`, e.g. `feat-x`).
+    pub agent: String,
+    /// The gate that failed (e.g. `testing`, `spec audit`). When given, each
+    /// error is prefixed `[<gate>] `, as `sweep.sh feedback-gate` does.
+    #[serde(default)]
+    pub gate: Option<String>,
+    /// The errors the agent should address; at least one.
+    pub errors: Vec<String>,
+}
+
+/// A required text parameter, trimmed; an error naming `field` when blank.
+fn required(field: &str, value: &str) -> Result<String, PawError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(PawError::McpError(format!("`{field}` must not be empty")));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// The verdict tools, registered for a root session only (see
+/// [`GitPawMcpServer::new`]). They publish as `supervisor` and attach the
+/// session's authority credential, as `sweep.sh verified` / `feedback-gate`
+/// do.
+#[tool_router(router = verdict_router, vis = "pub(crate)")]
+impl GitPawMcpServer {
+    /// `publish_verified` — the root's verdict that an agent passed
+    /// verification.
+    #[tool(
+        description = "Publish an agent.verified verdict for the named agent, as the supervisor (root \
+                       session only). Use it after the agent's work has passed every verification \
+                       gate. The verifier identity and the session credential are attached \
+                       automatically; the agent parameter names the agent whose work was verified."
+    )]
+    pub(crate) fn publish_verified(
+        &self,
+        Parameters(p): Parameters<PublishVerifiedParams>,
+    ) -> Result<Json<PublishResponse>, ErrorData> {
+        let agent = required("agent", &p.agent).map_err(to_err)?;
+        let message = required("message", &p.message).map_err(to_err)?;
+        let (url, authority) = verdict_endpoint(&self.ctx).map_err(to_err)?;
+        let msg = BrokerMessage::Verified {
+            agent_id: agent,
+            payload: VerifiedPayload {
+                verified_by: SUPERVISOR_AGENT_ID.to_string(),
+                message: Some(message),
+            },
+        };
+        BrokerClient::new(url)
+            .publish_with_authority(&msg, Some(authority.expose()))
+            .map_err(to_err)?;
+        Ok(Json(PublishResponse { published: true }))
+    }
+
+    /// `publish_feedback` — the root's corrective feedback to an agent.
+    #[tool(
+        description = "Publish an agent.feedback message to the named agent, from the supervisor \
+                       (root session only): the errors it must address before it can be verified, \
+                       optionally tagged with the gate that failed. The sender identity and the \
+                       session credential are attached automatically."
+    )]
+    pub(crate) fn publish_feedback(
+        &self,
+        Parameters(p): Parameters<PublishFeedbackParams>,
+    ) -> Result<Json<PublishResponse>, ErrorData> {
+        let agent = required("agent", &p.agent).map_err(to_err)?;
+        let gate = match p.gate.as_deref() {
+            Some(gate) => Some(required("gate", gate).map_err(to_err)?),
+            None => None,
+        };
+        let errors = p
+            .errors
+            .iter()
+            .map(|e| required("errors", e))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(to_err)?;
+        if errors.is_empty() {
+            return Err(to_err(PawError::McpError(
+                "`errors` must name at least one error".to_string(),
+            )));
+        }
+        let errors = match gate {
+            Some(gate) => errors
+                .into_iter()
+                .map(|e| format!("[{gate}] {e}"))
+                .collect(),
+            None => errors,
+        };
+        let (url, authority) = verdict_endpoint(&self.ctx).map_err(to_err)?;
+        let msg = BrokerMessage::Feedback {
+            agent_id: agent,
+            payload: FeedbackPayload {
+                from: SUPERVISOR_AGENT_ID.to_string(),
+                errors,
+            },
+        };
+        BrokerClient::new(url)
+            .publish_with_authority(&msg, Some(authority.expose()))
+            .map_err(to_err)?;
         Ok(Json(PublishResponse { published: true }))
     }
 }
@@ -324,6 +462,8 @@ mod tests {
             git_paw_dir: None,
             broker_url,
             server_name: "git-paw".to_string(),
+            is_main_worktree: false,
+            authority: None,
         })
     }
 
@@ -613,34 +753,257 @@ mod tests {
         assert!(!err.message.is_empty());
     }
 
-    /// `mcp-agent-publish`, "A publish from the main working tree is
-    /// refused": a server resolved to the main working tree has no agent to
-    /// be, so it errors and publishes nothing rather than deriving
-    /// `agent-main` from the default branch.
+    /// A server resolved the way `git paw mcp` resolves one, for `root`.
+    fn resolved_server(root: &Path, broker_url: Option<String>) -> GitPawMcpServer {
+        let mut ctx = RepoContext::for_root(root.canonicalize().unwrap());
+        ctx.broker_url = broker_url;
+        GitPawMcpServer::new(ctx)
+    }
+
+    /// A root-session server presenting `authority`.
+    fn root_server(broker_url: &str, authority: Option<&str>) -> GitPawMcpServer {
+        GitPawMcpServer::new(RepoContext {
+            root: std::env::temp_dir(),
+            git_paw_dir: None,
+            broker_url: Some(broker_url.to_string()),
+            server_name: "git-paw".to_string(),
+            is_main_worktree: true,
+            authority: authority.map(|a| crate::mcp::SessionAuthority::new(a.to_string())),
+        })
+    }
+
+    /// A test broker that enforces `credential` for verdicts.
+    fn spawn_authority_broker(credential: &str) -> (broker::BrokerHandle, String) {
+        for _ in 0..10 {
+            let config = BrokerConfig {
+                enabled: true,
+                port: pick_broker_port(),
+                bind: "127.0.0.1".to_string(),
+                ..Default::default()
+            };
+            let state = BrokerState::new(None).with_authority(Some(credential.to_string()));
+            if let Ok(handle) = broker::start_broker(&config, state, Vec::new()) {
+                return (handle, config.url());
+            }
+        }
+        panic!("failed to start an authority test broker");
+    }
+
+    const CREDENTIAL: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// `mcp-agent-publish` "Publish tools act as the calling agent only": a
+    /// root session publishes the worker events as the root identity
+    /// `supervisor`, never as an agent named after the default branch.
     #[test]
-    fn publish_from_the_main_working_tree_is_refused_and_publishes_nothing() {
+    fn a_root_session_publishes_worker_events_as_supervisor() {
         let (handle, url) = spawn_test_broker();
         let repo = main_working_tree();
-        let server = server_for(repo.path().canonicalize().unwrap(), Some(url.clone()));
+        let server = resolved_server(repo.path(), Some(url.clone()));
 
-        let err = server
+        server
             .publish_status(Parameters(PublishStatusParams {
-                message: "booting".to_string(),
+                message: "orchestrating".to_string(),
             }))
-            .err()
-            .expect("the main working tree must be refused, not published from");
-        assert!(
-            err.message.contains("main working tree"),
-            "the error should name the main working tree; got: {err:?}"
-        );
+            .expect("a root session publishes");
 
         let log = fetch_log_over_http(&url).expect("fetch broker log");
         assert!(
-            !log.iter().any(|m| m.agent_id() == "agent-main"),
-            "a refused derivation must publish nothing; log: {log:?}"
+            log.iter().any(|m| matches!(
+                m,
+                BrokerMessage::Status { agent_id, payload }
+                    if agent_id == "supervisor" && payload.message.as_deref() == Some("orchestrating")
+            )),
+            "the root session must publish as supervisor; log: {log:?}"
         );
-
+        assert!(
+            !log.iter()
+                .any(|m| m.agent_id() == "agent-main" || m.agent_id() == "main"),
+            "no agent may be derived from the default branch; log: {log:?}"
+        );
         drop(handle);
+    }
+
+    /// `mcp-agent-publish` "Root verdict carries supervisor as the verifier"
+    /// and "Root session verdict is accepted by the broker": wire-identical
+    /// to `sweep.sh verified <agent> <message>`.
+    #[test]
+    fn publish_verified_publishes_the_helper_shape_with_the_credential() {
+        let (handle, url) = spawn_authority_broker(CREDENTIAL);
+        let server = root_server(&url, Some(CREDENTIAL));
+
+        server
+            .publish_verified(Parameters(PublishVerifiedParams {
+                agent: "feat-x".to_string(),
+                message: "gates green".to_string(),
+            }))
+            .expect("the broker accepts a credentialed verdict");
+
+        let log = fetch_log_over_http(&url).expect("fetch broker log");
+        let verified: Vec<_> = log
+            .iter()
+            .filter_map(|m| match m {
+                BrokerMessage::Verified { agent_id, payload } => Some((agent_id, payload)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(verified.len(), 1, "one verdict; log: {log:?}");
+        let (agent_id, payload) = verified[0];
+        assert_eq!(agent_id, "feat-x");
+        assert_eq!(payload.verified_by, "supervisor");
+        assert_eq!(payload.message.as_deref(), Some("gates green"));
+        drop(handle);
+    }
+
+    /// Wire-identical to `sweep.sh feedback-gate <agent> <gate> <message>`:
+    /// each error is tagged `[<gate>] `, from `supervisor`.
+    #[test]
+    fn publish_feedback_tags_errors_with_the_gate_as_the_helper_does() {
+        let (handle, url) = spawn_authority_broker(CREDENTIAL);
+        let server = root_server(&url, Some(CREDENTIAL));
+
+        server
+            .publish_feedback(Parameters(PublishFeedbackParams {
+                agent: "feat-x".to_string(),
+                gate: Some("testing".to_string()),
+                errors: vec!["two tests fail".to_string()],
+            }))
+            .expect("the broker accepts credentialed feedback");
+        server
+            .publish_feedback(Parameters(PublishFeedbackParams {
+                agent: "feat-x".to_string(),
+                gate: None,
+                errors: vec!["rename the flag".to_string()],
+            }))
+            .expect("feedback without a gate is accepted");
+
+        let log = fetch_log_over_http(&url).expect("fetch broker log");
+        let feedback: Vec<_> = log
+            .iter()
+            .filter_map(|m| match m {
+                BrokerMessage::Feedback { agent_id, payload } => Some((
+                    agent_id.clone(),
+                    payload.from.clone(),
+                    payload.errors.clone(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            feedback,
+            vec![
+                (
+                    "feat-x".to_string(),
+                    "supervisor".to_string(),
+                    vec!["[testing] two tests fail".to_string()]
+                ),
+                (
+                    "feat-x".to_string(),
+                    "supervisor".to_string(),
+                    vec!["rename the flag".to_string()]
+                ),
+            ]
+        );
+        drop(handle);
+    }
+
+    /// A root session without a credential publishes no verdict, and says
+    /// why without quoting any credential.
+    #[test]
+    fn a_verdict_without_a_session_credential_is_refused_and_publishes_nothing() {
+        let (handle, url) = spawn_authority_broker(CREDENTIAL);
+        let server = root_server(&url, None);
+
+        let err = server
+            .publish_verified(Parameters(PublishVerifiedParams {
+                agent: "feat-x".to_string(),
+                message: "gates green".to_string(),
+            }))
+            .err()
+            .expect("no credential, no verdict");
+        assert!(err.message.contains("credential"), "got: {err:?}");
+
+        let log = fetch_log_over_http(&url).expect("fetch broker log");
+        assert!(
+            !log.iter()
+                .any(|m| matches!(m, BrokerMessage::Verified { .. })),
+            "nothing may be published; log: {log:?}"
+        );
+        drop(handle);
+    }
+
+    /// A credential the broker does not hold is refused (403), and the error
+    /// never echoes the credential that was presented.
+    #[test]
+    fn a_wrong_credential_is_refused_without_echoing_it() {
+        let (handle, url) = spawn_authority_broker(CREDENTIAL);
+        let presented = "f".repeat(64);
+        let server = root_server(&url, Some(&presented));
+
+        let err = server
+            .publish_verified(Parameters(PublishVerifiedParams {
+                agent: "feat-x".to_string(),
+                message: "gates green".to_string(),
+            }))
+            .err()
+            .expect("the broker refuses a credential it does not hold");
+        assert!(err.message.contains("403"), "got: {err:?}");
+        assert!(!err.message.contains(&presented), "got: {err:?}");
+
+        let log = fetch_log_over_http(&url).expect("fetch broker log");
+        assert!(
+            !log.iter()
+                .any(|m| matches!(m, BrokerMessage::Verified { .. })),
+            "nothing may be published; log: {log:?}"
+        );
+        drop(handle);
+    }
+
+    #[test]
+    fn publish_feedback_needs_at_least_one_error() {
+        let (handle, url) = spawn_authority_broker(CREDENTIAL);
+        let server = root_server(&url, Some(CREDENTIAL));
+        let err = server
+            .publish_feedback(Parameters(PublishFeedbackParams {
+                agent: "feat-x".to_string(),
+                gate: Some("testing".to_string()),
+                errors: Vec::new(),
+            }))
+            .err()
+            .expect("an empty error list is refused");
+        assert!(err.message.contains("errors"), "got: {err:?}");
+        drop(handle);
+    }
+
+    /// `mcp-agent-publish` "Credential is never a tool parameter" and
+    /// "Publisher id is derived, not supplied": the verdict schemas take the
+    /// target and the text only.
+    #[test]
+    fn verdict_schemas_take_no_credential_or_publisher() {
+        let server = root_server("http://127.0.0.1:1", None);
+        let tools = server.tool_router.list_all();
+        for (name, allowed) in [
+            ("publish_verified", &["agent", "message"][..]),
+            ("publish_feedback", &["agent", "gate", "errors"][..]),
+        ] {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} is registered for a root session"));
+            let props: Vec<&String> = tool
+                .input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .map(|p| p.keys().collect())
+                .unwrap_or_default();
+            assert!(
+                props.iter().all(|p| allowed.contains(&p.as_str())),
+                "{name} must take only {allowed:?}; got {props:?}"
+            );
+            assert!(
+                !props.is_empty(),
+                "{name} schema must declare its parameters"
+            );
+        }
     }
 
     #[test]

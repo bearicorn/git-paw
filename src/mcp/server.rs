@@ -6,13 +6,28 @@
 use std::path::Path;
 
 use rmcp::handler::server::router::tool::ToolRouter;
-use rmcp::model::{ServerCapabilities, ServerInfo};
+use rmcp::handler::server::tool::ToolCallContext;
+use rmcp::model::{CallToolRequestParams, CallToolResult, ServerCapabilities, ServerInfo};
+use rmcp::service::RequestContext;
 use rmcp::transport::stdio;
-use rmcp::{ServerHandler, ServiceExt, tool_handler};
+use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt, tool_handler};
 
 use crate::error::PawError;
 use crate::mcp::{RepoContext, logging};
 use crate::specs::SpecBackendKind;
+
+/// The tools offered to a root session only — the session lifecycle and the
+/// verdict publish tools. A server resolved to a linked worktree registers
+/// none of them, and answers a by-name call to one with an error naming the
+/// restriction.
+pub(crate) const ROOT_ONLY_TOOL_NAMES: &[&str] = &[
+    "start_session",
+    "pause_session",
+    "stop_session",
+    "purge_session",
+    "publish_verified",
+    "publish_feedback",
+];
 
 /// The MCP server handler. Holds the resolved [`RepoContext`] (shared
 /// read-only by every tool) and the merged tool router.
@@ -23,16 +38,19 @@ pub struct GitPawMcpServer {
     /// Combined router across all tool categories. `pub(crate)` so registry-
     /// inspection tests (the `mcp-agent-publish` security boundary: no
     /// generic publish tool, no `agent_id` parameter, no authority-verb
-    /// tools) can enumerate it from outside this module.
+    /// tools in a worktree session) can enumerate it from outside this
+    /// module.
     pub(crate) tool_router: ToolRouter<Self>,
 }
 
 impl GitPawMcpServer {
     /// Builds the server, merging the per-category tool routers (each defined
-    /// in its own file under `tools/`).
+    /// in its own file under `tools/`). The lifecycle and verdict routers are
+    /// merged only for a root session ([`RepoContext::is_main_worktree`]), so
+    /// a worktree server neither advertises nor dispatches them.
     #[must_use]
     pub fn new(ctx: RepoContext) -> Self {
-        let tool_router = Self::coordination_router()
+        let mut tool_router = Self::coordination_router()
             + Self::governance_router()
             + Self::project_router()
             + Self::session_router()
@@ -40,16 +58,44 @@ impl GitPawMcpServer {
             + Self::docs_router()
             + Self::source_router()
             + Self::publish_router();
+        if ctx.is_main_worktree {
+            tool_router = tool_router + Self::lifecycle_router() + Self::verdict_router();
+        }
         Self { ctx, tool_router }
     }
 }
 
-// The `#[tool_handler]` macro expands to an async trait method with no `.await`;
+/// The error a worktree session gets for a by-name call to a root-only tool.
+fn root_only_error(name: &str) -> ErrorData {
+    ErrorData::invalid_request(
+        format!(
+            "`{name}` is available only from the repository's main working tree (a root \
+             session); this server runs in a linked worktree"
+        ),
+        None,
+    )
+}
+
+// The `#[tool_handler]` macro expands to async trait methods with no `.await`;
 // silence clippy's 1.98 lint for the generated code. `unknown_lints` keeps this
 // harmless on the older toolchains (MSRV 1.96) that do not know the lint yet.
 #[allow(unknown_lints, clippy::unused_async_trait_impl)]
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for GitPawMcpServer {
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        // A worktree server has no route for a root-only tool; say why
+        // instead of the generic "tool not found".
+        if !self.ctx.is_main_worktree && ROOT_ONLY_TOOL_NAMES.contains(&request.name.as_ref()) {
+            return Err(root_only_error(&request.name));
+        }
+        let tcc = ToolCallContext::new(self, request, context);
+        self.tool_router.call(tcc).await
+    }
+
     fn get_info(&self) -> ServerInfo {
         // ServerInfo (InitializeResult) is #[non_exhaustive]; build from Default
         // and override the fields we care about.
@@ -66,10 +112,14 @@ impl ServerHandler for GitPawMcpServer {
              specs and tasks, session status and learnings, agent skills, git context, and source \
              browsing (list_files, read_file, search_code over the local working tree) are all \
              read-only and return empty/null results (not errors) when their data source is \
-             unavailable. The one write surface is a bounded, agent-scoped publish category \
-             covering exactly the four agent boot events (publish_status, publish_artifact, \
-             publish_blocked, publish_question) — each publishes as the calling agent only. \
-             Supervisor authority verbs (agent.verified, agent.feedback) are not exposed."
+             unavailable. The write surface is bounded: an identity-scoped publish category \
+             covering the four agent boot events (publish_status, publish_artifact, \
+             publish_blocked, publish_question) — each publishes as the calling session only (an \
+             agent's worktree as its branch, the main working tree as the supervisor). The \
+             session lifecycle tools (start_session, pause_session, stop_session, purge_session) \
+             and the verdict tools (publish_verified, publish_feedback) exist for a root session \
+             only — a server started in the repository's main working tree; a server in an \
+             agent's worktree neither lists nor runs them."
                 .to_string(),
         );
         info
@@ -138,8 +188,28 @@ pub fn run(ctx: RepoContext, log_file: Option<&Path>) -> Result<(), PawError> {
 mod tests {
     use super::*;
 
+    /// A worktree session's context (the default: no root-only tools).
     fn ctx() -> RepoContext {
         ctx_named("git-paw")
+    }
+
+    /// A root session's context: the main working tree, with a credential.
+    fn root_ctx() -> RepoContext {
+        RepoContext {
+            is_main_worktree: true,
+            authority: Some(crate::mcp::SessionAuthority::new("c".repeat(64))),
+            ..ctx()
+        }
+    }
+
+    /// The advertised tool names of a server built from `ctx`.
+    fn advertised(ctx: RepoContext) -> std::collections::BTreeSet<String> {
+        GitPawMcpServer::new(ctx)
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect()
     }
 
     fn ctx_named(name: &str) -> RepoContext {
@@ -148,6 +218,8 @@ mod tests {
             git_paw_dir: None,
             broker_url: None,
             server_name: name.to_string(),
+            is_main_worktree: false,
+            authority: None,
         }
     }
 
@@ -207,6 +279,8 @@ mod tests {
                 git_paw_dir: None,
                 broker_url: None,
                 server_name: "git-paw".to_string(),
+                is_main_worktree: false,
+                authority: None,
             };
             assert!(
                 validate_startup_config(&ctx).is_ok(),
@@ -231,6 +305,8 @@ mod tests {
             git_paw_dir: None,
             broker_url: None,
             server_name: "git-paw".to_string(),
+            is_main_worktree: false,
+            authority: None,
         };
         let err = validate_startup_config(&ctx).unwrap_err().to_string();
         assert!(err.contains("unrecognised"), "got: {err}");
@@ -326,36 +402,133 @@ mod tests {
         "list_files",
         "read_file",
         "search_code",
-        // mcp-agent-publish: the ONLY write category — bounded to exactly
-        // the four agent boot events, agent-scoped, authority verbs absent.
+        // mcp-agent-publish: the four agent boot events, for every session,
+        // publishing as the calling session only.
         "publish_status",
         "publish_artifact",
         "publish_blocked",
         "publish_question",
+        // Root session only (ROOT_ONLY_TOOL_NAMES): the session lifecycle and
+        // the two verdict tools.
+        "start_session",
+        "pause_session",
+        "stop_session",
+        "purge_session",
+        "publish_verified",
+        "publish_feedback",
     ];
 
-    /// `mcp-server` scenario "No file or git mutation is exposed" + `mcp-
-    /// agent-publish` scenario "No generic publish tool exists": the
-    /// registry is exactly the closed allowlist above — nothing more,
-    /// nothing less. A stray extra tool (mutating or not) fails this test
-    /// immediately, forcing a conscious update rather than a silent drift.
+    /// `mcp-server` scenario "No arbitrary file, git or config mutation is
+    /// exposed" + `mcp-agent-publish` scenario "No generic publish tool
+    /// exists": a root session's registry is exactly the closed allowlist
+    /// above — nothing more, nothing less. A stray extra tool (mutating or
+    /// not) fails this test immediately, forcing a conscious update rather
+    /// than a silent drift.
     #[test]
     fn registry_is_exactly_the_closed_allowlist() {
-        let server = GitPawMcpServer::new(ctx());
-        let names: std::collections::BTreeSet<String> = server
-            .tool_router
-            .list_all()
-            .into_iter()
-            .map(|t| t.name.to_string())
-            .collect();
         let allowed: std::collections::BTreeSet<String> = ALL_ALLOWED_TOOL_NAMES
             .iter()
             .map(std::string::ToString::to_string)
             .collect();
         assert_eq!(
-            names, allowed,
+            advertised(root_ctx()),
+            allowed,
             "the tool registry drifted from the closed allowlist — any addition or removal \
              must be a deliberate edit to ALL_ALLOWED_TOOL_NAMES, not an incidental one"
+        );
+    }
+
+    /// `mcp-server` "Worktree session does not see root-only tools": a
+    /// worktree session's registry is the allowlist minus exactly the
+    /// root-only names.
+    #[test]
+    fn worktree_registry_is_the_allowlist_without_the_root_only_tools() {
+        let expected: std::collections::BTreeSet<String> = ALL_ALLOWED_TOOL_NAMES
+            .iter()
+            .filter(|n| !ROOT_ONLY_TOOL_NAMES.contains(n))
+            .map(std::string::ToString::to_string)
+            .collect();
+        assert_eq!(advertised(ctx()), expected);
+        for worker in [
+            "publish_status",
+            "publish_artifact",
+            "publish_blocked",
+            "publish_question",
+        ] {
+            assert!(
+                expected.contains(worker),
+                "a worktree keeps the worker publish tools: {worker}"
+            );
+        }
+    }
+
+    /// `mcp-server` "Root session sees root-only tools": every root-only tool
+    /// is advertised to a root session, and each is on the allowlist.
+    #[test]
+    fn root_session_sees_every_root_only_tool() {
+        let names = advertised(root_ctx());
+        for name in ROOT_ONLY_TOOL_NAMES {
+            assert!(names.contains(*name), "{name} missing from a root session");
+            assert!(
+                ALL_ALLOWED_TOOL_NAMES.contains(name),
+                "{name} must be on the closed allowlist"
+            );
+        }
+    }
+
+    /// The error a worktree session gets for a root-only tool names the
+    /// restriction (the call path is covered end to end in
+    /// `tests/mcp_lifecycle_e2e.rs`).
+    #[test]
+    fn the_root_only_error_names_the_worktree_restriction() {
+        let err = root_only_error("pause_session");
+        assert!(err.message.contains("pause_session"), "got: {err:?}");
+        assert!(err.message.contains("worktree"), "got: {err:?}");
+        assert!(err.message.contains("main working tree"), "got: {err:?}");
+    }
+
+    /// `mcp-server` "`start_session` never runs the drive loop" and
+    /// "`stop_session` takes no confirmation or force parameter".
+    #[test]
+    fn lifecycle_schemas_offer_no_unattended_confirm_or_force() {
+        let server = GitPawMcpServer::new(root_ctx());
+        let props = |name: &str| -> Vec<String> {
+            let tool = server
+                .tool_router
+                .list_all()
+                .into_iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} registered for a root session"));
+            tool.input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .map(|p| p.keys().cloned().collect())
+                .unwrap_or_default()
+        };
+        let start = props("start_session");
+        assert!(start.contains(&"branches".to_string()), "got {start:?}");
+        assert!(!start.iter().any(|p| p == "unattended"), "got {start:?}");
+        let stop = props("stop_session");
+        assert!(
+            !stop.iter().any(|p| p == "confirm" || p == "force"),
+            "got {stop:?}"
+        );
+        assert!(props("purge_session").contains(&"confirm".to_string()));
+    }
+
+    /// `mcp-server` "Purge is annotated destructive".
+    #[test]
+    fn purge_session_is_annotated_destructive() {
+        let server = GitPawMcpServer::new(root_ctx());
+        let purge = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .find(|t| t.name == "purge_session")
+            .expect("purge_session registered for a root session");
+        assert_eq!(
+            purge.annotations.and_then(|a| a.destructive_hint),
+            Some(true)
         );
     }
 
@@ -399,9 +572,10 @@ mod tests {
     }
 
     /// `mcp-agent-publish` scenarios "No generic publish tool exists", "No
-    /// verified publish tool", "No feedback publish tool", and "Agent id is
-    /// derived, not supplied": adversarially inspect every advertised tool's
-    /// name and parameter schema, not just the four publish tools by name.
+    /// verified tool in a worktree session", "No feedback tool in a worktree
+    /// session", and "Publisher id is derived, not supplied": adversarially
+    /// inspect every tool a worktree session advertises — name and parameter
+    /// schema, not just the four publish tools by name.
     #[test]
     fn no_generic_publish_or_authority_verb_tool_is_advertised() {
         let server = GitPawMcpServer::new(ctx());
@@ -447,9 +621,11 @@ mod tests {
     }
 
     /// `mcp-agent-publish` scenario "Agent cannot self-verify via MCP": even
-    /// granting the strongest available capability (calling every advertised
-    /// tool), there is no tool call sequence that publishes an
-    /// `agent.verified` message — the verb simply is not on the surface.
+    /// granting a coding agent's worktree session the strongest available
+    /// capability (calling every advertised tool), there is no tool call
+    /// sequence that publishes an `agent.verified` message — the verb is not
+    /// on its surface (a by-name call is refused end to end in
+    /// `tests/mcp_lifecycle_e2e.rs`).
     #[test]
     fn agent_cannot_self_verify_because_no_tool_publishes_it() {
         let server = GitPawMcpServer::new(ctx());

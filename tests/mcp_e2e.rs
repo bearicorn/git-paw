@@ -324,21 +324,18 @@ fn full_lifecycle_initialize_list_call_shutdown() {
     client.shutdown_and_assert_clean_exit(Duration::from_secs(2));
 }
 
-/// `mcp-agent-publish`, "A publish from the main working tree is refused":
-/// a server resolved to the main working tree has no agent to be. Previously
-/// its `main` branch derived nothing the broker would take; with the
-/// `agent-` prefix it would derive the phantom `agent-main`, so the tool
-/// refuses instead — and, like every other degradation here, the refusal is
-/// an MCP-level error that leaves the server serving.
+/// `mcp-agent-publish` "Publish tools act as the calling agent only": a
+/// server resolved to the main working tree is a root session and publishes
+/// as `supervisor`, never as an agent derived from the default branch (the
+/// phantom `agent-main`). Asserted against a live broker's log by the unit
+/// test `mcp::tools::publish::tests::a_root_session_publishes_worker_events_as_supervisor`.
 ///
-/// This half of the scenario is the "server keeps running" half, which needs
-/// the real spawned binary. No broker runs here, so "publishes nothing" is
-/// asserted by the sibling unit test
-/// `mcp::tools::publish::tests::publish_from_the_main_working_tree_is_refused_and_publishes_nothing`,
-/// which checks a live broker's log. The message assertion below is what keeps
-/// this test honest: without it, an unconfigured broker would error anyway.
+/// This is the "server keeps running" half, which needs the real spawned
+/// binary: with no session there is no broker, so the publish degrades to an
+/// MCP-level error that names the missing broker — not a refusal to publish
+/// from the main working tree — and the server keeps serving.
 #[test]
-fn publish_from_the_main_working_tree_errors_and_the_server_keeps_running() {
+fn a_root_session_publish_without_a_broker_errors_and_the_server_keeps_running() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("proj");
     std::fs::create_dir(&repo).unwrap();
@@ -353,14 +350,18 @@ fn publish_from_the_main_working_tree_errors_and_the_server_keeps_running() {
     );
     let error = resp
         .get("error")
-        .unwrap_or_else(|| panic!("publishing from the main working tree must error: {resp}"));
+        .unwrap_or_else(|| panic!("publishing with no broker must error: {resp}"));
     let message = error
         .get("message")
         .and_then(Value::as_str)
         .unwrap_or_default();
     assert!(
-        message.contains("main working tree"),
-        "the error should name the main working tree: {resp}"
+        message.contains("no active broker"),
+        "the error should name the missing broker: {resp}"
+    );
+    assert!(
+        !message.contains("main working tree"),
+        "a root session is not refused for being the main working tree: {resp}"
     );
 
     // Server still alive: a follow-up request succeeds.
@@ -661,6 +662,8 @@ fn active_broker_populates_intents_and_conflicts() {
         git_paw_dir: None,
         broker_url: Some(handle.url.clone()),
         server_name: "git-paw".to_string(),
+        is_main_worktree: false,
+        authority: None,
     };
 
     let intents = query::intents::active_intents(&ctx);
@@ -718,6 +721,8 @@ fn broker_and_ctx(stall_minutes: u64) -> Option<(git_paw::broker::BrokerHandle, 
         git_paw_dir: None,
         broker_url: Some(handle.url.clone()),
         server_name: "git-paw".to_string(),
+        is_main_worktree: false,
+        authority: None,
     };
     // The temp dir only has to outlive the context's root path, which nothing
     // in these tests reads from disk.
@@ -875,6 +880,8 @@ fn get_session_status_reports_a_stalled_wave() {
         git_paw_dir: None,
         broker_url: Some(handle.url.clone()),
         server_name: "git-paw".to_string(),
+        is_main_worktree: false,
+        authority: None,
     };
 
     let snapshot = query::session::session_status_in(&ctx, sessions_dir)

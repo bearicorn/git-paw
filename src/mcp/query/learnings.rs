@@ -131,6 +131,8 @@ mod tests {
             git_paw_dir: dir.map(Path::to_path_buf),
             broker_url: None,
             server_name: "git-paw".to_string(),
+            is_main_worktree: false,
+            authority: None,
         }
     }
 

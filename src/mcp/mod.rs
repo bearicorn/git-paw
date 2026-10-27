@@ -64,6 +64,41 @@ pub struct RepoContext {
     /// config's `[mcp].name` (defaulting to `"git-paw"`) so the server handler
     /// never re-loads config per `get_info()` call.
     pub server_name: String,
+    /// Whether the server runs in the repository's main working tree (a root
+    /// session) rather than a linked worktree, as git reports it. Only a root
+    /// session is offered the lifecycle and verdict tools.
+    pub is_main_worktree: bool,
+    /// The session's broker authority credential — loaded only for a root
+    /// session, never for a worktree server, although that server resolves
+    /// the owning repository's session too.
+    pub authority: Option<SessionAuthority>,
+}
+
+/// A session's broker authority credential, as the root session's verdict
+/// tools present it in the `X-Paw-Authority` header.
+///
+/// Its `Debug` output is redacted, so a logged [`RepoContext`] never carries
+/// the credential.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SessionAuthority(String);
+
+impl SessionAuthority {
+    /// Wraps a credential read from the session receipt.
+    #[must_use]
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    /// The credential, for the request header only.
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SessionAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SessionAuthority(<redacted>)")
+    }
 }
 
 impl RepoContext {
@@ -80,6 +115,16 @@ impl RepoContext {
     /// Resolves the advertised server identity from the
     /// merged config's `[mcp].name`, defaulting to `"git-paw"` when unset (or
     /// when the config cannot be loaded).
+    ///
+    /// Decides once whether `root` is the repository's main working tree,
+    /// through the same [`RepoLayout::is_linked_worktree`] check `git paw
+    /// setup-cli` and `git paw __authority` make (the checkout's git
+    /// directory versus the common one, correct under `--separate-git-dir`).
+    /// A check that cannot run counts as a linked worktree, so a failure
+    /// never grants the root-only tools. The authority credential is loaded
+    /// for the main working tree only.
+    ///
+    /// [`RepoLayout::is_linked_worktree`]: crate::cli_setup::shell::RepoLayout::is_linked_worktree
     #[must_use]
     pub fn for_root(root: PathBuf) -> Self {
         let git_paw_dir = {
@@ -93,18 +138,89 @@ impl RepoContext {
             .and_then(broker_url_from_session);
         let server_name = crate::config::load_config(&root, None)
             .map_or_else(|_| "git-paw".to_string(), |cfg| cfg.mcp_server_name());
+        let is_main_worktree = is_main_working_tree(&root);
+        let authority = if is_main_worktree {
+            session::authority_for_repo(&root)
+                .ok()
+                .flatten()
+                .map(SessionAuthority::new)
+        } else {
+            None
+        };
         Self {
             root,
             git_paw_dir,
             broker_url,
             server_name,
+            is_main_worktree,
+            authority,
         }
+    }
+}
+
+/// Whether `root` is the repository's main working tree rather than a linked
+/// worktree. A check that cannot run answers `false`.
+///
+/// git runs with its repository-location variables removed, so the answer is
+/// about `root` and not about a repository an inherited environment points
+/// at.
+fn is_main_working_tree(root: &Path) -> bool {
+    crate::cli_setup::shell::resolve_layout(&LocationNeutralGit, root)
+        .is_ok_and(|layout| !layout.is_linked_worktree())
+}
+
+/// git's repository-location environment variables. Inherited — from a client
+/// that exported them, or a server spawned from inside a git command — they
+/// make `git -C <root>` describe that repository instead of `<root>`, which
+/// would let a linked worktree read as the main working tree.
+const GIT_LOCATION_ENV: [&str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"];
+
+/// Runs commands with [`GIT_LOCATION_ENV`] removed from the child's
+/// environment, for the root-session check.
+struct LocationNeutralGit;
+
+impl LocationNeutralGit {
+    fn command(program: &str, args: &[&str]) -> std::process::Command {
+        let mut command = std::process::Command::new(program);
+        command.args(args);
+        for var in GIT_LOCATION_ENV {
+            command.env_remove(var);
+        }
+        command
+    }
+}
+
+impl crate::command_runner::CommandRunner for LocationNeutralGit {
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+    ) -> std::io::Result<crate::command_runner::CommandOutput> {
+        let output = Self::command(program, args).output()?;
+        Ok(crate::command_runner::CommandOutput {
+            success: output.status.success(),
+            code: output.status.code(),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+
+    fn run_inheriting_stdio(
+        &self,
+        program: &str,
+        args: &[&str],
+    ) -> std::io::Result<crate::command_runner::CommandStatus> {
+        let status = Self::command(program, args).status()?;
+        Ok(crate::command_runner::CommandStatus {
+            success: status.success(),
+            code: status.code(),
+        })
     }
 }
 
 /// Derives the broker base URL from a session receipt, or `None` when the
 /// session carries no broker port (broker disabled, or session not active).
-fn broker_url_from_session(session: &Session) -> Option<String> {
+pub(crate) fn broker_url_from_session(session: &Session) -> Option<String> {
     // A stopped session's broker is gone; a paused session has stopped its
     // broker too. Only an active session can have a reachable broker.
     if session.status != SessionStatus::Active {
@@ -312,6 +428,92 @@ mod tests {
 
         let ctx = RepoContext::for_root(repo.canonicalize().unwrap());
         assert!(ctx.git_paw_dir.is_some());
+    }
+
+    /// A repository at `<tmp>/main` with one commit and a linked worktree at
+    /// `<tmp>/wt` on `feat/x`.
+    fn repo_with_worktree(tmp: &Path) -> (PathBuf, PathBuf) {
+        let main = tmp.join("main");
+        std::fs::create_dir(&main).unwrap();
+        git_init(&main);
+        for args in [
+            vec!["commit", "--allow-empty", "-q", "-m", "init"],
+            vec!["worktree", "add", "-q", "-b", "feat/x", "../wt"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .current_dir(&main)
+                    .args(&args)
+                    .status()
+                    .unwrap()
+                    .success(),
+                "git {args:?} failed"
+            );
+        }
+        (
+            main.canonicalize().unwrap(),
+            tmp.join("wt").canonicalize().unwrap(),
+        )
+    }
+
+    // mcp-server "Root-session detection": the main working tree is a root
+    // session; a `git worktree add` worktree is not, and holds no credential.
+    #[test]
+    fn root_detection_tells_the_main_working_tree_from_a_linked_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, wt) = repo_with_worktree(tmp.path());
+
+        assert!(RepoContext::for_root(main).is_main_worktree);
+        let worktree = RepoContext::for_root(wt);
+        assert!(!worktree.is_main_worktree);
+        assert!(worktree.authority.is_none());
+    }
+
+    // mcp-server "A separate-git-dir main checkout is a root session".
+    #[test]
+    fn a_separate_git_dir_main_checkout_is_a_root_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checkout = tmp.path().join("checkout");
+        let git_dir = tmp.path().join("store.git");
+        assert!(
+            Command::new("git")
+                .args([
+                    "init",
+                    "-q",
+                    "--separate-git-dir",
+                    git_dir.to_str().unwrap(),
+                    checkout.to_str().unwrap(),
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(checkout.join(".git").is_file(), "`.git` is a pointer file");
+        assert!(RepoContext::for_root(checkout.canonicalize().unwrap()).is_main_worktree);
+    }
+
+    // A directory git cannot resolve never counts as a root session.
+    #[test]
+    fn root_detection_fails_closed_outside_a_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!RepoContext::for_root(tmp.path().to_path_buf()).is_main_worktree);
+    }
+
+    // The credential never appears in a logged context.
+    #[test]
+    fn the_authority_credential_is_redacted_from_debug_output() {
+        let secret = "s3cr3t-credential-value";
+        let ctx = RepoContext {
+            root: PathBuf::from("/tmp"),
+            git_paw_dir: None,
+            broker_url: None,
+            server_name: "git-paw".to_string(),
+            is_main_worktree: true,
+            authority: Some(SessionAuthority::new(secret.to_string())),
+        };
+        let shown = format!("{ctx:?}");
+        assert!(!shown.contains(secret), "got: {shown}");
+        assert!(shown.contains("redacted"), "got: {shown}");
     }
 
     /// Lint (design risk: stdout pollution kills the MCP protocol): assert no

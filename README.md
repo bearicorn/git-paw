@@ -82,7 +82,7 @@ git-paw lets you run multiple AI coding assistants in parallel, each in its own 
 - **Conflict-detector tuning** — `[supervisor.conflict]` exposes the in-flight escalation window (`window_seconds`), the intent-overlap warning toggle (`warn_on_intent_overlap`), and the ownership-violation escalation toggle (`escalate_on_violation`)
 - **Learnings flush cadence** — `[supervisor.learnings_config] flush_interval_seconds` (default 60) controls how often learnings entries are flushed from memory to `.git-paw/session-learnings.md`
 - **Routing through the supervisor** — type `/agents` to the orchestrator to see the live agent inventory (status, mode, pane) and `/tell <agent> <prompt>` to route a prompt to one agent without tab-switching into its pane; `[supervisor.tell] mode` picks the delivery channel (`feedback` queue by default, `send-keys` for accept-edits agents) and every route is recorded in the session learnings
-- **MCP server (v0.7.0+)** — `git paw mcp` exposes this repo's read-only state (coordination intents/conflicts, governance docs, specs/tasks, session status/learnings, agent skills, git context) over the [Model Context Protocol](https://modelcontextprotocol.io) so any MCP-aware client can query it; runs standalone over stdio, degrades gracefully when no session is active, and never invokes an agent CLI as a backend
+- **MCP server (v0.7.0+)** — `git paw mcp` exposes this repo's read-only state (coordination intents/conflicts, governance docs, specs/tasks, session status/learnings, agent skills, git context) over the [Model Context Protocol](https://modelcontextprotocol.io) so any MCP-aware client can query it, plus a bounded write surface — agent publish tools, and for a server in the main working tree the session lifecycle (start/pause/stop/purge) and verdict tools; runs standalone over stdio, degrades gracefully when no session is active, and never invokes an agent CLI as a backend
 
 > **Tip:** git-paw uses `AGENTS.md` as the standard agent instruction file. Point your CLI at it without duplicating content:
 > - **Claude Code** reads only `CLAUDE.md` and supports imports, so create a `CLAUDE.md` whose first line imports `AGENTS.md`, then add any machine-local notes below it:
@@ -249,7 +249,7 @@ All examples below use `git paw`, but `git-paw` works identically.
 | `setup-cli` | Pre-approve git-paw's helper-script calls in one AI CLI's own settings. Consent-only: you run it, it prints its plan, and `--undo` takes back exactly what it added. |
 | `replay` | View session logs (`--list`, `--color`, `--session`). |
 | `approvals` | Report the command patterns you approved by hand during a session, with a hint on where to promote each (`--session`, `--limit`, `--json`). |
-| `mcp` | Read-only [MCP](https://modelcontextprotocol.io) server over stdio — no session or broker required (v0.7.0+). |
+| `mcp` | [MCP](https://modelcontextprotocol.io) server over stdio — read-only repository state plus bounded publish and root-session lifecycle tools; no session or broker required (v0.7.0+). |
 | `doctor` | Read-only preflight diagnostics — grouped ✓/⚠/✗ checks with a remedy on each finding, `--json`, `--live` (v0.13.0+). |
 | `completions` | Print a bash/zsh/fish completion script to stdout (v0.16.0+). |
 
