@@ -3,14 +3,14 @@
 //! These scenarios are WHEN-the-skill-is-read / THEN-the-prose-SHALL-state
 //! requirements: they pin the heuristic gates, the per-category primary
 //! identifiers, the documented body shapes, and the no-speculative-publishing
-//! discipline into the bundled `assets/agent-skills/supervisor.md` so a future
+//! discipline into the bundled `assets/agent-skills/orchestrator.md` so a future
 //! edit can't silently drop them.
 
 use std::fs;
 
 fn supervisor_skill() -> String {
-    fs::read_to_string("assets/agent-skills/supervisor.md")
-        .expect("supervisor.md is at the expected path")
+    fs::read_to_string("assets/agent-skills/orchestrator.md")
+        .expect("orchestrator.md is at the expected path")
 }
 
 /// The qualitative-learnings section, lower-cased, for substring scans that

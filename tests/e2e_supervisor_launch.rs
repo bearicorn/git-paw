@@ -350,15 +350,17 @@ dod = "docs/dod.md"
         "launched supervisor AGENTS.md must carry the configured dod bullet, got:\n{agents_md}"
     );
 
+    // The sidecar is the orchestrator's session context
+    // (orchestrator-skill-export); the governance section follows it.
     let skill_pos = agents_md
-        .find("\n## Supervisor Skills")
-        .expect("Supervisor Skills heading must exist in the supervisor's boot context");
+        .find("## git-paw session context")
+        .expect("the session-context heading must exist in the orchestrator's sidecar");
     let governance_pos = agents_md
         .find("\n## Governance documents\n")
         .expect("governance heading must exist when a path is configured");
     assert!(
         governance_pos > skill_pos,
-        "governance section must follow the supervisor skill content, got skill@{skill_pos} governance@{governance_pos}"
+        "governance section must follow the session context, got context@{skill_pos} governance@{governance_pos}"
     );
 
     // The requirement also positions the section before any per-agent task
@@ -396,4 +398,179 @@ cli = "echo"
         !agents_md.contains("\n## Governance documents\n"),
         "an unconfigured [governance] table must leave the boot context without the section, got:\n{agents_md}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// orchestrator-skill-export: the sidecar is the session context, start
+// refreshes the exported skills and announces both paths.
+// ---------------------------------------------------------------------------
+
+const ORCHESTRATOR_MD: &str = ".git-paw/skills/orchestrator/SKILL.md";
+const CLI_SETUP_MD: &str = ".git-paw/skills/cli-setup/SKILL.md";
+
+/// Runs `git paw <args>` in `root` with `home` as `HOME` and the private tmux
+/// socket; returns (success, stdout, stderr).
+fn run_paw(
+    root: &std::path::Path,
+    home: &std::path::Path,
+    tmux_env: &TmuxTestEnv,
+    args: &[&str],
+) -> (bool, String, String) {
+    let mut c = cmd();
+    tmux_env.apply_assert(&mut c);
+    let out = c
+        .current_dir(root)
+        .env("HOME", home)
+        .env_remove("XDG_DATA_HOME")
+        .args(args)
+        .timeout(Duration::from_secs(20))
+        .output()
+        .expect("run git paw");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+/// The session name from a supervised launch's `tmux attach -t` hint.
+fn attached_session(stdout: &str) -> String {
+    stdout
+        .lines()
+        .find(|l| l.contains("tmux attach -t"))
+        .and_then(|l| l.split_whitespace().last())
+        .expect("launch prints the attach hint")
+        .to_string()
+}
+
+const EXPORT_CONFIG: &str = r#"
+default_cli = "echo"
+
+[supervisor]
+enabled = true
+cli = "echo"
+test_command = "make test"
+"#;
+
+// supervisor-launch / Scenarios: Session context is rendered to the
+// repo-root sidecar; Launch output names both paths; The cli-setup skill
+// export is refreshed at start
+// core-init / Scenarios: Start re-renders the same bytes for an unchanged
+// config; No worktree receives the cli-setup skill
+#[test]
+#[serial]
+fn supervised_launch_writes_the_session_context_and_refreshes_the_exports() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let _proc_env = tmux_env.apply_to_process();
+    let home = TempDir::new().expect("home");
+    let root = tr.path();
+    fs::create_dir_all(root.join(".git-paw")).expect(".git-paw");
+    fs::write(root.join(".git-paw/config.toml"), EXPORT_CONFIG).expect("config");
+
+    let (ok, init_out, _) = run_paw(root, home.path(), &tmux_env, &["init"]);
+    assert!(ok, "init failed:\n{init_out}");
+    let skill_after_init = fs::read(root.join(ORCHESTRATOR_MD)).expect("init wrote SKILL.md");
+    let fresh_cli_setup = fs::read(root.join(CLI_SETUP_MD)).expect("init wrote cli-setup");
+    fs::write(root.join(CLI_SETUP_MD), "stale local content\n").expect("stale cli-setup");
+    let agents_md_before = fs::read(root.join("AGENTS.md")).expect("init wrote AGENTS.md");
+
+    let (ok, stdout, stderr) = run_paw(
+        root,
+        home.path(),
+        &tmux_env,
+        &["start", "--supervisor", "--branches", "a"],
+    );
+    assert!(ok, "start failed:\n{stdout}\n{stderr}");
+    let session = attached_session(&stdout);
+
+    // The announcement names both paths.
+    assert!(stdout.contains(".git-paw/AGENTS.local.md"), "{stdout}");
+    assert!(stdout.contains(ORCHESTRATOR_MD), "{stdout}");
+
+    // The sidecar is the session context: the session's values and a pointer
+    // at the skill, never the skill body.
+    let sidecar =
+        fs::read_to_string(root.join(git_paw::agents::SIDECAR_REL_PATH)).expect("sidecar");
+    assert!(sidecar.contains(&session), "session name in the sidecar");
+    assert!(
+        sidecar.contains("http://127.0.0.1:"),
+        "broker URL in the sidecar"
+    );
+    assert!(sidecar.contains(ORCHESTRATOR_MD));
+    assert!(
+        !sidecar.contains("## Supervisor Skills"),
+        "no duplicated skill body"
+    );
+
+    // The tracked AGENTS.md is untouched by the launch.
+    assert_eq!(fs::read(root.join("AGENTS.md")).unwrap(), agents_md_before);
+
+    // Start re-rendered the same bytes init wrote, and refreshed cli-setup.
+    assert_eq!(
+        fs::read(root.join(ORCHESTRATOR_MD)).unwrap(),
+        skill_after_init
+    );
+    assert_eq!(fs::read(root.join(CLI_SETUP_MD)).unwrap(), fresh_cli_setup);
+
+    // The session's values never reach the exported skill.
+    let skill = String::from_utf8(skill_after_init).unwrap();
+    assert!(!skill.contains(&session) && !skill.contains("http://"));
+
+    // No worktree receives the exported skills.
+    let worktrees = root.join(".git-paw/worktrees");
+    if worktrees.is_dir() {
+        assert!(
+            find_file(&worktrees, "SKILL.md").is_none(),
+            "no worktree may carry an exported skill"
+        );
+    }
+}
+
+// supervisor-launch / Scenario: Skill file is refreshed at start
+#[test]
+#[serial]
+fn supervised_launch_refreshes_the_skill_after_a_config_change() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let _proc_env = tmux_env.apply_to_process();
+    let home = TempDir::new().expect("home");
+    let root = tr.path();
+    fs::create_dir_all(root.join(".git-paw")).expect(".git-paw");
+    fs::write(root.join(".git-paw/config.toml"), EXPORT_CONFIG).expect("config");
+    let (ok, init_out, _) = run_paw(root, home.path(), &tmux_env, &["init"]);
+    assert!(ok, "init failed:\n{init_out}");
+    assert!(
+        fs::read_to_string(root.join(ORCHESTRATOR_MD))
+            .unwrap()
+            .contains("make test")
+    );
+
+    fs::write(
+        root.join(".git-paw/config.toml"),
+        EXPORT_CONFIG.replace("make test", "just verify"),
+    )
+    .expect("edit config");
+    let (ok, stdout, stderr) = run_paw(
+        root,
+        home.path(),
+        &tmux_env,
+        &["start", "--supervisor", "--branches", "a"],
+    );
+    assert!(ok, "start failed:\n{stdout}\n{stderr}");
+
+    let skill = fs::read_to_string(root.join(ORCHESTRATOR_MD)).unwrap();
+    assert!(
+        skill.contains("just verify"),
+        "{{TEST_COMMAND}} renders the new value"
+    );
+    assert!(!skill.contains("make test"));
 }

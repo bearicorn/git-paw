@@ -621,40 +621,20 @@ pub fn supervisor(
         seen
     };
 
-    // Render the orchestrator context into the repo-root sidecar
-    // (`.git-paw/AGENTS.local.md`). No pane reads it: the orchestrator drives
-    // the session from outside tmux — the operator's own agent session — and
-    // the launch prints the sidecar path so the operator can point it there.
-    let supervisor_skill_template = crate::skills::resolve("supervisor")?;
-    let supervisor_md = crate::skills::render_for_supervisor(
-        &supervisor_skill_template,
+    // Refresh the exported skills and write the orchestrator's session
+    // context into the repo-root sidecar. No pane reads it: the orchestrator
+    // drives the session from outside tmux — the operator's own agent
+    // session — and the launch announces both paths.
+    write_orchestrator_context(
+        repo_root,
+        config,
+        &session_name,
         &broker_config.url(),
-        &project,
-        &supervisor_cfg.gate_commands(),
-        &session_backends,
-    );
-    let supervisor_assignment = crate::agents::WorktreeAssignment {
-        branch: "supervisor".to_string(),
-        // The configured orchestrator CLI, else the CLI the coding agents run.
-        cli: orchestrator_cli
+        unattended,
+        &orchestrator_cli
             .clone()
             .unwrap_or_else(|| agent_cli.clone()),
-        spec_content: None,
-        owned_files: None,
-        // When unattended, append the drive-loop coordination directive so the
-        // orchestrator consumes the loop's escalations instead of
-        // blanket-approving (supervisor-loop-escalation-tiering), then the
-        // `## Governance documents` section so a configured `[governance]`
-        // table reaches the orchestrator context (boot-block: governance
-        // follows the supervisor skill content).
-        skill_content: Some(crate::skills::supervisor_boot_context(
-            &supervisor_md,
-            unattended,
-            &config.governance,
-        )),
-        inter_agent_rules: None,
-    };
-    crate::agents::setup_worktree_agents_md(repo_root, repo_root, &supervisor_assignment)?;
+    )?;
 
     // Resolve the coordination skill once for all agent panes.
     let coordination_template = if broker_config.enabled {
@@ -922,10 +902,7 @@ pub fn supervisor(
     ));
     // The orchestrator runs outside the session: point the operator's own
     // agent session at the context rendered for it.
-    out.line(&format!(
-        "Orchestrator context: {} (point your orchestrating agent session at it)",
-        crate::agents::SIDECAR_REL_PATH
-    ));
+    announce_orchestrator_paths(out);
 
     // Step 15 (supervisor-launch): branch on `--unattended`.
     //
@@ -1056,13 +1033,88 @@ pub fn revive_for_drive(
         },
     };
 
+    // A session first launched attended now has a drive loop: rewrite the
+    // orchestrator's context so it carries the drive-loop directive.
+    let orchestrator_cli = config
+        .supervisor
+        .as_ref()
+        .and_then(|s| s.cli.clone())
+        .or_else(|| config.default_cli.clone())
+        .unwrap_or_default();
+    write_orchestrator_context(
+        repo_root,
+        config,
+        &state.session_name,
+        &broker_config.url(),
+        true,
+        &orchestrator_cli,
+    )?;
+
     out.line(&format!(
         "Driving session '{}' unattended.",
         state.session_name
     ));
+    announce_orchestrator_paths(out);
     out.line("Attach from another terminal with:  git paw attach");
 
     Ok((state, broker_config))
+}
+
+/// Refreshes the exported skills (`.git-paw/skills/orchestrator/SKILL.md` and
+/// `.git-paw/skills/cli-setup/SKILL.md`, with the same session-independent
+/// inputs `git paw init` uses, so neither lags the config or the binary) and
+/// writes the orchestrator's session context into the repo-root sidecar
+/// `.git-paw/AGENTS.local.md`: the session's name and broker URL, the helpers,
+/// the drive-loop directive when `unattended`, and the governance section,
+/// pointing at the exported skill for the procedure.
+///
+/// Called by a fresh supervised launch and when a drive loop is bound to an
+/// existing session, so a session first launched attended and then driven
+/// unattended hands its orchestrator the directive (the unattended merge rule
+/// keys on it).
+fn write_orchestrator_context(
+    repo_root: &Path,
+    config: &PawConfig,
+    session_name: &str,
+    broker_url: &str,
+    unattended: bool,
+    orchestrator_cli: &str,
+) -> Result<(), PawError> {
+    crate::init::export_skills(repo_root, config)?;
+    let template = crate::skills::resolve(crate::skills::ORCHESTRATOR_SKILL)?;
+    let assignment = crate::agents::WorktreeAssignment {
+        branch: "supervisor".to_string(),
+        cli: orchestrator_cli.to_string(),
+        spec_content: None,
+        owned_files: None,
+        // When unattended, the context carries the drive-loop coordination
+        // directive so the orchestrator consumes the loop's escalations
+        // instead of blanket-approving (supervisor-loop-escalation-tiering),
+        // then the `## Governance documents` section so a configured
+        // `[governance]` table reaches the orchestrator (boot-block:
+        // governance follows the orchestrator context).
+        skill_content: Some(crate::skills::orchestrator_session_context(
+            &template,
+            session_name,
+            broker_url,
+            unattended,
+            &config.governance,
+        )),
+        inter_agent_rules: None,
+    };
+    crate::agents::setup_worktree_agents_md(repo_root, repo_root, &assignment)
+}
+
+/// Announces the sidecar and orchestrator-skill paths through `out`.
+fn announce_orchestrator_paths(out: &mut dyn Output) {
+    out.line(&format!(
+        "Orchestrator context: {} (point your orchestrating agent session at it)",
+        crate::agents::SIDECAR_REL_PATH
+    ));
+    out.line(&format!(
+        "Orchestrator skill:   {}/SKILL.md",
+        crate::init::EXPORTED_SKILL_DIRS[0]
+    ));
 }
 
 /// Reads the session receipt's `created_at` back from disk — the durable
@@ -1406,5 +1458,88 @@ mod supervisor_question_tests {
             result.is_err(),
             "publishing to an unreachable broker must error"
         );
+    }
+}
+
+#[cfg(test)]
+mod orchestrator_context_tests {
+    //! `orchestrator-skill-export`: binding a drive loop to an existing
+    //! session rewrites the orchestrator's session context with the
+    //! drive-loop directive and refreshes the exported skills.
+
+    use std::path::PathBuf;
+
+    use crate::commands::CaptureOutput;
+    use crate::config::PawConfig;
+    use crate::session::{Session, SessionMode, SessionStatus};
+
+    use super::revive_for_drive;
+
+    #[test]
+    fn binding_a_drive_loop_to_a_live_session_rewrites_the_context_with_the_directive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let st = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        // A context written by an earlier attended launch: no directive.
+        std::fs::create_dir_all(repo.join(".git-paw")).unwrap();
+        std::fs::write(
+            repo.join(crate::agents::SIDECAR_REL_PATH),
+            "attended context\n",
+        )
+        .unwrap();
+
+        let existing = Session {
+            session_name: "paw-ctx-test".to_string(),
+            repo_path: repo.clone(),
+            project_name: "repo".to_string(),
+            created_at: std::time::SystemTime::now(),
+            status: SessionStatus::Active,
+            worktrees: Vec::new(),
+            broker_port: Some(9411),
+            broker_bind: Some("127.0.0.1".to_string()),
+            broker_log_path: None,
+            broker_authority: None,
+            mode: SessionMode::Supervisor,
+            dashboard_pane: Some(0),
+            layout: None,
+        };
+        let mut out = CaptureOutput::default();
+        revive_for_drive(
+            &repo,
+            &PawConfig::default(),
+            &existing,
+            &SessionStatus::Active,
+            &mut out,
+        )
+        .unwrap();
+
+        let sidecar = std::fs::read_to_string(repo.join(crate::agents::SIDECAR_REL_PATH)).unwrap();
+        assert!(
+            sidecar.contains("## Unattended: a drive loop is running"),
+            "{sidecar}"
+        );
+        assert!(sidecar.contains("paw-ctx-test"));
+        assert!(sidecar.contains("http://127.0.0.1:9411"));
+        assert!(
+            PathBuf::from(&repo)
+                .join(".git-paw/skills/orchestrator/SKILL.md")
+                .is_file()
+        );
+        for path in [
+            ".git-paw/AGENTS.local.md",
+            ".git-paw/skills/orchestrator/SKILL.md",
+        ] {
+            assert!(
+                out.lines.iter().any(|l| l.contains(path)),
+                "the re-attach announces {path}: {:?}",
+                out.lines
+            );
+        }
     }
 }

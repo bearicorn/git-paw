@@ -39,7 +39,7 @@ Options:
 
 ## `git paw init`
 
-Initializes a repository for git-paw. Creates the `.git-paw/` directory, a default `config.toml`, the logs directory, and sets up `.gitignore`.
+Initializes a repository for git-paw. Creates the `.git-paw/` directory, a default `config.toml`, the logs directory, the bundled helpers and the exported orchestrator skills, adds the orchestrator pointer to `AGENTS.md`, and sets up `.gitignore`.
 
 ```
 Usage: git-paw init
@@ -73,10 +73,22 @@ on an existing config is the upgrade path after a version bump — see
   source for repository-root resolution, Python 3 detection, and broker /
   docs URL discovery. Binary-managed like the helpers themselves: it is
   overwritten on every `git paw init`, and a helper cannot run without it
+- `.git-paw/skills/orchestrator/SKILL.md` — the orchestrator skill, rendered
+  with your `[supervisor]` gate commands and configured spec format, for the
+  agent you drive the session with; `.git-paw/skills/cli-setup/SKILL.md` beside
+  it. `git paw start` re-renders both. See
+  [Quick Start: Orchestrator Mode](quick-start-orchestrator.md)
+- an orchestrator pointer section in the root `AGENTS.md`, between
+  `<!-- git-paw-orchestrator:start -->` and `<!-- git-paw-orchestrator:end -->`
+  (the file is created when absent; see [AGENTS.md](user-guide/agents-md.md))
 - `.gitignore` entries for `.git-paw/logs/`, `.git-paw/tmp/`,
   `.git-paw/worktrees/` (where agent worktrees live under the default `child`
-  placement), `.git-paw/session-summary.md`, and
+  placement), `.git-paw/skills/`, `.git-paw/session-summary.md`, and
   `.git-paw/session-learnings.md`
+
+A re-run reports a binary-managed file (a helper, an exported skill, the
+pointer section) as `Updated` only when its content changed, and closes with
+`Already initialized. Nothing to do.` only when nothing was created or changed.
 
 **Example:**
 ```bash

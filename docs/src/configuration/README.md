@@ -128,8 +128,10 @@ It never modifies or removes a section, a key, or a commented example you have
 already set, so your customised settings survive verbatim. Once `[supervisor]`
 and every top-level default key are present the config is left untouched, and
 — if nothing else needed creating — init reports
-`Already initialized. Nothing to do.` (The bundled `.git-paw/scripts/` helpers
-are refreshed on every run regardless.)
+`Already initialized. Nothing to do.` (The bundled `.git-paw/scripts/` helpers,
+the exported `.git-paw/skills/` and the `AGENTS.md` pointer section are
+refreshed on every run; each is reported as `Updated` only when its content
+changed, and any such change closes with `Initialized git-paw.` instead.)
 
 When something is added, init names it:
 

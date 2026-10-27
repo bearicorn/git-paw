@@ -4,7 +4,7 @@
 //! skills / AGENTS.md, imposing no git-paw-specific standard). Full no-stack-token coverage of the
 //! added prose is provided by `lang_agnostic_skill_audit.rs`, which scans the whole rendered skill.
 
-const SUPERVISOR: &str = include_str!("../assets/agent-skills/supervisor.md");
+const SUPERVISOR: &str = include_str!("../assets/agent-skills/orchestrator.md");
 const COORDINATION: &str = include_str!("../assets/agent-skills/coordination.md");
 
 #[test]

@@ -2,7 +2,7 @@
 //!
 //! These are WHEN-the-skill-is-rendered / THEN-the-prose-SHALL-state
 //! requirements pinning the permission ladder into
-//! `assets/agent-skills/supervisor.md` so a future edit cannot silently
+//! `assets/agent-skills/orchestrator.md` so a future edit cannot silently
 //! re-introduce a git-paw command classifier: the agent CLI's own permission
 //! system decides first, anything it still prompts for is relayed to the
 //! human, and `sweep.sh approve` runs only on the human's explicit
@@ -17,8 +17,8 @@
 use std::fs;
 
 fn supervisor_skill() -> String {
-    fs::read_to_string("assets/agent-skills/supervisor.md")
-        .expect("supervisor.md is at the expected path")
+    fs::read_to_string("assets/agent-skills/orchestrator.md")
+        .expect("orchestrator.md is at the expected path")
 }
 
 /// Extract the section starting at `heading` and running until the next

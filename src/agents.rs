@@ -827,6 +827,95 @@ pub fn remove_session_boot_block(repo_root: &Path) -> Result<(), PawError> {
     })
 }
 
+/// Start marker of the orchestrator pointer section `git paw init` keeps in
+/// the repository root's `AGENTS.md`.
+///
+/// Distinct from the per-session `<!-- git-paw:start` marker on purpose: the
+/// pointer is permanent configuration, so the per-session teardown
+/// ([`remove_session_boot_block`]) never matches it.
+pub const ORCHESTRATOR_POINTER_START: &str = "<!-- git-paw-orchestrator:start -->";
+
+/// End marker of the orchestrator pointer section.
+pub const ORCHESTRATOR_POINTER_END: &str = "<!-- git-paw-orchestrator:end -->";
+
+/// Bundled, project-agnostic prose of the orchestrator pointer section.
+const ORCHESTRATOR_POINTER_BODY: &str = include_str!("../assets/agents-md-orchestrator-section.md");
+
+/// Returns the full orchestrator pointer section, markers included, ending
+/// with a newline.
+#[must_use]
+pub fn orchestrator_pointer_section() -> String {
+    let body = ORCHESTRATOR_POINTER_BODY.trim_end_matches('\n');
+    format!("{ORCHESTRATOR_POINTER_START}\n{body}\n{ORCHESTRATOR_POINTER_END}\n")
+}
+
+/// Returns `content` with the orchestrator pointer section injected: the
+/// marker-delimited section is replaced in place when present (everything
+/// outside the markers byte-identical), appended after a blank line
+/// otherwise, and the whole content when `content` is empty.
+#[must_use]
+pub fn inject_orchestrator_pointer_into(content: &str) -> String {
+    let section = orchestrator_pointer_section();
+    if let Some(start) = content.find(ORCHESTRATOR_POINTER_START)
+        && let Some(end_rel) = content[start..].find(ORCHESTRATOR_POINTER_END)
+    {
+        let mut end = start + end_rel + ORCHESTRATOR_POINTER_END.len();
+        // The section owns the newline closing its end-marker line.
+        if content[end..].starts_with('\n') {
+            end += 1;
+        }
+        return format!("{}{section}{}", &content[..start], &content[end..]);
+    }
+    if content.is_empty() {
+        return section;
+    }
+    let mut result = content.to_string();
+    if !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result.push('\n');
+    result.push_str(&section);
+    result
+}
+
+/// Injects the orchestrator pointer section into `<repo_root>/AGENTS.md`,
+/// creating the file when absent.
+///
+/// Returns `true` when the file was created or its content changed, and
+/// `false` when it already carried the current section byte-for-byte (no
+/// write happens then). Refuses to write through a symlink at `AGENTS.md`,
+/// which would otherwise overwrite the link's target.
+pub fn inject_orchestrator_pointer(repo_root: &Path) -> Result<bool, PawError> {
+    let agents_md = repo_root.join("AGENTS.md");
+    if let Ok(meta) = fs::symlink_metadata(&agents_md)
+        && meta.file_type().is_symlink()
+    {
+        return Err(PawError::AgentsMdError(format!(
+            "refusing to write the orchestrator pointer through a symlink at '{}'",
+            agents_md.display()
+        )));
+    }
+    let content = match fs::read_to_string(&agents_md) {
+        Ok(c) => Some(c),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(PawError::AgentsMdError(format!(
+                "failed to read '{}': {e}",
+                agents_md.display()
+            )));
+        }
+    };
+    let existing = content.as_deref().unwrap_or("");
+    let updated = inject_orchestrator_pointer_into(existing);
+    if content.is_some() && updated == existing {
+        return Ok(false);
+    }
+    fs::write(&agents_md, &updated).map_err(|e| {
+        PawError::AgentsMdError(format!("failed to write '{}': {e}", agents_md.display()))
+    })?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2442,5 +2531,100 @@ mod tests {
             after, original,
             "file without trailing newline must be preserved exactly"
         );
+    }
+
+    // === orchestrator pointer section (orchestrator-skill-export 3.3) ===
+
+    fn pointer_count(content: &str) -> usize {
+        content.matches(ORCHESTRATOR_POINTER_START).count()
+    }
+
+    #[test]
+    fn pointer_injects_into_an_existing_agents_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        fs::write(&path, "# My project\n\nSome rules.\n").unwrap();
+
+        assert!(inject_orchestrator_pointer(dir.path()).unwrap());
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.starts_with("# My project\n\nSome rules.\n"));
+        assert_eq!(pointer_count(&content), 1);
+        assert_eq!(content.matches(ORCHESTRATOR_POINTER_END).count(), 1);
+        assert!(content.contains(".git-paw/skills/orchestrator/SKILL.md"));
+        assert!(content.contains(".git-paw/AGENTS.local.md"));
+    }
+
+    #[test]
+    fn pointer_creates_agents_md_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(inject_orchestrator_pointer(dir.path()).unwrap());
+        let content = fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        assert_eq!(content, orchestrator_pointer_section());
+    }
+
+    #[test]
+    fn pointer_rerun_replaces_in_place_and_reports_no_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        fs::write(&path, "# My project\n").unwrap();
+        inject_orchestrator_pointer(dir.path()).unwrap();
+        let mut with_user = fs::read_to_string(&path).unwrap();
+        with_user.push_str("\n## User section after\n");
+        fs::write(&path, &with_user).unwrap();
+
+        assert!(!inject_orchestrator_pointer(dir.path()).unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), with_user);
+    }
+
+    #[test]
+    fn pointer_replaces_a_stale_section_keeping_the_outside_byte_identical() {
+        let before = "# My project\n\n";
+        let after = "\n## Tail\nno trailing newline";
+        let stale = format!(
+            "{before}{ORCHESTRATOR_POINTER_START}\nold text\n{ORCHESTRATOR_POINTER_END}\n{after}"
+        );
+        let updated = inject_orchestrator_pointer_into(&stale);
+        assert_eq!(
+            updated,
+            format!("{before}{}{after}", orchestrator_pointer_section())
+        );
+        assert_eq!(pointer_count(&updated), 1);
+    }
+
+    #[test]
+    fn session_block_removal_leaves_the_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        fs::write(&path, "# My project\n").unwrap();
+        inject_orchestrator_pointer(dir.path()).unwrap();
+        let with_pointer = fs::read_to_string(&path).unwrap();
+        assert!(!has_git_paw_section(&with_pointer));
+
+        remove_session_boot_block(dir.path()).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), with_pointer);
+
+        // With a per-session block present too, only that block goes.
+        fs::write(
+            &path,
+            format!("{with_pointer}\n{START_MARKER}\nper-session-block-body\n{END_MARKER}\n"),
+        )
+        .unwrap();
+        remove_session_boot_block(dir.path()).unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("per-session-block-body"));
+        assert!(after.contains(&orchestrator_pointer_section()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pointer_refuses_to_write_through_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere.md");
+        fs::write(&target, "untouched").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join("AGENTS.md")).unwrap();
+
+        assert!(inject_orchestrator_pointer(dir.path()).is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "untouched");
     }
 }

@@ -615,6 +615,12 @@ pub enum Command {
         about = "Initialize .git-paw/ directory and configuration",
         long_about = "Creates the .git-paw/ directory with a default config and sets up \
                       .gitignore for logs.\n\n\
+                      Also installs the bundled helpers under .git-paw/scripts/, exports the \
+                      orchestrator skill (rendered with your gate commands) to \
+                      .git-paw/skills/orchestrator/SKILL.md and the cli-setup skill beside it \
+                      (.git-paw/skills/ is gitignored), and adds an orchestrator pointer section \
+                      to the root AGENTS.md. A re-run reports a file as updated only when its \
+                      content changed.\n\n\
                       Also the upgrade path after a version bump: re-running init on an \
                       existing config appends a missing [supervisor] section and backfills any \
                       missing top-level default key, without modifying settings you have \
@@ -1927,6 +1933,19 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    /// `orchestrator-skill-export`: `git paw init --help` names the exported
+    /// orchestrator skill and the `AGENTS.md` pointer section.
+    #[test]
+    fn init_help_names_the_orchestrator_exports() {
+        let err = Cli::try_parse_from(["git-paw", "init", "--help"]).unwrap_err();
+        let help = err.to_string();
+        assert!(
+            help.contains(".git-paw/skills/orchestrator/SKILL.md"),
+            "{help}"
+        );
+        assert!(help.contains("AGENTS.md"), "{help}");
     }
 
     #[test]

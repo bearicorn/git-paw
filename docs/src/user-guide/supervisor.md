@@ -1,13 +1,15 @@
 # Supervisor
 
-This chapter mirrors the user-facing prose for the bundled
-`assets/agent-skills/supervisor.md` skill — the doctrine the supervisor agent
-runs against in supervisor mode. Sections here document the same rules the
-embedded skill teaches, so users reading the mdBook can understand supervisor
-behaviour without opening the skill file directly.
+This chapter mirrors the user-facing prose for the bundled orchestrator
+skill (`assets/agent-skills/orchestrator.md`, exported to
+`.git-paw/skills/orchestrator/SKILL.md`; `supervisor` remains an alias of its
+name) — the doctrine the orchestrator runs against in supervisor mode. Sections
+here document the same rules the skill teaches, so users reading the mdBook can
+understand the orchestrator's behaviour without opening the skill file
+directly.
 
 For the launcher-level "how do I start supervisor mode" walkthrough, see
-[Quick Start: Supervisor Mode](../quick-start-supervisor.md). For the
+[Quick Start: Orchestrator Mode](../quick-start-orchestrator.md). For the
 broker-side message contract the supervisor exchanges with coding agents, see
 [Agent Coordination](coordination.md).
 
@@ -31,13 +33,16 @@ their own resolution chain (see [Spec-driven launch](spec-driven-launch.md)).
 A supervised session holds the **dashboard at pane 0**, as a full-width top
 row, and **one coding agent per pane from pane 1**, row-major below it (at
 most five per row). No pane runs an orchestrator CLI. The orchestrator is your
-own agent session, run outside tmux at the repository root: the launch renders
-its context — the bundled orchestrator skill, the gate commands, the
-spec-path doctrine, any `[governance]` documents and, under `--unattended`,
-the drive-loop directive — into the gitignored sidecar
-`.git-paw/AGENTS.local.md` and prints that path with the attach hint. The
-orchestrator reads it and drives the run through the broker, the bundled
-helpers (`.git-paw/scripts/sweep.sh`, `broker.sh`) or the MCP server. Its
+own agent session, run outside tmux at the repository root. The launch
+re-renders the exported orchestrator skill
+(`.git-paw/skills/orchestrator/SKILL.md`, with the gate commands and the
+spec-path doctrine) and writes the session context — the session name, the
+broker URL, the helper paths, any `[governance]` documents and, under
+`--unattended`, the drive-loop directive — into the gitignored sidecar
+`.git-paw/AGENTS.local.md`, and prints both paths with the attach hint. The
+orchestrator reads them and drives the run through the bundled helpers
+(`.git-paw/scripts/sweep.sh`, `broker.sh`) or the MCP server. See
+[Driving the session from your own agent](#driving-the-session-from-your-own-agent). Its
 roster row (`supervisor`) appears on the dashboard once it publishes its own
 `agent.status`; the launcher never publishes on its behalf.
 
@@ -51,6 +56,57 @@ dashboard at pane 1, agents from pane 2) keeps working until it ends: every
 command derives the agent panes from the session's recorded dashboard index,
 and nothing types into that session's first two panes. Recovering it rebuilds
 the layout above.
+
+## Driving the session from your own agent
+
+The orchestrator is whatever agent session you already use — any agent CLI,
+at the repository root, outside tmux. git-paw gives it three things:
+
+| File | Written by | What it holds |
+|---|---|---|
+| `.git-paw/skills/orchestrator/SKILL.md` | `git paw init`, refreshed by `git paw start` | The orchestrator skill (the procedure: five gates, spec audit, merge orchestration, stuck detection, routing), rendered with your `[supervisor]` gate commands and configured spec format. It carries no session value, so one file serves every session. |
+| `.git-paw/AGENTS.local.md` | `git paw start` | The **session context**: session name, broker URL, helper paths, the discovery file, `[governance]` documents, the drive-loop directive under `--unattended`, and a pointer to `SKILL.md`. The only file carrying this session's values. |
+| `AGENTS.md` pointer section | `git paw init` | A short section between `<!-- git-paw-orchestrator:start -->` and `<!-- git-paw-orchestrator:end -->` telling any agent that reads your root `AGENTS.md` that, when a git-paw session is active, it is the orchestrator and should read the two files above. `git paw stop` and `git paw purge` leave it in place. See [AGENTS.md Injection](agents-md.md#orchestrator-pointer-section). |
+
+Both `.git-paw/skills/` exports (the orchestrator skill and the `cli-setup`
+skill beside it) are in the standard skill-directory layout, so a skill-aware
+CLI can load them directly; copy or symlink them into a vendor skill directory
+if your CLI needs that. Over MCP, `get_skill` serves the same skill under the
+name `orchestrator` (or its alias `supervisor`).
+
+**The surfaces it uses.**
+
+- **Follow the session** by blocking on the broker's event cursor — the MCP
+  `wait_for_events` tool or `.git-paw/scripts/sweep.sh events` — carrying the
+  returned cursor forward, and inspect when an event or a `stalled` wave says
+  to. `get_session_status`, `sweep.sh status` and `sweep.sh inbox` read the
+  roster and the orchestrator's inbox. A sampled pane capture can miss a
+  prompt that was answered and replaced between two samples, so capture
+  (`sweep.sh capture <pane>`) is for inspection, not detection.
+- **Publish verdicts** only through the credential-carrying helpers:
+  `sweep.sh verified`, `sweep.sh feedback-gate` and `sweep.sh conflict-ack`
+  (in the root session, the MCP `publish_verified` and `publish_feedback` tools
+  do the same). The broker refuses a verdict without the session's authority
+  credential.
+- **Answer and announce** with `sweep.sh answer <agent> <text> [re]` and, after
+  each merge, `sweep.sh advanced-main <merged-branch> <summary>`. Its own
+  questions and main-side intents go through
+  `broker.sh --agent supervisor question|intent`. The skill contains no raw
+  HTTP request.
+- **Run the session** from the root session with `git paw` commands or the MCP
+  `start_session`, `pause_session`, `stop_session` and `purge_session` tools.
+
+**Pairing with `--unattended`.** `git paw start --unattended` adds the
+in-process drive loop: it keeps the panes moving and escalates every live
+permission prompt to the broker, approving none. The orchestrator reads those
+escalations first each cycle, relays each prompt to you in its own session, and
+runs `sweep.sh approve <pane>` only on your explicit instruction. It merges as
+soon as every expected agent is verified and escalates only on a conflict, an
+exhausted correction cycle or a regression (see
+[Merge orchestration](#merge-orchestration)). If the loop exits on its
+heartbeat, re-run `git paw start --unattended` to re-attach a drive loop to the
+live session. The driving session can itself be remote-controlled from a
+phone — see [Remote Control](remote-control.md).
 
 ## Unattended mode (`--unattended`)
 
@@ -599,7 +655,8 @@ below is easy to see. By default each session gets:
 
   Pane `0` is always `dashboard` and the agent panes are labelled with their
   branch id (`feat/<branch>`). The index shown is the
-  same one you pass to `tmux send-keys -t paw-<project>:0.<N>`, so you can
+  same one you pass to `tmux send-keys -t <session>:0.<N>` (window 0; the
+  session's second window, `broker`, hosts the broker), so you can
   cross-reference the label strip with the broker's `/status` agent listing.
 - **An active-pane highlight** — the focused pane's border is cyan-bold while
   inactive panes are dimmed, so you always know which pane has keyboard focus.
@@ -635,10 +692,10 @@ plain `status-publish <message>` form (no flags) publishes the v0.5.0 shape
 unchanged. The helper shapes the `agent.status` payload internally, so the
 supervisor never hand-rolls the JSON. Because the helper always lives at the
 stable path `.git-paw/scripts/sweep.sh`, a permission rule in your agent CLI
-scoped to that exact path covers every phase without a broad `curl` rule.
+scoped to that exact path covers every phase without a broad HTTP-client rule.
 
 Every `sweep.sh` publish verb — `status-publish`, `verified`, `feedback-gate`,
-`conflict-ack`, `learn` — checks the broker's HTTP response. When the broker
+`conflict-ack`, `learn`, `answer`, `advanced-main` — checks the broker's HTTP response. When the broker
 does not accept the publish (any non-2xx status, or no response at all), the
 helper prints the broker's error to stderr and **exits non-zero** instead of
 printing its "published" line. A non-zero exit means the event did NOT reach
@@ -682,10 +739,12 @@ to the launcher's internal scan order).
 The canonical resolution command queries tmux directly:
 
 ```bash
-tmux display-message -t paw-<project>:0.<pane> -p '#{pane_current_path}'
+tmux display-message -t <session>:0.<pane> -p '#{pane_current_path}'
 ```
 
-The output is the pane's working directory. For coding-agent panes that is
+`<session>` is the session name recorded in `.git-paw/AGENTS.local.md`;
+window 0 holds the panes (the session's second window, `broker`, hosts the
+broker). The output is the pane's working directory. For coding-agent panes that is
 the agent's worktree path — `<repo>/.git-paw/worktrees/feat-<branch>` under
 the child placement `git paw init` configures, or `<project>-feat-<branch>`
 beside the repo under the sibling placement. Matching it against the
@@ -701,10 +760,11 @@ The session file's roster also records a `pane_index`, but that is a
 launch-time value and is **not** used for routing — the live
 `pane_current_path` match is.
 
-The supervisor agent builds the `{pane_index → agent_id}` map once per
-session and reuses it. It re-resolves the map after `git paw add` or
-`git paw remove` — tmux renumbers panes on layout changes — and whenever it
-notices an inconsistency.
+The orchestrator reads the roster when it needs an agent's pane rather than
+building a pane map once and reusing it for the session, and in any case
+re-reads it after `git paw add` or `git paw remove` — the roster changes and
+tmux renumbers panes on layout changes. The roster can also be read through
+the helpers or the MCP `get_session_status` tool.
 
 The bundled `.git-paw/scripts/sweep.sh` invokes this command on every sweep
 iteration. If the helper is missing for any reason, the supervisor falls
@@ -1200,11 +1260,11 @@ after the run. The supervisor also records *qualitative* learnings it reasons ou
 the run — recurring failure shapes, doc gaps, ADR drift, scope mistakes, and
 **tooling friction** with git-paw itself — publishing each through the bundled
 `.git-paw/scripts/sweep.sh learn <category> <title> <body-json>` helper (never
-a raw curl). It captures them opportunistically during each sweep and again in
+a raw HTTP request). It captures them opportunistically during each sweep and again in
 a session-end synthesis pass. See [Learnings Mode](learnings.md) for the file
 format, the category set, and how to opt in.
 
-## When the user types in your pane
+## When the user types in your session
 
 The orchestrator runs in your own interactive agent session (outside tmux) —
 you can type at any time while its autonomous monitoring loop is running. The supervisor finishes the
@@ -1215,23 +1275,24 @@ Each kind of user input maps to an existing mechanism — the supervisor does
 not invent new channels:
 
 1. **Status question** ("how's feat-auth going?", "anything blocked?") —
-   answered conversationally in the pane using `sweep.sh status`,
+   answered conversationally in the orchestrator's session using `sweep.sh status`,
    `sweep.sh inbox`, and `sweep.sh capture <pane>`. **Nothing is published
    to the broker** — this is a conversation with the user, not a
    session-wide event.
 2. **Directive** ("ask feat-auth to use bcrypt", "tell feat-api to skip
    the migration") — published as `agent.feedback` to the named agent
-   with the `[directive]` gate prefix, plus a conversational confirmation
+   through `sweep.sh feedback-gate` with the `[directive]` gate, plus a conversational confirmation
    to the user.
 3. **Judgment-call ask** ("should we merge feat-a before feat-b?") — the
    supervisor applies its normal escalation rules. If the user has already
-   provided enough information to decide, the supervisor answers in the
-   pane using its reasoning. `agent.question` only fires when the call is
+   provided enough information to decide, the supervisor answers in its
+   session using its reasoning. `agent.question` only fires when the call is
    genuinely ambiguous beyond what the user just provided — typically
    when the user is asking *because they don't know either*.
 
-The mechanisms (`curl /status`, `tmux capture-pane`, `agent.feedback`,
-`tmux send-keys`, `agent.question`) are unchanged. The addition is *when
+The mechanisms (`sweep.sh status` / `inbox` or the MCP reads,
+`sweep.sh capture`, `sweep.sh feedback-gate`, `tmux send-keys`,
+`agent.question`) are unchanged. The addition is *when
 to use which* in response to user input.
 
 ## Routing through the supervisor
@@ -1242,15 +1303,18 @@ into each agent's pane. Two commands you type to the orchestrator drive this.
 
 ### `/agents` — the live inventory
 
-Type `/agents` and the supervisor responds with the current inventory: one
-row per agent plus the supervisor's own row, each carrying `branch_id`,
-`status`, `last_seen`, `cli`, the detected `mode`, and `pane_index`:
+Type `/agents` to the orchestrator, in its own session, and it responds with
+the current inventory: one row per agent plus the orchestrator's own
+`supervisor` row once it has published a status, each coding-agent row carrying
+`branch_id`, `status`, `last_seen`, `cli`, the detected `mode`, and
+`pane_index`. The `supervisor` row has no pane index — the orchestrator has no
+pane, and pane 0 is the dashboard:
 
 ```
 branch_id   status    last_seen  cli     mode          pane
 feat-auth   working   3s         claude  accept-edits  2
 feat-api    blocked   90s        claude  unknown       1
-supervisor  working   1s         claude  —             0
+supervisor  working   1s         claude  —             —
 ```
 
 The inventory is composed from broker `GET /status` (`branch_id`, `status`,
@@ -1287,7 +1351,7 @@ Type `/tell feat-auth rebase onto main` and the supervisor:
    the supervisor replies with the candidate list of available agents, e.g.
    `unknown target` `feat/ghost`​`; available agents: feat-api, feat-auth`.
 2. **Chooses a delivery mode** (see below) and delivers the prompt.
-3. **Acknowledges** in the pane and, when learnings mode is on, records the
+3. **Acknowledges** in its own session and, when learnings mode is on, records the
    routing decision (see [Learnings](./learnings.md)).
 
 `/tell` routes exactly the agent you name and exactly the prompt you type —
@@ -1320,8 +1384,9 @@ is written.
 ### Proactive routing (opt-in, confirmed)
 
 When a sweep finds an agent blocked on a question you have *already answered*
-earlier in the supervisor pane, the supervisor may **offer** to forward that
-context — it posts a yes/no question in its own pane and waits. It never routes
+earlier in the orchestrator's session, the orchestrator may **offer** to
+forward that context — it asks you a yes/no question in its own session and
+waits. It never routes
 on its own: no proactive `/tell` fires without your explicit `y`. Reply `n` (or
 anything else) and the offer is dropped. This keeps the pattern from feeling
 surveillance-y while it earns trust through dogfooding.
@@ -1395,7 +1460,10 @@ exactly what it added. Nothing in the supervisor, the drive loop or the MCP
 surface ever runs it, and it refuses to run from a linked worktree.
 
 The embedded `cli-setup` skill carries the rules an agent must follow around
-it (load it with the MCP `get_skill` tool under the name `cli-setup`). The
+it. `git paw init` and `git paw start` export it to
+`.git-paw/skills/cli-setup/SKILL.md` beside the orchestrator skill (main
+checkout only), and the MCP `get_skill` tool serves it under the name
+`cli-setup`. The
 supervisor skill restates the three that bind the orchestrator directly: run
 the writing form only when the human asked in the current conversation, pass
 `--yes` only after they approved the exact plan shown, and never run it
@@ -1403,17 +1471,35 @@ during an unattended run.
 
 ## Merge orchestration
 
-Once every spec'd agent has published `agent.verified` (or the user
-explicitly asks for a merge), the supervisor runs the merge orchestration
-loop. v0.5.0 removed the Rust auto-merge loop; merging is now the
-supervisor's responsibility, performed with the existing shell + curl
-tools.
+Once every spec'd agent has been verified — the orchestrator published
+`agent.verified` for it through `sweep.sh verified` (agents never publish it
+themselves) — or the user explicitly asks for a merge, the orchestrator runs the merge orchestration
+loop. v0.5.0 removed the Rust auto-merge loop; merging is the orchestrator's
+responsibility, performed with shell, git, the configured test command and the
+bundled helpers or MCP tools — never a raw HTTP request.
 
-**Trigger.** Either every spec'd agent has published `agent.verified`, or
+**Trigger.** Either every spec'd agent has been verified (the orchestrator
+published `agent.verified` for it), or
 the user has explicitly requested the merge.
 
-**Merge order.** The supervisor reads the broker's message log
-(`/messages/supervisor`) and builds a dependency graph from `agent.blocked`
+**Unattended runs merge without asking first.** When the session context
+carries the drive-loop directive (`--unattended`), the orchestrator merges as
+soon as the trigger holds — fast-forward only — without asking the human
+first. It holds a branch back and escalates only on:
+
+- a **conflict** — a non-fast-forward or conflicting branch (skipped, with
+  `agent.feedback` to its agent), or a dependency cycle (escalated with
+  `agent.question`);
+- an **exhausted correction cycle** — a branch whose correction budget ran out
+  (escalated with `agent.question`);
+- a **regression** — a merge that fails the test command (reverted, with
+  `agent.feedback` to its agent).
+
+Every held-back branch is named in the final summary. In an **attended** run
+the orchestrator may still confirm the merge order with you before merging.
+
+**Merge order.** The orchestrator reads the broker's message log
+(`sweep.sh inbox` / `sweep.sh events`, or the MCP read tools) and builds a dependency graph from `agent.blocked`
 events: each event from agent X with `payload.from = Y` is an edge "X
 depends on Y". The supervisor then topologically sorts the graph: agents
 with no incoming edges merge first; dependents follow.
@@ -1432,14 +1518,14 @@ rebase or resolve. On a successful fast-forward, the supervisor runs the
 configured `{{TEST_COMMAND}}`; if tests fail, the supervisor reverts the
 merge with `git reset --hard <prev-HEAD>` and publishes `agent.feedback`
 tagged `[regression]`. If tests pass, it publishes `agent.advanced-main`
-(the merged branch, the new default-branch SHA, and the resolved base branch
-name) so every dependent agent learns the base moved on its next inbox poll —
+with `sweep.sh advanced-main <merged-branch> <summary>` — the helper resolves
+the new default-branch SHA and the base branch name itself — so every dependent agent learns the base moved on its next inbox poll —
 see [When Main Advances](coordination.md#when-main-advances) — then moves on to
 the next branch.
 
 **Cycle handling.** If the dependency graph has a cycle, the supervisor
 does NOT merge any branch in the cycle. Instead, it publishes
-`agent.question` to the human and waits for guidance before continuing.
+`agent.question` (through `broker.sh --agent supervisor question`) to the human and waits for guidance before continuing.
 
 **Final summary.** When the loop completes, the supervisor publishes a
 final `agent.status` summarising which branches merged cleanly, which were

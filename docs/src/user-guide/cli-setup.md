@@ -57,7 +57,7 @@ differently configured repositories plan byte-identical entries.
 |---|---|---|
 | `broker.sh` | every subcommand | — |
 | `docs-fetch.sh` | `find` only | `get` |
-| `sweep.sh` | `snapshot`, `capture`, `status`, `worktrees-status`, `inbox`, `detect-stuck`, `stuck-eval`, `status-publish`, `learn`, `events` | `approve`, `verified`, `feedback-gate`, `conflict-ack`, `classify` |
+| `sweep.sh` | `snapshot`, `capture`, `status`, `worktrees-status`, `inbox`, `detect-stuck`, `stuck-eval`, `status-publish`, `learn`, `events` | `approve`, `verified`, `feedback-gate`, `conflict-ack`, `answer`, `advanced-main`, `classify` |
 | `_paw_common.sh` | — (it is sourced, never invoked) | — |
 
 That is **twelve** allow entries in total.
@@ -85,6 +85,10 @@ What is withheld, and why:
   file reaches worker sessions as well as the supervisor's, so granting these
   would let a worker forge its own verification or tell a peer a conflict was
   cleared.
+- **`sweep.sh answer` and `advanced-main`** publish with supervisor authority:
+  an answer is authoritative guidance to another agent, and a main-advance
+  event makes the drive loop rebase worker branches. Granting either would let
+  a worker forge one without a prompt.
 - **`sweep.sh classify`** is on its way out with the command classifier. It is
   listed as withheld so the guard that requires every subcommand to be
   explicitly granted or explicitly withheld keeps passing while it still

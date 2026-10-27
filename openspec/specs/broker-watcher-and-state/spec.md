@@ -5,9 +5,7 @@
 This capability keeps the broker's `/status` roster and per-agent state honest as worktrees change. It covers the broker-internal filesystem watcher that polls each mapped worktree's `git status --porcelain` and auto-publishes `agent.status`; roster hygiene (a row appears only once a pane actually publishes `agent.status`, and its CLI column is filled authoritatively from the launcher-known value rather than a self-reported guess); republishing an agent's status from `committed` back to `working` on post-commit file writes within a configurable TTL; and terminal-status stickiness in `update_agent_record` so a completed agent cannot be downgraded by later inferred activity.
 
 It also folds in the supervisor-introspection surface — optional `phase` and `detail` fields on `agent.status`, the documented supervisor phase taxonomy, and how the dashboard supervisor row and the MCP `get_session_status` tool surface them — and the `agent.advanced-main` broker event the supervisor publishes after every successful merge to main, together with the supervisor and coding-agent skill guidance (arrival on the normal poll, no auto-rebase) and its automatic dashboard broker-log rendering.
-
 ## Requirements
-
 ### Requirement: Roster populated only from agent.status publishers
 
 The broker SHALL populate the `/status` agent roster only from
@@ -506,7 +504,6 @@ its prose or examples.
 - **THEN** the audit SHALL pass on the rendered skill across
   all supported spec backends
 
-
 ### Requirement: agent.advanced-main broker variant
 
 The broker SHALL accept and route an `agent.advanced-main`
@@ -554,19 +551,22 @@ the same hour SHALL produce an identical id.
 
 ### Requirement: Supervisor publishes on merge to main
 
-The bundled supervisor skill SHALL teach the LLM to publish an
+The bundled orchestrator skill (formerly the supervisor skill) SHALL teach the LLM to publish an
 `agent.advanced-main` event after every successful `git merge`
 targeting `main` (or the configured `[git] main_branch`). The
-skill SHALL include a concrete curl invocation example with
-the message shape from this capability.
+skill SHALL include a concrete example publishing it through the
+bundled helper — `.git-paw/scripts/sweep.sh advanced-main
+<merged-branch> <summary>` — which sends the message shape from
+this capability; the example SHALL NOT be a raw `curl` request.
 
 #### Scenario: Skill prose names the publish trigger explicitly
 
-- **WHEN** the merge-orchestration section of supervisor.md is
+- **WHEN** the merge-orchestration section of the orchestrator skill is
   read
 - **THEN** the prose SHALL include a publish step that fires
   immediately after a successful merge to main, with a
-  concrete curl-to-`/publish` example
+  concrete `sweep.sh advanced-main` example
+- **AND** the section SHALL NOT contain a `curl` request to `/publish`
 
 #### Scenario: Publish includes the resolved base name
 

@@ -28,7 +28,14 @@ export.
 
 ## Export-surface inventory — check EVERY one
 
-- **Skills** — `assets/agent-skills/{coordination,supervisor,docs-fetch}.md`.
+- **Skills** — `assets/agent-skills/{coordination,orchestrator,docs-fetch,cli-setup}.md`
+  (`orchestrator` was `supervisor`, still resolvable under that alias).
+- **Exported skill files** — `git paw init` (and `git paw start`) writes
+  `.git-paw/skills/orchestrator/SKILL.md` (the orchestrator skill rendered with the consumer's gate
+  commands and configured spec format, no session value — no broker URL, no tmux session name, no
+  `curl`) and `.git-paw/skills/cli-setup/SKILL.md` (the resolved `cli-setup` skill), in the main
+  checkout only. The session's values go to the repo-root sidecar `.git-paw/AGENTS.local.md`
+  only, from `assets/orchestrator-session-context.md`.
 - **Agent-facing prose assets** — instructions, rules, directives, framing text and task-prompt
   scaffolding injected into an agent's sidecar, boot prompt, or skill content, authored in bundled
   assets rather than assembled from compiled string literals: `assets/inter-agent-rules.md`,
@@ -36,7 +43,9 @@ export.
   Compiled code keeps the assembly around them (placeholder substitution, conditional inclusion,
   per-backend selection, dedupe, region gating) — only the sentences live in the asset.
 - **Scripts & mirrored logic (code)** — `assets/scripts/{sweep,broker,docs-fetch}.sh`, including
-  the live-prompt gate mirrored into `sweep.sh` from `supervisor::permission_prompt`.
+  the live-prompt gate mirrored into `sweep.sh` from `supervisor::permission_prompt`. The
+  root-side `sweep.sh answer` and `sweep.sh advanced-main` verbs publish with supervisor authority
+  and are never granted by `setup-cli`, like the verdict verbs.
 - **Init default config** — the `.git-paw/config.toml` that `git paw init` generates.
 - **Agent-CLI allow rules written by `git paw setup-cli`** — the permission rules the
   `cli-setup` capability writes into a consumer's agent CLI settings. This surface is **live**:
@@ -48,7 +57,9 @@ export.
   helper by its stable path — never a consumer toolchain verb, and never a wildcard. Any change
   to the grant table is a change to this export surface.
 - **Injected artifacts** — the pane **boot block**, the marker-delimited git-paw section injected
-  into the consumer's `AGENTS.md`, **git hooks** (post-commit / pre-push / pre-commit, script
+  into the consumer's `AGENTS.md`, the permanent orchestrator pointer section `git paw init` injects
+  into the consumer's root `AGENTS.md` between `<!-- git-paw-orchestrator:start/end -->` (prose from
+  `assets/agents-md-orchestrator-section.md`; `stop`/`purge` leave it), **git hooks** (post-commit / pre-push / pre-commit, script
   bodies bundled at `assets/hooks/*.sh` — the installation mechanism itself stays compiled), CLI
   `settings.json` allowlist seeding.
 - **Templates** — `{{VAR}}` placeholders (`{{TEST_COMMAND}}`, `{{BRANCH_ID}}`,
@@ -82,7 +93,11 @@ export.
   bundled agent-facing prose asset (not only the supervisor/coordination skills) and to forbid
   vendor product names/paths (e.g. `Claude Code`, `.claude/`) outside an `<!-- allowlist-prose -->`
   span — the mechanism that keeps a deliberate CLI enumeration legal without making vendor naming
-  an accident.
+  an accident. It also audits the exported orchestrator `SKILL.md` (every backend, frontmatter
+  included), the exported `cli-setup` `SKILL.md`, the orchestrator pointer asset and the session
+  context template, and asserts no exported orchestrator rendering carries `curl` or a session value.
+- `skills::validate_skill_dir` — the strict standardized-format check the exported skill
+  directories must pass (`tests/cli_init_orchestrator_export.rs`).
 - The live-prompt gate's `sweep.sh`↔Rust parity tests (`tests/sweep_sh_live_gate_parity.rs`).
 - The generated-default-config "all commented / multi-stack" test (`src/config.rs`).
 

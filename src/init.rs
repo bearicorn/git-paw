@@ -22,6 +22,7 @@ const GITIGNORE_ENTRIES: &[&str] = &[
     ".git-paw/logs/",
     ".git-paw/tmp/",
     ".git-paw/worktrees/",
+    ".git-paw/skills/",
     ".git-paw/session-summary.md",
     ".git-paw/session-learnings.md",
 ];
@@ -125,38 +126,13 @@ pub fn run_init() -> Result<(), PawError> {
         println!("  Created .git-paw/scripts/");
     }
     // The shared preamble installs first: the three helpers source it, so it
-    // must be on disk before any of them can run.
-    let common_path = scripts_dir.join("_paw_common.sh");
-    let common_existed = common_path.exists();
-    install_script(&common_path, COMMON_SCRIPT)?;
-    if common_existed {
-        println!("  Updated .git-paw/scripts/_paw_common.sh");
-    } else {
-        println!("  Created .git-paw/scripts/_paw_common.sh");
-    }
-    let sweep_path = scripts_dir.join("sweep.sh");
-    let sweep_existed = sweep_path.exists();
-    install_script(&sweep_path, SWEEP_SCRIPT)?;
-    if sweep_existed {
-        println!("  Updated .git-paw/scripts/sweep.sh");
-    } else {
-        println!("  Created .git-paw/scripts/sweep.sh");
-    }
-    let broker_path = scripts_dir.join("broker.sh");
-    let broker_existed = broker_path.exists();
-    install_script(&broker_path, BROKER_SCRIPT)?;
-    if broker_existed {
-        println!("  Updated .git-paw/scripts/broker.sh");
-    } else {
-        println!("  Created .git-paw/scripts/broker.sh");
-    }
-    let docs_fetch_path = scripts_dir.join("docs-fetch.sh");
-    let docs_fetch_existed = docs_fetch_path.exists();
-    install_script(&docs_fetch_path, DOCS_FETCH_SCRIPT)?;
-    if docs_fetch_existed {
-        println!("  Updated .git-paw/scripts/docs-fetch.sh");
-    } else {
-        println!("  Created .git-paw/scripts/docs-fetch.sh");
+    // must be on disk before any of them can run. Each is reported only when
+    // its content changed (PP-30).
+    let mut managed_changed = false;
+    for (name, content) in bundled_scripts() {
+        let outcome = install_script(&scripts_dir.join(name), content)?;
+        outcome.report(&format!(".git-paw/scripts/{name}"));
+        managed_changed |= outcome.changed();
     }
 
     // 4. Generate or migrate config. For a fresh config, prompt for supervisor
@@ -208,12 +184,32 @@ pub fn run_init() -> Result<(), PawError> {
         println!("  Updated .gitignore");
     }
 
+    // 6. Export the orchestrator and cli-setup skills in the standardized
+    //    layout, rendered from the (possibly just written) config.
+    let config = config::load_config(&repo_root, None).unwrap_or_default();
+    for (rel, outcome) in export_skills(&repo_root, &config)? {
+        outcome.report(&rel);
+        managed_changed |= outcome.changed();
+    }
+
+    // 7. Inject the orchestrator pointer section into the root AGENTS.md.
+    let agents_md_existed = repo_root.join("AGENTS.md").exists();
+    if crate::agents::inject_orchestrator_pointer(&repo_root)? {
+        managed_changed = true;
+        if agents_md_existed {
+            println!("  Updated AGENTS.md (orchestrator pointer section)");
+        } else {
+            println!("  Created AGENTS.md (orchestrator pointer section)");
+        }
+    }
+
     if !created_dir
         && !created_logs
         && !created_tmp
         && !created_config
         && !migration.changed()
         && !updated_gitignore
+        && !managed_changed
     {
         println!("Already initialized. Nothing to do.");
     } else {
@@ -261,11 +257,145 @@ pub fn provision_worktree_helpers(
     Ok(())
 }
 
+/// What a binary-managed write did to the file on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOutcome {
+    /// The file did not exist and was written.
+    Created,
+    /// The file existed with different content and was overwritten.
+    Updated,
+    /// The file already held exactly this content; nothing was written.
+    Unchanged,
+}
+
+impl WriteOutcome {
+    /// Whether the write created or changed the file.
+    #[must_use]
+    pub fn changed(self) -> bool {
+        self != Self::Unchanged
+    }
+
+    /// Prints init's `Created` / `Updated` line for `rel`; nothing when the
+    /// content was already current.
+    fn report(self, rel: &str) {
+        match self {
+            Self::Created => println!("  Created {rel}"),
+            Self::Updated => println!("  Updated {rel}"),
+            Self::Unchanged => {}
+        }
+    }
+}
+
+/// The exported skill directories under `<repo>/.git-paw/skills/`, relative
+/// to the repository root, in write order.
+pub const EXPORTED_SKILL_DIRS: [&str; 2] =
+    [".git-paw/skills/orchestrator", ".git-paw/skills/cli-setup"];
+
+/// Writes the exported skills — the orchestrator skill rendered by
+/// [`crate::skills::render_standardized`] and the resolved `cli-setup`
+/// skill — in the standardized layout under `<repo_root>/.git-paw/skills/`.
+///
+/// The orchestrator skill renders from session-independent inputs only: the
+/// `[supervisor]` gate commands and the configured `[specs]` format (none →
+/// the no-backend doctrine sentinel). `git paw init` and `git paw start` both
+/// call this, so the two write the same bytes for the same config and binary.
+/// Written in the main checkout only; no worktree receives them.
+///
+/// Returns each file's repository-relative path with its [`WriteOutcome`].
+///
+/// # Errors
+///
+/// Returns an error when a skill cannot be resolved, a directory cannot be
+/// created, or a file cannot be written (including a symlink at the target).
+pub fn export_skills(
+    repo_root: &Path,
+    config: &config::PawConfig,
+) -> Result<Vec<(String, WriteOutcome)>, PawError> {
+    let skill_err = |e: crate::skills::SkillError| PawError::InitError(e.to_string());
+
+    let backends: Vec<crate::specs::SpecBackendKind> =
+        crate::specs::resolved_spec_type(config, repo_root)
+            .as_deref()
+            .and_then(crate::specs::SpecBackendKind::parse)
+            .into_iter()
+            .collect();
+    let supervisor = config.supervisor.clone().unwrap_or_default();
+    let orchestrator =
+        crate::skills::resolve(crate::skills::ORCHESTRATOR_SKILL).map_err(skill_err)?;
+    let orchestrator_md =
+        crate::skills::render_standardized(&orchestrator, &supervisor.gate_commands(), &backends);
+    let cli_setup = crate::skills::resolve("cli-setup").map_err(skill_err)?;
+    let cli_setup_md = crate::skills::to_skill_md(&cli_setup);
+
+    // A committed symlink anywhere on the way would redirect the writes
+    // outside the repository; these directories hold binary-managed files only.
+    for dir in [".git-paw", SKILLS_DIR]
+        .into_iter()
+        .chain(EXPORTED_SKILL_DIRS)
+    {
+        refuse_symlink(&repo_root.join(dir))?;
+    }
+    create_dir_if_missing(&repo_root.join(SKILLS_DIR))?;
+
+    // Self-ignoring: keeps the exports out of `git add -A` even in a repository
+    // whose `.gitignore` predates the `.git-paw/skills/` entry (a `start` with
+    // a newer binary, before `init` re-ran).
+    let ignore_rel = format!("{SKILLS_DIR}/.gitignore");
+    let mut outcomes = vec![(
+        ignore_rel.clone(),
+        write_managed_file(&repo_root.join(&ignore_rel), "*\n")?,
+    )];
+    for (dir, content) in EXPORTED_SKILL_DIRS
+        .iter()
+        .zip([orchestrator_md, cli_setup_md])
+    {
+        create_dir_if_missing(&repo_root.join(dir))?;
+        let rel = format!("{dir}/SKILL.md");
+        let outcome = write_managed_file(&repo_root.join(&rel), &content)?;
+        outcomes.push((rel, outcome));
+    }
+    Ok(outcomes)
+}
+
+/// The directory the exported skills live under, relative to the repository
+/// root.
+const SKILLS_DIR: &str = ".git-paw/skills";
+
+/// Fails when `path` exists as a symlink.
+fn refuse_symlink(path: &Path) -> Result<(), PawError> {
+    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(PawError::InitError(format!(
+            "refusing to write binary-managed files through a symlink at '{}' — \
+             remove it and re-run",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Writes binary-managed `content` to `path` unless the file already holds
+/// exactly that content, and reports what happened.
+///
+/// REFUSES when `path` is a symlink: `fs::write` follows links, so a link
+/// committed at a binary-managed path in a hostile repository would have
+/// this overwrite its target. A symlink there is never legitimate.
+fn write_managed_file(path: &Path, content: &str) -> Result<WriteOutcome, PawError> {
+    refuse_symlink(path)?;
+    let outcome = match fs::read(path) {
+        Ok(existing) if existing == content.as_bytes() => return Ok(WriteOutcome::Unchanged),
+        Ok(_) => WriteOutcome::Updated,
+        Err(_) => WriteOutcome::Created,
+    };
+    fs::write(path, content)
+        .map_err(|e| PawError::InitError(format!("failed to write '{}': {e}", path.display())))?;
+    Ok(outcome)
+}
+
 /// Writes a bundled helper script `content` to `path` and marks it
 /// executable (mode `0o755` on Unix). Overwrites any existing file at `path`
-/// (the scripts are treated as binary-managed content — users with local
-/// edits SHALL back the file up before re-running `git paw init`). Shared by
-/// the `sweep.sh` and `broker.sh` installers.
+/// whose content differs (the scripts are treated as binary-managed content
+/// — users with local edits SHALL back the file up before re-running
+/// `git paw init`). Shared by the `sweep.sh` and `broker.sh` installers.
 ///
 /// REFUSES when `path` is a symlink. `fs::write` and `set_permissions` both
 /// follow links, so a link committed at `.git-paw/scripts/broker.sh` in a
@@ -274,7 +404,7 @@ pub fn provision_worktree_helpers(
 /// path, into every agent worktree. A symlink there is never legitimate (the
 /// directory holds binary-managed files), so the safe answer is to stop and
 /// name the path rather than guess what the operator meant.
-fn install_script(path: &Path, content: &str) -> Result<(), PawError> {
+fn install_script(path: &Path, content: &str) -> Result<WriteOutcome, PawError> {
     if let Ok(meta) = fs::symlink_metadata(path)
         && meta.file_type().is_symlink()
     {
@@ -284,8 +414,7 @@ fn install_script(path: &Path, content: &str) -> Result<(), PawError> {
             path.display()
         )));
     }
-    fs::write(path, content)
-        .map_err(|e| PawError::InitError(format!("failed to write '{}': {e}", path.display())))?;
+    let outcome = write_managed_file(path, content)?;
 
     #[cfg(unix)]
     {
@@ -302,7 +431,7 @@ fn install_script(path: &Path, content: &str) -> Result<(), PawError> {
         })?;
     }
 
-    Ok(())
+    Ok(outcome)
 }
 
 /// Creates a directory if it doesn't exist. Returns `true` if created.
@@ -1600,6 +1729,24 @@ test_command = "just check"
     /// committed at `.git-paw/scripts/broker.sh` in a hostile repository would
     /// have provisioning overwrite its target and chmod it `0755`. Provisioning
     /// must refuse and name the path, leaving the target untouched.
+    /// A committed symlink at `.git-paw/skills` would redirect the exports
+    /// outside the repository; the export refuses and writes nothing there.
+    #[cfg(unix)]
+    #[test]
+    fn export_refuses_a_symlinked_skills_directory() {
+        let repo = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        fs::create_dir_all(repo.path().join(".git-paw")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), repo.path().join(".git-paw/skills")).unwrap();
+
+        let result = export_skills(repo.path(), &config::PawConfig::default());
+        assert!(
+            result.is_err(),
+            "a symlinked skills directory must be refused"
+        );
+        assert_eq!(fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+    }
+
     #[cfg(unix)]
     #[test]
     fn provision_refuses_to_write_a_helper_through_a_symlink() {

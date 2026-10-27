@@ -151,6 +151,10 @@ pub const SWEEP_GRANTED: &[&str] = &[
 ///   could forge its own verification;
 /// - `conflict-ack` publishes an `agent.feedback` into two *other* agents'
 ///   inboxes, telling peers a conflict was reviewed and ruled acceptable;
+/// - `answer` publishes authoritative guidance to an agent as the supervisor,
+///   and `advanced-main` tells the drive loop the default branch moved, which
+///   makes it rebase worker branches — the grant target reaches worker
+///   sessions too, so neither may run there without a prompt;
 /// - `classify` is removed by `classifier-retirement`; it is listed so the
 ///   dispatch guard keeps passing on either side of that merge.
 pub const SWEEP_NEVER_GRANTED: &[&str] = &[
@@ -158,6 +162,8 @@ pub const SWEEP_NEVER_GRANTED: &[&str] = &[
     "verified",
     "feedback-gate",
     "conflict-ack",
+    "answer",
+    "advanced-main",
     "classify",
 ];
 

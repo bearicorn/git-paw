@@ -349,7 +349,11 @@ fn init_creates_git_paw_dir() {
     assert!(tr.path().join(".git-paw").is_dir());
     assert!(tr.path().join(".git-paw/config.toml").exists());
     assert!(tr.path().join(".git-paw/logs").is_dir());
-    assert!(!tr.path().join("AGENTS.md").exists());
+    // core-init / *Init injects an orchestrator pointer section into the root
+    // AGENTS.md* (orchestrator-skill-export): init creates it when absent,
+    // holding only the pointer section.
+    let agents_md = std::fs::read_to_string(tr.path().join("AGENTS.md")).expect("AGENTS.md");
+    assert!(agents_md.contains("<!-- git-paw-orchestrator:start -->"));
 }
 
 #[test]
