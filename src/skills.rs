@@ -5208,6 +5208,7 @@ Your role this session is escalation-driven, in this order each cycle:\n\
                 session_id_args: None,
                 resume_args: None,
                 mcp,
+                headless_args: None,
             },
         );
         clis

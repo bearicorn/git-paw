@@ -270,6 +270,11 @@ agent_approval = "full-auto"
 /// Writes a supervisor config and runs `start --supervisor --dry-run` for one
 /// branch, returning (stdout, stderr).
 fn dry_run_with_config(config_content: &str) -> (String, String) {
+    dry_run_with_config_and(config_content, &[])
+}
+
+/// [`dry_run_with_config`] with `extra` flags appended to the command line.
+fn dry_run_with_config_and(config_content: &str, extra: &[&str]) -> (String, String) {
     let tr = setup_test_repo();
     fs::create_dir(tr.path().join("specs")).expect("create specs directory");
 
@@ -289,6 +294,7 @@ fn dry_run_with_config(config_content: &str) -> (String, String) {
             "--branches",
             "feat/test",
         ])
+        .args(extra)
         .output()
         .expect("run start with supervisor");
     assert!(
@@ -326,6 +332,10 @@ agent_approval = "auto"
     assert!(
         stdout.contains("Approval:   Auto"),
         "the plan reports agent_approval, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Hand-off:"),
+        "only an unattended plan reports the headless hand-off, got:\n{stdout}"
     );
     assert!(
         !stdout.contains("Supervisor:") && !stdout.contains("Supervisor approval"),
@@ -395,4 +405,28 @@ fn approval_key_leaves_every_planned_command_byte_identical() {
         "plan lists commands:\n{with_key}"
     );
     assert_eq!(commands(&with_key), commands(&without_key));
+}
+
+/// `orchestrator-escalation-handoff` task 2.3: an unattended dry run reports
+/// the resolved headless hand-off form, or why none resolved.
+#[test]
+fn unattended_dry_run_reports_the_headless_hand_off() {
+    let (stdout, _) = dry_run_with_config_and(
+        "[supervisor]\nenabled = true\ncli = \"claude\"\n",
+        &["--unattended"],
+    );
+    assert!(
+        stdout.contains("Hand-off:   headless hand-off: claude -p"),
+        "got:\n{stdout}"
+    );
+
+    let (stdout, _) = dry_run_with_config_and(
+        "[supervisor]\nenabled = true\ncli = \"my-agent\"\n\n[clis.my-agent]\ncommand = \"my-agent\"\n",
+        &["--unattended"],
+    );
+    assert!(
+        stdout.contains("`my-agent` has no headless form")
+            && stdout.contains("[clis.my-agent].headless_args"),
+        "got:\n{stdout}"
+    );
 }

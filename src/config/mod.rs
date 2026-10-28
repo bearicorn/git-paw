@@ -26,7 +26,7 @@ mod tests;
 pub use broker::{BrokerConfig, WatcherConfig};
 pub use cli::{
     CustomCli, Preset, add_custom_cli, add_custom_cli_to, launch_command, remove_custom_cli,
-    remove_custom_cli_from, resolve_submit_delay_ms,
+    remove_custom_cli_from, resolve_headless_args, resolve_submit_delay_ms,
 };
 pub use dashboard::{BrokerLogConfig, DashboardConfig};
 pub use layout::LayoutConfig;
@@ -36,9 +36,9 @@ pub use prompt_profile::{
 pub use specs::SpecsConfig;
 pub use supervisor::{
     ApprovalLevel, ApprovalLevelPreset, AutoApproveConfig, BrokerPublish, CommonDevAllowlistConfig,
-    ConflictConfig, CorrectionConfig, LearningsConfig, OnExhausted, SESSION_ID_PLACEHOLDER,
-    SupervisorConfig, TellConfig, TellMode, approval_flags, resolve_approval_flags,
-    resolve_resume_args, resolve_session_id_args,
+    ConflictConfig, CorrectionConfig, EscalationConfig, LearningsConfig, OnExhausted,
+    SESSION_ID_PLACEHOLDER, SupervisorConfig, TellConfig, TellMode, approval_flags,
+    resolve_approval_flags, resolve_resume_args, resolve_session_id_args,
 };
 
 /// Governance document paths.
@@ -672,6 +672,7 @@ pub(crate) fn load_config_file(path: &Path) -> Result<Option<PawConfig>, PawErro
             validate_cli_commands(&config, path)?;
             validate_approval_args(&config, path)?;
             validate_session_templates(&config, path)?;
+            validate_headless_args(&config, path)?;
             for warning in worktree_runtime_warnings(&config) {
                 eprintln!("warning: {}: {warning}", path.display());
             }
@@ -798,6 +799,28 @@ fn validate_session_templates(config: &PawConfig, path: &Path) -> Result<(), Paw
                     path.display()
                 )));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Rejects an empty `[clis.<name>].headless_args`.
+///
+/// An empty override would resolve to a headless form with no arguments and
+/// spawn the CLI interactively with nobody at its terminal, so it fails the
+/// load, naming the key. Omit the key to fall back to the built-in table.
+fn validate_headless_args(config: &PawConfig, path: &Path) -> Result<(), PawError> {
+    for (name, cli) in &config.clis {
+        if cli
+            .headless_args
+            .as_deref()
+            .is_some_and(|a| a.trim().is_empty())
+        {
+            return Err(PawError::ConfigError(format!(
+                "{}: [clis.{name}] headless_args is empty; omit it to use the built-in \
+                 headless form, or set the arguments that run one non-interactive turn",
+                path.display()
+            )));
         }
     }
     Ok(())
@@ -1096,7 +1119,7 @@ worktree_placement = "child"
 # spec_validate_command = "openspec validate {{CHANGE_ID}} --strict"  # OpenSpec only
 # security_audit_command = "cargo audit"                       # or: "npm audit", "bandit -r ."
 # agent_approval = "auto"  # one of: "manual", "auto", "full-auto"
-# approval = "manual"  # orchestrator's own level, reserved for git-paw-initiated orchestrator invocations; changes no pane command
+# approval = "manual"  # level of the drive loop's headless orchestrator invocations (default: agent_approval); changes no pane command
 # verify_on_commit_nudge = true  # broker nudges the supervisor to verify each commit promptly (default true)
 #
 # Stuck/bloat detection thresholds, read by .git-paw/scripts/sweep.sh. Each is
@@ -1147,6 +1170,17 @@ worktree_placement = "child"
 # max_cycles = 5
 # on_exhausted = "escalate"  # one of: "escalate", "abandon"
 # escalate_after_cycles = 3
+#
+# Headless orchestrator hand-off. The --unattended drive loop hands each
+# judgment call it cannot make (an ambiguous question, a merge decision, a
+# correction-exhausted branch) to a one-shot, non-interactive run of the
+# orchestrator CLI ([supervisor] cli, else default_cli), at its `approval`
+# level. Permission prompts are never handed off. One run at a time; a run
+# still going after timeout_seconds is killed. Set enabled = false while you
+# drive the session by hand.
+# [supervisor.escalation]
+# enabled = true
+# timeout_seconds = 1800
 
 # opsx (OpenSpec) role gating. When the session's spec engine is OpenSpec,
 # git-paw's post-commit guard detects archive activity (`/opsx:archive` /
@@ -1190,6 +1224,10 @@ worktree_placement = "child"
 # (git-paw's built-in table already covers "claude").
 # session_id_args = "--session-id {{SESSION_ID}}"
 # resume_args = "--resume {{SESSION_ID}}"
+#
+# Arguments that run one non-interactive turn reading the prompt from stdin,
+# for the headless orchestrator hand-off (built in: claude "-p", codex "exec").
+# headless_args = "--batch"
 
 # Named presets for quick launches.
 # [presets.my-preset]

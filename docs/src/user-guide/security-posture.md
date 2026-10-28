@@ -343,6 +343,11 @@ A root session's MCP server (one started in the main working tree) offers
 `publish_verified` and `publish_feedback`, which carry the root credential read
 from the same session file. A worktree session's MCP server has no verdict tool.
 
+A [headless orchestrator one-shot](#the-headless-orchestrator-one-shot) is not
+handed the credential: it publishes a verdict only through those root-side
+paths — the `sweep.sh` verbs or a root session's MCP verdict tools — like any
+root-side helper.
+
 The worker-side `broker.sh` has no credential-bearing verb.
 
 **Threat model.** The rule stops a mistaken or skill-misled worker — one
@@ -364,6 +369,65 @@ Feedback from any other sender (the post-commit branch-guard hook, a person) is
 not a verdict and stays ungated, and so does one agent publishing a non-verdict
 message as another. Messages the broker's own subsystems publish in-process
 (the conflict detector, the role guard) never cross HTTP and are not gated.
+
+## The headless orchestrator one-shot
+
+Under `--unattended`, the drive loop can
+[hand a judgment call](./supervisor.md#headless-hand-off-of-judgment-calls) —
+an ambiguous question, a merge decision, a correction-exhausted branch — to
+the orchestrator CLI, run once and non-interactively **at the repository
+root**. Its permission level is `[supervisor] approval` (falling back to
+`agent_approval`), and nobody is present to answer its own prompts.
+
+- **`full-auto` here is an unattended agent with root-level write access** for
+  up to `[supervisor.escalation] timeout_seconds` (default 30 minutes). It is
+  the power the old orchestrator pane had, without its interactive surface:
+  bounded by the timeout (which kills the whole process group), serialized to
+  one invocation at a time, and logged to
+  `.git-paw/logs/<session>/orchestrator-escalations.log`, with each outcome
+  published on the broker. Run it inside the [sandbox](./sandbox.md).
+- **Under `full-auto` the `ask` rule on `sweep.sh approve` does not apply.**
+  `git paw setup-cli` puts `sweep.sh approve` on `ask` so a human sees every
+  approval; a skip-permissions turn consults no rule. The one-shot's framing,
+  which forbids running `sweep.sh approve` or answering any permission prompt,
+  is then the only guard — an instruction, not a control. Permission prompts
+  never enter its context: the loop never hands one off, so the one-shot has
+  no prompt in front of it to be talked into approving.
+- **Under `auto` it cannot sign off work — with the built-in mapping.** For
+  `claude`, `auto` resolves to `--permission-mode acceptEdits`; with the
+  `setup-cli` grants the verdict verbs (`sweep.sh verified`, `feedback-gate`,
+  `conflict-ack`) are never granted, so a non-interactive turn is denied them
+  and a merge decision stays on the broker for you. This does not hold for a
+  custom CLI or wrapper that pins its own permission mode: its one-shot can do
+  whatever that mode allows.
+- **Prompt injection from worker-written text is the residual risk.** A
+  question, artifact status or branch detail is text a coding agent wrote, and
+  the context quotes it. It is fenced between markers as data, and the
+  framing forbids acting on instructions inside it or verifying, merging or
+  publishing a verdict because it asks — but that is an instruction to a
+  model, not a control. Under `full-auto`, or a CLI wrapper with a permissive
+  mode, a one-shot runs at the repository root where `git paw __authority`
+  hands it the credential, so injected text could steer it into a
+  self-verify and a merge. Run `full-auto` inside the [sandbox](./sandbox.md).
+- **One pending question per agent.** A worker publishing many distinct
+  questions queues one one-shot at a time; the rest stay on the broker and
+  are counted in the exit summary, so it cannot buy an LLM run per question.
+- **No secret reaches it.** The escalation context goes on stdin, never on
+  argv (nothing in `ps`), and the environment adds only `GIT_PAW_BROKER_URL`;
+  the authority credential is never on its command line or in its
+  environment.
+- **Interrupting git-paw does not stop it.** The one-shot runs in its own
+  process group, so Ctrl-C or a closed terminal reaches git-paw but not the
+  one-shot, and its timeout is enforced by the drive loop, which is then gone.
+  The escalation log records each one-shot's pid, which is also its process
+  group id; kill that group by hand. A session torn down under a running loop
+  kills it.
+- **Its background processes outlive a normal exit.** The whole group is
+  killed on timeout or teardown, but when the one-shot exits on its own, any
+  process it left running in the background keeps running.
+
+Set `[supervisor.escalation] enabled = false` to keep every judgment call on
+the broker for a human.
 
 ## MCP repository writes
 

@@ -655,6 +655,7 @@ const AUDITED_PROSE_ASSETS: &[&str] = &[
     "assets/hooks/post-commit.sh",
     "assets/hooks/pre-push.sh",
     "assets/hooks/pre-commit.sh",
+    "assets/escalation-framing.md",
 ];
 
 #[test]
@@ -805,4 +806,55 @@ fn exported_orchestrator_skill_carries_no_curl_or_session_value() {
             "{label}: session name"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// orchestrator-escalation-handoff: the headless escalation context
+// (core-lang-agnostic, *Escalation framing prose is a bundled agnostic
+// asset*).
+// ---------------------------------------------------------------------------
+
+// Scenario: Rendered escalation context passes the audit
+#[test]
+fn rendered_escalation_context_passes_the_audit_for_every_kind() {
+    use git_paw::supervisor::escalation::{ContextInputs, HandOff, HandOffKind, render_context};
+
+    let kinds = [
+        HandOffKind::Question {
+            question: "RS256 or HS256?".to_string(),
+        },
+        HandOffKind::MergeDecision {
+            status: "committed".to_string(),
+        },
+        HandOffKind::CorrectionExhausted {
+            detail: "branch is unrecoverable after 5 correction cycle(s); needs a human"
+                .to_string(),
+        },
+    ];
+    for kind in kinds {
+        let label = format!("escalation-context-{kind:?}");
+        let rendered = render_context(
+            &HandOff {
+                agent_id: "feat-x".to_string(),
+                kind,
+            },
+            ContextInputs {
+                repo_root: std::path::Path::new("/repo"),
+                broker_url: Some("http://127.0.0.1:9119"),
+            },
+        );
+        assert_no_forbidden_tokens(&rendered, &label);
+        assert_no_commit_convention(&rendered, &label);
+    }
+}
+
+// Scenario: Framing is not a compiled literal
+#[test]
+fn escalation_framing_is_loaded_from_the_bundled_asset() {
+    let source = std::fs::read_to_string("src/supervisor/escalation.rs")
+        .expect("escalation module must be readable");
+    assert!(
+        source.contains("include_str!(\"../../assets/escalation-framing.md\")"),
+        "the framing prose must come from the bundled asset"
+    );
 }

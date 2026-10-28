@@ -576,6 +576,14 @@ pub fn supervisor(
             out.line(&format!("  Agent CLI:  {agent_cli}"));
         }
         out.line(&format!("  Approval:   {agent_approval:?}"));
+        if unattended {
+            let handoff = crate::supervisor::escalation::resolve_handoff(
+                supervisor_cfg,
+                config.default_cli.as_deref(),
+                &config.clis,
+            );
+            out.line(&format!("  Hand-off:   {}", handoff.notice()));
+        }
         out.line(&format!(
             "  Mouse:      {}",
             if mouse { "on" } else { "off" }
@@ -1254,6 +1262,12 @@ pub fn unattended_drive_run(
         clis: loaded_config.clis.clone(),
         layout: crate::surface::SessionLayout::of(state),
         binding: Some(binding),
+        handoff: crate::supervisor::escalation::resolve_handoff(
+            supervisor_cfg,
+            loaded_config.default_cli.as_deref(),
+            &loaded_config.clis,
+        ),
+        handoff_timeout: std::time::Duration::from_secs(supervisor_cfg.escalation.timeout_seconds),
     };
 
     UnattendedRun {

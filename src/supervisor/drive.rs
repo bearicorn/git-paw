@@ -76,6 +76,7 @@ use crate::terminal::TerminalBackend;
 
 use super::approval_gate::{approval_dedup_key, live_prompt_in_tail};
 use super::claim::PaneClaim;
+use super::escalation::{HandoffPort, HandoffReport};
 use super::keys::KeyDispatcher;
 use super::loop_binding::DriveLoopBinding;
 use super::permission_prompt::{
@@ -434,7 +435,7 @@ pub fn detect_completion(
 // ---------------------------------------------------------------------------
 
 /// Escalation verdict label for a branch whose correction budget is spent.
-const CORRECTION_EXHAUSTED_VERDICT: &str = "correction-exhausted";
+pub(crate) const CORRECTION_EXHAUSTED_VERDICT: &str = "correction-exhausted";
 
 /// Escalation verdict label for the one-time early heads-up emitted before a
 /// slow-converging branch reaches `max_cycles`.
@@ -816,6 +817,10 @@ pub struct DriveSummary {
     /// wave (GP-05) — the fallback the per-agent list has when its own
     /// resolution is sparse or unavailable, and a useful roll-up otherwise.
     pub merged_summary: Option<String>,
+    /// The headless orchestrator hand-off's outcome counts, or why it was
+    /// unavailable (`orchestrator-escalation-handoff`). `None` when the loop
+    /// was run without a hand-off resolution (unit tests).
+    pub handoff: Option<HandoffReport>,
 }
 
 /// The summary line stating the loop's CLI-unavailability coverage: the
@@ -873,6 +878,10 @@ impl DriveSummary {
                 };
                 let _ = writeln!(out, "  - {}: {} cycle(s), {policy}", b.agent_id, b.cycles);
             }
+        }
+
+        if let Some(report) = &self.handoff {
+            let _ = writeln!(out, "\n{}", report.render());
         }
 
         if let Some(log) = &self.broker_log_hint {
@@ -1089,6 +1098,10 @@ pub struct DriveDeps<'a> {
     /// same place `drive-loop-exit-summary-truth` appends its `[unmerged]`
     /// entries.
     pub wedged: Vec<Escalation>,
+    /// The headless orchestrator hand-off (`orchestrator-escalation-handoff`):
+    /// `Some` only when a headless invocation is resolvable and
+    /// `[supervisor.escalation] enabled`. `None` keeps the broker-only path.
+    pub handoff: Option<&'a mut dyn HandoffPort>,
 }
 
 impl DriveDeps<'_> {
@@ -1155,6 +1168,10 @@ pub struct DriveConfig {
     /// need not construct one — pins the loop to the roster it was started
     /// with, the behaviour before the roster followed the session.
     pub roster: Option<std::sync::Arc<dyn RosterReader + Send + Sync>>,
+    /// Why the headless hand-off is unavailable, resolved once at loop start,
+    /// for the exit summary when [`DriveDeps::handoff`] is `None`. `None`
+    /// (the default) reports nothing.
+    pub handoff_unavailable: Option<String>,
 }
 
 impl Default for DriveConfig {
@@ -1174,6 +1191,7 @@ impl Default for DriveConfig {
             // layout (dashboard 0, agents 1+) is the default.
             layout: SessionLayout::planned(crate::session::SessionMode::Supervisor, true),
             roster: None,
+            handoff_unavailable: None,
         }
     }
 }
@@ -1425,6 +1443,7 @@ pub fn drive_loop_logged(
                 gate_tags: &config.correction.gate_tags,
                 winding_down,
                 branch_refresh_enabled: config.branch_refresh_enabled,
+                handoff_enabled: deps.handoff.is_some(),
             },
         );
         correction = next;
@@ -1452,6 +1471,14 @@ pub fn drive_loop_logged(
 
         // --- Correction pass (auto-loopback) ---------------------------------
         run_correction_pass(&mut shell, deps, &view, config, &mut correction);
+
+        // --- Headless hand-off (orchestrator-escalation-handoff) -------------
+        // Polls the running one-shot and starts the next queued one. Never
+        // waits on it: the sweep goes on while it runs.
+        let now = deps.clock.now();
+        if let Some(handoff) = deps.handoff.as_deref_mut() {
+            handoff.pump(now, true);
+        }
 
         // --- Progress observation (unattended-heartbeat-progress) ------------
         // A failed tip read is no observation. A branch this loop rebased
@@ -1511,6 +1538,23 @@ pub fn drive_loop_logged(
     let mut escalations = std::mem::take(&mut shell.escalations);
     escalations.append(&mut deps.wedged);
 
+    // --- Hand-off wind-down -------------------------------------------------
+    // No new one-shot starts once the loop stopped, but a running one is let
+    // finish or time out: a half-done merge is worse than a late exit. A
+    // session torn down under the loop is the exception — its one-shot is
+    // killed rather than left acting on a session that is gone.
+    let handoff = drain_handoff(
+        deps,
+        config.poll_interval,
+        outcome == DriveOutcome::SessionTornDown,
+    );
+    let handoff = handoff.or_else(|| {
+        config
+            .handoff_unavailable
+            .clone()
+            .map(HandoffReport::Unavailable)
+    });
+
     // --- Ref-derived merge truth (drive-loop-exit-summary-truth, D1) --------
     // Merged-ness is answered by git, once per coding branch, never by loop
     // or phase state: a worker reaching `verified`/`done` says nothing about
@@ -1532,6 +1576,7 @@ pub fn drive_loop_logged(
             default_branch: &config.default_branch,
             broker_log_hint: config.broker_log_hint.clone(),
             learnings_hint: config.learnings_hint.clone(),
+            handoff,
         },
         &merge_results,
     );
@@ -1549,6 +1594,34 @@ pub fn drive_loop_logged(
         summary,
         effect_log: shell.log,
     }
+}
+
+/// Lets a running headless one-shot finish or time out without starting
+/// another — or, when the session was `torn_down`, kills it — then returns
+/// the hand-off's report. `None` when the loop ran without one.
+fn drain_handoff(
+    deps: &mut DriveDeps<'_>,
+    poll_interval: Duration,
+    torn_down: bool,
+) -> Option<HandoffReport> {
+    let clock = deps.clock;
+    let handoff = deps.handoff.as_deref_mut()?;
+    if torn_down {
+        handoff.abort(clock.now(), "the session was torn down");
+        return Some(handoff.report());
+    }
+    handoff.pump(clock.now(), false);
+    if handoff.has_in_flight() {
+        eprintln!(
+            "drive: waiting for the running headless orchestrator hand-off to finish \
+             (bounded by [supervisor.escalation] timeout_seconds)"
+        );
+    }
+    while handoff.has_in_flight() {
+        clock.sleep(poll_interval);
+        handoff.pump(clock.now(), false);
+    }
+    Some(handoff.report())
 }
 
 /// `agent.artifact` statuses that make a **merge decision** live.
@@ -1764,6 +1837,17 @@ impl<'r> Shell<'r> {
                 EffectOutcome::Recorded
             }
             DriveEffect::NoteJudgmentCall { .. } => EffectOutcome::Noted,
+            DriveEffect::InvokeOrchestrator(handoff) => {
+                let queued = deps
+                    .handoff
+                    .as_deref_mut()
+                    .is_some_and(|port| port.enqueue(handoff.clone()));
+                if queued {
+                    EffectOutcome::Queued
+                } else {
+                    EffectOutcome::Skipped
+                }
+            }
         };
         self.log.push(AppliedEffect {
             effect,
@@ -1928,6 +2012,7 @@ fn run_correction_pass(
             correction: &config.correction,
             learnings_enabled: config.learnings_enabled,
             clis: &config.clis,
+            handoff_enabled: deps.handoff.is_some(),
         },
     );
     *correction = next;
@@ -2865,6 +2950,56 @@ pub struct DriveRunOptions {
     /// `None` runs the loop with no exclusion at all; it exists only so a
     /// caller that cannot take a binding is not forced to fabricate one.
     pub binding: Option<DriveLoopBinding>,
+    /// The headless orchestrator hand-off, resolved once by the caller from
+    /// `[supervisor]`, `default_cli` and `[clis]`
+    /// (`orchestrator-escalation-handoff`).
+    pub handoff: super::escalation::HandoffResolution,
+    /// `[supervisor.escalation] timeout_seconds`.
+    pub handoff_timeout: Duration,
+}
+
+/// The production hand-off port the drive loop runs with: reports the
+/// resolution at launch (the form, or why none resolved, plus any approval
+/// warning) and returns the port when an invocation resolved, or the reason
+/// for the exit summary when none did.
+fn handoff_port(
+    handoff: super::escalation::HandoffResolution,
+    timeout: Duration,
+    session: &str,
+    repo_root: &Path,
+    broker_url: Option<&String>,
+) -> (
+    Option<
+        super::escalation::Orchestrator<
+            crate::command_runner::RealCommandRunner,
+            super::escalation::BrokerOutcomePublisher,
+        >,
+    >,
+    Option<String>,
+) {
+    if let Some(warning) = &handoff.warning {
+        eprintln!("{warning}");
+    }
+    println!("{}", handoff.notice());
+    match handoff.invocation {
+        Ok(invocation) => (
+            Some(super::escalation::Orchestrator::new(
+                super::escalation::HandoffSetup {
+                    invocation,
+                    repo_root: repo_root.to_path_buf(),
+                    broker_url: broker_url.cloned(),
+                    log_path: super::escalation::escalation_log_path(repo_root, session),
+                    timeout,
+                },
+                crate::command_runner::RealCommandRunner,
+                super::escalation::BrokerOutcomePublisher {
+                    broker_url: broker_url.cloned(),
+                },
+            )),
+            None,
+        ),
+        Err(reason) => (None, Some(reason)),
+    }
 }
 
 /// Runs the unattended drive loop with production dependencies, prints the exit
@@ -2897,7 +3032,17 @@ pub fn run_drive_loop(
         clis,
         layout,
         binding,
+        handoff,
+        handoff_timeout,
     } = options;
+
+    let (mut orchestrator, handoff_unavailable) = handoff_port(
+        handoff,
+        handoff_timeout,
+        session,
+        repo_root,
+        broker_url.as_ref(),
+    );
 
     let instance = BoundInstanceGuard {
         inner: FileSessionInstanceGuard {
@@ -2964,6 +3109,7 @@ pub fn run_drive_loop(
         // session receipt each sweep so `git paw add` / `git paw remove` take
         // effect without restarting it.
         roster: Some(std::sync::Arc::new(SessionFileRoster::new(repo_root))),
+        handoff_unavailable,
         ..DriveConfig::default()
     };
 
@@ -2981,6 +3127,9 @@ pub fn run_drive_loop(
         manual_decisions: manual_decisions.as_mut(),
         refresher: &mut refresher,
         wedged: Vec::new(),
+        handoff: orchestrator
+            .as_mut()
+            .map(|o| o as &mut dyn super::escalation::HandoffPort),
     };
 
     let summary = drive_loop(session, repo_root, agents, &mut deps, &config, &instance);
@@ -3610,6 +3759,7 @@ mod tests {
                         session_id_args: None,
                         resume_args: None,
                         mcp: None,
+                        headless_args: None,
                     },
                 )
             })
@@ -3742,6 +3892,7 @@ mod tests {
                 manual_decisions: &mut manual_decisions,
                 refresher: &mut refresher,
                 wedged: Vec::new(),
+                handoff: None,
             };
             let config = DriveConfig::default();
             let mut dedup = DedupWindow::new(config.dedup_window);
@@ -3916,6 +4067,7 @@ mod tests {
                 manual_decisions: sink,
                 refresher: &mut refresher,
                 wedged: Vec::new(),
+                handoff: None,
             };
             let config = DriveConfig::default();
             let mut dedup = DedupWindow::new(config.dedup_window);
@@ -4053,6 +4205,7 @@ mod tests {
                 manual_decisions: &mut manual_decisions,
                 refresher: &mut refresher,
                 wedged: Vec::new(),
+                handoff: None,
             };
             let config = DriveConfig {
                 poll_interval: Duration::from_secs(1),
@@ -4375,6 +4528,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -4558,6 +4712,7 @@ mod tests {
             broker_log_hint: Some("/tmp/broker.log".to_string()),
             learnings_hint: Some(".git-paw/session-learnings.md".to_string()),
             merged_summary: None,
+            handoff: None,
         };
         let text = summary.render();
         assert!(text.contains("escalated-for-review"), "states outcome");
@@ -4589,6 +4744,7 @@ mod tests {
                 broker_log_hint: None,
                 learnings_hint: None,
                 merged_summary: None,
+                handoff: None,
             };
             let text = summary.render();
             assert!(
@@ -4645,6 +4801,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -4710,6 +4867,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_millis(0),
@@ -4781,6 +4939,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_millis(0),
@@ -4864,6 +5023,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_millis(0),
@@ -4948,6 +5108,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             heartbeat: Duration::from_hours(1),
@@ -5041,6 +5202,7 @@ mod tests {
                 manual_decisions: &mut manual_decisions,
                 refresher: &mut refresher,
                 wedged: Vec::new(),
+                handoff: None,
             };
             let config = DriveConfig {
                 poll_interval: Duration::from_secs(1),
@@ -5357,6 +5519,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -5425,6 +5588,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -5514,6 +5678,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -5615,6 +5780,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -5688,6 +5854,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -5754,6 +5921,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let mut config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -6166,6 +6334,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -6262,6 +6431,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -6320,6 +6490,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -6494,6 +6665,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -6642,6 +6814,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let repo = tempfile::tempdir().expect("temp repo root");
         let outcome = send_reengagement(
@@ -6702,6 +6875,7 @@ mod tests {
                 manual_decisions: &mut manual_decisions,
                 refresher: &mut refresher,
                 wedged: Vec::new(),
+                handoff: None,
             };
             send_reengagement(
                 &mut deps,
@@ -6923,6 +7097,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         // `DriveConfig::default()` carries `CorrectionConfig::default()`, i.e.
         // `auto_loopback = false` — the absent-table resolution.
@@ -6983,6 +7158,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -7011,6 +7187,22 @@ mod tests {
         correction: CorrectionConfig,
         learnings_enabled: bool,
         status_rows: Vec<AgentStatusRow>,
+    ) -> (
+        DriveSummary,
+        RecordingDispatcher,
+        RecordingAlerts,
+        RecordingLearnings,
+    ) {
+        run_always_failing_with(rounds, correction, learnings_enabled, status_rows, None)
+    }
+
+    /// [`run_always_failing`] with a headless hand-off port.
+    fn run_always_failing_with(
+        rounds: usize,
+        correction: CorrectionConfig,
+        learnings_enabled: bool,
+        status_rows: Vec<AgentStatusRow>,
+        handoff: Option<&mut dyn HandoffPort>,
     ) -> (
         DriveSummary,
         RecordingDispatcher,
@@ -7046,6 +7238,8 @@ mod tests {
                 manual_decisions: &mut manual_decisions,
                 refresher: &mut refresher,
                 wedged: Vec::new(),
+                // Shortens the port's object lifetime to the deps' own.
+                handoff: handoff.map(|h| h as &mut dyn HandoffPort),
             };
             let config = DriveConfig {
                 poll_interval: Duration::from_secs(1),
@@ -7275,6 +7469,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -7361,6 +7556,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         drive_loop_in_tmp("paw-test", agents, &mut deps, config);
         (dispatcher, alerts)
@@ -7401,6 +7597,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let summary = drive_loop_in_tmp("paw-test", agents, &mut deps, config);
         (summary, dispatcher)
@@ -7735,6 +7932,7 @@ mod tests {
                 session_id_args: None,
                 resume_args: None,
                 mcp: None,
+                headless_args: None,
             },
         );
         let merge_check = FakeMergeCheck::default();
@@ -7805,6 +8003,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let summary = drive_loop_in_tmp(
             "paw-test",
@@ -7869,6 +8068,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let summary = drive_loop_in_tmp(
             "paw-test",
@@ -8097,6 +8297,7 @@ mod tests {
                 manual_decisions: &mut manual_decisions,
                 refresher: &mut refresher,
                 wedged: Vec::new(),
+                handoff: None,
             };
             drive_loop_in_tmp("paw-test", agents, &mut deps, &config)
         };
@@ -8497,6 +8698,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -8859,6 +9061,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let config = DriveConfig {
             poll_interval: Duration::from_secs(1),
@@ -9163,6 +9366,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
 
         refresh_branches_after_merge(
@@ -9325,6 +9529,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
 
         let pre_head = capture_real_git(&worktree_path, &["rev-parse", "feat/example"]);
@@ -9568,6 +9773,7 @@ mod tests {
     /// friction learning reaches the ports in that order, and the effect log
     /// lists the three in that order with their outcomes.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn effects_are_applied_in_order_and_logged() {
         let agents = vec![AgentPane {
             agent_id: "feat-a".to_string(),
@@ -9606,6 +9812,7 @@ mod tests {
             manual_decisions: &mut manual_decisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let repo = tempfile::tempdir().expect("temp repo root");
         let run = drive_loop_logged(
@@ -9667,6 +9874,7 @@ mod tests {
                     manual_decisions: &mut NoopManualDecisions,
                     refresher: &mut RecordingRefresher::default(),
                     wedged: Vec::new(),
+                    handoff: None,
                 },
                 &DriveConfig::default(),
             ),
@@ -9719,6 +9927,7 @@ mod tests {
             manual_decisions: &mut NoopManualDecisions,
             refresher: &mut refresher,
             wedged: Vec::new(),
+            handoff: None,
         };
         let repo = tempfile::tempdir().expect("temp repo root");
         let run = drive_loop_logged(
@@ -9744,5 +9953,357 @@ mod tests {
         );
         assert!(dispatcher.events.is_empty(), "{:?}", dispatcher.events);
         assert!(alerts.escalations.is_empty(), "{:?}", alerts.escalations);
+    }
+    // --- headless hand-off (orchestrator-escalation-handoff) ---------------
+
+    /// A child that reports `Running` for `polls` polls, then exits 0.
+    struct CountdownChild {
+        polls: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+
+    impl crate::command_runner::SpawnedChild for CountdownChild {
+        fn poll(&mut self) -> std::io::Result<crate::command_runner::ChildState> {
+            let left = self.polls.get();
+            if left == 0 {
+                return Ok(crate::command_runner::ChildState::Exited(Some(0)));
+            }
+            self.polls.set(left - 1);
+            Ok(crate::command_runner::ChildState::Running)
+        }
+        fn kill_group(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn id(&self) -> u32 {
+            0
+        }
+    }
+
+    /// Records published hand-off outcomes.
+    #[derive(Clone, Default)]
+    struct RecordedOutcomes(
+        std::rc::Rc<std::cell::RefCell<Vec<super::super::escalation::InvocationOutcome>>>,
+    );
+
+    impl super::super::escalation::OutcomePublisher for RecordedOutcomes {
+        fn publish(&mut self, outcome: &super::super::escalation::InvocationOutcome) {
+            self.0.borrow_mut().push(outcome.clone());
+        }
+    }
+
+    /// A fake runner whose every one-shot runs for `polls` polls, then exits 0.
+    fn countdown_runner(polls: u32) -> crate::command_runner::test_support::FakeCommandRunner {
+        crate::command_runner::test_support::FakeCommandRunner::succeeding("").with_spawn(
+            move |_| {
+                Ok(Box::new(CountdownChild {
+                    polls: std::rc::Rc::new(std::cell::Cell::new(polls)),
+                }))
+            },
+        )
+    }
+
+    fn handoff_setup(repo: &Path) -> super::super::escalation::HandoffSetup {
+        super::super::escalation::HandoffSetup {
+            invocation: super::super::escalation::HeadlessInvocation {
+                cli: "claude".to_string(),
+                program: "claude".to_string(),
+                approval_flags: Vec::new(),
+                headless_args: vec!["-p".to_string()],
+            },
+            repo_root: repo.to_path_buf(),
+            broker_url: Some("http://127.0.0.1:9119".to_string()),
+            log_path: super::super::escalation::escalation_log_path(repo, "paw-test"),
+            timeout: Duration::from_mins(30),
+        }
+    }
+
+    /// Spec scenarios "Escalation is always recorded on the broker", "An
+    /// ambiguous question spawns a one-shot with context on stdin", "A
+    /// permission prompt spawns no one-shot" and "A permission prompt stays
+    /// on the broker with a resolvable orchestrator", through the loop: the
+    /// question is handed to exactly one one-shot, the loop publishes no copy
+    /// of it, keeps sweeping while the one-shot runs (escalating another
+    /// worker's live prompt meanwhile, which spawns nothing), and the
+    /// outcome reaches the publisher and the summary.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn a_question_is_handed_off_once_while_the_sweep_goes_on() {
+        let agents = vec![
+            AgentPane {
+                agent_id: "feat-a".to_string(),
+                worktree_path: PathBuf::from("/repo-feat-a"),
+                branch: "feat/a".to_string(),
+            },
+            AgentPane {
+                agent_id: "feat-b".to_string(),
+                worktree_path: PathBuf::from("/repo-feat-b"),
+                branch: "feat/b".to_string(),
+            },
+        ];
+        let enumerator = FakeEnumerator {
+            panes: vec![
+                PaneInfo {
+                    pane_index: 1,
+                    owner: "/repo-feat-a".to_string(),
+                },
+                PaneInfo {
+                    pane_index: 2,
+                    owner: "/repo-feat-b".to_string(),
+                },
+            ],
+        };
+        let prompt = live_safe_capture("rm -rf build");
+        let capturer = FakeCapturer::new(&[(1, "● Done.\n  ? for shortcuts"), (2, &prompt)]);
+        let mut dispatcher = RecordingDispatcher::default();
+        let status = ScriptedStatus::new(vec![
+            vec![row("feat-a", "working"), row("feat-b", "working")],
+            vec![row("feat-a", "working"), row("feat-b", "working")],
+            vec![row("feat-a", "verified"), row("feat-b", "verified")],
+        ]);
+        let messages = ScriptedMessages::new(vec![vec![BrokerMessage::Question {
+            agent_id: "feat-a".to_string(),
+            payload: crate::broker::messages::QuestionPayload {
+                question: "RS256 or HS256?".to_string(),
+            },
+        }]]);
+        let clock = FakeClock::new();
+        let mut alerts = RecordingAlerts::default();
+        let mut learnings = RecordingLearnings::default();
+        let mut refresher = RecordingRefresher::default();
+        let merge_check = FakeMergeCheck::default();
+        let repo = tempfile::tempdir().expect("temp repo root");
+        let runner = countdown_runner(3);
+        let outcomes = RecordedOutcomes::default();
+        let mut port = super::super::escalation::Orchestrator::new(
+            handoff_setup(repo.path()),
+            &runner,
+            outcomes.clone(),
+        );
+        let mut deps = DriveDeps {
+            enumerator: &enumerator,
+            capturer: &capturer,
+            dispatcher: &mut dispatcher,
+            status: &status,
+            messages: &messages,
+            clock: &clock,
+            merge_check: &merge_check,
+            alerts: &mut alerts,
+            learnings: &mut learnings,
+            manual_decisions: &mut NoopManualDecisions,
+            refresher: &mut refresher,
+            wedged: Vec::new(),
+            handoff: Some(&mut port),
+        };
+        let run = drive_loop_logged(
+            "paw-test",
+            repo.path(),
+            &agents,
+            &mut deps,
+            &DriveConfig::default(),
+            &AlwaysCurrentGuard,
+        );
+
+        let spawns = runner.spawns();
+        assert_eq!(spawns.len(), 1, "exactly one one-shot: {spawns:?}");
+        assert_eq!(spawns[0].program, "claude");
+        assert_eq!(spawns[0].args, ["-p"]);
+        assert_eq!(spawns[0].cwd, repo.path());
+        let stdin = String::from_utf8(spawns[0].stdin.clone()).unwrap();
+        assert!(stdin.contains("feat-a") && stdin.contains("RS256 or HS256?"));
+        assert!(!spawns[0].args.iter().any(|a| a.contains("RS256")));
+
+        assert!(
+            run.effect_log.iter().any(|e| matches!(
+                (&e.effect, &e.outcome),
+                (DriveEffect::InvokeOrchestrator(_), EffectOutcome::Queued)
+            )),
+            "{:?}",
+            run.effect_log
+        );
+        // The worker's own question is the review item: the loop publishes
+        // no copy. The only escalation is feat-b's prompt, which stays on
+        // the broker and spawns nothing.
+        assert_eq!(alerts.escalations.len(), 1, "{:?}", alerts.escalations);
+        assert_eq!(alerts.escalations[0].agent_id, "feat-b");
+        assert_eq!(alerts.escalations[0].verdict, PERMISSION_PROMPT_VERDICT);
+        assert!(
+            run.effect_log
+                .iter()
+                .any(|e| matches!(&e.effect, DriveEffect::RecordManualDecision { agent_id, .. } if agent_id == "feat-b"))
+        );
+        assert!(dispatcher.events.is_empty(), "{:?}", dispatcher.events);
+
+        assert_eq!(outcomes.0.borrow().len(), 1, "the outcome is published");
+        assert_eq!(
+            outcomes.0.borrow()[0].result,
+            super::super::escalation::InvocationResult::Exited(Some(0))
+        );
+        let Some(super::super::escalation::HandoffReport::Ran { completed, .. }) =
+            run.summary.handoff
+        else {
+            panic!("a hand-off report: {:?}", run.summary.handoff);
+        };
+        assert_eq!(completed, 1);
+    }
+
+    /// Spec scenarios "A correction-exhausted branch spawns one one-shot" and
+    /// "Handed-off escalations remain listed": later failing sweeps spawn no
+    /// second one-shot, and the exhausted branch stays among the escalations
+    /// awaiting review.
+    #[test]
+    fn an_exhausted_branch_spawns_one_one_shot_and_stays_listed() {
+        let repo = tempfile::tempdir().expect("temp repo root");
+        let runner = countdown_runner(0);
+        let mut port = super::super::escalation::Orchestrator::new(
+            handoff_setup(repo.path()),
+            &runner,
+            RecordedOutcomes::default(),
+        );
+        let (summary, _dispatcher, alerts, _learnings) = run_always_failing_with(
+            8,
+            CorrectionConfig {
+                auto_loopback: true,
+                max_cycles: 2,
+                on_exhausted: OnExhausted::Escalate,
+                ..CorrectionConfig::default()
+            },
+            false,
+            vec![row("feat-a", "working")],
+            Some(&mut port),
+        );
+        let spawns = runner.spawns();
+        assert_eq!(
+            spawns.len(),
+            1,
+            "one one-shot for the exhaustion: {spawns:?}"
+        );
+        let stdin = String::from_utf8(spawns[0].stdin.clone()).unwrap();
+        assert!(stdin.contains(CORRECTION_EXHAUSTED_VERDICT), "{stdin}");
+        assert!(
+            alerts
+                .escalations
+                .iter()
+                .any(|e| e.verdict == CORRECTION_EXHAUSTED_VERDICT),
+            "recorded on the broker"
+        );
+        assert!(
+            summary
+                .escalations
+                .iter()
+                .any(|e| e.verdict == CORRECTION_EXHAUSTED_VERDICT && e.agent_id == "feat-a"),
+            "still listed awaiting review: {:?}",
+            summary.escalations
+        );
+        assert!(
+            summary.render().contains("1 completed"),
+            "{}",
+            summary.render()
+        );
+    }
+
+    /// Spec scenario "Summary explains an unavailable hand-off": with no
+    /// port, the reason resolved at loop start reaches the summary.
+    #[test]
+    fn an_unavailable_hand_off_is_explained_in_the_summary() {
+        let config = DriveConfig {
+            handoff_unavailable: Some("no orchestrator CLI is configured".to_string()),
+            ..DriveConfig::default()
+        };
+        let summary = drive_loop_in_tmp(
+            "paw-test",
+            &[],
+            &mut DriveDeps {
+                enumerator: &FakeEnumerator { panes: Vec::new() },
+                capturer: &FakeCapturer::new(&[]),
+                dispatcher: &mut RecordingDispatcher::default(),
+                status: &ScriptedStatus::new(vec![Vec::new()]),
+                messages: &ScriptedMessages::none(),
+                clock: &FakeClock::new(),
+                merge_check: &FakeMergeCheck::default(),
+                alerts: &mut RecordingAlerts::default(),
+                learnings: &mut RecordingLearnings::default(),
+                manual_decisions: &mut NoopManualDecisions,
+                refresher: &mut RecordingRefresher::default(),
+                wedged: Vec::new(),
+                handoff: None,
+            },
+            &config,
+        );
+        let text = summary.render();
+        assert!(
+            text.contains("Headless hand-off unavailable: no orchestrator CLI is configured"),
+            "{text}"
+        );
+    }
+    /// A session torn down while a one-shot runs: the loop kills it instead
+    /// of waiting out its timeout, and records it.
+    #[test]
+    fn a_torn_down_session_kills_the_running_one_shot() {
+        let agents = vec![AgentPane {
+            agent_id: "feat-a".to_string(),
+            worktree_path: PathBuf::from("/repo-feat-a"),
+            branch: "feat/a".to_string(),
+        }];
+        let enumerator = FakeEnumerator {
+            panes: vec![PaneInfo {
+                pane_index: 1,
+                owner: "/repo-feat-a".to_string(),
+            }],
+        };
+        let capturer = FakeCapturer::new(&[(1, "● Done.\n  ? for shortcuts")]);
+        let messages = ScriptedMessages::new(vec![vec![BrokerMessage::Question {
+            agent_id: "feat-a".to_string(),
+            payload: crate::broker::messages::QuestionPayload {
+                question: "which?".to_string(),
+            },
+        }]]);
+        let state = std::rc::Rc::new(std::cell::Cell::new(
+            crate::command_runner::ChildState::Running,
+        ));
+        let killed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let (st, k) = (state.clone(), killed.clone());
+        let runner = crate::command_runner::test_support::FakeCommandRunner::succeeding("")
+            .with_spawn(move |_| {
+                Ok(Box::new(
+                    crate::command_runner::test_support::FakeChild::new(st.clone(), k.clone()),
+                ))
+            });
+        let repo = tempfile::tempdir().expect("temp repo root");
+        let outcomes = RecordedOutcomes::default();
+        let mut port = super::super::escalation::Orchestrator::new(
+            handoff_setup(repo.path()),
+            &runner,
+            outcomes.clone(),
+        );
+        let run = drive_loop_logged(
+            "paw-test",
+            repo.path(),
+            &agents,
+            &mut DriveDeps {
+                enumerator: &enumerator,
+                capturer: &capturer,
+                dispatcher: &mut RecordingDispatcher::default(),
+                status: &ScriptedStatus::new(vec![vec![row("feat-a", "working")]]),
+                messages: &messages,
+                clock: &FakeClock::new(),
+                merge_check: &FakeMergeCheck::default(),
+                alerts: &mut RecordingAlerts::default(),
+                learnings: &mut RecordingLearnings::default(),
+                manual_decisions: &mut NoopManualDecisions,
+                refresher: &mut RecordingRefresher::default(),
+                wedged: Vec::new(),
+                handoff: Some(&mut port),
+            },
+            &DriveConfig::default(),
+            &TornDownAfter::new(1),
+        );
+        assert_eq!(run.summary.outcome, DriveOutcome::SessionTornDown);
+        assert_eq!(runner.spawns().len(), 1);
+        assert!(killed.get(), "the one-shot's group was killed");
+        assert_eq!(
+            outcomes.0.borrow()[0].result,
+            super::super::escalation::InvocationResult::Killed(
+                "the session was torn down".to_string()
+            )
+        );
     }
 }
