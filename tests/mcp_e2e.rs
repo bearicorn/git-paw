@@ -663,6 +663,7 @@ fn active_broker_populates_intents_and_conflicts() {
         broker_url: Some(handle.url.clone()),
         server_name: "git-paw".to_string(),
         is_main_worktree: false,
+        allow_repo_writes: false,
         authority: None,
     };
 
@@ -722,6 +723,7 @@ fn broker_and_ctx(stall_minutes: u64) -> Option<(git_paw::broker::BrokerHandle, 
         broker_url: Some(handle.url.clone()),
         server_name: "git-paw".to_string(),
         is_main_worktree: false,
+        allow_repo_writes: false,
         authority: None,
     };
     // The temp dir only has to outlive the context's root path, which nothing
@@ -881,6 +883,7 @@ fn get_session_status_reports_a_stalled_wave() {
         broker_url: Some(handle.url.clone()),
         server_name: "git-paw".to_string(),
         is_main_worktree: false,
+        allow_repo_writes: false,
         authority: None,
     };
 

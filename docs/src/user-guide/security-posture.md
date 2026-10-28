@@ -339,8 +339,9 @@ restart from pause starts its broker host.
   which fetch it through the hidden `git paw __authority` subcommand — which
   refuses to run from a linked worktree.
 
-No MCP tool publishes a verdict today; root-session MCP verdict tools, when they
-land, will read the same session file.
+A root session's MCP server (one started in the main working tree) offers
+`publish_verified` and `publish_feedback`, which carry the root credential read
+from the same session file. A worktree session's MCP server has no verdict tool.
 
 The worker-side `broker.sh` has no credential-bearing verb.
 
@@ -363,6 +364,17 @@ Feedback from any other sender (the post-commit branch-guard hook, a person) is
 not a verdict and stays ungated, and so does one agent publishing a non-verdict
 message as another. Messages the broker's own subsystems publish in-process
 (the conflict detector, the role guard) never cross HTTP and are not gated.
+
+## MCP repository writes
+
+The MCP server's spec-authoring tools (`create_spec`, `write_spec_artifact`) are its only tools that write file content into the repository. MCP input is untrusted, because the orchestrator calling them may have been prompt-injected by content it read. These are the guarantees:
+
+- **Off by default, and only the repository can consent.** The tools exist only when the repository's own `.git-paw/config.toml` sets `[mcp] allow_repo_writes = true`. The user-level config, environment variables and tool arguments cannot enable them, and no tool has a parameter that grants consent. The server reads the switch once at startup and logs whether writes are enabled.
+- **Root session only.** A server in an agent's worktree never lists or runs them, whatever that worktree's config says.
+- **Confined to the change directory.** Lexical checks refuse an absolute `path`, a `..` or `.git` component, and a `change` that is not one kebab-case segment. Canonical checks refuse a spec directory outside the repository, inside `.git`, at the repository root or inside `.git-paw`, a symlinked directory leading out of the change directory, and a symlinked target file. The spec directory comes from the repository's own `[specs]` section only, never the user-level config. So writes land only inside change folders under the repository-configured spec directory, and never in `.git` or `.git-paw`. Where that directory points is the repository's choice: set to `.github` or `src`, its "change folders" are CI or source directories. Content is written to a temporary file and renamed into place.
+- **No process, no commit.** No tool spawns a process (`validate_spec` checks in-process), and nothing is staged or committed. `git status` / `git diff` and one server-log line per write record what was authored.
+
+**The limit.** The switch is a file in the repository, so anything that can edit the root's `.git-paw/config.toml` can turn it on. That includes an unsandboxed worker writing outside its worktree, or a merged branch that carries the key. The change shows up in the diff a human reviews and in the server's startup log line, and the [sandbox](./sandbox.md) confines a worker's writes to its worktree. Against an unsandboxed rogue worker, though, the switch is no defence, as with [broker verdict authority](#broker-verdict-authority). Likewise, a local process that can already write inside the change directory could swap a directory that was just checked for a symbolic link before the write lands. That is out of scope for the same reason: it already has write access.
 
 ## The bottom line
 

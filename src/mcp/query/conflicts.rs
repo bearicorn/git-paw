@@ -147,6 +147,7 @@ mod tests {
             broker_url: None,
             server_name: "git-paw".to_string(),
             is_main_worktree: false,
+            allow_repo_writes: false,
             authority: None,
         };
         assert!(conflicts(&ctx).is_empty());

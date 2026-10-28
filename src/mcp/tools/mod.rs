@@ -13,6 +13,10 @@
 //! four tools publish to the broker instead of reading, and an unreachable
 //! broker surfaces as an [`rmcp::ErrorData`] rather than degrading to an
 //! empty result — there is no "empty" form of having published nothing.
+//!
+//! `spec_authoring` adds the repository-write tools (`create_spec`,
+//! `write_spec_artifact`), present only behind the repository-write gate in
+//! [`crate::mcp::repo_write`], and the read-only `validate_spec`.
 
 pub mod coordination;
 pub mod docs;
@@ -22,3 +26,4 @@ pub mod project;
 pub mod publish;
 pub mod session;
 pub mod source;
+pub mod spec_authoring;

@@ -3344,6 +3344,7 @@ fn mcp_config_round_trips_through_toml() {
     let config = PawConfig {
         mcp: McpConfig {
             name: Some("my-project".to_string()),
+            allow_repo_writes: true,
         },
         ..PawConfig::default()
     };
@@ -3382,6 +3383,69 @@ fn mcp_base_name_preserved_when_overlay_absent() {
     let overlay: PawConfig = toml::from_str("default_cli = \"claude\"\n").expect("overlay");
     let merged = base.merged_with(&overlay);
     assert_eq!(merged.mcp.name, Some("global-name".to_string()));
+}
+
+// core-configuration "MCP configuration section" — Scenario: Config with
+// [mcp] allow_repo_writes parses the field.
+#[test]
+fn mcp_allow_repo_writes_parses_from_the_repository_config() {
+    let tmp = TempDir::new().unwrap();
+    let global = tmp.path().join("global.toml");
+    write_file(
+        &tmp.path().join(".git-paw/config.toml"),
+        "[mcp]\nallow_repo_writes = true\n",
+    );
+    let config = load_config_from(&global, tmp.path()).expect("loads");
+    assert!(config.mcp.allow_repo_writes);
+}
+
+// Scenario: Config without [mcp] section loads with defaults.
+#[test]
+fn mcp_allow_repo_writes_defaults_to_false() {
+    let config: PawConfig = toml::from_str("default_cli = \"claude\"\n").expect("parses");
+    assert_eq!(config.mcp, McpConfig::default());
+    assert!(!config.mcp.allow_repo_writes);
+    assert!(config.mcp.name.is_none());
+}
+
+// Scenario: The user-level config cannot enable repository writes.
+#[test]
+fn user_level_config_cannot_enable_repo_writes() {
+    let tmp = TempDir::new().unwrap();
+    let global = tmp.path().join("global.toml");
+    write_file(&global, "[mcp]\nallow_repo_writes = true\n");
+    write_file(
+        &tmp.path().join(".git-paw/config.toml"),
+        "[mcp]\nname = \"repo\"\n",
+    );
+    let config = load_config_from(&global, tmp.path()).expect("loads");
+    assert!(!config.mcp.allow_repo_writes);
+    assert_eq!(config.mcp.name.as_deref(), Some("repo"));
+}
+
+// Scenario: A false switch is not serialized.
+#[test]
+fn false_allow_repo_writes_is_not_serialized() {
+    let config = PawConfig {
+        mcp: McpConfig {
+            name: Some("x".to_string()),
+            allow_repo_writes: false,
+        },
+        ..PawConfig::default()
+    };
+    let serialized = toml::to_string_pretty(&config).expect("serializes");
+    assert!(
+        !serialized.contains("allow_repo_writes"),
+        "got:\n{serialized}"
+    );
+}
+
+#[test]
+fn generated_template_documents_allow_repo_writes_commented_out() {
+    let template = generate_default_config();
+    assert!(template.contains("# allow_repo_writes = false"));
+    let config: PawConfig = toml::from_str(&template).expect("template parses");
+    assert!(!config.mcp.allow_repo_writes);
 }
 
 // --- worktree_placement (worktree-embedded-placement) ---

@@ -36,6 +36,7 @@
 
 pub mod logging;
 pub mod query;
+pub mod repo_write;
 pub mod server;
 pub mod tools;
 
@@ -68,6 +69,12 @@ pub struct RepoContext {
     /// session) rather than a linked worktree, as git reports it. Only a root
     /// session is offered the lifecycle and verdict tools.
     pub is_main_worktree: bool,
+    /// The repository's `[mcp] allow_repo_writes` consent, resolved once at
+    /// startup from the repository's own config (a user-level value never
+    /// applies). Together with [`Self::is_main_worktree`] it decides, through
+    /// [`repo_write::repo_write_access`], whether the repository-write tools
+    /// exist for this session.
+    pub allow_repo_writes: bool,
     /// The session's broker authority credential — loaded only for a root
     /// session, never for a worktree server, although that server resolves
     /// the owning repository's session too.
@@ -114,7 +121,8 @@ impl RepoContext {
     /// read-only session view; mutating commands keep the exact match.
     /// Resolves the advertised server identity from the
     /// merged config's `[mcp].name`, defaulting to `"git-paw"` when unset (or
-    /// when the config cannot be loaded).
+    /// when the config cannot be loaded), and the `[mcp] allow_repo_writes`
+    /// consent, `false` when the config cannot be loaded.
     ///
     /// Decides once whether `root` is the repository's main working tree,
     /// through the same [`RepoLayout::is_linked_worktree`] check `git paw
@@ -136,8 +144,12 @@ impl RepoContext {
             .flatten()
             .as_ref()
             .and_then(broker_url_from_session);
-        let server_name = crate::config::load_config(&root, None)
-            .map_or_else(|_| "git-paw".to_string(), |cfg| cfg.mcp_server_name());
+        let config = crate::config::load_config(&root, None).ok();
+        let server_name = config.as_ref().map_or_else(
+            || "git-paw".to_string(),
+            crate::config::PawConfig::mcp_server_name,
+        );
+        let allow_repo_writes = config.is_some_and(|cfg| cfg.mcp.allow_repo_writes);
         let is_main_worktree = is_main_working_tree(&root);
         let authority = if is_main_worktree {
             session::authority_for_repo(&root)
@@ -153,6 +165,7 @@ impl RepoContext {
             broker_url,
             server_name,
             is_main_worktree,
+            allow_repo_writes,
             authority,
         }
     }
@@ -509,6 +522,7 @@ mod tests {
             broker_url: None,
             server_name: "git-paw".to_string(),
             is_main_worktree: true,
+            allow_repo_writes: false,
             authority: Some(SessionAuthority::new(secret.to_string())),
         };
         let shown = format!("{ctx:?}");

@@ -94,13 +94,15 @@ pub struct GovernanceConfig {
 
 /// MCP server configuration.
 ///
-/// Carries settings specific to the `git paw mcp` server. Currently a single
-/// optional `name` field that overrides the identity the server advertises in
-/// the `initialize` handshake's `serverInfo.name`.
+/// Carries settings specific to the `git paw mcp` server: an optional `name`
+/// that overrides the identity the server advertises in the `initialize`
+/// handshake's `serverInfo.name`, and the repository's `allow_repo_writes`
+/// consent for the MCP tools that write spec files.
 ///
 /// Embedded as a plain (non-`Option`) field on [`PawConfig`] with
 /// `#[serde(default)]`, so a config with no `[mcp]` section loads
-/// [`McpConfig::default`] (`name: None`) and pre-existing configs round-trip
+/// [`McpConfig::default`] (`name: None`, `allow_repo_writes: false`) and
+/// pre-existing configs round-trip
 /// identically.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpConfig {
@@ -112,6 +114,14 @@ pub struct McpConfig {
     /// distinguish instances by the server's own identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Repository consent for MCP tools that write file content into the
+    /// working tree (the spec-authoring tools). Defaults to `false`. Honoured
+    /// only from the repository's own `.git-paw/config.toml`:
+    /// [`PawConfig::merged_with`] takes the repository value alone, so a
+    /// user-level value never applies. The MCP server reads it once at
+    /// startup.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_repo_writes: bool,
 }
 
 /// Enforcement mode for the opsx role-gating guard.
@@ -560,6 +570,8 @@ impl PawConfig {
             opsx: overlay.opsx.clone().or_else(|| self.opsx.clone()),
             mcp: McpConfig {
                 name: overlay.mcp.name.clone().or_else(|| self.mcp.name.clone()),
+                // Repository consent only: the user-level value never applies.
+                allow_repo_writes: overlay.mcp.allow_repo_writes,
             },
             worktree_placement: overlay.worktree_placement.or(self.worktree_placement),
             docs_base_url: overlay
@@ -1164,6 +1176,9 @@ worktree_placement = "child"
 # server; defaults to "git-paw".
 # [mcp]
 # name = "git-paw"
+# Let MCP tools write spec files into this repository (root session only;
+# honoured from this file alone; restart the MCP server after changing it).
+# allow_repo_writes = false
 
 # Custom CLI definitions.
 # [clis.my-agent]

@@ -25,7 +25,10 @@ Alongside those, the server exposes a bounded **write** surface: the
 [Publish tools](#publish-tools) for every session, and — for a **root session**
 only (a server started in the repository's main working tree) — the
 [Session lifecycle](#session-lifecycle-root-session-only) tools and the two
-verdict publish tools.
+verdict publish tools, plus — only once the repository opts in with
+`[mcp] allow_repo_writes` — the
+[Spec authoring](#spec-authoring-repository-writes-root-session-only) write
+tools. `validate_spec` is read-only and every session gets it.
 
 The server is **standalone**: it does not need a tmux session, broker, or
 supervisor for the read-only categories (the publish tools do need a reachable
@@ -33,16 +36,18 @@ broker — see below). When a data source is unavailable (no broker, no
 session, no governance config) read tools return well-formed empty/null
 results rather than errors — so the client always gets an unambiguous answer.
 
-> **Read/write boundary.** Every tool category except **Publish tools** and
-> **Session lifecycle** is read-only, deterministically sourced from files, git,
+> **Read/write boundary.** Every tool category except **Publish tools**,
+> **Session lifecycle** and the two **Spec authoring** write tools is read-only, deterministically sourced from files, git,
 > and broker state. The write surface is a fixed set of tools: the four worker
 > publish tools (the same four events the bundled `broker.sh` helper covers),
 > each publishing only as the calling session; and, for a root session only,
 > the session lifecycle tools (exactly what `git paw start` / `pause` / `stop` /
 > `purge` do) and the two verdict tools (`publish_verified`,
 > `publish_feedback`, exactly what `sweep.sh verified` / `feedback-gate` do).
-> There is no tool that writes a caller-named file, runs a caller-supplied git
-> or shell command, or writes configuration, and no generic "publish anything"
+> The spec-authoring write tools, for a consenting repository's root session,
+> write only inside one spec change directory. There is no tool that writes a
+> file outside a spec change directory, runs a caller-supplied git or shell
+> command, or writes configuration, and no generic "publish anything"
 > tool. A server in an agent's worktree never lists or runs the root-only tools,
 > so a coding agent cannot verify its own work through MCP — see
 > [Publish tools](#publish-tools). The server also **never invokes an agent
@@ -243,8 +248,8 @@ VS Code (1.102+) supports MCP servers. It is workspace-aware, so bare
 
 ## Tool reference
 
-Every category below is read-only except **Publish tools** and **Session
-lifecycle**. For the
+Every category below is read-only except **Publish tools**, **Session
+lifecycle** and the two write tools of **Spec authoring**. For the
 read-only categories, collection results are empty (`[]`) and single-record
 results are `null` when the underlying data is unavailable. Governance tools
 return a protocol error only when a **configured** document path exists but
@@ -469,5 +474,95 @@ returns structured JSON with the command's output lines and warnings.
 - With no session, `pause_session`, `stop_session` and `purge_session` return
   `{ "no_session": true }` rather than an error.
 
-Authoring specs over MCP is not part of this surface; those tools are
-documented with the spec-authoring tools when they ship.
+Authoring specs over MCP is a separate surface, gated by the repository's own
+consent; see [Spec authoring](#spec-authoring-repository-writes-root-session-only).
+
+### Spec authoring (repository writes, root session only)
+
+Three tools let an orchestrator author and check an OpenSpec change without its
+own file tools. `create_spec` and `write_spec_artifact` write files into the
+repository working tree, so they are **off by default**. `validate_spec` only
+reads, and every session gets it.
+
+| Tool | Input | Result |
+|------|-------|--------|
+| `create_spec` | `{ name }` | `{ written }` |
+| `write_spec_artifact` | `{ change, path, content }` | `{ written, replaced }` |
+| `validate_spec` | `{ change }` | `{ valid, findings: [{ file, message }] }` |
+
+**Consent.** The two write tools are listed and run only when both of these
+hold:
+
+- The repository's own `.git-paw/config.toml` sets
+  [`[mcp] allow_repo_writes = true`](../configuration/README.md#mcp). A value in
+  the user-level config has no effect, and no environment variable or tool
+  argument turns it on.
+- The server runs in the repository's main working tree (a root session). A
+  server in an agent's worktree never gets them, even with the switch on.
+
+The server reads the switch once, at startup, and logs whether repository
+writes are enabled. Changing it in either direction takes effect only after
+you restart the MCP server. When a condition fails, the tools are absent from
+`tools/list`. A by-name call returns an MCP error and writes nothing. The
+error names `allow_repo_writes` and `.git-paw/config.toml` when the switch is
+off, or the worktree restriction in a worktree session.
+
+**The tools:**
+
+- **`create_spec`** creates `<[specs] dir>/<name>/.openspec.yaml` with
+  `schema: spec-driven` and today's date as `created: YYYY-MM-DD`. That is the
+  scaffold `openspec new change <name>` creates, so the consumer needs no
+  OpenSpec CLI installed. `name` must be lowercase letters, digits and hyphens,
+  and an existing change is refused.
+- **`write_spec_artifact`** writes `content` (at most 1 MiB) verbatim to
+  `path` inside the existing change directory `<[specs] dir>/<change>/`. It
+  refuses `.openspec.yaml`, which `create_spec` owns. It creates missing
+  parent directories inside the change and replaces an existing regular file.
+  `replaced` says whether it did. A change that does not exist is an error.
+- **`validate_spec`** runs an in-process structural check on a change. It
+  reports a missing `proposal.md`, no `specs/<capability>/spec.md` with an
+  `## ADDED`, `## MODIFIED`, `## REMOVED` or `## RENAMED Requirements` header,
+  an added or modified requirement whose first body line has neither SHALL nor
+  MUST, and an added or modified requirement without a `#### Scenario:`.
+  `valid` is `true` exactly when `findings` is empty. It spawns no process and
+  checks only this subset, so your project's own spec validator stays
+  authoritative.
+
+```json
+{ "name": "write_spec_artifact",
+  "arguments": { "change": "add-export",
+                 "path": "specs/data-export/spec.md",
+                 "content": "## ADDED Requirements\n..." } }
+```
+
+```json
+{ "written": ["openspec/changes/add-export/specs/data-export/spec.md"], "replaced": false }
+```
+
+Returned paths are repository-relative. Each write logs one line on the server
+log with the path, byte count and whether it replaced a file. The tools never
+stage or commit, so `git status` and `git diff` show exactly what was authored.
+
+**Confinement.** Before writing, the server refuses the call with an MCP error
+naming the offending input, and writes nothing, when:
+
+- `path` is absolute or has a `..` or `.git` component;
+- `change` is not a single kebab-case change name (lowercase letters, digits
+  and hyphens);
+- the spec directory resolves outside the repository, inside its `.git`, to
+  the repository root itself, or inside `.git-paw`;
+- a directory between the change directory and the target is a symbolic link
+  resolving outside the change directory;
+- the target itself is a symbolic link.
+
+Content goes to a temporary file in the target directory and is renamed into
+place.
+
+**OpenSpec only.** The spec directory and format come from the `[specs]`
+section of the repository's own `.git-paw/config.toml`; a user-level `[specs]`
+section is ignored here, as it is for consent. Under any other `[specs] type`
+the three tools return "not supported for format `<type>`". With no `[specs]`
+section in the repository config they return an error naming `[specs]`.
+
+The switch does not govern the lifecycle and verdict tools above. Those follow
+the root-session rule alone.

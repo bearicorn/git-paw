@@ -13,7 +13,7 @@ use rmcp::transport::stdio;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt, tool_handler};
 
 use crate::error::PawError;
-use crate::mcp::{RepoContext, logging};
+use crate::mcp::{RepoContext, logging, repo_write};
 use crate::specs::SpecBackendKind;
 
 /// The tools offered to a root session only — the session lifecycle and the
@@ -28,6 +28,12 @@ pub(crate) const ROOT_ONLY_TOOL_NAMES: &[&str] = &[
     "publish_verified",
     "publish_feedback",
 ];
+
+/// The tools that write file content into the repository working tree. They
+/// exist only when [`repo_write::repo_write_access`] passes — a root session
+/// of a repository whose own config sets `[mcp] allow_repo_writes = true` —
+/// and a by-name call otherwise gets the refusal's message.
+pub(crate) const REPO_WRITE_TOOL_NAMES: &[&str] = &["create_spec", "write_spec_artifact"];
 
 /// The MCP server handler. Holds the resolved [`RepoContext`] (shared
 /// read-only by every tool) and the merged tool router.
@@ -47,7 +53,9 @@ impl GitPawMcpServer {
     /// Builds the server, merging the per-category tool routers (each defined
     /// in its own file under `tools/`). The lifecycle and verdict routers are
     /// merged only for a root session ([`RepoContext::is_main_worktree`]), so
-    /// a worktree server neither advertises nor dispatches them.
+    /// a worktree server neither advertises nor dispatches them. The
+    /// spec-authoring write router is merged only when the repository-write
+    /// gate passes.
     #[must_use]
     pub fn new(ctx: RepoContext) -> Self {
         let mut tool_router = Self::coordination_router()
@@ -57,9 +65,13 @@ impl GitPawMcpServer {
             + Self::git_router()
             + Self::docs_router()
             + Self::source_router()
-            + Self::publish_router();
+            + Self::publish_router()
+            + Self::spec_check_router();
         if ctx.is_main_worktree {
             tool_router = tool_router + Self::lifecycle_router() + Self::verdict_router();
+        }
+        if repo_write::repo_write_access(ctx.is_main_worktree, ctx.allow_repo_writes).is_ok() {
+            tool_router += Self::spec_write_router();
         }
         Self { ctx, tool_router }
     }
@@ -92,6 +104,16 @@ impl ServerHandler for GitPawMcpServer {
         if !self.ctx.is_main_worktree && ROOT_ONLY_TOOL_NAMES.contains(&request.name.as_ref()) {
             return Err(root_only_error(&request.name));
         }
+        // An unadvertised repository-write tool: say which condition failed.
+        if REPO_WRITE_TOOL_NAMES.contains(&request.name.as_ref())
+            && let Err(refusal) =
+                repo_write::repo_write_access(self.ctx.is_main_worktree, self.ctx.allow_repo_writes)
+        {
+            return Err(ErrorData::invalid_request(
+                format!("`{}`: {refusal}", request.name),
+                None,
+            ));
+        }
         let tcc = ToolCallContext::new(self, request, context);
         self.tool_router.call(tcc).await
     }
@@ -119,7 +141,11 @@ impl ServerHandler for GitPawMcpServer {
              session lifecycle tools (start_session, pause_session, stop_session, purge_session) \
              and the verdict tools (publish_verified, publish_feedback) exist for a root session \
              only — a server started in the repository's main working tree; a server in an \
-             agent's worktree neither lists nor runs them."
+             agent's worktree neither lists nor runs them. Repository writes (create_spec, \
+             write_spec_artifact) exist only for a root session of a repository whose own \
+             .git-paw/config.toml sets [mcp] allow_repo_writes = true, read when the server \
+             starts; they write inside one spec change directory and never stage or commit. \
+             validate_spec is read-only and always available."
                 .to_string(),
         );
         info
@@ -160,6 +186,14 @@ pub fn run(ctx: RepoContext, log_file: Option<&Path>) -> Result<(), PawError> {
     validate_startup_config(&ctx)?;
 
     logging::info(&format!("serving repository {}", ctx.root.display()));
+    // Enabled writes are logged at `warn` so the line is recorded at the
+    // default verbosity: it is the operator's signal that consent is on.
+    match repo_write::repo_write_access(ctx.is_main_worktree, ctx.allow_repo_writes) {
+        Ok(()) => logging::warn(
+            "repository writes are ENABLED ([mcp] allow_repo_writes = true, root session)",
+        ),
+        Err(refusal) => logging::info(&format!("repository writes are disabled: {refusal}")),
+    }
     if ctx.broker_url.is_none() {
         logging::info("no active broker; coordination/session tools will return empty results");
     }
@@ -202,6 +236,14 @@ mod tests {
         }
     }
 
+    /// A root session of a repository that consented to repository writes.
+    fn consenting_root_ctx() -> RepoContext {
+        RepoContext {
+            allow_repo_writes: true,
+            ..root_ctx()
+        }
+    }
+
     /// The advertised tool names of a server built from `ctx`.
     fn advertised(ctx: RepoContext) -> std::collections::BTreeSet<String> {
         GitPawMcpServer::new(ctx)
@@ -219,6 +261,7 @@ mod tests {
             broker_url: None,
             server_name: name.to_string(),
             is_main_worktree: false,
+            allow_repo_writes: false,
             authority: None,
         }
     }
@@ -280,6 +323,7 @@ mod tests {
                 broker_url: None,
                 server_name: "git-paw".to_string(),
                 is_main_worktree: false,
+                allow_repo_writes: false,
                 authority: None,
             };
             assert!(
@@ -306,6 +350,7 @@ mod tests {
             broker_url: None,
             server_name: "git-paw".to_string(),
             is_main_worktree: false,
+            allow_repo_writes: false,
             authority: None,
         };
         let err = validate_startup_config(&ctx).unwrap_err().to_string();
@@ -416,12 +461,18 @@ mod tests {
         "purge_session",
         "publish_verified",
         "publish_feedback",
+        // mcp-spec-authoring-tools: read-only, every session.
+        "validate_spec",
+        // Repository writes (REPO_WRITE_TOOL_NAMES): a consenting root
+        // session only.
+        "create_spec",
+        "write_spec_artifact",
     ];
 
     /// `mcp-server` scenario "No arbitrary file, git or config mutation is
     /// exposed" + `mcp-agent-publish` scenario "No generic publish tool
-    /// exists": a root session's registry is exactly the closed allowlist
-    /// above — nothing more, nothing less. A stray extra tool (mutating or
+    /// exists": a consenting root session's registry is exactly the closed
+    /// allowlist above — nothing more, nothing less. A stray extra tool (mutating or
     /// not) fails this test immediately, forcing a conscious update rather
     /// than a silent drift.
     #[test]
@@ -431,7 +482,7 @@ mod tests {
             .map(std::string::ToString::to_string)
             .collect();
         assert_eq!(
-            advertised(root_ctx()),
+            advertised(consenting_root_ctx()),
             allowed,
             "the tool registry drifted from the closed allowlist — any addition or removal \
              must be a deliberate edit to ALL_ALLOWED_TOOL_NAMES, not an incidental one"
@@ -445,10 +496,16 @@ mod tests {
     fn worktree_registry_is_the_allowlist_without_the_root_only_tools() {
         let expected: std::collections::BTreeSet<String> = ALL_ALLOWED_TOOL_NAMES
             .iter()
-            .filter(|n| !ROOT_ONLY_TOOL_NAMES.contains(n))
+            .filter(|n| !ROOT_ONLY_TOOL_NAMES.contains(n) && !REPO_WRITE_TOOL_NAMES.contains(n))
             .map(std::string::ToString::to_string)
             .collect();
         assert_eq!(advertised(ctx()), expected);
+        // Even with the switch on, a worktree gets no repository writes.
+        let worktree_on = RepoContext {
+            allow_repo_writes: true,
+            ..ctx()
+        };
+        assert_eq!(advertised(worktree_on), expected);
         for worker in [
             "publish_status",
             "publish_artifact",
@@ -473,6 +530,135 @@ mod tests {
                 ALL_ALLOWED_TOOL_NAMES.contains(name),
                 "{name} must be on the closed allowlist"
             );
+        }
+    }
+
+    /// `mcp-server` "Repository write tools require repository consent and a
+    /// root session": the write tools are listed exactly in the
+    /// (root, switch on) case, `validate_spec` in all four, and every gated
+    /// name is on the closed allowlist.
+    #[test]
+    fn repo_write_tools_are_listed_only_for_a_consenting_root_session() {
+        for (root, switch) in [(true, true), (true, false), (false, true), (false, false)] {
+            let names = advertised(RepoContext {
+                is_main_worktree: root,
+                allow_repo_writes: switch,
+                ..ctx()
+            });
+            for name in REPO_WRITE_TOOL_NAMES {
+                assert_eq!(
+                    names.contains(*name),
+                    root && switch,
+                    "{name} ({root}, {switch})"
+                );
+                assert!(ALL_ALLOWED_TOOL_NAMES.contains(name));
+            }
+            assert!(names.contains("validate_spec"), "({root}, {switch})");
+        }
+    }
+
+    /// `mcp-server` "No tool parameter grants consent": no advertised tool's
+    /// schema, in any session, accepts a parameter that enables writes.
+    #[test]
+    fn no_tool_schema_carries_a_consent_parameter() {
+        let server = GitPawMcpServer::new(consenting_root_ctx());
+        for tool in server.tool_router.list_all() {
+            let props = tool
+                .input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .map(|p| p.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            for p in &props {
+                let lowered = p.to_ascii_lowercase();
+                assert!(
+                    !["allow", "consent", "grant", "enable", "force", "override"]
+                        .iter()
+                        .any(|t| lowered.contains(t)),
+                    "{} accepts {p}",
+                    tool.name
+                );
+            }
+        }
+    }
+
+    /// `mcp-server` "No arbitrary file, git or config mutation is exposed",
+    /// in every session and switch combination: the only file-content writes
+    /// are the two spec-authoring tools, whose parameters name a change and a
+    /// path inside it — no tool takes a command, a git argument list, or a
+    /// config key, and no tool's name says it writes config.
+    #[test]
+    fn bounded_write_surface_holds_for_every_session_and_switch() {
+        for (root, switch) in [(true, true), (true, false), (false, true), (false, false)] {
+            let server = GitPawMcpServer::new(RepoContext {
+                is_main_worktree: root,
+                allow_repo_writes: switch,
+                ..root_ctx()
+            });
+            for tool in server.tool_router.list_all() {
+                let name = tool.name.to_ascii_lowercase();
+                assert!(
+                    !name.contains("config") && !name.contains("exec") && !name.contains("shell"),
+                    "{name}"
+                );
+                let props: Vec<String> = tool
+                    .input_schema
+                    .get("properties")
+                    .and_then(serde_json::Value::as_object)
+                    .map(|p| p.keys().cloned().collect())
+                    .unwrap_or_default();
+                for p in &props {
+                    assert!(
+                        !["command", "cmd", "args", "argv", "git_args", "script"]
+                            .contains(&p.as_str()),
+                        "{name} takes {p}"
+                    );
+                }
+                if props.iter().any(|p| p == "content") {
+                    assert!(
+                        REPO_WRITE_TOOL_NAMES.contains(&tool.name.as_ref()),
+                        "{name} writes content but is not behind the repository-write gate"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Export agnosticism: the three spec-authoring tool descriptions carry
+    /// no stack token and no commit-format prose. The token lists mirror
+    /// `FORBIDDEN_TOKENS` and `FORBIDDEN_COMMIT_CONVENTION_TOKENS` in
+    /// `tests/lang_agnostic_skill_audit.rs`.
+    #[test]
+    fn spec_authoring_descriptions_are_project_agnostic() {
+        const FORBIDDEN: &[&str] = &[
+            "cargo",
+            "rustdoc",
+            ".rs:",
+            "Cargo.toml",
+            "rustc",
+            "Claude Code",
+            ".claude/",
+            "feat(",
+            "fix(",
+            "docs(",
+            "test(",
+            "chore(",
+            "refactor(",
+            "perf(",
+        ];
+        let server = GitPawMcpServer::new(consenting_root_ctx());
+        for name in ["create_spec", "write_spec_artifact", "validate_spec"] {
+            let tool = server
+                .tool_router
+                .list_all()
+                .into_iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} registered"));
+            let description = tool.description.unwrap_or_default();
+            assert!(!description.is_empty(), "{name} has a description");
+            for token in FORBIDDEN {
+                assert!(!description.contains(token), "{name} mentions {token}");
+            }
         }
     }
 

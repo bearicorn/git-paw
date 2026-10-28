@@ -106,6 +106,26 @@ git paw start --unattended --from-all-specs
 
 Your driving session can itself be remote-controlled from a phone through its own agent CLI. git-paw needs no extra topology for that. See [Remote control](user-guide/remote-control.md).
 
+## Authoring a Change from Your Own Agent
+
+An orchestrator connected over MCP can write the OpenSpec change it then launches, even without file tools of its own. Repository writes are off by default; you opt in per repository:
+
+1. **Enable the switch** in the repository's own `.git-paw/config.toml` (the user-level config cannot enable it):
+
+   ```toml
+   [mcp]
+   allow_repo_writes = true
+   ```
+
+2. **Restart the MCP server** at the repository root. The switch is read once at startup, and the write tools exist only for a server in the main working tree.
+3. **Scaffold the change** with `create_spec` and a kebab-case name, such as `add-greeting`.
+4. **Write each artifact** with `write_spec_artifact`: `proposal.md`, one `specs/<capability>/spec.md` per capability, `tasks.md`, and anything else your workflow uses.
+5. **Check the structure** with `validate_spec`, and fix what it reports.
+6. **Run your project's own spec validator.** `validate_spec` checks only a subset of the rules.
+7. **Review `git diff` and commit yourself**, following your project's conventions. The tools never stage or commit.
+
+See [Spec authoring](user-guide/mcp.md#spec-authoring-repository-writes-root-session-only) for the tools' parameters and the confinement rules.
+
 ## Skipping Supervisor for One Session
 
 If your project sets `[supervisor] enabled = true` (the recommended setup for active development), every `git paw start` launches in supervisor mode. To skip it for a single session, pass `--no-supervisor`. This suits a quick debug-only run or a one-off branch flip, and you don't need to edit the config:
