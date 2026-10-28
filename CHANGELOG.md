@@ -5,7 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.17.0] - 2026-10-17
+## [0.18.0] - 2026-10-29
+
+### Features
+
+- *(supervisor,config)* Hand unattended judgment calls to a headless orchestrator one-shot
+- *(mcp,config)* Add consented spec-authoring tools confined to the change directory
+- *(skills,init)* Export the orchestrator skill for driving a session from your own agent
+- *(mcp)* Offer session lifecycle and verdict tools to a root session
+- *(broker,session)* Require the session authority credential for verdicts **BREAKING**
+- *(broker,dashboard)* Host the broker in its own process and make the dashboard a thin client
+- *(supervisor,cli)* Re-attach a drive loop to a live session with start --unattended
+- *(session,tmux,cli)* Lay out every pane-less session as the agent grid with hot-attach
+- *(supervisor,session)* Move the orchestrator out of the session and drop the supervisor pane **BREAKING**
+- *(skills)* Forbid git hook bypass, tmux driving and self-approval in the coordination skill
+- *(broker,mcp,cli)* Add a cursor-based event read surface with wave staleness
+- *(cli,config)* Judge applied cli setup against the settings file and report leftover grants
+- *(cli)* Check that a spec workflow is reachable from a new worktree in git paw doctor
+
+### Bug Fixes
+
+- *(broker)* Treat a connection reset during the stale-broker probe as no live broker
+- *(cli,session)* Submit the workflow entry point as its own line and name the worktree root
+- *(tmux,session)* Split new grid rows full width so each agent's keystrokes reach its own pane
+- *(supervisor)* Measure the unattended heartbeat from the last observed progress
+- *(broker,mcp,skills)* Derive no publishing agent id in the main working tree
+
+### Refactor
+
+- *(cli)* Move the command bodies into the library as git_paw::commands
+- *(supervisor)* Split the drive loop into pure decisions and an effect-applying shell
+- *(tmux,supervisor,cli)* Reach terminal surfaces through a terminal backend port
+- *(session,supervisor)* Resolve every surface role through a typed layout record
+
+### Documentation
+
+- *(specs)* Count window 0's panes now that the broker has its own window
+- *(specs)* Spec the v0.18.0 orchestrator relocation changes
+
+### Testing
+
+- *(broker)* Wait for a freed test port to refuse connects before using it
+
+### CI/CD
+
+- Drop truncated profiles before merging coverage
+## [0.17.0] - 2026-10-25
 
 ### Features
 
@@ -46,7 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Testing
 
 - *(ci)* Isolate every session-touching test from the real session directory
-## [0.16.0] - 2026-09-10
+## [0.16.0] - 2026-09-14
 
 ### Features
 
@@ -430,6 +475,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 - Add CLI tool for parallel AI coding sessions across git worktrees
+[0.18.0]: https://github.com/bearicorn/git-paw/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/bearicorn/git-paw/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/bearicorn/git-paw/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/bearicorn/git-paw/compare/v0.14.0...v0.15.0
