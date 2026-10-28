@@ -441,6 +441,7 @@ mod tests {
                 session_id_args: None,
                 resume_args: None,
                 mcp: None,
+                headless_args: None,
             },
         );
         assert_eq!(
@@ -469,6 +470,7 @@ mod tests {
                 session_id_args: None,
                 resume_args: None,
                 mcp: None,
+                headless_args: None,
             },
         );
         assert_eq!(
@@ -515,6 +517,7 @@ mod tests {
                 session_id_args: None,
                 resume_args: None,
                 mcp: None,
+                headless_args: None,
             },
         );
         let resolved = resolve_prompt_profile("mycli", &clis);
@@ -556,6 +559,7 @@ mod tests {
                 session_id_args: None,
                 resume_args: None,
                 mcp: None,
+                headless_args: None,
             },
         );
         assert_eq!(
@@ -582,6 +586,7 @@ mod tests {
                 session_id_args: None,
                 resume_args: None,
                 mcp: None,
+                headless_args: None,
             },
         );
         assert_eq!(

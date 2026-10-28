@@ -1433,3 +1433,13 @@ The authority credential SHALL be readable only from the user-data `Session` fil
 - **WHEN** the broker log is flushed and inspected
 - **THEN** it SHALL contain the message and SHALL NOT contain the credential value
 
+### Requirement: A headless hand-off outcome is not wave progress
+
+The broker SHALL NOT count an `agent.status` from `supervisor` whose `phase` is `escalation` — the drive loop's report that a headless orchestrator invocation finished — as wave progress, whether or not it changes the supervisor's recorded status or phase. Whatever the invocation changed reaches the broker as its own messages, which are classified as usual.
+
+#### Scenario: A hand-off outcome is not progress
+
+- **GIVEN** a wave whose last progress was recorded at time T and a supervisor whose recorded phase is `sweep`
+- **WHEN** the drive loop publishes a hand-off outcome (`agent.status` from `supervisor`, `phase = "escalation"`)
+- **THEN** the wave's last-progress time SHALL remain T
+

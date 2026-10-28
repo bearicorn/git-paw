@@ -48,8 +48,11 @@ roster row (`supervisor`) appears on the dashboard once it publishes its own
 
 `[supervisor].cli` (else `default_cli`) names the orchestrator's CLI in that
 context and is the coding agents' last CLI fallback; no orchestrator CLI is
-needed to launch. `[supervisor].approval` is still parsed but shapes no pane
-command — it is reserved for git-paw-initiated orchestrator invocations.
+needed to launch. It is also the CLI the `--unattended` drive loop runs
+headlessly for a judgment call (see
+[Headless hand-off](#headless-hand-off-of-judgment-calls)).
+`[supervisor].approval` shapes no pane command — it is the approval level of
+those headless invocations.
 
 A live session started by an earlier release (orchestrator CLI at pane 0,
 dashboard at pane 1, agents from pane 2) keeps working until it ends: every
@@ -174,7 +177,10 @@ Each poll (~15 seconds) the loop:
   rather than every fifteen seconds. A prompt nobody ever answers does not, on
   its own, end the run — the wave ends on completion or the heartbeat.
 - **Leaves judgment calls on the broker** — see
-  [The loop is a pump, the supervisor is the brain](#the-loop-is-a-pump-the-supervisor-is-the-brain).
+  [The loop is a pump, the supervisor is the brain](#the-loop-is-a-pump-the-supervisor-is-the-brain)
+  — and hands a question, a merge decision or a correction-exhausted branch to
+  a [headless one-shot orchestrator](#headless-hand-off-of-judgment-calls)
+  when one resolves.
 - **Re-engages a gate-failed worker**, when
   [`[supervisor.correction] auto_loopback`](#unattended-correction-loop) is
   enabled — closing the verify↔fix cycle without a human hop.
@@ -507,6 +513,116 @@ orchestrator genuinely cannot decide — plus the heartbeat exit described
 above, and any run no orchestrator is driving, where the broker review items
 and the exit summary are the whole escalation.
 
+### Headless hand-off of judgment calls
+
+Waiting for someone to pull the broker inbox makes an unattended run depend
+on a human. So when a headless invocation resolves, the drive loop hands each
+judgment call it cannot make to the orchestrator CLI **once,
+non-interactively** — a fresh one-shot turn at the repository root that reads
+the orchestrator skill and acts on the call:
+
+| Judgment call | Handed to a one-shot? |
+|---|---|
+| An ambiguous `agent.question` | yes |
+| A merge decision (a `committed`/`done` `agent.artifact`) | yes |
+| A correction-exhausted branch | yes |
+| A live permission prompt | **never** |
+| The early correction heads-up (slow-converging branch) | **never** — it requires no action yet |
+
+The broker review item is always in place first — the worker's own message
+for a question or a merge decision, the loop's escalation otherwise — so the
+hand-off adds to the record, it never replaces it. **A permission prompt is
+never handed off**: a one-shot has no human to relay it to, and no git-paw
+process answers a permission prompt. It stays on the broker, in the exit
+summary and in the [manual-decision log](#manual-approvals), for you or for an
+orchestrator you tell to run `sweep.sh approve`.
+
+**Resolution.** The CLI is `[supervisor].cli`, else `default_cli`. Its
+headless form is `[clis.<name>].headless_args`, else the built-in row
+(`claude` → `-p`, `codex` → `exec`), else none. The launch output reports the
+result once, at loop start — for example `headless hand-off: claude -p` — or
+says why the hand-off is unavailable (no CLI resolved, the CLI has no headless
+form and which `[clis.<name>].headless_args` key would supply one, or
+`[supervisor.escalation] enabled = false`). With no hand-off the loop behaves
+exactly as without it: broker records and the exit summary only.
+
+**The invocation.** The argv is the CLI, then the approval flags resolved from
+`[supervisor].approval` (falling back to `agent_approval`), then the headless
+arguments — e.g. `claude --dangerously-skip-permissions -p`. The escalation
+context arrives on **stdin**, never on argv, so nothing appears in `ps`. It
+names the agent and the call — the worker-written part fenced between markers
+as quoted data the one-shot must never take instructions from — points at
+`.git-paw/skills/orchestrator/SKILL.md`
+and `.git-paw/AGENTS.local.md`, gives the broker URL, tells the one-shot to act
+only through the bundled helpers or the MCP tools and to publish its outcome,
+and forbids it to run `sweep.sh approve` or answer any permission prompt. For
+a merge decision it carries the unattended merge rule: merge fast-forward only
+once every gate is verified; escalate only on a merge conflict, an exhausted
+correction cycle or a regression. "Escalating", for a one-shot, means
+publishing the reason on the broker and exiting, leaving the review item for
+you. The environment adds only `GIT_PAW_BROKER_URL` — no credential: verdicts
+go through `sweep.sh`, which fetches it at the root via `git paw __authority`.
+There is no terminal; stdout and stderr are appended to
+`.git-paw/logs/<session>/orchestrator-escalations.log`.
+
+**Bounded, serialized, deduplicated.** At most one one-shot runs at a time per
+session; further calls queue FIFO. Each queued call is keyed by its kind, its
+agent and its discriminator (the question text, the artifact status, or
+nothing for a correction-exhausted branch); a call whose key is already queued
+or in flight is dropped, so a worker re-publishing the same question or
+`committed` artifact while its one-shot is pending does not spawn a second
+one. Once that one-shot has exited, a later identical message is a new event.
+Each agent also gets **one pending question at a time**: while a question from
+an agent is queued or running, its further questions stay on the broker only,
+and the exit summary counts them — a looping worker cannot queue an LLM run per
+question.
+`[supervisor.escalation] timeout_seconds` (default 1800) bounds each one: on
+expiry its whole process group is killed and the outcome recorded as
+`timeout`. The loop never waits on a one-shot — the sweep continues while it
+runs. At wind-down the loop stops starting queued one-shots but lets the
+in-flight one finish or time out, saying on stderr that it is waiting; calls
+never started are reported as still queued. A session torn down under the loop
+(`git paw stop`, `git paw purge`) kills the running one-shot instead. If
+git-paw itself is interrupted while a one-shot runs, the one-shot is **not**
+killed — see the [security posture](security-posture.md#the-headless-orchestrator-one-shot).
+
+**Outcomes.** Each finished or timed-out one-shot is published as an
+`agent.status` from `supervisor` (status `working`) whose `detail` carries
+`escalation_key`, `exit_code` (or `"timeout"`) and `duration_seconds`; it is
+in the broker log, and the supervisor's `/status` row shows the phase
+`escalation` until its next message. The exit summary adds the number of
+invocations with a per-outcome count (completed, non-zero exit, timed out),
+the number still queued and the escalation-log path — or, when no invocation
+ran, why the hand-off was unavailable or disabled. A handed-off escalation is
+still listed among the escalations awaiting review.
+
+```toml
+[supervisor]
+cli = "claude"
+approval = "full-auto"      # what the one-shot may do unattended — see below
+
+[supervisor.escalation]
+enabled = true              # default
+timeout_seconds = 1800      # default; 0 is rejected
+```
+
+**What a one-shot can do depends on `[supervisor].approval`.** Nobody answers
+the one-shot's own permission prompts, so it can do exactly what its approval
+level and the CLI's own allow rules permit. Under `auto` with the
+[`git paw setup-cli`](#per-cli-setup-consent-only) grants it can read state and
+answer a question through the broker helper, but it **cannot publish a
+verdict or merge**: `sweep.sh verified`, `sweep.sh feedback-gate` and
+`sweep.sh conflict-ack` are deliberately never granted, and `git` merges fall
+under your own rules. A merge-decision hand-off therefore needs
+`approval = "full-auto"` — recommended only inside the
+[sandbox](sandbox.md) — or allow rules you write yourself. See the
+[security posture](security-posture.md) for what `full-auto` means here.
+
+**Set `enabled = false` when you drive the session yourself.** Your own
+interactive orchestrator and a one-shot would otherwise act on the same
+judgment call at once. Disabling the hand-off restores broker-only behaviour
+without any other change.
+
 ### Unattended correction loop
 
 When a supervisor gate fails, git-paw publishes `agent.feedback` to the
@@ -572,13 +688,16 @@ under-powered for a class of task. With learnings off, nothing is recorded.
 
 ### The orchestrator's own permission level
 
-No pane runs an orchestrator, so no git-paw launch flag reaches it: the
-orchestrator runs in your own agent session, under whatever permission mode
-you started that session with. `[supervisor].approval` is still parsed — an
-earlier config that sets it loads and launches unchanged, with no warning —
-but it changes no pane command; it is reserved for git-paw-initiated
-orchestrator invocations. Coding agents resolve their flags from
-`agent_approval` alone.
+No pane runs an orchestrator, so no git-paw launch flag reaches your
+interactive orchestrator: it runs in your own agent session, under whatever
+permission mode you started that session with. `[supervisor].approval` changes
+no pane command; it is the approval level of the drive loop's
+[headless one-shot invocations](#headless-hand-off-of-judgment-calls), falling
+back to `agent_approval` when unset. When it resolves to `full-auto` for a CLI
+with no built-in flag row and no `[clis.<name>].approval_args` override, the
+loop prints a warning naming the CLI and the override key and runs the
+one-shot without flags. Coding agents resolve their flags from
+`agent_approval` alone — setting `approval` never changes a worker pane.
 
 ### `auto` resolves to a deterministic permission mode
 

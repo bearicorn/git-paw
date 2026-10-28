@@ -2221,3 +2221,275 @@ fn unattended_escalates_a_rate_limited_worker_and_keeps_going() {
         "the summary lists the escalation quoting the matching line; stdout:\n{stdout}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// orchestrator-escalation-handoff: headless hand-off, end to end
+// ---------------------------------------------------------------------------
+
+/// Writes an executable stub orchestrator CLI that records each run: its
+/// argv (one arg per line) to `argv.log`, its working directory to
+/// `cwd.log`, everything on its stdin to `stdin.log`, and one line per run to
+/// `runs.log`, all under `record_dir` — then exits 0. It never runs a model.
+fn write_stub_orchestrator(dir: &Path, record_dir: &Path) -> PathBuf {
+    let path = dir.join("stub_orchestrator.sh");
+    let rec = record_dir.display();
+    let script = format!(
+        "#!/usr/bin/env bash\n\
+         # Test stub orchestrator CLI: record argv, cwd and stdin, then exit 0.\n\
+         printf '%s\\n' \"$@\" >> '{rec}/argv.log'\n\
+         pwd >> '{rec}/cwd.log'\n\
+         cat >> '{rec}/stdin.log'\n\
+         echo run >> '{rec}/runs.log'\n\
+         exit 0\n"
+    );
+    fs::write(&path, script).expect("write stub orchestrator");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path).expect("stat stub").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("chmod stub");
+    }
+    path
+}
+
+/// The supervisor row's `phase` on the broker `/status`, read from the raw
+/// body (the loop's typed row does not carry `phase`).
+fn supervisor_phase(url: &str) -> Option<String> {
+    let body = git_paw::broker::client::BrokerClient::new(url)
+        .status_body()
+        .ok()?;
+    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+    json["agents"]
+        .as_array()?
+        .iter()
+        .find(|a| a["agent_id"] == "supervisor")?
+        .get("phase")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// The `detail` of the first hand-off outcome (`agent.status` from
+/// `supervisor` with an `escalation_key`) on the broker's message log.
+fn handoff_outcome_detail(url: &str) -> Option<serde_json::Value> {
+    let page = git_paw::broker::publish::fetch_log_page_over_http(url, 0, None).ok()?;
+    page.entries.into_iter().find_map(|e| match e.message {
+        BrokerMessage::Status { agent_id, payload } if agent_id == "supervisor" => {
+            payload.detail.filter(|d| d.get("escalation_key").is_some())
+        }
+        _ => None,
+    })
+}
+
+/// Spec scenarios (`supervisor-autonomous-orchestrator`) "An ambiguous
+/// question spawns a one-shot with context on stdin", "A permission prompt
+/// spawns no one-shot", "A permission prompt stays on the broker with a
+/// resolvable orchestrator", "Claude resolves through the built-in row"
+/// (launch notice, here through a `[clis.stub].headless_args` override) and
+/// "Completed invocation is published", end to end: `feat/alpha` sits on a
+/// live permission prompt, `feat/beta` publishes an ambiguous question. The
+/// question spawns the stub orchestrator exactly once, at the repository
+/// root, with the question on stdin and never on argv; alpha's prompt is
+/// escalated to the broker and the manual-decision log and spawns nothing;
+/// the sweep goes on to completion; and the outcome is published from
+/// `supervisor` with its escalation key and exit code 0.
+#[test]
+#[serial]
+#[allow(clippy::too_many_lines)]
+fn unattended_hands_an_ambiguous_question_to_a_headless_one_shot() {
+    if !tmux_available() {
+        eprintln!("skipping: tmux not available");
+        return;
+    }
+    let tr = setup_test_repo();
+    let tmux_env = tmux_test_env();
+    let home = TempDir::new().expect("home dir");
+    let out = TempDir::new().expect("out dir");
+    let record = TempDir::new().expect("stub record dir");
+    let port = pick_broker_port();
+    let url = format!("http://127.0.0.1:{port}");
+
+    let alpha_stdin = out.path().join("alpha-stdin.bin");
+    let agent = write_prompt_recorder_dummy(
+        tr.path(),
+        "dummy_agent.sh",
+        "feat/alpha",
+        "ls -la",
+        &alpha_stdin,
+    );
+    let stub = write_stub_orchestrator(out.path(), record.path());
+    let paw = tr.path().join(".git-paw");
+    fs::create_dir_all(&paw).expect("create .git-paw");
+    fs::write(
+        paw.join("config.toml"),
+        format!(
+            "default_cli = \"{agent}\"\n\n\
+             [broker]\n\
+             enabled = true\n\
+             port = {port}\n\n\
+             [supervisor]\n\
+             enabled = true\n\
+             cli = \"stub\"\n\n\
+             [clis.stub]\n\
+             command = \"{stub}\"\n\
+             headless_args = \"--once\"\n",
+            agent = agent.display(),
+            stub = stub.display(),
+        ),
+    )
+    .expect("write config");
+
+    let (mut child, stdout_path) = spawn_unattended(
+        tr.path(),
+        home.path(),
+        tmux_env.socket_dir(),
+        out.path(),
+        "feat/alpha,feat/beta",
+        "400",
+        "120000",
+    );
+
+    assert!(
+        wait_for_broker(&url, Duration::from_secs(20)),
+        "broker should come up on the ephemeral port"
+    );
+    // Alpha's live prompt is escalated on the broker first …
+    let escalated = wait_for_broker_log(
+        home.path(),
+        &["question:", "feat-alpha is waiting on", "ls -la"],
+        Duration::from_secs(25),
+    );
+    // … then beta raises an ambiguous question.
+    let question = BrokerMessage::Question {
+        agent_id: "feat-beta".to_string(),
+        payload: git_paw::broker::messages::QuestionPayload {
+            question: "RS256 or HS256?".to_string(),
+        },
+    };
+    publish_to_broker_http(&url, &question).expect("publish the question");
+
+    let runs_log = record.path().join("runs.log");
+    let spawned = wait_for_path(&runs_log, Duration::from_secs(20));
+    let detail = {
+        let mut found = None;
+        wait_until(
+            || {
+                found = handoff_outcome_detail(&url);
+                found.is_some()
+            },
+            Duration::from_secs(15),
+        );
+        found
+    };
+    let phase_seen = wait_until(
+        || supervisor_phase(&url).as_deref() == Some("escalation"),
+        Duration::from_secs(10),
+    );
+
+    // The sweep went on: the wave still completes.
+    publish_terminal(&url, "feat-beta", "done");
+    let beta_done = wait_for_status(&url, "feat-beta", "done", Duration::from_secs(25));
+    publish_terminal(&url, "supervisor", "done");
+
+    let status = wait_child(&mut child, Duration::from_secs(30));
+    let stdout = read_to_string(&stdout_path);
+    let broker_log = read_broker_log(home.path());
+    let session = session_name_in(&stdout);
+    kill_session(tmux_env.socket_dir(), &stdout);
+
+    assert!(
+        escalated,
+        "alpha's prompt reaches the broker; stdout:\n{stdout}\nbroker log:\n{broker_log}"
+    );
+    assert!(spawned, "the question spawned the stub; stdout:\n{stdout}");
+
+    // Exactly one one-shot ran — for the question, none for the prompt.
+    let runs = read_to_string(&runs_log);
+    assert_eq!(
+        runs.lines().count(),
+        1,
+        "exactly one one-shot ran: {runs:?}"
+    );
+
+    // Argv: headless args only (no approval flags for an unmapped CLI at
+    // the default level); the question is never on argv.
+    let argv = read_to_string(&record.path().join("argv.log"));
+    assert_eq!(
+        argv.lines().collect::<Vec<_>>(),
+        ["--once"],
+        "argv: {argv:?}"
+    );
+    assert!(!argv.contains("RS256"), "context must never be on argv");
+
+    // Stdin: the rendered context, naming the agent, the question, the skill
+    // and the sidecar, and forbidding `sweep.sh approve`. The prompting
+    // agent's command never reaches it.
+    let stdin = read_to_string(&record.path().join("stdin.log"));
+    for needle in [
+        "feat-beta",
+        "RS256 or HS256?",
+        ".git-paw/skills/orchestrator/SKILL.md",
+        ".git-paw/AGENTS.local.md",
+        &url,
+        "Never run `sweep.sh approve`",
+    ] {
+        assert!(stdin.contains(needle), "stdin lacks {needle:?}:\n{stdin}");
+    }
+    assert!(!stdin.contains("ls -la"), "no permission prompt in context");
+
+    // Cwd: the repository root.
+    let cwd = read_to_string(&record.path().join("cwd.log"));
+    assert_eq!(
+        fs::canonicalize(cwd.trim()).expect("cwd recorded"),
+        fs::canonicalize(tr.path()).expect("repo root"),
+    );
+
+    // The outcome is published from `supervisor` with its key and exit code.
+    let detail = detail.unwrap_or_else(|| panic!("no hand-off outcome on the broker log"));
+    assert_eq!(
+        detail["escalation_key"],
+        "question|feat-beta|RS256 or HS256?"
+    );
+    assert_eq!(detail["exit_code"], 0);
+    assert!(detail["duration_seconds"].is_u64(), "{detail}");
+    assert!(
+        phase_seen,
+        "the supervisor row on /status shows the escalation phase"
+    );
+
+    // The prompt stayed with the human: broker + manual-decision log, and
+    // no keystroke reached alpha.
+    let decisions = read_manual_decision_log(tr.path());
+    assert!(
+        decisions.contains("\"agent_id\":\"feat-alpha\"") && decisions.contains("ls -la"),
+        "the prompt is in the manual-decision log:\n{decisions}"
+    );
+    assert!(
+        fs::read(&alpha_stdin).unwrap_or_default().is_empty(),
+        "no keystroke may reach the prompting pane"
+    );
+
+    // Launch notice, exit summary and the escalation log.
+    assert!(beta_done, "the wave completed; stdout:\n{stdout}");
+    let status = status.unwrap_or_else(|| panic!("child did not exit; stdout:\n{stdout}"));
+    assert!(status.success(), "exit 0; stdout:\n{stdout}");
+    assert!(
+        stdout.contains("headless hand-off: stub --once"),
+        "launch notice; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("1 invocation(s): 1 completed, 0 non-zero exit, 0 timed out"),
+        "summary counts; stdout:\n{stdout}"
+    );
+    let session = session.unwrap_or_else(|| panic!("no session name; stdout:\n{stdout}"));
+    let escalation_log = read_to_string(
+        &tr.path()
+            .join(".git-paw/logs")
+            .join(&session)
+            .join("orchestrator-escalations.log"),
+    );
+    assert!(
+        escalation_log.contains("question|feat-beta|RS256 or HS256?"),
+        "escalation log: {escalation_log:?}"
+    );
+}

@@ -545,6 +545,11 @@ approval_args = { "full-auto" = "--dangerously-skip-permissions" }
 # assigned, no resume on recovery).
 session_id_args = "--session-id {{SESSION_ID}}"
 resume_args = "--resume {{SESSION_ID}}"
+# Arguments that make this CLI run one non-interactive turn reading its
+# prompt from stdin — used when the unattended drive loop hands a judgment
+# call to a headless orchestrator. Resolution is override → built-in
+# (`claude` → `-p`, `codex` → `exec`) → none. An empty string fails the load.
+headless_args = "-p"
 # Whether this CLI speaks MCP, deciding which form of the coordination boot
 # block it receives. Unset by default (and omitted from written config), in
 # which case the built-in MCP-capable set decides. Only set `true` once
@@ -567,6 +572,7 @@ approval_markers = ["proceed? (y/n)"]
 | `approval_args` | no | Map from approval-level name (`"manual"`, `"auto"`, `"full-auto"`) to the flags appended to the launch command at that level. Consulted **before** the [built-in flag table](#supervisor); an unknown level key is rejected at config load with an error naming the key. |
 | `session_id_args` | no | Template (containing `{{SESSION_ID}}`) for the flag(s) that assign a fresh session identifier at launch. Consulted **before** the built-in table (`claude` only); a CLI resolving neither launches unchanged, with no id recorded. |
 | `resume_args` | no | Template (containing `{{SESSION_ID}}`) for the flag(s) that resume a previously assigned session. Appended on recovery when the worktree's recorded id and this CLI's resolved template are both present; a template omitting the placeholder is rejected at config load. |
+| `headless_args` | no | Arguments that make the CLI run one non-interactive turn reading its prompt from stdin, used for the drive loop's [headless orchestrator hand-off](../user-guide/supervisor.md#headless-hand-off-of-judgment-calls). Consulted **before** the built-in table (`claude` → `-p`, `codex` → `exec`); a CLI resolving neither has no headless form, and the hand-off is unavailable for it. An empty string is rejected at config load, naming the key. The hand-off spawns this entry's `command` directly, not through a shell, so it must name a single program (a path or a name on `PATH`); the headless arguments and approval flags are split on whitespace, so quoted arguments are not supported there. |
 | `prompt_profile` | no | Per-field overrides of the CLI's terminal-shape markers, consulted before the embedded Claude Code default. Carries no permission policy — see [CLI Prompt-Shape Profiles](../user-guide/cli-prompt-profiles.md). |
 | `mcp` | no | Boolean. Whether this CLI identity speaks MCP, selecting the MCP publish-tool form of the coordination boot block over the `broker.sh` helper form. Unset by default and omitted when the config is written back. |
 
@@ -864,7 +870,7 @@ branch_refresh = false
 | `spec_validate_command` | (none) | Spec validator — gate 3 (e.g. `"openspec validate {{CHANGE_ID}} --strict"` for OpenSpec). `{{CHANGE_ID}}` is substituted by the supervisor agent at verification time with the change name being audited; it is **not** expanded at config load |
 | `security_audit_command` | (none) | Security audit tooling — gate 5 (e.g. `"cargo audit"`, `"npm audit"`, `"bandit -r ."`, `"gosec ./..."`) |
 | `agent_approval` | `"auto"` | Permission level for coding agents: `"manual"`, `"auto"`, or `"full-auto"` |
-| `approval` | (unset) | The orchestrator's **own** permission level: `"manual"`, `"auto"`, or `"full-auto"`, distinct from `agent_approval`. Still parsed, with no warning, so earlier configs load and launch unchanged — but no pane runs an orchestrator, so it changes **no** pane command; it is reserved for git-paw-initiated orchestrator invocations. Coding agents resolve from `agent_approval` alone |
+| `approval` | (unset) | The orchestrator's **own** permission level: `"manual"`, `"auto"`, or `"full-auto"`, distinct from `agent_approval`. No pane runs an orchestrator, so it changes **no** pane command; it is the approval level of the drive loop's [headless orchestrator invocations](../user-guide/supervisor.md#headless-hand-off-of-judgment-calls), whose flags resolve for `(cli, approval)` and fall back to `agent_approval` when unset. `full-auto` on a CLI with no flag row and no `approval_args` override warns and runs the invocation without flags. Coding agents resolve from `agent_approval` alone |
 | `verify_on_commit_nudge` | `true` | When on, the broker posts a `supervisor.verify-now` message to the supervisor inbox on every `agent.artifact { status: "committed" }`, so the supervisor verifies each commit promptly on an explicit event instead of batching. Set `false` to fall back to sweep-cadence verification |
 | `strict_branch_guard` | `true` | When `true`, a per-worktree **pre-commit** hook refuses any commit whose checked-out branch differs from the branch the worktree was created for, blocking cross-worktree contamination (linked worktrees share `.git/refs`, so a stray `cd` can otherwise advance the wrong branch). Set `false` to disable *enforcement* — the **post-commit** hook still publishes an `agent.feedback` + `agent.learning` record when it detects a mismatch (detection without enforcement) |
 | `manual_approvals_log` | `true` | When `true`, every live permission prompt the `--unattended` drive loop escalates for a human decision is appended to `.git-paw/sessions/<session>.manual-approvals.jsonl` and surfaced via [`git paw approvals`](../cli-reference.md). Applies to `--unattended` runs only — an attended session runs no drive loop and records nothing. On a pattern's first sighting a `permission_pattern` learning is also emitted (when `learnings = true`). Set `false` to suppress both the log writes and the learnings emission; the opt-out affects writes only, so `git paw approvals` still reads any pre-existing log |
@@ -879,7 +885,8 @@ branch_refresh = false
 resolves the permission flags for a `(CLI, level)` pair in order: (1) the
 per-CLI [`[clis.<name>] approval_args`](#custom-clis) override, (2) the
 built-in table below, (3) no flags. Coding-agent panes always resolve at
-`agent_approval`; no pane resolves at `approval`. This resolution applies on **every**
+`agent_approval`; no pane resolves at `approval` — only the drive loop's
+headless orchestrator invocation does. This resolution applies on **every**
 launch path that spawns a worker CLI — supervisor mode, a bare `git paw
 start`, a non-supervisor `--specs` / `--from-all-specs` launch, and `git paw
 add` alike — not only supervisor sessions, even though `agent_approval` is
@@ -1086,6 +1093,29 @@ appends a `correction_exhausted` learning carrying the branch, the worker CLI,
 and the cycle count — the signal that tells you a worker's model tier is
 under-powered for a class of task. With learnings disabled, nothing is
 recorded.
+
+### Headless escalation hand-off
+
+The `[supervisor.escalation]` table controls whether the `--unattended` drive
+loop hands a judgment call — an ambiguous question, a merge decision or a
+correction-exhausted branch, never a permission prompt — to a one-shot,
+non-interactive run of the orchestrator CLI. See
+[Supervisor § Headless hand-off of judgment calls](../user-guide/supervisor.md#headless-hand-off-of-judgment-calls).
+
+```toml
+[supervisor.escalation]
+enabled = true
+timeout_seconds = 1800
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `true` | Whether to hand judgment calls to a headless one-shot when one resolves (`[supervisor].cli`, else `default_cli`, with a [`headless_args`](#custom-clis) form). `false` keeps the broker-only path — set it when you drive the session from your own interactive orchestrator. |
+| `timeout_seconds` | `1800` | Upper bound on one invocation; on expiry its whole process group is killed and the outcome recorded as `timeout`. Must be a positive integer — `0` is a config error naming the key. |
+
+The table is optional: a config without it loads with both defaults. The
+invocation's permission level is [`[supervisor] approval`](#supervisor)
+(falling back to `agent_approval`).
 
 ### Routing through the supervisor (`/tell`)
 

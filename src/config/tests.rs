@@ -527,6 +527,7 @@ fn config_survives_save_and_load() {
                 session_id_args: None,
                 resume_args: None,
                 mcp: None,
+                headless_args: None,
             },
         )]),
         presets: HashMap::from([(
@@ -635,6 +636,7 @@ fn custom_cli_empty_approval_args_omitted_on_serialize() {
         session_id_args: None,
         resume_args: None,
         mcp: None,
+        headless_args: None,
     };
     let serialized = toml::to_string_pretty(&cli).unwrap();
     assert!(
@@ -1323,6 +1325,7 @@ fn supervisor_round_trips_through_save_and_load() {
             tell: TellConfig::default(),
             correction: CorrectionConfig::default(),
             branch_refresh: None,
+            escalation: EscalationConfig::default(),
         }),
         ..Default::default()
     };
@@ -1969,6 +1972,7 @@ fn cli_with_approval_args(command: &str, args: &[(&str, &str)]) -> CustomCli {
         session_id_args: None,
         resume_args: None,
         mcp: None,
+        headless_args: None,
     }
 }
 
@@ -2041,6 +2045,7 @@ fn cli_with_session_templates(
         session_id_args: session_id_args.map(String::from),
         resume_args: resume_args.map(String::from),
         mcp: None,
+        headless_args: None,
     }
 }
 
@@ -3752,6 +3757,7 @@ fn clis_with_submit_delay(cli: &str, submit_delay_ms: Option<u64>) -> HashMap<St
             session_id_args: None,
             resume_args: None,
             mcp: None,
+            headless_args: None,
         },
     );
     clis
@@ -3821,6 +3827,7 @@ fn clis_with_command(name: &str, command: &str) -> HashMap<String, CustomCli> {
             session_id_args: None,
             resume_args: None,
             mcp: None,
+            headless_args: None,
         },
     );
     clis
@@ -3970,4 +3977,131 @@ fn a_config_without_mcp_loads_unchanged() {
 
     assert_eq!(parsed.get("claude-oss").and_then(|c| c.mcp), None);
     assert_eq!(launch_command("claude-oss", &parsed), "claude");
+}
+
+// ---------------------------------------------------------------------------
+// orchestrator-escalation-handoff: [supervisor.escalation] + headless_args
+// ---------------------------------------------------------------------------
+
+/// Spec scenario "Absent section yields defaults".
+#[test]
+fn escalation_absent_section_yields_defaults() {
+    let config: PawConfig = toml::from_str("[supervisor]\nenabled = true\n").unwrap();
+    let escalation = config.supervisor.unwrap().escalation;
+    assert!(escalation.enabled);
+    assert_eq!(escalation.timeout_seconds, 1800);
+}
+
+/// Spec scenario "Section round-trips".
+#[test]
+fn escalation_section_round_trips_through_save_and_load() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(
+        &path,
+        "[supervisor]\nenabled = true\n\n[supervisor.escalation]\nenabled = false\ntimeout_seconds = 600\n",
+    );
+    let loaded = load_config_file(&path).unwrap().unwrap();
+    let saved = tmp.path().join("saved.toml");
+    save_config_to(&saved, &loaded).unwrap();
+    let reloaded = load_config_file(&saved).unwrap().unwrap();
+    let escalation = reloaded.supervisor.unwrap().escalation;
+    assert!(!escalation.enabled);
+    assert_eq!(escalation.timeout_seconds, 600);
+}
+
+/// An all-default `[supervisor.escalation]` is not written back, so an older
+/// config round-trips without gaining a table.
+#[test]
+fn escalation_default_table_is_not_serialized() {
+    let config: PawConfig = toml::from_str("[supervisor]\nenabled = true\n").unwrap();
+    let serialized = toml::to_string(&config).unwrap();
+    assert!(
+        !serialized.contains("escalation"),
+        "default escalation table must not serialize, got:\n{serialized}"
+    );
+}
+
+/// Spec scenario "Zero timeout is rejected".
+#[test]
+fn escalation_zero_timeout_is_rejected_naming_the_key() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(
+        &path,
+        "[supervisor]\nenabled = true\n[supervisor.escalation]\ntimeout_seconds = 0\n",
+    );
+    let err = load_config_file(&path).unwrap_err();
+    assert!(
+        err.to_string().contains("timeout_seconds"),
+        "error should name timeout_seconds, got: {err}"
+    );
+}
+
+/// Spec scenario "Claude and Codex resolve through the built-in table".
+#[test]
+fn headless_args_built_in_rows_for_claude_and_codex() {
+    let clis: HashMap<String, CustomCli> = HashMap::new();
+    assert_eq!(
+        resolve_headless_args("claude", &clis).as_deref(),
+        Some("-p")
+    );
+    assert_eq!(
+        resolve_headless_args("codex", &clis).as_deref(),
+        Some("exec")
+    );
+}
+
+/// Spec scenario "Override wins over the built-in row".
+#[test]
+fn headless_args_override_wins_over_built_in_row() {
+    let config: PawConfig = toml::from_str(
+        "[clis.claude]\ncommand = \"claude\"\nheadless_args = \"-p --output-format text\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        resolve_headless_args("claude", &config.clis).as_deref(),
+        Some("-p --output-format text")
+    );
+}
+
+/// Spec scenario "Unknown CLI resolves none".
+#[test]
+fn headless_args_unknown_cli_resolves_none() {
+    let clis: HashMap<String, CustomCli> = HashMap::new();
+    assert_eq!(resolve_headless_args("my-agent", &clis), None);
+}
+
+/// Spec scenario "Empty override is rejected".
+#[test]
+fn headless_args_empty_override_is_rejected_naming_the_key() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("config.toml");
+    write_file(
+        &path,
+        "[clis.my-agent]\ncommand = \"my-agent\"\nheadless_args = \"\"\n",
+    );
+    let err = load_config_file(&path).unwrap_err();
+    assert!(
+        err.to_string().contains("headless_args"),
+        "error should name headless_args, got: {err}"
+    );
+}
+
+/// `approval` wins when set; otherwise the orchestrator inherits
+/// `agent_approval`.
+#[test]
+fn orchestrator_approval_falls_back_to_agent_approval() {
+    let inherit: PawConfig =
+        toml::from_str("[supervisor]\nagent_approval = \"full-auto\"\n").unwrap();
+    assert_eq!(
+        inherit.supervisor.unwrap().orchestrator_approval(),
+        ApprovalLevel::FullAuto
+    );
+    let own: PawConfig =
+        toml::from_str("[supervisor]\nagent_approval = \"auto\"\napproval = \"manual\"\n").unwrap();
+    assert_eq!(
+        own.supervisor.unwrap().orchestrator_approval(),
+        ApprovalLevel::Manual
+    );
 }

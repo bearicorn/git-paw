@@ -22,6 +22,7 @@ use crate::config::{
     CliPromptProfile, CorrectionConfig, CustomCli, OnExhausted, resolve_submit_delay_ms,
 };
 use crate::error::PawError;
+use crate::supervisor::escalation::{HandOff, HandOffKind};
 use crate::surface::SurfaceRole;
 
 use super::{
@@ -102,6 +103,12 @@ pub enum DriveEffect {
         /// What the call is about.
         call: JudgmentCall,
     },
+    /// Hand a judgment call to a headless orchestrator invocation, queued
+    /// behind any running one. Returned only after the call's broker review
+    /// item is in place, only when a headless invocation is resolvable and
+    /// enabled, and never for a live permission prompt or the early
+    /// correction heads-up.
+    InvokeOrchestrator(HandOff),
 }
 
 /// What a judgment call is about.
@@ -145,6 +152,8 @@ pub enum EffectOutcome {
     Refreshed(Vec<String>),
     /// Noted in the effect log only.
     Noted,
+    /// Queued for a headless orchestrator invocation.
+    Queued,
 }
 
 impl EffectOutcome {
@@ -283,6 +292,9 @@ pub(super) struct MessagePolicy<'a> {
     pub(super) winding_down: bool,
     /// Whether `supervisor-branch-refresh` is enabled.
     pub(super) branch_refresh_enabled: bool,
+    /// Whether judgment calls are handed to a headless orchestrator
+    /// invocation (resolvable and `[supervisor.escalation] enabled`).
+    pub(super) handoff_enabled: bool,
 }
 
 /// Decides what the broker messages published since the previous sweep mean
@@ -304,8 +316,9 @@ pub(super) struct MessagePolicy<'a> {
 /// - A worker's **`agent.question`**, and its **`agent.artifact`** at a merge-
 ///   candidate status, outside wind-down → a judgment call naming the agent
 ///   and the question or status. No orchestrator runs inside the session: the
-///   worker's own broker message is the review item, so the call is only
-///   noted, never republished or typed anywhere.
+///   worker's own broker message is the review item, so the call is noted,
+///   never republished or typed anywhere — and then, when the hand-off is
+///   enabled, handed to a headless orchestrator invocation.
 pub(super) fn decide_message(
     state: &CorrectionState,
     messages: &[BrokerMessage],
@@ -350,10 +363,22 @@ pub(super) fn decide_message(
         if let Some(call) = call
             && !policy.winding_down
         {
+            let handoff = policy.handoff_enabled.then(|| HandOff {
+                agent_id: agent_id.clone(),
+                kind: match &call {
+                    JudgmentCall::Question { question } => HandOffKind::Question {
+                        question: question.clone(),
+                    },
+                    JudgmentCall::MergeCandidate { status } => HandOffKind::MergeDecision {
+                        status: status.clone(),
+                    },
+                },
+            });
             effects.push(DriveEffect::NoteJudgmentCall {
                 agent_id: agent_id.clone(),
                 call,
             });
+            effects.extend(handoff.map(DriveEffect::InvokeOrchestrator));
         }
     }
     (correction, effects)
@@ -380,6 +405,9 @@ pub(super) struct NudgePolicy<'a> {
     pub(super) learnings_enabled: bool,
     /// `[clis.<name>]`, for the worker's settle delay.
     pub(super) clis: &'a HashMap<String, CustomCli>,
+    /// Whether an escalated exhaustion is handed to a headless orchestrator
+    /// invocation (resolvable and `[supervisor.escalation] enabled`).
+    pub(super) handoff_enabled: bool,
 }
 
 /// Decides one sweep of the correction loop over every branch marked by a
@@ -479,8 +507,10 @@ pub(super) fn decide_reengaged(
 /// correction budget is spent, which also record it in the exit summary.
 ///
 /// `escalate` flags the branch to the orchestrator/human through the loop's
-/// escalation path; `abandon` marks it failed without an escalation. Neither
-/// re-engages the branch again.
+/// escalation path — and, when the hand-off is enabled, hands it to a
+/// headless orchestrator invocation right behind the broker record; `abandon`
+/// marks it failed without an escalation. Neither re-engages the branch
+/// again.
 fn exhaustion_effects(
     correction: &CorrectionState,
     status: &[AgentStatusRow],
@@ -491,13 +521,19 @@ fn exhaustion_effects(
     let on_exhausted = policy.correction.on_exhausted;
     let mut effects = Vec::new();
     if on_exhausted == OnExhausted::Escalate {
+        let command =
+            format!("branch is unrecoverable after {cycles} correction cycle(s); needs a human");
         effects.push(DriveEffect::PublishEscalation(Escalation {
             agent_id: agent_id.to_string(),
             verdict: CORRECTION_EXHAUSTED_VERDICT.to_string(),
-            command: format!(
-                "branch is unrecoverable after {cycles} correction cycle(s); needs a human"
-            ),
+            command: command.clone(),
         }));
+        if policy.handoff_enabled {
+            effects.push(DriveEffect::InvokeOrchestrator(HandOff {
+                agent_id: agent_id.to_string(),
+                kind: HandOffKind::CorrectionExhausted { detail: command },
+            }));
+        }
     }
     effects.push(DriveEffect::RecordExhausted(ExhaustedBranch {
         agent_id: agent_id.to_string(),
@@ -580,6 +616,8 @@ pub(super) struct LoopState<'a> {
     pub(super) broker_log_hint: Option<String>,
     /// Learnings file pointer for the summary.
     pub(super) learnings_hint: Option<String>,
+    /// The headless hand-off's report, if the loop resolved one.
+    pub(super) handoff: Option<crate::supervisor::escalation::HandoffReport>,
 }
 
 /// Decides the exit summary from the loop's final state and each coding
@@ -607,6 +645,7 @@ pub(super) fn summarize(
         default_branch,
         broker_log_hint,
         learnings_hint,
+        handoff,
     } = state;
     let coding_ids: Vec<String> = agents.iter().map(|a| a.agent_id.clone()).collect();
 
@@ -676,6 +715,7 @@ pub(super) fn summarize(
         broker_log_hint,
         learnings_hint,
         merged_summary,
+        handoff,
     };
     (summary, effects)
 }
@@ -1102,6 +1142,15 @@ mod tests {
         messages: &[BrokerMessage],
         winding_down: bool,
     ) -> (CorrectionState, Vec<DriveEffect>) {
+        message_with(state, messages, winding_down, false)
+    }
+
+    fn message_with(
+        state: &CorrectionState,
+        messages: &[BrokerMessage],
+        winding_down: bool,
+        handoff_enabled: bool,
+    ) -> (CorrectionState, Vec<DriveEffect>) {
         let coding_ids = ["feat-a".to_string(), "feat-b".to_string()];
         let gate_tags = ["test".to_string()];
         decide_message(
@@ -1112,6 +1161,7 @@ mod tests {
                 gate_tags: &gate_tags,
                 winding_down,
                 branch_refresh_enabled: true,
+                handoff_enabled,
             },
         )
     }
@@ -1245,6 +1295,7 @@ mod tests {
                 gate_tags: &[],
                 winding_down: false,
                 branch_refresh_enabled: false,
+                handoff_enabled: false,
             },
         );
         assert!(effects.is_empty(), "{effects:?}");
@@ -1280,6 +1331,16 @@ mod tests {
         correction: &CorrectionConfig,
         learnings_enabled: bool,
     ) -> (CorrectionState, Vec<DriveEffect>) {
+        nudge_with(state, status, correction, learnings_enabled, false)
+    }
+
+    fn nudge_with(
+        state: &CorrectionState,
+        status: &[AgentStatusRow],
+        correction: &CorrectionConfig,
+        learnings_enabled: bool,
+        handoff_enabled: bool,
+    ) -> (CorrectionState, Vec<DriveEffect>) {
         let panes = HashMap::from([("feat-a".to_string(), 1)]);
         decide_nudge(
             state,
@@ -1291,6 +1352,7 @@ mod tests {
                 correction,
                 learnings_enabled,
                 clis: &HashMap::new(),
+                handoff_enabled,
             },
         )
     }
@@ -1415,6 +1477,191 @@ mod tests {
         assert!(effects.is_empty(), "{effects:?}");
     }
 
+    // --- headless hand-off (orchestrator-escalation-handoff) ---------------
+
+    fn invocations(effects: &[DriveEffect]) -> Vec<&HandOff> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                DriveEffect::InvokeOrchestrator(h) => Some(h),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Spec scenario "An ambiguous question spawns a one-shot with context on
+    /// stdin" (decision half): the question is noted first — the worker's own
+    /// message is the review item — then handed off.
+    #[test]
+    fn a_question_is_noted_then_handed_off_when_enabled() {
+        let (_, effects) = message_with(
+            &CorrectionState::new(),
+            &[question("feat-a", "RS256 or HS256?")],
+            false,
+            true,
+        );
+        assert_eq!(
+            effects,
+            vec![
+                DriveEffect::NoteJudgmentCall {
+                    agent_id: "feat-a".to_string(),
+                    call: JudgmentCall::Question {
+                        question: "RS256 or HS256?".to_string(),
+                    },
+                },
+                DriveEffect::InvokeOrchestrator(HandOff {
+                    agent_id: "feat-a".to_string(),
+                    kind: HandOffKind::Question {
+                        question: "RS256 or HS256?".to_string(),
+                    },
+                }),
+            ]
+        );
+    }
+
+    /// Spec scenario "Merge decision spawns a one-shot" (decision half): only
+    /// a merge-candidate status is handed off.
+    #[test]
+    fn a_committed_artifact_is_handed_off_and_no_other_status_is() {
+        let (_, effects) = message_with(
+            &CorrectionState::new(),
+            &[
+                artifact("feat-a", "committed"),
+                artifact("feat-b", "working"),
+            ],
+            false,
+            true,
+        );
+        let handed: Vec<_> = invocations(&effects);
+        assert_eq!(
+            handed,
+            vec![&HandOff {
+                agent_id: "feat-a".to_string(),
+                kind: HandOffKind::MergeDecision {
+                    status: "committed".to_string(),
+                },
+            }]
+        );
+    }
+
+    /// Spec scenarios "Escalation disabled falls back to broker-only" and "No
+    /// resolvable invocation falls back to broker-only" (decision half): the
+    /// judgment call is still noted, never handed off.
+    #[test]
+    fn no_handoff_when_disabled_or_unresolvable() {
+        let (_, effects) = message_with(
+            &CorrectionState::new(),
+            &[question("feat-a", "which?"), artifact("feat-b", "done")],
+            false,
+            false,
+        );
+        assert!(invocations(&effects).is_empty(), "{effects:?}");
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|e| matches!(e, DriveEffect::NoteJudgmentCall { .. }))
+                .count(),
+            2
+        );
+    }
+
+    /// Nothing is handed off during wind-down.
+    #[test]
+    fn no_handoff_while_winding_down() {
+        let (_, effects) = message_with(
+            &CorrectionState::new(),
+            &[question("feat-a", "q")],
+            true,
+            true,
+        );
+        assert!(effects.is_empty(), "{effects:?}");
+    }
+
+    /// Spec scenario "A permission prompt spawns no one-shot" (decision half):
+    /// a live permission prompt yields no `InvokeOrchestrator`; its v0.17.0
+    /// effects are unchanged.
+    #[test]
+    fn a_live_permission_prompt_yields_no_invoke_orchestrator() {
+        let (_, effects) = prompt(
+            &fresh_dedup(),
+            &coding("feat-a"),
+            LIVE_LS_PROMPT,
+            Instant::now(),
+        );
+        assert!(invocations(&effects).is_empty(), "{effects:?}");
+        assert!(matches!(
+            effects.as_slice(),
+            [
+                DriveEffect::RecordManualDecision { .. },
+                DriveEffect::PublishEscalation(_),
+                DriveEffect::RecordLearning { .. },
+            ]
+        ));
+    }
+
+    /// Spec scenario "The early correction heads-up spawns no one-shot"
+    /// (decision half).
+    #[test]
+    fn the_early_heads_up_yields_no_invoke_orchestrator() {
+        let (_, effects) = decide_reengaged(&marked(1), "feat-a", &loopback(3, 2));
+        let [DriveEffect::PublishEscalation(heads_up)] = effects.as_slice() else {
+            panic!("one early heads-up and nothing else: {effects:?}");
+        };
+        assert_eq!(heads_up.verdict, "correction-slow");
+    }
+
+    /// Spec scenario "A correction-exhausted branch spawns one one-shot"
+    /// (decision half): the hand-off follows the broker escalation, once per
+    /// exhaustion.
+    #[test]
+    fn an_escalated_exhaustion_is_handed_off_once_after_its_broker_record() {
+        let status = [row("feat-a", "committed")];
+        let (after, effects) = nudge_with(&marked(3), &status, &loopback(3, 2), false, true);
+        let [
+            DriveEffect::PublishEscalation(escalation),
+            DriveEffect::InvokeOrchestrator(handoff),
+            DriveEffect::RecordExhausted(_),
+        ] = effects.as_slice()
+        else {
+            panic!("escalation, hand-off, exhausted record: {effects:?}");
+        };
+        assert_eq!(escalation.verdict, "correction-exhausted");
+        assert_eq!(
+            *handoff,
+            HandOff {
+                agent_id: "feat-a".to_string(),
+                kind: HandOffKind::CorrectionExhausted {
+                    detail: escalation.command.clone(),
+                },
+            }
+        );
+
+        let mut again = after.clone();
+        again.mark_gate_failure("feat-a", "still failing".to_string());
+        let (_, effects) = nudge_with(&again, &status, &loopback(3, 2), false, true);
+        assert!(
+            effects.is_empty(),
+            "handed off once per episode: {effects:?}"
+        );
+    }
+
+    /// An abandoned branch is not escalated, so nothing is handed off.
+    #[test]
+    fn an_abandoned_exhaustion_is_not_handed_off() {
+        let policy = CorrectionConfig {
+            on_exhausted: OnExhausted::Abandon,
+            ..loopback(1, 1)
+        };
+        let (_, effects) = nudge_with(
+            &marked(1),
+            &[row("feat-a", "committed")],
+            &policy,
+            false,
+            true,
+        );
+        assert!(invocations(&effects).is_empty(), "{effects:?}");
+    }
+
     #[test]
     fn recovery_retries_a_stale_line_then_declares_it_wedged() {
         let stale = "╭──────────────╮\n│ > please continue │\n╰──────────────╯";
@@ -1468,6 +1715,7 @@ mod tests {
                 default_branch: "main",
                 broker_log_hint: None,
                 learnings_hint: None,
+                handoff: None,
             },
             merge_states,
         )

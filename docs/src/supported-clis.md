@@ -48,6 +48,24 @@ detected list, so there a `[clis.cursor]` entry is the route to take.
 interactive picker, and the picker is built from the detected list — an
 undetected `cursor` has no row to pre-select, so the setting has no effect.
 
+## Headless (one-shot) form
+
+The `--unattended` drive loop can hand a judgment call to the orchestrator CLI
+as a single non-interactive turn that reads its prompt from stdin — see
+[Headless hand-off of judgment calls](user-guide/supervisor.md#headless-hand-off-of-judgment-calls).
+git-paw knows the headless form of two CLIs:
+
+| CLI | Headless arguments |
+|-----|--------------------|
+| `claude` | `-p` |
+| `codex` | `exec` |
+| Every other CLI | none — set `[clis.<name>].headless_args` |
+
+Any CLI that can run one turn from stdin gains the hand-off through a
+`headless_args` override in its [`[clis.<name>]` entry](configuration/README.md#custom-clis);
+the override also wins over a built-in row. Without a form, the drive loop
+keeps every judgment call on the broker and says so at launch.
+
 ## Per-CLI Setup Support
 
 [`git paw setup-cli`](user-guide/cli-setup.md) writes git-paw's setup items

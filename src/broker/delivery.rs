@@ -137,6 +137,15 @@ pub fn message_is_progress(inner: &BrokerStateInner, msg: &BrokerMessage) -> boo
             if is_stall_alert_phase(payload.phase.as_deref()) {
                 return false;
             }
+            // The drive loop's report that a headless orchestrator one-shot
+            // finished is its own bookkeeping, not the wave moving: whatever
+            // the one-shot changed reaches the broker as its own messages
+            // (an artifact, a verdict, an advanced-main).
+            if agent_id == crate::surface::SUPERVISOR_AGENT_ID
+                && payload.phase.as_deref() == Some(crate::supervisor::escalation::OUTCOME_PHASE)
+            {
+                return false;
+            }
             match inner
                 .agents
                 .get(agent_id)
@@ -1068,6 +1077,31 @@ mod tests {
                 "`{phase}` is a real phase advance and must count as progress"
             );
         }
+    }
+
+    /// `broker-runtime` scenario "A hand-off outcome is not progress": the
+    /// drive loop's report that a headless orchestrator one-shot finished is
+    /// its own bookkeeping, so it never resets the stall clock — not even
+    /// when it changes the supervisor's recorded phase.
+    #[test]
+    fn a_hand_off_outcome_is_not_progress() {
+        let state = fresh_state();
+        publish_message(
+            &state,
+            &make_status_with_phase("supervisor", "working", Some("sweep")),
+        );
+        state.set_last_progress_unix_secs(1_000);
+
+        let outcome = crate::supervisor::escalation::outcome_status_message(
+            &crate::supervisor::escalation::InvocationOutcome {
+                key: "question|feat-a|q".to_string(),
+                result: crate::supervisor::escalation::InvocationResult::Exited(Some(0)),
+                duration: std::time::Duration::from_secs(42),
+            },
+        );
+        assert!(!message_is_progress(&state.read(), &outcome));
+        publish_message(&state, &outcome);
+        assert_eq!(state.wave_status().last_progress_unix_secs, 1_000);
     }
 
     /// `broker-runtime` scenario "Recovering from an alert phase is

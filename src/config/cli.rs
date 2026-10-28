@@ -101,6 +101,56 @@ pub struct CustomCli {
     /// reads a different config dir does not silently inherit `claude`'s form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<bool>,
+    /// The arguments that make this CLI run one non-interactive turn reading
+    /// its prompt from stdin, consulted BEFORE the built-in table by
+    /// [`resolve_headless_args`].
+    ///
+    /// Used by the drive loop's headless orchestrator hand-off
+    /// (`orchestrator-escalation-handoff`). An empty string is rejected at
+    /// config load, naming the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headless_args: Option<String>,
+}
+
+/// Built-in `headless_args` for `cli`, or `None` when the CLI has no known
+/// one-shot, stdin-reading mode.
+///
+/// Verified against upstream documentation 2026-10-29: Claude Code's
+/// `-p`/`--print` runs one non-interactive turn and reads the prompt from
+/// stdin when none is given on argv; Codex's `exec` subcommand does the same
+/// (a missing prompt argument, or `-`, reads stdin).
+#[must_use]
+fn built_in_headless_args(cli: &str) -> Option<&'static str> {
+    match cli {
+        "claude" => Some("-p"),
+        "codex" => Some("exec"),
+        _ => None,
+    }
+}
+
+/// Resolves the headless (one-shot, stdin-reading) arguments for `cli`,
+/// consulting (in order): the `[clis.<name>].headless_args` override, the
+/// built-in table, then `None` — the CLI has no headless form.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::HashMap;
+/// use git_paw::config::{resolve_headless_args, CustomCli};
+///
+/// let clis: HashMap<String, CustomCli> = HashMap::new();
+/// assert_eq!(resolve_headless_args("claude", &clis).as_deref(), Some("-p"));
+/// assert_eq!(resolve_headless_args("codex", &clis).as_deref(), Some("exec"));
+/// assert_eq!(resolve_headless_args("my-agent", &clis), None);
+/// ```
+#[must_use]
+pub fn resolve_headless_args<S: std::hash::BuildHasher>(
+    cli: &str,
+    clis: &HashMap<String, CustomCli, S>,
+) -> Option<String> {
+    clis.get(cli)
+        .and_then(|c| c.headless_args.clone())
+        .or_else(|| built_in_headless_args(cli).map(str::to_string))
 }
 
 /// A named preset defining branches and a CLI to use.
@@ -155,6 +205,7 @@ pub fn add_custom_cli_to(
             session_id_args: None,
             resume_args: None,
             mcp: None,
+            headless_args: None,
         },
     );
 

@@ -104,8 +104,11 @@ pub fn list_logs_for_session(repo_root: &Path, session: &str) -> Result<Vec<LogE
         let entry = entry
             .map_err(|e| PawError::SessionError(format!("failed to read directory entry: {e}")))?;
         let path = entry.path();
+        // The headless orchestrator hand-off's log shares the session
+        // directory but is not a pane log, so it is not listed as a branch.
         if path.is_file()
             && let Some(filename) = path.file_name().and_then(|f| f.to_str())
+            && filename != crate::supervisor::escalation::ESCALATION_LOG_FILE
             && Path::new(filename)
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("log"))
@@ -244,6 +247,21 @@ mod tests {
         assert_eq!(entries[0].branch, "feat/api/v2");
         assert_eq!(entries[1].branch, "feat/auth");
         assert_eq!(entries[2].branch, "main");
+    }
+
+    /// The headless hand-off's escalation log is not a pane log, so it is
+    /// never listed as a branch to replay.
+    #[test]
+    fn list_logs_for_session_skips_the_escalation_log() {
+        let tmp = TempDir::new().unwrap();
+        let session_dir = tmp.path().join(".git-paw/logs/paw-test");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(session_dir.join("main.log"), "").unwrap();
+        std::fs::write(session_dir.join("orchestrator-escalations.log"), "").unwrap();
+
+        let entries = list_logs_for_session(tmp.path(), "paw-test").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].branch, "main");
     }
 
     #[test]

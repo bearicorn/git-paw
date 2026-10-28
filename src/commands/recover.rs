@@ -478,6 +478,7 @@ mod tests {
                 session_id_args: None,
                 resume_args: Some("--continue {{SESSION_ID}}".to_string()),
                 mcp: None,
+                headless_args: None,
             },
         );
         assert_eq!(

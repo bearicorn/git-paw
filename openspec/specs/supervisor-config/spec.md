@@ -8,10 +8,10 @@ Defines the `[supervisor]` config schema — the `SupervisorConfig` struct, its 
 The system SHALL define a `SupervisorConfig` struct with the following fields:
 
 - `enabled: bool` — defaults to `false` when the field or section is absent
-- `cli: Option<String>` — defaults to `None` when absent (resolved at runtime)
+- `cli: Option<String>` — defaults to `None` when absent. Names the orchestrator CLI used for headless escalation invocations and for seeding the roster's `supervisor` row; not required to launch a session.
 - `test_command: Option<String>` — defaults to `None` when absent
 - `agent_approval: ApprovalLevel` — defaults to `Auto` when absent
-- `approval: Option<ApprovalLevel>` — defaults to `None` when absent. The SUPERVISOR pane's own approval level. When `None`, the supervisor pane inherits `agent_approval` (the pre-v0.11.0 behavior, preserved exactly). The field SHALL be annotated `#[serde(default, skip_serializing_if = "Option::is_none")]` so older TOMLs parse unchanged and unset values omit on round-trip.
+- `approval: Option<ApprovalLevel>` — defaults to `None` when absent. The orchestrator's own approval level, applied to git-paw-initiated headless orchestrator invocations. When `None`, those invocations inherit `agent_approval`. The field SHALL be annotated `#[serde(default, skip_serializing_if = "Option::is_none")]` so older TOMLs parse unchanged and unset values omit on round-trip.
 
 The `ApprovalLevel` enum SHALL have three variants: `Manual`, `Auto`, `FullAuto`, serialized as kebab-case (`"manual"`, `"auto"`, `"full-auto"`).
 
@@ -379,27 +379,28 @@ The block SHALL include at minimum the six keys (`lint_command`, `build_command`
 
 ### Requirement: Supervisor-specific approval level resolution
 
-The system SHALL continue to parse `[supervisor].approval` and SHALL treat it as the orchestrator's own approval level, distinct from `agent_approval`. With no orchestrator pane inside the session, this field SHALL NOT influence any pane's launch command in this release; it is reserved for git-paw-initiated orchestrator invocations (bound by the `orchestrator-escalation-handoff` change). Coding-agent panes SHALL resolve their flags from `agent_approval` alone — setting `approval` SHALL NOT change any coding-agent pane's launch flags. Setting `approval` SHALL NOT produce a warning or an error.
+The system SHALL resolve the orchestrator's effective approval level as `supervisor.approval` when the field is `Some(level)`, and as `supervisor.agent_approval` when it is `None`, and SHALL append the flags resolved for `([supervisor].cli, effective level)` to every headless orchestrator invocation the drive loop spawns. Coding-agent panes SHALL continue to resolve from `agent_approval` alone — setting `approval` SHALL NOT change any coding-agent pane's launch flags. When the effective level is `FullAuto` and flag resolution yields `""` (no built-in row and no `[clis.<name>].approval_args` override), the system SHALL print a warning naming the CLI and the `[clis.<name>]` override and SHALL spawn the invocation without flags. The launch SHALL NOT fail.
 
-#### Scenario: approval does not change any pane command
+#### Scenario: approval set to full-auto relaxes only the headless invocation
 
-- **GIVEN** a config with `[supervisor]` containing `agent_approval = "auto"` and `approval = "full-auto"` and `cli = "claude"`
-- **WHEN** the supervised session launch commands are built
-- **THEN** every pane command SHALL be identical to the commands built for the same config without the `approval` key
-- **AND** no pane command SHALL include `--dangerously-skip-permissions`
+- **GIVEN** `[supervisor]` containing `agent_approval = "auto"`, `approval = "full-auto"` and `cli = "claude"`
+- **WHEN** a headless orchestrator invocation is spawned and the coding-agent pane commands are built
+- **THEN** the invocation argv SHALL include `--dangerously-skip-permissions`
+- **AND** every coding-agent pane command SHALL NOT include it
 
-#### Scenario: Coding agents resolve from agent_approval
+#### Scenario: Absent approval inherits agent_approval for the invocation
 
-- **GIVEN** a config with `[supervisor]` containing `agent_approval = "full-auto"` and `approval = "manual"`
-- **WHEN** the coding-agent pane commands are built for `cli = "claude"`
-- **THEN** each SHALL include `--dangerously-skip-permissions`
+- **GIVEN** `[supervisor]` containing `agent_approval = "full-auto"`, no `approval` key and `cli = "claude"`
+- **WHEN** a headless orchestrator invocation is spawned
+- **THEN** its argv SHALL include `--dangerously-skip-permissions`
 
-#### Scenario: Pre-relocation config with approval still loads
+#### Scenario: Full-auto with an unmapped CLI warns and degrades
 
-- **GIVEN** a `.git-paw/config.toml` written before this change with `[supervisor] approval = "full-auto"`
-- **WHEN** the config is loaded and a session launched
-- **THEN** loading SHALL succeed without error or warning
-- **AND** the launch SHALL succeed
+- **GIVEN** `[supervisor]` containing `approval = "full-auto"`, `cli = "my-agent"`, `[clis.my-agent].headless_args = "--batch"` and no `[clis.my-agent].approval_args`
+- **WHEN** the drive loop starts and later spawns an invocation
+- **THEN** a warning SHALL be printed naming `my-agent` and the `[clis.my-agent]` override
+- **AND** the invocation argv SHALL be `my-agent --batch`
+- **AND** the launch SHALL NOT fail
 
 ### Requirement: CustomCli approval_args override field
 
@@ -500,4 +501,26 @@ When a configuration file declares either table, the system SHALL print exactly 
 - **WHEN** an `--unattended` run's agent pane shows a live permission prompt for `ls -la`
 - **THEN** the prompt SHALL be escalated
 - **AND** no keystroke SHALL be sent to that pane
+
+### Requirement: `[supervisor.escalation]` config section
+
+The system SHALL accept an optional `[supervisor.escalation]` table with `enabled: bool` (default `true`) and `timeout_seconds: u64` (default `1800`), annotated `#[serde(default)]` so its absence yields the defaults and older configs load unchanged. `timeout_seconds = 0` SHALL be rejected at load with an error naming the key.
+
+#### Scenario: Absent section yields defaults
+
+- **GIVEN** a config with `[supervisor]` and no `[supervisor.escalation]`
+- **WHEN** the config is loaded
+- **THEN** `escalation.enabled` SHALL be `true` and `escalation.timeout_seconds` SHALL be `1800`
+
+#### Scenario: Section round-trips
+
+- **GIVEN** `[supervisor.escalation]` with `enabled = false` and `timeout_seconds = 600`
+- **WHEN** the config is saved and loaded back
+- **THEN** both values SHALL match
+
+#### Scenario: Zero timeout is rejected
+
+- **GIVEN** `[supervisor.escalation] timeout_seconds = 0`
+- **WHEN** the config is loaded
+- **THEN** loading SHALL fail with an error naming `timeout_seconds`
 

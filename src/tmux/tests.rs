@@ -2653,6 +2653,7 @@ fn gate_pane_for_injection_uses_the_resolved_cli_profile() {
             session_id_args: None,
             resume_args: None,
             mcp: None,
+            headless_args: None,
         },
     );
     let profile = crate::config::resolve_prompt_profile("mycli", &clis);
@@ -2695,6 +2696,7 @@ fn gate_pane_resolves_profile_by_identity_and_relaunches_command() {
             session_id_args: None,
             resume_args: None,
             mcp: None,
+            headless_args: None,
         },
     );
 

@@ -59,8 +59,10 @@ pub struct SupervisorConfig {
     /// Whether supervisor mode is enabled by default for this repo.
     #[serde(default)]
     pub enabled: bool,
-    /// Override the CLI used when launching the supervisor (e.g. `"claude"`).
-    /// `None` resolves to the normal CLI selection flow at runtime.
+    /// The orchestrator CLI (e.g. `"claude"`): the CLI the unattended drive
+    /// loop runs headlessly for a judgment call, and the roster's
+    /// `supervisor` row. Not required to launch a session; `None` falls back
+    /// to `default_cli`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli: Option<String>,
     /// Test command to run after each agent completes (e.g. `"just check"`).
@@ -141,10 +143,10 @@ pub struct SupervisorConfig {
     /// The orchestrator's own approval level, decoupled from
     /// [`Self::agent_approval`].
     ///
-    /// Still parsed and round-tripped, with no warning, so earlier configs
-    /// load and launch unchanged. No pane runs an orchestrator, so it changes
-    /// no pane command: it is reserved for git-paw-initiated orchestrator
-    /// invocations. Coding agents resolve from `agent_approval` alone.
+    /// The approval level of the drive loop's headless orchestrator
+    /// invocations (`orchestrator-escalation-handoff`); `None` inherits
+    /// `agent_approval`. No pane runs an orchestrator, so it changes no pane
+    /// command. Coding agents resolve from `agent_approval` alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalLevel>,
     /// **Deprecated: parsed for compatibility; no effect.**
@@ -311,6 +313,65 @@ pub struct SupervisorConfig {
     /// merge) — see the `supervisor-branch-refresh` capability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_refresh: Option<bool>,
+    /// Headless orchestrator hand-off policy (`[supervisor.escalation]`).
+    ///
+    /// Governs whether the unattended drive loop hands a judgment call (an
+    /// ambiguous question, a merge decision, a correction-exhausted branch)
+    /// to a one-shot, non-interactive orchestrator invocation, and how long
+    /// that invocation may run. An absent table loads
+    /// [`EscalationConfig::default`]; the all-default table is not written
+    /// back on save, so older configs round-trip unchanged.
+    #[serde(default, skip_serializing_if = "EscalationConfig::is_default")]
+    pub escalation: EscalationConfig,
+}
+
+/// `[supervisor.escalation]`: the headless orchestrator hand-off policy
+/// (`orchestrator-escalation-handoff`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EscalationConfig {
+    /// Whether judgment calls are handed to a headless orchestrator
+    /// invocation when one is resolvable. Default: `true`. With `false` the
+    /// loop keeps the broker-only path.
+    pub enabled: bool,
+    /// Seconds a headless invocation may run before its process group is
+    /// killed and the outcome recorded as `timeout`. Default: `1800`.
+    /// Must be positive; `0` is a config error.
+    #[serde(deserialize_with = "deserialize_timeout_seconds")]
+    pub timeout_seconds: u64,
+}
+
+impl Default for EscalationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            timeout_seconds: 1800,
+        }
+    }
+}
+
+impl EscalationConfig {
+    /// Whether this is the all-default table (skipped on serialization).
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// `deserialize_with` shim for [`EscalationConfig::timeout_seconds`]: rejects
+/// `0`, which would kill every invocation before it could act.
+fn deserialize_timeout_seconds<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    if value == 0 {
+        return Err(serde::de::Error::custom(
+            "[supervisor.escalation] timeout_seconds must be a positive integer (1 or greater), \
+             got 0; to turn the headless hand-off off set enabled = false",
+        ));
+    }
+    Ok(value)
 }
 
 /// Action applied to a branch that has exhausted its correction-cycle budget
@@ -553,6 +614,14 @@ impl TellConfig {
 }
 
 impl SupervisorConfig {
+    /// The orchestrator's effective approval level: [`Self::approval`] when
+    /// set, otherwise [`Self::agent_approval`]. Applied to the drive loop's
+    /// headless orchestrator invocations; coding-agent panes never read it.
+    #[must_use]
+    pub fn orchestrator_approval(&self) -> ApprovalLevel {
+        self.approval.unwrap_or(self.agent_approval)
+    }
+
     /// Resolves whether the pre-commit branch guard enforces (blocks) on a
     /// branch mismatch. Defaults to `true` when the config field is absent.
     #[must_use]
@@ -948,6 +1017,7 @@ pub fn approval_flags(cli: &str, level: &ApprovalLevel) -> &'static str {
 ///         session_id_args: None,
 ///         resume_args: None,
 ///         mcp: None,
+///         headless_args: None,
 ///     },
 /// );
 /// assert_eq!(
