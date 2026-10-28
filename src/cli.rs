@@ -784,7 +784,12 @@ pub enum Command {
                       in the repository's main working tree only, the session lifecycle tools \
                       (start_session, pause_session, stop_session, purge_session) and the verdict \
                       tools (publish_verified, publish_feedback). A server in an agent's worktree \
-                      neither lists nor runs those.\n\n\
+                      neither lists nor runs those. Spec authoring (create_spec, \
+                      write_spec_artifact) is off by default: it exists only for a server in the \
+                      main working tree of a repository whose own .git-paw/config.toml sets \
+                      [mcp] allow_repo_writes = true, writes only inside one spec change \
+                      directory, and never stages or commits; validate_spec is read-only and \
+                      always available.\n\n\
                       The server is client-spawned and one-shot: the MCP client owns the \
                       process lifecycle and the server exits when stdin is closed. It runs \
                       standalone — no tmux session, broker, or supervisor is required. When a \

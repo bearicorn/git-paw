@@ -463,6 +463,7 @@ mod tests {
             broker_url,
             server_name: "git-paw".to_string(),
             is_main_worktree: false,
+            allow_repo_writes: false,
             authority: None,
         })
     }
@@ -768,6 +769,7 @@ mod tests {
             broker_url: Some(broker_url.to_string()),
             server_name: "git-paw".to_string(),
             is_main_worktree: true,
+            allow_repo_writes: false,
             authority: authority.map(|a| crate::mcp::SessionAuthority::new(a.to_string())),
         })
     }

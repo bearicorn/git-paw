@@ -163,6 +163,7 @@ mod tests {
             broker_url: None,
             server_name: "git-paw".to_string(),
             is_main_worktree: false,
+            allow_repo_writes: false,
             authority: None,
         };
         let snapshot = session_status_in(&ctx, sessions.path()).expect("the session resolves");
@@ -182,6 +183,7 @@ mod tests {
             broker_url: None,
             server_name: "git-paw".to_string(),
             is_main_worktree: false,
+            allow_repo_writes: false,
             authority: None,
         };
         assert!(session_status(&ctx).is_none());
@@ -217,6 +219,7 @@ mod tests {
             broker_url: None,
             server_name: "git-paw".to_string(),
             is_main_worktree: false,
+            allow_repo_writes: false,
             authority: None,
         };
         let snapshot = session_status_in(&ctx, sessions.path()).expect("the session resolves");

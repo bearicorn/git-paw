@@ -5,7 +5,7 @@
 //! as the entry point for discovering pending specs.
 
 mod markdown;
-mod openspec;
+pub mod openspec;
 pub mod resolve;
 pub mod speckit;
 pub mod superpowers;

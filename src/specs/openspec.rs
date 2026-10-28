@@ -8,6 +8,9 @@ use std::fmt::Write;
 use std::fs;
 use std::path::Path;
 
+use rmcp::schemars;
+use serde::Serialize;
+
 use crate::error::PawError;
 use crate::specs::{SpecBackend, SpecBackendKind, SpecEntry};
 
@@ -170,6 +173,179 @@ fn extract_owned_files(content: &str) -> Option<Vec<String>> {
     }
 
     if files.is_empty() { None } else { Some(files) }
+}
+
+/// File name of an `OpenSpec` change's metadata.
+pub const CHANGE_METADATA_FILE: &str = ".openspec.yaml";
+
+/// Whether `name` is a valid `OpenSpec` change name: non-empty and made only
+/// of lowercase ASCII letters, digits and hyphens.
+#[must_use]
+pub fn is_valid_change_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// The [`CHANGE_METADATA_FILE`] content `openspec new change` writes for a
+/// change created on `created`.
+#[must_use]
+pub fn change_metadata(created: chrono::NaiveDate) -> String {
+    format!(
+        "schema: spec-driven\ncreated: {}\n",
+        created.format("%Y-%m-%d")
+    )
+}
+
+/// One structural finding reported by [`check_change`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct ChangeFinding {
+    /// The file the finding concerns, relative to the change directory.
+    pub file: String,
+    /// What is wrong.
+    pub message: String,
+}
+
+impl ChangeFinding {
+    fn new(file: &str, message: String) -> Self {
+        Self {
+            file: file.to_string(),
+            message,
+        }
+    }
+}
+
+/// The delta-section headers a delta spec may carry.
+const DELTA_HEADERS: [&str; 4] = [
+    "## ADDED Requirements",
+    "## MODIFIED Requirements",
+    "## REMOVED Requirements",
+    "## RENAMED Requirements",
+];
+
+/// Whether `path` is a delta spec: exactly `specs/<capability>/spec.md`.
+fn is_delta_path(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    matches!(parts.as_slice(), ["specs", cap, "spec.md"] if !cap.is_empty())
+}
+
+/// The lines of `content` outside fenced code blocks; fenced lines (and the
+/// fences themselves) are replaced by `None` so headers inside them are
+/// ignored.
+fn unfenced_lines(content: &str) -> Vec<Option<&str>> {
+    let mut in_fence = false;
+    content
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("```") {
+                in_fence = !in_fence;
+                return None;
+            }
+            if in_fence { None } else { Some(line) }
+        })
+        .collect()
+}
+
+/// Checks one delta file's ADDED and MODIFIED requirements.
+fn check_delta(path: &str, content: &str, findings: &mut Vec<ChangeFinding>) {
+    let lines = unfenced_lines(content);
+    let mut in_checked_section = false;
+    let mut i = 0;
+    while i < lines.len() {
+        let Some(line) = lines[i] else {
+            i += 1;
+            continue;
+        };
+        if line.starts_with("## ") {
+            let header = line.trim_end();
+            in_checked_section =
+                header == "## ADDED Requirements" || header == "## MODIFIED Requirements";
+            i += 1;
+            continue;
+        }
+        let Some(name) = line.strip_prefix("### Requirement:") else {
+            i += 1;
+            continue;
+        };
+        let name = name.trim();
+        // The block runs to the next `### ` or `## ` header.
+        let mut end = i + 1;
+        while end < lines.len()
+            && !lines[end].is_some_and(|l| l.starts_with("### ") || l.starts_with("## "))
+        {
+            end += 1;
+        }
+        if in_checked_section {
+            let body = &lines[i + 1..end];
+            let first = content
+                .lines()
+                .skip(i + 1)
+                .take(end - i - 1)
+                .find(|l| !l.trim().is_empty());
+            if !first.is_some_and(|l| l.contains("SHALL") || l.contains("MUST")) {
+                findings.push(ChangeFinding::new(
+                    path,
+                    format!(
+                        "requirement \"{name}\": SHALL or MUST must appear on the first line of its body"
+                    ),
+                ));
+            }
+            if !body
+                .iter()
+                .any(|l| l.is_some_and(|l| l.starts_with("#### Scenario:")))
+            {
+                findings.push(ChangeFinding::new(
+                    path,
+                    format!("requirement \"{name}\" has no #### Scenario: block"),
+                ));
+            }
+        }
+        i = end;
+    }
+}
+
+/// Structural check over an `OpenSpec` change, a subset of what the project's
+/// own validator enforces. `files` holds each file of the change as (path
+/// relative to the change directory with forward slashes, content).
+///
+/// Reports a missing `proposal.md`; the absence of any
+/// `specs/<capability>/spec.md` carrying an `## ADDED|MODIFIED|REMOVED|RENAMED
+/// Requirements` header; and, in ADDED and MODIFIED sections, a requirement
+/// whose first non-blank body line holds neither SHALL nor MUST, or that has
+/// no `#### Scenario:` block. Headers inside fenced code blocks are ignored.
+#[must_use]
+pub fn check_change(files: &[(String, String)]) -> Vec<ChangeFinding> {
+    let mut findings = Vec::new();
+    if !files.iter().any(|(p, _)| p == "proposal.md") {
+        findings.push(ChangeFinding::new(
+            "proposal.md",
+            "missing proposal.md".to_string(),
+        ));
+    }
+
+    let mut deltas: Vec<&(String, String)> =
+        files.iter().filter(|(p, _)| is_delta_path(p)).collect();
+    deltas.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let has_header = deltas.iter().any(|(_, content)| {
+        unfenced_lines(content)
+            .into_iter()
+            .flatten()
+            .any(|l| DELTA_HEADERS.contains(&l.trim_end()))
+    });
+    if !has_header {
+        findings.push(ChangeFinding::new(
+            "specs/<capability>/spec.md",
+            "no delta spec with an ## ADDED|MODIFIED|REMOVED|RENAMED Requirements header"
+                .to_string(),
+        ));
+    }
+
+    for (path, content) in deltas {
+        check_delta(path, content, &mut findings);
+    }
+    findings
 }
 
 #[cfg(test)]
@@ -485,5 +661,142 @@ mod tests {
             SpecBackendKind::OpenSpec,
             "single-entry scan must still tag the entry as OpenSpec",
         );
+    }
+
+    // --- change authoring: name, scaffold, structural check ---
+
+    #[test]
+    fn change_name_validation_table() {
+        for (name, valid) in [
+            ("add-export", true),
+            ("a1", true),
+            ("x", true),
+            ("Add_Export", false),
+            ("../x", false),
+            ("", false),
+            ("a b", false),
+            ("a/b", false),
+            ("add.export", false),
+        ] {
+            assert_eq!(is_valid_change_name(name), valid, "name {name:?}");
+        }
+    }
+
+    #[test]
+    fn change_metadata_matches_openspec_new_change() {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        assert_eq!(
+            change_metadata(date),
+            "schema: spec-driven\ncreated: 2026-10-19\n"
+        );
+        assert_eq!(CHANGE_METADATA_FILE, ".openspec.yaml");
+    }
+
+    fn files(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(p, c)| ((*p).to_string(), (*c).to_string()))
+            .collect()
+    }
+
+    const GOOD_DELTA: &str = "## ADDED Requirements\n\n### Requirement: Export\n\nThe system SHALL export.\n\n#### Scenario: Exports\n\n- **WHEN** x\n- **THEN** y\n";
+
+    #[test]
+    fn well_formed_change_has_no_findings() {
+        let change = files(&[
+            (".openspec.yaml", "schema: spec-driven\n"),
+            ("proposal.md", "## Why\n"),
+            ("specs/data-export/spec.md", GOOD_DELTA),
+        ]);
+        assert_eq!(check_change(&change), Vec::new());
+    }
+
+    #[test]
+    fn missing_proposal_is_reported() {
+        let findings = check_change(&files(&[("specs/data-export/spec.md", GOOD_DELTA)]));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].file, "proposal.md");
+        assert!(findings[0].message.contains("missing proposal.md"));
+    }
+
+    #[test]
+    fn scaffold_only_change_reports_missing_proposal_and_delta() {
+        let findings = check_change(&files(&[(".openspec.yaml", "schema: spec-driven\n")]));
+        let names: Vec<&str> = findings.iter().map(|f| f.file.as_str()).collect();
+        assert_eq!(names, ["proposal.md", "specs/<capability>/spec.md"]);
+        assert!(
+            findings[1]
+                .message
+                .contains("ADDED|MODIFIED|REMOVED|RENAMED")
+        );
+    }
+
+    #[test]
+    fn a_header_outside_a_delta_path_does_not_count() {
+        for path in [
+            "design.md",
+            "specs/spec.md",
+            "specs/a/b/spec.md",
+            "specs/a/other.md",
+        ] {
+            let findings = check_change(&files(&[("proposal.md", "x"), (path, GOOD_DELTA)]));
+            assert_eq!(findings.len(), 1, "{path}: {findings:?}");
+            assert_eq!(findings[0].file, "specs/<capability>/spec.md", "{path}");
+        }
+    }
+
+    #[test]
+    fn second_line_shall_and_missing_scenario_name_the_delta_file() {
+        let delta = "## MODIFIED Requirements\n\n### Requirement: Late\n\nSome prose first.\nThe system SHALL act.\n\n#### Scenario: S\n\n- WHEN a\n\n### Requirement: Bare\n\nThe system MUST act.\n";
+        let findings = check_change(&files(&[
+            ("proposal.md", "x"),
+            ("specs/cap/spec.md", delta),
+        ]));
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert!(findings.iter().all(|f| f.file == "specs/cap/spec.md"));
+        assert!(findings[0].message.contains("\"Late\""));
+        assert!(findings[0].message.contains("first line"));
+        assert!(findings[1].message.contains("\"Bare\""));
+        assert!(findings[1].message.contains("#### Scenario:"));
+    }
+
+    #[test]
+    fn empty_requirement_body_gets_the_shall_finding() {
+        let delta = "## ADDED Requirements\n\n### Requirement: Empty\n";
+        let findings = check_change(&files(&[("proposal.md", "x"), ("specs/c/spec.md", delta)]));
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert!(findings[0].message.contains("first line"));
+    }
+
+    #[test]
+    fn removed_and_renamed_requirements_are_not_checked() {
+        let delta = "## REMOVED Requirements\n\n### Requirement: Gone\n\n**Reason**: obsolete\n";
+        let findings = check_change(&files(&[("proposal.md", "x"), ("specs/c/spec.md", delta)]));
+        assert_eq!(findings, Vec::new());
+    }
+
+    #[test]
+    fn headers_inside_fenced_code_are_ignored() {
+        // The only delta header sits in a fence: no real delta header.
+        let fenced = "```\n## ADDED Requirements\n### Requirement: X\n```\n";
+        let findings = check_change(&files(&[("proposal.md", "x"), ("specs/c/spec.md", fenced)]));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].file, "specs/<capability>/spec.md");
+
+        // A fenced requirement header inside a real section is not a requirement.
+        let mixed = format!("{GOOD_DELTA}\n```\n### Requirement: Fake\n```\n");
+        let findings = check_change(&files(&[("proposal.md", "x"), ("specs/c/spec.md", &mixed)]));
+        assert_eq!(findings, Vec::new());
+    }
+
+    #[test]
+    fn findings_follow_sorted_delta_path_order() {
+        let bad = "## ADDED Requirements\n\n### Requirement: R\n\nThe system SHALL x.\n";
+        let findings = check_change(&files(&[
+            ("proposal.md", "x"),
+            ("specs/zeta/spec.md", bad),
+            ("specs/alpha/spec.md", bad),
+        ]));
+        let paths: Vec<&str> = findings.iter().map(|f| f.file.as_str()).collect();
+        assert_eq!(paths, ["specs/alpha/spec.md", "specs/zeta/spec.md"]);
     }
 }

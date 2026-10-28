@@ -1231,14 +1231,18 @@ This `[governance]` table is the storage slot. The runtime consumer is the super
 
 ```toml
 [mcp]
-name = "my-project"   # optional; default: "git-paw"
+name = "my-project"        # optional; default: "git-paw"
+allow_repo_writes = false  # optional; repository config only
 ```
 
 | Field | Default | Purpose |
 |-------|---------|---------|
 | `name` | `"git-paw"` | The identity the `git paw mcp` server advertises as `serverInfo.name` in the MCP `initialize` handshake. Set a custom value to distinguish multiple repositories that each run an MCP server. Distinct from the client-side `mcpServers` key (the display label in clients like Claude Desktop), which you rename independently. See the [MCP server](../user-guide/mcp.md) chapter. |
+| `allow_repo_writes` | `false` | Whether the MCP server may write file content into this repository. When `true`, a root session (a server in the main working tree) gets the spec-authoring write tools `create_spec` and `write_spec_artifact`. See [Spec authoring](../user-guide/mcp.md#spec-authoring-repository-writes-root-session-only). |
 
 The section is optional; omitting it (or `name`) makes the server advertise `git-paw`.
+
+`allow_repo_writes` is the repository's consent, so it is honoured **only from the repository's own `.git-paw/config.toml`**. A value in the user-level config has no effect. The server reads it once at startup, so restart the MCP server after changing it. It never enables writes from a worktree session. It governs only tools that write file content into the repository: it does **not** gate the root-session lifecycle tools (`start_session`, `pause_session`, `stop_session`, `purge_session`) or the verdict tools (`publish_verified`, `publish_feedback`), which follow the root-session rule alone. The read-only `validate_spec` is available whatever its value.
 
 ## Dashboard
 
