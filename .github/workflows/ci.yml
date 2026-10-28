@@ -104,7 +104,15 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Run tests with coverage
         run: |
-          cargo llvm-cov --json --output-path cov.json
+          cargo llvm-cov --no-report
+          # A process killed while writing its profile at exit (a test tearing
+          # down a session or a timed-out child) leaves a truncated .profraw,
+          # and llvm-profdata then refuses the whole merge. Drop those first.
+          PROFDATA="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-profdata"
+          for f in target/llvm-cov-target/*.profraw; do
+            "$PROFDATA" show "$f" > /dev/null 2>&1 || { echo "dropping corrupt profile $f"; rm -f "$f"; }
+          done
+          cargo llvm-cov report --json --output-path cov.json
           COVERAGE=$(python3 -c "import json; d=json.load(open('cov.json')); print(f\"{d['data'][0]['totals']['lines']['percent']:.1f}\")")
           echo "## Coverage: ${COVERAGE}%" >> "$GITHUB_STEP_SUMMARY"
           echo "[Full report](https://bearicorn.github.io/git-paw/coverage/)" >> "$GITHUB_STEP_SUMMARY"
@@ -196,7 +204,16 @@ jobs:
       - name: Build book
         run: mdbook build docs/
       - name: Generate coverage report
-        run: cargo llvm-cov --html --output-dir docs/book/coverage
+        run: |
+          cargo llvm-cov --no-report
+          # A process killed while writing its profile at exit (a test tearing
+          # down a session or a timed-out child) leaves a truncated .profraw,
+          # and llvm-profdata then refuses the whole merge. Drop those first.
+          PROFDATA="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-profdata"
+          for f in target/llvm-cov-target/*.profraw; do
+            "$PROFDATA" show "$f" > /dev/null 2>&1 || { echo "dropping corrupt profile $f"; rm -f "$f"; }
+          done
+          cargo llvm-cov report --html --output-dir docs/book/coverage
       # Emit the agent-friendly discovery surface (llms.txt, sitemap.xml,
       # robots.txt, per-page metadata) into docs/book so it deploys with the
       # Pages artifact. Runs after the book is built and before the upload; the
